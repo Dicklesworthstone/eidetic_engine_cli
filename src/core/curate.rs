@@ -84,6 +84,8 @@ pub const CURATE_UNTOMBSTONE_SCHEMA_V1: &str = "ee.curate.untombstone.v1";
 pub const CURATE_AUTO_PROMOTE_SCHEMA_V1: &str = "ee.curate.auto_promote.v1";
 /// Stable schema for review workspace reports.
 pub const REVIEW_WORKSPACE_SCHEMA_V1: &str = "ee.review.workspace.v1";
+/// Stable schema for ambient capture suggestion reports.
+pub const CAPTURE_SUGGESTIONS_SCHEMA_V1: &str = "ee.capture_suggestions.v1";
 /// Stable schema for explicit propose-derived candidate reports (bd-kxm0c).
 pub const CURATE_PROPOSE_DERIVED_SCHEMA_V1: &str = "ee.curate.propose_derived.v1";
 /// Stable schema for reflect request proposal reports.
@@ -99,6 +101,9 @@ const REFLECTION_REQUEST_LEDGER_INVALID_HASH_SENTINEL: &str = "[REDACTED:invalid
 pub const CURATE_PEER_EVIDENCE_SOURCE_PREFIX: &str = "peer_evidence|";
 const MAX_CANDIDATE_LIST_LIMIT: u32 = 1000;
 const MAX_REVIEW_SESSION_LIMIT: u32 = 100;
+pub const DEFAULT_CAPTURE_SUGGESTION_LIMIT: u32 = 2;
+const MAX_CAPTURE_SUGGESTION_LIMIT: u32 = 10;
+const CAPTURE_SUGGESTION_DEDUP_MIN_JACCARD: f32 = 0.72;
 const MAX_CURATE_REVIEW_REASON_BYTES: usize = 4 * 1024;
 const DEFAULT_SNOOZE_SECONDS: u64 = 90 * 24 * 60 * 60;
 const REVIEW_SESSION_CREATED_AT: &str = "1970-01-01T00:00:00Z";
@@ -293,6 +298,23 @@ pub struct ReviewSessionOptions<'a> {
     /// Minimum confidence threshold for proposals.
     pub min_confidence: f32,
     /// Maximum candidates to return.
+    pub limit: u32,
+}
+
+/// Options for low-friction, read-only ambient capture suggestions.
+#[derive(Clone, Debug)]
+pub struct CaptureSuggestOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Internal ee session ID or upstream CASS session ID. Defaults to the latest imported session.
+    pub session_id: Option<&'a str>,
+    /// Prefer the latest imported session when `session_id` is absent.
+    pub from_recent: bool,
+    /// Minimum confidence threshold for surfaced suggestions.
+    pub min_confidence: f32,
+    /// Maximum surfaced suggestions. Defaults to a small session-end budget.
     pub limit: u32,
 }
 
@@ -650,6 +672,104 @@ pub struct ReviewSessionCandidate {
     pub confidence: f32,
     pub content_hash: String,
     pub persisted: bool,
+}
+
+/// Result of read-only ambient capture suggestion.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSuggestionsReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub selection: CaptureSuggestionSelection,
+    pub read_only: bool,
+    pub durable_mutation: bool,
+    pub session_id: String,
+    pub cass_session_id: String,
+    pub evidence_span_count: usize,
+    pub candidate_count: usize,
+    pub suppressed_count: usize,
+    pub min_confidence: f32,
+    pub limit: u32,
+    pub candidates: Vec<CaptureSuggestion>,
+    pub suppressed: Vec<CaptureSuggestionSuppression>,
+    #[serde(serialize_with = "serialize_review_session_degradations")]
+    pub degraded: Vec<CurateCandidatesDegradation>,
+    pub next_action: String,
+}
+
+/// How `ee capture suggest` chose the session under review.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSuggestionSelection {
+    pub source: String,
+    pub requested_session_id: Option<String>,
+}
+
+/// One candidate surfaced by read-only ambient capture.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSuggestion {
+    pub candidate_id: String,
+    pub candidate_type: String,
+    pub candidate_kind: String,
+    pub topic_key: String,
+    pub target_memory_id: Option<String>,
+    pub proposed_fields: CaptureSuggestionProposedFields,
+    pub evidence: Vec<CaptureSuggestionEvidence>,
+    pub confidence: f32,
+    pub dedupe_status: CaptureSuggestionDedupeStatus,
+    pub review_command: String,
+    pub accept_command: String,
+    pub reject_command: String,
+}
+
+/// Durable memory fields proposed by ambient capture. They are not stored until accepted.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSuggestionProposedFields {
+    pub level: String,
+    pub kind: String,
+    pub tags: Vec<String>,
+    pub content: String,
+    pub confidence: f32,
+}
+
+/// Redaction-safe evidence carried with an ambient capture suggestion.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSuggestionEvidence {
+    pub evidence_span_id: String,
+    pub cass_span_id: String,
+    pub role: Option<String>,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub content_hash: String,
+    pub excerpt: String,
+}
+
+/// Anti-spam verdict for a capture suggestion.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSuggestionDedupeStatus {
+    pub status: String,
+    pub method: String,
+    pub reason: String,
+    pub matched_candidate_id: Option<String>,
+    pub matched_memory_id: Option<String>,
+    pub similarity: Option<f32>,
+}
+
+/// Suppressed capture suggestion retained for observability.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSuggestionSuppression {
+    pub candidate_id: String,
+    pub topic_key: String,
+    pub dedupe_status: CaptureSuggestionDedupeStatus,
 }
 
 fn review_candidate_target_display(candidate: &ReviewSessionCandidate) -> String {
@@ -2617,6 +2737,137 @@ pub fn review_session_proposals(
     })
 }
 
+/// Suggest high-value memories from recent CASS evidence without storing anything.
+pub fn capture_suggestions(
+    options: &CaptureSuggestOptions<'_>,
+) -> Result<CaptureSuggestionsReport, DomainError> {
+    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    validate_capture_suggest_options(options)?;
+
+    let connection = open_existing_database(&prepared.database_path)?;
+    let requested_session_id = options
+        .session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let session =
+        resolve_review_session(&connection, &prepared.workspace_id, requested_session_id)?;
+    let evidence_spans = connection
+        .list_evidence_spans_for_session(&session.id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list capture suggestion evidence spans: {error}"),
+            repair: Some("ee import cass --workspace . --json".to_owned()),
+        })?;
+    let existing_candidates = connection
+        .list_curation_candidates(&prepared.workspace_id, None, None, None)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load capture suggestion curation queue: {error}"),
+            repair: Some("ee curate candidates --json".to_owned()),
+        })?;
+    let existing_memories = connection
+        .list_memories(&prepared.workspace_id, None, false)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load memories for capture suggestion dedupe: {error}"),
+            repair: Some("ee memory list --json".to_owned()),
+        })?;
+
+    let evidence_by_id = evidence_spans
+        .iter()
+        .map(|span| (span.id.as_str(), span))
+        .collect::<BTreeMap<_, _>>();
+    let review_candidates = build_review_session_candidates(
+        &prepared.workspace_id,
+        &session,
+        &evidence_spans,
+        options.min_confidence,
+        u32::MAX,
+    );
+    let limit = usize::try_from(options.limit).unwrap_or(usize::MAX);
+    let mut suggestions = Vec::new();
+    let mut suppressed = Vec::new();
+    for candidate in review_candidates {
+        let dedupe_status = capture_suggestion_dedupe_status(
+            &candidate,
+            &existing_candidates,
+            &existing_memories,
+        );
+        if capture_dedupe_status_suppresses(&dedupe_status) {
+            suppressed.push(CaptureSuggestionSuppression {
+                candidate_id: candidate.candidate_id,
+                topic_key: candidate.topic_key,
+                dedupe_status,
+            });
+            continue;
+        }
+        if suggestions.len() >= limit {
+            continue;
+        }
+        suggestions.push(capture_suggestion_from_review_candidate(
+            &candidate,
+            &session,
+            &evidence_by_id,
+            dedupe_status,
+        ));
+    }
+
+    let candidate_count = suggestions.len();
+    let suppressed_count = suppressed.len();
+    let next_action = if candidate_count == 0 {
+        "no capture suggestions proposed".to_owned()
+    } else {
+        format!(
+            "ee review session {} --propose --json; then ee curate accept <candidate-id> --json",
+            session.cass_session_id
+        )
+    };
+
+    tracing::info!(
+        target: "ee::capture",
+        event = "capture_suggest",
+        workspace_id = prepared.workspace_id.as_str(),
+        session_id = session.id.as_str(),
+        cass_session_id = session.cass_session_id.as_str(),
+        evidence_span_count = evidence_spans.len(),
+        candidate_count,
+        suppressed_count,
+        limit = options.limit,
+        min_confidence = options.min_confidence,
+        durable_mutation = false,
+        "ambient capture suggestions generated"
+    );
+
+    Ok(CaptureSuggestionsReport {
+        schema: CAPTURE_SUGGESTIONS_SCHEMA_V1,
+        command: "capture suggest",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        selection: CaptureSuggestionSelection {
+            source: if requested_session_id.is_some() {
+                "from_session".to_owned()
+            } else if options.from_recent {
+                "from_recent".to_owned()
+            } else {
+                "latest_session".to_owned()
+            },
+            requested_session_id: requested_session_id.map(str::to_owned),
+        },
+        read_only: true,
+        durable_mutation: false,
+        session_id: session.id,
+        cass_session_id: session.cass_session_id,
+        evidence_span_count: evidence_spans.len(),
+        candidate_count,
+        suppressed_count,
+        min_confidence: options.min_confidence,
+        limit: options.limit,
+        candidates: suggestions,
+        suppressed,
+        degraded: Vec::new(),
+        next_action,
+    })
+}
+
 fn validate_review_session_options(options: &ReviewSessionOptions<'_>) -> Result<(), DomainError> {
     if !(0.0..=1.0).contains(&options.min_confidence) {
         return Err(curate_usage_error(
@@ -2637,6 +2888,33 @@ fn validate_review_session_options(options: &ReviewSessionOptions<'_>) -> Result
         return Err(curate_usage_error(
             format!("review session --limit must be <= {MAX_REVIEW_SESSION_LIMIT}"),
             "ee review session --help",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_capture_suggest_options(
+    options: &CaptureSuggestOptions<'_>,
+) -> Result<(), DomainError> {
+    if !(0.0..=1.0).contains(&options.min_confidence) {
+        return Err(curate_usage_error(
+            format!(
+                "capture suggest --min-confidence must be between 0.0 and 1.0, got {}",
+                options.min_confidence
+            ),
+            "ee capture suggest --help",
+        ));
+    }
+    if options.limit == 0 {
+        return Err(curate_usage_error(
+            "capture suggest --max must be greater than zero".to_owned(),
+            "ee capture suggest --help",
+        ));
+    }
+    if options.limit > MAX_CAPTURE_SUGGESTION_LIMIT {
+        return Err(curate_usage_error(
+            format!("capture suggest --max must be <= {MAX_CAPTURE_SUGGESTION_LIMIT}"),
+            "ee capture suggest --help",
         ));
     }
     Ok(())
@@ -2992,6 +3270,214 @@ fn build_review_candidate(
         content_hash,
         persisted: false,
     })
+}
+
+fn capture_suggestion_from_review_candidate(
+    candidate: &ReviewSessionCandidate,
+    session: &StoredSession,
+    evidence_by_id: &BTreeMap<&str, &StoredEvidenceSpan>,
+    dedupe_status: CaptureSuggestionDedupeStatus,
+) -> CaptureSuggestion {
+    let kind = capture_suggestion_memory_kind(candidate);
+    let mut tags = BTreeSet::from([
+        "ambient-capture".to_owned(),
+        "cass".to_owned(),
+        "review-session".to_owned(),
+        candidate.topic_key.clone(),
+        kind.clone(),
+    ])
+    .into_iter()
+    .collect::<Vec<_>>();
+    tags.sort();
+    let mut evidence = candidate
+        .source_ids
+        .iter()
+        .filter_map(|source_id| evidence_by_id.get(source_id.as_str()).copied())
+        .map(|span| CaptureSuggestionEvidence {
+            evidence_span_id: span.id.clone(),
+            cass_span_id: span.cass_span_id.clone(),
+            role: span.role.clone(),
+            start_line: span.start_line,
+            end_line: span.end_line,
+            content_hash: span.content_hash.clone(),
+            excerpt: span.excerpt.clone(),
+        })
+        .collect::<Vec<_>>();
+    evidence.sort_by(|left, right| {
+        left.start_line
+            .cmp(&right.start_line)
+            .then_with(|| left.end_line.cmp(&right.end_line))
+            .then_with(|| left.evidence_span_id.cmp(&right.evidence_span_id))
+    });
+    let review_command = format!("ee review session {} --propose --json", session.cass_session_id);
+    let accept_command = format!(
+        "{review_command} && ee curate accept {} --json",
+        candidate.candidate_id
+    );
+    let reject_command = format!(
+        "{review_command} && ee curate reject {} --json",
+        candidate.candidate_id
+    );
+
+    CaptureSuggestion {
+        candidate_id: candidate.candidate_id.clone(),
+        candidate_type: candidate.candidate_type.clone(),
+        candidate_kind: candidate.candidate_kind.clone(),
+        topic_key: candidate.topic_key.clone(),
+        target_memory_id: candidate.target_memory_id.clone(),
+        proposed_fields: CaptureSuggestionProposedFields {
+            level: "procedural".to_owned(),
+            kind,
+            tags,
+            content: candidate.proposed_content.clone(),
+            confidence: candidate.proposed_confidence,
+        },
+        evidence,
+        confidence: candidate.confidence,
+        dedupe_status,
+        review_command,
+        accept_command,
+        reject_command,
+    }
+}
+
+fn capture_suggestion_memory_kind(candidate: &ReviewSessionCandidate) -> String {
+    if candidate.candidate_kind == REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY {
+        return MemoryKind::Rule.as_str().to_owned();
+    }
+    if MemoryKind::from_str(&candidate.candidate_kind).is_ok() {
+        return candidate.candidate_kind.clone();
+    }
+    if candidate.candidate_type == CandidateType::AntiPatternProposal.as_str() {
+        return MemoryKind::AntiPattern.as_str().to_owned();
+    }
+    MemoryKind::Rule.as_str().to_owned()
+}
+
+fn capture_suggestion_dedupe_status(
+    candidate: &ReviewSessionCandidate,
+    existing_candidates: &[StoredCurationCandidate],
+    existing_memories: &[StoredMemory],
+) -> CaptureSuggestionDedupeStatus {
+    if let Some(existing) = existing_candidates
+        .iter()
+        .find(|existing| existing.id == candidate.candidate_id)
+    {
+        return CaptureSuggestionDedupeStatus {
+            status: "suppressed_existing_candidate".to_owned(),
+            method: "curation_queue_exact_id".to_owned(),
+            reason: format!(
+                "Curation candidate {} already exists with status `{}`; capture suggest will not re-propose it.",
+                existing.id, existing.status
+            ),
+            matched_candidate_id: Some(existing.id.clone()),
+            matched_memory_id: None,
+            similarity: None,
+        };
+    }
+
+    if let Some((existing, similarity)) =
+        best_existing_candidate_capture_match(candidate, existing_candidates)
+    {
+        return CaptureSuggestionDedupeStatus {
+            status: "suppressed_existing_candidate".to_owned(),
+            method: "curation_queue_lexical_jaccard".to_owned(),
+            reason: format!(
+                "Existing curation candidate {} with status `{}` is {:.0}% lexically similar.",
+                existing.id,
+                existing.status,
+                similarity * 100.0
+            ),
+            matched_candidate_id: Some(existing.id.clone()),
+            matched_memory_id: None,
+            similarity: Some(round_capture_similarity(similarity)),
+        };
+    }
+
+    if let Some((memory, similarity)) =
+        best_existing_memory_capture_match(candidate, existing_memories)
+    {
+        return CaptureSuggestionDedupeStatus {
+            status: "suppressed_existing_memory".to_owned(),
+            method: "memory_lexical_jaccard".to_owned(),
+            reason: format!(
+                "Existing memory {} is {:.0}% lexically similar; capture suggest suppresses duplicate lessons.",
+                memory.id,
+                similarity * 100.0
+            ),
+            matched_candidate_id: None,
+            matched_memory_id: Some(memory.id.clone()),
+            similarity: Some(round_capture_similarity(similarity)),
+        };
+    }
+
+    CaptureSuggestionDedupeStatus {
+        status: "unique".to_owned(),
+        method: "curation_queue_then_memory_lexical_jaccard".to_owned(),
+        reason: "No matching curation candidate or existing memory reached the capture suppression threshold."
+            .to_owned(),
+        matched_candidate_id: None,
+        matched_memory_id: None,
+        similarity: None,
+    }
+}
+
+fn best_existing_candidate_capture_match<'a>(
+    candidate: &ReviewSessionCandidate,
+    existing_candidates: &'a [StoredCurationCandidate],
+) -> Option<(&'a StoredCurationCandidate, f32)> {
+    existing_candidates
+        .iter()
+        .filter_map(|existing| {
+            let content = existing.proposed_content.as_deref()?;
+            let similarity = capture_content_similarity(&candidate.proposed_content, content)?;
+            (similarity >= CAPTURE_SUGGESTION_DEDUP_MIN_JACCARD).then_some((existing, similarity))
+        })
+        .max_by(|(left, left_similarity), (right, right_similarity)| {
+            left_similarity
+                .total_cmp(right_similarity)
+                .then_with(|| right.id.cmp(&left.id))
+        })
+}
+
+fn best_existing_memory_capture_match<'a>(
+    candidate: &ReviewSessionCandidate,
+    existing_memories: &'a [StoredMemory],
+) -> Option<(&'a StoredMemory, f32)> {
+    existing_memories
+        .iter()
+        .filter_map(|memory| {
+            let similarity =
+                capture_content_similarity(&candidate.proposed_content, &memory.content)?;
+            (similarity >= CAPTURE_SUGGESTION_DEDUP_MIN_JACCARD).then_some((memory, similarity))
+        })
+        .max_by(|(left, left_similarity), (right, right_similarity)| {
+            left_similarity
+                .total_cmp(right_similarity)
+                .then_with(|| right.id.cmp(&left.id))
+        })
+}
+
+fn capture_content_similarity(left: &str, right: &str) -> Option<f32> {
+    let left_tokens = normalized_review_tokens(left);
+    let right_tokens = normalized_review_tokens(right);
+    if left_tokens.is_empty() || right_tokens.is_empty() {
+        return None;
+    }
+    let intersection = left_tokens.intersection(&right_tokens).count();
+    let union = left_tokens.union(&right_tokens).count();
+    if union == 0 {
+        return None;
+    }
+    Some(intersection as f32 / union as f32)
+}
+
+fn round_capture_similarity(value: f32) -> f32 {
+    (value * 10_000.0).round() / 10_000.0
+}
+
+fn capture_dedupe_status_suppresses(status: &CaptureSuggestionDedupeStatus) -> bool {
+    status.status.starts_with("suppressed_")
 }
 
 fn review_topic_key(excerpt: &str) -> String {
@@ -13758,11 +14244,12 @@ mod tests {
     use tracing_subscriber::registry::Registry;
 
     use super::{
-        CURATE_APPLY_SCHEMA_V1, CURATE_CANDIDATES_SCHEMA_V1, CURATE_DISPOSITION_SCHEMA_V1,
-        CURATE_RETIRE_SCHEMA_V1, CURATE_REVIEW_SCHEMA_V1, CURATE_TOMBSTONE_SCHEMA_V1,
-        CURATE_UNTOMBSTONE_SCHEMA_V1, CURATE_VALIDATE_SCHEMA_V1, CandidateType,
-        CurateCandidatesDegradation, CurateCandidatesFilter, CurateCandidatesOptions,
-        CurateCandidatesReport, CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
+        CAPTURE_SUGGESTIONS_SCHEMA_V1, CURATE_APPLY_SCHEMA_V1, CURATE_CANDIDATES_SCHEMA_V1,
+        CURATE_DISPOSITION_SCHEMA_V1, CURATE_RETIRE_SCHEMA_V1, CURATE_REVIEW_SCHEMA_V1,
+        CURATE_TOMBSTONE_SCHEMA_V1, CURATE_UNTOMBSTONE_SCHEMA_V1, CURATE_VALIDATE_SCHEMA_V1,
+        CandidateStatus, CandidateType, CaptureSuggestOptions, CurateCandidatesDegradation,
+        CurateCandidatesFilter, CurateCandidatesOptions, CurateCandidatesReport,
+        CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
         REFLECTION_INGEST_SCHEMA_V1, REFLECTION_PROPOSE_SCHEMA_V1,
         REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY,
         REVIEW_SESSION_SCHEMA_V1, REVIEW_WORKSPACE_SCHEMA_V1, ReflectionIngestOptions,
@@ -13770,7 +14257,7 @@ mod tests {
         ReflectionRequestLedgerDiagnosticsOptions, ReflectionResultDurableIngestOutcome,
         ReviewSessionCandidate, ReviewSessionOptions, ReviewSessionReport, ReviewWorkspaceOptions,
         apply_curation_candidate, build_bootstrap_session_candidates,
-        build_review_session_candidates, candidate_summary_from_stored,
+        build_review_session_candidates, candidate_summary_from_stored, capture_suggestions,
         evaluate_candidate_for_validation, evaluate_create_derived_candidate_for_validation,
         ingest_reflection_result, list_curation_candidates,
         list_reflection_request_ledger_diagnostics, parse_reflection_diagnostics_time,
@@ -16355,6 +16842,213 @@ mod tests {
                 .iter()
                 .all(|candidate| candidate.evidence.len() >= 2)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn capture_suggestions_are_read_only_thresholded_and_limited() -> TestResult {
+        let fixture = review_session_fixture()?;
+
+        let report = capture_suggestions(&CaptureSuggestOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            session_id: Some("cass-review-session-a"),
+            from_recent: false,
+            min_confidence: 0.50,
+            limit: 1,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.schema, CAPTURE_SUGGESTIONS_SCHEMA_V1);
+        assert_eq!(report.command, "capture suggest");
+        assert_eq!(report.selection.source, "from_session");
+        assert_eq!(
+            report.selection.requested_session_id.as_deref(),
+            Some("cass-review-session-a")
+        );
+        assert!(report.read_only);
+        assert!(!report.durable_mutation);
+        assert_eq!(report.limit, 1);
+        assert_eq!(report.candidate_count, 1);
+        assert_eq!(report.candidates.len(), 1);
+        assert_eq!(report.suppressed_count, 0);
+        let suggestion = report
+            .candidates
+            .first()
+            .ok_or_else(|| "expected one capture suggestion".to_owned())?;
+        assert_eq!(suggestion.dedupe_status.status, "unique");
+        assert_eq!(suggestion.proposed_fields.level, "procedural");
+        assert!(suggestion.proposed_fields.tags.contains(&"ambient-capture".to_owned()));
+        assert!(!suggestion.evidence.is_empty());
+        assert!(suggestion.review_command.contains("ee review session cass-review-session-a"));
+        assert!(suggestion.accept_command.contains("ee curate accept"));
+        assert!(suggestion.reject_command.contains("ee curate reject"));
+
+        let connection =
+            DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+        let stored = connection
+            .list_curation_candidates(&fixture.workspace_id, None, None, None)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            stored.is_empty(),
+            "capture suggest must not persist curation candidates by itself"
+        );
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn capture_suggestions_suppress_rejected_candidate_replays() -> TestResult {
+        let fixture = review_session_fixture()?;
+        let first = capture_suggestions(&CaptureSuggestOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            session_id: Some(fixture.session_id.as_str()),
+            from_recent: false,
+            min_confidence: 0.50,
+            limit: 2,
+        })
+        .map_err(|error| error.message())?;
+        let rejected = first
+            .candidates
+            .first()
+            .ok_or_else(|| "expected capture suggestion to reject".to_owned())?;
+
+        let connection =
+            DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+        connection
+            .insert_curation_candidate(
+                &rejected.candidate_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: fixture.workspace_id.clone(),
+                    candidate_type: rejected.candidate_type.clone(),
+                    target_memory_id: rejected.target_memory_id.clone(),
+                    proposed_content: Some(rejected.proposed_fields.content.clone()),
+                    proposed_confidence: Some(rejected.proposed_fields.confidence),
+                    proposed_trust_class: Some("agent_assertion".to_owned()),
+                    source_type: CandidateSource::AgentInference.as_str().to_owned(),
+                    source_id: Some(
+                        rejected
+                            .evidence
+                            .iter()
+                            .map(|evidence| evidence.evidence_span_id.clone())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ),
+                    reason: "Rejected capture suggestion should not be re-proposed.".to_owned(),
+                    confidence: rejected.confidence,
+                    status: Some(CandidateStatus::Rejected.as_str().to_owned()),
+                    created_at: Some("2026-05-06T00:11:00Z".to_owned()),
+                    ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let second = capture_suggestions(&CaptureSuggestOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            session_id: Some(fixture.session_id.as_str()),
+            from_recent: false,
+            min_confidence: 0.50,
+            limit: 2,
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(
+            second
+                .candidates
+                .iter()
+                .all(|candidate| candidate.candidate_id != rejected.candidate_id)
+        );
+        let suppression = second
+            .suppressed
+            .iter()
+            .find(|suppression| suppression.candidate_id == rejected.candidate_id)
+            .ok_or_else(|| "expected rejected suggestion suppression".to_owned())?;
+        assert_eq!(
+            suppression.dedupe_status.status,
+            "suppressed_existing_candidate"
+        );
+        assert_eq!(
+            suppression.dedupe_status.method,
+            "curation_queue_exact_id"
+        );
+        assert_eq!(
+            suppression.dedupe_status.matched_candidate_id.as_deref(),
+            Some(rejected.candidate_id.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn capture_suggestions_suppress_existing_memory_duplicates() -> TestResult {
+        let fixture = review_session_fixture()?;
+        let first = capture_suggestions(&CaptureSuggestOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            session_id: Some(fixture.session_id.as_str()),
+            from_recent: false,
+            min_confidence: 0.50,
+            limit: 2,
+        })
+        .map_err(|error| error.message())?;
+        let duplicate = first
+            .candidates
+            .first()
+            .ok_or_else(|| "expected capture suggestion to duplicate".to_owned())?;
+        let duplicate_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(909)).to_string();
+
+        let connection =
+            DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                &duplicate_memory_id,
+                &CreateMemoryInput {
+                    workspace_id: fixture.workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: duplicate.proposed_fields.kind.clone(),
+                    content: duplicate.proposed_fields.content.clone(),
+                    workflow_id: None,
+                    confidence: duplicate.proposed_fields.confidence,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("capture://test-duplicate".to_owned()),
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: Some("capture-suggestion".to_owned()),
+                    tags: duplicate.proposed_fields.tags.clone(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let second = capture_suggestions(&CaptureSuggestOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            session_id: Some(fixture.session_id.as_str()),
+            from_recent: false,
+            min_confidence: 0.50,
+            limit: 2,
+        })
+        .map_err(|error| error.message())?;
+        let suppression = second
+            .suppressed
+            .iter()
+            .find(|suppression| suppression.candidate_id == duplicate.candidate_id)
+            .ok_or_else(|| "expected memory duplicate suppression".to_owned())?;
+        assert_eq!(
+            suppression.dedupe_status.status,
+            "suppressed_existing_memory"
+        );
+        assert_eq!(
+            suppression.dedupe_status.matched_memory_id.as_deref(),
+            Some(duplicate_memory_id.as_str())
+        );
+        assert_eq!(suppression.dedupe_status.similarity, Some(1.0));
         Ok(())
     }
 
