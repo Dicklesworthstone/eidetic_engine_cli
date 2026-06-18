@@ -49,7 +49,7 @@ data:
       source: missing
       error: cass binary not found at 'cass'
       trusted: false
-  envOverrides[99]{name,category,controls,defaultValue,isSet,source}:
+  envOverrides[101]{name,category,controls,defaultValue,isSet,source}:
     EE_AGENT_NAME,output,Identify the current agent for scoped memory retrieval.,null,false,unset
     EE_AGENT_MODE,output,Use agent-oriented output defaults.,null,false,unset
     EE_AUDIT_LANE_BATCH_MAX,tuning,Override the audit-lane writer batch size before flushing.,"64",false,registry_default
@@ -69,6 +69,8 @@ data:
     EE_EMBED_DEDUP_COSINE_FLOOR,embeddings,Set the cosine-similarity floor for insert-time embedding dedup confirmation.,"0.97",false,registry_default
     EE_EMBED_DEDUP_ENABLED,embeddings,Enable insert-time embedding deduplication after storage and write-path gates are wired.,"false",false,registry_default
     EE_EMBED_DEDUP_HAMMING_K,embeddings,Set the maximum SimHash Hamming distance admitted to dedup cosine confirmation.,"12",false,registry_default
+    EE_EMBED_DOWNLOAD,embeddings,Control bundled embedding model download behavior with auto or off.,auto,false,registry_default
+    EE_EMBED_MODEL_DIR,embeddings,Override the bundled embedding model cache directory used by ee.,null,false,unset
     EE_EMBED_MODEL_PATH,embeddings,Override the embedder model path used by search-time embedder availability checks.,null,false,unset
     EE_EXPERIMENTAL_TRIAD,output,Compatibility no-op for the promoted ee pack/note/why aliases.,null,false,unset
     EE_FLIGHT_RECORDER,diagnostics,Enable the redacted command flight recorder for ee subcommands.,"false",false,registry_default
