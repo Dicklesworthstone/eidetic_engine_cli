@@ -112,6 +112,9 @@ pub const TRUST_REPORT_SCHEMA_V1: &str = "ee.trust_report.v1";
 /// Schema identifier for the user-global memory store-metadata block (bd-2vq2z.13).
 pub const GLOBAL_MEMORY_SCHEMA_V1: &str = "ee.global_memory.v1";
 
+/// Schema identifier for the time-travel memory audit report (bd-2vq2z.16).
+pub const TIMELINE_SCHEMA_V1: &str = "ee.timeline.v1";
+
 /// All known schema identifiers for validation.
 pub const KNOWN_SCHEMAS: &[&str] = &[
     RESPONSE_SCHEMA_V0,
@@ -200,6 +203,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     PROVENANCE_HEALTH_SCHEMA_V1,
     TRUST_REPORT_SCHEMA_V1,
     GLOBAL_MEMORY_SCHEMA_V1,
+    TIMELINE_SCHEMA_V1,
     // Active learning agenda and experiment schemas (EE-440)
     LEARNING_QUESTION_SCHEMA_V1,
     UNCERTAINTY_ESTIMATE_SCHEMA_V1,
@@ -451,6 +455,20 @@ mod tests {
             validate_schema(GLOBAL_MEMORY_SCHEMA_V1),
             Ok(()),
             "global memory schema should validate",
+        )
+    }
+
+    #[test]
+    fn timeline_schema_is_registered() -> TestResult {
+        ensure(
+            is_known_schema(TIMELINE_SCHEMA_V1),
+            true,
+            "timeline schema should be known",
+        )?;
+        ensure(
+            validate_schema(TIMELINE_SCHEMA_V1),
+            Ok(()),
+            "timeline schema should validate",
         )
     }
 

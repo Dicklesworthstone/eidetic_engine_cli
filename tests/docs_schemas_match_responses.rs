@@ -37,6 +37,7 @@ use ee::core::learn::{
 };
 use ee::core::memory::{
     MemoryDetails, MemoryListFilter, MemoryListReport, MemoryShowReport, MemorySummary,
+    MemoryTimelineReport, TimelineChange, TimelineMemory,
 };
 use ee::core::swarm_next_action::SWARM_NEXT_ACTION_SCHEMA_V1;
 use ee::curate::{
@@ -164,34 +165,16 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     ),
     ("ee.mcp.manifest.v1", "ee.mcp.manifest.v1.json"),
     // Session-feature schemas — not yet in docs_schemas_match_responses at ship time
-    (
-        "ee.curate.doctor.v1",
-        "ee.curate.doctor.v1.json",
-    ),
-    (
-        "ee.curate.debt_trend.v1",
-        "ee.curate.debt_trend.v1.json",
-    ),
-    (
-        "ee.scale_envelope.v1",
-        "ee.scale_envelope.v1.json",
-    ),
+    ("ee.curate.doctor.v1", "ee.curate.doctor.v1.json"),
+    ("ee.curate.debt_trend.v1", "ee.curate.debt_trend.v1.json"),
+    ("ee.scale_envelope.v1", "ee.scale_envelope.v1.json"),
     (
         "ee.session_budget.plan.v1",
         "ee.session_budget.plan.v1.json",
     ),
-    (
-        "ee.decide.record.v1",
-        "ee.decide.record.v1.json",
-    ),
-    (
-        "ee.decide.list.v1",
-        "ee.decide.list.v1.json",
-    ),
-    (
-        "ee.decide.revisit.v1",
-        "ee.decide.revisit.v1.json",
-    ),
+    ("ee.decide.record.v1", "ee.decide.record.v1.json"),
+    ("ee.decide.list.v1", "ee.decide.list.v1.json"),
+    ("ee.decide.revisit.v1", "ee.decide.revisit.v1.json"),
     (
         "ee.toolchain_provenance.v1",
         "ee.toolchain_provenance.v1.json",
@@ -251,6 +234,107 @@ fn docs_schema_files_are_strict_draft_2020_12_documents() -> TestResult {
         ensure_field_presets(schema_id, &schema)?;
     }
     Ok(())
+}
+
+#[test]
+fn timeline_schema_documents_as_of_report_shape() -> TestResult {
+    let schema_id = ee::models::schema::TIMELINE_SCHEMA_V1;
+    let schema = read_json(&schema_path("ee.timeline.v1.json"))?;
+
+    ensure_json_str(
+        &schema,
+        "/$schema",
+        "https://json-schema.org/draft/2020-12/schema",
+    )?;
+    ensure_json_str(&schema, "/title", schema_id)?;
+    ensure_json_bool(&schema, "/additionalProperties", false)?;
+    ensure_field_presets(schema_id, &schema)?;
+    ensure_json_str(&schema, "/properties/schema/const", schema_id)?;
+    ensure_json_str(
+        &schema,
+        "/properties/memoriesThen/items/$ref",
+        "#/$defs/timelineMemory",
+    )?;
+    ensure_json_str(
+        &schema,
+        "/properties/changesSince/items/$ref",
+        "#/$defs/timelineChange",
+    )?;
+    ensure_json_str(
+        &schema,
+        "/properties/decisionsInEffect/items/$ref",
+        "#/$defs/timelineMemory",
+    )?;
+
+    let required = schema
+        .pointer("/required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "timeline schema required must be an array".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for field in [
+        "topic",
+        "asOf",
+        "memoriesThen",
+        "changesSince",
+        "decisionsInEffect",
+        "totalMemoriesThen",
+        "totalChangesSince",
+        "totalDecisionsInEffect",
+        "truncated",
+    ] {
+        if !required.contains(&field) {
+            return Err(format!("timeline schema required missing {field}"));
+        }
+    }
+
+    let example = schema
+        .pointer("/examples/0")
+        .ok_or_else(|| "timeline schema must include an example".to_owned())?;
+    validate_json_schema(example, &schema, &schema, "$.examples[0]")
+        .map_err(|error| format!("timeline schema example invalid: {error}"))?;
+
+    let sample_memory = TimelineMemory {
+        memory_id: "mem_00000000000000000000000101".to_owned(),
+        level: "procedural".to_owned(),
+        kind: "rule".to_owned(),
+        content: "Use central batch verification before release.".to_owned(),
+        tags: vec!["release".to_owned(), "verification".to_owned()],
+        confidence: 0.86,
+        trust_class: "human_explicit".to_owned(),
+        trust_subclass: None,
+        provenance_uri: Some("file:///timeline/rule.md:1".to_owned()),
+        known_at: "2026-05-01T00:00:00Z".to_owned(),
+        valid_from: Some("2026-05-01T00:00:00Z".to_owned()),
+        valid_to: None,
+        validity_then: "active".to_owned(),
+        validity_window_kind: "starts_at".to_owned(),
+        is_tombstoned_then: false,
+    };
+    let document = MemoryTimelineReport {
+        schema: ee::models::schema::TIMELINE_SCHEMA_V1,
+        command: "timeline".to_owned(),
+        topic: "release verification".to_owned(),
+        as_of: "2026-05-02T12:00:00Z".to_owned(),
+        memories_then: vec![sample_memory.clone()],
+        changes_since: vec![TimelineChange {
+            change_type: "added".to_owned(),
+            changed_at: "2026-05-03T00:00:00Z".to_owned(),
+            memory_id: "mem_00000000000000000000000102".to_owned(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content_preview: "Central batch verify owns release proof.".to_owned(),
+            reason: "memory became applicable after as-of".to_owned(),
+        }],
+        decisions_in_effect: vec![sample_memory],
+        total_memories_then: 1,
+        total_changes_since: 1,
+        total_decisions_in_effect: 1,
+        truncated: false,
+    }
+    .data_json();
+    validate_json_schema(&document, &schema, &schema, "$")
 }
 
 #[test]

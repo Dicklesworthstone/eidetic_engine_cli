@@ -7444,7 +7444,7 @@ pub fn get_memory_history(options: &GetMemoryHistoryOptions<'_>) -> MemoryHistor
 }
 
 /// Stable schema name for the read-only memory time-travel report.
-pub const TIMELINE_SCHEMA_V1: &str = "ee.timeline.v1";
+pub use crate::models::schema::TIMELINE_SCHEMA_V1;
 
 /// Options for reconstructing what was knowable about a topic at a point in time.
 #[derive(Clone, Debug)]

@@ -1,0 +1,294 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.timeline.v1.json",
+  "title": "ee.timeline.v1",
+  "description": "Read-only time-travel memory audit report for a topic at an RFC3339 as-of instant, including memories that were in effect then, changes since, and decisions in effect then.",
+  "x-ee-status": {
+    "shipped": true,
+    "available_in_build": true,
+    "tracking_bead": "bd-2vq2z.16"
+  },
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "topic",
+    "asOf",
+    "memoriesThen",
+    "changesSince",
+    "decisionsInEffect",
+    "totalMemoriesThen",
+    "totalChangesSince",
+    "totalDecisionsInEffect",
+    "truncated"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.timeline.v1"
+    },
+    "command": {
+      "type": "string",
+      "const": "timeline"
+    },
+    "topic": {
+      "type": "string",
+      "minLength": 1
+    },
+    "asOf": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "memoriesThen": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/timelineMemory"
+      }
+    },
+    "changesSince": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/timelineChange"
+      }
+    },
+    "decisionsInEffect": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/timelineMemory"
+      }
+    },
+    "totalMemoriesThen": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "totalChangesSince": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "totalDecisionsInEffect": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "truncated": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "timelineMemory": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "level",
+        "kind",
+        "content",
+        "tags",
+        "confidence",
+        "trustClass",
+        "trustSubclass",
+        "provenanceUri",
+        "knownAt",
+        "validFrom",
+        "validTo",
+        "validityThen",
+        "validityWindowKind",
+        "isTombstonedThen"
+      ],
+      "properties": {
+        "memoryId": {
+          "type": "string",
+          "pattern": "^mem_"
+        },
+        "level": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "trustClass": {
+          "type": "string"
+        },
+        "trustSubclass": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provenanceUri": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "knownAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "validFrom": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "validTo": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "validityThen": {
+          "type": "string",
+          "enum": [
+            "active",
+            "future",
+            "expired",
+            "tombstoned"
+          ]
+        },
+        "validityWindowKind": {
+          "type": "string"
+        },
+        "isTombstonedThen": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "timelineChange": {
+      "type": "object",
+      "required": [
+        "changeType",
+        "changedAt",
+        "memoryId",
+        "level",
+        "kind",
+        "contentPreview",
+        "reason"
+      ],
+      "properties": {
+        "changeType": {
+          "type": "string",
+          "enum": [
+            "added",
+            "superseded",
+            "tombstoned"
+          ]
+        },
+        "changedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "memoryId": {
+          "type": "string",
+          "pattern": "^mem_"
+        },
+        "level": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "contentPreview": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "field_presets": {
+    "minimal": [
+      "schema",
+      "topic",
+      "asOf",
+      "memoriesThen",
+      "changesSince",
+      "decisionsInEffect"
+    ],
+    "summary": [
+      "schema",
+      "topic",
+      "asOf",
+      "totalMemoriesThen",
+      "totalChangesSince",
+      "totalDecisionsInEffect",
+      "truncated"
+    ],
+    "standard": [
+      "schema",
+      "topic",
+      "asOf",
+      "memoriesThen",
+      "changesSince",
+      "decisionsInEffect",
+      "truncated"
+    ],
+    "full": [
+      "*"
+    ]
+  },
+  "examples": [
+    {
+      "schema": "ee.timeline.v1",
+      "command": "timeline",
+      "topic": "release verification",
+      "asOf": "2026-05-02T12:00:00Z",
+      "memoriesThen": [
+        {
+          "memoryId": "mem_00000000000000000000000101",
+          "level": "procedural",
+          "kind": "rule",
+          "content": "Use RCH before release.",
+          "tags": [
+            "release",
+            "verification"
+          ],
+          "confidence": 0.86,
+          "trustClass": "human_explicit",
+          "trustSubclass": null,
+          "provenanceUri": "file:///timeline/rule.md:1",
+          "knownAt": "2026-05-01T00:00:00Z",
+          "validFrom": "2026-05-01T00:00:00Z",
+          "validTo": "2026-05-03T00:00:00Z",
+          "validityThen": "active",
+          "validityWindowKind": "bounded",
+          "isTombstonedThen": false
+        }
+      ],
+      "changesSince": [
+        {
+          "changeType": "superseded",
+          "changedAt": "2026-05-03T00:00:00Z",
+          "memoryId": "mem_00000000000000000000000101",
+          "level": "procedural",
+          "kind": "rule",
+          "contentPreview": "Use RCH before release.",
+          "reason": "memory validity window ended after as-of"
+        }
+      ],
+      "decisionsInEffect": [],
+      "totalMemoriesThen": 1,
+      "totalChangesSince": 1,
+      "totalDecisionsInEffect": 0,
+      "truncated": false
+    }
+  ]
+}
