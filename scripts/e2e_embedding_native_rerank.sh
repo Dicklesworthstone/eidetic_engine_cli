@@ -128,11 +128,19 @@ assert_jq "$search_one" '.data.metrics.fieldCoverage.rerankScoreCount == 0' "fie
 assert_jq "$search_one" '[.data.results[]? | has("rerankScore")] | any | not' "fusion-only results omit rerankScore"
 assert_jq "$search_one" '[.data.degraded[]? | select(.code == "rerank_model_unavailable")] | length >= 1' \
     "degraded list carries rerank_model_unavailable"
+assert_jq "$search_one" 'first(.data.degraded[]? | select(.code == "rerank_model_unavailable") | .severity) == "low"' \
+    "rerank unavailable degradation has low severity"
+assert_jq "$search_one" \
+    'first(.data.degraded[]? | select(.code == "rerank_model_unavailable") | .repair) == "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst"' \
+    "rerank unavailable degradation carries fetch repair"
 
 first_order="$(json_scalar "$search_one" '[.data.results[]?.docId] | join(",")' "first search order")"
 rerank_mode="$(json_scalar "$search_one" '.data.rerank.mode' "rerank mode")"
 degraded_code="$(json_scalar "$search_one" '.data.rerank.degradedCode' "rerank degraded code")"
+degraded_severity="$(json_scalar "$search_one" 'first(.data.degraded[]? | select(.code == "rerank_model_unavailable") | .severity)' "rerank degraded severity")"
+degraded_repair="$(json_scalar "$search_one" 'first(.data.degraded[]? | select(.code == "rerank_model_unavailable") | .repair)' "rerank degraded repair")"
 e2e_log_note "pre_post_rerank_order mode=$rerank_mode degraded=$degraded_code order=$first_order"
+e2e_log_note "rerank_degradation_detail code=$degraded_code severity=$degraded_severity repair=$degraded_repair"
 
 step "repeat same query to prove deterministic fusion-only order"
 run_ee_capture search_two search_fusion_only_repeat search "$QUERY" --workspace "$WS" --limit 5 --json

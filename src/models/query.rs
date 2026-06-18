@@ -1911,6 +1911,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_eql_query_rejects_zero_limit_even_when_rerank_requested() -> TestResult {
+        let error = parse_eql_query(&serde_json::json!({
+            "q": "semantic rerank fixture",
+            "rerank": true,
+            "limit": 0
+        }))
+        .expect_err("zero limit must be rejected before rerank planning");
+
+        ensure(error.field == "limit", "zero limit should fail on limit")?;
+        ensure(
+            error.message.contains("greater than zero"),
+            "zero limit error should explain the positive boundary",
+        )
+    }
+
+    #[test]
     fn parse_eql_query_rejects_non_boolean_rerank() -> TestResult {
         let error = parse_eql_query(&serde_json::json!({
             "q": "semantic rerank fixture",
