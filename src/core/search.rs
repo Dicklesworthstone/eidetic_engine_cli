@@ -400,6 +400,42 @@ impl SearchSourceMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SearchFusionWeights {
+    lexical: f32,
+    semantic: f32,
+    graph: f32,
+}
+
+impl Default for SearchFusionWeights {
+    fn default() -> Self {
+        Self {
+            lexical: DEFAULT_SEARCH_LEXICAL_WEIGHT,
+            semantic: DEFAULT_SEARCH_SEMANTIC_WEIGHT,
+            graph: DEFAULT_SEARCH_GRAPH_WEIGHT,
+        }
+    }
+}
+
+impl SearchFusionWeights {
+    fn from_config(config: &crate::config::SearchConfig) -> Self {
+        let defaults = Self::default();
+        Self {
+            lexical: unit_weight_or(config.lexical_weight, defaults.lexical),
+            semantic: unit_weight_or(config.semantic_weight, defaults.semantic),
+            graph: unit_weight_or(config.graph_weight, defaults.graph),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SearchFusionAdjustment {
+    multiplier: f32,
+    lexical_component: f32,
+    semantic_component: f32,
+    graph_component: f32,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SourceModeResolution {
     applied: SearchSourceMode,
@@ -437,6 +473,10 @@ pub const DEFAULT_RELEVANCE_FLOOR: f32 = 0.05;
 /// signal cut for RRF-magnitude scores (top hit at 1/61 ≈ 0.0164 still
 /// passes; rank ~190 single-arm RRF gets filtered).
 pub const DEFAULT_RELEVANCE_FLOOR_HYBRID: f32 = 0.005;
+
+const DEFAULT_SEARCH_LEXICAL_WEIGHT: f32 = 0.45;
+const DEFAULT_SEARCH_SEMANTIC_WEIGHT: f32 = 0.45;
+const DEFAULT_SEARCH_GRAPH_WEIGHT: f32 = 0.10;
 
 /// Reference maximum magnitude for an RRF-fused `Hybrid` score (bd-1et0v.11).
 ///
@@ -6343,6 +6383,7 @@ fn run_search_inner_with_performance(
     let rerank_runtime =
         resolve_search_rerank_runtime(options, source_mode.applied, read_connection, &mut degraded);
     trace.record_elapsed("search::rerankResolve", rerank_resolve_start);
+    let fusion_weights = resolved_search_fusion_weights(&options.workspace_path);
     if source_mode.unavailable_no_results {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         trace.record_elapsed("search::total", start);
@@ -6385,6 +6426,7 @@ fn run_search_inner_with_performance(
         source_mode.applied,
         determinism,
         rerank_runtime,
+        fusion_weights,
         &mut trace,
     );
     trace.record_elapsed("search::retrieve", retrieve_start);
@@ -6787,12 +6829,15 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
     }
 
     let config = options.two_tier_config_for_limit(effective_limit);
+    let fusion_weights = resolved_search_fusion_weights(&options.workspace_path);
     let diag_result = diag_search_sync(
         &index_dir,
         &options.query,
         effective_limit as usize,
         config,
         options.explain,
+        options.source_mode,
+        fusion_weights,
     )
     .map_err(SearchError::Index)?;
 
@@ -7428,6 +7473,8 @@ fn diag_search_sync(
     limit: usize,
     config: TwoTierConfig,
     explain: bool,
+    source_mode: SearchSourceMode,
+    fusion_weights: SearchFusionWeights,
 ) -> Result<DiagSearchSyncResult, String> {
     let index_dir_owned = index_dir.to_path_buf();
     let query_owned = query.to_string();
@@ -7543,7 +7590,14 @@ fn diag_search_sync(
                 Ok((results, _metrics)) => {
                     let mut hits: Vec<SearchHit> = results
                         .into_iter()
-                        .map(|result| search_hit_from_scored_result(result, explain))
+                        .map(|result| {
+                            search_hit_from_scored_result(
+                                result,
+                                explain,
+                                source_mode,
+                                fusion_weights,
+                            )
+                        })
                         .collect();
                     let rerank_seed = Deterministic::from_seed(0).shared_child("search.rerank");
                     canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
@@ -7713,7 +7767,109 @@ fn score_source_from_frankensearch(source: crate::search::ScoreSource) -> ScoreS
     }
 }
 
-fn search_hit_from_scored_result(result: crate::search::ScoredResult, explain: bool) -> SearchHit {
+fn unit_weight_or(value: Option<f64>, default: f32) -> f32 {
+    value
+        .filter(|weight| weight.is_finite() && (0.0..=1.0).contains(weight))
+        .map_or(default, |weight| weight as f32)
+}
+
+fn resolved_search_fusion_weights(workspace_path: &Path) -> SearchFusionWeights {
+    crate::core::config_surface::merged_workspace_config(workspace_path)
+        .map(|config| SearchFusionWeights::from_config(&config.values.search))
+        .unwrap_or_default()
+}
+
+fn non_negative_component_score(score: Option<f32>) -> f32 {
+    score
+        .filter(|score| score.is_finite())
+        .map_or(0.0, |score| score.max(0.0))
+}
+
+fn semantic_component_score(hit: &SearchHit) -> f32 {
+    non_negative_component_score(hit.quality_score.or(hit.fast_score))
+}
+
+fn weighted_component_mix(
+    weights: SearchFusionWeights,
+    lexical_component: f32,
+    semantic_component: f32,
+    graph_component: f32,
+) -> f32 {
+    (weights.lexical * lexical_component)
+        + (weights.semantic * semantic_component)
+        + (weights.graph * graph_component)
+}
+
+fn configured_fusion_adjustment(
+    hit: &SearchHit,
+    source_mode: SearchSourceMode,
+    weights: SearchFusionWeights,
+) -> Option<SearchFusionAdjustment> {
+    if source_mode != SearchSourceMode::Hybrid || !hit.score.is_finite() {
+        return None;
+    }
+
+    let lexical_component = non_negative_component_score(hit.lexical_score);
+    let semantic_component = semantic_component_score(hit);
+    let graph_component = 0.0;
+    if lexical_component == 0.0 && semantic_component == 0.0 && graph_component == 0.0 {
+        return None;
+    }
+
+    let default_weights = SearchFusionWeights::default();
+    let default_mix = weighted_component_mix(
+        default_weights,
+        lexical_component,
+        semantic_component,
+        graph_component,
+    );
+    if !default_mix.is_finite() || default_mix <= f32::EPSILON {
+        return None;
+    }
+
+    let configured_mix =
+        weighted_component_mix(weights, lexical_component, semantic_component, graph_component);
+    if !configured_mix.is_finite() {
+        return None;
+    }
+    let multiplier = (configured_mix / default_mix).max(0.0);
+    if !multiplier.is_finite() {
+        return None;
+    }
+
+    Some(SearchFusionAdjustment {
+        multiplier,
+        lexical_component,
+        semantic_component,
+        graph_component,
+    })
+}
+
+fn append_configured_fusion_weight_factor(
+    explanation: &mut ScoreExplanation,
+    weights: SearchFusionWeights,
+    adjustment: SearchFusionAdjustment,
+) {
+    let base = explanation.summary.trim_end_matches('.');
+    explanation.summary = format!(
+        "{base}. Configured fusion weights adjusted score by {:.4}x (lexical={:.2}, semantic={:.2}, graph={:.2}).",
+        adjustment.multiplier, weights.lexical, weights.semantic, weights.graph
+    );
+    explanation.factors.push(ScoreFactor::new(
+        "configured_fusion_weight",
+        adjustment.multiplier,
+        "workspace search.lexical_weight/search.semantic_weight/search.graph_weight multiplier",
+        "search.lexical_weight/search.semantic_weight/search.graph_weight",
+        "adjusted_score = raw_fusion_score * (configured_component_mix / default_component_mix)",
+    ));
+}
+
+fn search_hit_from_scored_result(
+    result: crate::search::ScoredResult,
+    explain: bool,
+    source_mode: SearchSourceMode,
+    fusion_weights: SearchFusionWeights,
+) -> SearchHit {
     let mut hit = SearchHit {
         doc_id: result.doc_id,
         score: result.score,
@@ -7725,8 +7881,16 @@ fn search_hit_from_scored_result(result: crate::search::ScoredResult, explain: b
         metadata: result.metadata,
         explanation: None,
     };
+    let fusion_adjustment = configured_fusion_adjustment(&hit, source_mode, fusion_weights);
+    if let Some(adjustment) = fusion_adjustment {
+        hit.score = (hit.score * adjustment.multiplier).max(0.0);
+    }
     if explain {
-        hit.explanation = Some(ScoreExplanation::generate(&hit));
+        let mut explanation = ScoreExplanation::generate(&hit);
+        if let Some(adjustment) = fusion_adjustment {
+            append_configured_fusion_weight_factor(&mut explanation, fusion_weights, adjustment);
+        }
+        hit.explanation = Some(explanation);
     }
     hit
 }
@@ -8097,6 +8261,7 @@ fn search_sync(
         source_mode,
         determinism,
         SearchRerankRuntime::disabled(),
+        SearchFusionWeights::default(),
         &mut trace,
     )
 }
@@ -8111,6 +8276,7 @@ fn search_sync_with_performance(
     source_mode: SearchSourceMode,
     determinism: &Deterministic<Seed>,
     rerank_runtime: SearchRerankRuntime,
+    fusion_weights: SearchFusionWeights,
     trace: &mut SearchPerformanceTrace,
 ) -> Result<(Vec<SearchHit>, Vec<String>), String> {
     let plan_cache_key =
@@ -8199,7 +8365,14 @@ fn search_sync_with_performance(
                     Ok(results) => {
                         let mut hits: Vec<SearchHit> = results
                             .into_iter()
-                            .map(|result| search_hit_from_scored_result(result, explain))
+                            .map(|result| {
+                                search_hit_from_scored_result(
+                                    result,
+                                    explain,
+                                    source_mode,
+                                    fusion_weights,
+                                )
+                            })
                             .collect();
                         canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                         sort_search_hits_by_score_order(&mut hits);
@@ -8333,7 +8506,14 @@ fn search_sync_with_performance(
                     }
                     let mut hits: Vec<SearchHit> = results
                         .into_iter()
-                        .map(|result| search_hit_from_scored_result(result, explain))
+                        .map(|result| {
+                            search_hit_from_scored_result(
+                                result,
+                                explain,
+                                source_mode,
+                                fusion_weights,
+                            )
+                        })
                         .collect();
                     canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
                     sort_search_hits_by_score_order(&mut hits);
