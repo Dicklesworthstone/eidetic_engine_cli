@@ -4929,6 +4929,7 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
     // System state is in `data.posture` (canonical, 5-state enum) and `data.healthy`
     // (deprecated boolean kept for v0.1→v0.2 transition).
     b.field_bool("success", true);
+    b.field_raw("degraded", "[]");
     b.field_object("data", |d| {
         d.field_str("command", "doctor");
         d.field_str("version", report.version);
@@ -4976,6 +4977,7 @@ pub fn render_doctor_concise_json(report: &DoctorReport) -> String {
     let mut b = JsonBuilder::with_capacity(384);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
+    b.field_raw("degraded", "[]");
     b.field_str("fields", "doctor_concise");
     b.field_object("data", |d| {
         d.field_str("command", "doctor");
@@ -14301,6 +14303,7 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
     // bd-2xdom Gap 4: envelope `success` means "command ran", not "system is healthy".
     // System state is in `data.posture` (canonical) and `data.healthy` (deprecated alias).
     b.field_bool("success", true);
+    b.field_raw("degraded", "[]");
     b.field_str("fields", profile.as_str());
     b.field_object("data", |d| {
         d.field_str("command", "doctor");
@@ -18415,6 +18418,17 @@ mod tests {
         }
     }
 
+    fn ensure_empty_top_level_degraded(value: &serde_json::Value, context: &str) -> TestResult {
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("{context}: missing top-level degraded array"))?;
+        ensure(
+            degraded.is_empty(),
+            format!("{context}: expected empty degraded array, got {degraded:?}"),
+        )
+    }
+
     fn ensure_contains(haystack: &str, needle: &str, context: &str) -> TestResult {
         ensure(
             haystack.contains(needle),
@@ -21848,6 +21862,7 @@ mod tests {
 
         let expected_json = serde_json::from_str::<serde_json::Value>(&json)
             .map_err(|error| format!("doctor JSON should parse: {error}"))?;
+        ensure_empty_top_level_degraded(&expected_json, "doctor JSON envelope")?;
         let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
         let decoded = toon::try_decode(&toon, None)
             .map_err(|error| format!("doctor TOON should decode: {error}"))?;
@@ -21864,6 +21879,7 @@ mod tests {
 
         let expected_json = serde_json::from_str::<serde_json::Value>(&json)
             .map_err(|error| format!("doctor concise JSON should parse: {error}"))?;
+        ensure_empty_top_level_degraded(&expected_json, "doctor concise JSON envelope")?;
         let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
         let decoded = toon::try_decode(&toon, None)
             .map_err(|error| format!("doctor concise TOON should decode: {error}"))?;
@@ -22098,6 +22114,7 @@ mod tests {
         let json = render_doctor_json_filtered(&report, FieldProfile::Standard);
         let value = serde_json::from_str::<serde_json::Value>(&json)
             .map_err(|error| format!("doctor JSON should parse: {error}"))?;
+        ensure_empty_top_level_degraded(&value, "doctor filtered JSON envelope")?;
         ensure_equal(
             &value["data"]["healthy"],
             &serde_json::json!(true),
