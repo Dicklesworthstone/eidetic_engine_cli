@@ -117,8 +117,12 @@ assert_jq "$(cat "$HOOK_SETTINGS")" 'any(.hooks.PreToolUse[]; .eeManaged | conta
     "hook install writes managed PreToolUse entry"
 assert_jq "$(cat "$HOOK_SETTINGS")" 'any(.hooks.PostToolUse[]; .matcher == "Bash")' \
     "hook install writes Bash failure capture entry"
+assert_jq "$install_out" 'any(.data.harnessInstall.snippets[]?; .id == "ee-ambient-session-capture-suggest" and .event == "Stop" and (.command | contains("capture") and contains("suggest") and contains("--from-recent")))' \
+    "hook install JSON exposes session-end capture suggest hook"
 log_event "recall_hooks_step" step hook_install command "ee hook claude-code --install" exit_code 0 elapsed_ms 0 \
     assertion "settings JSON merged"
+log_event "recall_hooks_step" step hook_install_capture command "ee hook claude-code --install" exit_code 0 elapsed_ms 0 \
+    assertion "session-end capture suggest hook advertised in JSON"
 
 pre_cmd="$(jq -r '.hooks.PreToolUse[] | select((.eeManaged // "") | contains("bd-u875s.4")) | .hooks[0].command' "$HOOK_SETTINGS" | head -n 1)"
 post_cmd="$(jq -r '.hooks.PostToolUse[] | select((.eeManaged // "") | contains("bd-u875s.4")) | .hooks[0].command' "$HOOK_SETTINGS" | head -n 1)"

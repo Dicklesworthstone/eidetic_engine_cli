@@ -17291,6 +17291,58 @@ mod tests {
     }
 
     #[test]
+    fn capture_suggestions_reject_invalid_threshold_and_limit_edges() -> TestResult {
+        let fixture = review_session_fixture()?;
+        let cases: [(f32, u32, &str, &str); 3] = [
+            (
+                -0.01,
+                1,
+                "capture suggest --min-confidence",
+                "between 0.0 and 1.0",
+            ),
+            (0.50, 0, "capture suggest --max", "greater than zero"),
+            (
+                0.50,
+                super::MAX_CAPTURE_SUGGESTION_LIMIT + 1,
+                "capture suggest --max",
+                "<= 10",
+            ),
+        ];
+
+        for (min_confidence, limit, field, expected_message) in cases {
+            let error = match capture_suggestions(&CaptureSuggestOptions {
+                workspace_path: fixture.workspace_path.as_path(),
+                database_path: Some(fixture.database_path.as_path()),
+                session_id: Some(fixture.session_id.as_str()),
+                from_recent: false,
+                min_confidence,
+                limit,
+            }) {
+                Ok(_) => {
+                    return Err(format!(
+                        "expected usage error for min_confidence={min_confidence} limit={limit}"
+                    ));
+                }
+                Err(error) => error,
+            };
+
+            assert_eq!(error.code(), "usage");
+            assert_eq!(error.repair(), Some("ee capture suggest --help"));
+            assert!(
+                error.message().contains(field),
+                "error `{}` should mention `{field}`",
+                error.message()
+            );
+            assert!(
+                error.message().contains(expected_message),
+                "error `{}` should mention `{expected_message}`",
+                error.message()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn capture_suggestions_suppress_rejected_candidate_replays() -> TestResult {
         let fixture = review_session_fixture()?;
         let first = capture_suggestions(&CaptureSuggestOptions {
