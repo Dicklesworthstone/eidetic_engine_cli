@@ -177,8 +177,8 @@ use crate::core::memory::{
     ReviseReason, WorkflowCloseOptions, WorkflowCloseReport, WorkflowCreateOptions,
     build_memory_timeline, close_workflow, create_workflow, expire_memory, get_memory_details,
     list_memories, remember_git_capture_candidate_from_repo, remember_memory_batch_stdin,
-    remember_memory_with_controls, revise_memory, update_memory_level, update_memory_link,
-    update_memory_tags,
+    remember_global_memory_with_controls, remember_memory_with_controls, revise_memory,
+    update_memory_level, update_memory_link, update_memory_tags,
 };
 use crate::core::orient::{OrientDecisionOptions, orient_decisions};
 use crate::core::outcome::{
@@ -9202,6 +9202,10 @@ pub struct RememberArgs {
     /// Source provenance URI (e.g., file://path:line).
     #[arg(long)]
     pub source: Option<String>,
+
+    /// Store this memory in the user-global memory tier instead of the workspace store.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub global: bool,
 
     /// Persist secret-like content with an explicit policy-bypass audit signal.
     #[arg(long = "allow-secret-mention", action = ArgAction::SetTrue)]
@@ -47845,6 +47849,7 @@ fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
         no_propose_candidates: args.no_propose_candidates,
         confidence: args.confidence,
         source: args.source.clone(),
+        global: false,
         allow_secret_mention: args.allow_secret_mention,
         valid_from: args.valid_from.clone(),
         valid_to: args.valid_to.clone(),
@@ -48331,30 +48336,33 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, Do
             args.kind.as_str()
         };
         let source = args.source.as_deref().unwrap_or(candidate.source.as_str());
-        let outcome = remember_memory_with_controls(
-            &RememberMemoryOptions {
-                workspace_path: &workspace_path,
-                database_path: None,
-                content: candidate.content.as_str(),
-                workflow_id: args.workflow.as_deref(),
-                level: &args.level,
-                kind,
-                tags: tag_ref,
-                confidence: args.confidence,
-                source: Some(source),
-                allow_secret_mention: args.allow_secret_mention,
-                valid_from: args.valid_from.as_deref(),
-                valid_to: args.valid_to.as_deref(),
-                dry_run: !args.apply,
-                auto_link: !args.no_auto_link,
-                propose_candidates: !args.no_propose_candidates,
-            },
-            &RememberWriteControls {
-                reinforce: false,
-                idempotency_key: args.idempotency_key.as_deref(),
-                defer_index_processing: false,
-            },
-        )?;
+        let options = RememberMemoryOptions {
+            workspace_path: &workspace_path,
+            database_path: None,
+            content: candidate.content.as_str(),
+            workflow_id: args.workflow.as_deref(),
+            level: &args.level,
+            kind,
+            tags: tag_ref,
+            confidence: args.confidence,
+            source: Some(source),
+            allow_secret_mention: args.allow_secret_mention,
+            valid_from: args.valid_from.as_deref(),
+            valid_to: args.valid_to.as_deref(),
+            dry_run: !args.apply,
+            auto_link: !args.no_auto_link,
+            propose_candidates: !args.no_propose_candidates,
+        };
+        let controls = RememberWriteControls {
+            reinforce: false,
+            idempotency_key: args.idempotency_key.as_deref(),
+            defer_index_processing: false,
+        };
+        let outcome = if args.global {
+            remember_global_memory_with_controls(&options, &controls)
+        } else {
+            remember_memory_with_controls(&options, &controls)
+        }?;
         if let RememberOutcome::Created(ref report) = outcome {
             persist_remember_sentinels(args, report)?;
         }
@@ -48367,30 +48375,33 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, Do
             repair: Some("ee remember \"<content>\" --json".to_owned()),
         });
     };
-    let outcome = remember_memory_with_controls(
-        &RememberMemoryOptions {
-            workspace_path: &workspace_path,
-            database_path: None,
-            content,
-            workflow_id: args.workflow.as_deref(),
-            level: &args.level,
-            kind: &args.kind,
-            tags: args.tags.as_deref(),
-            confidence: args.confidence,
-            source: args.source.as_deref(),
-            allow_secret_mention: args.allow_secret_mention,
-            valid_from: args.valid_from.as_deref(),
-            valid_to: args.valid_to.as_deref(),
-            dry_run: args.dry_run,
-            auto_link: !args.no_auto_link,
-            propose_candidates: !args.no_propose_candidates,
-        },
-        &RememberWriteControls {
-            reinforce: args.reinforce,
-            idempotency_key: args.idempotency_key.as_deref(),
-            defer_index_processing: false,
-        },
-    )?;
+    let options = RememberMemoryOptions {
+        workspace_path: &workspace_path,
+        database_path: None,
+        content,
+        workflow_id: args.workflow.as_deref(),
+        level: &args.level,
+        kind: &args.kind,
+        tags: args.tags.as_deref(),
+        confidence: args.confidence,
+        source: args.source.as_deref(),
+        allow_secret_mention: args.allow_secret_mention,
+        valid_from: args.valid_from.as_deref(),
+        valid_to: args.valid_to.as_deref(),
+        dry_run: args.dry_run,
+        auto_link: !args.no_auto_link,
+        propose_candidates: !args.no_propose_candidates,
+    };
+    let controls = RememberWriteControls {
+        reinforce: args.reinforce,
+        idempotency_key: args.idempotency_key.as_deref(),
+        defer_index_processing: false,
+    };
+    let outcome = if args.global {
+        remember_global_memory_with_controls(&options, &controls)
+    } else {
+        remember_memory_with_controls(&options, &controls)
+    }?;
     let RememberOutcome::Created(ref report) = outcome else {
         return Ok(outcome);
     };
@@ -48462,6 +48473,13 @@ where
     E: Write,
 {
     if args.batch || args.stdin {
+        if args.global {
+            let error = DomainError::Usage {
+                message: "--global is not supported with --batch --stdin".to_owned(),
+                repair: Some("Use single-memory `ee remember --global \"...\" --json`.".to_owned()),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
         return handle_remember_batch(cli, args, stdout, stderr);
     }
     match handle_remember(cli, args) {

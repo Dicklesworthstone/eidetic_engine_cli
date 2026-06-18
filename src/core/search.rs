@@ -23,7 +23,8 @@ use crate::models::degradation::{
 use crate::models::model_registry::{ModelPurpose, ModelRegistryStatus};
 use crate::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use crate::models::{
-    MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri, TrustClass, UnitScore,
+    GLOBAL_MEMORY_SCOPE_TAG, MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri, TrustClass,
+    UnitScore,
     degraded_recovery_actions,
 };
 use crate::obs::audit_events::query_hash as audit_query_hash;
@@ -3890,6 +3891,30 @@ fn metadata_string<'a>(metadata: &'a serde_json::Value, key: &str) -> Option<&'a
         .filter(|value| !value.trim().is_empty())
 }
 
+fn search_hit_metadata_tags(hit: &SearchHit) -> Option<Vec<String>> {
+    let metadata = hit.metadata.as_ref()?;
+    let value = metadata.get("tags")?;
+    if let Some(tags) = value.as_array() {
+        let parsed = tags
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        return (!parsed.is_empty()).then_some(parsed);
+    }
+    value.as_str().and_then(|raw| {
+        let parsed = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        (!parsed.is_empty()).then_some(parsed)
+    })
+}
+
 fn metadata_bool(metadata: &serde_json::Value, key: &str) -> Option<bool> {
     metadata.get(key).and_then(serde_json::Value::as_bool)
 }
@@ -6640,7 +6665,17 @@ fn run_search_inner_with_performance(
             // and discard the rest. Stable ordering is preserved (first
             // occurrence's position wins among ties).
             let dedupe_doc_id_start = Instant::now();
-            let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(raw_hits);
+            let (mut raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(raw_hits);
+            let global_hits = global_store_lexical_hits(
+                options,
+                effective_limit,
+                &mut degraded,
+                preloaded_memories.as_deref_mut(),
+            );
+            if !global_hits.is_empty() {
+                raw_hits.extend(global_hits);
+                sort_search_hits_by_score_order(&mut raw_hits);
+            }
             trace.record_elapsed("search::dedupeDocId", dedupe_doc_id_start);
             let dedupe_mi_start = Instant::now();
             let (raw_hits, mi_duplicates_collapsed, mi_eligible_count) =
@@ -6717,6 +6752,14 @@ fn run_search_inner_with_performance(
             let truncate_start = Instant::now();
             truncate_hits_to_limit(&mut above_floor, effective_limit);
             trace.record_elapsed("search::truncate", truncate_start);
+            let preload_start = Instant::now();
+            preload_returned_search_memories(
+                &above_floor,
+                read_connection,
+                preloaded_memories.as_deref_mut(),
+                &mut degraded,
+            );
+            trace.record_elapsed("search::preloadReturnedMemories", preload_start);
             let kept = above_floor.len();
 
             // Representative floor for degradation reporting + metrics:
@@ -8161,6 +8204,222 @@ fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
     }
 }
 
+fn global_store_lexical_hits(
+    options: &SearchOptions,
+    effective_limit: u32,
+    degraded: &mut Vec<SearchDegradation>,
+    preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
+) -> Vec<SearchHit> {
+    if !global_store_participates_in_scope(options.memory_scope) {
+        return Vec::new();
+    }
+    let query_terms = search_lexical_terms(&options.query);
+    if query_terms.is_empty() {
+        return Vec::new();
+    }
+    let paths = match super::global_store::default_global_store_paths_from_env() {
+        Ok(paths) => paths,
+        Err(error) => {
+            if matches!(options.memory_scope, MemoryScope::Global) {
+                degraded.push(SearchDegradation::scope_metadata_unavailable(&format!(
+                    "global store path resolution failed: {error}"
+                )));
+            }
+            return Vec::new();
+        }
+    };
+    let memories =
+        match super::global_store::read_global_store_memories(&paths, options.include_tombstoned) {
+            Ok(memories) => memories,
+            Err(error) => {
+                degraded.push(SearchDegradation::scope_metadata_unavailable(&format!(
+                    "global store read failed: {error}"
+                )));
+                return Vec::new();
+            }
+        };
+    if memories.is_empty() {
+        return Vec::new();
+    }
+
+    let reference_time = options.as_of.unwrap_or_else(Utc::now);
+    let mut scored = Vec::new();
+    let mut preloaded_memories = preloaded_memories;
+    for memory in memories {
+        if memory.tombstoned_at.is_some() && !options.include_tombstoned {
+            continue;
+        }
+        if !matches!(
+            memory_validity_visibility(
+                memory.valid_from.as_deref(),
+                memory.valid_to.as_deref(),
+                reference_time,
+                options.include_expired,
+                options.include_future,
+            ),
+            MemoryValidityVisibility::Visible
+        ) {
+            continue;
+        }
+        let Some(score) = search_lexical_memory_score(&memory, &query_terms) else {
+            continue;
+        };
+        if let Some(preloaded) = preloaded_memories.as_deref_mut() {
+            preloaded
+                .entry(memory.id.clone())
+                .or_insert_with(|| memory.clone());
+        }
+        scored.push((memory, score));
+    }
+
+    scored.sort_by(|(left_memory, left_score), (right_memory, right_score)| {
+        right_score
+            .total_cmp(left_score)
+            .then_with(|| left_memory.workspace_id.cmp(&right_memory.workspace_id))
+            .then_with(|| left_memory.id.cmp(&right_memory.id))
+    });
+
+    scored
+        .into_iter()
+        .take(usize::try_from(effective_limit).unwrap_or(usize::MAX))
+        .map(|(memory, score)| SearchHit {
+            doc_id: memory.id.clone(),
+            score,
+            source: ScoreSource::Lexical,
+            fast_score: None,
+            quality_score: None,
+            lexical_score: Some(score),
+            rerank_score: None,
+            metadata: Some(global_store_search_metadata(&memory, reference_time)),
+            explanation: None,
+        })
+        .collect()
+}
+
+fn global_store_participates_in_scope(scope: MemoryScope) -> bool {
+    matches!(
+        scope,
+        MemoryScope::Swarm | MemoryScope::Workspace | MemoryScope::Global
+    )
+}
+
+fn search_lexical_terms(text: &str) -> BTreeSet<String> {
+    text.split(|ch: char| !ch.is_alphanumeric())
+        .map(str::trim)
+        .filter(|term| term.len() >= 2)
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn search_lexical_memory_score(
+    memory: &StoredMemory,
+    query_terms: &BTreeSet<String>,
+) -> Option<f32> {
+    let haystack =
+        format!("{} {} {}", memory.level, memory.kind, memory.content).to_ascii_lowercase();
+    let matched = query_terms
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
+        .count();
+    (matched > 0).then_some(matched as f32 / query_terms.len() as f32)
+}
+
+fn global_store_search_metadata(
+    memory: &StoredMemory,
+    reference_time: DateTime<Utc>,
+) -> serde_json::Value {
+    let mut metadata = serde_json::json!({
+        "source": "memory",
+        "storeLane": super::global_store::GLOBAL_PROVENANCE_LANE,
+        "memoryId": &memory.id,
+        "memory_id": &memory.id,
+        "workspaceId": &memory.workspace_id,
+        "workspace_id": &memory.workspace_id,
+        "level": &memory.level,
+        "kind": &memory.kind,
+        "confidence": memory.confidence,
+        "utility": memory.utility,
+        "importance": memory.importance,
+        "provenanceUri": &memory.provenance_uri,
+        "createdAt": &memory.created_at,
+        "updatedAt": &memory.updated_at,
+        "valid_from": &memory.valid_from,
+        "valid_to": &memory.valid_to,
+        "validity_status": search_validity_status_for_memory(memory, reference_time),
+        "memory_scope": MemoryScope::Global.as_str(),
+        "tags": [GLOBAL_MEMORY_SCOPE_TAG],
+    });
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            SEARCH_ANALYSIS_CONTENT_KEY.to_owned(),
+            serde_json::json!(&memory.content),
+        );
+        object.insert(
+            SEARCH_ANALYSIS_CONFIDENCE_KEY.to_owned(),
+            serde_json::json!(memory.confidence),
+        );
+        object.insert(
+            SEARCH_ANALYSIS_UTILITY_KEY.to_owned(),
+            serde_json::json!(memory.utility),
+        );
+        object.insert(
+            SEARCH_ANALYSIS_CREATED_AT_KEY.to_owned(),
+            serde_json::json!(&memory.created_at),
+        );
+    }
+    metadata
+}
+
+fn search_validity_status_for_memory(
+    memory: &StoredMemory,
+    reference_time: DateTime<Utc>,
+) -> &'static str {
+    match memory_validity_visibility(
+        memory.valid_from.as_deref(),
+        memory.valid_to.as_deref(),
+        reference_time,
+        true,
+        true,
+    ) {
+        MemoryValidityVisibility::Visible => "current",
+        MemoryValidityVisibility::Expired => "expired",
+        MemoryValidityVisibility::Future => "future",
+        MemoryValidityVisibility::Malformed => "invalid",
+    }
+}
+
+fn preload_returned_search_memories(
+    hits: &[SearchHit],
+    read_connection: Option<&DbConnection>,
+    preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
+    degraded: &mut Vec<SearchDegradation>,
+) {
+    let Some(preloaded) = preloaded_memories else {
+        return;
+    };
+    let missing = hits
+        .iter()
+        .filter(|hit| hit.doc_id.starts_with("mem_") && !preloaded.contains_key(&hit.doc_id))
+        .map(|hit| hit.doc_id.as_str())
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return;
+    }
+    let Some(connection) = read_connection else {
+        return;
+    };
+    match connection.get_memories_batch(&missing) {
+        Ok(memories) => {
+            for (memory_id, memory) in memories {
+                preloaded.entry(memory_id).or_insert(memory);
+            }
+        }
+        Err(error) => degraded.push(SearchDegradation::scope_metadata_unavailable(&format!(
+            "search result memory preload failed: {error}"
+        ))),
+    }
+}
+
 /// Ranking order for final search hits (bd-2vq2z.30). Reranked hits (those
 /// carrying a `rerank_score`) outrank fusion-only hits and order amongst
 /// themselves by descending rerank score, so a reranker's decision survives to
@@ -9244,11 +9503,23 @@ fn apply_memory_scope_visibility_with_connection(
 ) -> (Vec<SearchHit>, MemoryScopeStats) {
     let hit_doc_ids: BTreeSet<String> = hits.iter().map(|hit| hit.doc_id.clone()).collect();
     let hit_doc_refs: Vec<&str> = hit_doc_ids.iter().map(String::as_str).collect();
-    let (scope_memories, read_error): (BTreeMap<String, crate::db::StoredMemory>, Option<String>) =
+    let (mut scope_memories, read_error): (
+        BTreeMap<String, crate::db::StoredMemory>,
+        Option<String>,
+    ) =
         match connection.get_memories_batch(&hit_doc_refs) {
             Ok(memories) => (memories, None),
             Err(error) => (BTreeMap::new(), Some(error.to_string())),
         };
+    if let Some(preloaded) = preloaded_memories.as_deref() {
+        for memory_id in &hit_doc_ids {
+            if let Some(memory) = preloaded.get(memory_id) {
+                scope_memories
+                    .entry(memory_id.clone())
+                    .or_insert_with(|| memory.clone());
+            }
+        }
+    }
     let (scope_tags, tag_read_error): (BTreeMap<String, Vec<String>>, Option<String>) =
         if matches!(scope_context.scope, MemoryScope::Global) {
             match connection.get_memory_tags_batch(&hit_doc_refs) {
@@ -9268,10 +9539,12 @@ fn apply_memory_scope_visibility_with_connection(
 
     let mut scoped_hits = Vec::with_capacity(hits.len());
     for mut hit in hits {
+        let metadata_tags = search_hit_metadata_tags(&hit);
         match scope_memories.get(&hit.doc_id) {
             Some(memory) => {
                 let tags = scope_tags
                     .get(&hit.doc_id)
+                    .or(metadata_tags.as_ref())
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
                 let in_scope = scope_context.memory_in_scope_with_tags(memory, tags);

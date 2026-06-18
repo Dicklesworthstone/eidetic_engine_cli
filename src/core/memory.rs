@@ -41,9 +41,9 @@ use crate::db::{
     audit_actions, generate_audit_id, generate_audit_id_seeded,
 };
 use crate::models::{
-    DomainError, MAX_TAG_BYTES, MemoryContent, MemoryId, MemoryKind, MemoryLevel,
-    MemoryValidationError, ProducerMetadata, ProducerSourceSystem, ProvenanceUri, Tag, TrustClass,
-    UnitScore, WorkspaceId,
+    DomainError, GLOBAL_MEMORY_SCOPE_TAG, MAX_TAG_BYTES, MemoryContent, MemoryId, MemoryKind,
+    MemoryLevel, MemoryValidationError, ProducerMetadata, ProducerSourceSystem, ProvenanceUri, Tag,
+    TrustClass, UnitScore, WorkspaceId,
 };
 use crate::obs::{AuditEvent, AuditOutcome, now_rfc3339_nanos};
 use crate::runtime::determinism::{Deterministic, Seed};
@@ -1373,7 +1373,24 @@ fn remember_memory_inner(
     audit_lane: Option<&AuditLaneHandle>,
     defer_index_processing: bool,
 ) -> Result<RememberMemoryReport, DomainError> {
-    let prepared = prepare_remember_memory(options, id_source.next_memory_id())?;
+    remember_memory_inner_with_store(
+        options,
+        id_source,
+        audit_lane,
+        defer_index_processing,
+        None,
+    )
+}
+
+fn remember_memory_inner_with_store(
+    options: &RememberMemoryOptions<'_>,
+    id_source: &mut RememberIdSource<'_>,
+    audit_lane: Option<&AuditLaneHandle>,
+    defer_index_processing: bool,
+    store_override: Option<&RememberStoreOverride>,
+) -> Result<RememberMemoryReport, DomainError> {
+    let prepared =
+        prepare_remember_memory_with_store(options, id_source.next_memory_id(), store_override)?;
     if options.dry_run {
         return Ok(RememberMemoryReport {
             version: env!("CARGO_PKG_VERSION"),
@@ -1626,10 +1643,7 @@ fn remember_memory_inner(
         }
     }
 
-    let index_dir = prepared
-        .workspace_path
-        .join(".ee")
-        .join(DEFAULT_INDEX_SUBDIR);
+    let index_dir = prepared.index_dir.clone();
     let index_report = if defer_index_processing {
         // bd-2efx1: leave the job pending; the batch lane drains every
         // pending job with one coalesced rebuild after its last line.
@@ -2131,6 +2145,7 @@ struct PreparedRememberMemory {
     workspace_id: String,
     workspace_path: PathBuf,
     database_path: PathBuf,
+    index_dir: PathBuf,
     content: String,
     workflow_id: Option<String>,
     level: MemoryLevel,
@@ -2143,6 +2158,14 @@ struct PreparedRememberMemory {
     valid_to: Option<String>,
     validity_status: String,
     validity_window_kind: String,
+}
+
+#[derive(Clone, Debug)]
+struct RememberStoreOverride {
+    workspace_id: String,
+    workspace_path: PathBuf,
+    database_path: PathBuf,
+    index_dir: PathBuf,
 }
 
 struct RememberWriteReplayGuard {
@@ -2188,17 +2211,37 @@ fn prepare_remember_memory(
     options: &RememberMemoryOptions<'_>,
     memory_id: MemoryId,
 ) -> Result<PreparedRememberMemory, DomainError> {
-    let workspace_path = resolve_workspace_path(options.workspace_path, options.dry_run)?;
-    let database_path = options
+    prepare_remember_memory_with_store(options, memory_id, None)
+}
+
+fn prepare_remember_memory_with_store(
+    options: &RememberMemoryOptions<'_>,
+    memory_id: MemoryId,
+    store_override: Option<&RememberStoreOverride>,
+) -> Result<PreparedRememberMemory, DomainError> {
+    let caller_workspace_path = resolve_workspace_path(options.workspace_path, options.dry_run)?;
+    let default_database_path = options
         .database_path
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+        .unwrap_or_else(|| caller_workspace_path.join(".ee").join("ee.db"));
+    let workspace_path = store_override
+        .map(|store| store.workspace_path.clone())
+        .unwrap_or_else(|| caller_workspace_path.clone());
+    let database_path = store_override
+        .map(|store| store.database_path.clone())
+        .unwrap_or(default_database_path);
+    let workspace_id = store_override
+        .map(|store| store.workspace_id.clone())
+        .unwrap_or_else(|| stable_workspace_id(&workspace_path));
+    let index_dir = store_override
+        .map(|store| store.index_dir.clone())
+        .unwrap_or_else(|| workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR));
     let content = MemoryContent::parse(options.content)
         .map_err(|error| remember_usage_error(error.to_string()))?
         .as_str()
         .to_owned();
     let policy_bypass =
-        validate_remember_policy(&content, &workspace_path, options.allow_secret_mention)?;
+        validate_remember_policy(&content, &caller_workspace_path, options.allow_secret_mention)?;
     let workflow_id = parse_workflow_id(options.workflow_id)?;
     let level = MemoryLevel::from_str(options.level)
         .map_err(|error| remember_usage_error(error.to_string()))?;
@@ -2220,9 +2263,10 @@ fn prepare_remember_memory(
 
     Ok(PreparedRememberMemory {
         memory_id,
-        workspace_id: stable_workspace_id(&workspace_path),
+        workspace_id,
         workspace_path,
         database_path,
+        index_dir,
         content,
         workflow_id,
         level,
@@ -5851,6 +5895,145 @@ pub fn remember_memory_with_controls(
         record_remember_idempotency_key(&report, key)?;
     }
     Ok(RememberOutcome::Created(Box::new(report)))
+}
+
+/// Store one memory in the separate user-global store used by `ee remember --global`.
+///
+/// This is intentionally a narrow wrapper around the normal remember pipeline:
+/// global writes still run the same validation, audit, index-job, auto-link, and
+/// curation proposal code, but their storage target is
+/// `<user-data-root>/global/{ee.db,indexes}` instead of the current workspace DB.
+pub fn remember_global_memory_with_controls(
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+) -> Result<RememberOutcome, DomainError> {
+    if controls.reinforce {
+        return Err(remember_usage_error(
+            "--global cannot be combined with --reinforce".to_owned(),
+        ));
+    }
+
+    let paths = super::global_store::default_global_store_paths_from_env()
+        .map_err(remember_global_store_error)?;
+    let workspace_id = if options.dry_run {
+        super::global_store::global_workspace_id(&paths)
+    } else {
+        let (connection, workspace_id) =
+            super::global_store::open_or_create_global_store(&paths)
+                .map_err(remember_global_store_error)?;
+        if let Err(error) = connection.close() {
+            tracing::warn!(
+                target: "ee::memory",
+                event = "global_store_bootstrap_close_failed",
+                database_path = %paths.database_path.display(),
+                error = %error,
+            );
+        }
+        workspace_id
+    };
+    let store_override = RememberStoreOverride {
+        workspace_id: workspace_id.clone(),
+        workspace_path: paths.root.clone(),
+        database_path: paths.database_path.clone(),
+        index_dir: paths.index_dir.clone(),
+    };
+    let tags = remember_tags_with_global_scope(options.tags);
+    let global_options = RememberMemoryOptions {
+        workspace_path: options.workspace_path,
+        database_path: Some(&paths.database_path),
+        content: options.content,
+        workflow_id: options.workflow_id,
+        level: options.level,
+        kind: options.kind,
+        tags: Some(tags.as_str()),
+        confidence: options.confidence,
+        source: options.source,
+        allow_secret_mention: options.allow_secret_mention,
+        valid_from: options.valid_from,
+        valid_to: options.valid_to,
+        dry_run: options.dry_run,
+        auto_link: options.auto_link,
+        propose_candidates: options.propose_candidates,
+    };
+
+    let idempotency_key = controls
+        .idempotency_key
+        .map(validate_remember_idempotency_key)
+        .transpose()?;
+    if let Some(key) = idempotency_key.as_deref() {
+        let canonical_content = MemoryContent::parse(global_options.content)
+            .map_err(|error| remember_usage_error(error.to_string()))?
+            .as_str()
+            .to_owned();
+        let content_hash = remember_content_hash(&canonical_content);
+        if paths.database_path.exists() {
+            let connection = open_remember_database_with_retry(&paths.database_path)?;
+            migrate_remember_database_with_retry(&connection)?;
+            if let Some(existing) = connection
+                .get_remember_idempotency_key(&workspace_id, key)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to look up global idempotency key: {error}"),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?
+            {
+                if existing.content_hash == content_hash {
+                    return Ok(RememberOutcome::AlreadyRecorded(
+                        RememberAlreadyRecordedReport {
+                            version: env!("CARGO_PKG_VERSION"),
+                            workspace_id,
+                            database_path: paths.database_path,
+                            memory_id: existing.memory_id,
+                            idempotency_key: existing.idempotency_key,
+                            dry_run: options.dry_run,
+                        },
+                    ));
+                }
+                return Err(remember_idempotency_conflict_error(key));
+            }
+        }
+    }
+
+    let mut id_source = RememberIdSource::Ambient;
+    let report = remember_memory_inner_with_store(
+        &global_options,
+        &mut id_source,
+        None,
+        controls.defer_index_processing,
+        Some(&store_override),
+    )?;
+    if let Some(key) = idempotency_key.as_deref()
+        && !global_options.dry_run
+    {
+        record_remember_idempotency_key(&report, key)?;
+    }
+    Ok(RememberOutcome::Created(Box::new(report)))
+}
+
+fn remember_tags_with_global_scope(tags: Option<&str>) -> String {
+    let mut values = tags
+        .map(|tags| {
+            tags.split(',')
+                .map(str::trim)
+                .filter(|tag| !tag.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let already_global = values.iter().any(|tag| {
+        let normalized = tag.trim().to_ascii_lowercase().replace('-', "_");
+        matches!(normalized.as_str(), "global" | "house_rule")
+    });
+    if !already_global {
+        values.push(GLOBAL_MEMORY_SCOPE_TAG.to_owned());
+    }
+    values.join(",")
+}
+
+fn remember_global_store_error(message: String) -> DomainError {
+    DomainError::Storage {
+        message,
+        repair: Some("Ensure HOME or XDG_DATA_HOME is set and writable, then retry.".to_owned()),
+    }
 }
 
 // -----------------------------------------------------------------------------
