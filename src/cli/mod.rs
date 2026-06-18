@@ -2803,6 +2803,10 @@ pub struct ContextArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain: bool,
 
+    /// Emit task-specific capture-demand gaps instead of the context pack.
+    #[arg(skip)]
+    pub explain_gaps: bool,
+
     /// Suppress data.pack.packDna even when --explain is requested.
     #[arg(long = "no-pack-dna", action = ArgAction::SetTrue)]
     pub no_pack_dna: bool,
@@ -3158,6 +3162,10 @@ pub struct PackArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain: bool,
 
+    /// Emit task-specific capture-demand gaps instead of the context pack.
+    #[arg(long = "explain-gaps", action = ArgAction::SetTrue)]
+    pub explain_gaps: bool,
+
     /// Emit a redaction-safe query and pack performance report instead of the context pack.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
@@ -3313,6 +3321,10 @@ pub struct PackBuildArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain: bool,
 
+    /// Emit task-specific capture-demand gaps instead of the context pack.
+    #[arg(long = "explain-gaps", action = ArgAction::SetTrue)]
+    pub explain_gaps: bool,
+
     /// Emit a redaction-safe query and pack performance report instead of the context pack.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
@@ -3383,6 +3395,7 @@ impl PackArgs {
             index_dir: self.index_dir.clone(),
             output: self.output.clone(),
             explain: self.explain,
+            explain_gaps: self.explain_gaps,
             explain_performance: self.explain_performance,
             as_of: self.as_of,
             include_expired: self.include_expired,
@@ -10215,12 +10228,16 @@ pub struct WhyArgs {
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct WhyNotArgs {
     /// Memory ID to explain the exclusion of.
-    #[arg(value_name = "MEMORY_ID")]
-    pub memory_id: String,
+    #[arg(value_name = "MEMORY_ID", required_unless_present = "gaps")]
+    pub memory_id: Option<String>,
 
     /// Task/query the context pack would be built for.
     #[arg(long, value_name = "TASK")]
     pub task: String,
+
+    /// Report task-specific capture-demand gaps instead of a single memory exclusion.
+    #[arg(long = "gaps", action = ArgAction::SetTrue)]
+    pub gaps: bool,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -14962,17 +14979,33 @@ fn collect_eval_run_reports(
 
     let mut reports = Vec::with_capacity(target_fixtures.len());
     for fixture in &target_fixtures {
+        let scenario = crate::eval::load_scenario(&fixture.scenario_path)?;
         let source = crate::eval::load_source_memories(&fixture.source_memory_path)?;
+        crate::eval::validate_fixture_scenario(&scenario, &source)?;
         let per_query = run_eval_retrieval_queries(&source)?;
         let fixture_metrics = crate::eval::compute_fixture_metrics(&fixture.fixture_id, per_query);
+        let semantic_recall = scenario
+            .semantic_recall_expectations
+            .as_ref()
+            .map(|expectations| {
+                crate::eval::evaluate_semantic_recall_expectations(
+                    &fixture.fixture_id,
+                    expectations,
+                )
+            });
 
         let mut report = crate::eval::EvalRunReport::new(
             fixture.fixture_id.clone(),
             fixture.fixture_family.clone(),
         );
         report.metrics = fixture_metrics;
+        report.semantic_recall = semantic_recall;
         report.duration_ms = start.elapsed().as_secs_f64() * 1000.0;
-        report.status = if report.metrics.mean_precision_at_1 >= 0.5 {
+        let semantic_recall_passed = report
+            .semantic_recall
+            .as_ref()
+            .is_none_or(|semantic_recall| semantic_recall.passed);
+        report.status = if report.metrics.mean_precision_at_1 >= 0.5 && semantic_recall_passed {
             crate::eval::EvalRunStatus::Passed
         } else {
             crate::eval::EvalRunStatus::Failed
@@ -35148,8 +35181,8 @@ where
         require_fresh_sentinels: args.require_fresh_sentinels,
         filters,
         output_options,
-        persist_pack: !args.read_only,
-        baseline_write: if args.read_only || args.no_baseline_write {
+        persist_pack: !args.read_only && !args.explain_gaps,
+        baseline_write: if args.read_only || args.explain_gaps || args.no_baseline_write {
             None
         } else {
             crate::core::memory_scope::current_agent_name().map(|agent_name| {
@@ -35188,6 +35221,16 @@ where
                     repair: Some(CONTEXT_DEPRECATED_ALIAS_REPAIR.to_string()),
                 });
                 response.data.degraded.push(entry);
+            }
+            if args.explain_gaps {
+                let report = crate::pack::explain_coverage_gap(&args.query, &response.data.pack);
+                return write_coverage_gap_report(
+                    cli.context_renderer(),
+                    cli.format,
+                    args.output.as_deref(),
+                    &report,
+                    stdout,
+                );
             }
             if args.explain && !args.no_pack_dna {
                 attach_pack_dna_to_context_response(&database_path_for_pack_dna, &mut response);
@@ -38261,6 +38304,7 @@ where
             output: args.output.clone(),
             explain_performance: args.explain_performance,
             explain: args.explain,
+            explain_gaps: args.explain_gaps,
             no_pack_dna: args.no_pack_dna,
             no_coverage_fill: args.no_coverage_fill,
             no_rendered_text: args.no_rendered_text,
@@ -38496,7 +38540,7 @@ where
             .map(|resolved| resolved.task_lens.clone()),
         require_fresh_sentinels: args.require_fresh_sentinels,
         output_options,
-        persist_pack: !args.read_only,
+        persist_pack: !args.read_only && !args.explain_gaps,
         baseline_write: None,
         no_lod: args.no_lod,
     };
@@ -38515,6 +38559,16 @@ where
     match run_context_pack_with_performance(&options, "pack").map(|run| run.response) {
         Ok(mut response) => {
             response.data.degraded.extend(request.degraded);
+            if args.explain_gaps {
+                let report = crate::pack::explain_coverage_gap(&options.query, &response.data.pack);
+                return write_coverage_gap_report(
+                    renderer,
+                    cli.format,
+                    args.output.as_deref(),
+                    &report,
+                    stdout,
+                );
+            }
             if args.explain {
                 let database_path_for_pack_dna = options
                     .database_path
@@ -45131,17 +45185,6 @@ where
         None => None,
     };
 
-    let memory_id = match args.memory_id.parse::<crate::models::MemoryId>() {
-        Ok(id) => id,
-        Err(_) => {
-            let domain_error = DomainError::Usage {
-                message: format!("Invalid memory id: {}", args.memory_id),
-                repair: Some("ee memory list --workspace . --json".to_string()),
-            };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-        }
-    };
-
     let options = ContextPackOptions {
         workspace_path,
         database_path: Some(database_path),
@@ -45177,6 +45220,37 @@ where
         persist_pack: false,
         baseline_write: None,
         no_lod: false,
+    };
+
+    if args.gaps {
+        let report = match run_context_pack_with_performance(&options, "why-not")
+            .map(|run| crate::pack::explain_coverage_gap(&args.task, &run.response.data.pack))
+        {
+            Ok(report) => report,
+            Err(error) => {
+                let domain_error = context_error_to_domain(&error);
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        return write_coverage_gap_report(cli.renderer(), cli.format, None, &report, stdout);
+    }
+
+    let Some(memory_id_raw) = args.memory_id.as_deref() else {
+        let domain_error = DomainError::Usage {
+            message: "Memory id is required unless --gaps is supplied.".to_string(),
+            repair: Some("Use `ee why-not <memory-id> --task \"<task>\" --json`, or `ee why-not --task \"<task>\" --gaps --json`.".to_string()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    };
+    let memory_id = match memory_id_raw.parse::<crate::models::MemoryId>() {
+        Ok(id) => id,
+        Err(_) => {
+            let domain_error = DomainError::Usage {
+                message: format!("Invalid memory id: {memory_id_raw}"),
+                repair: Some("ee memory list --workspace . --json".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
     };
 
     let report = match explain_why_not_default(&options, memory_id) {
@@ -45284,6 +45358,116 @@ fn format_why_not_human(report: &crate::pack::WhyNotSelectedReport) -> String {
     ));
     for hint in &report.counterfactual_hints {
         out.push_str(&format!("  hint [{}]: {}\n", hint.kind, hint.action));
+    }
+    out
+}
+
+fn write_coverage_gap_report<W>(
+    renderer: output::Renderer,
+    requested_format: OutputFormat,
+    output_path: Option<&Path>,
+    report: &crate::pack::CoverageGapReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let rendered = match renderer {
+        output::Renderer::Human => format_coverage_gap_human(report),
+        output::Renderer::Markdown => format_coverage_gap_markdown(report),
+        output::Renderer::Toon => {
+            output::render_toon_from_json(&format_coverage_gap_json(report)) + "\n"
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => format_coverage_gap_json(report) + "\n",
+    };
+    tracing::debug!(
+        target: "ee::coverage_gap",
+        event = "coverage_gap_render",
+        format = context_format_name(renderer, requested_format),
+        missing_kinds = report.missing_kinds.len(),
+        capture_templates = report.capture_templates.len(),
+        nearest_insufficient = report.nearest_insufficient.len(),
+        task_hash = %report.task_hash,
+    );
+    write_output_bytes(stdout, output_path, rendered.as_bytes())
+}
+
+fn format_coverage_gap_json(report: &crate::pack::CoverageGapReport) -> String {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": report,
+        "degraded": [],
+    })
+    .to_string()
+}
+
+fn format_coverage_gap_markdown(report: &crate::pack::CoverageGapReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# Coverage gaps: {}\n\n", report.posture));
+    out.push_str(&format!("- task hash: `{}`\n", report.task_hash));
+    out.push_str(&format!(
+        "- pack: {} selected, {} omitted, {} / {} tokens, quality `{}`\n",
+        report.pack_summary.selected_count,
+        report.pack_summary.omitted_count,
+        report.pack_summary.used_tokens,
+        report.pack_summary.max_tokens,
+        report.pack_summary.quality
+    ));
+    if report.missing_kinds.is_empty() {
+        out.push_str("\nNo task-specific capture gaps detected.\n");
+        return out;
+    }
+    out.push_str("\n## Missing Kinds\n\n");
+    for gap in &report.missing_kinds {
+        out.push_str(&format!(
+            "- **{}** ({} / {}, confidence {}): {}\n",
+            gap.kind,
+            gap.expected_level,
+            gap.expected_memory_kind,
+            gap.confidence,
+            gap.evidence_demand
+        ));
+    }
+    out.push_str("\n## Capture Templates\n\n");
+    for template in &report.capture_templates {
+        out.push_str(&format!(
+            "- **{}**: `{}`\n",
+            template.kind, template.command
+        ));
+    }
+    out
+}
+
+fn format_coverage_gap_human(report: &crate::pack::CoverageGapReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("coverage gaps: {}\n", report.posture));
+    out.push_str(&format!(
+        "  pack: {} selected, {} omitted, {} / {} tokens, quality {}\n",
+        report.pack_summary.selected_count,
+        report.pack_summary.omitted_count,
+        report.pack_summary.used_tokens,
+        report.pack_summary.max_tokens,
+        report.pack_summary.quality
+    ));
+    if report.missing_kinds.is_empty() {
+        out.push_str("  missing: none\n");
+        return out;
+    }
+    for gap in &report.missing_kinds {
+        out.push_str(&format!(
+            "  missing [{}]: {} (confidence {})\n",
+            gap.kind, gap.evidence_demand, gap.confidence
+        ));
+    }
+    for template in &report.capture_templates {
+        out.push_str(&format!(
+            "  capture [{}]: {}\n",
+            template.kind, template.command
+        ));
     }
     out
 }

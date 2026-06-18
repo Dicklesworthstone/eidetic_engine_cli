@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.coverage_gap.v1.json",
+  "title": "ee.coverage_gap.v1",
+  "description": "Task-specific capture-demand gap report emitted by ee why-not --gaps and ee pack --explain-gaps. The report is read-only and names missing memory kinds, nearest insufficient evidence, and concrete capture templates.",
+  "x-ee-status": {
+    "shipped": true,
+    "available_in_build": true,
+    "tracking_bead": "bd-2vq2z.17"
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "task",
+    "taskHash",
+    "posture",
+    "packSummary",
+    "missingKinds",
+    "nearestInsufficient",
+    "captureTemplates"
+  ],
+  "properties": {
+    "schema": { "const": "ee.coverage_gap.v1" },
+    "task": { "type": "string" },
+    "taskHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "posture": {
+      "type": "string",
+      "enum": ["covered", "capture_recommended", "capture_required"]
+    },
+    "packSummary": { "$ref": "#/$defs/packSummary" },
+    "missingKinds": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/missingKind" }
+    },
+    "nearestInsufficient": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nearestInsufficient" }
+    },
+    "captureTemplates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/captureTemplate" }
+    }
+  },
+  "$defs": {
+    "packSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selectedCount", "omittedCount", "usedTokens", "maxTokens", "quality"],
+      "properties": {
+        "selectedCount": { "type": "integer", "minimum": 0 },
+        "omittedCount": { "type": "integer", "minimum": 0 },
+        "usedTokens": { "type": "integer", "minimum": 0 },
+        "maxTokens": { "type": "integer", "minimum": 1 },
+        "quality": {
+          "type": "string",
+          "enum": ["empty", "thin", "partial", "covered"]
+        }
+      }
+    },
+    "missingKind": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "expectedMemoryKind",
+        "expectedLevel",
+        "section",
+        "reason",
+        "evidenceDemand",
+        "confidence"
+      ],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "expectedMemoryKind": { "type": "string", "minLength": 1 },
+        "expectedLevel": { "type": "string", "minLength": 1 },
+        "section": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string" },
+        "evidenceDemand": { "type": "string", "minLength": 1 },
+        "confidence": { "type": "integer", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "nearestInsufficient": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memoryId",
+        "section",
+        "selected",
+        "reason",
+        "relevance",
+        "utility",
+        "insufficientFor"
+      ],
+      "properties": {
+        "memoryId": { "type": "string", "minLength": 1 },
+        "section": { "type": "string", "minLength": 1 },
+        "selected": { "type": "boolean" },
+        "reason": { "type": "string" },
+        "relevance": { "type": "number", "minimum": 0, "maximum": 1 },
+        "utility": { "type": "number", "minimum": 0, "maximum": 1 },
+        "contentPreview": { "type": "string" },
+        "insufficientFor": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "captureTemplate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "level",
+        "memoryKind",
+        "contentTemplate",
+        "command",
+        "sourceHint"
+      ],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "level": { "type": "string", "minLength": 1 },
+        "memoryKind": { "type": "string", "minLength": 1 },
+        "contentTemplate": { "type": "string", "minLength": 1 },
+        "command": { "type": "string", "minLength": 1 },
+        "sourceHint": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

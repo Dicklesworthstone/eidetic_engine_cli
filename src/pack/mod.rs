@@ -13,9 +13,9 @@ use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
 };
 use crate::models::{
-    ContextProfile, ContextProfileName, ContextProfileSection, ContextProfileSectionMix,
-    ERROR_SCHEMA_V2, MemoryId, MemoryScopeStats, ProvenanceUri, RESPONSE_SCHEMA_V1,
-    RESPONSE_SCHEMA_V2, RedactionLevel, TrustClass, UnitScore,
+    COVERAGE_GAP_SCHEMA_V1, ContextProfile, ContextProfileName, ContextProfileSection,
+    ContextProfileSectionMix, ERROR_SCHEMA_V2, MemoryId, MemoryScopeStats, ProvenanceUri,
+    RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V2, RedactionLevel, TrustClass, UnitScore,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
@@ -2427,6 +2427,140 @@ pub struct WhyNotCounterfactualHint {
     pub rationale: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageGapReport {
+    pub schema: &'static str,
+    pub task: String,
+    pub task_hash: String,
+    pub posture: String,
+    pub pack_summary: CoverageGapPackSummary,
+    pub missing_kinds: Vec<CoverageGapMissingKind>,
+    pub nearest_insufficient: Vec<CoverageGapNearestInsufficient>,
+    pub capture_templates: Vec<CoverageGapCaptureTemplate>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageGapPackSummary {
+    pub selected_count: usize,
+    pub omitted_count: usize,
+    pub used_tokens: u32,
+    pub max_tokens: u32,
+    pub quality: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageGapMissingKind {
+    pub kind: String,
+    pub expected_memory_kind: String,
+    pub expected_level: String,
+    pub section: String,
+    pub reason: String,
+    pub evidence_demand: String,
+    pub confidence: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageGapNearestInsufficient {
+    pub memory_id: String,
+    pub section: String,
+    pub selected: bool,
+    pub reason: String,
+    pub relevance: f32,
+    pub utility: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_preview: Option<String>,
+    pub insufficient_for: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageGapCaptureTemplate {
+    pub kind: String,
+    pub level: String,
+    pub memory_kind: String,
+    pub content_template: String,
+    pub command: String,
+    pub source_hint: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CoverageGapKindSpec {
+    kind: &'static str,
+    expected_memory_kind: &'static str,
+    expected_level: &'static str,
+    section: PackSection,
+    trigger_terms: &'static [&'static str],
+    marker_terms: &'static [&'static str],
+    evidence_demand: &'static str,
+    content_template: &'static str,
+    source_hint: &'static str,
+}
+
+const RELEASE_RULE_TERMS: &[&str] = &["release", "ship", "deploy", "publish", "tag"];
+const DECISION_TERMS: &[&str] = &["decision", "adr", "architecture", "design", "choose"];
+const ANTI_PATTERN_TERMS: &[&str] = &[
+    "anti-pattern",
+    "antipattern",
+    "avoid",
+    "never",
+    "regression",
+    "failure",
+    "blocked",
+    "gotcha",
+];
+const PROCEDURAL_TERMS: &[&str] = &["rule", "checklist", "workflow", "command", "must"];
+
+const COVERAGE_GAP_KIND_SPECS: &[CoverageGapKindSpec] = &[
+    CoverageGapKindSpec {
+        kind: "release_rule",
+        expected_memory_kind: "rule",
+        expected_level: "procedural",
+        section: PackSection::ProceduralRules,
+        trigger_terms: RELEASE_RULE_TERMS,
+        marker_terms: RELEASE_RULE_TERMS,
+        evidence_demand: "A release/deploy task needs a concrete release rule or checklist with gates, rollback, and verification commands.",
+        content_template: "Before releasing <target>, run <verification commands>, confirm <rollback condition>, and record <release evidence>.",
+        source_hint: "file://AGENTS.md#L<line> or file://docs/release.md#L<line>",
+    },
+    CoverageGapKindSpec {
+        kind: "decision",
+        expected_memory_kind: "decision",
+        expected_level: "semantic",
+        section: PackSection::Decisions,
+        trigger_terms: DECISION_TERMS,
+        marker_terms: &["decision", "decided", "adr", "choose", "chosen", "because"],
+        evidence_demand: "The task mentions design or architecture pressure but the pack lacks a decision record explaining the chosen direction.",
+        content_template: "Decision: for <task/context>, choose <approach> because <evidence>; rejected alternatives: <alternatives>.",
+        source_hint: "file://docs/adr/<id>.md#L<line> or file://README.md#L<line>",
+    },
+    CoverageGapKindSpec {
+        kind: "anti_pattern",
+        expected_memory_kind: "anti-pattern",
+        expected_level: "procedural",
+        section: PackSection::Failures,
+        trigger_terms: ANTI_PATTERN_TERMS,
+        marker_terms: ANTI_PATTERN_TERMS,
+        evidence_demand: "A risky or failure-prone task needs at least one remembered anti-pattern/failure mode so the pack can steer away from repeated mistakes.",
+        content_template: "Anti-pattern: when working on <surface>, do not <risky action>; prior failure/evidence: <what happened>; safer path: <replacement action>.",
+        source_hint: "file://docs/incidents/<date>.md#L<line> or cass-session://<session>#L<line>",
+    },
+    CoverageGapKindSpec {
+        kind: "procedural_rule",
+        expected_memory_kind: "rule",
+        expected_level: "procedural",
+        section: PackSection::ProceduralRules,
+        trigger_terms: PROCEDURAL_TERMS,
+        marker_terms: PROCEDURAL_TERMS,
+        evidence_demand: "The task needs a concrete procedural guardrail, but the pack lacks a rule/checklist matching the requested work.",
+        content_template: "Rule: before <task>, run <command/check>, inspect <artifact>, and stop if <failure condition>.",
+        source_hint: "file://AGENTS.md#L<line> or file://docs/testing-strategy.md#L<line>",
+    },
+];
+
 /// Explain why a candidate memory was not selected for a context-pack task.
 ///
 /// The report is read-only and deliberately omits the target memory content.
@@ -2530,6 +2664,199 @@ pub fn explain_why_not_selected(
             .map(PackProvenance::rendered)
             .collect(),
     })
+}
+
+#[must_use]
+pub fn explain_coverage_gap(task: impl Into<String>, pack: &PackDraft) -> CoverageGapReport {
+    let task = task.into();
+    let task_lower = task.to_ascii_lowercase();
+    let expected_specs = expected_gap_specs_for_task(&task_lower);
+    let missing_specs = expected_specs
+        .into_iter()
+        .filter(|spec| !pack_satisfies_gap_spec(pack, spec))
+        .collect::<Vec<_>>();
+    let missing_kinds = missing_specs
+        .iter()
+        .map(|spec| CoverageGapMissingKind {
+            kind: spec.kind.to_string(),
+            expected_memory_kind: spec.expected_memory_kind.to_string(),
+            expected_level: spec.expected_level.to_string(),
+            section: spec.section.as_str().to_string(),
+            reason: format!(
+                "No selected memory in {} satisfies `{}` demand for this task.",
+                spec.section.as_str(),
+                spec.kind
+            ),
+            evidence_demand: spec.evidence_demand.to_string(),
+            confidence: coverage_gap_confidence(&task_lower, spec),
+        })
+        .collect::<Vec<_>>();
+    let nearest_insufficient = coverage_gap_nearest_insufficient(pack, &missing_specs);
+    let capture_templates = missing_specs
+        .iter()
+        .map(|spec| coverage_gap_capture_template(&task, spec))
+        .collect::<Vec<_>>();
+    CoverageGapReport {
+        schema: COVERAGE_GAP_SCHEMA_V1,
+        task: task.clone(),
+        task_hash: blake3::hash(task.as_bytes()).to_hex().to_string(),
+        posture: coverage_gap_posture(pack, missing_kinds.len()),
+        pack_summary: CoverageGapPackSummary {
+            selected_count: pack.items.len(),
+            omitted_count: pack.omitted.len(),
+            used_tokens: pack.used_tokens,
+            max_tokens: pack.budget.max_tokens(),
+            quality: coverage_gap_quality(pack, missing_kinds.len()),
+        },
+        missing_kinds,
+        nearest_insufficient,
+        capture_templates,
+    }
+}
+
+fn expected_gap_specs_for_task(task_lower: &str) -> Vec<&'static CoverageGapKindSpec> {
+    let mut specs = Vec::new();
+    for spec in COVERAGE_GAP_KIND_SPECS {
+        if spec
+            .trigger_terms
+            .iter()
+            .any(|term| task_lower.contains(term))
+            || matches!(spec.kind, "decision" | "anti_pattern")
+        {
+            specs.push(spec);
+        }
+    }
+    specs.sort_by(|left, right| left.kind.cmp(right.kind));
+    specs.dedup_by(|left, right| left.kind == right.kind);
+    specs
+}
+
+fn pack_satisfies_gap_spec(pack: &PackDraft, spec: &CoverageGapKindSpec) -> bool {
+    pack.items
+        .iter()
+        .any(|item| item.section == spec.section && content_satisfies_gap_spec(&item.content, spec))
+}
+
+fn content_satisfies_gap_spec(content: &str, spec: &CoverageGapKindSpec) -> bool {
+    let lower = content.to_ascii_lowercase();
+    spec.marker_terms.iter().any(|term| lower.contains(term))
+}
+
+fn coverage_gap_confidence(task_lower: &str, spec: &CoverageGapKindSpec) -> u32 {
+    if spec
+        .trigger_terms
+        .iter()
+        .any(|term| task_lower.contains(term))
+    {
+        90
+    } else {
+        70
+    }
+}
+
+fn coverage_gap_quality(pack: &PackDraft, missing_count: usize) -> String {
+    if pack.items.is_empty() {
+        "empty".to_string()
+    } else if missing_count >= 2 || pack.items.len() <= 1 {
+        "thin".to_string()
+    } else if missing_count == 1 {
+        "partial".to_string()
+    } else {
+        "covered".to_string()
+    }
+}
+
+fn coverage_gap_posture(pack: &PackDraft, missing_count: usize) -> String {
+    if pack.items.is_empty() || missing_count >= 2 {
+        "capture_required".to_string()
+    } else if missing_count == 1 {
+        "capture_recommended".to_string()
+    } else {
+        "covered".to_string()
+    }
+}
+
+fn coverage_gap_nearest_insufficient(
+    pack: &PackDraft,
+    missing_specs: &[&CoverageGapKindSpec],
+) -> Vec<CoverageGapNearestInsufficient> {
+    if missing_specs.is_empty() {
+        return Vec::new();
+    }
+    let insufficient_for = missing_specs
+        .iter()
+        .map(|spec| spec.kind.to_string())
+        .collect::<Vec<_>>();
+    let mut rows = pack
+        .items
+        .iter()
+        .map(|item| CoverageGapNearestInsufficient {
+            memory_id: item.memory_id.to_string(),
+            section: item.section.as_str().to_string(),
+            selected: true,
+            reason: "selected_but_gap_remains".to_string(),
+            relevance: round_metric(item.relevance.into_inner()),
+            utility: round_metric(item.utility.into_inner()),
+            content_preview: Some(coverage_gap_content_preview(&item.content)),
+            insufficient_for: insufficient_for.clone(),
+        })
+        .chain(
+            pack.omitted
+                .iter()
+                .map(|omission| CoverageGapNearestInsufficient {
+                    memory_id: omission.memory_id.to_string(),
+                    section: "omitted_candidate".to_string(),
+                    selected: false,
+                    reason: omission.reason.as_str().to_string(),
+                    relevance: round_metric(omission.relevance.into_inner()),
+                    utility: round_metric(omission.utility.into_inner()),
+                    content_preview: None,
+                    insufficient_for: insufficient_for.clone(),
+                }),
+        )
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        compare_f32_desc(left.relevance, right.relevance)
+            .then_with(|| compare_f32_desc(left.utility, right.utility))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    rows.truncate(3);
+    rows
+}
+
+fn coverage_gap_capture_template(
+    task: &str,
+    spec: &CoverageGapKindSpec,
+) -> CoverageGapCaptureTemplate {
+    let content = spec.content_template.replace("<task/context>", task);
+    CoverageGapCaptureTemplate {
+        kind: spec.kind.to_string(),
+        level: spec.expected_level.to_string(),
+        memory_kind: spec.expected_memory_kind.to_string(),
+        content_template: content.clone(),
+        command: format!(
+            "ee remember {} --level {} --kind {} --source {} --json",
+            shell_quote(&content),
+            spec.expected_level,
+            spec.expected_memory_kind,
+            shell_quote(spec.source_hint)
+        ),
+        source_hint: spec.source_hint.to_string(),
+    }
+}
+
+fn coverage_gap_content_preview(content: &str) -> String {
+    let collapsed = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 120;
+    if collapsed.chars().count() <= MAX_CHARS {
+        collapsed
+    } else {
+        collapsed.chars().take(MAX_CHARS).collect()
+    }
+}
+
+fn compare_f32_desc(left: f32, right: f32) -> Ordering {
+    right.partial_cmp(&left).unwrap_or(Ordering::Equal)
 }
 
 fn why_not_reason_source(primary_reason: &str) -> String {
@@ -13485,6 +13812,143 @@ mod tests {
                 .any(|hint| hint.kind == "repair_degraded_index"),
             "degraded index miss should include repair hint",
         )
+    }
+
+    #[test]
+    fn coverage_gap_reports_missing_kinds_for_thin_release_pack() -> TestResult {
+        let draft = assemble_classic_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            TokenBudget::new(200).map_err(|error| format!("budget rejected: {error:?}"))?,
+            vec![candidate_with_content(
+                1,
+                0.95,
+                0.5,
+                20,
+                "Run cargo fmt before editing code.",
+            )?],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        let report = super::explain_coverage_gap("prepare release", &draft);
+        let missing = report
+            .missing_kinds
+            .iter()
+            .map(|gap| gap.kind.as_str())
+            .collect::<Vec<_>>();
+        let templates = report
+            .capture_templates
+            .iter()
+            .map(|template| template.kind.as_str())
+            .collect::<Vec<_>>();
+
+        ensure_equal(
+            &report.schema,
+            &super::COVERAGE_GAP_SCHEMA_V1,
+            "coverage gap schema",
+        )?;
+        ensure_equal(
+            &report.posture.as_str(),
+            &"capture_required",
+            "thin release pack posture",
+        )?;
+        ensure(
+            missing.contains(&"release_rule")
+                && missing.contains(&"decision")
+                && missing.contains(&"anti_pattern"),
+            "thin release pack should demand release, decision, and anti-pattern capture",
+        )?;
+        ensure_equal(
+            &missing,
+            &templates,
+            "each missing kind should have a capture template",
+        )?;
+        ensure(
+            !report.nearest_insufficient.is_empty(),
+            "thin pack should name nearest insufficient evidence",
+        )
+    }
+
+    #[test]
+    fn coverage_gap_clears_release_rule_after_capture() -> TestResult {
+        let before = assemble_classic_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            TokenBudget::new(200).map_err(|error| format!("budget rejected: {error:?}"))?,
+            vec![candidate_with_content(
+                1,
+                0.95,
+                0.5,
+                20,
+                "Run cargo fmt before editing code.",
+            )?],
+        )
+        .map_err(|error| format!("before draft rejected: {error:?}"))?;
+        let after = assemble_classic_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            TokenBudget::new(200).map_err(|error| format!("budget rejected: {error:?}"))?,
+            vec![
+                candidate_with_content(1, 0.95, 0.5, 20, "Run cargo fmt before editing code.")?,
+                candidate_with_content(
+                    2,
+                    0.94,
+                    0.5,
+                    20,
+                    "Release rule: before release run verify, confirm rollback, then tag.",
+                )?,
+            ],
+        )
+        .map_err(|error| format!("after draft rejected: {error:?}"))?;
+
+        let before_report = super::explain_coverage_gap("prepare release", &before);
+        let after_report = super::explain_coverage_gap("prepare release", &after);
+
+        ensure(
+            before_report
+                .missing_kinds
+                .iter()
+                .any(|gap| gap.kind == "release_rule"),
+            "before capture should demand a release rule",
+        )?;
+        ensure(
+            !after_report
+                .missing_kinds
+                .iter()
+                .any(|gap| gap.kind == "release_rule"),
+            "after capture should clear release rule demand",
+        )?;
+        ensure(
+            after_report.missing_kinds.len() < before_report.missing_kinds.len(),
+            "capture should reduce the missing-kind count",
+        )?;
+        ensure(
+            !after_report
+                .capture_templates
+                .iter()
+                .any(|template| template.kind == "release_rule"),
+            "cleared demand should not keep a stale capture template",
+        )
+    }
+
+    #[test]
+    fn coverage_gap_report_is_deterministic_for_same_draft() -> TestResult {
+        let draft = assemble_classic_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            TokenBudget::new(200).map_err(|error| format!("budget rejected: {error:?}"))?,
+            vec![
+                candidate_with_content(1, 0.95, 0.5, 20, "Run cargo fmt before editing code.")?,
+                candidate_with_content(2, 0.80, 0.5, 20, "Keep release notes concise.")?,
+            ],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        let first = serde_json::to_value(super::explain_coverage_gap("prepare release", &draft))
+            .map_err(|error| error.to_string())?;
+        let second = serde_json::to_value(super::explain_coverage_gap("prepare release", &draft))
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&first, &second, "coverage gap JSON must be stable")
     }
 
     #[test]
