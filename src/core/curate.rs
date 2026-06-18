@@ -3482,8 +3482,8 @@ fn embedding_dedup_metadata_json(
 ) -> String {
     let source_memory_ids = member_ids
         .iter()
-        .filter(|id| *id != target_memory_id)
         .copied()
+        .filter(|id| *id != target_memory_id)
         .collect::<Vec<_>>();
     let mut ordered_signals = signals.to_vec();
     ordered_signals.sort_by(|left, right| left.link_id.cmp(&right.link_id));
