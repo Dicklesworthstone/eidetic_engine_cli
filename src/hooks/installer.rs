@@ -4430,15 +4430,13 @@ mod tests {
             "SessionStart orientation snippet must be installed and bounded"
         );
         assert!(
-            report
-                .snippets
-                .iter()
-                .any(|snippet| snippet.id == "ee-ambient-session-capture-suggest"
-                    && snippet.event == "Stop"
-                    && snippet.installable
-                    && snippet.command.contains("capture")
-                    && snippet.command.contains("suggest")
-                    && snippet.command.contains("--from-recent")),
+            report.snippets.iter().any(|snippet| snippet.id
+                == "ee-ambient-session-capture-suggest"
+                && snippet.event == "Stop"
+                && snippet.installable
+                && snippet.command.contains("capture")
+                && snippet.command.contains("suggest")
+                && snippet.command.contains("--from-recent")),
             "session-end capture snippet must be installed and proposal-only"
         );
         assert!(
@@ -4511,6 +4509,63 @@ mod tests {
             "ambient profile must document verbosity control"
         );
         Ok(())
+    }
+
+    #[test]
+    fn embedded_python_hook_templates_keep_raw_string_markers_intact() {
+        let ambient_templates = [
+            ("pre_edit", pre_edit_python(), "pre_edit_recall"),
+            (
+                "session_start",
+                session_start_python(),
+                "session_start_orient",
+            ),
+            (
+                "session_end_capture",
+                session_end_capture_python(),
+                "session_end_capture_suggest",
+            ),
+            (
+                "pre_bash_preflight",
+                pre_bash_preflight_python(),
+                "pre_risky_preflight",
+            ),
+        ];
+
+        for (name, script, surface) in ambient_templates {
+            assert!(
+                !script.trim().is_empty(),
+                "{name} hook template must not be empty"
+            );
+            assert!(
+                script.contains("ee.ambient_context.v1"),
+                "{name} hook template must keep the ambient schema marker"
+            );
+            assert!(
+                script.contains(surface),
+                "{name} hook template must keep its surface marker"
+            );
+        }
+
+        let session_capture = session_end_capture_python();
+        assert!(
+            session_capture.contains("### ee capture suggestions"),
+            "session-end capture hook must preserve its markdown heading"
+        );
+        assert!(
+            session_capture.contains("\"capture\", \"suggest\""),
+            "session-end capture hook must still call ee capture suggest"
+        );
+
+        let post_bash_failure = post_bash_failure_python();
+        assert!(
+            !post_bash_failure.trim().is_empty(),
+            "post-bash failure hook template must not be empty"
+        );
+        assert!(
+            post_bash_failure.contains("\"journal\", \"append\""),
+            "post-bash failure hook must still journal command failures"
+        );
     }
 
     #[test]
