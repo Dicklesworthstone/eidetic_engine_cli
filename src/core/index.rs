@@ -3589,6 +3589,7 @@ pub struct IndexStatusReport {
     pub health: IndexHealth,
     pub index_dir: PathBuf,
     pub database_path: PathBuf,
+    pub embedding: Option<EmbeddingPosture>,
     pub index_exists: bool,
     pub index_file_count: u32,
     pub index_size_bytes: u64,
@@ -3669,6 +3670,7 @@ impl IndexStatusReport {
             "degraded": degraded,
             "indexDir": self.index_dir.to_string_lossy(),
             "databasePath": self.database_path.to_string_lossy(),
+            "embedding": self.embedding.as_ref().map(EmbeddingPosture::data_json),
             "indexExists": self.index_exists,
             "indexFileCount": self.index_file_count,
             "indexSizeBytes": self.index_size_bytes,
@@ -3790,9 +3792,9 @@ pub(crate) fn get_index_status_with_connection(
 
     // Fast-path degraded states: when the index is missing/corrupt, we can
     // report health without scanning DB tables for counts/generation.
-    let (db_memory_count, db_session_count, db_generation) =
+    let (db_memory_count, db_session_count, db_generation, embedding) =
         if !index_exists || index_file_count == 0 {
-            (0, 0, None)
+            (0, 0, None, None)
         } else if database_path.exists() {
             let owned_connection;
             let db = if let Some(connection) = connection {
@@ -3801,9 +3803,11 @@ pub(crate) fn get_index_status_with_connection(
                 owned_connection = DbConnection::open_file(&database_path)?;
                 &owned_connection
             };
-            get_db_stats(db)?
+            let (memory_count, session_count, generation) = get_db_stats(db)?;
+            let embedding = index_status_embedding_posture(db, &index_dir)?;
+            (memory_count, session_count, generation, embedding)
         } else {
-            (0, 0, None)
+            (0, 0, None, None)
         };
 
     // Read index metadata if available.
@@ -3831,6 +3835,7 @@ pub(crate) fn get_index_status_with_connection(
         health,
         index_dir,
         database_path,
+        embedding,
         index_exists,
         index_file_count,
         index_size_bytes,
@@ -3845,6 +3850,30 @@ pub(crate) fn get_index_status_with_connection(
     };
     log_db_generation_observed(&report);
     Ok(report)
+}
+
+fn index_status_embedding_posture(
+    db: &DbConnection,
+    index_dir: &Path,
+) -> Result<Option<EmbeddingPosture>, IndexStatusError> {
+    let Some(workspace_id) = latest_workspace_id_for_index_status(db)? else {
+        return Ok(None);
+    };
+    Ok(Some(current_embedding_posture(
+        db,
+        &workspace_id,
+        index_dir,
+    )?))
+}
+
+fn latest_workspace_id_for_index_status(db: &DbConnection) -> Result<Option<String>, DbError> {
+    let rows = db.query(
+        "SELECT id FROM workspaces ORDER BY created_at DESC LIMIT 1",
+        &[],
+    )?;
+    Ok(rows
+        .first()
+        .and_then(|row| row.get(0).and_then(|v| v.as_str().map(str::to_string))))
 }
 
 fn log_db_generation_observed(report: &IndexStatusReport) {
@@ -5714,6 +5743,7 @@ mod tests {
             health: IndexHealth::Stale,
             index_dir: PathBuf::from("/tmp/index"),
             database_path: PathBuf::from("/tmp/ee.db"),
+            embedding: Some(fixture_hash_embedding_posture()),
             index_exists: true,
             index_file_count: 3,
             index_size_bytes: 1024,
@@ -5732,6 +5762,13 @@ mod tests {
         assert_eq!(json["degradationCode"], "index_stale");
         assert_eq!(json["degraded"][0]["code"], "index_stale");
         assert_eq!(json["degraded"][0]["severity"], "high");
+        assert_eq!(json["embedding"]["schema"], EMBEDDING_POSTURE_SCHEMA_V1);
+        assert_eq!(json["embedding"]["semantic"], false);
+        assert_eq!(json["embedding"]["source"], "frankensearch_hash_fallback");
+        assert_eq!(
+            json["embedding"]["vector_coverage"],
+            serde_json::json!({"embedded": 0, "total": 10})
+        );
         assert_eq!(json["dbGeneration"], 12);
         assert_eq!(json["indexGeneration"], 9);
         assert_eq!(json["dbMemoryCount"], 10);
@@ -5745,6 +5782,7 @@ mod tests {
             health: IndexHealth::Stale,
             index_dir: PathBuf::from("/tmp/index"),
             database_path: PathBuf::from("/tmp/ee.db"),
+            embedding: None,
             index_exists: true,
             index_file_count: 3,
             index_size_bytes: 1024,
