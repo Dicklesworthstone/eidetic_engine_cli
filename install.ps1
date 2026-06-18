@@ -650,6 +650,73 @@ function Invoke-SelfTest {
     }
 }
 
+function Get-InstallSemanticSmokeMode {
+    if ([string]::IsNullOrWhiteSpace($env:EE_INSTALL_SEMANTIC_SMOKE)) { return "0" }
+    return $env:EE_INSTALL_SEMANTIC_SMOKE.ToLowerInvariant()
+}
+
+function Test-InstallSemanticSmokeEnabled {
+    $mode = Get-InstallSemanticSmokeMode
+    return @("1", "true", "yes", "warn", "warning", "require", "required", "fail").Contains($mode)
+}
+
+function Test-InstallSemanticSmokeRequired {
+    $mode = Get-InstallSemanticSmokeMode
+    return @("1", "true", "yes", "require", "required", "fail").Contains($mode)
+}
+
+function Complete-SemanticSmokeFailure {
+    param([string] $Message)
+    if (Test-InstallSemanticSmokeRequired) {
+        Write-ErrorExit $Message
+    }
+    Write-Warning2 $Message
+}
+
+function Invoke-SemanticFirstUseSmoke {
+    param([string]$BinaryPath, [string]$SmokeRoot)
+    if (-not (Test-InstallSemanticSmokeEnabled)) { return }
+
+    $workspace = Join-Path $SmokeRoot "semantic-first-use-workspace"
+    New-Item -ItemType Directory -Force -Path $workspace | Out-Null
+    Write-Info "Running semantic first-use smoke (EE_INSTALL_SEMANTIC_SMOKE=$(Get-InstallSemanticSmokeMode))"
+
+    & $BinaryPath init --workspace $workspace --json 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Complete-SemanticSmokeFailure "Semantic first-use smoke failed during ee init"
+        return
+    }
+
+    & $BinaryPath remember --workspace $workspace --level semantic --kind fact --tags "install-smoke,semantic" --json "Release installer semantic first-use smoke memory for bundled model2vec retrieval." 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Complete-SemanticSmokeFailure "Semantic first-use smoke failed during ee remember"
+        return
+    }
+
+    & $BinaryPath index rebuild --workspace $workspace --json 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Complete-SemanticSmokeFailure "Semantic first-use smoke failed during ee index rebuild"
+        return
+    }
+
+    $statusOutput = @(& $BinaryPath model status --workspace $workspace --json 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        Complete-SemanticSmokeFailure "Semantic first-use smoke failed during ee model status: $($statusOutput -join ' ')"
+        return
+    }
+    try {
+        $statusJson = ($statusOutput -join "`n") | ConvertFrom-Json
+        $readiness = $statusJson.data.modelLifecycle.semanticReadiness
+        if ([string] $readiness.state -eq "available" -and [string] $readiness.mode -eq "semantic") {
+            Write-Ok "Semantic first-use smoke: model status is semantic/available"
+            return
+        }
+        Complete-SemanticSmokeFailure "Semantic first-use smoke did not reach semanticReadiness.state=available mode=semantic"
+    } catch {
+        Complete-SemanticSmokeFailure "Semantic first-use smoke model status was not parseable JSON: $_"
+    }
+}
+
 # ───────────────────────────────────────────────────────────────────────────
 # Build-from-source path
 # ───────────────────────────────────────────────────────────────────────────
@@ -909,6 +976,7 @@ function Main {
                     Invoke-FromSource -DestDir $InstallDir -BinaryName $Script:BinaryName -VersionTag $Version
                     Install-Completions -BinaryPath $binaryPath
                     if ($Verify) { Invoke-SelfTest -BinaryPath $binaryPath }
+                    Invoke-SemanticFirstUseSmoke -BinaryPath $binaryPath -SmokeRoot $tempDir
                     Show-AgentIntegration -Agents $agents -BinaryPath $binaryPath
                     Show-Summary -BinaryPath $binaryPath -VersionTag $Version -Target $target
                     return
@@ -975,6 +1043,7 @@ function Main {
             Update-UserPath -Dir $InstallDir
             Install-Completions -BinaryPath $binaryPath
             if ($Verify) { Invoke-SelfTest -BinaryPath $binaryPath }
+            Invoke-SemanticFirstUseSmoke -BinaryPath $binaryPath -SmokeRoot $tempDir
             Show-AgentIntegration -Agents $agents -BinaryPath $binaryPath
             Show-Summary -BinaryPath $binaryPath -VersionTag $Version -Target $target
         }

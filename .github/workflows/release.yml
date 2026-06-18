@@ -728,7 +728,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/${{ needs.tag.outputs.tag }}/install.sh \
-            | EE_VERSION="${{ needs.tag.outputs.tag }}" bash
+            | EE_VERSION="${{ needs.tag.outputs.tag }}" EE_INSTALL_SEMANTIC_SMOKE=require bash -s -- --verify
 
       - name: Verify installation
         run: |
@@ -747,7 +747,7 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/${{ needs.tag.outputs.tag }}/install.sh \
-            | EE_VERSION="${{ needs.tag.outputs.tag }}" EE_INSTALL_DIR="$RUNNER_TEMP/ee-bin" bash
+            | EE_VERSION="${{ needs.tag.outputs.tag }}" EE_INSTALL_DIR="$RUNNER_TEMP/ee-bin" EE_INSTALL_SEMANTIC_SMOKE=require bash -s -- --verify
 
       - name: Verify installation
         run: |

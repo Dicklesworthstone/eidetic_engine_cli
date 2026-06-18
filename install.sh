@@ -1008,6 +1008,83 @@ PY
 }
 
 # ───────────────────────────────────────────────────────────────────────────
+# Optional semantic first-use smoke
+# ───────────────────────────────────────────────────────────────────────────
+
+semantic_smoke_mode() {
+  printf '%s' "${EE_INSTALL_SEMANTIC_SMOKE:-0}" | tr 'A-Z' 'a-z'
+}
+
+semantic_smoke_enabled() {
+  case "$(semantic_smoke_mode)" in
+    1|true|yes|warn|warning|require|required|fail) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+semantic_smoke_required() {
+  case "$(semantic_smoke_mode)" in
+    1|true|yes|require|required|fail) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+semantic_smoke_fail_or_warn() {
+  local message="$1"
+  if semantic_smoke_required; then
+    err "$message"
+    return 1
+  fi
+  warn "$message"
+  return 0
+}
+
+run_semantic_first_use_smoke() {
+  local bin="$1"
+  semantic_smoke_enabled || return 0
+
+  local smoke_ws status_json compact
+  smoke_ws="$TMP/semantic-first-use-workspace"
+  if ! mkdir -p "$smoke_ws" 2>/dev/null; then
+    semantic_smoke_fail_or_warn "Semantic first-use smoke could not create workspace at $smoke_ws"
+    return $?
+  fi
+
+  info "Running semantic first-use smoke (EE_INSTALL_SEMANTIC_SMOKE=$(semantic_smoke_mode))"
+  if ! "$bin" init --workspace "$smoke_ws" --json >/dev/null 2>&1; then
+    semantic_smoke_fail_or_warn "Semantic first-use smoke failed during ee init"
+    return $?
+  fi
+  if ! "$bin" remember \
+        --workspace "$smoke_ws" \
+        --level semantic \
+        --kind fact \
+        --tags install-smoke,semantic \
+        --json \
+        "Release installer semantic first-use smoke memory for bundled model2vec retrieval." \
+        >/dev/null 2>&1; then
+    semantic_smoke_fail_or_warn "Semantic first-use smoke failed during ee remember"
+    return $?
+  fi
+  if ! "$bin" index rebuild --workspace "$smoke_ws" --json >/dev/null 2>&1; then
+    semantic_smoke_fail_or_warn "Semantic first-use smoke failed during ee index rebuild"
+    return $?
+  fi
+  if ! status_json=$("$bin" model status --workspace "$smoke_ws" --json 2>&1); then
+    semantic_smoke_fail_or_warn "Semantic first-use smoke failed during ee model status: $status_json"
+    return $?
+  fi
+
+  compact=$(printf '%s' "$status_json" | tr -d '\n')
+  if printf '%s' "$compact" | grep -Eq '"semanticReadiness"[[:space:]]*:[[:space:]]*\{[^}]*"state"[[:space:]]*:[[:space:]]*"available"[^}]*"mode"[[:space:]]*:[[:space:]]*"semantic"'; then
+    ok "Semantic first-use smoke: model status is semantic/available"
+    return 0
+  fi
+
+  semantic_smoke_fail_or_warn "Semantic first-use smoke did not reach semanticReadiness.state=available mode=semantic"
+}
+
+# ───────────────────────────────────────────────────────────────────────────
 # Build-from-source helpers
 # ───────────────────────────────────────────────────────────────────────────
 
@@ -1328,6 +1405,8 @@ if [ "$VERIFY" -eq 1 ]; then
     warn "ee doctor reported issues — run 'ee doctor --json | jq .' to inspect"
   fi
 fi
+
+run_semantic_first_use_smoke "$DEST/$BINARY"
 
 # ───────────────────────────────────────────────────────────────────────────
 # Agent integration instructions

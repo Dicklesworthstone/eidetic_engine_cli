@@ -404,6 +404,21 @@ Initial matrix:
 No degraded response may silently look complete. If a result is useful but
 partial, the output must say which capability was missing and what that means.
 
+### Release Installer Semantic Smoke
+
+Release packaging lanes set `EE_INSTALL_SEMANTIC_SMOKE=require` when invoking
+`install.sh` / `install.ps1`. That opt-in smoke creates a temporary workspace,
+stores one explicit semantic memory, rebuilds the index, and requires
+`ee model status --json` to report
+`data.modelLifecycle.semanticReadiness.state == "available"` and
+`mode == "semantic"`. This proves a default online install can perform the
+one-time model2vec first-use download without operator steps.
+
+Normal installer `--verify` stays concise and does not download the model unless
+`EE_INSTALL_SEMANTIC_SMOKE` is set. Offline or air-gapped release checks must
+exercise the documented hash-fallback path separately, or use an explicitly
+pre-provisioned model cache before running the same smoke.
+
 ## Determinism Rules
 
 Tests must make nondeterminism impossible to miss:

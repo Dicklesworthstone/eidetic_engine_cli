@@ -30,7 +30,7 @@ New-Item -ItemType Directory -Force -Path $ArtifactRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
 
 $originalProcessEnv = @{}
-foreach ($name in @("APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "USERPROFILE", "PATH", "CARGO_HOME", "RUSTUP_HOME", "NO_COLOR")) {
+foreach ($name in @("APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "USERPROFILE", "PATH", "CARGO_HOME", "RUSTUP_HOME", "NO_COLOR", "EE_INSTALL_SEMANTIC_SMOKE")) {
     $originalProcessEnv[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
 
@@ -62,7 +62,7 @@ function Write-LiveSmokeEvent {
         schema = "ee.test_event.v1"
         kind = "windows_installer_live_smoke"
         bead_id = "bd-3tprq.4"
-        related_bead_ids = @("bd-3tprq.4", "bd-3tprq")
+        related_bead_ids = @("bd-3tprq.4", "bd-3tprq", "bd-1et0v.24")
         surface = "install_ps1_live_release_smoke"
         phase = $Phase
         result = $Result
@@ -182,6 +182,7 @@ try {
     New-Item -ItemType Directory -Force -Path $installBin | Out-Null
     $InstalledBinary = Join-Path $installBin "ee.exe"
     $InstallerOutputPath = Join-Path $ArtifactRoot "installer-output.txt"
+    $env:EE_INSTALL_SEMANTIC_SMOKE = "require"
     $psExe = Find-PowerShellHost
     $installerArgs = @(
         "-NoLogo",
@@ -252,6 +253,50 @@ try {
     Write-LiveSmokeEvent -Phase "doctor_json" -Result "pass" -Details @{
         exit_code = $doctorExitCode
         schema = $doctorSchema
+    }
+
+    $semanticWorkspace = Join-Path $ArtifactRoot "semantic-first-use-workspace"
+    New-Item -ItemType Directory -Force -Path $semanticWorkspace | Out-Null
+    @(& $InstalledBinary init --workspace $semanticWorkspace --json 2>&1) | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Fail-Smoke -Phase "semantic_first_use_init" -Diagnosis "ee init failed for semantic first-use workspace"
+    }
+    @(& $InstalledBinary remember --workspace $semanticWorkspace --level semantic --kind fact --tags "install-smoke,semantic" --json "Windows live installer semantic first-use smoke memory for bundled model2vec retrieval." 2>&1) | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Fail-Smoke -Phase "semantic_first_use_remember" -Diagnosis "ee remember failed for semantic first-use workspace"
+    }
+    @(& $InstalledBinary index rebuild --workspace $semanticWorkspace --json 2>&1) | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Fail-Smoke -Phase "semantic_first_use_rebuild" -Diagnosis "ee index rebuild failed for semantic first-use workspace"
+    }
+
+    $modelOutput = @(& $InstalledBinary model status --workspace $semanticWorkspace --json 2>&1)
+    $modelExitCode = $LASTEXITCODE
+    $modelText = ($modelOutput -join "`n")
+    if ($modelExitCode -ne 0) {
+        Fail-Smoke -Phase "semantic_model_status" -Diagnosis "ee model status --json exited $modelExitCode; output=$modelText" -Details @{
+            exit_code = $modelExitCode
+            output = $modelText
+        }
+    }
+    try {
+        $modelJson = $modelText | ConvertFrom-Json
+        $readiness = $modelJson.data.modelLifecycle.semanticReadiness
+    } catch {
+        Fail-Smoke -Phase "semantic_model_status" -Diagnosis "ee model status --json did not emit parseable JSON: $($_.Exception.Message)" -Details @{
+            output = $modelText
+        }
+    }
+    if ([string] $readiness.state -ne "available" -or [string] $readiness.mode -ne "semantic") {
+        Fail-Smoke -Phase "semantic_model_status" -Diagnosis "semantic first-use smoke did not reach available/semantic readiness" -Details @{
+            state = [string] $readiness.state
+            mode = [string] $readiness.mode
+        }
+    }
+    Write-LiveSmokeEvent -Phase "semantic_model_status" -Result "pass" -Details @{
+        state = [string] $readiness.state
+        mode = [string] $readiness.mode
+        selected_model_id = [string] $readiness.selectedModelId
     }
 } finally {
     Restore-ProcessEnv
