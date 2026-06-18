@@ -1162,6 +1162,11 @@ run_stage "Doctor Concise E2E (bd-1et0v.15)" "EE_E2E_TMPDIR=/private/tmp ./scrip
 # synthetic CASS/RCH advisory failures do not flip the top-line posture.
 run_stage "Doctor Health E2E (bd-1et0v.21)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_doctor_health.sh"
 
+# Gate 6.1292: memory-health scorecard real-binary E2E (bd-2vq2z.14).
+# No-Cargo: proves scorecard schema, debt snapshot trend reads, duplicate/
+# provenance debt scoring, top repair actions, and read-only determinism.
+run_stage "Health Scorecard E2E (bd-2vq2z.14)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_health_scorecard.sh"
+
 # Gate 6.1295: embedding-native retrieval real-binary E2E (bd-2vq2z.19).
 # No-Cargo and no-download: uses EE_EMBED_MODEL_FIXTURE_DIR when a
 # pre-provisioned model cache is available, otherwise asserts the explicit
