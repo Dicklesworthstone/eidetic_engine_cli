@@ -85,6 +85,7 @@ fn doctor_robot_docs_json_route_is_agent_readable_response_envelope() -> TestRes
         surface_names
             == [
                 "ee doctor",
+                "ee doctor --full",
                 "ee doctor --fix-plan",
                 "ee doctor --franken-health",
                 "ee doctor --capabilities",
@@ -113,6 +114,27 @@ fn doctor_robot_docs_json_route_is_agent_readable_response_envelope() -> TestRes
             format!("surfaces[{index}].example must be a doctor invocation; got {surface}"),
         )?;
     }
+
+    let full_surface = surfaces
+        .iter()
+        .find(|surface| surface["name"].as_str() == Some("ee doctor --full"))
+        .ok_or_else(|| format!("robot-docs must include the --full surface; got {surfaces:?}"))?;
+    ensure(
+        full_surface["kind"].as_str() == Some("flag"),
+        format!("--full surface must be documented as a flag; got {full_surface}"),
+    )?;
+    ensure(
+        full_surface["example"].as_str() == Some("ee doctor --full --json"),
+        format!("--full surface must pin the canonical JSON invocation; got {full_surface}"),
+    )?;
+    ensure(
+        full_surface["purpose"]
+            .as_str()
+            .is_some_and(|purpose| purpose.contains("exhaustive")),
+        format!(
+            "--full surface purpose should describe exhaustive diagnostics; got {full_surface}"
+        ),
+    )?;
 
     let related_schemas = data["related_schemas"]
         .as_array()
