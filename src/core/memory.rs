@@ -175,6 +175,8 @@ pub struct RememberMemoryReport {
     pub curation_candidate_status: String,
     /// Non-fatal degradations encountered while proposing curation candidates.
     pub curation_candidate_degradations: Vec<RememberSuggestedLinkDegradation>,
+    /// Near-duplicate memories surfaced for explicit agent review.
+    pub near_duplicates: Vec<RememberNearDuplicate>,
 }
 
 fn remember_producer_metadata() -> ProducerMetadata {
@@ -383,6 +385,25 @@ impl RememberEmbedDedupDecision {
     }
 }
 
+fn remember_near_duplicates_from_embed_dedup_decision(
+    decision: &RememberEmbedDedupDecision,
+) -> Vec<RememberNearDuplicate> {
+    decision.link.as_ref().map_or_else(Vec::new, |link| {
+        vec![RememberNearDuplicate {
+            memory_id: link.target_memory_id.clone(),
+            similarity: link.cosine_similarity,
+            threshold: link.cosine_floor,
+            hamming_distance: link.hamming_distance,
+            source: "embedding_reuse".to_owned(),
+            next_actions: vec![
+                "ee remember --reinforce <same-content>".to_owned(),
+                format!("ee memory link <new-memory-id> {}", link.target_memory_id),
+                "ee curate candidates --type paraphrase_dedup_proposal --json".to_owned(),
+            ],
+        }]
+    })
+}
+
 /// A staged adjacent-memory suggestion returned from `ee remember`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RememberSuggestedLink {
@@ -440,6 +461,25 @@ pub struct RememberCurationCandidateProposal {
     pub audit_id: Option<String>,
     /// Human-readable proposal reason.
     pub reason: String,
+}
+
+/// A remember-time near-duplicate surfaced without blocking or mutating the
+/// existing memory. The new memory may still be stored; agents decide whether
+/// to reinforce, supersede, or keep both.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RememberNearDuplicate {
+    /// Existing memory that appears near-duplicate to the new content.
+    pub memory_id: String,
+    /// Similarity score in 0.0..=1.0.
+    pub similarity: f32,
+    /// Threshold that admitted this candidate.
+    pub threshold: f32,
+    /// SimHash Hamming distance used as the cheap deterministic gate.
+    pub hamming_distance: u32,
+    /// Ranking/source lane that found the candidate.
+    pub source: String,
+    /// Stable next actions; no silent mutation is performed.
+    pub next_actions: Vec<String>,
 }
 
 /// Non-fatal remember suggestion degradation.
@@ -612,6 +652,7 @@ fn remember_memory_inner(
             curation_candidate: None,
             curation_candidate_status: "dry_run_not_evaluated".to_owned(),
             curation_candidate_degradations: Vec::new(),
+            near_duplicates: Vec::new(),
         });
     }
 
@@ -664,6 +705,7 @@ fn remember_memory_inner(
         documents_total: 1,
     };
     let embed_dedup_decision = remember_embed_dedup_decision_from_env(&connection, &memory_input)?;
+    let near_duplicates = remember_near_duplicates_from_embed_dedup_decision(&embed_dedup_decision);
     let embed_dedup_link_id = embed_dedup_decision
         .link
         .as_ref()
@@ -916,6 +958,7 @@ fn remember_memory_inner(
         curation_candidate,
         curation_candidate_status,
         curation_candidate_degradations,
+        near_duplicates,
     };
     drop(_workspace_write_lock);
     if let Err(error) = connection.close() {
@@ -9098,6 +9141,61 @@ mod tests {
         }
 
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn remember_near_duplicates_surface_confirmed_embed_dedup_link() -> TestResult {
+        let decision = RememberEmbedDedupDecision::reused(
+            [2_u8; 16],
+            RememberEmbedDedupLink {
+                target_memory_id: "mem_existingduplicate000000000".to_owned(),
+                hamming_distance: 4,
+                cosine_similarity: 0.981,
+                cosine_floor: 0.97,
+            },
+        );
+
+        let near_duplicates = remember_near_duplicates_from_embed_dedup_decision(&decision);
+
+        ensure(near_duplicates.len(), 1_usize, "near duplicate count")?;
+        let duplicate = &near_duplicates[0];
+        ensure(
+            duplicate.memory_id.as_str(),
+            "mem_existingduplicate000000000",
+            "near duplicate memory id",
+        )?;
+        ensure(duplicate.similarity, 0.981_f32, "near duplicate similarity")?;
+        ensure(duplicate.threshold, 0.97_f32, "near duplicate threshold")?;
+        ensure(
+            duplicate.hamming_distance,
+            4_u32,
+            "near duplicate hamming distance",
+        )?;
+        ensure(
+            duplicate.source.as_str(),
+            "embedding_reuse",
+            "near duplicate source",
+        )?;
+        ensure(
+            duplicate
+                .next_actions
+                .iter()
+                .any(|action| action.contains("remember --reinforce")),
+            true,
+            "near duplicate reinforce action",
+        )
+    }
+
+    #[test]
+    fn remember_near_duplicates_empty_without_confirmed_embed_dedup_link() {
+        assert!(remember_near_duplicates_from_embed_dedup_decision(
+            &RememberEmbedDedupDecision::fresh([1_u8; 16], "cosine_under_floor")
+        )
+        .is_empty());
+        assert!(remember_near_duplicates_from_embed_dedup_decision(
+            &RememberEmbedDedupDecision::disabled()
+        )
+        .is_empty());
     }
 
     #[test]
