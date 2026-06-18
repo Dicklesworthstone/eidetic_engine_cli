@@ -726,8 +726,10 @@ fn score_row(row: &RecallCandidateRow, stale_anchor_penalty: f32) -> RecallItem 
     // default `stale_anchor_penalty` of 0.0 the floor is 1.0, so a drifted anchor
     // keeps its rank and is surfaced only via `freshness_state`. An operator may
     // opt into a small tie-breaker via `[retrieval] stale_anchor_penalty`.
-    let freshness =
-        freshness_drift_multiplier(row.freshness_state, stale_anchor_floor(stale_anchor_penalty));
+    let freshness = freshness_drift_multiplier(
+        row.freshness_state,
+        stale_anchor_floor(stale_anchor_penalty),
+    );
     let confidence = row.confidence.clamp(0.0, 1.0);
     let level_tilt = recall_level_tilt(&row.level);
     let kind_bonus = recall_kind_bonus(&row.kind);
@@ -1576,11 +1578,11 @@ mod tests {
         warning.freshness_state = MemoryAnchorFreshnessState::Suspect;
         let report = evaluate_recall(&path_query(&["src/*.rs"]), &[warning], Some(7), 7);
         let item = &report.items[0];
-        assert!((item.score_components.freshness - 0.7).abs() < 1e-6);
+        assert!((item.score_components.freshness - 1.0).abs() < 1e-6);
         assert!((item.score_components.confidence - 0.5).abs() < 1e-6);
         assert!((item.score_components.level_tilt - 0.6).abs() < 1e-6);
         assert!((item.score_components.kind_bonus - 1.15).abs() < 1e-6);
-        let expected = 0.7 * 0.5 * 0.6 * 1.15;
+        let expected = 1.0 * 0.5 * 0.6 * 1.15;
         assert!((item.score - expected).abs() < 1e-6);
         // Suspect/stale items carry a repair hint.
         assert_eq!(
@@ -1709,14 +1711,20 @@ mod tests {
         assert_eq!(empty.degraded.len(), 1);
         assert_eq!(empty.degraded[0].code, ANCHOR_INDEX_EMPTY_CODE);
         assert_eq!(empty.degraded[0].severity, "info");
-        assert_eq!(empty.degraded[0].repair, Some(ANCHOR_INDEX_REPAIR.to_owned()));
+        assert_eq!(
+            empty.degraded[0].repair,
+            Some(ANCHOR_INDEX_REPAIR.to_owned())
+        );
 
         let rows = vec![row("mem_a", Some("src/a.rs"), None)];
         let stale = evaluate_recall(&path_query(&["src/*.rs"]), &rows, Some(3), 5);
         assert_eq!(stale.degraded.len(), 1);
         assert_eq!(stale.degraded[0].code, ANCHOR_INDEX_STALE_CODE);
         assert_eq!(stale.degraded[0].severity, "low");
-        assert_eq!(stale.degraded[0].repair, Some(ANCHOR_INDEX_REPAIR.to_owned()));
+        assert_eq!(
+            stale.degraded[0].repair,
+            Some(ANCHOR_INDEX_REPAIR.to_owned())
+        );
         // Stale detection never blocks results.
         assert_eq!(stale.items.len(), 1);
 
