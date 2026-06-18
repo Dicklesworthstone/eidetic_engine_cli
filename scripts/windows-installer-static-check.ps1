@@ -137,6 +137,17 @@ if (Test-Path $liveSmokePath) {
             $liveSmokeText -match 'first_failure_diagnosis'
         ) `
         -Diagnosis "windows-installer-live-smoke.ps1 must emit ee.test_event.v1 records with first_failure_diagnosis"
+    Assert-True `
+        -Assertion "windows_live_smoke_pins_semantic_first_use_evidence" `
+        -Condition (
+            $liveSmokeText -match 'EE_INSTALL_SEMANTIC_SMOKE\s*=\s*"require"' -and
+            $liveSmokeText -match 'semantic_first_use_init' -and
+            $liveSmokeText -match 'semantic_first_use_remember' -and
+            $liveSmokeText -match 'semantic_first_use_rebuild' -and
+            $liveSmokeText -match 'semantic_model_status' -and
+            $liveSmokeText -match 'selected_model_id'
+        ) `
+        -Diagnosis "windows-installer-live-smoke.ps1 must set EE_INSTALL_SEMANTIC_SMOKE=require and log first-use semantic phases with selected_model_id evidence"
 }
 
 if (Test-Path $installPath) {
@@ -233,6 +244,17 @@ if (Test-Path $installPath) {
         -Assertion "show_agent_integration_array_wraps_optional_agents" `
         -Condition ($arrayAssignmentIndex -ge 0 -and $countReadIndex -gt $arrayAssignmentIndex -and $functionText -match '\$other\s*=\s*@\(\s*@\(') `
         -Diagnosis "Show-AgentIntegration must wrap optional-agent Where-Object results in @() before reading .Count under Set-StrictMode -Version Latest"
+    Assert-True `
+        -Assertion "install_ps1_semantic_smoke_warn_require_contract" `
+        -Condition (
+            $installText -match 'function Get-InstallSemanticSmokeMode' -and
+            $installText -match 'function Test-InstallSemanticSmokeRequired' -and
+            $installText -match 'function Complete-SemanticSmokeFailure' -and
+            $installText -match 'Write-ErrorExit \$Message' -and
+            $installText -match 'Write-Warning2 \$Message' -and
+            $installText -match 'Semantic first-use smoke did not reach semanticReadiness\.state=available mode=semantic'
+        ) `
+        -Diagnosis "install.ps1 must keep EE_INSTALL_SEMANTIC_SMOKE warn/require semantics and fail only when required"
 }
 
 if (Test-Path $readmePath) {
