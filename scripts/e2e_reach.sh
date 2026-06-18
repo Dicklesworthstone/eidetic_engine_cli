@@ -76,6 +76,11 @@ doctor_out="$(
 )"
 assert_jq "$doctor_out" '.schema == "ee.response.v2" and .success == true' \
     "ee doctor returns a success response envelope"
+log_event "reach_doctor_contract_assertion" \
+    assertion "doctor envelope exposes degraded array for advisory config-lint context" \
+    bead "bd-2vq2z.15"
+assert_jq "$doctor_out" '(.degraded // null) | type == "array"' \
+    "doctor envelope exposes a machine-readable degraded array"
 if printf '%s' "$doctor_out" | jq -e '
     [.. | objects | select(((.code? // "") | tostring | startswith("config_")))]
     | length >= 1

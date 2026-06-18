@@ -595,6 +595,22 @@ mod tests {
     }
 
     #[test]
+    fn lint_flags_semantic_weight_boundaries_without_neural_tier() {
+        for weight in [0.0, 1.0] {
+            let finding = lint_semantic_weight_without_neural_tier(Some(weight), false)
+                .expect("boundary weights still need the neural-tier honesty warning");
+            assert_eq!(finding.code, LINT_WEIGHT_WITHOUT_NEURAL_TIER);
+            assert_eq!(finding.key.as_str(), SEARCH_SEMANTIC_WEIGHT_KEY);
+            assert!(
+                finding
+                    .message
+                    .contains(&format!("search.semantic_weight={weight}")),
+                "finding should report the exact configured boundary weight"
+            );
+        }
+    }
+
+    #[test]
     fn lint_flags_missing_embedding_model_path() {
         let finding = lint_embedding_model_path_missing(
             "embedding.model_path",
