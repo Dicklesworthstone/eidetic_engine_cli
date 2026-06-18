@@ -2218,6 +2218,11 @@ mod tests {
         },
         CanonicalFieldRule {
             logical_name: "relevance score",
+            canonical_key: "relevanceScore",
+            forbidden_aliases: &["scores.relevance", "relevance_score"],
+        },
+        CanonicalFieldRule {
+            logical_name: "pack relevance score",
             canonical_key: "scores.relevance",
             forbidden_aliases: &["relevanceScore", "relevance_score"],
         },
@@ -2251,9 +2256,9 @@ mod tests {
         CanonicalFieldSurface {
             surface: "ee search",
             logical_name: "relevance score",
-            canonical_path: "data.results[].scores.relevance",
+            canonical_path: "data.results[].relevanceScore",
             forbidden_paths: &[
-                "data.results[].relevanceScore",
+                "data.results[].scores.relevance",
                 "data.results[].relevance_score",
             ],
         },
@@ -2265,7 +2270,7 @@ mod tests {
         },
         CanonicalFieldSurface {
             surface: "ee context",
-            logical_name: "relevance score",
+            logical_name: "pack relevance score",
             canonical_path: "data.pack.items[].scores.relevance",
             forbidden_paths: &[
                 "data.pack.items[].relevanceScore",
@@ -2331,8 +2336,15 @@ mod tests {
 
     fn observed_key_for_path(path: &str, rule: &CanonicalFieldRule) -> String {
         let key = field_key_from_path(path);
-        if rule.canonical_key.contains('.') && key == field_key_from_path(rule.canonical_key) {
+        if path.ends_with(rule.canonical_key) {
             rule.canonical_key.to_owned()
+        } else if let Some(alias) = rule
+            .forbidden_aliases
+            .iter()
+            .copied()
+            .find(|alias| path.ends_with(alias))
+        {
+            alias.to_owned()
         } else {
             key.to_owned()
         }
@@ -3454,7 +3466,8 @@ mod tests {
             ("workspace id", "workspace_id"),
             ("workspace path", "workspace_path"),
             ("memory creation timestamp", "created_at"),
-            ("relevance score", "scores.relevance"),
+            ("relevance score", "relevanceScore"),
+            ("pack relevance score", "scores.relevance"),
         ];
 
         for (logical_name, canonical_key) in required {
@@ -3543,7 +3556,9 @@ mod tests {
             ("workspace id", "workspaceId"),
             ("workspace path", "workspacePath"),
             ("memory creation timestamp", "createdAt"),
-            ("relevance score", "relevanceScore"),
+            ("relevance score", "scores.relevance"),
+            ("relevance score", "relevance_score"),
+            ("pack relevance score", "relevanceScore"),
         ];
 
         for (logical_name, observed_key) in drift_cases {
@@ -3578,8 +3593,10 @@ mod tests {
             ("memory body text", "content_format"),
             ("workspace id", "workspace_id"),
             ("workspace id", "workspace_id_hash"),
-            ("relevance score", "scores.relevance"),
-            ("relevance score", "relevance_hash"),
+            ("relevance score", "relevanceScore"),
+            ("relevance score", "relevanceScore_hash"),
+            ("pack relevance score", "scores.relevance"),
+            ("pack relevance score", "relevance_hash"),
         ];
 
         for (logical_name, observed_key) in allowed_cases {
