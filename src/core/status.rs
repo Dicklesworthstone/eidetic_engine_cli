@@ -562,7 +562,12 @@ impl DerivedAssetReport {
             path: SEARCH_INDEX_PATH,
             last_built_at: report.last_rebuild_at.clone(),
             memory_graph: None,
-            repair: report.repair_hint.or(Some(SEARCH_INDEX_REBUILD_COMMAND)),
+            repair: report.repair_hint.or_else(|| match report.health {
+                IndexHealth::Ready => None,
+                IndexHealth::Stale | IndexHealth::Missing | IndexHealth::Corrupt => {
+                    Some(SEARCH_INDEX_REBUILD_COMMAND)
+                }
+            }),
             source_dependencies: vec![
                 FreshnessDependency::new(
                     "source",
@@ -7154,6 +7159,37 @@ mod tests {
             asset.freshness.invalidates,
             vec![SEARCH_INDEX_ASSET_NAME],
             "freshness invalidates",
+        )
+    }
+
+    #[test]
+    fn derived_asset_from_ready_empty_index_has_no_rebuild_repair() -> TestResult {
+        let report = super::super::index::IndexStatusReport {
+            health: IndexHealth::Ready,
+            index_dir: PathBuf::from("/tmp/index"),
+            database_path: PathBuf::from("/tmp/ee.db"),
+            index_exists: true,
+            index_file_count: 0,
+            index_size_bytes: 0,
+            db_memory_count: 0,
+            db_session_count: 0,
+            db_generation: Some(0),
+            index_generation: None,
+            last_rebuild_at: None,
+            last_check_error: None,
+            repair_hint: None,
+            elapsed_ms: 1.0,
+            embedding: None,
+        };
+
+        let asset = DerivedAssetReport::from_index_status(&report);
+
+        ensure(asset.status, DerivedAssetStatus::Current, "status")?;
+        ensure(asset.repair, None, "ready index repair hint")?;
+        ensure(
+            asset.freshness.verdict.as_str(),
+            "current",
+            "freshness verdict",
         )
     }
 
