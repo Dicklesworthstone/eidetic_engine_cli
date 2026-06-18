@@ -14,10 +14,6 @@ set -uo pipefail
 
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Avoid the shared harness's cargo-metadata fallback in code-first swarm lanes.
-EE_BIN="${EE_BIN:-ee}"
-export EE_BIN
-
 # shellcheck source=scripts/e2e_lib.sh
 # shellcheck disable=SC1091
 source "$E2E_DIR/e2e_lib.sh"

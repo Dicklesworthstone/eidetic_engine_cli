@@ -9,8 +9,6 @@ set -uo pipefail
 
 E2E_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-EE_BIN="${EE_BIN:-ee}"
-export EE_BIN
 if [ -d /private/tmp ]; then
     EE_E2E_TMPDIR="${EE_E2E_TMPDIR:-/private/tmp}"
     export EE_E2E_TMPDIR

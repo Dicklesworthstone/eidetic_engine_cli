@@ -55,6 +55,7 @@ HARNESS_TMP_WORKSPACES=()
 # ---------------------------------------------------------------------------
 _harness_resolve_ee_bin() {
     if [ -n "${EE_BIN:-}" ]; then printf '%s' "$EE_BIN"; return 0; fi
+    if [ -n "${EE_BINARY:-}" ]; then printf '%s' "$EE_BINARY"; return 0; fi
     local target_dir
     target_dir="$(cd "$REPO_ROOT" && cargo metadata --no-deps --format-version 1 2>/dev/null \
         | python3 -c 'import sys,json; print(json.load(sys.stdin).get("target_directory",""))' 2>/dev/null)"
