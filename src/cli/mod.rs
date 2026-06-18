@@ -172,10 +172,11 @@ use crate::core::memory::{
     ExpireMemoryOptions, GetMemoryOptions, ListMemoriesOptions, MemoryExpireReport,
     MemoryLevelOptions, MemoryLevelReport, MemoryLinkMode, MemoryLinkOptions, MemoryLinkReport,
     MemoryReviseReport, MemoryTagsMode, MemoryTagsOptions, MemoryTagsReport, MemoryTimelineOptions,
-    RememberBatchOptions, RememberMemoryOptions, RememberMemoryReport, RememberOutcome,
-    RememberWriteControls, ReviseMemoryOptions, ReviseReason, WorkflowCloseOptions,
-    WorkflowCloseReport, WorkflowCreateOptions, build_memory_timeline, close_workflow,
-    create_workflow, expire_memory, get_memory_details, list_memories, remember_memory_batch_stdin,
+    RememberBatchOptions, RememberGitCaptureMode, RememberGitCaptureOptions, RememberMemoryOptions,
+    RememberMemoryReport, RememberOutcome, RememberWriteControls, ReviseMemoryOptions,
+    ReviseReason, WorkflowCloseOptions, WorkflowCloseReport, WorkflowCreateOptions,
+    build_memory_timeline, close_workflow, create_workflow, expire_memory, get_memory_details,
+    list_memories, remember_git_capture_candidate_from_repo, remember_memory_batch_stdin,
     remember_memory_with_controls, revise_memory, update_memory_level, update_memory_link,
     update_memory_tags,
 };
@@ -9141,7 +9142,7 @@ pub struct WorkflowCreateArgs {
 /// Arguments for the remember command.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct RememberArgs {
-    /// Memory content to store. Required unless --batch --stdin is given.
+    /// Memory content to store. Required unless --batch --stdin or a git capture source is given.
     #[arg(value_name = "CONTENT")]
     pub content: Option<String>,
 
@@ -9222,6 +9223,22 @@ pub struct RememberArgs {
     /// returns the original memory id with status=already_recorded.
     #[arg(long = "idempotency-key", value_name = "KEY")]
     pub idempotency_key: Option<String>,
+
+    /// Build memory content from one git commit and dry-run unless --apply is supplied.
+    #[arg(long = "from-commit", value_name = "REF")]
+    pub from_commit: Option<String>,
+
+    /// Build memory content from `git diff <REF>` and dry-run unless --apply is supplied.
+    #[arg(long = "from-diff", value_name = "REF")]
+    pub from_diff: Option<String>,
+
+    /// Build memory content from the current working-tree diff against HEAD.
+    #[arg(long = "from-worktree", action = ArgAction::SetTrue)]
+    pub from_worktree: bool,
+
+    /// Persist a git-derived remember candidate. Git capture is dry-run by default.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub apply: bool,
 
     /// Perform a dry run without storing.
     #[arg(long, action = ArgAction::SetTrue)]
@@ -47673,6 +47690,10 @@ fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
         stdin: false,
         reinforce: false,
         idempotency_key: None,
+        from_commit: None,
+        from_diff: None,
+        from_worktree: false,
+        apply: false,
         dry_run: args.dry_run,
     }
 }
@@ -48002,9 +48023,126 @@ fn validate_remember_sentinels(args: &RememberArgs) -> Result<(), DomainError> {
     Ok(())
 }
 
+fn remember_git_capture_selection(
+    args: &RememberArgs,
+) -> Result<Option<(RememberGitCaptureMode, Option<&str>)>, DomainError> {
+    let mut selections = Vec::new();
+    if let Some(reference) = args.from_commit.as_deref() {
+        selections.push((RememberGitCaptureMode::Commit, Some(reference)));
+    }
+    if let Some(reference) = args.from_diff.as_deref() {
+        selections.push((RememberGitCaptureMode::Diff, Some(reference)));
+    }
+    if args.from_worktree {
+        selections.push((RememberGitCaptureMode::WorkingTree, None));
+    }
+    if selections.len() > 1 {
+        return Err(DomainError::Usage {
+            message: "pass only one of --from-commit, --from-diff, or --from-worktree".to_owned(),
+            repair: Some("ee remember --from-commit HEAD --json".to_owned()),
+        });
+    }
+    Ok(selections.pop())
+}
+
+fn merge_remember_git_tags(manual_tags: Option<&str>, suggested_tags: &[String]) -> String {
+    let mut tags = BTreeSet::new();
+    if let Some(raw) = manual_tags {
+        tags.extend(
+            raw.split(',')
+                .map(str::trim)
+                .filter(|tag| !tag.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    tags.extend(suggested_tags.iter().filter(|tag| !tag.is_empty()).cloned());
+    tags.into_iter().collect::<Vec<_>>().join(",")
+}
+
+fn validate_remember_git_capture_args<'a>(
+    args: &RememberArgs,
+    selection: Option<(RememberGitCaptureMode, Option<&'a str>)>,
+) -> Result<Option<(RememberGitCaptureMode, Option<&'a str>)>, DomainError> {
+    let Some(selection) = selection else {
+        if args.apply {
+            return Err(DomainError::Usage {
+                message:
+                    "--apply is only valid with --from-commit, --from-diff, or --from-worktree"
+                        .to_owned(),
+                repair: Some("ee remember --from-commit HEAD --apply --json".to_owned()),
+            });
+        }
+        return Ok(None);
+    };
+    if args.batch || args.stdin {
+        return Err(DomainError::Usage {
+            message: "git capture cannot be combined with --batch or --stdin".to_owned(),
+            repair: Some("ee remember --from-commit HEAD --json".to_owned()),
+        });
+    }
+    if args.content.is_some() {
+        return Err(DomainError::Usage {
+            message: "pass either positional CONTENT or a git capture source, not both".to_owned(),
+            repair: Some("ee remember --from-commit HEAD --json".to_owned()),
+        });
+    }
+    if args.reinforce {
+        return Err(DomainError::Usage {
+            message: "git capture cannot be combined with --reinforce".to_owned(),
+            repair: Some("review the dry-run candidate, then rerun with --apply".to_owned()),
+        });
+    }
+    if args.apply && args.dry_run {
+        return Err(DomainError::Usage {
+            message: "--apply cannot be combined with --dry-run".to_owned(),
+            repair: Some("omit --dry-run to persist, or omit --apply to preview".to_owned()),
+        });
+    }
+    Ok(Some(selection))
+}
+
+fn persist_remember_sentinels(
+    args: &RememberArgs,
+    report: &RememberMemoryReport,
+) -> Result<(), DomainError> {
+    if args.sentinels.is_empty() || report.dry_run {
+        return Ok(());
+    }
+    let specs = args
+        .sentinels
+        .iter()
+        .map(|raw| {
+            MemorySentinelSpec::from_raw(
+                &report.memory_id.to_string(),
+                raw,
+                None,
+                "ee remember --sentinel",
+                args.sentinel_stale_threshold_seconds,
+            )
+            .map_err(memory_sentinel_validation_to_domain)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let connection =
+        DbConnection::open_file(&report.database_path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to open database {} for sentinel metadata: {error}",
+                report.database_path.display()
+            ),
+            repair: Some("ee doctor --workspace . --json".to_string()),
+        })?;
+    connection
+        .upsert_memory_sentinel_specs(&specs)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to persist memory sentinel metadata: {error}"),
+            repair: Some("ee doctor --workspace . --json".to_string()),
+        })
+}
+
 fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, DomainError> {
     let workspace_path = cli.resolve_workspace();
     validate_remember_sentinels(args)?;
+    let git_selection =
+        validate_remember_git_capture_args(args, remember_git_capture_selection(args)?)?;
     if !args.sentinels.is_empty() && args.reinforce {
         return Err(DomainError::Usage {
             message: "--sentinel cannot be combined with --reinforce; a reinforced write \
@@ -48013,6 +48151,49 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, Do
                 .to_owned(),
             repair: Some("ee remember --help".to_owned()),
         });
+    }
+    if let Some((mode, reference)) = git_selection {
+        let candidate = remember_git_capture_candidate_from_repo(&RememberGitCaptureOptions {
+            workspace_path: &workspace_path,
+            mode,
+            reference,
+        })?;
+        let merged_tags = merge_remember_git_tags(args.tags.as_deref(), &candidate.tags);
+        let tag_ref = (!merged_tags.is_empty()).then_some(merged_tags.as_str());
+        let kind = if args.kind == "fact" {
+            candidate.kind.as_str()
+        } else {
+            args.kind.as_str()
+        };
+        let source = args.source.as_deref().unwrap_or(candidate.source.as_str());
+        let outcome = remember_memory_with_controls(
+            &RememberMemoryOptions {
+                workspace_path: &workspace_path,
+                database_path: None,
+                content: candidate.content.as_str(),
+                workflow_id: args.workflow.as_deref(),
+                level: &args.level,
+                kind,
+                tags: tag_ref,
+                confidence: args.confidence,
+                source: Some(source),
+                allow_secret_mention: args.allow_secret_mention,
+                valid_from: args.valid_from.as_deref(),
+                valid_to: args.valid_to.as_deref(),
+                dry_run: !args.apply,
+                auto_link: !args.no_auto_link,
+                propose_candidates: !args.no_propose_candidates,
+            },
+            &RememberWriteControls {
+                reinforce: false,
+                idempotency_key: args.idempotency_key.as_deref(),
+                defer_index_processing: false,
+            },
+        )?;
+        if let RememberOutcome::Created(ref report) = outcome {
+            persist_remember_sentinels(args, report)?;
+        }
+        return Ok(outcome);
     }
     let Some(content) = args.content.as_deref() else {
         return Err(DomainError::Usage {
@@ -48048,37 +48229,7 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, Do
     let RememberOutcome::Created(ref report) = outcome else {
         return Ok(outcome);
     };
-    if !args.sentinels.is_empty() && !report.dry_run {
-        let specs = args
-            .sentinels
-            .iter()
-            .map(|raw| {
-                MemorySentinelSpec::from_raw(
-                    &report.memory_id.to_string(),
-                    raw,
-                    None,
-                    "ee remember --sentinel",
-                    args.sentinel_stale_threshold_seconds,
-                )
-                .map_err(memory_sentinel_validation_to_domain)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let connection = DbConnection::open_file(&report.database_path).map_err(|error| {
-            DomainError::Storage {
-                message: format!(
-                    "Failed to open database {} for sentinel metadata: {error}",
-                    report.database_path.display()
-                ),
-                repair: Some("ee doctor --workspace . --json".to_string()),
-            }
-        })?;
-        connection
-            .upsert_memory_sentinel_specs(&specs)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to persist memory sentinel metadata: {error}"),
-                repair: Some("ee doctor --workspace . --json".to_string()),
-            })?;
-    }
+    persist_remember_sentinels(args, report)?;
     Ok(outcome)
 }
 
@@ -73498,6 +73649,50 @@ mod tests {
                 ensure_equal(&args.allow_secret_mention, &true, "allow secret flag")
             }
             _ => Err("expected Remember command".to_string()),
+        }
+    }
+
+    #[test]
+    fn remember_command_accepts_git_capture_flags_without_content() -> TestResult {
+        let from_commit =
+            Cli::try_parse_from(["ee", "remember", "--from-commit", "HEAD", "--apply"]).map_err(
+                |error| format!("failed to parse remember --from-commit: {:?}", error.kind()),
+            )?;
+        match from_commit.command {
+            Some(Command::Remember(ref args)) => {
+                ensure_equal(
+                    &args.content,
+                    &None,
+                    "from-commit has no positional content",
+                )?;
+                ensure_equal(&args.from_commit, &Some("HEAD".to_string()), "from_commit")?;
+                ensure_equal(&args.apply, &true, "apply flag")?;
+            }
+            _ => return Err("expected Remember command for from-commit".to_string()),
+        }
+
+        let from_diff = Cli::try_parse_from(["ee", "remember", "--from-diff", "HEAD~1"])
+            .map_err(|error| format!("failed to parse remember --from-diff: {:?}", error.kind()))?;
+        match from_diff.command {
+            Some(Command::Remember(ref args)) => {
+                ensure_equal(&args.from_diff, &Some("HEAD~1".to_string()), "from_diff")?
+            }
+            _ => return Err("expected Remember command for from-diff".to_string()),
+        }
+
+        let worktree =
+            Cli::try_parse_from(["ee", "remember", "--from-worktree"]).map_err(|error| {
+                format!(
+                    "failed to parse remember --from-worktree: {:?}",
+                    error.kind()
+                )
+            })?;
+        match worktree.command {
+            Some(Command::Remember(ref args)) => {
+                ensure_equal(&args.from_worktree, &true, "from_worktree")?;
+                ensure_equal(&args.apply, &false, "git capture is dry-run by default")
+            }
+            _ => Err("expected Remember command for from-worktree".to_string()),
         }
     }
 
