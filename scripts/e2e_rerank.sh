@@ -256,6 +256,18 @@ assert_jq_file "${lexical_file}" '((.data.results // []) | length) >= 2' "true" 
 assert_jq_file "${lexical_file}" '.data.rerank.schema' "ee.rerank_posture.v1" "lexical baseline carries rerank posture schema"
 assert_jq_file "${lexical_file}" '.data.rerank.mode' "fusion_only" "lexical baseline disables rerank"
 emit_search_observation "pre_rerank_lexical_baseline" "${lexical_file}"
+log_step "assert lexical baseline top memory is logged for pre/post rerank comparison"
+lexical_top_memory="$(jq -r '(.data.results[0].memoryId // "")' "${lexical_file}")"
+if [[ -n "${lexical_top_memory}" && "${lexical_top_memory}" != "null" ]]; then
+    record_pass "lexical baseline top memory captured"
+    emit_event "rerank_baseline_top_observed" "$(jq -cn \
+        --arg bead "bd-2vq2z.6" \
+        --arg memoryId "${lexical_top_memory}" \
+        --arg responseArtifact "${lexical_file}" \
+        '{bead_id:$bead,surface:"rerank_e2e",label:"lexical_baseline_top_memory",memory_id:$memoryId,response_artifact_path:$responseArtifact,redaction_status:"local_workspace_artifacts_retained"}')"
+else
+    record_failure "lexical baseline top memory captured" "missing memoryId in lexical baseline first result"
+fi
 
 run_ee_json "search_hybrid_rerank_or_degraded" search "${QUERY}" --limit 3 --relevance-floor 0 --json
 hybrid_file="${LAST_STDOUT_FILE}"
