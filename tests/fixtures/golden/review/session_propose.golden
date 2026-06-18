@@ -34,5 +34,5 @@
     }
   ],
   "degraded": [],
-  "nextAction": "ee review session <session-id> --propose --json"
+  "nextAction": "ee review session cass-review-golden --workspace /workspace/example --propose --json"
 }

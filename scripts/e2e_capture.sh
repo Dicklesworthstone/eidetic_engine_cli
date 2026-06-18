@@ -257,6 +257,10 @@ if review_session_available; then
         and .data.durableMutation == false
         and (.data.candidateCount // 0) >= 1
     ' "review session dry-run proposes without mutation"
+    assert_jq "$review_dry" ".data.nextAction | contains(\"--workspace\") and contains(\"$WS\")" \
+        "review session dry-run next action preserves source workspace"
+    assert_jq "$review_dry" '.data.nextAction | contains("ee review session ")' \
+        "review session dry-run next action is executable"
     before_review_candidates="$(candidate_count "$WS")"
     review_apply="$(ee_json --workspace "$WS" review session "$SESSION_PATH" --propose --limit 4 --min-confidence 0.35 --json)"
     assert_jq "$review_apply" '.schema == "ee.response.v2" and .success == true' \
@@ -266,6 +270,10 @@ if review_session_available; then
         and .data.durableMutation == true
         and (.data.candidateCount // 0) >= 1
     ' "review session writes only curation proposals"
+    assert_jq "$review_apply" ".data.nextAction | contains(\"--workspace\") and contains(\"$WS\")" \
+        "review session propose next action preserves source workspace"
+    assert_jq "$review_apply" '.data.nextAction | contains("ee curate candidates ")' \
+        "review session propose next action lists pending candidates"
     after_review_candidates="$(candidate_count "$WS")"
     if [ "${after_review_candidates:-0}" -gt "${before_review_candidates:-0}" ]; then
         e2e_log_assert_eq "increased" "increased" "review session persisted proposal candidates" || true

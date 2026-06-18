@@ -2748,12 +2748,14 @@ pub fn review_session_proposals(
         .collect::<BTreeSet<_>>()
         .len();
     let candidate_count = candidates.len();
+    let workspace_arg = shell_quote_command_arg(&prepared.workspace_path.display().to_string());
+    let session_arg = shell_quote_command_arg(&session.cass_session_id);
     let next_action = if candidate_count == 0 {
         "no session-review candidates proposed".to_owned()
     } else if options.propose && !options.dry_run {
-        "ee curate candidates --status pending --json".to_owned()
+        format!("ee curate candidates --status pending --workspace {workspace_arg} --json")
     } else {
-        "ee review session <session-id> --propose --json".to_owned()
+        format!("ee review session {session_arg} --workspace {workspace_arg} --propose --json")
     };
 
     Ok(ReviewSessionReport {
@@ -18078,7 +18080,9 @@ mod tests {
                 persisted: false,
             }],
             degraded: Vec::new(),
-            next_action: "ee review session <session-id> --propose --json".to_owned(),
+            next_action:
+                "ee review session cass-review-golden --workspace /workspace/example --propose --json"
+                    .to_owned(),
         };
 
         let actual = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
@@ -18125,7 +18129,9 @@ mod tests {
                 persisted: false,
             }],
             degraded: Vec::new(),
-            next_action: "ee review session <session-id> --propose --json".to_owned(),
+            next_action:
+                "ee review session cass-review-bootstrap-golden --workspace /workspace/bootstrap --propose --json"
+                    .to_owned(),
         };
 
         let actual = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
