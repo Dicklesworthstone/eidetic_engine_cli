@@ -5172,6 +5172,11 @@ mod tests {
         let audit = connection
             .list_audit_by_target("memory", OUTCOME_TEST_MEMORY_ID, None)
             .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &audit.len(),
+            &2_usize,
+            "helpful human_explicit memory outcome writes feedback plus Bayes audit rows",
+        )?;
         let feedback_audit = audit
             .iter()
             .filter(|row| row.action == crate::db::audit_actions::FEEDBACK_RECORD)
