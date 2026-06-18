@@ -109,11 +109,14 @@ assert_eq "$(grep -q 'fn max_stale_anchor_penalty_keeps_drifted_memory_visible' 
     "present" "scoring unit pins max opt-in stale-anchor visibility"
 assert_eq "$(grep -q 'fn invalid_stale_anchor_penalty_fails_closed_to_neutral' "$REPO_ROOT/src/search/scoring.rs" && echo present || echo missing)" \
     "present" "scoring unit pins invalid penalty neutrality"
+printf '[anchors-e2e] assert: stale-anchor suspect boundary unit is present\n' >&2
+assert_eq "$(grep -q 'fn max_penalty_suspect_anchor_stays_between_current_and_stale' "$REPO_ROOT/src/search/scoring.rs" && echo present || echo missing)" \
+    "present" "scoring unit pins max-penalty suspect midpoint"
 assert_eq "$(grep -q 'fn default_stale_anchor_survives_tight_budget_tie' "$REPO_ROOT/src/core/recall.rs" && echo present || echo missing)" \
     "present" "recall unit pins tight-budget stale-anchor visibility"
 assert_eq "$(grep -q 'fn invalid_stale_anchor_penalty_is_neutral_in_recall' "$REPO_ROOT/src/core/recall.rs" && echo present || echo missing)" \
     "present" "recall unit pins invalid penalty neutrality"
-e2e_log_note "stale_anchor_guard source=src/search/scoring.rs,src/core/recall.rs coverage=default_neutral,opt_in_visible,invalid_penalty,tight_budget"
+e2e_log_note "stale_anchor_guard source=src/search/scoring.rs,src/core/recall.rs coverage=default_neutral,opt_in_visible,invalid_penalty,tight_budget,suspect_boundary"
 
 # No-silent-cap: record the anchors+freshness behavior that exists only as
 # library primitives, not yet as observable CLI behavior, so a green run is not

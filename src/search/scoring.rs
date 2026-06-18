@@ -1363,6 +1363,42 @@ mod tests {
     }
 
     #[test]
+    fn max_penalty_suspect_anchor_stays_between_current_and_stale() {
+        let config = SearchScoringConfig {
+            stale_anchor_penalty: 1.0,
+            ..SearchScoringConfig::default()
+        };
+        let current = SearchScoreComponents::from_signals(
+            SearchScoringSignals {
+                freshness_drift: Some(MemoryAnchorFreshnessState::Current),
+                ..SearchScoringSignals::new(1.0, RetrievalMaturity::Semantic)
+            },
+            config,
+        );
+        let suspect = SearchScoreComponents::from_signals(
+            SearchScoringSignals {
+                freshness_drift: Some(MemoryAnchorFreshnessState::Suspect),
+                ..SearchScoringSignals::new(1.0, RetrievalMaturity::Semantic)
+            },
+            config,
+        );
+        let stale = SearchScoreComponents::from_signals(
+            SearchScoringSignals {
+                freshness_drift: Some(MemoryAnchorFreshnessState::Stale),
+                ..SearchScoringSignals::new(1.0, RetrievalMaturity::Semantic)
+            },
+            config,
+        );
+
+        assert_eq!(current.freshness_drift, 1.0);
+        assert_eq!(stale.freshness_drift, DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR);
+        assert!(
+            stale.final_score < suspect.final_score && suspect.final_score < current.final_score,
+            "suspect remains a visible midpoint between stale and current at the max opt-in penalty"
+        );
+    }
+
+    #[test]
     fn max_stale_anchor_penalty_keeps_drifted_memory_visible() {
         let config = SearchScoringConfig {
             stale_anchor_penalty: 1.0,
