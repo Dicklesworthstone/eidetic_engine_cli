@@ -7443,6 +7443,435 @@ pub fn get_memory_history(options: &GetMemoryHistoryOptions<'_>) -> MemoryHistor
     )
 }
 
+/// Stable schema name for the read-only memory time-travel report.
+pub const TIMELINE_SCHEMA_V1: &str = "ee.timeline.v1";
+
+/// Options for reconstructing what was knowable about a topic at a point in time.
+#[derive(Clone, Debug)]
+pub struct MemoryTimelineOptions<'a> {
+    /// Database path.
+    pub database_path: &'a Path,
+    /// Workspace path used to derive the workspace id.
+    pub workspace_path: &'a Path,
+    /// Natural-language topic to match against memory content and tags.
+    pub topic: &'a str,
+    /// RFC3339 timestamp for the historical view.
+    pub as_of: &'a str,
+    /// Maximum rows per report section.
+    pub limit: u32,
+}
+
+/// One memory that was in effect at the requested timeline instant.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineMemory {
+    pub memory_id: String,
+    pub level: String,
+    pub kind: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub confidence: f32,
+    pub trust_class: String,
+    pub trust_subclass: Option<String>,
+    pub provenance_uri: Option<String>,
+    pub known_at: String,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
+    pub validity_then: String,
+    pub validity_window_kind: String,
+    pub is_tombstoned_then: bool,
+}
+
+/// One deterministic lifecycle change observed after the requested instant.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineChange {
+    pub change_type: String,
+    pub changed_at: String,
+    pub memory_id: String,
+    pub level: String,
+    pub kind: String,
+    pub content_preview: String,
+    pub reason: String,
+}
+
+/// Read-only `ee.timeline.v1` data payload.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryTimelineReport {
+    pub schema: &'static str,
+    pub command: String,
+    pub topic: String,
+    pub as_of: String,
+    pub memories_then: Vec<TimelineMemory>,
+    pub changes_since: Vec<TimelineChange>,
+    pub decisions_in_effect: Vec<TimelineMemory>,
+    pub total_memories_then: u32,
+    pub total_changes_since: u32,
+    pub total_decisions_in_effect: u32,
+    pub truncated: bool,
+}
+
+impl MemoryTimelineReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_else(|_| {
+            serde_json::json!({
+                "schema": TIMELINE_SCHEMA_V1,
+                "command": "timeline",
+                "topic": self.topic,
+                "asOf": self.as_of,
+                "memoriesThen": [],
+                "changesSince": [],
+                "decisionsInEffect": [],
+                "totalMemoriesThen": self.total_memories_then,
+                "totalChangesSince": self.total_changes_since,
+                "totalDecisionsInEffect": self.total_decisions_in_effect,
+                "truncated": true,
+            })
+        })
+    }
+
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        let mut out = String::new();
+        out.push_str("ee timeline\n\n");
+        out.push_str(&format!("Topic: {}\n", self.topic));
+        out.push_str(&format!("As of: {}\n", self.as_of));
+        out.push_str(&format!(
+            "Memories then: {} shown of {}\n",
+            self.memories_then.len(),
+            self.total_memories_then
+        ));
+        for memory in &self.memories_then {
+            out.push_str(&format!(
+                "- {} [{} {} confidence {:.3}] {}\n",
+                memory.memory_id, memory.level, memory.kind, memory.confidence, memory.content
+            ));
+        }
+        out.push_str(&format!(
+            "Changes since: {} shown of {}\n",
+            self.changes_since.len(),
+            self.total_changes_since
+        ));
+        for change in &self.changes_since {
+            out.push_str(&format!(
+                "- {} {} at {} ({})\n",
+                change.memory_id, change.change_type, change.changed_at, change.reason
+            ));
+        }
+        out.push_str(&format!(
+            "Decisions in effect: {} shown of {}\n",
+            self.decisions_in_effect.len(),
+            self.total_decisions_in_effect
+        ));
+        for decision in &self.decisions_in_effect {
+            out.push_str(&format!("- {} {}\n", decision.memory_id, decision.content));
+        }
+        if self.truncated {
+            out.push_str("\nResults truncated by --limit.\n");
+        }
+        out
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TimelineSourceMemory {
+    memory: StoredMemory,
+    tags: Vec<String>,
+    effective_from: DateTime<Utc>,
+    valid_to: Option<DateTime<Utc>>,
+    tombstoned_at: Option<DateTime<Utc>>,
+}
+
+/// Reconstruct a deterministic as-of memory timeline for a topic.
+pub fn build_memory_timeline(
+    options: &MemoryTimelineOptions<'_>,
+) -> Result<MemoryTimelineReport, DomainError> {
+    let topic = options.topic.trim();
+    if topic.is_empty() {
+        return Err(DomainError::Usage {
+            message: "timeline topic must not be empty".to_owned(),
+            repair: Some(
+                "ee timeline \"release process\" --as-of 2026-05-01T00:00:00Z --json".to_owned(),
+            ),
+        });
+    }
+    let as_of = parse_timeline_as_of(options.as_of)?;
+    let normalized_as_of = normalize_timeline_timestamp(&as_of);
+    let tokens = timeline_topic_tokens(topic);
+    let conn = open_migrated_memory_database(options.database_path).map_err(|message| {
+        DomainError::Storage {
+            message,
+            repair: Some("ee init --workspace . --json".to_owned()),
+        }
+    })?;
+    let workspace_path = options
+        .workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| options.workspace_path.to_path_buf());
+    let workspace_id = stable_workspace_id(&workspace_path);
+    let stored = conn
+        .list_memories_for_retrieval(&workspace_id, None, true)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list memories for timeline: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+
+    let mut sources = Vec::new();
+    for memory in stored {
+        let tags = conn
+            .get_memory_tags(&memory.id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to load memory tags for timeline: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        if !timeline_memory_matches_topic(&memory, &tags, &tokens, topic) {
+            continue;
+        }
+        sources.push(TimelineSourceMemory {
+            effective_from: timeline_effective_from(&memory, &as_of),
+            valid_to: parse_stored_timeline_timestamp(memory.valid_to.as_deref()),
+            tombstoned_at: parse_stored_timeline_timestamp(memory.tombstoned_at.as_deref()),
+            memory,
+            tags,
+        });
+    }
+    sources.sort_by(timeline_source_order);
+
+    let mut all_memories_then = Vec::new();
+    let mut all_changes_since = Vec::new();
+    let mut all_decisions = Vec::new();
+    for source in &sources {
+        if timeline_source_active_at(source, &as_of) {
+            let memory = timeline_memory(source, &as_of);
+            if source.memory.kind == "decision" {
+                all_decisions.push(memory.clone());
+            }
+            all_memories_then.push(memory);
+        }
+        append_timeline_changes_since(source, &as_of, &mut all_changes_since);
+    }
+    all_memories_then.sort_by(timeline_memory_order);
+    all_decisions.sort_by(timeline_memory_order);
+    all_changes_since.sort_by(timeline_change_order);
+
+    let limit = usize::try_from(options.limit).unwrap_or(usize::MAX);
+    let total_memories_then = all_memories_then.len() as u32;
+    let total_changes_since = all_changes_since.len() as u32;
+    let total_decisions_in_effect = all_decisions.len() as u32;
+    let truncated = all_memories_then.len() > limit
+        || all_changes_since.len() > limit
+        || all_decisions.len() > limit;
+    all_memories_then.truncate(limit);
+    all_changes_since.truncate(limit);
+    all_decisions.truncate(limit);
+
+    Ok(MemoryTimelineReport {
+        schema: TIMELINE_SCHEMA_V1,
+        command: "timeline".to_owned(),
+        topic: topic.to_owned(),
+        as_of: normalized_as_of,
+        memories_then: all_memories_then,
+        changes_since: all_changes_since,
+        decisions_in_effect: all_decisions,
+        total_memories_then,
+        total_changes_since,
+        total_decisions_in_effect,
+        truncated,
+    })
+}
+
+fn parse_timeline_as_of(raw: &str) -> Result<DateTime<Utc>, DomainError> {
+    DateTime::parse_from_rfc3339(raw.trim())
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|error| DomainError::Usage {
+            message: format!("--as-of must be an RFC3339 timestamp: {error}"),
+            repair: Some("ee timeline \"topic\" --as-of 2026-05-01T00:00:00Z --json".to_owned()),
+        })
+}
+
+fn parse_stored_timeline_timestamp(raw: Option<&str>) -> Option<DateTime<Utc>> {
+    raw.and_then(|value| {
+        DateTime::parse_from_rfc3339(value)
+            .ok()
+            .map(|timestamp| timestamp.with_timezone(&Utc))
+    })
+}
+
+fn normalize_timeline_timestamp(timestamp: &DateTime<Utc>) -> String {
+    timestamp.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn timeline_topic_tokens(topic: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = topic
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter_map(|part| {
+            let token = part.trim().to_ascii_lowercase();
+            (!token.is_empty()).then_some(token)
+        })
+        .collect();
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn timeline_memory_matches_topic(
+    memory: &StoredMemory,
+    tags: &[String],
+    tokens: &[String],
+    topic: &str,
+) -> bool {
+    let haystack = format!(
+        "{} {} {} {}",
+        memory.content,
+        memory.kind,
+        memory.level,
+        tags.join(" ")
+    )
+    .to_ascii_lowercase();
+    let topic_lower = topic.to_ascii_lowercase();
+    haystack.contains(&topic_lower)
+        || (!tokens.is_empty() && tokens.iter().all(|token| haystack.contains(token)))
+}
+
+fn timeline_effective_from(memory: &StoredMemory, fallback: &DateTime<Utc>) -> DateTime<Utc> {
+    parse_stored_timeline_timestamp(memory.valid_from.as_deref())
+        .or_else(|| parse_stored_timeline_timestamp(Some(memory.created_at.as_str())))
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+fn timeline_source_active_at(source: &TimelineSourceMemory, as_of: &DateTime<Utc>) -> bool {
+    &source.effective_from <= as_of
+        && source
+            .valid_to
+            .as_ref()
+            .is_none_or(|valid_to| valid_to > as_of)
+        && source
+            .tombstoned_at
+            .as_ref()
+            .is_none_or(|tombstoned_at| tombstoned_at > as_of)
+}
+
+fn timeline_validity_then(source: &TimelineSourceMemory, as_of: &DateTime<Utc>) -> &'static str {
+    if &source.effective_from > as_of {
+        "future"
+    } else if source
+        .tombstoned_at
+        .as_ref()
+        .is_some_and(|tombstoned_at| tombstoned_at <= as_of)
+    {
+        "tombstoned"
+    } else if source
+        .valid_to
+        .as_ref()
+        .is_some_and(|valid_to| valid_to <= as_of)
+    {
+        "expired"
+    } else {
+        "active"
+    }
+}
+
+fn timeline_memory(source: &TimelineSourceMemory, as_of: &DateTime<Utc>) -> TimelineMemory {
+    TimelineMemory {
+        memory_id: source.memory.id.clone(),
+        level: source.memory.level.clone(),
+        kind: source.memory.kind.clone(),
+        content: source.memory.content.clone(),
+        tags: source.tags.clone(),
+        confidence: source.memory.confidence,
+        trust_class: source.memory.trust_class.clone(),
+        trust_subclass: source.memory.trust_subclass.clone(),
+        provenance_uri: source.memory.provenance_uri.clone(),
+        known_at: normalize_timeline_timestamp(&source.effective_from),
+        valid_from: source.memory.valid_from.clone(),
+        valid_to: source.memory.valid_to.clone(),
+        validity_then: timeline_validity_then(source, as_of).to_owned(),
+        validity_window_kind: validity_window_kind(
+            source.memory.valid_from.as_deref(),
+            source.memory.valid_to.as_deref(),
+        )
+        .to_owned(),
+        is_tombstoned_then: source
+            .tombstoned_at
+            .as_ref()
+            .is_some_and(|tombstoned_at| tombstoned_at <= as_of),
+    }
+}
+
+fn append_timeline_changes_since(
+    source: &TimelineSourceMemory,
+    as_of: &DateTime<Utc>,
+    changes: &mut Vec<TimelineChange>,
+) {
+    if &source.effective_from > as_of {
+        changes.push(timeline_change(
+            "added",
+            source.effective_from.to_owned(),
+            source,
+            "memory became applicable after as-of",
+        ));
+    }
+    if let Some(valid_to) = source.valid_to.as_ref()
+        && valid_to > as_of
+        && &source.effective_from <= as_of
+    {
+        changes.push(timeline_change(
+            "superseded",
+            valid_to.to_owned(),
+            source,
+            "memory validity window ended after as-of",
+        ));
+    }
+    if let Some(tombstoned_at) = source.tombstoned_at.as_ref()
+        && tombstoned_at > as_of
+    {
+        changes.push(timeline_change(
+            "tombstoned",
+            tombstoned_at.to_owned(),
+            source,
+            "memory was tombstoned after as-of",
+        ));
+    }
+}
+
+fn timeline_change(
+    change_type: &str,
+    changed_at: DateTime<Utc>,
+    source: &TimelineSourceMemory,
+    reason: &str,
+) -> TimelineChange {
+    TimelineChange {
+        change_type: change_type.to_owned(),
+        changed_at: normalize_timeline_timestamp(&changed_at),
+        memory_id: source.memory.id.clone(),
+        level: source.memory.level.clone(),
+        kind: source.memory.kind.clone(),
+        content_preview: truncate_content(&source.memory.content).0,
+        reason: reason.to_owned(),
+    }
+}
+
+fn timeline_source_order(left: &TimelineSourceMemory, right: &TimelineSourceMemory) -> Ordering {
+    left.effective_from
+        .cmp(&right.effective_from)
+        .then_with(|| left.memory.id.cmp(&right.memory.id))
+}
+
+fn timeline_memory_order(left: &TimelineMemory, right: &TimelineMemory) -> Ordering {
+    left.known_at
+        .cmp(&right.known_at)
+        .then_with(|| left.memory_id.cmp(&right.memory_id))
+}
+
+fn timeline_change_order(left: &TimelineChange, right: &TimelineChange) -> Ordering {
+    left.changed_at
+        .cmp(&right.changed_at)
+        .then_with(|| left.change_type.cmp(&right.change_type))
+        .then_with(|| left.memory_id.cmp(&right.memory_id))
+}
+
 // =============================================================================
 // Memory Revise (EE-066)
 //
@@ -9188,14 +9617,19 @@ mod tests {
 
     #[test]
     fn remember_near_duplicates_empty_without_confirmed_embed_dedup_link() {
-        assert!(remember_near_duplicates_from_embed_dedup_decision(
-            &RememberEmbedDedupDecision::fresh([1_u8; 16], "cosine_under_floor")
-        )
-        .is_empty());
-        assert!(remember_near_duplicates_from_embed_dedup_decision(
-            &RememberEmbedDedupDecision::disabled()
-        )
-        .is_empty());
+        assert!(
+            remember_near_duplicates_from_embed_dedup_decision(&RememberEmbedDedupDecision::fresh(
+                [1_u8; 16],
+                "cosine_under_floor"
+            ))
+            .is_empty()
+        );
+        assert!(
+            remember_near_duplicates_from_embed_dedup_decision(
+                &RememberEmbedDedupDecision::disabled()
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -11694,6 +12128,289 @@ mod tests {
     fn memory_history_report_version_matches_package() -> TestResult {
         let report = MemoryHistoryReport::not_found("mem_test".to_string());
         ensure(report.version, env!("CARGO_PKG_VERSION"), "version")
+    }
+
+    fn timeline_test_memory_input(
+        workspace_id: &str,
+        kind: &str,
+        content: &str,
+        valid_from: &str,
+        valid_to: Option<&str>,
+        tags: &[&str],
+    ) -> CreateMemoryInput {
+        CreateMemoryInput {
+            workspace_id: workspace_id.to_owned(),
+            level: "procedural".to_owned(),
+            kind: kind.to_owned(),
+            content: content.to_owned(),
+            workflow_id: None,
+            confidence: 0.86,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: Some(format!("file:///timeline/{kind}.md:1")),
+            trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+            trust_subclass: None,
+            tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            valid_from: Some(valid_from.to_owned()),
+            valid_to: valid_to.map(str::to_owned),
+        }
+    }
+
+    fn setup_timeline_fixture() -> Result<(tempfile::TempDir, PathBuf, PathBuf), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = temp.path().join("workspace");
+        fs::create_dir_all(workspace_path.join(".ee")).map_err(|error| error.to_string())?;
+        let canonical = workspace_path
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database_path = canonical.join(".ee").join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(&canonical);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: canonical.to_string_lossy().into_owned(),
+                    name: Some("timeline fixture".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000101",
+                &timeline_test_memory_input(
+                    &workspace_id,
+                    "rule",
+                    "Timeline audit policy: use RCH before release.",
+                    "2026-05-01T00:00:00Z",
+                    Some("2026-05-03T00:00:00Z"),
+                    &["timeline", "audit"],
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000102",
+                &timeline_test_memory_input(
+                    &workspace_id,
+                    "rule",
+                    "Timeline audit policy: central batch verify owns release proof.",
+                    "2026-05-03T00:00:00Z",
+                    None,
+                    &["timeline", "audit"],
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000103",
+                &timeline_test_memory_input(
+                    &workspace_id,
+                    "decision",
+                    "Decision: timeline audit uses memory validity windows.",
+                    "2026-05-02T00:00:00Z",
+                    None,
+                    &["timeline", "decision"],
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000104",
+                &timeline_test_memory_input(
+                    &workspace_id,
+                    "fact",
+                    "Timeline audit temporary workaround.",
+                    "2026-05-01T00:00:00Z",
+                    None,
+                    &["timeline", "temporary"],
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .restore_imported_memory_tombstone(
+                "mem_00000000000000000000000104",
+                "2026-05-04T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000105",
+                &timeline_test_memory_input(
+                    &workspace_id,
+                    "fact",
+                    "Garden notes are unrelated to release audits.",
+                    "2026-05-01T00:00:00Z",
+                    None,
+                    &["garden"],
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+
+        Ok((temp, database_path, canonical))
+    }
+
+    #[test]
+    fn memory_timeline_reconstructs_as_of_state_and_changes_since() -> TestResult {
+        let (_temp, database_path, workspace_path) = setup_timeline_fixture()?;
+
+        let report = build_memory_timeline(&MemoryTimelineOptions {
+            database_path: &database_path,
+            workspace_path: &workspace_path,
+            topic: "timeline audit",
+            as_of: "2026-05-02T12:00:00Z",
+            limit: 20,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(report.schema, TIMELINE_SCHEMA_V1, "schema")?;
+        ensure(report.as_of.as_str(), "2026-05-02T12:00:00Z", "as_of")?;
+        ensure(report.total_memories_then, 3, "then count")?;
+        ensure(report.total_changes_since, 3, "changes count")?;
+        ensure(report.total_decisions_in_effect, 1, "decision count")?;
+        ensure(report.truncated, false, "not truncated")?;
+        ensure(
+            report
+                .memories_then
+                .iter()
+                .any(|memory| memory.memory_id == "mem_00000000000000000000000101"),
+            true,
+            "old policy visible then",
+        )?;
+        ensure(
+            report
+                .memories_then
+                .iter()
+                .any(|memory| memory.memory_id == "mem_00000000000000000000000104"),
+            true,
+            "later tombstone still visible then",
+        )?;
+        ensure(
+            report
+                .decisions_in_effect
+                .iter()
+                .any(|memory| memory.memory_id == "mem_00000000000000000000000103"),
+            true,
+            "decision in effect",
+        )?;
+        ensure(
+            report.changes_since.iter().any(|change| {
+                change.memory_id == "mem_00000000000000000000000102"
+                    && change.change_type == "added"
+                    && change.changed_at == "2026-05-03T00:00:00Z"
+            }),
+            true,
+            "new policy added since",
+        )?;
+        ensure(
+            report.changes_since.iter().any(|change| {
+                change.memory_id == "mem_00000000000000000000000101"
+                    && change.change_type == "superseded"
+            }),
+            true,
+            "old policy superseded since",
+        )?;
+        ensure(
+            report.changes_since.iter().any(|change| {
+                change.memory_id == "mem_00000000000000000000000104"
+                    && change.change_type == "tombstoned"
+            }),
+            true,
+            "later tombstone reported",
+        )
+    }
+
+    #[test]
+    fn memory_timeline_valid_to_boundary_switches_current_revision() -> TestResult {
+        let (_temp, database_path, workspace_path) = setup_timeline_fixture()?;
+
+        let report = build_memory_timeline(&MemoryTimelineOptions {
+            database_path: &database_path,
+            workspace_path: &workspace_path,
+            topic: "timeline audit policy",
+            as_of: "2026-05-03T00:00:00Z",
+            limit: 20,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            report
+                .memories_then
+                .iter()
+                .any(|memory| memory.memory_id == "mem_00000000000000000000000101"),
+            false,
+            "valid_to boundary excludes old policy",
+        )?;
+        ensure(
+            report
+                .memories_then
+                .iter()
+                .any(|memory| memory.memory_id == "mem_00000000000000000000000102"),
+            true,
+            "valid_from boundary includes new policy",
+        )
+    }
+
+    #[test]
+    fn memory_timeline_zero_limit_keeps_totals_and_marks_truncated() -> TestResult {
+        let (_temp, database_path, workspace_path) = setup_timeline_fixture()?;
+
+        let report = build_memory_timeline(&MemoryTimelineOptions {
+            database_path: &database_path,
+            workspace_path: &workspace_path,
+            topic: "timeline audit",
+            as_of: "2026-05-02T12:00:00Z",
+            limit: 0,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(report.total_memories_then, 3, "total memories retained")?;
+        ensure(report.memories_then.is_empty(), true, "memory page empty")?;
+        ensure(report.changes_since.is_empty(), true, "change page empty")?;
+        ensure(
+            report.decisions_in_effect.is_empty(),
+            true,
+            "decision page empty",
+        )?;
+        ensure(report.truncated, true, "zero limit truncates")
+    }
+
+    #[test]
+    fn memory_timeline_empty_topic_fails_closed() -> TestResult {
+        let (_temp, database_path, workspace_path) = setup_timeline_fixture()?;
+
+        match build_memory_timeline(&MemoryTimelineOptions {
+            database_path: &database_path,
+            workspace_path: &workspace_path,
+            topic: "   ",
+            as_of: "2026-05-02T12:00:00Z",
+            limit: 10,
+        }) {
+            Err(DomainError::Usage { message, .. }) => {
+                ensure(message.contains("topic"), true, "mentions topic")
+            }
+            other => Err(format!("expected topic usage error, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn memory_timeline_invalid_as_of_fails_closed() -> TestResult {
+        let (_temp, database_path, workspace_path) = setup_timeline_fixture()?;
+
+        match build_memory_timeline(&MemoryTimelineOptions {
+            database_path: &database_path,
+            workspace_path: &workspace_path,
+            topic: "timeline audit",
+            as_of: "not-a-timestamp",
+            limit: 10,
+        }) {
+            Err(DomainError::Usage { message, .. }) => {
+                ensure(message.contains("--as-of"), true, "mentions as-of")
+            }
+            other => Err(format!("expected as-of usage error, got {other:?}")),
+        }
     }
 
     // =========================================================================
