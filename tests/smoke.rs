@@ -1377,8 +1377,8 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
     )?;
     ensure_equal(
         &status_empty_json["data"]["registeredCount"],
-        &serde_json::json!(0),
-        "model status empty registered count",
+        &serde_json::json!(1),
+        "model status bundled registered count",
     )?;
     ensure_equal(
         &status_empty_json["data"]["availableCount"],
@@ -1393,8 +1393,8 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
     )?;
     ensure_equal(
         &status_empty_json["data"]["degradations"][0]["code"],
-        &serde_json::json!("model_registry_empty"),
-        "model status empty degradation code",
+        &serde_json::json!("model_registry_no_available_entry"),
+        "model status no available degradation code",
     )?;
 
     let connection = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;

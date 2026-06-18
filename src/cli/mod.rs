@@ -79,10 +79,11 @@ use crate::core::curate::{
     CurateCandidatesReport, CurateDispositionOptions, CurateDispositionReport, CurateRetireOptions,
     CurateReviewAction, CurateReviewOptions, CurateReviewReport, CurateShowOptions,
     CurateShowReport, CurateTombstoneOptions, CurateUntombstoneOptions, CurateValidateOptions,
-    CurateValidateReport, ReflectionIngestOptions, ReflectionProposeOptions,
+    CurateValidateReport, DEFAULT_CAPTURE_SUGGESTION_LIMIT, CaptureSuggestOptions,
+    CaptureSuggestionsReport, ReflectionIngestOptions, ReflectionProposeOptions,
     ReflectionRequestLedgerDiagnosticsOptions, ReviewSessionOptions, ReviewSessionReport,
-    ReviewWorkspaceOptions, apply_curation_candidate, ingest_reflection_result,
-    list_curation_candidates, list_reflection_request_ledger_diagnostics,
+    ReviewWorkspaceOptions, apply_curation_candidate, capture_suggestions,
+    ingest_reflection_result, list_curation_candidates, list_reflection_request_ledger_diagnostics,
     propose_reflection_request, review_curation_candidate, review_session_proposals,
     run_curate_auto_promote, run_curate_retire, run_curate_tombstone, run_curate_untombstone,
     run_curation_disposition, run_review_workspace, show_curation_candidate,
@@ -361,12 +362,13 @@ const HELP_PRELUDE: &str = concat!(
     "\n",
     "Agent shortcuts:\n",
     "  note          Capture a memory with agent-friendly level/kind inference\n",
+    "  capture       Suggest durable memories from recent session evidence\n",
     "\n",
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
     "  Inspect:        status, doctor, capabilities, insights, impact, lens, why-not, recall, similar, memory show, memory history\n",
     "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome, journal\n",
-    "  Curate:         curate (candidates|validate|apply), reflect, playbook, review\n",
+    "  Curate:         capture, curate (candidates|validate|apply), reflect, playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
     "  Maintenance:    maintenance, job, index, steward, daemon\n",
     "  Import/Export:  import (cass|jsonl|eidetic-legacy|agentsmd), export [agentsmd], backup, handoff\n",
@@ -761,6 +763,7 @@ fn set_governor_resume_cursor(cursor: Option<&str>) {
 const EXPORT_REPORT_SCHEMA_V1: &str = "ee.export.report.v1";
 const TASK_LENS_CATALOG_SCHEMA_V1: &str = "ee.task_lens.catalog.v1";
 const TASK_LENS_EXPLAIN_SCHEMA_V1: &str = "ee.task_lens.explain.v1";
+const DEFAULT_CAPTURE_SUGGEST_MIN_CONFIDENCE: f32 = 0.58;
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum Command {
@@ -836,6 +839,9 @@ pub enum Command {
     /// Persist redaction-safe coordination fallback evidence.
     #[command(subcommand)]
     Coordination(CoordinationCommand),
+    /// Suggest high-value memories from session evidence without storing them.
+    #[command(subcommand)]
+    Capture(CaptureCommand),
     /// Review curation proposals without silently mutating memory.
     #[command(subcommand)]
     Curate(CurateCommand),
@@ -11069,6 +11075,36 @@ pub struct ModelFetchArgs {
 }
 
 #[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum CaptureCommand {
+    /// Suggest one-tap memory captures from recent CASS evidence without writing.
+    Suggest(CaptureSuggestArgs),
+}
+
+/// Arguments for `ee capture suggest`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct CaptureSuggestArgs {
+    /// Suggest from a specific CASS session path or ID.
+    #[arg(long = "from-session", value_name = "SESSION")]
+    pub from_session: Option<String>,
+
+    /// Suggest from the most recent CASS session evidence.
+    #[arg(long = "from-recent", action = ArgAction::SetTrue)]
+    pub from_recent: bool,
+
+    /// Maximum suggestions to return.
+    #[arg(long, default_value_t = DEFAULT_CAPTURE_SUGGESTION_LIMIT)]
+    pub max: u32,
+
+    /// Minimum confidence threshold for suggestions (0.0-1.0).
+    #[arg(long = "min-confidence", default_value_t = DEFAULT_CAPTURE_SUGGEST_MIN_CONFIDENCE)]
+    pub min_confidence: f32,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum ReviewCommand {
     /// Review a session and propose curation candidates.
     Session(ReviewSessionArgs),
@@ -12408,6 +12444,9 @@ where
         Some(Command::Coordination(CoordinationCommand::Evidence(
             CoordinationEvidenceCommand::Ingest(ref args),
         ))) => handle_coordination_evidence_ingest(&cli, args, stdout, stderr),
+        Some(Command::Capture(CaptureCommand::Suggest(ref args))) => {
+            handle_capture_suggest(&cli, args, stdout, stderr)
+        },
         Some(Command::Db(ref db_cmd)) => match db_cmd {
             DbCommand::Status(args) => handle_db_status(&cli, args, stdout),
             DbCommand::Inspect(args) => handle_db_inspect(&cli, args, stdout),
@@ -40296,6 +40335,89 @@ where
     ProcessExitCode::Usage
 }
 
+fn handle_capture_suggest<W, E>(
+    cli: &Cli,
+    args: &CaptureSuggestArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let options = CaptureSuggestOptions {
+        workspace_path: workspace_path.as_path(),
+        database_path: args.database.as_deref(),
+        session_id: args.from_session.as_deref(),
+        from_recent: args.from_recent,
+        min_confidence: args.min_confidence,
+        limit: args.max,
+    };
+
+    match capture_suggestions(&options) {
+        Ok(report) => write_capture_suggest_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_capture_suggest_report<W>(
+    cli: &Cli,
+    report: &CaptureSuggestionsReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &format_capture_suggest_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&format_capture_suggest_json(report)) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(format_capture_suggest_json(report) + "\n"))
+        }
+    }
+}
+
+fn format_capture_suggest_json(report: &CaptureSuggestionsReport) -> String {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": report,
+        "degraded": [],
+    })
+    .to_string()
+}
+
+fn format_capture_suggest_human(report: &CaptureSuggestionsReport) -> String {
+    let mut output = format!(
+        "capture suggest: {} suggestion(s), {} suppressed, read-only\n\n",
+        report.candidate_count, report.suppressed_count
+    );
+    for suggestion in &report.candidates {
+        output.push_str(&format!(
+            "  {} [{}] confidence={:.2}\n    {}\n    accept: {}\n    reject: {}\n",
+            suggestion.candidate_id,
+            suggestion.proposed_fields.kind,
+            suggestion.confidence,
+            suggestion.proposed_fields.content,
+            suggestion.accept_command,
+            suggestion.reject_command
+        ));
+    }
+    output.push_str("\nNext:\n  ");
+    output.push_str(&report.next_action);
+    output.push('\n');
+    output
+}
+
 fn handle_review_session<W, E>(
     cli: &Cli,
     args: &ReviewSessionArgs,
@@ -57942,6 +58064,9 @@ impl NormalizedInvocation {
                             "coordination evidence ingest".to_string()
                         }
                     },
+                },
+                Command::Capture(capture) => match capture {
+                    CaptureCommand::Suggest(_) => "capture suggest".to_string(),
                 },
                 Command::Db(db) => match db {
                     DbCommand::Status(_) => "db status".to_string(),

@@ -1,0 +1,67 @@
+{
+  "schema": "ee.capture_suggestions.v1",
+  "command": "capture suggest",
+  "version": "0.0.0-test",
+  "workspaceId": "wsp_demo",
+  "workspacePath": "/workspace/demo",
+  "databasePath": "/workspace/demo/.ee/ee.db",
+  "selection": {
+    "source": "from_recent",
+    "requestedSessionId": null
+  },
+  "readOnly": true,
+  "durableMutation": false,
+  "sessionId": "sess_demo",
+  "cassSessionId": "cass_demo",
+  "evidenceSpanCount": 1,
+  "candidateCount": 1,
+  "suppressedCount": 0,
+  "minConfidence": 0.58,
+  "limit": 2,
+  "candidates": [
+    {
+      "candidateId": "curate_demo",
+      "candidateType": "create_derived_memory",
+      "candidateKind": "rule",
+      "topicKey": "cargo",
+      "targetMemoryId": null,
+      "proposedFields": {
+        "level": "procedural",
+        "kind": "rule",
+        "tags": [
+          "ambient-capture",
+          "capture-suggest",
+          "cargo"
+        ],
+        "content": "Run cargo fmt before release verification.",
+        "confidence": 0.76
+      },
+      "evidence": [
+        {
+          "evidenceSpanId": "evspan_demo",
+          "cassSpanId": "span_demo",
+          "role": "assistant",
+          "startLine": 1,
+          "endLine": 1,
+          "contentHash": "blake3:span",
+          "excerpt": "Run cargo fmt before release verification."
+        }
+      ],
+      "confidence": 0.76,
+      "dedupeStatus": {
+        "status": "unique",
+        "method": "exact_hash_then_lexical_jaccard",
+        "reason": "No active memory or rejected candidate covers this evidence.",
+        "matchedCandidateId": null,
+        "matchedMemoryId": null,
+        "similarity": null
+      },
+      "reviewCommand": "ee review session cass_demo --propose --json",
+      "acceptCommand": "ee review session cass_demo --propose --json && ee curate accept curate_demo --reason \"accepted capture suggestion from cass_demo\" --json",
+      "rejectCommand": "ee review session cass_demo --propose --json && ee curate reject curate_demo --reason \"declined ambient capture suggestion from cass_demo\" --json"
+    }
+  ],
+  "suppressed": [],
+  "degraded": [],
+  "nextAction": "review suggested acceptCommand/rejectCommand entries; no memory is stored until a curation command is run"
+}

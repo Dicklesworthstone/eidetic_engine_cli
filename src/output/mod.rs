@@ -9428,6 +9428,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: curate_candidates_response_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::curate::CAPTURE_SUGGESTIONS_SCHEMA_V1,
+            version: "1",
+            description: "Read-only ambient capture suggestions with explicit curation accept/reject commands",
+            category: "curate",
+            definition: capture_suggestions_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::curate::CURATE_AUTO_PROMOTE_SCHEMA_V1,
             version: "1",
             description: "Threshold-driven memory level-transition proposals emitted by `ee curate auto-promote` (bd-2r8vp).",
@@ -10739,6 +10746,10 @@ fn export_response_schema_definition() -> String {
 
 fn curate_candidates_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.curate.candidates.v1.json").to_string()
+}
+
+fn capture_suggestions_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.capture_suggestions.v1.json").to_string()
 }
 
 fn curate_auto_promote_schema_definition() -> String {

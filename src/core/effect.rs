@@ -1181,6 +1181,10 @@ impl EffectManifest {
                 "claim verify",
                 "Verify executable claim evidence without mutating source records",
             ),
+            CommandEffect::read_only_db(
+                "capture suggest",
+                "Suggest ambient capture candidates from session evidence without durable mutation",
+            ),
             CommandEffect::read_only("config get", "Read one merged config key"),
             CommandEffect::read_only("config show", "Show merged config values"),
             CommandEffect::read_only_db(

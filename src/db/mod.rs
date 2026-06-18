@@ -8083,6 +8083,61 @@ impl DbConnection {
         Ok(())
     }
 
+    /// Update an existing model registry row by ID.
+    ///
+    /// This is used when a previously declared model becomes genuinely
+    /// available after a verified load/download. The row identity stays stable;
+    /// only the registry metadata and availability fields are reconciled.
+    pub fn update_model_registry_entry(
+        &self,
+        id: &str,
+        input: &CreateModelRegistryInput,
+    ) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE model_registry SET workspace_id = ?1, provider = ?2, model_name = ?3, purpose = ?4, dimension = ?5, distance_metric = ?6, status = ?7, version = ?8, source_uri = ?9, content_hash = ?10, metadata_json = ?11, updated_at = ?12, last_checked_at = ?13 WHERE id = ?14",
+            &[
+                Value::Text(input.workspace_id.clone()),
+                Value::Text(input.provider.as_str().to_string()),
+                Value::Text(input.model_name.clone()),
+                Value::Text(input.purpose.as_str().to_string()),
+                input
+                    .dimension
+                    .map_or(Value::Null, |dimension| Value::BigInt(i64::from(dimension))),
+                input
+                    .distance_metric
+                    .map_or(Value::Null, |metric| Value::Text(metric.as_str().to_string())),
+                Value::Text(input.status.as_str().to_string()),
+                input
+                    .version
+                    .as_ref()
+                    .map_or(Value::Null, |version| Value::Text(version.clone())),
+                input
+                    .source_uri
+                    .as_ref()
+                    .map_or(Value::Null, |source| Value::Text(source.clone())),
+                input
+                    .content_hash
+                    .as_ref()
+                    .map_or(Value::Null, |hash| Value::Text(hash.clone())),
+                input
+                    .metadata_json
+                    .as_ref()
+                    .map_or(Value::Null, |metadata| Value::Text(metadata.clone())),
+                Value::Text(now),
+                input
+                    .last_checked_at
+                    .as_ref()
+                    .map_or(Value::Null, |checked| Value::Text(checked.clone())),
+                Value::Text(id.to_string()),
+            ],
+        )?;
+
+        Ok(affected > 0)
+    }
+
     /// Get a model registry row by ID.
     pub fn get_model_registry_entry(&self, id: &str) -> Result<Option<StoredModelRegistryEntry>> {
         let rows = self.query_for(
@@ -8143,6 +8198,15 @@ impl DbConnection {
         input: &CreateEmbeddingMetadataInput,
     ) -> Result<()> {
         self.insert_model_registry_entry(id, &input.to_model_registry_input()?)
+    }
+
+    /// Update an existing embedding metadata record through the model registry.
+    pub fn update_embedding_metadata_record(
+        &self,
+        id: &str,
+        input: &CreateEmbeddingMetadataInput,
+    ) -> Result<bool> {
+        self.update_model_registry_entry(id, &input.to_model_registry_input()?)
     }
 
     /// Get a parsed embedding metadata record by registry ID.
@@ -27255,6 +27319,51 @@ mod tests {
             ModelPurpose::Embedding,
         )?;
         ensure_equal(&found, &Some(entry), "identity lookup returns entry")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn update_model_registry_entry_promotes_status_in_place() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let mut input =
+            model_registry_input(ModelProvider::Model2Vec, "potion", ModelPurpose::Embedding);
+        input.status = ModelRegistryStatus::Unavailable;
+        input.content_hash = None;
+        connection.insert_model_registry_entry("mdl_01234567890123456789012399", &input)?;
+
+        let mut promoted = input;
+        promoted.status = ModelRegistryStatus::Available;
+        promoted.content_hash = Some(
+            "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                .to_string(),
+        );
+        let updated =
+            connection.update_model_registry_entry("mdl_01234567890123456789012399", &promoted)?;
+        ensure(updated, "existing registry row should update")?;
+
+        let entry = connection
+            .get_model_registry_entry("mdl_01234567890123456789012399")?
+            .ok_or_else(|| TestFailure::new("promoted entry missing"))?;
+        ensure_equal(
+            &entry.status,
+            &ModelRegistryStatus::Available,
+            "promoted status",
+        )?;
+        ensure_equal(
+            &entry.content_hash,
+            &promoted.content_hash,
+            "promoted content hash",
+        )?;
+        ensure_equal(
+            &entry.model_name,
+            &"potion".to_string(),
+            "identity preserved",
+        )?;
 
         connection.close()?;
         Ok(())

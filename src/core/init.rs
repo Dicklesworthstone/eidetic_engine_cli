@@ -837,7 +837,9 @@ fn initialize_database(
     let existing = connection
         .get_workspace_by_path(&workspace_key)
         .map_err(|error| format!("failed to check workspace: {error}"))?;
-    if existing.is_none() {
+    let workspace_id = if let Some(existing) = existing {
+        existing.id
+    } else {
         let workspace_id = stable_workspace_id(workspace_path);
         connection
             .insert_workspace(
@@ -848,7 +850,11 @@ fn initialize_database(
                 },
             )
             .map_err(|error| format!("failed to create workspace row: {error}"))?;
-    }
+        workspace_id
+    };
+
+    super::model::ensure_bundled_embedding_model_registered(&connection, &workspace_id)
+        .map_err(|error| format!("failed to register bundled embedding model: {error}"))?;
 
     Ok(())
 }

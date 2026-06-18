@@ -18,7 +18,8 @@ use crate::config::workspace_fingerprint;
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::index::{
     DEFAULT_INDEX_SUBDIR, EmbeddingPosture, IndexHealth, IndexStatusOptions,
-    current_embedding_posture, get_index_status_with_connection,
+    current_embedding_posture, default_embedder_model_root, ensure_loaded_embedding_registry_record,
+    get_index_status_with_connection, potion_model_destination_dir, POTION_MODEL_NAME,
 };
 use crate::db::{
     CreateEmbeddingMetadataInput, CreateModelRegistryInput, DbConnection, DbError,
@@ -28,6 +29,10 @@ use crate::models::DomainError;
 use crate::models::model_registry::{
     EmbeddingMetadataRecord, EmbeddingPooling, ModelDistanceMetric, ModelProvider, ModelPurpose,
     ModelRegistryStatus,
+};
+use frankensearch::Model2VecEmbedder;
+use frankensearch::embed::{
+    ConsentSource, DownloadConsent, ModelDownloader, ModelLifecycle, ModelManifest,
 };
 
 /// Convert a DbError to DomainError, preserving MigrationDrift as a distinct error code.
@@ -72,6 +77,7 @@ const MODEL_LIFECYCLE_INDEX_ID: &str = "search-main";
 const MODEL_LIFECYCLE_INDEX_METADATA_FILE: &str = "meta.json";
 const MODEL_LIFECYCLE_INDEX_METADATA_LIMIT: u64 = 4 * 1024 * 1024;
 const HASH_FALLBACK_MODEL_ID: &str = "frankensearch-hash-fallback";
+const DEFAULT_EMBEDDING_MODEL_ALIAS: &str = "embedding-default";
 
 #[derive(Debug)]
 struct VerifiedRerankArtifact {
@@ -805,6 +811,7 @@ pub struct ModelFetchReport {
     pub workspace_path: PathBuf,
     pub database_path: PathBuf,
     pub model_id: String,
+    pub model_purpose: &'static str,
     pub source_path: PathBuf,
     pub stored_path: PathBuf,
     pub copied: bool,
@@ -822,6 +829,7 @@ impl ModelFetchReport {
             "workspacePath": self.workspace_path.to_string_lossy(),
             "databasePath": self.database_path.to_string_lossy(),
             "modelId": self.model_id,
+            "modelPurpose": self.model_purpose,
             "sourcePath": redact_model_source_uri(&self.source_path.to_string_lossy()),
             "storedPath": redact_model_source_uri(&self.stored_path.to_string_lossy()),
             "copied": self.copied,
@@ -835,8 +843,12 @@ impl ModelFetchReport {
     #[must_use]
     pub fn human_summary(&self) -> String {
         format!(
-            "Fetched reranker model {} ({} bytes, blake3:{})\nRegistered model: {}\n",
-            self.model_id, self.content_length_bytes, self.hash_blake3, self.registry_entry.id,
+            "Fetched {} model {} ({} bytes, blake3:{})\nRegistered model: {}\n",
+            self.model_purpose,
+            self.model_id,
+            self.content_length_bytes,
+            self.hash_blake3,
+            self.registry_entry.id,
         )
     }
 }
@@ -2151,6 +2163,21 @@ fn resolve_workspace_id(
         })
 }
 
+fn ensure_bundled_embedding_model_registered_for_status(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> Result<(), DomainError> {
+    ensure_bundled_embedding_model_registered(connection, workspace_id)
+        .map(|_| ())
+        .map_err(|error| {
+            db_error_to_domain(
+                error,
+                "Failed to register bundled embedding model",
+                Some("ee model status --workspace . --json".to_string()),
+            )
+        })
+}
+
 /// Build the reusable model-lifecycle report for non-`ee model status`
 /// surfaces that already hold a DB connection.
 pub fn build_model_lifecycle_report_for_workspace(
@@ -2184,6 +2211,7 @@ pub fn build_model_lifecycle_report_for_workspace(
         }
     };
     let workspace_id = resolve_workspace_id(connection, &workspace_path)?;
+    ensure_bundled_embedding_model_registered_for_status(connection, &workspace_id)?;
     let entries = connection
         .list_model_registry_entries(&workspace_id)
         .map_err(|error| {
@@ -2221,6 +2249,7 @@ pub fn build_model_status_report(
         )
     })?;
     let workspace_id = resolve_workspace_id(&connection, &workspace_path)?;
+    ensure_bundled_embedding_model_registered_for_status(&connection, &workspace_id)?;
 
     let entries = connection
         .list_model_registry_entries(&workspace_id)
@@ -2361,6 +2390,7 @@ pub fn build_model_list_report(
         )
     })?;
     let workspace_id = resolve_workspace_id(&connection, &workspace_path)?;
+    ensure_bundled_embedding_model_registered_for_status(&connection, &workspace_id)?;
 
     let entries = connection
         .list_model_registry_entries(&workspace_id)
@@ -2425,9 +2455,213 @@ pub fn bundled_rerank_model_manifest() -> Result<RerankModelManifest, DomainErro
 }
 
 /// Fetch and register the default rerank model.
+pub fn fetch_model(options: &ModelFetchOptions<'_>) -> Result<ModelFetchReport, DomainError> {
+    if is_default_embedding_model_request(options.model_id) {
+        return fetch_bundled_embedding_model(options);
+    }
+    fetch_rerank_model(options)
+}
+
+fn is_default_embedding_model_request(model_id: &str) -> bool {
+    let model_id = model_id.trim();
+    model_id.eq_ignore_ascii_case(DEFAULT_EMBEDDING_MODEL_ALIAS)
+        || model_id.eq_ignore_ascii_case(BUNDLED_EMBEDDING_MODEL_ID)
+        || model_id.eq_ignore_ascii_case(POTION_MODEL_NAME)
+}
+
+fn fetch_bundled_embedding_model(
+    options: &ModelFetchOptions<'_>,
+) -> Result<ModelFetchReport, DomainError> {
+    if options.from_file.is_some() {
+        return Err(DomainError::Usage {
+            message: format!(
+                "{DEFAULT_EMBEDDING_MODEL_ALIAS} is fetched from the pinned frankensearch manifest; --from-file is only supported for rerank artifacts"
+            ),
+            repair: Some(format!("ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}")),
+        });
+    }
+
+    let workspace_path = resolve_workspace_path(options.workspace_path)?;
+    let database_path = resolved_database_path(&workspace_path, options.database_path)?;
+    let connection = DbConnection::open_file(&database_path).map_err(|error| {
+        db_error_to_domain(
+            error,
+            "Failed to open database",
+            Some("ee init --workspace .".to_string()),
+        )
+    })?;
+    let workspace_id = resolve_workspace_id(&connection, &workspace_path)?;
+    ensure_bundled_embedding_model_registered_for_status(&connection, &workspace_id)?;
+
+    let model_root = options
+        .model_store_root
+        .map(Path::to_path_buf)
+        .unwrap_or_else(default_embedder_model_root);
+    let stored_path = potion_model_destination_dir(&model_root);
+    let manifest = ModelManifest::potion_128m();
+    let content_length_bytes = manifest.total_size_bytes();
+    let source_path = PathBuf::from(format!(
+        "https://huggingface.co/{}/tree/{}",
+        manifest.repo, manifest.revision
+    ));
+    let was_cached = Model2VecEmbedder::load_with_name(&stored_path, POTION_MODEL_NAME).is_ok();
+
+    if !was_cached {
+        download_embedding_manifest(&manifest, &stored_path)?;
+    }
+
+    let loaded = Model2VecEmbedder::load_with_name(&stored_path, POTION_MODEL_NAME).map_err(|error| {
+        DomainError::Configuration {
+            message: format!(
+                "Bundled embedding model downloaded to {} but failed to load: {error}",
+                stored_path.display()
+            ),
+            repair: Some(format!("ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}")),
+        }
+    })?;
+    ensure_loaded_embedding_registry_record(&connection, &workspace_id, &loaded).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to register downloaded bundled embedding model: {error}"),
+            repair: Some("ee model status --workspace . --json".to_string()),
+        }
+    })?;
+
+    let registry_entry = connection
+        .find_model_registry_entry(
+            &workspace_id,
+            ModelProvider::Model2Vec,
+            POTION_MODEL_NAME,
+            ModelPurpose::Embedding,
+        )
+        .map_err(|error| {
+            db_error_to_domain(
+                error,
+                "Failed to reload bundled embedding model registry entry",
+                Some("ee model status --workspace . --json".to_string()),
+            )
+        })?
+        .ok_or_else(|| DomainError::Storage {
+            message: "Downloaded bundled embedding model was not registered".to_string(),
+            repair: Some("ee model status --workspace . --json".to_string()),
+        })?;
+    let hash_blake3 = registry_entry
+        .content_hash
+        .as_deref()
+        .and_then(|hash| hash.strip_prefix("blake3:"))
+        .unwrap_or_default()
+        .to_string();
+    let hash_sha256 = model_manifest_sha256_fingerprint(&manifest);
+
+    connection
+        .insert_audit(
+            &crate::db::generate_audit_id(),
+            &crate::db::CreateAuditInput {
+                workspace_id: Some(workspace_id),
+                actor: None,
+                action: "model.fetched".to_string(),
+                target_type: Some("model_registry".to_string()),
+                target_id: Some(registry_entry.id.clone()),
+                details: Some(
+                    serde_json::json!({
+                        "schema": MODEL_FETCH_SCHEMA_V1,
+                        "modelId": POTION_MODEL_NAME,
+                        "modelPurpose": "embedding",
+                        "storedPath": stored_path.to_string_lossy(),
+                        "downloaded": !was_cached,
+                        "downloadSizeBytes": content_length_bytes,
+                    })
+                    .to_string(),
+                ),
+            },
+        )
+        .map_err(|error| {
+            db_error_to_domain(
+                error,
+                "Failed to audit embedding model fetch",
+                Some("ee audit verify --workspace . --json".to_string()),
+            )
+        })?;
+
+    Ok(ModelFetchReport {
+        schema: MODEL_FETCH_SCHEMA_V1,
+        workspace_path,
+        database_path,
+        model_id: POTION_MODEL_NAME.to_string(),
+        model_purpose: "embedding",
+        source_path,
+        stored_path,
+        copied: !was_cached,
+        content_length_bytes,
+        hash_blake3,
+        hash_sha256,
+        registry_entry: ModelRegistryEntryView::from_stored(registry_entry),
+    })
+}
+
+fn download_embedding_manifest(
+    manifest: &ModelManifest,
+    destination: &Path,
+) -> Result<(), DomainError> {
+    let manifest = manifest.clone();
+    let destination = destination.to_path_buf();
+    let result = crate::core::run_cli_future(async move {
+        let cx = asupersync::Cx::for_testing();
+        let downloader = ModelDownloader::with_defaults();
+        let consent = DownloadConsent::granted(ConsentSource::Programmatic);
+        let mut lifecycle = ModelLifecycle::new(manifest.clone(), consent);
+        let staged = downloader
+            .download_model(&cx, &manifest, &destination, &mut lifecycle, |_| {})
+            .await?;
+        manifest.promote_verified_installation(&staged, &destination)?;
+        Ok::<(), frankensearch::SearchError>(())
+    })
+    .map_err(|error| DomainError::Configuration {
+        message: format!("Failed to start embedding model download runtime: {error}"),
+        repair: Some(format!("ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}")),
+    })?;
+
+    result.map_err(|error| DomainError::Configuration {
+        message: format!("Failed to download bundled embedding model: {error}"),
+        repair: Some(
+            "Check network access, or set EE_EMBED_DOWNLOAD=off for lexical-only operation."
+                .to_string(),
+        ),
+    })
+}
+
+fn model_manifest_sha256_fingerprint(manifest: &ModelManifest) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(manifest.id.as_bytes());
+    hasher.update([0]);
+    hasher.update(manifest.repo.as_bytes());
+    hasher.update([0]);
+    hasher.update(manifest.revision.as_bytes());
+    hasher.update([0]);
+    let mut files = manifest.files.clone();
+    files.sort_by(|left, right| left.name.cmp(&right.name));
+    for file in files {
+        hasher.update(file.name.as_bytes());
+        hasher.update([0]);
+        hasher.update(file.sha256.as_bytes());
+        hasher.update([0]);
+        hasher.update(file.size.to_string().as_bytes());
+        hasher.update([0]);
+    }
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Fetch and register the default rerank model.
 pub fn fetch_rerank_model(
     options: &ModelFetchOptions<'_>,
 ) -> Result<ModelFetchReport, DomainError> {
+    if is_default_embedding_model_request(options.model_id) {
+        return fetch_bundled_embedding_model(options);
+    }
+
     let manifest = resolve_rerank_model_manifest(options.model_id)?;
     let Some(source_path) = options.from_file else {
         return Err(DomainError::Configuration {
@@ -2629,6 +2863,7 @@ pub fn fetch_rerank_model(
         workspace_path,
         database_path,
         model_id: manifest.model_id,
+        model_purpose: "reranker",
         source_path: source_path.to_path_buf(),
         stored_path,
         copied,
@@ -3675,7 +3910,7 @@ mod tests {
     }
 
     #[test]
-    fn status_reports_empty_registry_with_degradation() -> TestResult {
+    fn status_auto_declares_bundled_embedding_model_with_degradation() -> TestResult {
         let (_temp, workspace_path) = make_workspace()?;
         fresh_db_for_workspace(&workspace_path)?;
 
@@ -3686,20 +3921,31 @@ mod tests {
         .map_err(|error| format!("status: {error:?}"))?;
 
         ensure(report.schema == MODEL_STATUS_SCHEMA_V2, "schema constant")?;
-        ensure(report.registered_count == 0, "registered_count")?;
+        ensure(report.registered_count == 1, "registered_count")?;
         ensure(report.available_count == 0, "available_count")?;
         ensure(
             report.reranker.registered_count == 0 && report.reranker.available_count == 0,
             "reranker counts empty",
         )?;
         ensure(
-            report.active.source == "frankensearch_hash_fallback",
-            "fallback source",
+            report.active.source == "ee_model2vec_download_pending",
+            "pending bundled model source",
         )?;
         ensure(report.degradations.len() == 1, "degradation count")?;
         ensure(
-            report.degradations[0].code == "model_registry_empty",
+            report.degradations[0].code == "model_registry_no_available_entry",
             "degradation code",
+        )?;
+        ensure(
+            report
+                .model_lifecycle
+                .models
+                .iter()
+                .any(|entry| {
+                    entry.model_id == BUNDLED_EMBEDDING_MODEL_ID
+                        && entry.registry_status == "unavailable"
+                }),
+            "bundled embedding row is declared unavailable until downloaded",
         )
     }
 
@@ -3792,13 +4038,9 @@ mod tests {
         })
         .map_err(|error| format!("status: {error:?}"))?;
 
-        ensure(report.registered_count == 2, "registered_count")?;
+        ensure(report.registered_count == 3, "registered_count")?;
         ensure(report.available_count == 1, "available_count")?;
         ensure(report.degradations.is_empty(), "no degradations")?;
-        ensure(
-            report.active.source == "registry_observed",
-            "registry_observed source",
-        )?;
         let selected = report
             .active
             .selected_registry_entry
@@ -3825,7 +4067,7 @@ mod tests {
         })
         .map_err(|error| format!("status: {error:?}"))?;
 
-        ensure(report.registered_count == 1, "registered_count")?;
+        ensure(report.registered_count == 2, "registered_count")?;
         ensure(report.available_count == 1, "available_count")?;
         ensure(
             report.active.source == "frankensearch_hash_fallback",
@@ -3880,7 +4122,7 @@ mod tests {
         })
         .map_err(|error| format!("status: {error:?}"))?;
 
-        ensure(report.registered_count == 1, "registered_count")?;
+        ensure(report.registered_count == 2, "registered_count")?;
         ensure(report.available_count == 1, "available_count")?;
         ensure(
             report
@@ -3910,7 +4152,7 @@ mod tests {
         })
         .map_err(|error| format!("status: {error:?}"))?;
 
-        ensure(report.registered_count == 1, "registered_count")?;
+        ensure(report.registered_count == 2, "registered_count")?;
         ensure(report.available_count == 0, "available_count")?;
         ensure(report.degradations.len() == 1, "degradation count")?;
         ensure(
@@ -4093,12 +4335,16 @@ mod tests {
         .map_err(|error| format!("list: {error:?}"))?;
 
         ensure(report.schema == MODEL_LIST_SCHEMA_V1, "schema constant")?;
-        ensure(report.entries.len() == 2, "entries length")?;
+        ensure(report.entries.len() == 3, "entries length")?;
         // list_model_registry_entries orders by purpose, provider, model_name, id
         ensure(report.entries[0].provider == "hash", "first hash")?;
         ensure(
             report.entries[1].provider == "model2vec",
             "second model2vec",
+        )?;
+        ensure(
+            report.entries[2].model_id == BUNDLED_EMBEDDING_MODEL_ID,
+            "bundled model auto-declared",
         )?;
         ensure(report.degradations.is_empty(), "no degradations")
     }
@@ -4121,7 +4367,7 @@ mod tests {
         })
         .map_err(|error| format!("list: {error:?}"))?;
 
-        ensure(report.entries.len() == 1, "reranker entry listed")?;
+        ensure(report.entries.len() == 2, "reranker plus bundled embedding listed")?;
         ensure(report.degradations.len() == 1, "degradation count")?;
         ensure(
             report.degradations[0].code == "model_registry_no_available_entry",

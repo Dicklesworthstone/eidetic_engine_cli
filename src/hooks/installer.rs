@@ -2053,6 +2053,11 @@ fn ambient_context_report(snippets: &[HarnessHookSnippet]) -> AmbientContextRepo
                 max_tokens: 0,
                 max_paths: None,
             },
+            AmbientContextBudget {
+                surface: "session_end_capture_suggest".to_owned(),
+                max_tokens: 0,
+                max_paths: None,
+            },
         ],
         suppression_rules: vec![
             AmbientContextSuppressionRule {
@@ -2070,6 +2075,14 @@ fn ambient_context_report(snippets: &[HarnessHookSnippet]) -> AmbientContextRepo
             AmbientContextSuppressionRule {
                 code: "preflight_allows_command".to_owned(),
                 description: "Suppress preflight output for commands that are not policy-denied.".to_owned(),
+            },
+            AmbientContextSuppressionRule {
+                code: "declined_capture".to_owned(),
+                description: "Suppress capture suggestions that match a previously rejected curation candidate.".to_owned(),
+            },
+            AmbientContextSuppressionRule {
+                code: "existing_memory_covers".to_owned(),
+                description: "Suppress capture suggestions already covered by a durable memory.".to_owned(),
             },
         ],
         controls: vec![
@@ -2146,6 +2159,11 @@ fn harness_hook_snippets(target: HarnessHookTarget, ee_binary: &Path) -> Vec<Har
         .installed_pre_edit_matcher()
         .expect("supported harness must have a pre-edit matcher")
         .to_owned();
+    let capture_event = match target {
+        HarnessHookTarget::ClaudeCode => "Stop",
+        HarnessHookTarget::Codex => "SessionEnd",
+        HarnessHookTarget::Gemini => "SessionEnd",
+    };
     vec![
         HarnessHookSnippet {
             id: "ee-ambient-pre-edit-recall".to_owned(),
@@ -2186,6 +2204,16 @@ fn harness_hook_snippets(target: HarnessHookTarget, ee_binary: &Path) -> Vec<Har
             async_hook: false,
             installable: true,
             purpose: "Inject a bounded SessionStart `ee orient \"session start\" --include-primer --fast --json` bundle with primer and swarm posture; suppress duplicate session output and quiet verbosity.".to_owned(),
+        },
+        HarnessHookSnippet {
+            id: "ee-ambient-session-capture-suggest".to_owned(),
+            event: capture_event.to_owned(),
+            matcher: None,
+            command: python_hook_command(session_end_capture_python(), ee_binary),
+            timeout_seconds: 10,
+            async_hook: false,
+            installable: true,
+            purpose: "Present low-noise `ee capture suggest --from-recent --max 2 --json` candidates with explicit accept/reject commands; never stores memories from the hook.".to_owned(),
         },
     ]
 }
@@ -2356,6 +2384,98 @@ if result.returncode != 0 or not text or already_seen(text):
     sys.exit(0)
 header = f"<!-- ee ambient_context schema={SCHEMA} surface={SURFACE} budgetTokens={BUDGET} verbosity={VERBOSITY} provenance=ee:{SCHEMA} -->"
 payload = {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name") or "SessionStart", "additionalContext": header + "\n" + text}}
+print(json.dumps(payload, separators=(",", ":")))
+"#
+}
+
+fn session_end_capture_python() -> &'static str {
+    r#"import hashlib, json, os, subprocess, sys
+ee = sys.argv[1]
+SCHEMA = "ee.ambient_context.v1"
+SURFACE = "session_end_capture_suggest"
+MAX_SUGGESTIONS = 2
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+def ambient_enabled():
+    value = os.environ.get("EE_AMBIENT_CONTEXT", "true").strip().lower()
+    return value not in ("0", "false", "off", "no", "disable", "disabled")
+def ambient_verbosity():
+    value = os.environ.get("EE_AMBIENT_CONTEXT_VERBOSITY", "standard").strip().lower()
+    if value in ("quiet", "standard", "verbose"):
+        return value
+    return "standard"
+if not ambient_enabled() or ambient_verbosity() == "quiet":
+    sys.exit(0)
+def state_path():
+    cwd = data.get("cwd") or os.getcwd()
+    root = os.environ.get("EE_AMBIENT_CONTEXT_STATE_DIR") or os.path.join(cwd, ".ee", "hook-state")
+    try:
+        os.makedirs(root, exist_ok=True)
+    except Exception:
+        return None
+    return os.path.join(root, "ambient_context_seen.json")
+def already_seen(text):
+    path = state_path()
+    if not path:
+        return False
+    session = str(data.get("session_id") or data.get("sessionId") or "default")
+    digest = hashlib.blake2s(text.encode("utf-8"), digest_size=16).hexdigest()
+    key = SURFACE + ":" + session + ":" + digest
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            seen = json.load(f)
+    except Exception:
+        seen = {}
+    if seen.get(key):
+        return True
+    seen[key] = True
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(seen, f, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        pass
+    return False
+cmd = [ee, "capture", "suggest", "--from-recent", "--max", str(MAX_SUGGESTIONS), "--json"]
+try:
+    result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=10)
+except Exception:
+    sys.exit(0)
+if result.returncode != 0 or not result.stdout.strip():
+    sys.exit(0)
+try:
+    response = json.loads(result.stdout)
+except Exception:
+    sys.exit(0)
+report = response.get("data") if isinstance(response, dict) else {}
+suggestions = []
+if isinstance(report, dict):
+    suggestions = report.get("suggestions") or report.get("candidates") or []
+if not suggestions:
+    sys.exit(0)
+lines = ["### ee capture suggestions", "", "No memories were stored. Run one command to accept or reject."]
+for item in suggestions[:MAX_SUGGESTIONS]:
+    fields = item.get("proposedFields") or {}
+    content = str(fields.get("content") or "").strip()
+    if not content:
+        continue
+    confidence = item.get("confidence")
+    try:
+        confidence_text = f"{float(confidence):.2f}"
+    except Exception:
+        confidence_text = "n/a"
+    kind = str(fields.get("kind") or item.get("candidateKind") or "memory")
+    lines.append("")
+    lines.append(f"- {kind} confidence={confidence_text}: {content}")
+    lines.append(f"  accept: `{item.get('acceptCommand')}`")
+    lines.append(f"  reject: `{item.get('rejectCommand')}`")
+text = "\n".join(lines).strip()
+if not text or already_seen(text):
+    sys.exit(0)
+header = f"<!-- ee ambient_context schema={SCHEMA} surface={SURFACE} maxSuggestions={MAX_SUGGESTIONS} provenance=ee:{SCHEMA} -->"
+event = data.get("hook_event_name") or data.get("hookEventName") or "SessionEnd"
+payload = {"hookSpecificOutput": {"hookEventName": event, "additionalContext": header + "\n" + text}}
 print(json.dumps(payload, separators=(",", ":")))
 "#
 }
@@ -4313,6 +4433,18 @@ mod tests {
             report
                 .snippets
                 .iter()
+                .any(|snippet| snippet.id == "ee-ambient-session-capture-suggest"
+                    && snippet.event == "Stop"
+                    && snippet.installable
+                    && snippet.command.contains("capture")
+                    && snippet.command.contains("suggest")
+                    && snippet.command.contains("--from-recent")),
+            "session-end capture snippet must be installed and proposal-only"
+        );
+        assert!(
+            report
+                .snippets
+                .iter()
                 .any(|snippet| snippet.command.contains("journal")
                     && snippet.command.contains("append")
                     && snippet.command.contains("--source")),
@@ -4340,10 +4472,25 @@ mod tests {
         assert!(
             report
                 .ambient_context
+                .installed_snippet_ids
+                .contains(&"ee-ambient-session-capture-suggest".to_owned()),
+            "ambient profile must include session-end capture suggestions"
+        );
+        assert!(
+            report
+                .ambient_context
                 .suppression_rules
                 .iter()
                 .any(|rule| rule.code == "duplicate_in_session"),
             "ambient profile documents duplicate suppression"
+        );
+        assert!(
+            report
+                .ambient_context
+                .suppression_rules
+                .iter()
+                .any(|rule| rule.code == "declined_capture"),
+            "ambient profile documents declined capture suppression"
         );
         assert!(
             report
@@ -4390,6 +4537,17 @@ mod tests {
         assert!(session_start.contains("--include-primer"));
         assert!(session_start.contains("already_seen(text)"));
         assert!(session_start.contains("provenance=ee:{SCHEMA}"));
+
+        let session_capture = session_end_capture_python();
+        assert!(session_capture.contains("EE_AMBIENT_CONTEXT"));
+        assert!(session_capture.contains("EE_AMBIENT_CONTEXT_VERBOSITY"));
+        assert!(session_capture.contains("\"capture\", \"suggest\""));
+        assert!(session_capture.contains("\"--from-recent\""));
+        assert!(session_capture.contains("acceptCommand"));
+        assert!(session_capture.contains("rejectCommand"));
+        assert!(session_capture.contains("No memories were stored"));
+        assert!(session_capture.contains("already_seen(text)"));
+        assert!(session_capture.contains("provenance=ee:{SCHEMA}"));
 
         let preflight = pre_bash_preflight_python();
         assert!(preflight.contains("EE_AMBIENT_CONTEXT"));

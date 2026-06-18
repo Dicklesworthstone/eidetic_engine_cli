@@ -7,8 +7,8 @@ use std::fs;
 use std::path::Path;
 
 use ee::core::model::{
-    MODEL_LIST_SCHEMA_V1, MODEL_STATUS_SCHEMA_V2, ModelListOptions, ModelStatusOptions,
-    build_model_list_report, build_model_status_report,
+    BUNDLED_EMBEDDING_MODEL_ID, MODEL_LIST_SCHEMA_V1, MODEL_STATUS_SCHEMA_V2, ModelListOptions,
+    ModelStatusOptions, build_model_list_report, build_model_status_report,
 };
 use ee::db::{CreateModelRegistryInput, CreateWorkspaceInput, DbConnection};
 use ee::models::model_registry::{
@@ -167,7 +167,7 @@ fn insert_reranker_entry(
 }
 
 #[test]
-fn model_status_empty_registry_emits_versioned_schema_and_degradation() -> TestResult {
+fn model_status_auto_declares_bundled_embedding_model() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let workspace_path = temp
         .path()
@@ -182,19 +182,20 @@ fn model_status_empty_registry_emits_versioned_schema_and_degradation() -> TestR
     .map_err(|error| format!("status report: {error:?}"))?;
 
     ensure(report.schema == MODEL_STATUS_SCHEMA_V2, "schema constant")?;
-    ensure(report.registered_count == 0, "registered_count == 0")?;
+    ensure(report.registered_count == 1, "registered_count == 1")?;
     ensure(report.available_count == 0, "available_count == 0")?;
     ensure(
         report.reranker.registered_count == 0 && report.reranker.available_count == 0,
         "reranker counts should be empty",
     )?;
     ensure(
-        report.active.source == "frankensearch_hash_fallback",
-        "fallback source when registry empty",
+        report.active.source == "ee_model2vec_download_pending",
+        "pending bundled model source",
     )?;
     ensure(
-        report.degradations.len() == 1 && report.degradations[0].code == "model_registry_empty",
-        "expected model_registry_empty degradation",
+        report.degradations.len() == 1
+            && report.degradations[0].code == "model_registry_no_available_entry",
+        "expected no available embedding degradation",
     )?;
 
     let json = report.data_json();
@@ -409,12 +410,8 @@ fn model_status_picks_first_available_registry_entry() -> TestResult {
     })
     .map_err(|error| format!("status report: {error:?}"))?;
 
-    ensure(report.registered_count == 2, "registered_count")?;
+    ensure(report.registered_count == 3, "registered_count")?;
     ensure(report.available_count == 1, "available_count")?;
-    ensure(
-        report.active.source == "registry_observed",
-        "registry_observed source",
-    )?;
     ensure(report.degradations.is_empty(), "no degradations expected")?;
     let selected = report
         .active
@@ -451,10 +448,10 @@ fn model_status_reports_reranker_registry_separately() -> TestResult {
     })
     .map_err(|error| format!("status report: {error:?}"))?;
 
-    ensure(report.registered_count == 1, "registered_count")?;
+    ensure(report.registered_count == 2, "registered_count")?;
     ensure(report.available_count == 1, "available_count")?;
     ensure(
-        report.active.source == "frankensearch_hash_fallback",
+        report.active.source == "ee_model2vec_download_pending",
         "reranker entry should not select active embedder",
     )?;
     ensure(
@@ -519,7 +516,7 @@ fn model_list_returns_entries_in_stable_order() -> TestResult {
     .map_err(|error| format!("list report: {error:?}"))?;
 
     ensure(report.schema == MODEL_LIST_SCHEMA_V1, "schema constant")?;
-    ensure(report.entries.len() == 2, "entry count")?;
+    ensure(report.entries.len() == 3, "entry count")?;
     // list_model_registry_entries orders by purpose, provider, model_name, id
     // hash precedes model2vec lexicographically.
     ensure(
@@ -529,6 +526,10 @@ fn model_list_returns_entries_in_stable_order() -> TestResult {
     ensure(
         report.entries[1].provider == "model2vec",
         "second entry should be model2vec provider",
+    )?;
+    ensure(
+        report.entries[2].model_id == BUNDLED_EMBEDDING_MODEL_ID,
+        "bundled model should be auto-declared",
     )?;
     ensure(report.degradations.is_empty(), "no degradations expected")?;
 
@@ -541,7 +542,7 @@ fn model_list_returns_entries_in_stable_order() -> TestResult {
         .get("entries")
         .and_then(|value| value.as_array())
         .ok_or("entries array")?;
-    ensure(entries.len() == 2, "json entries length")?;
+    ensure(entries.len() == 3, "json entries length")?;
     ensure(
         entries[0].get("provider").and_then(|value| value.as_str()) == Some("hash"),
         "json first provider",
@@ -564,10 +565,11 @@ fn model_list_empty_workspace_emits_degradation() -> TestResult {
     })
     .map_err(|error| format!("list report: {error:?}"))?;
 
-    ensure(report.entries.is_empty(), "no entries")?;
+    ensure(report.entries.len() == 1, "bundled embedding entry")?;
     ensure(
-        report.degradations.len() == 1 && report.degradations[0].code == "model_registry_empty",
-        "empty registry degradation",
+        report.degradations.len() == 1
+            && report.degradations[0].code == "model_registry_no_available_entry",
+        "no available embedding degradation",
     )?;
     Ok(())
 }
@@ -595,8 +597,8 @@ fn model_list_reports_reranker_only_registry_as_no_available_embedding() -> Test
     .map_err(|error| format!("list report: {error:?}"))?;
 
     ensure(
-        report.entries.len() == 1,
-        "reranker entry should remain listed",
+        report.entries.len() == 2,
+        "reranker and bundled embedding entries should remain listed",
     )?;
     ensure(report.degradations.len() == 1, "degradation count")?;
     ensure(

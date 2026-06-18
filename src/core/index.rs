@@ -2806,7 +2806,7 @@ fn build_index_sync(
 
 const EE_MODEL_CACHE_SUBDIR: &str = "models";
 const EMBEDDING_REGISTRY_FINGERPRINT_SCHEMA: &str = "ee.embedding_registry_fingerprint.v1";
-const POTION_MODEL_NAME: &str = "potion-multilingual-128M";
+pub(crate) const POTION_MODEL_NAME: &str = "potion-multilingual-128M";
 const EE_EMBED_DOWNLOAD_AUTO: &str = "auto";
 const EE_EMBED_DOWNLOAD_OFF: &str = "off";
 const EE_DOWNLOAD_STATE_PENDING: u8 = 0;
@@ -2911,7 +2911,7 @@ fn default_embedder_settings() -> EeEmbedderSettings {
     }
 }
 
-fn default_embedder_model_root() -> PathBuf {
+pub(crate) fn default_embedder_model_root() -> PathBuf {
     if let Some(model_dir) = configured_embedder_model_root() {
         return model_dir;
     }
@@ -3132,7 +3132,7 @@ impl crate::search::Embedder for EeLazyModel2VecEmbedder {
     }
 }
 
-fn potion_model_destination_dir(model_root: &Path) -> PathBuf {
+pub(crate) fn potion_model_destination_dir(model_root: &Path) -> PathBuf {
     if model_root.ends_with(POTION_MODEL_NAME) {
         return model_root.to_path_buf();
     }
@@ -3258,7 +3258,14 @@ fn ensure_active_embedding_registry_record(
     workspace_id: &str,
     stack: &EmbedderStack,
 ) -> Result<(), IndexRebuildError> {
-    let fast_embedder = stack.fast();
+    ensure_loaded_embedding_registry_record(db, workspace_id, stack.fast())
+}
+
+pub(crate) fn ensure_loaded_embedding_registry_record(
+    db: &DbConnection,
+    workspace_id: &str,
+    fast_embedder: &dyn crate::search::Embedder,
+) -> Result<(), IndexRebuildError> {
     if !fast_embedder.is_semantic() {
         return Ok(());
     }
@@ -3272,23 +3279,56 @@ fn ensure_active_embedding_registry_record(
         );
         return Ok(());
     }
-    if db
+
+    let Some(input) = active_embedding_registry_input(workspace_id, fast_embedder)? else {
+        return Ok(());
+    };
+
+    if let Some(existing) = db
         .find_model_registry_entry(
             workspace_id,
             provider,
             fast_embedder.id(),
             ModelPurpose::Embedding,
         )?
-        .is_some()
     {
+        if registry_entry_matches_embedding_input(&existing, &input) {
+            return Ok(());
+        }
+        let updated = db.update_embedding_metadata_record(&existing.id, &input)?;
+        if !updated {
+            return Err(IndexRebuildError::Index(format!(
+                "active embedding registry entry {} vanished before update",
+                existing.id
+            )));
+        }
+        tracing::info!(
+            target: "ee::index::embedder",
+            provider = provider.as_str(),
+            model = fast_embedder.id(),
+            registry_id = existing.id,
+            "updated active embedding model registry entry"
+        );
         return Ok(());
     }
 
-    let Some(input) = active_embedding_registry_input(workspace_id, fast_embedder)? else {
-        return Ok(());
-    };
     db.insert_embedding_metadata_record(&generate_model_registry_id(), &input)?;
     Ok(())
+}
+
+fn registry_entry_matches_embedding_input(
+    entry: &crate::db::StoredModelRegistryEntry,
+    input: &crate::db::CreateEmbeddingMetadataInput,
+) -> bool {
+    entry.provider == input.provider
+        && entry.model_name == input.model_name
+        && entry.purpose == ModelPurpose::Embedding
+        && entry.dimension == Some(input.dimension)
+        && entry.distance_metric == Some(input.distance_metric)
+        && entry.status == input.status
+        && entry.version == input.version
+        && entry.source_uri == input.source_uri
+        && entry.content_hash == input.content_hash
 }
 
 fn active_embedding_registry_input(
@@ -4843,6 +4883,7 @@ fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::model::{BUNDLED_EMBEDDING_DIMENSION, BUNDLED_EMBEDDING_MODEL_REVISION};
     use crate::core::profile::OperatingProfile;
 
     type TestResult = Result<(), String>;
@@ -5223,6 +5264,83 @@ mod tests {
         ensure(
             records.is_empty(),
             "lazy-load failure must not leave an Available registry row",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn active_registry_promotes_declared_unavailable_bundled_row() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_declaredfirst00000000000000";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-declared-first-test".to_owned(),
+                    name: Some("declared first test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let mut metadata =
+            EmbeddingMetadataRecord::new(BUNDLED_EMBEDDING_DIMENSION, ModelDistanceMetric::Cosine);
+        metadata.pooling = EmbeddingPooling::ModelDefault;
+        metadata.tokenizer = Some("tokenizer.json".to_owned());
+        metadata.model_revision = Some(BUNDLED_EMBEDDING_MODEL_REVISION.to_owned());
+        metadata.deterministic = true;
+        connection
+            .insert_embedding_metadata_record(
+                "mdl_declaredfirst00000000000001",
+                &crate::db::CreateEmbeddingMetadataInput {
+                    workspace_id: workspace_id.to_owned(),
+                    provider: ModelProvider::Model2Vec,
+                    model_name: POTION_MODEL_NAME.to_owned(),
+                    dimension: BUNDLED_EMBEDDING_DIMENSION,
+                    distance_metric: ModelDistanceMetric::Cosine,
+                    status: ModelRegistryStatus::Unavailable,
+                    version: Some(BUNDLED_EMBEDDING_MODEL_REVISION.to_owned()),
+                    source_uri: Some(format!(
+                        "frankensearch://{}/{}",
+                        ModelProvider::Model2Vec.as_str(),
+                        POTION_MODEL_NAME
+                    )),
+                    content_hash: None,
+                    metadata,
+                    last_checked_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let stack = EmbedderStack::from_parts(
+            Arc::new(TestSemanticEmbedder::new(POTION_MODEL_NAME, 256))
+                as Arc<dyn crate::search::Embedder>,
+            None,
+        );
+        ensure_active_embedding_registry_record(&connection, workspace_id, &stack)
+            .map_err(|error| error.to_string())?;
+
+        let records = connection
+            .list_embedding_metadata_records(workspace_id)
+            .map_err(|error| error.to_string())?;
+        ensure(records.len() == 1, "promotion should not duplicate registry row")?;
+        ensure(
+            records[0].registry.status == ModelRegistryStatus::Available,
+            "declared row should become Available after loaded semantic proof",
+        )?;
+        ensure(
+            records[0].registry.content_hash.is_some(),
+            "promoted row should carry active content hash",
+        )?;
+        let summary = reembed_embedding_summary(
+            &connection,
+            workspace_id,
+            &stack,
+            EmbeddingVectorCoverage::new(1, 1),
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            summary.available_model_count == 1 && summary.source == "registry_observed",
+            "promoted row should drive registry_observed source",
         )?;
         connection.close().map_err(|error| error.to_string())
     }
