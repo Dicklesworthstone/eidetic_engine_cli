@@ -222,6 +222,9 @@ use crate::core::profile::{
     ProfileConfigError, ProfileConfigOptions, ProfileConfigReport, VerificationRecipe,
     apply_profile_config, plan_profile_config,
 };
+use crate::core::provenance_health::{
+    ProvenanceHealthOptions, generate_provenance_health_report,
+};
 use crate::core::proof_verify::{
     ProofCheckReport, ProofCheckStatus, SystemProofCommandRunner, run_proof_checks,
 };
@@ -278,6 +281,7 @@ use crate::core::tripwire::{
     ListOptions as TripwireListOptions, ListReport as TripwireListReport, TripwireEventPayload,
     check_tripwire, list_tripwires,
 };
+use crate::core::trust_report::{TrustReportOptions, generate_trust_report};
 use crate::core::verify::{
     DEFAULT_VERIFY_PROVENANCE_LIMIT, DEFAULT_VERIFY_PROVENANCE_STALE_AFTER_DAYS,
     VerificationClosureGuidanceOptions, VerificationRecordOptions, VerifyProvenanceOptions,
@@ -369,7 +373,7 @@ const HELP_PRELUDE: &str = concat!(
     "\n",
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
-    "  Inspect:        status, doctor, capabilities, insights, impact, lens, why-not, recall, similar, memory show, memory history\n",
+    "  Inspect:        status, doctor, capabilities, insights, impact, lens, why-not, recall, similar, trust report, memory show, memory history\n",
     "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome, journal\n",
     "  Curate:         capture, curate (candidates|validate|apply), reflect, playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
@@ -976,6 +980,9 @@ pub enum Command {
     /// Review harmful-feedback quarantine rows.
     #[command(name = "outcome-quarantine", subcommand)]
     OutcomeQuarantine(OutcomeQuarantineCommand),
+    /// Audit memory confidence calibration and outcome-backed reliability.
+    #[command(subcommand)]
+    Trust(TrustCommand),
     /// Build, replay, or diff context packs.
     Pack(PackArgs),
     /// Compare normalized performance artifacts without mutating state.
@@ -3511,6 +3518,8 @@ pub enum DiagCommand {
     PackLatest(DiagPackLatestArgs),
     /// Report EQL query plan-cache capacity, counters, and integration posture.
     PlanCache,
+    /// Report live provenance freshness for stored memories.
+    Provenance(DiagProvenanceArgs),
     /// Report quarantine status for import sources.
     #[command(subcommand)]
     Quarantine(DiagQuarantineCommand),
@@ -3537,6 +3546,18 @@ pub struct DiagAgentsmdDriftArgs {
     /// root. Defaults to AGENTS.md.
     #[arg(long = "file", value_name = "PATH")]
     pub file: Option<PathBuf>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee diag provenance`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct DiagProvenanceArgs {
+    /// Maximum memories to inspect.
+    #[arg(short = 'n', long, value_name = "N", default_value_t = 10_000)]
+    pub limit: usize,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -10239,6 +10260,33 @@ pub struct OutcomeQuarantineReleaseArgs {
     pub database: Option<PathBuf>,
 }
 
+/// Subcommands of `ee trust`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum TrustCommand {
+    /// Audit confidence calibration, reliability leaders, and outcome coverage.
+    Report(TrustReportArgs),
+}
+
+/// Arguments for `ee trust report`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TrustReportArgs {
+    /// Number of confidence buckets in the calibration curve.
+    #[arg(long = "buckets", value_name = "N", default_value_t = 5)]
+    pub bucket_count: usize,
+
+    /// Maximum most-helpful and most-harmful memories to include.
+    #[arg(long, value_name = "N", default_value_t = 10)]
+    pub leaderboard_limit: usize,
+
+    /// Maximum recent pack items to inspect for outcome coverage.
+    #[arg(long, value_name = "N", default_value_t = 10_000)]
+    pub pack_item_limit: u32,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
 /// Arguments for `ee why`.
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct WhyArgs {
@@ -12622,6 +12670,7 @@ where
             DiagCommand::PackRecord(args) => handle_diag_pack_record(&cli, args, stdout, stderr),
             DiagCommand::PackLatest(args) => handle_diag_pack_latest(&cli, args, stdout, stderr),
             DiagCommand::PlanCache => handle_diag_plan_cache(&cli, stdout),
+            DiagCommand::Provenance(args) => handle_diag_provenance(&cli, args, stdout, stderr),
             DiagCommand::Quarantine(subcmd) => match subcmd {
                 DiagQuarantineCommand::List(args) => {
                     handle_diag_quarantine_list(&cli, args, stdout, stderr)
@@ -13473,6 +13522,9 @@ where
         }
         Some(Command::OutcomeQuarantine(OutcomeQuarantineCommand::Release(ref args))) => {
             handle_outcome_quarantine_release(&cli, args, stdout, stderr)
+        }
+        Some(Command::Trust(TrustCommand::Report(ref args))) => {
+            handle_trust_report(&cli, args, stdout, stderr)
         }
         Some(Command::Pack(ref args)) => handle_pack_command(&cli, args, stdout, stderr),
         Some(Command::Perf(ref perf_cmd)) => handle_perf_command(&cli, perf_cmd, stdout, stderr),
@@ -27690,6 +27742,118 @@ where
             &(output::render_integrity_diagnostics_json(&report) + "\n"),
         ),
     }
+}
+
+fn handle_diag_provenance<W, E>(
+    cli: &Cli,
+    args: &DiagProvenanceArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let mut options = ProvenanceHealthOptions::new(cli.resolve_workspace());
+    options.database_path = args.database.clone();
+    options.limit = args.limit;
+
+    let report = match generate_provenance_health_report(options) {
+        Ok(report) => report,
+        Err(error) => {
+            let domain_error = read_only_report_storage_error("diag provenance", error);
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_provenance_health_human(&report))
+        }
+        output::Renderer::Toon => {
+            let json = report_envelope_json(report.data_json());
+            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(report_envelope_json(report.data_json()) + "\n"))
+        }
+    }
+}
+
+fn handle_trust_report<W, E>(
+    cli: &Cli,
+    args: &TrustReportArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let mut options = TrustReportOptions::new(cli.resolve_workspace());
+    options.database_path = args.database.clone();
+    options.bucket_count = args.bucket_count;
+    options.leaderboard_limit = args.leaderboard_limit;
+    options.pack_item_limit = args.pack_item_limit;
+
+    let report = match generate_trust_report(options) {
+        Ok(report) => report,
+        Err(error) => {
+            let domain_error = read_only_report_storage_error("trust report", error);
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &(report.human_summary() + "\n"))
+        }
+        output::Renderer::Toon => {
+            let json = report_envelope_json(report.data_json());
+            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(report_envelope_json(report.data_json()) + "\n"))
+        }
+    }
+}
+
+fn report_envelope_json(data: serde_json::Value) -> String {
+    let data_raw = data.to_string();
+    output::ResponseEnvelope::success()
+        .data_raw(&data_raw)
+        .finish()
+}
+
+fn read_only_report_storage_error(
+    surface: &str,
+    error: impl std::fmt::Display,
+) -> DomainError {
+    DomainError::Storage {
+        message: format!("{surface} failed to read workspace storage: {error}"),
+        repair: Some("Run `ee init --workspace . --json` for a new workspace, or pass --database <PATH> pointing at an initialized ee database.".to_string()),
+    }
+}
+
+fn render_provenance_health_human(
+    report: &crate::core::provenance_health::ProvenanceHealthReport,
+) -> String {
+    format!(
+        "Provenance health: {} memories, {} pointers, {} present, {} moved, {} missing, {} unverifiable, {} memory issue(s).\n",
+        report.summary.memory_count,
+        report.summary.pointer_count,
+        report.summary.present_count,
+        report.summary.moved_count,
+        report.summary.missing_count,
+        report.summary.unverifiable_count,
+        report.summary.memory_with_issue_count
+    )
 }
 
 fn handle_diag_incident<W, E>(
@@ -58639,6 +58803,7 @@ impl NormalizedInvocation {
                     DiagCommand::PackLatest(_) => "diag pack-latest".to_string(),
                     DiagCommand::PackRecord(_) => "diag pack-record".to_string(),
                     DiagCommand::PlanCache => "diag plan-cache".to_string(),
+                    DiagCommand::Provenance(_) => "diag provenance".to_string(),
                     DiagCommand::Quarantine(subcmd) => match subcmd {
                         DiagQuarantineCommand::List(_) => "diag quarantine list".to_string(),
                         DiagQuarantineCommand::Show(_) => "diag quarantine show".to_string(),
@@ -58816,6 +58981,9 @@ impl NormalizedInvocation {
                     OutcomeQuarantineCommand::Release(_) => {
                         "outcome quarantine release".to_string()
                     }
+                },
+                Command::Trust(trust) => match trust {
+                    TrustCommand::Report(_) => "trust report".to_string(),
                 },
                 Command::Pack(pack) => match &pack.command {
                     Some(PackCommand::Build(_)) | None => "pack build".to_string(),
@@ -59789,7 +59957,7 @@ mod tests {
         RegressExplainArgs, RegressionSurfaceArg, RuleCommand, SessionBudgetCommand,
         SessionBudgetPlanArgs, ShadowMode, SituationCommand, StatusArgs, SupportCommand,
         SwarmBriefArgs, SwarmCommand, SwarmRepairPlanArgs, SwarmWorkPacketArgs, TaskFrameCommand,
-        TaskFrameSubgoalCommand, VerifyCommand, VerifyRchCommand, WorkflowCommand,
+        TaskFrameSubgoalCommand, TrustCommand, VerifyCommand, VerifyRchCommand, WorkflowCommand,
         WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode, db_inspect_redact_source_uri,
         diag_environment_attestation_response_json, environment_attestation_unavailable_sources,
         format_impact_json, format_search_json_with_mesh_and_recalibration,
@@ -73045,6 +73213,68 @@ mod tests {
                 )
             }
             _ => Err("expected Memory Drift command".to_string()),
+        }
+    }
+
+    #[test]
+    fn diag_provenance_command_parses_read_only_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "diag",
+            "provenance",
+            "--limit",
+            "25",
+            "--database",
+            "/tmp/ee-provenance.db",
+        ])
+        .map_err(|e| format!("failed to parse diag provenance: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Diag(DiagCommand::Provenance(ref args))) => {
+                ensure_equal(&args.limit, &25, "diag provenance limit")?;
+                ensure_equal(
+                    &args.database,
+                    &Some(PathBuf::from("/tmp/ee-provenance.db")),
+                    "diag provenance database",
+                )
+            }
+            _ => Err("expected Diag Provenance command".to_string()),
+        }
+    }
+
+    #[test]
+    fn trust_report_command_parses_calibration_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "trust",
+            "report",
+            "--buckets",
+            "7",
+            "--leaderboard-limit",
+            "3",
+            "--pack-item-limit",
+            "42",
+            "--database",
+            "/tmp/ee-trust.db",
+        ])
+        .map_err(|e| format!("failed to parse trust report: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Trust(TrustCommand::Report(ref args))) => {
+                ensure_equal(&args.bucket_count, &7, "trust report buckets")?;
+                ensure_equal(
+                    &args.leaderboard_limit,
+                    &3,
+                    "trust report leaderboard limit",
+                )?;
+                ensure_equal(&args.pack_item_limit, &42, "trust report pack item limit")?;
+                ensure_equal(
+                    &args.database,
+                    &Some(PathBuf::from("/tmp/ee-trust.db")),
+                    "trust report database",
+                )
+            }
+            _ => Err("expected Trust Report command".to_string()),
         }
     }
 
