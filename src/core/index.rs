@@ -3792,23 +3792,24 @@ pub(crate) fn get_index_status_with_connection(
 
     // Fast-path degraded states: when the index is missing/corrupt, we can
     // report health without scanning DB tables for counts/generation.
-    let (db_memory_count, db_session_count, db_generation, embedding) =
-        if !index_exists || index_file_count == 0 {
-            (0, 0, None, None)
-        } else if database_path.exists() {
-            let owned_connection;
-            let db = if let Some(connection) = connection {
-                connection
-            } else {
-                owned_connection = DbConnection::open_file(&database_path)?;
-                &owned_connection
-            };
-            let (memory_count, session_count, generation) = get_db_stats(db)?;
-            let embedding = index_status_embedding_posture(db, &index_dir)?;
-            (memory_count, session_count, generation, embedding)
+    let (db_memory_count, db_session_count, db_generation, embedding) = if !index_exists
+        || index_file_count == 0
+    {
+        (0, 0, None, None)
+    } else if database_path.exists() {
+        let owned_connection;
+        let db = if let Some(connection) = connection {
+            connection
         } else {
-            (0, 0, None, None)
+            owned_connection = DbConnection::open_file(&database_path)?;
+            &owned_connection
         };
+        let (memory_count, session_count, generation) = get_db_stats(db)?;
+        let embedding = index_status_embedding_posture(db, &options.workspace_path, &index_dir)?;
+        (memory_count, session_count, generation, embedding)
+    } else {
+        (0, 0, None, None)
+    };
 
     // Read index metadata if available.
     let (index_generation, last_rebuild_at, last_check_error) = read_index_metadata(&index_dir);
@@ -3854,9 +3855,10 @@ pub(crate) fn get_index_status_with_connection(
 
 fn index_status_embedding_posture(
     db: &DbConnection,
+    workspace_path: &Path,
     index_dir: &Path,
 ) -> Result<Option<EmbeddingPosture>, IndexStatusError> {
-    let Some(workspace_id) = latest_workspace_id_for_index_status(db)? else {
+    let Some(workspace_id) = workspace_id_for_index_status(db, workspace_path)? else {
         return Ok(None);
     };
     Ok(Some(current_embedding_posture(
@@ -3866,14 +3868,24 @@ fn index_status_embedding_posture(
     )?))
 }
 
-fn latest_workspace_id_for_index_status(db: &DbConnection) -> Result<Option<String>, DbError> {
-    let rows = db.query(
-        "SELECT id FROM workspaces ORDER BY created_at DESC LIMIT 1",
-        &[],
-    )?;
-    Ok(rows
-        .first()
-        .and_then(|row| row.get(0).and_then(|v| v.as_str().map(str::to_string))))
+fn workspace_id_for_index_status(
+    db: &DbConnection,
+    workspace_path: &Path,
+) -> Result<Option<String>, DbError> {
+    let canonical_root = default_workspace_root(workspace_path);
+    let canonical_key = canonical_root.to_string_lossy();
+    if let Some(workspace) = db.get_workspace_by_path(canonical_key.as_ref())? {
+        return Ok(Some(workspace.id));
+    }
+
+    let lexical_key = workspace_path.to_string_lossy();
+    if lexical_key != canonical_key {
+        if let Some(workspace) = db.get_workspace_by_path(lexical_key.as_ref())? {
+            return Ok(Some(workspace.id));
+        }
+    }
+
+    Ok(None)
 }
 
 fn log_db_generation_observed(report: &IndexStatusReport) {
@@ -5801,6 +5813,75 @@ mod tests {
         assert!(summary.contains("rebuild recommended"));
         assert!(summary.contains("DB generation: 12"));
         assert!(summary.contains("Index generation: 9"));
+    }
+
+    #[test]
+    fn index_status_embedding_posture_uses_requested_workspace_path() -> TestResult {
+        let root = unique_test_dir("status-workspace-selector");
+        let workspace_a = root.join("workspace-a");
+        let workspace_b = root.join("workspace-b");
+        std::fs::create_dir_all(&workspace_a).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&workspace_b).map_err(|error| error.to_string())?;
+        let database = root.join("shared-ee.db");
+        let index_dir_a = workspace_a.join(".ee").join("index");
+        write_marker(&index_dir_a, "marker.bin", "index present")?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_a_id = "wsp_statuspath000000000000000a";
+        let workspace_b_id = "wsp_statuspath000000000000000b";
+        connection
+            .insert_workspace(
+                workspace_a_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: default_workspace_root(&workspace_a)
+                        .to_string_lossy()
+                        .into_owned(),
+                    name: Some("status path workspace a".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                workspace_b_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: default_workspace_root(&workspace_b)
+                        .to_string_lossy()
+                        .into_owned(),
+                    name: Some("status path workspace b".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let semantic_b = EmbedderStack::from_parts(
+            Arc::new(TestSemanticEmbedder::new("semantic-workspace-b-only", 256))
+                as Arc<dyn crate::search::Embedder>,
+            None,
+        );
+        ensure_active_embedding_registry_record(&connection, workspace_b_id, &semantic_b)
+            .map_err(|error| error.to_string())?;
+
+        let report = get_index_status_with_connection(
+            &IndexStatusOptions {
+                workspace_path: workspace_a.clone(),
+                database_path: Some(database),
+                index_dir: Some(index_dir_a),
+            },
+            Some(&connection),
+        )
+        .map_err(|error| error.to_string())?;
+        let embedding = report
+            .embedding
+            .ok_or_else(|| "workspace A should resolve to its own embedding posture".to_owned())?;
+
+        ensure(
+            embedding.available_model_count == 0,
+            format!("workspace A must not borrow workspace B registry rows: {embedding:?}",),
+        )?;
+        ensure(
+            embedding.selected_registry_model.is_none(),
+            "workspace A should not expose workspace B as selected registry model",
+        )?;
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]
