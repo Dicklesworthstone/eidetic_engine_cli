@@ -1248,6 +1248,7 @@ mod tests {
         // bd-2vq2z.1: penalty 0.0 -> neutral floor 1.0 (flag, don't penalize).
         assert_eq!(stale_anchor_floor(DEFAULT_STALE_ANCHOR_PENALTY), 1.0);
         assert_eq!(stale_anchor_floor(0.0), 1.0);
+        assert!((stale_anchor_floor(0.25) - 0.75).abs() < 1e-6);
         assert!((stale_anchor_floor(0.6) - 0.4).abs() < 1e-6);
         assert_eq!(
             stale_anchor_floor(1.0),
@@ -1260,6 +1261,8 @@ mod tests {
         );
         assert_eq!(stale_anchor_floor(-1.0), 1.0);
         assert_eq!(stale_anchor_floor(f32::NAN), 1.0);
+        assert_eq!(stale_anchor_floor(f32::INFINITY), 1.0);
+        assert_eq!(stale_anchor_floor(f32::NEG_INFINITY), 1.0);
     }
 
     #[test]
@@ -1312,6 +1315,51 @@ mod tests {
         assert!((stale.freshness_drift - DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR).abs() < 1e-6);
         assert!(stale.final_score < neutral.final_score);
         assert!(stale.final_score > 0.0, "penalized but never vanishes");
+    }
+
+    #[test]
+    fn missing_freshness_signal_is_neutral_even_with_max_penalty() {
+        let config = SearchScoringConfig {
+            stale_anchor_penalty: 1.0,
+            ..SearchScoringConfig::default()
+        };
+        let neutral = SearchScoreComponents::from_signals(
+            SearchScoringSignals::new(1.0, RetrievalMaturity::Semantic),
+            config,
+        );
+
+        assert_eq!(
+            neutral.freshness_drift, 1.0,
+            "unanchored or unknown freshness must stay neutral"
+        );
+        assert!(neutral.final_score > 0.0);
+    }
+
+    #[test]
+    fn invalid_stale_anchor_penalty_fails_closed_to_neutral() {
+        let base = SearchScoringSignals {
+            freshness_drift: Some(MemoryAnchorFreshnessState::Stale),
+            ..SearchScoringSignals::new(1.0, RetrievalMaturity::Semantic)
+        };
+        let neutral = SearchScoreComponents::from_signals(base, SearchScoringConfig::default());
+
+        for invalid_penalty in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.25] {
+            let scored = SearchScoreComponents::from_signals(
+                base,
+                SearchScoringConfig {
+                    stale_anchor_penalty: invalid_penalty,
+                    ..SearchScoringConfig::default()
+                },
+            );
+            assert_eq!(
+                scored.freshness_drift, 1.0,
+                "invalid penalty {invalid_penalty:?} stays neutral"
+            );
+            assert_eq!(
+                scored.final_score, neutral.final_score,
+                "invalid penalty {invalid_penalty:?} must not silently demote stale anchors"
+            );
+        }
     }
 
     #[test]

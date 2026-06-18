@@ -1663,6 +1663,31 @@ mod tests {
     }
 
     #[test]
+    fn default_stale_anchor_survives_tight_budget_tie() {
+        // Under the default "flag, don't penalize" policy, a stale anchor can
+        // still win a deterministic tie and survive a one-item recall budget.
+        let mut stale = row("mem_a_stale", Some("src/a.rs"), None);
+        stale.freshness_state = MemoryAnchorFreshnessState::Stale;
+        let current = row("mem_b_current", Some("src/a.rs"), None);
+        let rows = vec![stale, current];
+
+        let mut query = path_query(&["src/*.rs"]);
+        let unbounded = evaluate_recall(&query, &rows, Some(7), 7);
+        assert_eq!(unbounded.items.len(), 2);
+        assert_eq!(unbounded.items[0].memory_id, "mem_a_stale");
+        assert_eq!(unbounded.items[0].score_components.freshness, 1.0);
+
+        let per_item_budget =
+            u32::try_from(recall_item_token_estimate(&unbounded.items[0])).expect("budget fits");
+        query.max_tokens = Some(per_item_budget);
+        let tight = evaluate_recall(&query, &rows, Some(7), 7);
+        assert_eq!(tight.items.len(), 1);
+        assert_eq!(tight.items[0].memory_id, "mem_a_stale");
+        assert_eq!(tight.items[0].freshness_state, "stale");
+        assert!(tight.truncated);
+    }
+
+    #[test]
     fn opt_in_stale_anchor_penalty_ranks_drift_down_without_vanishing() {
         // An operator may opt into a small tie-breaker. With a configured penalty
         // the stale anchor ranks below an otherwise-identical fresh one, but its
@@ -1691,6 +1716,37 @@ mod tests {
         assert!(stale_item.score > 0.0, "penalized but never vanishes");
         // Ordering: the fresh memory sorts first.
         assert_eq!(report.items[0].memory_id, "mem_current");
+    }
+
+    #[test]
+    fn invalid_stale_anchor_penalty_is_neutral_in_recall() {
+        let mut stale = row("mem_stale", Some("src/a.rs"), None);
+        stale.freshness_state = MemoryAnchorFreshnessState::Stale;
+        let current = row("mem_current", Some("src/a.rs"), None);
+
+        for invalid_penalty in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.25] {
+            let mut query = path_query(&["src/*.rs"]);
+            query.stale_anchor_penalty = invalid_penalty;
+            let report = evaluate_recall(&query, &[stale.clone(), current.clone()], Some(7), 7);
+            let stale_item = report
+                .items
+                .iter()
+                .find(|item| item.memory_id == "mem_stale")
+                .expect("stale memory present");
+            let current_item = report
+                .items
+                .iter()
+                .find(|item| item.memory_id == "mem_current")
+                .expect("current memory present");
+            assert_eq!(
+                stale_item.score_components.freshness, 1.0,
+                "invalid penalty {invalid_penalty:?} stays neutral"
+            );
+            assert_eq!(
+                stale_item.score, current_item.score,
+                "invalid penalty {invalid_penalty:?} must not silently demote stale anchors"
+            );
+        }
     }
 
     #[test]
