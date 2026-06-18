@@ -104,6 +104,7 @@ pub mod preflight_token;
 pub mod primer;
 pub mod procedure;
 pub mod profile;
+pub mod provenance_health;
 pub mod proof_verify;
 pub mod qos;
 pub mod quarantine;

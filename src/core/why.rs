@@ -28,6 +28,9 @@ use crate::core::influence::{
 use crate::core::memory::{
     EvidenceFreshness, EvidenceFreshnessStatus, assess_memory_evidence_freshness, memory_validity,
 };
+use crate::core::provenance_health::{
+    MemoryProvenanceHealth, ProvenancePointerStatus, assess_memory_provenance_health,
+};
 use crate::db::{DbConnection, generate_audit_id, generate_audit_id_seeded};
 use crate::models::{
     AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
@@ -559,6 +562,8 @@ pub struct WhyReport {
     pub content: Option<String>,
     /// Storage explanation.
     pub storage: Option<StorageExplanation>,
+    /// Structured freshness status for cited provenance pointers.
+    pub provenance_health: Option<MemoryProvenanceHealth>,
     /// Retrieval explanation.
     pub retrieval: Option<RetrievalExplanation>,
     /// Graph-derived retrieval features and gaps.
@@ -673,6 +678,7 @@ impl WhyReport {
             found: true,
             content: None,
             storage: Some(storage),
+            provenance_health: None,
             retrieval: Some(retrieval),
             graph_retrieval: None,
             selection: Some(selection),
@@ -731,6 +737,7 @@ impl WhyReport {
             found: false,
             content: None,
             storage: None,
+            provenance_health: None,
             retrieval: None,
             graph_retrieval: None,
             selection: None,
@@ -764,6 +771,7 @@ impl WhyReport {
             found: false,
             content: None,
             storage: None,
+            provenance_health: None,
             retrieval: None,
             graph_retrieval: None,
             selection: None,
@@ -993,6 +1001,13 @@ impl WhyReport {
         self.attestation_manifest = attestation_manifest;
         self
     }
+
+    /// Attach structured provenance-freshness status.
+    #[must_use]
+    pub fn with_provenance_health(mut self, provenance_health: MemoryProvenanceHealth) -> Self {
+        self.provenance_health = Some(provenance_health);
+        self
+    }
 }
 
 /// Options for the why query.
@@ -1217,6 +1232,10 @@ fn explain_memory_inner(
     if let Some(degradation) = why_evidence_freshness_degradation(memory_id, &freshness) {
         evidence_degradations.push(degradation);
     }
+    let provenance_health = assess_memory_provenance_health(&memory, workspace_path.as_deref());
+    if let Some(degradation) = why_provenance_health_degradation(&provenance_health) {
+        evidence_degradations.push(degradation);
+    }
     let contradictions = contradiction_fetch.items;
     let links = link_fetch.items;
     let history = history_fetch.items.into_iter().next();
@@ -1298,6 +1317,7 @@ fn explain_memory_inner(
                 },
             )
             .with_content(memory.content.clone())
+            .with_provenance_health(provenance_health.clone())
             .with_counterfactual_influence(counterfactual_influence);
             trace_why_math_surfaces(
                 &memory.workspace_id,
@@ -1339,7 +1359,8 @@ fn explain_memory_inner(
             dedup_link: find_embed_dedup_link(&conn, memory_id),
         },
     )
-    .with_content(memory.content.clone());
+    .with_content(memory.content.clone())
+    .with_provenance_health(provenance_health);
     let report = report.with_confidence_intervals(why_conformal_confidence_intervals(
         workspace_path.as_deref(),
         memory_id,
@@ -1697,6 +1718,38 @@ fn why_evidence_freshness_degradation(
             detail
         ),
         repair,
+    })
+}
+
+fn why_provenance_health_degradation(
+    provenance_health: &MemoryProvenanceHealth,
+) -> Option<WhyDegradation> {
+    let code = match provenance_health.health {
+        ProvenancePointerStatus::Present => return None,
+        ProvenancePointerStatus::Moved => "why_provenance_freshness_moved",
+        ProvenancePointerStatus::Missing => "why_provenance_freshness_missing",
+        ProvenancePointerStatus::Unverifiable => "why_provenance_freshness_unverifiable",
+    };
+    let detail = provenance_health
+        .pointers
+        .iter()
+        .filter(|pointer| pointer.status.is_issue())
+        .map(|pointer| redact_pack_provenance_text(&pointer.detail))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(WhyDegradation {
+        code,
+        severity: "low",
+        message: format!(
+            "Memory {} provenance health is {}: {}",
+            provenance_health.memory_id,
+            provenance_health.health.as_str(),
+            detail
+        ),
+        repair: Some(
+            "Run `ee diag provenance --json` and revise or re-remember affected memories."
+                .to_string(),
+        ),
     })
 }
 
