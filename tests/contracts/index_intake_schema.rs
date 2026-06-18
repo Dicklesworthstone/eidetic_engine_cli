@@ -23,6 +23,9 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const SCHEMA_REL: &str = "docs/schemas/ee.index_intake.v1.json";
+const PERF_FIXTURE_REL: &str =
+    "tests/fixtures/golden/perf_artifact/incremental_index_intake.json";
+const E2E_SCRIPT_REL: &str = "scripts/e2e_incremental_index.sh";
 const REDACTION_CONST: &str = "counts_modes_no_content";
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -35,6 +38,11 @@ fn load_json(relative: &str) -> Result<Value, String> {
         std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
     serde_json::from_slice::<Value>(&bytes)
         .map_err(|error| format!("parse {}: {error}", path.display()))
+}
+
+fn load_text(relative: &str) -> Result<String, String> {
+    let path = repo_path(relative);
+    std::fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))
 }
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
@@ -174,5 +182,76 @@ fn index_intake_modes_and_fallback_reasons_are_closed_sets() -> TestResult {
     ensure(
         required == expected,
         format!("top-level required set drifted: {required:?}"),
+    )
+}
+
+#[test]
+fn incremental_index_e2e_perf_contract_is_pinned() -> TestResult {
+    let fixture = load_json(PERF_FIXTURE_REL)?;
+    ensure(
+        fixture.pointer("/schema").and_then(Value::as_str)
+            == Some("ee.perf.artifact_summary.v1"),
+        "incremental index perf fixture must use the normalized perf artifact summary schema",
+    )?;
+    ensure(
+        fixture.pointer("/artifactKind").and_then(Value::as_str) == Some("e2e_perf_probe"),
+        "incremental index perf fixture must be an E2E perf probe",
+    )?;
+    ensure(
+        fixture.pointer("/sourceSchema").and_then(Value::as_str) == Some("ee.test_event.v1"),
+        "incremental index perf fixture must be derived from structured test events",
+    )?;
+    ensure(
+        fixture.pointer("/commandFamily").and_then(Value::as_str) == Some("remember"),
+        "incremental index perf fixture must cover the production remember write path",
+    )?;
+
+    let metrics = fixture
+        .pointer("/metrics")
+        .and_then(Value::as_object)
+        .ok_or("incremental index perf fixture is missing metrics")?;
+    for metric in [
+        "incremental_first_window_avg_ms",
+        "incremental_last_window_avg_ms",
+        "flat_latency_ratio",
+        "full_rebuild_baseline_elapsed_ms",
+        "rebuild_avoided_count",
+        "search_equivalence_cases",
+    ] {
+        ensure(
+            metrics.contains_key(metric),
+            format!("incremental index perf fixture missing metric {metric}"),
+        )?;
+    }
+    ensure(
+        fixture
+            .pointer("/metrics/flat_latency_ratio/value")
+            .and_then(Value::as_f64)
+            .is_some_and(|ratio| ratio <= 2.0),
+        "golden fixture should document flat incremental latency",
+    )?;
+
+    let script = load_text(E2E_SCRIPT_REL)?;
+    for expected in [
+        "EE_BINARY",
+        "EE_E2E_TMPDIR",
+        "ee.test_event.v1",
+        "bench_iteration",
+        "index rebuild",
+        "incremental_search_matches_full_rebuild",
+        "incremental_write_latency_flat",
+    ] {
+        ensure(
+            script.contains(expected),
+            format!("incremental index E2E script missing {expected}"),
+        )?;
+    }
+    ensure(
+        !script.contains("cargo "),
+        "incremental index E2E script must not invoke local Cargo",
+    )?;
+    ensure(
+        !script.contains("rustc"),
+        "incremental index E2E script must not invoke local rustc",
     )
 }

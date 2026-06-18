@@ -1,0 +1,67 @@
+{
+  "schema": "ee.perf.artifact_summary.v1",
+  "artifactId": "incremental-index-intake-e2e",
+  "artifactKind": "e2e_perf_probe",
+  "sourceSchema": "ee.test_event.v1",
+  "sourcePath": "target/*/incremental_index_e2e/incremental_index_events.jsonl",
+  "contentHash": "computed-at-test-runtime",
+  "observedHash": "computed-at-test-runtime",
+  "profile": {
+    "profileName": "rch-no-mock-e2e",
+    "confidence": "medium"
+  },
+  "fixtureTier": "smoke",
+  "commandFamily": "remember",
+  "metrics": {
+    "incremental_first_window_avg_ms": {
+      "kind": "measured",
+      "value": 18.0,
+      "unit": "ms",
+      "source": "ee.test_event.v1 bench_iteration elapsed_ms"
+    },
+    "incremental_last_window_avg_ms": {
+      "kind": "measured",
+      "value": 20.0,
+      "unit": "ms",
+      "source": "ee.test_event.v1 bench_iteration elapsed_ms"
+    },
+    "flat_latency_ratio": {
+      "kind": "derived",
+      "value": 1.111111,
+      "unit": "ratio",
+      "source": "incremental_last_window_avg_ms / incremental_first_window_avg_ms"
+    },
+    "full_rebuild_baseline_elapsed_ms": {
+      "kind": "measured",
+      "value": 220.0,
+      "unit": "ms",
+      "source": "ee index rebuild baseline in scripts/e2e_incremental_index.sh"
+    },
+    "rebuild_avoided_count": {
+      "kind": "counted",
+      "value": 15.0,
+      "unit": "writes",
+      "source": "incremental remember writes before full-rebuild baseline"
+    },
+    "search_equivalence_cases": {
+      "kind": "counted",
+      "value": 1.0,
+      "unit": "comparisons",
+      "source": "incremental search result ids compared with post-rebuild result ids"
+    }
+  },
+  "degraded": [],
+  "redaction": "clean",
+  "provenance": [
+    {
+      "field": "elapsed_ms",
+      "sourcePath": "incremental_index_events.jsonl",
+      "sourceLine": null
+    },
+    {
+      "field": "search_equivalence_cases",
+      "sourcePath": "incremental_index_events.jsonl",
+      "sourceLine": null
+    }
+  ]
+}

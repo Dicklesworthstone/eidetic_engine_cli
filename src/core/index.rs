@@ -5022,6 +5022,8 @@ mod tests {
     use super::*;
     use crate::core::model::{BUNDLED_EMBEDDING_DIMENSION, BUNDLED_EMBEDDING_MODEL_REVISION};
     use crate::core::profile::OperatingProfile;
+    use proptest::prelude::*;
+    use proptest::test_runner::Config as ProptestConfig;
 
     type TestResult = Result<(), String>;
 
@@ -5877,11 +5879,53 @@ mod tests {
             .with_metadata("fixture", "incremental-index")
     }
 
+    fn deterministic_incremental_doc(
+        slot: u8,
+        term: u8,
+        generation: u64,
+    ) -> crate::search::IndexableDocument {
+        const TERMS: [&str; 8] = [
+            "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "theta", "kappa",
+        ];
+        let id = format!("doc-{slot}");
+        let term = TERMS[usize::from(term) % TERMS.len()];
+        let content = format!(
+            "incremental equivalence release notes common-token slot-{slot} term-{term} generation-{generation}"
+        );
+        test_indexable_doc(&id, &content)
+            .with_metadata("slot", slot.to_string())
+            .with_metadata("term", term)
+    }
+
+    #[derive(Clone, Debug)]
+    enum IncrementalDocOp {
+        Upsert { slot: u8, term: u8 },
+        Delete { slot: u8 },
+    }
+
+    fn incremental_doc_ops() -> impl Strategy<Value = Vec<IncrementalDocOp>> {
+        prop::collection::vec(
+            prop_oneof![
+                (0u8..8, 0u8..16).prop_map(|(slot, term)| {
+                    IncrementalDocOp::Upsert { slot, term }
+                }),
+                (0u8..8).prop_map(|slot| IncrementalDocOp::Delete { slot }),
+            ],
+            1..24,
+        )
+    }
+
     #[derive(Debug, Eq, PartialEq)]
     struct VectorSnapshotRow {
         doc_id: String,
         fast_bits: Vec<u32>,
         quality_bits: Option<Vec<u32>>,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct SearchSnapshotRow {
+        doc_id: String,
+        score: String,
     }
 
     fn vector_index_snapshot(index_dir: &Path) -> Result<Vec<VectorSnapshotRow>, String> {
@@ -5909,6 +5953,156 @@ mod tests {
             });
         }
         Ok(rows)
+    }
+
+    fn search_result_snapshot(
+        index_dir: &Path,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchSnapshotRow>, String> {
+        let index =
+            Arc::new(crate::search::TwoTierIndex::open(
+                index_dir,
+                crate::search::TwoTierConfig::default(),
+            )
+            .map_err(|error| error.to_string())?);
+        let fast_embedder =
+            Arc::new(HashEmbedder::default_256()) as Arc<dyn crate::search::Embedder>;
+        let searcher = crate::search::TwoTierSearcher::new(
+            index,
+            fast_embedder,
+            crate::search::TwoTierConfig::default(),
+        );
+        let query = query.to_owned();
+        crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            let (results, _) = searcher
+                .search_collect(&cx, &query, limit)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<Vec<SearchSnapshotRow>, String>(
+                results
+                    .into_iter()
+                    .map(|result| SearchSnapshotRow {
+                        doc_id: result.doc_id,
+                        score: format!("{:.6}", result.score),
+                    })
+                    .collect(),
+            )
+        })
+        .map_err(|error| format!("search runtime failed: {error}"))?
+    }
+
+    fn ensure_search_results_match_full_rebuild(
+        incremental_dir: &Path,
+        full_dir: &Path,
+    ) -> TestResult {
+        for query in [
+            "incremental release",
+            "common-token notes",
+            "alpha",
+            "beta",
+            "theta",
+            "slot-3",
+        ] {
+            let incremental = search_result_snapshot(incremental_dir, query, 10)?;
+            let full = search_result_snapshot(full_dir, query, 10)?;
+            ensure(
+                incremental == full,
+                format!(
+                    "incremental search snapshot should match full rebuild for query {query:?}: incremental={incremental:?} full={full:?}"
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn assert_incremental_sequence_equivalent_to_full_rebuild(
+        ops: &[IncrementalDocOp],
+    ) -> TestResult {
+        let root = unique_test_dir("incremental-equivalence-property");
+        let incremental_dir = root.join("incremental-index");
+        let full_dir = root.join("full-index");
+        let mut live_docs = BTreeMap::new();
+        live_docs.insert(
+            "doc-sentinel".to_owned(),
+            test_indexable_doc(
+                "doc-sentinel",
+                "incremental equivalence sentinel release notes common-token",
+            ),
+        );
+        for slot in 0u8..3 {
+            let document = deterministic_incremental_doc(slot, slot, 1);
+            live_docs.insert(format!("doc-{slot}"), document);
+        }
+
+        build_index_sync(
+            &incremental_dir,
+            hash_fallback_embedder_stack(),
+            live_docs.values().cloned().collect(),
+        )?;
+        let mut generation = 1u64;
+        write_index_metadata(&incremental_dir, generation, live_docs.len() as u32)
+            .map_err(|error| error.to_string())?;
+
+        for op in ops {
+            generation += 1;
+            match *op {
+                IncrementalDocOp::Upsert { slot, term } => {
+                    let id = format!("doc-{slot}");
+                    let document = deterministic_incremental_doc(slot, term, generation);
+                    live_docs.insert(id.clone(), document.clone());
+                    let outcome = apply_incremental_index_change_sync(
+                        &incremental_dir,
+                        hash_fallback_embedder_stack(),
+                        &id,
+                        Some(document),
+                        generation,
+                        live_docs.len() as u32,
+                    );
+                    ensure(
+                        matches!(
+                            outcome,
+                            IncrementalApplyOutcome::Applied {
+                                documents_indexed: 1
+                            }
+                        ),
+                        format!("unexpected upsert outcome for {id}: {outcome:?}"),
+                    )?;
+                }
+                IncrementalDocOp::Delete { slot } => {
+                    let id = format!("doc-{slot}");
+                    live_docs.remove(&id);
+                    let outcome = apply_incremental_index_change_sync(
+                        &incremental_dir,
+                        hash_fallback_embedder_stack(),
+                        &id,
+                        None,
+                        generation,
+                        live_docs.len() as u32,
+                    );
+                    ensure(
+                        matches!(
+                            outcome,
+                            IncrementalApplyOutcome::Applied {
+                                documents_indexed: 0
+                            }
+                        ),
+                        format!("unexpected delete outcome for {id}: {outcome:?}"),
+                    )?;
+                }
+            }
+        }
+
+        build_index_sync(
+            &full_dir,
+            hash_fallback_embedder_stack(),
+            live_docs.values().cloned().collect(),
+        )?;
+        write_index_metadata(&full_dir, generation, live_docs.len() as u32)
+            .map_err(|error| error.to_string())?;
+
+        ensure_search_results_match_full_rebuild(&incremental_dir, &full_dir)
     }
 
     fn read_marker(dir: &Path, file: &str) -> Result<String, String> {
@@ -5998,7 +6192,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_upsert_and_delete_match_full_rebuild_vectors() -> TestResult {
+    fn incremental_upsert_and_delete_match_full_rebuild_vectors_and_results() -> TestResult {
         let root = unique_test_dir("incremental-equivalence");
         let incremental_dir = root.join("incremental-index");
         let full_dir = root.join("full-index");
@@ -6013,14 +6207,14 @@ mod tests {
 
         build_index_sync(
             &incremental_dir,
-            default_embedder_stack(),
+            hash_fallback_embedder_stack(),
             initial_docs.clone(),
         )?;
         write_index_metadata(&incremental_dir, 1, 2).map_err(|error| error.to_string())?;
 
         let beta_outcome = apply_incremental_index_change_sync(
             &incremental_dir,
-            default_embedder_stack(),
+            hash_fallback_embedder_stack(),
             "doc-beta",
             Some(test_indexable_doc("doc-beta", "beta updated notes")),
             2,
@@ -6038,7 +6232,7 @@ mod tests {
 
         let gamma_outcome = apply_incremental_index_change_sync(
             &incremental_dir,
-            default_embedder_stack(),
+            hash_fallback_embedder_stack(),
             "doc-gamma",
             Some(test_indexable_doc("doc-gamma", "gamma new notes")),
             3,
@@ -6056,7 +6250,7 @@ mod tests {
 
         let alpha_outcome = apply_incremental_index_change_sync(
             &incremental_dir,
-            default_embedder_stack(),
+            hash_fallback_embedder_stack(),
             "doc-alpha",
             None,
             4,
@@ -6072,13 +6266,29 @@ mod tests {
             format!("unexpected alpha outcome: {alpha_outcome:?}"),
         )?;
 
-        build_index_sync(&full_dir, default_embedder_stack(), final_docs)?;
+        build_index_sync(&full_dir, hash_fallback_embedder_stack(), final_docs)?;
         write_index_metadata(&full_dir, 4, 2).map_err(|error| error.to_string())?;
 
         ensure(
             vector_index_snapshot(&incremental_dir)? == vector_index_snapshot(&full_dir)?,
             "incremental vector snapshot should match full rebuild snapshot",
-        )
+        )?;
+        ensure_search_results_match_full_rebuild(&incremental_dir, &full_dir)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 32,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn incremental_random_add_update_delete_ops_match_full_rebuild_results(
+            ops in incremental_doc_ops()
+        ) {
+            let result = assert_incremental_sequence_equivalent_to_full_rebuild(&ops);
+            prop_assert!(result.is_ok(), "{}", result.err().unwrap_or_default());
+        }
     }
 
     #[test]

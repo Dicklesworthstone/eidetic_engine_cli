@@ -61,6 +61,7 @@ warnings. Each item carries an evidence pointer and a score breakdown.
 | Capability | What you get |
 |---|---|
 | **Hybrid retrieval** | BM25 + neural-local vector search via Frankensearch's `TwoTierSearcher`; default builds use the pinned `potion-multilingual-128M` Model2Vec embedder, with deterministic hash fallback only when the local model path is unavailable |
+| **Incremental index intake** | Single-memory writes update the derived Frankensearch tiers incrementally when safe, with full rebuild as the audited fallback and RCH-only equivalence/perf proof in `scripts/e2e_incremental_index.sh` |
 | **Explainable scores** | Every returned memory shows component scores, freshness, confidence, and which sources support it |
 | **Typed memory fields** | Registry-backed sidecars for failures, decisions, commands, rules, conventions, risks, and anti-patterns; search filters use stable field names instead of prose parsing |
 | **Procedural rules with decay** | Confidence ages out, harmful feedback demotes faster than helpful feedback promotes |
@@ -1157,6 +1158,11 @@ ee outcome <candidate-id> --target-type candidate --signal negative --reason "To
 |---|---|
 | `ee index status` / `rebuild` / `reembed` | Manage derived search indexes (Frankensearch owns model selection) |
 | `ee index vacuum` | Preview reclaimable derived search-index artifacts without deleting or rewriting files |
+
+Incremental index intake keeps single-memory write latency from growing with the
+corpus when the active index is healthy. See [`docs/indexing.md`](docs/indexing.md)
+for the equivalence property, fallback contract, and RCH-only flat-latency E2E
+proof.
 
 ### Workspace, models, schemas
 

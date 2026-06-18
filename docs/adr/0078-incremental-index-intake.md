@@ -2,7 +2,7 @@
 
 Status: accepted
 Date: 2026-06-16
-Bead: bd-d67os.5
+Bead: bd-d67os.5, bd-d67os.8
 
 ## Context
 
@@ -87,9 +87,9 @@ Incremental intake must keep existing staleness consumers
   fails safe to `full_rebuild` with the corresponding `fallback_to_full` reason;
   silent partial intake is forbidden.
 
-This ADR records a contract only; it does not change runtime behavior. The core
-delta path lands in `bd-d67os.6`, integration in `.7`, and the
-equivalence-property + flat-latency perf proof in `.8`.
+This ADR records the contract for the runtime behavior. The core delta path
+landed in `bd-d67os.6`, integration in `.7`, and the equivalence-property plus
+flat-latency perf proof in `.8`.
 
 ## Relationship To Existing Work
 
@@ -143,11 +143,15 @@ equivalence-property + flat-latency perf proof in `.8`.
   `fallback_to_full` sets.
 - A `tests/fixtures/failure_modes/*` fixture documents each `fallback_to_full`
   reason with trigger shape and the `full_rebuild` path as the safe fallback.
-- The core leaf (`bd-d67os.6`) carries an equivalence property: an index built by
-  N incremental intakes must answer queries identically to the same documents
-  built by one full rebuild (deterministic ranking, identical result sets).
-- The perf leaf (`bd-d67os.8`) carries the no-mock `e2e_incremental_index.sh`
-  proving flat (corpus-size-independent) single-write latency versus the
-  full-rebuild baseline.
+- The core/index tests carry an equivalence property: an index built by N
+  incremental add/update/delete intakes must answer queries identically to the
+  same final documents built by one full rebuild (deterministic ranking,
+  identical result sets, identical rounded scores).
+- The perf leaf (`bd-d67os.8`) carries the no-mock
+  `scripts/e2e_incremental_index.sh` proof. It writes a growing corpus through
+  `ee remember`, emits `ee.test_event.v1` `bench_iteration` rows, compares
+  search ordering before and after `ee index rebuild`, and writes an
+  `ee.perf.artifact_summary.v1` summary. The committed fixture is
+  `tests/fixtures/golden/perf_artifact/incremental_index_intake.json`.
 - All Cargo verification for the schema and unit tests is RCH-only on this Mac
   lane.
