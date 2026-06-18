@@ -138,7 +138,8 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
     )?;
     ensure_eq_str(
         status_data
-            .get("active").and_then(|v| v.pointer("/source"))
+            .get("active")
+            .and_then(|v| v.pointer("/source"))
             .and_then(Value::as_str)
             .ok_or_else(|| "missing active.source".to_string())?,
         "frankensearch_hash_fallback",
@@ -146,14 +147,16 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
     )?;
     ensure_eq_bool(
         status_data
-            .get("active").and_then(|v| v.pointer("/semantic"))
+            .get("active")
+            .and_then(|v| v.pointer("/semantic"))
             .and_then(Value::as_bool)
             .ok_or_else(|| "missing active.semantic".to_string())?,
         false,
         "status active.semantic before artifact download",
     )?;
     let lifecycle_models = status_data
-        .get("modelLifecycle").and_then(|v| v.pointer("/models"))
+        .get("modelLifecycle")
+        .and_then(|v| v.pointer("/models"))
         .and_then(Value::as_array)
         .ok_or_else(|| "missing modelLifecycle.models".to_string())?;
     let lifecycle_entry = find_object_by_string(
@@ -174,7 +177,8 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
     )?;
     ensure_eq_u64(
         lifecycle_entry
-            .get("embeddingMetadata").and_then(|v| v.pointer("/dimension"))
+            .get("embeddingMetadata")
+            .and_then(|v| v.pointer("/dimension"))
             .and_then(Value::as_u64)
             .ok_or_else(|| "missing embeddingMetadata.dimension".to_string())?,
         u64::from(BUNDLED_EMBEDDING_DIMENSION),
@@ -215,6 +219,12 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
         .and_then(Value::as_array)
         .ok_or_else(|| "missing model list entries".to_string())?;
     let entry = find_object_by_string(entries, "entries", "modelName", BUNDLED_EMBEDDING_MODEL_ID)?;
+    let entry_id = string_member(entry, "id")?.to_owned();
+    ensure_eq_usize(
+        count_objects_by_string(entries, "modelName", BUNDLED_EMBEDDING_MODEL_ID)?,
+        1,
+        "bundled model list duplicate count",
+    )?;
     ensure_eq_str(
         string_member(entry, "provider")?,
         "model2vec",
@@ -234,6 +244,83 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
         u64_member(entry, "dimension")?,
         u64::from(BUNDLED_EMBEDDING_DIMENSION),
         "entry dimension",
+    )?;
+
+    let status_again = run_ee(
+        &workspace,
+        "act_model_status_again",
+        &[
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+            "model",
+            "status",
+        ],
+    )?;
+    ensure_success(&status_again, "second ee model status")?;
+    ensure_empty_stderr(&status_again, "second ee model status")?;
+    let status_again_json = stdout_json(&status_again, "second ee model status")?;
+    let status_again_data = response_data(&status_again_json, "second ee model status")?;
+    ensure_eq_u64(
+        u64_member(status_again_data, "availableCount")?,
+        0,
+        "second status availableCount before artifact download",
+    )?;
+
+    let list_again = run_ee(
+        &workspace,
+        "act_model_list_again",
+        &[
+            "--workspace",
+            workspace.workspace_arg()?,
+            "--json",
+            "model",
+            "list",
+        ],
+    )?;
+    ensure_success(&list_again, "second ee model list")?;
+    ensure_empty_stderr(&list_again, "second ee model list")?;
+    let list_again_json = stdout_json(&list_again, "second ee model list")?;
+    let list_again_data = response_data(&list_again_json, "second ee model list")?;
+    let entries_again = list_again_data
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "missing second model list entries".to_string())?;
+    ensure_eq_usize(
+        count_objects_by_string(entries_again, "modelName", BUNDLED_EMBEDDING_MODEL_ID)?,
+        1,
+        "second bundled model list duplicate count",
+    )?;
+    let entry_again = find_object_by_string(
+        entries_again,
+        "entries_again",
+        "modelName",
+        BUNDLED_EMBEDDING_MODEL_ID,
+    )?;
+    let entry_again_id = string_member(entry_again, "id")?;
+    workspace.log(
+        "assert_idempotent_registry_row",
+        json!({
+            "event": "idempotent_model_list_observed",
+            "firstEntryId": entry_id.as_str(),
+            "secondEntryId": entry_again_id,
+            "secondEntryCount": entries_again.len(),
+        }),
+    )?;
+    ensure_eq_str(
+        entry_again_id,
+        entry_id.as_str(),
+        "bundled row id stable across repeated status/list",
+    )?;
+    ensure_eq_str(
+        string_member(entry_again, "status")?,
+        "unavailable",
+        "second entry status before artifact download",
+    )?;
+    ensure_eq_u64(
+        u64_member(entry_again, "dimension")?,
+        u64::from(BUNDLED_EMBEDDING_DIMENSION),
+        "second entry dimension",
     )?;
     workspace.log(
         "complete",
@@ -364,6 +451,19 @@ fn find_object_by_string<'a>(
     ))
 }
 
+fn count_objects_by_string(items: &[Value], field: &str, expected: &str) -> TestResult<usize> {
+    let mut count = 0;
+    for (index, item) in items.iter().enumerate() {
+        let object = item
+            .as_object()
+            .ok_or_else(|| format!("entries[{index}] is not an object"))?;
+        if string_member(object, field)? == expected {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 fn ensure_eq_str(actual: &str, expected: &str, field: &str) -> TestResult {
     if actual == expected {
         return Ok(());
@@ -383,6 +483,15 @@ fn ensure_eq_bool(actual: bool, expected: bool, field: &str) -> TestResult {
 }
 
 fn ensure_eq_u64(actual: u64, expected: u64, field: &str) -> TestResult {
+    if actual == expected {
+        return Ok(());
+    }
+    Err(format!(
+        "{field} mismatch: expected {expected}, got {actual}"
+    ))
+}
+
+fn ensure_eq_usize(actual: usize, expected: usize, field: &str) -> TestResult {
     if actual == expected {
         return Ok(());
     }
