@@ -457,6 +457,11 @@ pub const HOOKS_SCHEMAS: &[SchemaEntry] = &[
         "ee.hook.harness_install.v1",
         SchemaCategory::Hooks,
     ),
+    SchemaEntry::new(
+        "ambient_context",
+        "ee.ambient_context.v1",
+        SchemaCategory::Hooks,
+    ),
 ];
 
 /// Learn schemas.
@@ -3309,6 +3314,10 @@ mod tests {
         ensure(
             versions.contains(&"ee.hook.harness_install.v1"),
             "hooks schemas must include harness install (bd-u875s.4)",
+        )?;
+        ensure(
+            versions.contains(&"ee.ambient_context.v1"),
+            "hooks schemas must include ambient context (bd-2vq2z.10)",
         )
     }
 

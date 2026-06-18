@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.ambient_context.v1.json",
+  "title": "ee.ambient_context.v1",
+  "description": "Proactive ambient-context hook profile for bounded, provenance-tagged orient, recall, and preflight injection.",
+  "type": "object",
+  "required": [
+    "schema",
+    "profile",
+    "enabledByDefault",
+    "readOnly",
+    "provenanceTag",
+    "stateScope",
+    "budgets",
+    "suppressionRules",
+    "controls",
+    "installedSnippetIds"
+  ],
+  "properties": {
+    "schema": { "const": "ee.ambient_context.v1" },
+    "profile": { "const": "ambient" },
+    "enabledByDefault": { "const": true },
+    "readOnly": { "const": true },
+    "provenanceTag": {
+      "type": "string",
+      "pattern": "^ee:ee\\.ambient_context\\.v1$"
+    },
+    "stateScope": {
+      "enum": ["workspace_session_cache"]
+    },
+    "budgets": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["surface", "maxTokens", "maxPaths"],
+        "properties": {
+          "surface": {
+            "enum": [
+              "session_start_orient",
+              "pre_edit_recall",
+              "pre_risky_preflight"
+            ]
+          },
+          "maxTokens": { "type": "integer", "minimum": 0 },
+          "maxPaths": { "type": ["integer", "null"], "minimum": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "suppressionRules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["code", "description"],
+        "properties": {
+          "code": {
+            "enum": [
+              "no_relevant_input",
+              "empty_context",
+              "duplicate_in_session",
+              "preflight_allows_command"
+            ]
+          },
+          "description": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "controls": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["envVar", "defaultValue", "description"],
+        "properties": {
+          "envVar": {
+            "enum": [
+              "EE_AMBIENT_CONTEXT",
+              "EE_AMBIENT_CONTEXT_VERBOSITY",
+              "EE_AMBIENT_CONTEXT_STATE_DIR"
+            ]
+          },
+          "defaultValue": { "type": "string", "minLength": 1 },
+          "description": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      },
+      "uniqueItems": true
+    },
+    "installedSnippetIds": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "string",
+        "pattern": "^ee-ambient-"
+      },
+      "uniqueItems": true
+    }
+  },
+  "additionalProperties": false
+}

@@ -9883,6 +9883,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: hook_harness_install_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::AMBIENT_CONTEXT_SCHEMA_V1,
+            version: "1",
+            description: "On-by-default proactive ambient hook profile for session orient, pre-edit recall, and risky-command preflight.",
+            category: "ops",
+            definition: ambient_context_schema_definition,
+        },
+        SchemaEntry {
             id: crate::hooks::HARNESS_CONFORMANCE_SCHEMA_V1,
             version: "1",
             description: "Redaction-safe harness conformance fixture contract for hook-event and transcript simulation. ADR 0075.",
@@ -11259,6 +11266,10 @@ fn hooks_git_readiness_schema_definition() -> String {
 
 fn hook_harness_install_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.hook.harness_install.v1.json").to_string()
+}
+
+fn ambient_context_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.ambient_context.v1.json").to_string()
 }
 
 fn harness_conformance_schema_definition() -> String {

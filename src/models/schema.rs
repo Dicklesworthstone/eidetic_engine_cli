@@ -98,6 +98,9 @@ pub const EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH: &str = "deterministic_hash"
 /// Embedding posture mode: a neural model exists but download/load policy blocked it.
 pub const EMBEDDING_POSTURE_MODE_NEURAL_REMOTE_BLOCKED: &str = "neural_remote_blocked";
 
+/// Schema identifier for the proactive ambient hook profile (bd-2vq2z.10).
+pub const AMBIENT_CONTEXT_SCHEMA_V1: &str = "ee.ambient_context.v1";
+
 /// All known schema identifiers for validation.
 pub const KNOWN_SCHEMAS: &[&str] = &[
     RESPONSE_SCHEMA_V0,
@@ -181,6 +184,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     WRITE_GROUP_COMMIT_SCHEMA_V1,
     INDEX_INTAKE_SCHEMA_V1,
     EMBEDDING_POSTURE_SCHEMA_V1,
+    AMBIENT_CONTEXT_SCHEMA_V1,
     // Active learning agenda and experiment schemas (EE-440)
     LEARNING_QUESTION_SCHEMA_V1,
     UNCERTAINTY_ESTIMATE_SCHEMA_V1,

@@ -3,6 +3,7 @@
 //! Provides safe installation of ee hooks into agent harness hook directories.
 //! Supports dry-run mode, idempotent re-installation, and preservation of existing hooks.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -32,6 +33,9 @@ pub const GIT_HOOK_AHEAD_RISK_SCHEMA_V1: &str = "ee.hooks.git_readiness.ahead_ri
 
 /// Schema for agent-harness hook generation/install reports.
 pub const HARNESS_HOOK_INSTALL_SCHEMA_V1: &str = "ee.hook.harness_install.v1";
+
+/// Schema for proactive ambient context hook injection (bd-2vq2z.10).
+pub const AMBIENT_CONTEXT_SCHEMA_V1: &str = "ee.ambient_context.v1";
 
 /// Schema for harness conformance simulation cases and reports.
 pub const HARNESS_CONFORMANCE_SCHEMA_V1: &str = "ee.harness_conformance.v1";
@@ -1140,6 +1144,106 @@ pub struct HarnessHookMarkers {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AmbientContextBudget {
+    pub surface: String,
+    pub max_tokens: u32,
+    pub max_paths: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AmbientContextSuppressionRule {
+    pub code: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AmbientContextControl {
+    pub env_var: String,
+    pub default_value: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AmbientContextReport {
+    pub schema: String,
+    pub profile: String,
+    pub enabled_by_default: bool,
+    pub read_only: bool,
+    pub provenance_tag: String,
+    pub state_scope: String,
+    pub budgets: Vec<AmbientContextBudget>,
+    pub suppression_rules: Vec<AmbientContextSuppressionRule>,
+    pub controls: Vec<AmbientContextControl>,
+    pub installed_snippet_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AmbientContextNoiseDecision {
+    Inject {
+        text: String,
+        used_tokens: u32,
+        truncated: bool,
+    },
+    Suppress {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AmbientContextNoiseGovernor {
+    seen: BTreeSet<String>,
+}
+
+impl AmbientContextNoiseGovernor {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn evaluate(
+        &mut self,
+        surface: &str,
+        text: &str,
+        max_tokens: u32,
+    ) -> AmbientContextNoiseDecision {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return AmbientContextNoiseDecision::Suppress {
+                reason: "empty_context".to_owned(),
+            };
+        }
+
+        let digest = blake3::hash(format!("{surface}\0{trimmed}").as_bytes())
+            .to_hex()
+            .to_string();
+        if !self.seen.insert(digest) {
+            return AmbientContextNoiseDecision::Suppress {
+                reason: "duplicate_in_session".to_owned(),
+            };
+        }
+
+        let words = trimmed.split_whitespace().collect::<Vec<_>>();
+        let budget = usize::try_from(max_tokens).unwrap_or(usize::MAX);
+        let truncated = words.len() > budget;
+        let selected = if truncated {
+            words[..budget].join(" ")
+        } else {
+            trimmed.to_owned()
+        };
+        AmbientContextNoiseDecision::Inject {
+            text: selected,
+            used_tokens: u32::try_from(words.len().min(budget)).unwrap_or(u32::MAX),
+            truncated,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HarnessHookSnippet {
     pub id: String,
     pub event: String,
@@ -1231,6 +1335,7 @@ pub struct HarnessHookInstallReport {
     pub backup_path: Option<String>,
     pub written_paths: Vec<String>,
     pub markers: HarnessHookMarkers,
+    pub ambient_context: AmbientContextReport,
     pub snippets: Vec<HarnessHookSnippet>,
     pub plan: Vec<HarnessHookPlanItem>,
     pub capability_gaps: Vec<HarnessHookCapabilityGap>,
@@ -1558,6 +1663,7 @@ pub fn generate_harness_hook_install(
             entry_marker: HARNESS_HOOK_MARKER.to_owned(),
             managed_by: "ee".to_owned(),
         },
+        ambient_context: ambient_context_report(&snippets),
         snippets,
         plan,
         capability_gaps,
@@ -1923,6 +2029,74 @@ fn harness_install_audit_docs() -> Vec<HarnessHookInstallAuditDocLink> {
     ]
 }
 
+fn ambient_context_report(snippets: &[HarnessHookSnippet]) -> AmbientContextReport {
+    AmbientContextReport {
+        schema: AMBIENT_CONTEXT_SCHEMA_V1.to_owned(),
+        profile: "ambient".to_owned(),
+        enabled_by_default: true,
+        read_only: true,
+        provenance_tag: format!("ee:{AMBIENT_CONTEXT_SCHEMA_V1}"),
+        state_scope: "workspace_session_cache".to_owned(),
+        budgets: vec![
+            AmbientContextBudget {
+                surface: "session_start_orient".to_owned(),
+                max_tokens: 1600,
+                max_paths: None,
+            },
+            AmbientContextBudget {
+                surface: "pre_edit_recall".to_owned(),
+                max_tokens: 800,
+                max_paths: Some(12),
+            },
+            AmbientContextBudget {
+                surface: "pre_risky_preflight".to_owned(),
+                max_tokens: 0,
+                max_paths: None,
+            },
+        ],
+        suppression_rules: vec![
+            AmbientContextSuppressionRule {
+                code: "no_relevant_input".to_owned(),
+                description: "Suppress when the hook payload has no task, path, diff, or command target.".to_owned(),
+            },
+            AmbientContextSuppressionRule {
+                code: "empty_context".to_owned(),
+                description: "Suppress when the underlying ee command returns no injectable context.".to_owned(),
+            },
+            AmbientContextSuppressionRule {
+                code: "duplicate_in_session".to_owned(),
+                description: "Suppress repeated injections whose content hash was already emitted for this workspace session.".to_owned(),
+            },
+            AmbientContextSuppressionRule {
+                code: "preflight_allows_command".to_owned(),
+                description: "Suppress preflight output for commands that are not policy-denied.".to_owned(),
+            },
+        ],
+        controls: vec![
+            AmbientContextControl {
+                env_var: "EE_AMBIENT_CONTEXT".to_owned(),
+                default_value: "true".to_owned(),
+                description: "Set to false, 0, off, no, disable, or disabled to suppress all ambient hook injection.".to_owned(),
+            },
+            AmbientContextControl {
+                env_var: "EE_AMBIENT_CONTEXT_VERBOSITY".to_owned(),
+                default_value: "standard".to_owned(),
+                description: "quiet lowers recall budget and suppresses session-start orient; verbose raises the recall/orient ceilings.".to_owned(),
+            },
+            AmbientContextControl {
+                env_var: "EE_AMBIENT_CONTEXT_STATE_DIR".to_owned(),
+                default_value: ".ee/hook-state".to_owned(),
+                description: "Workspace-relative default directory for per-session de-duplication state.".to_owned(),
+            },
+        ],
+        installed_snippet_ids: snippets
+            .iter()
+            .filter(|snippet| snippet.installable && snippet.id.starts_with("ee-ambient-"))
+            .map(|snippet| snippet.id.clone())
+            .collect(),
+    }
+}
+
 fn harness_hook_plan(
     target: HarnessHookTarget,
     settings_path: &Option<PathBuf>,
@@ -1974,14 +2148,24 @@ fn harness_hook_snippets(target: HarnessHookTarget, ee_binary: &Path) -> Vec<Har
         .to_owned();
     vec![
         HarnessHookSnippet {
-            id: "ee-recall-pre-edit".to_owned(),
+            id: "ee-ambient-pre-edit-recall".to_owned(),
             event: "PreToolUse".to_owned(),
             matcher: Some(pre_edit_matcher),
             command: python_hook_command(pre_edit_python(), ee_binary),
             timeout_seconds: 10,
             async_hook: false,
             installable: true,
-            purpose: "Inject bounded `ee recall --path ... --budget-tokens 400 --format markdown` context for edited files; fail open on every recall error.".to_owned(),
+            purpose: "Inject provenance-tagged, de-duped `ee recall --path ... --budget-tokens <ambient-budget> --format markdown` context for edited files; suppress empty output and fail open on recall errors.".to_owned(),
+        },
+        HarnessHookSnippet {
+            id: "ee-ambient-pre-risky-preflight".to_owned(),
+            event: "PreToolUse".to_owned(),
+            matcher: Some("Bash".to_owned()),
+            command: python_hook_command(pre_bash_preflight_python(), ee_binary),
+            timeout_seconds: 10,
+            async_hook: false,
+            installable: true,
+            purpose: "Run `ee preflight check --cmd ... --json` before Bash commands and block only policy-denied risky commands; suppress all-clear checks.".to_owned(),
         },
         HarnessHookSnippet {
             id: "ee-journal-bash-failure".to_owned(),
@@ -1994,14 +2178,14 @@ fn harness_hook_snippets(target: HarnessHookTarget, ee_binary: &Path) -> Vec<Har
             purpose: "Capture non-zero Bash command outcomes through `ee journal append --source hook` without blocking the harness.".to_owned(),
         },
         HarnessHookSnippet {
-            id: "ee-session-orientation-suggestion".to_owned(),
+            id: "ee-ambient-session-orient".to_owned(),
             event: "SessionStart".to_owned(),
             matcher: None,
-            command: "ee primer --workspace . --json  # or: ee orient --workspace . --json".to_owned(),
-            timeout_seconds: 0,
+            command: python_hook_command(session_start_python(), ee_binary),
+            timeout_seconds: 10,
             async_hook: false,
-            installable: false,
-            purpose: "Print-only startup suggestion; not auto-installed.".to_owned(),
+            installable: true,
+            purpose: "Inject a bounded SessionStart `ee orient \"session start\" --include-primer --fast --json` bundle with primer and swarm posture; suppress duplicate session output and quiet verbosity.".to_owned(),
         },
     ]
 }
@@ -2015,12 +2199,66 @@ fn python_hook_command(script: &str, ee_binary: &Path) -> String {
 }
 
 fn pre_edit_python() -> &'static str {
-    r#"import json, subprocess, sys
+    r#"import hashlib, json, os, subprocess, sys
 ee = sys.argv[1]
+SCHEMA = "ee.ambient_context.v1"
+SURFACE = "pre_edit_recall"
+DEFAULT_BUDGET = 400
+QUIET_BUDGET = 200
+VERBOSE_BUDGET = 800
+DEFAULT_MAX_PATHS = 8
+QUIET_MAX_PATHS = 4
+VERBOSE_MAX_PATHS = 12
 try:
     data = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
+def ambient_enabled():
+    value = os.environ.get("EE_AMBIENT_CONTEXT", "true").strip().lower()
+    return value not in ("0", "false", "off", "no", "disable", "disabled")
+def ambient_verbosity():
+    value = os.environ.get("EE_AMBIENT_CONTEXT_VERBOSITY", "standard").strip().lower()
+    if value in ("quiet", "standard", "verbose"):
+        return value
+    return "standard"
+if not ambient_enabled():
+    sys.exit(0)
+VERBOSITY = ambient_verbosity()
+BUDGET = {"quiet": QUIET_BUDGET, "standard": DEFAULT_BUDGET, "verbose": VERBOSE_BUDGET}[VERBOSITY]
+MAX_PATHS = {"quiet": QUIET_MAX_PATHS, "standard": DEFAULT_MAX_PATHS, "verbose": VERBOSE_MAX_PATHS}[VERBOSITY]
+def state_path():
+    cwd = data.get("cwd") or os.getcwd()
+    root = os.environ.get("EE_AMBIENT_CONTEXT_STATE_DIR") or os.path.join(cwd, ".ee", "hook-state")
+    try:
+        os.makedirs(root, exist_ok=True)
+    except Exception:
+        return None
+    return os.path.join(root, "ambient_context_seen.json")
+def already_seen(text):
+    path = state_path()
+    if not path:
+        return False
+    key = SURFACE + ":" + hashlib.blake2s(text.encode("utf-8"), digest_size=16).hexdigest()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            seen = json.load(f)
+    except Exception:
+        seen = {}
+    if seen.get(key):
+        return True
+    seen[key] = True
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(seen, f, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        pass
+    return False
+def emit(text):
+    if already_seen(text):
+        return
+    header = f"<!-- ee ambient_context schema={SCHEMA} surface={SURFACE} budgetTokens={BUDGET} maxPaths={MAX_PATHS} verbosity={VERBOSITY} provenance=ee:{SCHEMA} -->"
+    payload = {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name") or "PreToolUse", "additionalContext": header + "\n" + text}}
+    print(json.dumps(payload, separators=(",", ":")))
 tool_input = data.get("tool_input") or {}
 paths = []
 for key in ("file_path", "path", "notebook_path"):
@@ -2039,9 +2277,9 @@ for path in paths:
 if not seen:
     sys.exit(0)
 cmd = [ee, "recall"]
-for path in seen[:8]:
+for path in seen[:MAX_PATHS]:
     cmd.extend(["--path", path])
-cmd.extend(["--budget-tokens", "400", "--format", "markdown"])
+cmd.extend(["--budget-tokens", str(BUDGET), "--format", "markdown"])
 try:
     result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=10)
 except Exception:
@@ -2049,7 +2287,110 @@ except Exception:
 text = result.stdout.strip()
 if result.returncode != 0 or not text:
     sys.exit(0)
-payload = {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name") or "PreToolUse", "additionalContext": text}}
+emit(text)
+"#
+}
+
+fn session_start_python() -> &'static str {
+    r#"import hashlib, json, os, subprocess, sys
+ee = sys.argv[1]
+SCHEMA = "ee.ambient_context.v1"
+SURFACE = "session_start_orient"
+DEFAULT_BUDGET = 1200
+VERBOSE_BUDGET = 1600
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+def ambient_enabled():
+    value = os.environ.get("EE_AMBIENT_CONTEXT", "true").strip().lower()
+    return value not in ("0", "false", "off", "no", "disable", "disabled")
+def ambient_verbosity():
+    value = os.environ.get("EE_AMBIENT_CONTEXT_VERBOSITY", "standard").strip().lower()
+    if value in ("quiet", "standard", "verbose"):
+        return value
+    return "standard"
+if not ambient_enabled():
+    sys.exit(0)
+VERBOSITY = ambient_verbosity()
+if VERBOSITY == "quiet":
+    sys.exit(0)
+BUDGET = VERBOSE_BUDGET if VERBOSITY == "verbose" else DEFAULT_BUDGET
+def state_path():
+    cwd = data.get("cwd") or os.getcwd()
+    root = os.environ.get("EE_AMBIENT_CONTEXT_STATE_DIR") or os.path.join(cwd, ".ee", "hook-state")
+    try:
+        os.makedirs(root, exist_ok=True)
+    except Exception:
+        return None
+    return os.path.join(root, "ambient_context_seen.json")
+def already_seen(text):
+    path = state_path()
+    if not path:
+        return False
+    session = str(data.get("session_id") or data.get("sessionId") or "default")
+    digest = hashlib.blake2s(text.encode("utf-8"), digest_size=16).hexdigest()
+    key = SURFACE + ":" + session + ":" + digest
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            seen = json.load(f)
+    except Exception:
+        seen = {}
+    if seen.get(key):
+        return True
+    seen[key] = True
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(seen, f, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        pass
+    return False
+task = str(data.get("task") or data.get("prompt") or "session start")[:240]
+cmd = [ee, "--max-output-tokens", str(BUDGET), "orient", task, "--workspace", ".", "--include-primer", "--fast", "--json"]
+try:
+    result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=10)
+except Exception:
+    sys.exit(0)
+text = result.stdout.strip()
+if result.returncode != 0 or not text or already_seen(text):
+    sys.exit(0)
+header = f"<!-- ee ambient_context schema={SCHEMA} surface={SURFACE} budgetTokens={BUDGET} verbosity={VERBOSITY} provenance=ee:{SCHEMA} -->"
+payload = {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name") or "SessionStart", "additionalContext": header + "\n" + text}}
+print(json.dumps(payload, separators=(",", ":")))
+"#
+}
+
+fn pre_bash_preflight_python() -> &'static str {
+    r#"import json, os, subprocess, sys
+ee = sys.argv[1]
+SCHEMA = "ee.ambient_context.v1"
+SURFACE = "pre_risky_preflight"
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+def ambient_enabled():
+    value = os.environ.get("EE_AMBIENT_CONTEXT", "true").strip().lower()
+    return value not in ("0", "false", "off", "no", "disable", "disabled")
+if not ambient_enabled():
+    sys.exit(0)
+if (data.get("tool_name") or "") != "Bash":
+    sys.exit(0)
+tool_input = data.get("tool_input") or {}
+command = str(tool_input.get("command") or "")
+if not command.strip():
+    sys.exit(0)
+cmd = [ee, "preflight", "check", "--cmd", command, "--json"]
+try:
+    result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=10)
+except Exception:
+    sys.exit(0)
+if result.returncode != 7:
+    sys.exit(0)
+text = result.stdout.strip() or result.stderr.strip() or "ee preflight denied this command."
+reason = "ee preflight denied this command; get explicit human authorization before bypassing."
+header = f"<!-- ee ambient_context schema={SCHEMA} surface={SURFACE} provenance=ee:{SCHEMA} -->"
+payload = {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name") or "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason, "additionalContext": header + "\n" + text}}
 print(json.dumps(payload, separators=(",", ":")))
 "#
 }
@@ -3862,7 +4203,64 @@ mod tests {
     }
 
     #[test]
-    fn harness_print_is_read_only_and_includes_recall_and_journal_snippets() -> TestResult {
+    fn ambient_context_noise_governor_budgets_injected_text() -> TestResult {
+        let mut governor = AmbientContextNoiseGovernor::new();
+        let decision = governor.evaluate("pre_edit_recall", "alpha beta gamma delta", 2);
+        match decision {
+            AmbientContextNoiseDecision::Inject {
+                text,
+                used_tokens,
+                truncated,
+            } => {
+                assert_eq!(text, "alpha beta");
+                assert_eq!(used_tokens, 2);
+                assert!(truncated);
+            }
+            AmbientContextNoiseDecision::Suppress { reason } => {
+                return Err(format!("expected injection, got suppression {reason}"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ambient_context_noise_governor_dedups_by_surface_and_text() -> TestResult {
+        let mut governor = AmbientContextNoiseGovernor::new();
+        let first = governor.evaluate("session_start_orient", "same context", 10);
+        assert!(
+            matches!(first, AmbientContextNoiseDecision::Inject { .. }),
+            "first context should inject"
+        );
+        let second = governor.evaluate("session_start_orient", "same context", 10);
+        assert_eq!(
+            second,
+            AmbientContextNoiseDecision::Suppress {
+                reason: "duplicate_in_session".to_owned()
+            }
+        );
+        let other_surface = governor.evaluate("pre_edit_recall", "same context", 10);
+        assert!(
+            matches!(other_surface, AmbientContextNoiseDecision::Inject { .. }),
+            "same text on another surface is independently useful"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ambient_context_noise_governor_suppresses_empty_context() -> TestResult {
+        let mut governor = AmbientContextNoiseGovernor::new();
+        let decision = governor.evaluate("pre_edit_recall", " \n\t ", 10);
+        assert_eq!(
+            decision,
+            AmbientContextNoiseDecision::Suppress {
+                reason: "empty_context".to_owned()
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn harness_print_is_read_only_and_includes_ambient_and_journal_snippets() -> TestResult {
         let temp = TempDir::new().map_err(|e| e.to_string())?;
         let settings_path = temp.path().join("settings.json");
         let report = generate_harness_hook_install(&harness_options(
@@ -3883,10 +4281,33 @@ mod tests {
             report
                 .snippets
                 .iter()
-                .any(|snippet| snippet.command.contains("recall")
+                .any(|snippet| snippet.id == "ee-ambient-pre-edit-recall"
+                    && snippet.command.contains("recall")
                     && snippet.command.contains("--budget-tokens")
                     && snippet.command.contains("400")),
             "pre-edit snippet should route through bounded recall"
+        );
+        assert!(
+            report
+                .snippets
+                .iter()
+                .any(|snippet| snippet.id == "ee-ambient-pre-risky-preflight"
+                    && snippet.command.contains("preflight")
+                    && snippet.command.contains("check")
+                    && snippet.command.contains("permissionDecision")),
+            "pre-risky snippet should route through preflight and carry a deny decision"
+        );
+        assert!(
+            report
+                .snippets
+                .iter()
+                .any(|snippet| snippet.id == "ee-ambient-session-orient"
+                    && snippet.event == "SessionStart"
+                    && snippet.installable
+                    && snippet.command.contains("orient")
+                    && snippet.command.contains("--include-primer")
+                    && snippet.command.contains("--max-output-tokens")),
+            "SessionStart orientation snippet must be installed and bounded"
         );
         assert!(
             report
@@ -3898,14 +4319,85 @@ mod tests {
             "post-bash snippet should route through journal append"
         );
         assert!(
+            report.ambient_context.schema == AMBIENT_CONTEXT_SCHEMA_V1,
+            "ambient context schema must be reported"
+        );
+        assert!(
+            report.ambient_context.enabled_by_default,
+            "ambient profile is on by default"
+        );
+        assert!(
+            report.ambient_context.read_only,
+            "ambient profile must be read-only"
+        );
+        assert!(
             report
-                .plan
+                .ambient_context
+                .installed_snippet_ids
+                .contains(&"ee-ambient-session-orient".to_owned()),
+            "ambient profile must include SessionStart orient"
+        );
+        assert!(
+            report
+                .ambient_context
+                .suppression_rules
                 .iter()
-                .any(|item| item.action == "print_only"
-                    && item.event.as_deref() == Some("SessionStart")),
-            "SessionStart orientation snippet must be print-only"
+                .any(|rule| rule.code == "duplicate_in_session"),
+            "ambient profile documents duplicate suppression"
+        );
+        assert!(
+            report
+                .ambient_context
+                .controls
+                .iter()
+                .any(|control| control.env_var == "EE_AMBIENT_CONTEXT"
+                    && control.default_value == "true"),
+            "ambient profile must document the global on/off control"
+        );
+        assert!(
+            report
+                .ambient_context
+                .controls
+                .iter()
+                .any(|control| control.env_var == "EE_AMBIENT_CONTEXT_VERBOSITY"
+                    && control.default_value == "standard"),
+            "ambient profile must document verbosity control"
         );
         Ok(())
+    }
+
+    #[test]
+    fn ambient_hook_scripts_encode_noise_governor_controls() {
+        let pre_edit = pre_edit_python();
+        assert!(pre_edit.contains("EE_AMBIENT_CONTEXT"));
+        assert!(pre_edit.contains("EE_AMBIENT_CONTEXT_VERBOSITY"));
+        assert!(pre_edit.contains("DEFAULT_BUDGET = 400"));
+        assert!(pre_edit.contains("QUIET_BUDGET = 200"));
+        assert!(pre_edit.contains("VERBOSE_BUDGET = 800"));
+        assert!(pre_edit.contains("DEFAULT_MAX_PATHS = 8"));
+        assert!(pre_edit.contains("QUIET_MAX_PATHS = 4"));
+        assert!(pre_edit.contains("VERBOSE_MAX_PATHS = 12"));
+        assert!(pre_edit.contains("already_seen(text)"));
+        assert!(pre_edit.contains("if not seen:"));
+        assert!(pre_edit.contains("if result.returncode != 0 or not text:"));
+        assert!(pre_edit.contains("provenance=ee:{SCHEMA}"));
+
+        let session_start = session_start_python();
+        assert!(session_start.contains("EE_AMBIENT_CONTEXT"));
+        assert!(session_start.contains("EE_AMBIENT_CONTEXT_VERBOSITY"));
+        assert!(session_start.contains("if VERBOSITY == \"quiet\":"));
+        assert!(session_start.contains("--max-output-tokens"));
+        assert!(session_start.contains("--include-primer"));
+        assert!(session_start.contains("already_seen(text)"));
+        assert!(session_start.contains("provenance=ee:{SCHEMA}"));
+
+        let preflight = pre_bash_preflight_python();
+        assert!(preflight.contains("EE_AMBIENT_CONTEXT"));
+        assert!(preflight.contains("preflight"));
+        assert!(preflight.contains("check"));
+        assert!(preflight.contains("if result.returncode != 7:"));
+        assert!(preflight.contains("\"permissionDecision\": \"deny\""));
+        assert!(preflight.contains("provenance=ee:{SCHEMA}"));
     }
 
     #[test]
