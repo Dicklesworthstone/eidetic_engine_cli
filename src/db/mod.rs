@@ -7968,6 +7968,14 @@ pub struct StoredModelRegistryEntry {
     pub last_checked_at: Option<String>,
 }
 
+/// Outcome of reconciling a model registry row by workspace-scoped identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelRegistryUpsertOutcome {
+    Inserted,
+    Updated,
+    Unchanged,
+}
+
 /// Input for creating a registered embedding metadata record.
 #[derive(Debug, Clone)]
 pub struct CreateEmbeddingMetadataInput {
@@ -8209,6 +8217,48 @@ impl DbConnection {
         self.update_model_registry_entry(id, &input.to_model_registry_input()?)
     }
 
+    /// Insert or reconcile an embedding metadata record by registry identity.
+    ///
+    /// The identity is `(workspace_id, provider, model_name, purpose)`, not the
+    /// generated registry row id. Existing rows keep their id while status,
+    /// dimension, fingerprint/hash, source, version, and metadata are updated
+    /// to match `input`.
+    pub fn upsert_embedding_metadata_record(
+        &self,
+        insert_id: &str,
+        input: &CreateEmbeddingMetadataInput,
+    ) -> Result<ModelRegistryUpsertOutcome> {
+        let model_input = input.to_model_registry_input()?;
+        let existing = self.find_model_registry_entry(
+            &model_input.workspace_id,
+            model_input.provider,
+            &model_input.model_name,
+            model_input.purpose,
+        )?;
+
+        let Some(existing) = existing else {
+            self.insert_model_registry_entry(insert_id, &model_input)?;
+            return Ok(ModelRegistryUpsertOutcome::Inserted);
+        };
+
+        if model_registry_entry_matches_input(&existing, &model_input) {
+            return Ok(ModelRegistryUpsertOutcome::Unchanged);
+        }
+
+        let updated = self.update_model_registry_entry(&existing.id, &model_input)?;
+        if updated {
+            Ok(ModelRegistryUpsertOutcome::Updated)
+        } else {
+            Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!(
+                    "model registry entry {} vanished before reconcile update",
+                    existing.id
+                ),
+            })
+        }
+    }
+
     /// Get a parsed embedding metadata record by registry ID.
     pub fn get_embedding_metadata_record(
         &self,
@@ -8234,6 +8284,24 @@ impl DbConnection {
         }
         Ok(records)
     }
+}
+
+fn model_registry_entry_matches_input(
+    entry: &StoredModelRegistryEntry,
+    input: &CreateModelRegistryInput,
+) -> bool {
+    entry.workspace_id == input.workspace_id
+        && entry.provider == input.provider
+        && entry.model_name == input.model_name
+        && entry.purpose == input.purpose
+        && entry.dimension == input.dimension
+        && entry.distance_metric == input.distance_metric
+        && entry.status == input.status
+        && entry.version == input.version
+        && entry.source_uri == input.source_uri
+        && entry.content_hash == input.content_hash
+        && entry.metadata_json == input.metadata_json
+        && entry.last_checked_at == input.last_checked_at
 }
 
 fn embedding_metadata_json(metadata: &EmbeddingMetadataRecord) -> Result<String> {
@@ -27339,8 +27407,7 @@ mod tests {
         let mut promoted = input;
         promoted.status = ModelRegistryStatus::Available;
         promoted.content_hash = Some(
-            "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                .to_string(),
+            "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
         );
         let updated =
             connection.update_model_registry_entry("mdl_01234567890123456789012399", &promoted)?;
@@ -27363,6 +27430,169 @@ mod tests {
             &entry.model_name,
             &"potion".to_string(),
             "identity preserved",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn upsert_embedding_metadata_reconciles_stale_hash_and_dimension() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = embedding_metadata_input(ModelProvider::Model2Vec, "potion");
+        let inserted = connection
+            .upsert_embedding_metadata_record("mdl_upsertinsert00000000000001", &input)?;
+        ensure_equal(
+            &inserted,
+            &super::ModelRegistryUpsertOutcome::Inserted,
+            "first upsert inserts",
+        )?;
+
+        let unchanged = connection
+            .upsert_embedding_metadata_record("mdl_upsertignore00000000000002", &input)?;
+        ensure_equal(
+            &unchanged,
+            &super::ModelRegistryUpsertOutcome::Unchanged,
+            "identical upsert is unchanged",
+        )?;
+        let before = connection
+            .find_model_registry_entry(
+                "wsp_01234567890123456789012345",
+                ModelProvider::Model2Vec,
+                "potion",
+                ModelPurpose::Embedding,
+            )?
+            .ok_or_else(|| TestFailure::new("upserted entry missing"))?;
+        ensure_equal(
+            &before.id,
+            &"mdl_upsertinsert00000000000001".to_string(),
+            "unchanged upsert keeps original row id",
+        )?;
+
+        let mut reconciled = input.clone();
+        reconciled.dimension = 256;
+        reconciled.metadata = EmbeddingMetadataRecord::new(256, ModelDistanceMetric::Cosine);
+        reconciled.metadata.max_input_tokens = Some(1024);
+        reconciled.metadata.tokenizer = Some("bpe:distilled-v2".to_string());
+        reconciled.metadata.model_revision = Some("2026-06-18".to_string());
+        reconciled.metadata.deterministic = true;
+        reconciled.version = Some("distilled-v2".to_string());
+        reconciled.content_hash = Some(
+            "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
+        );
+        reconciled.last_checked_at = Some("2026-06-18T00:00:00Z".to_string());
+
+        let updated = connection
+            .upsert_embedding_metadata_record("mdl_upsertignore00000000000003", &reconciled)?;
+        ensure_equal(
+            &updated,
+            &super::ModelRegistryUpsertOutcome::Updated,
+            "changed fingerprint/dimension updates existing row",
+        )?;
+
+        let after = connection
+            .find_model_registry_entry(
+                "wsp_01234567890123456789012345",
+                ModelProvider::Model2Vec,
+                "potion",
+                ModelPurpose::Embedding,
+            )?
+            .ok_or_else(|| TestFailure::new("reconciled entry missing"))?;
+        ensure_equal(
+            &after.id,
+            &"mdl_upsertinsert00000000000001".to_string(),
+            "reconcile keeps stable row id",
+        )?;
+        ensure_equal(&after.dimension, &Some(256), "dimension reconciled")?;
+        ensure_equal(
+            &after.content_hash,
+            &reconciled.content_hash,
+            "content hash reconciled",
+        )?;
+        ensure_equal(
+            &after.version,
+            &Some("distilled-v2".to_string()),
+            "version reconciled",
+        )?;
+        ensure_equal(
+            &after.last_checked_at,
+            &Some("2026-06-18T00:00:00Z".to_string()),
+            "last_checked_at reconciled",
+        )?;
+        let record = connection
+            .get_embedding_metadata_record(after.id.as_str())?
+            .ok_or_else(|| TestFailure::new("parsed reconciled metadata missing"))?;
+        ensure_equal(&record.metadata.dimension, &256, "metadata dimension")?;
+        ensure_equal(
+            &record.metadata.tokenizer,
+            &Some("bpe:distilled-v2".to_string()),
+            "metadata tokenizer reconciled",
+        )?;
+
+        let records =
+            connection.list_embedding_metadata_records("wsp_01234567890123456789012345")?;
+        ensure_equal(&records.len(), &1, "upsert must not duplicate rows")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn upsert_embedding_metadata_promotes_unavailable_to_available() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let mut declared = embedding_metadata_input(ModelProvider::Model2Vec, "potion");
+        declared.status = ModelRegistryStatus::Unavailable;
+        declared.content_hash = None;
+        let inserted = connection
+            .upsert_embedding_metadata_record("mdl_upsertpromote0000000000001", &declared)?;
+        ensure_equal(
+            &inserted,
+            &super::ModelRegistryUpsertOutcome::Inserted,
+            "declared unavailable row inserted",
+        )?;
+
+        let mut available = declared.clone();
+        available.status = ModelRegistryStatus::Available;
+        available.content_hash = Some(
+            "blake3:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_string(),
+        );
+        available.last_checked_at = Some("2026-06-18T01:00:00Z".to_string());
+        let promoted = connection
+            .upsert_embedding_metadata_record("mdl_upsertignore00000000000004", &available)?;
+        ensure_equal(
+            &promoted,
+            &super::ModelRegistryUpsertOutcome::Updated,
+            "download success promotes row in place",
+        )?;
+
+        let entry = connection
+            .find_model_registry_entry(
+                "wsp_01234567890123456789012345",
+                ModelProvider::Model2Vec,
+                "potion",
+                ModelPurpose::Embedding,
+            )?
+            .ok_or_else(|| TestFailure::new("promoted upsert entry missing"))?;
+        ensure_equal(
+            &entry.id,
+            &"mdl_upsertpromote0000000000001".to_string(),
+            "promotion keeps declared row id",
+        )?;
+        ensure_equal(
+            &entry.status,
+            &ModelRegistryStatus::Available,
+            "status promoted",
+        )?;
+        ensure_equal(
+            &entry.content_hash,
+            &available.content_hash,
+            "available fingerprint recorded",
         )?;
 
         connection.close()?;
