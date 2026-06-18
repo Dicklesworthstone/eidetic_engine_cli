@@ -5,7 +5,7 @@
 //! diagram renderers offline and text-only while protecting stable node labels
 //! and edge ordering.
 
-use ee::core::doctor::{CheckResult, CheckSeverity, DoctorReport, Posture};
+use ee::core::doctor::{CheckResult, CheckSeverity, CheckTier, DoctorReport, Posture};
 use ee::core::procedure::{
     PROCEDURE_PROMOTE_REPORT_SCHEMA_V1, PROCEDURE_PROMOTION_AUDIT_SCHEMA_V1,
     PROCEDURE_PROMOTION_CURATION_SCHEMA_V1, ProcedurePromoteReport, ProcedurePromotionAuditPlan,
@@ -221,6 +221,7 @@ fn doctor_fixture() -> DoctorReport {
                 message: "database opened".to_string(),
                 error_code: None,
                 repair: None,
+                tier: CheckTier::Core,
             },
             CheckResult {
                 name: "search_index",
@@ -228,6 +229,7 @@ fn doctor_fixture() -> DoctorReport {
                 message: "index generation lags database".to_string(),
                 error_code: None,
                 repair: Some("ee index rebuild --workspace ."),
+                tier: CheckTier::Core,
             },
             CheckResult {
                 name: "cass",
@@ -235,6 +237,7 @@ fn doctor_fixture() -> DoctorReport {
                 message: "cass binary not found".to_string(),
                 error_code: None,
                 repair: Some("install cass or disable cass.enabled"),
+                tier: CheckTier::Core,
             },
         ],
     }

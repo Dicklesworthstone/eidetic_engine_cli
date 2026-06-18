@@ -3619,10 +3619,13 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::install::{
+        INSTALL_FRESHNESS_SCHEMA_V1, InstallFreshnessReport, InstallFreshnessVerdict,
+        InstallVersionEvidence,
+    };
     use crate::models::{
-        CurrentBinary, InstallCheckReport, InstallFinding, InstallFindingCode,
-        InstallFreshnessReport, InstallFreshnessVerdict, InstallPathAnalysis, InstallPathStatus,
-        InstallPermissionCheck, InstallPermissionStatus, InstallTarget, InstallVersionEvidence,
+        CurrentBinary, InstallCheckReport, InstallFinding, InstallFindingCode, InstallPathAnalysis,
+        InstallPathStatus, InstallPermissionCheck, InstallPermissionStatus, InstallTarget,
         PathBinary, UpdateSourcePosture,
     };
 
@@ -3695,7 +3698,7 @@ mod tests {
                 status: "offline_no_manifest".to_owned(),
             },
             freshness: InstallFreshnessReport {
-                schema: crate::models::INSTALL_FRESHNESS_SCHEMA_V1.to_owned(),
+                schema: INSTALL_FRESHNESS_SCHEMA_V1.to_owned(),
                 verdict: InstallFreshnessVerdict::ShadowedBinary,
                 authoritative: false,
                 comparison: "equal".to_owned(),

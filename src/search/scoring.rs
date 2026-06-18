@@ -902,6 +902,7 @@ mod tests {
             redundancy_lambda: 2.0,
             anchor_match_bias_cap: DEFAULT_ANCHOR_MATCH_BIAS_CAP,
             bead_affinity_bias_cap: DEFAULT_BEAD_AFFINITY_BIAS_CAP,
+            stale_anchor_penalty: DEFAULT_STALE_ANCHOR_PENALTY,
         };
         let components = SearchScoreComponents::from_signals(
             SearchScoringSignals {
@@ -966,6 +967,7 @@ mod tests {
             redundancy_lambda: f32::NEG_INFINITY,
             anchor_match_bias_cap: f32::NAN,
             bead_affinity_bias_cap: f32::NAN,
+            stale_anchor_penalty: DEFAULT_STALE_ANCHOR_PENALTY,
         };
         let components = SearchScoreComponents::from_signals(
             SearchScoringSignals {
