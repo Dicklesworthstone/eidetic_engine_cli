@@ -133,7 +133,9 @@ use crate::core::handoff::{
     RotateKeyOptions as HandoffRotateKeyOptions, create_handoff, inspect_handoff, preview_handoff,
     resume_handoff, rotate_handoff_key,
 };
-use crate::core::health::{HealthReport, StructuralHealthReport};
+use crate::core::health::{
+    HealthReport, HealthScorecardOptions, HealthScorecardReport, StructuralHealthReport,
+};
 use crate::core::impact::{
     ImpactError, ImpactOptions, ImpactReport, ImpactSurfaceQuery, run_impact,
 };
@@ -2412,6 +2414,30 @@ pub struct HealthArgs {
     /// Emit graph-derived structural health for robot consumers.
     #[arg(long, action = ArgAction::SetTrue)]
     pub robot_insights: bool,
+
+    #[command(subcommand)]
+    pub command: Option<HealthCommand>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum HealthCommand {
+    /// Summarize memory-store health with trend and prioritized repair actions.
+    Scorecard(HealthScorecardArgs),
+}
+
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct HealthScorecardArgs {
+    /// Explicit database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Record an append-only memory-debt trend snapshot before scoring.
+    #[arg(long = "record-snapshot", action = ArgAction::SetTrue)]
+    pub record_snapshot: bool,
+
+    /// Number of prior trend snapshots to inspect.
+    #[arg(long = "history-limit", value_name = "N", default_value_t = 12)]
+    pub history_limit: u32,
 }
 
 /// Arguments for `ee help`. Accepts an optional subcommand path so that
@@ -13048,6 +13074,38 @@ where
                 }
             }
         },
+        Some(Command::Health(HealthArgs {
+            command: Some(HealthCommand::Scorecard(ref args)),
+            ..
+        })) => {
+            let workspace_path = cli.resolve_workspace();
+            let options = HealthScorecardOptions {
+                workspace_path: &workspace_path,
+                database_path: args.database.as_deref(),
+                record_snapshot: args.record_snapshot,
+                history_limit: args.history_limit,
+                now_rfc3339: None,
+            };
+            match HealthScorecardReport::gather(&options) {
+                Ok(report) => match cli.renderer() {
+                    output::Renderer::Human | output::Renderer::Markdown => {
+                        write_stdout(stdout, &output::render_health_scorecard_human(&report))
+                    }
+                    output::Renderer::Toon => write_stdout(
+                        stdout,
+                        &(output::render_health_scorecard_toon(&report) + "\n"),
+                    ),
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => write_stdout(
+                        stdout,
+                        &(output::render_health_scorecard_json(&report) + "\n"),
+                    ),
+                },
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
         Some(Command::Health(ref args)) if args.robot_insights => {
             let report = match structural_health_feature_enabled(&cli) {
                 Ok(true) => cli.workspace.as_deref().map_or_else(
@@ -58474,7 +58532,10 @@ impl NormalizedInvocation {
                     HandoffCommand::Resume(_) => "handoff resume".to_string(),
                     HandoffCommand::RotateKey(_) => "handoff rotate-key".to_string(),
                 },
-                Command::Health(_) => "health".to_string(),
+                Command::Health(health) => match &health.command {
+                    Some(HealthCommand::Scorecard(_)) => "health scorecard".to_string(),
+                    None => "health".to_string(),
+                },
                 Command::Help(_) => "help".to_string(),
                 Command::Init(_) => "init".to_string(),
                 Command::Insights(_) => "insights".to_string(),

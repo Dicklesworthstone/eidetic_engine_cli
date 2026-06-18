@@ -651,6 +651,7 @@ themselves.
 | `ee why <memory-id> --causal-explain --json` | Add a causalExplanation block with causal ancestry and min-cost path evidence |
 | `ee insights --section causalBottlenecks --json` | Inspect causal bottleneck findings across failure-oriented causal evidence |
 | `ee health --robot-insights --json` | Surface structural health through k-truss and contradiction-cluster summaries |
+| `ee health scorecard --json` | Summarize memory-store health across coverage, freshness, trust, redundancy, and graph structure with trend and top actions |
 | `ee insights --section knowledgeSkyline --json` | Summarize portfolio-level memory posture across onion layers, communities, trust, age, and graph support |
 
 Worked example: inspect bridge memories before curation.
@@ -1200,6 +1201,7 @@ base retrieval signal dominant.
 | Command | Purpose |
 |---|---|
 | `ee doctor --quick\|--robot-triage\|--capabilities\|--gc-plan <days>` | Focused repair and operator triage surfaces |
+| `ee health scorecard [--record-snapshot] --json` | Trend-aware memory-health scorecard with coverage, freshness, trust, redundancy, graph, and top-action signals |
 | `ee curate doctor --trend --json` / `ee learn gaps --json` | Content-health diagnostics: memory-debt queue, steward trend snapshots, and demand-driven gap templates |
 | `ee preflight run "<task>"` / `show` / `close` | Task risk assessment, tripwire context, and post-run feedback |
 | `ee preflight check --cmd "<command>" --json` | Command-facing policy guard for shell hooks; use `--stdin` or `--cmd-base64` when an outer harness may block risky argv text before `ee` can inspect it |
