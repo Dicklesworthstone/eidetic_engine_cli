@@ -3080,7 +3080,7 @@ impl crate::search::Embedder for EeLazyModel2VecEmbedder {
     }
 
     fn is_semantic(&self) -> bool {
-        !self.failed()
+        self.is_ready()
     }
 
     fn category(&self) -> ModelCategory {
@@ -3095,7 +3095,7 @@ impl crate::search::Embedder for EeLazyModel2VecEmbedder {
     }
 
     fn supports_mrl(&self) -> bool {
-        !self.failed()
+        self.is_ready()
     }
 }
 
@@ -5018,7 +5018,7 @@ mod tests {
     }
 
     #[test]
-    fn embed_download_auto_uses_lazy_semantic_stack_for_empty_cache() -> TestResult {
+    fn embed_download_auto_uses_lazy_stack_for_empty_cache() -> TestResult {
         let settings = EeEmbedderSettings {
             model_root: unique_test_dir("embed-download-auto-empty"),
             download_mode: EeEmbedDownloadMode::Auto,
@@ -5026,8 +5026,8 @@ mod tests {
         let stack = search_embedder_stack_for_settings(&settings);
 
         ensure(
-            stack.fast().is_semantic(),
-            "auto mode should expose the lazy local semantic fast tier before first embed",
+            !stack.fast().is_semantic(),
+            "auto mode must not claim semantic retrieval before the model is loaded",
         )?;
         ensure(
             stack.fast().id() == POTION_MODEL_NAME,
@@ -5039,7 +5039,36 @@ mod tests {
         )?;
         ensure(
             stack.quality().is_none(),
-            "lazy semantic fast tier should not graft a misleading hash quality tier",
+            "lazy first-use download tier should not graft a misleading hash quality tier",
+        )
+    }
+
+    #[test]
+    fn lazy_model2vec_embedder_reports_hash_posture_after_failure() -> TestResult {
+        let embedder = EeLazyModel2VecEmbedder::new(unique_test_dir("lazy-model-failure"));
+
+        ensure(
+            !embedder.is_semantic(),
+            "pending lazy model must be download-capable but not semantic-ready",
+        )?;
+        ensure(
+            embedder.id() == POTION_MODEL_NAME,
+            "pending lazy model should still disclose the intended bundled model id",
+        )?;
+
+        embedder.mark_failed();
+        let fallback = HashEmbedder::default_256();
+        ensure(
+            !embedder.is_semantic(),
+            "failed lazy model must remain non-semantic",
+        )?;
+        ensure(
+            embedder.id() == fallback.id(),
+            "failed lazy model should disclose the active hash fallback id",
+        )?;
+        ensure(
+            embedder.category() == ModelCategory::HashEmbedder,
+            "failed lazy model should disclose hash fallback category",
         )
     }
 
