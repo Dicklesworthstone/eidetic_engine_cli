@@ -290,3 +290,131 @@ else
     e2e_log_assert_eq "$E6_OPERATION_DEGRADATIONS_LEN" "$E6_DEGRADED_LEN" \
         "e6_this_operation_degradation_count_matches_status"
 fi
+
+# ------------------------------------------------------------
+# bd-1et0v.12 — doctor-health core/advisory agreement:
+# Doctor and status top-lines must agree that advisory-only issues are visible
+# but non-blocking, while core memory-loop issues drive the verdict.
+# ------------------------------------------------------------
+printf '%s\n' "bd-1et0v.12 e2e: running ee doctor --json" >&2
+e2e_log_note "bd_1et0v_12_step=run_doctor_json"
+BD12_DOCTOR_JSON=$(ee_workspace doctor --json || true)
+assert_jq "$BD12_DOCTOR_JSON" '.schema' "ee.response.v2" \
+    "bd12_doctor_response_schema"
+assert_jq "$BD12_DOCTOR_JSON" '.success' "true" \
+    "bd12_doctor_response_success"
+assert_jq "$BD12_DOCTOR_JSON" \
+    '([.data.checks[]?.tier | select(. != "core" and . != "advisory")] | length)' \
+    "0" "bd12_doctor_check_tiers_classified"
+assert_jq "$BD12_DOCTOR_JSON" '(.data.advisories | type)' "array" \
+    "bd12_doctor_advisories_array"
+
+BD12_DOCTOR_POSTURE=$(printf '%s' "$BD12_DOCTOR_JSON" \
+    | jq -r '.data.posture // empty' 2>/dev/null || echo "")
+case "$BD12_DOCTOR_POSTURE" in
+    ok|degraded_recoverable|blocked)
+        e2e_log_assert_eq "true" "true" "bd12_doctor_posture_enum_valid"
+        ;;
+    *)
+        e2e_log_assert_eq "${BD12_DOCTOR_POSTURE:-missing}" \
+            "ok|degraded_recoverable|blocked" "bd12_doctor_posture_enum_valid"
+        ;;
+esac
+
+BD12_DOCTOR_CORE_NONOK_COUNT=$(printf '%s' "$BD12_DOCTOR_JSON" \
+    | jq -r '[.data.checks[]? | select(.tier == "core" and .severity != "ok")] | length' \
+    2>/dev/null || echo "?")
+BD12_DOCTOR_ADVISORY_NONOK_COUNT=$(printf '%s' "$BD12_DOCTOR_JSON" \
+    | jq -r '[.data.checks[]? | select(.tier == "advisory" and .severity != "ok")] | length' \
+    2>/dev/null || echo "?")
+BD12_DOCTOR_ADVISORIES_LEN=$(printf '%s' "$BD12_DOCTOR_JSON" \
+    | jq -r '.data.advisories | length' 2>/dev/null || echo "?")
+if [ "$BD12_DOCTOR_CORE_NONOK_COUNT" = "?" ] \
+    || [ "$BD12_DOCTOR_ADVISORY_NONOK_COUNT" = "?" ] \
+    || [ "$BD12_DOCTOR_ADVISORIES_LEN" = "?" ]; then
+    e2e_log_assert_eq "parse_failed" "numeric" "bd12_doctor_check_counts_parsed"
+else
+    e2e_log_assert_eq "$BD12_DOCTOR_ADVISORIES_LEN" "$BD12_DOCTOR_ADVISORY_NONOK_COUNT" \
+        "bd12_doctor_advisory_summary_matches_nonok_advisory_checks"
+    if [ "$BD12_DOCTOR_CORE_NONOK_COUNT" -eq 0 ]; then
+        assert_jq "$BD12_DOCTOR_JSON" '.data.posture' "ok" \
+            "bd12_doctor_core_clear_posture_ok"
+        assert_jq "$BD12_DOCTOR_JSON" '.data.healthy' "true" \
+            "bd12_doctor_core_clear_healthy_true"
+        BD12_DOCTOR_CORE_CLEAR="true"
+    else
+        if [ "$BD12_DOCTOR_POSTURE" = "ok" ]; then
+            e2e_log_assert_eq "$BD12_DOCTOR_POSTURE" "non_ok_when_core_check_nonok" \
+                "bd12_doctor_core_nonok_posture_not_ok"
+        else
+            e2e_log_assert_eq "true" "true" "bd12_doctor_core_nonok_posture_not_ok"
+        fi
+        BD12_DOCTOR_CORE_CLEAR="false"
+    fi
+fi
+
+printf '%s\n' "bd-1et0v.12 e2e: running ee status --json" >&2
+e2e_log_note "bd_1et0v_12_step=run_status_json"
+BD12_STATUS_JSON=$(ee_workspace status --json || true)
+assert_jq "$BD12_STATUS_JSON" '.schema' "ee.response.v2" \
+    "bd12_status_response_schema"
+assert_jq "$BD12_STATUS_JSON" '.success' "true" \
+    "bd12_status_response_success"
+assert_jq "$BD12_STATUS_JSON" '(.data.posture.subsystems | type)' "array" \
+    "bd12_status_subsystems_array"
+
+BD12_STATUS_OVERALL=$(printf '%s' "$BD12_STATUS_JSON" \
+    | jq -r '.data.posture.overall // empty' 2>/dev/null || echo "")
+case "$BD12_STATUS_OVERALL" in
+    ok|degraded_recoverable|degraded_required|blocked|unimplemented|initializing)
+        e2e_log_assert_eq "true" "true" "bd12_status_overall_enum_valid"
+        ;;
+    *)
+        e2e_log_assert_eq "${BD12_STATUS_OVERALL:-missing}" \
+            "ok|degraded_recoverable|degraded_required|blocked|unimplemented|initializing" \
+            "bd12_status_overall_enum_valid"
+        ;;
+esac
+
+BD12_STATUS_CORE_NONOK_COUNT=$(printf '%s' "$BD12_STATUS_JSON" \
+    | jq -r '[.data.posture.subsystems[]?
+        | select(.id as $id
+            | (["runtime","storage","search","memory","pack"] | index($id))
+              and .status != "ok")] | length' \
+    2>/dev/null || echo "?")
+BD12_STATUS_CORE_IDS=$(printf '%s' "$BD12_STATUS_JSON" \
+    | jq -r '[.data.posture.subsystems[]?
+        | select(.id as $id | ["runtime","storage","search","memory","pack"] | index($id))
+        | .id] | sort | join(",")' 2>/dev/null || echo "")
+if [ "$BD12_STATUS_CORE_NONOK_COUNT" = "?" ]; then
+    e2e_log_assert_eq "parse_failed" "numeric" "bd12_status_core_count_parsed"
+else
+    e2e_log_assert_eq "$BD12_STATUS_CORE_IDS" "memory,pack,runtime,search,storage" \
+        "bd12_status_core_ids_present"
+    if [ "$BD12_STATUS_CORE_NONOK_COUNT" -eq 0 ]; then
+        assert_jq "$BD12_STATUS_JSON" '.data.posture.overall' "ok" \
+            "bd12_status_core_clear_overall_ok"
+        BD12_STATUS_CORE_CLEAR="true"
+    else
+        if [ "$BD12_STATUS_OVERALL" = "ok" ]; then
+            e2e_log_assert_eq "$BD12_STATUS_OVERALL" "non_ok_when_core_subsystem_nonok" \
+                "bd12_status_core_nonok_overall_not_ok"
+        else
+            e2e_log_assert_eq "true" "true" "bd12_status_core_nonok_overall_not_ok"
+        fi
+        BD12_STATUS_CORE_CLEAR="false"
+    fi
+fi
+
+if [ -n "${BD12_DOCTOR_CORE_CLEAR:-}" ] && [ -n "${BD12_STATUS_CORE_CLEAR:-}" ]; then
+    e2e_log_assert_eq "$BD12_DOCTOR_CORE_CLEAR" "$BD12_STATUS_CORE_CLEAR" \
+        "bd12_doctor_status_core_clear_agreement"
+    _e2e_emit_event "posture_summary" \
+        "bead_id" "bd-1et0v.12" \
+        "doctor_posture" "$BD12_DOCTOR_POSTURE" \
+        "status_overall" "$BD12_STATUS_OVERALL" \
+        "doctor_core_nonok_count" "$BD12_DOCTOR_CORE_NONOK_COUNT" \
+        "doctor_advisory_nonok_count" "$BD12_DOCTOR_ADVISORY_NONOK_COUNT" \
+        "status_core_nonok_count" "$BD12_STATUS_CORE_NONOK_COUNT" \
+        "doctor_status_core_clear_agreement" "$BD12_DOCTOR_CORE_CLEAR"
+fi

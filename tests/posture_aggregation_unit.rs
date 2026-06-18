@@ -74,6 +74,127 @@ fn workspace_posture_uses_same_aggregation_rule() -> TestResult {
 }
 
 #[test]
+fn core_vs_advisory_empty_inputs_stay_green() -> TestResult {
+    use SubsystemPostureStatus as S;
+
+    let no_doctor_checks: Vec<CheckResult> = Vec::new();
+    ensure_equal(
+        DoctorPosture::from_checks(&no_doctor_checks, None),
+        DoctorPosture::Ok,
+        "doctor empty input",
+    )?;
+    ensure_equal(
+        no_doctor_checks.iter().all(CheckResult::is_topline_healthy),
+        true,
+        "doctor empty input healthy",
+    )?;
+
+    let status_without_core_rows = WorkspacePostureReport::new_core_overall(
+        vec![
+            SubsystemPostureReport::new("graph_compute", S::Unimplemented),
+            SubsystemPostureReport::new("rch_worker_pressure", S::DegradedRecoverable),
+        ],
+        OperationPostureReport::ok(["runtime"]),
+    );
+    ensure_equal(
+        status_without_core_rows.overall,
+        S::Ok,
+        "status empty core input",
+    )?;
+    ensure_equal(
+        status_without_core_rows.subsystems.len(),
+        2,
+        "status empty core input keeps advisory rows",
+    )
+}
+
+#[test]
+fn advisory_errors_remain_visible_without_blocking_topline() -> TestResult {
+    use SubsystemPostureStatus as S;
+
+    let doctor_checks = vec![
+        CheckResult::ok("runtime", "ok"),
+        CheckResult::ok("workspace", "ok"),
+        CheckResult::ok("database", "ok"),
+        CheckResult::ok("search_index", "ok"),
+        CheckResult::error("rch_worker_pressure", "worker unavailable", INDEX_STALE).advisory(),
+    ];
+    let status_report = WorkspacePostureReport::new_core_overall(
+        vec![
+            SubsystemPostureReport::new("runtime", S::Ok),
+            SubsystemPostureReport::new("storage", S::Ok),
+            SubsystemPostureReport::new("search", S::Ok),
+            SubsystemPostureReport::new("memory", S::Ok),
+            SubsystemPostureReport::new("pack", S::Ok),
+            SubsystemPostureReport::new("rch_worker_pressure", S::Blocked),
+        ],
+        OperationPostureReport::ok(["runtime", "storage", "search", "memory", "pack"]),
+    );
+
+    ensure_equal(
+        DoctorPosture::from_checks(&doctor_checks, None),
+        DoctorPosture::Ok,
+        "doctor advisory error does not block top-line",
+    )?;
+    ensure_equal(
+        doctor_checks.iter().all(CheckResult::is_topline_healthy),
+        true,
+        "doctor advisory error is top-line healthy",
+    )?;
+    ensure_equal(
+        status_report.overall,
+        S::Ok,
+        "status advisory blocked subsystem does not block top-line",
+    )?;
+    ensure_equal(
+        status_report.subsystems.iter().any(|subsystem| {
+            subsystem.id == "rch_worker_pressure" && subsystem.status == S::Blocked
+        }),
+        true,
+        "status advisory blocked subsystem remains visible",
+    )
+}
+
+#[test]
+fn core_errors_block_both_toplines_even_with_advisories_present() -> TestResult {
+    use SubsystemPostureStatus as S;
+
+    let doctor_checks = vec![
+        CheckResult::ok("runtime", "ok"),
+        CheckResult::ok("workspace", "ok"),
+        CheckResult::error("database", "database unavailable", INDEX_STALE),
+        CheckResult::warning("cass", "cass limited", INDEX_STALE).advisory(),
+    ];
+    let status_report = WorkspacePostureReport::new_core_overall(
+        vec![
+            SubsystemPostureReport::new("runtime", S::Ok),
+            SubsystemPostureReport::new("storage", S::Blocked),
+            SubsystemPostureReport::new("search", S::Ok),
+            SubsystemPostureReport::new("memory", S::Ok),
+            SubsystemPostureReport::new("pack", S::Ok),
+            SubsystemPostureReport::new("rch_worker_pressure", S::DegradedRecoverable),
+        ],
+        OperationPostureReport::ok(["runtime", "storage", "search", "memory", "pack"]),
+    );
+
+    ensure_equal(
+        DoctorPosture::from_checks(&doctor_checks, None),
+        DoctorPosture::Blocked,
+        "doctor core error blocks top-line",
+    )?;
+    ensure_equal(
+        doctor_checks.iter().all(CheckResult::is_topline_healthy),
+        false,
+        "doctor core error flips healthy flag",
+    )?;
+    ensure_equal(
+        status_report.overall,
+        S::Blocked,
+        "status core blocked subsystem blocks top-line",
+    )
+}
+
+#[test]
 fn doctor_and_status_toplines_agree_on_core_vs_advisory_health() -> TestResult {
     use SubsystemPostureStatus as S;
 
