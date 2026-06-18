@@ -56,12 +56,12 @@
         "matchedMemoryId": null,
         "similarity": null
       },
-      "reviewCommand": "ee review session cass_demo --propose --json",
-      "acceptCommand": "ee review session cass_demo --propose --json && ee curate accept curate_demo --reason \"accepted capture suggestion from cass_demo\" --json",
-      "rejectCommand": "ee review session cass_demo --propose --json && ee curate reject curate_demo --reason \"declined ambient capture suggestion from cass_demo\" --json"
+      "reviewCommand": "ee review session cass_demo --workspace /workspace/demo --propose --json",
+      "acceptCommand": "ee review session cass_demo --workspace /workspace/demo --propose --json && ee curate accept curate_demo --workspace /workspace/demo --json",
+      "rejectCommand": "ee review session cass_demo --workspace /workspace/demo --propose --json && ee curate reject curate_demo --workspace /workspace/demo --json"
     }
   ],
   "suppressed": [],
   "degraded": [],
-  "nextAction": "review suggested acceptCommand/rejectCommand entries; no memory is stored until a curation command is run"
+  "nextAction": "ee review session cass_demo --workspace /workspace/demo --propose --json && ee curate accept <candidate-id> --workspace /workspace/demo --json"
 }

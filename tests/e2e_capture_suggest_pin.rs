@@ -264,6 +264,7 @@ fn assert_capture_report(
     parsed: &Value,
     expected_source: &str,
     requested_session: Option<&str>,
+    expected_workspace: &str,
 ) -> TestResult {
     assert_logged(
         log_path,
@@ -343,16 +344,28 @@ fn assert_capture_report(
     )?;
     let accept_command = candidate["acceptCommand"].as_str().unwrap_or_default();
     let reject_command = candidate["rejectCommand"].as_str().unwrap_or_default();
+    let next_action = data["nextAction"].as_str().unwrap_or_default();
     assert_logged(
         log_path,
         "capture_explicit_accept_reject_commands",
         accept_command.contains("ee review session")
             && accept_command.contains("ee curate accept")
+            && accept_command.contains(" && ee curate accept ")
+            && accept_command.contains("--workspace")
+            && accept_command.contains(expected_workspace)
             && reject_command.contains("ee review session")
-            && reject_command.contains("ee curate reject"),
+            && reject_command.contains("ee curate reject")
+            && reject_command.contains(" && ee curate reject ")
+            && reject_command.contains("--workspace")
+            && reject_command.contains(expected_workspace)
+            && next_action.contains(" && ee curate accept ")
+            && next_action.contains("--workspace")
+            && next_action.contains(expected_workspace),
         json!({
             "acceptCommand": accept_command,
             "rejectCommand": reject_command,
+            "nextAction": next_action,
+            "expectedWorkspace": expected_workspace,
         }),
     )
 }
@@ -473,6 +486,7 @@ fn capture_suggest_real_binary_is_read_only_and_repairable() -> TestResult {
         &session_report,
         "from_session",
         Some(CASS_SESSION_ID),
+        workspace_arg,
     )?;
 
     emit_note(&log_path, "act_from_recent", json!({"max": 1}))?;
@@ -495,7 +509,13 @@ fn capture_suggest_real_binary_is_read_only_and_repairable() -> TestResult {
         recent_output.status.success(),
         json!({"status": recent_output.status.code()}),
     )?;
-    assert_capture_report(&log_path, &recent_report, "from_recent", None)?;
+    assert_capture_report(
+        &log_path,
+        &recent_report,
+        "from_recent",
+        None,
+        workspace_arg,
+    )?;
 
     emit_note(&log_path, "act_invalid_max", json!({"max": 0}))?;
     let (invalid_output, invalid_report) = run_ee_json(
