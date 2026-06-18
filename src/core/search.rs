@@ -2243,7 +2243,7 @@ impl SearchReport {
             })
             .collect();
         let consensus_conflicts = search_consensus_conflict_report(&self.query, &visible_results);
-        let rerank_hits = visible_results.iter().collect::<Vec<_>>();
+        let rerank_hits: Vec<&SearchHit> = visible_results.iter().collect();
 
         let mut data = serde_json::json!({
             "command": "search",
