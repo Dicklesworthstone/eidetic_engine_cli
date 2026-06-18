@@ -339,6 +339,7 @@ impl DoctorReport {
         let checks = vec![
             check_runtime(),
             check_ee_install_path(),
+            check_embedding_posture(workspace_path),
             check_workspace(workspace_path),
             check_database(workspace_path),
             check_shard_fanout(workspace_path).advisory(),
@@ -2802,6 +2803,135 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
     }
 }
 
+/// Foreign embedding-config environment variables ee does NOT consume.
+///
+/// ee uses its own bundled local embedder (ADR 0080) and never reads these.
+/// `check_embedding_posture` only DETECTS their presence (never the value) to
+/// warn an operator who set one expecting it to enable neural retrieval — the
+/// analyst trap (findings #1/#2). (Follow-up bd-1et0v.8: surface these in
+/// docs/env_vars.md as "detected-but-ignored".)
+const EMBEDDING_TRAP_ENV_VARS: &[&str] = &["EMBEDDING_MODEL", "OPENAI_API_KEY"];
+
+/// Presence-only scan of the foreign embedding-config env vars (never reads a
+/// value, so it is redaction-safe).
+fn present_embedding_trap_env_vars() -> Vec<&'static str> {
+    EMBEDDING_TRAP_ENV_VARS
+        .iter()
+        .copied()
+        .filter(|name| std::env::var_os(name).is_some())
+        .collect()
+}
+
+/// Build the "EMBEDDING_MODEL is set but ee ignores it" disclosure note, or
+/// `None` when no foreign embedding-config var is present.
+fn embedding_env_trap_note(trap_present: &[&str], mode: &str) -> Option<String> {
+    if trap_present.is_empty() {
+        return None;
+    }
+    let names = trap_present.join(", ");
+    let pronoun = if trap_present.len() == 1 { "it" } else { "them" };
+    Some(format!(
+        "Note: {names} set but ee does not consume {pronoun} — ee uses its own bundled local embedder (current retrieval mode: {mode})."
+    ))
+}
+
+/// Render the advisory embedding-posture check from already-resolved posture
+/// facts. Pure and deterministic (no DB, no env) so the rendering is unit
+/// testable; the `*_present` trap list is injected by the caller.
+///
+/// Always [`CheckTier::Advisory`] — it discloses the active retrieval mode and
+/// the env trap but MUST NOT flip the top-line memory-health verdict (per the
+/// doctor-health tiering leaf, bd-1et0v.12). Semantic-ready is `Ok` (info);
+/// hash fallback is `Warning` (still advisory).
+fn embedding_posture_check_result(
+    semantic: bool,
+    mode: &str,
+    fast_model_id: &str,
+    fast_dimension: usize,
+    deterministic: bool,
+    trap_present: &[&str],
+) -> CheckResult {
+    let trap_note = embedding_env_trap_note(trap_present, mode);
+    let check = if semantic {
+        let determinism = if deterministic { ", deterministic" } else { "" };
+        let mut message = format!(
+            "Semantic retrieval: ready ({mode}, {fast_model_id}, {fast_dimension}d{determinism}). Inspect the active mode with `ee model status` / `ee index status`."
+        );
+        if let Some(note) = trap_note {
+            message.push(' ');
+            message.push_str(&note);
+        }
+        CheckResult::ok("embedding_posture", message)
+    } else {
+        let mut message = format!(
+            "Semantic retrieval: deterministic-hash fallback (non-semantic) — the bundled neural model is not active (mode={mode}, {fast_model_id}, {fast_dimension}d). Degraded code: embed_model_unavailable."
+        );
+        if let Some(note) = trap_note {
+            message.push(' ');
+            message.push_str(&note);
+        }
+        CheckResult {
+            name: "embedding_posture",
+            severity: CheckSeverity::Warning,
+            message,
+            error_code: None,
+            repair: Some(
+                "Inspect with `ee model status`; pre-download the bundled model with `ee model fetch`; then `ee index rebuild` to re-embed. Memory still works on the deterministic-hash tier meanwhile.",
+            ),
+            tier: CheckTier::Advisory,
+        }
+    };
+    // Belt-and-suspenders: this check never participates in top-line health.
+    check.advisory()
+}
+
+/// Advisory result for when the active retrieval mode cannot be determined
+/// (no workspace, or the index status read failed). Still `Ok`/advisory and
+/// still discloses the env trap; points to the canonical inspection surfaces.
+fn embedding_posture_unavailable_check(trap_present: &[&str], reason: &str) -> CheckResult {
+    let mut message = format!(
+        "Semantic retrieval mode could not be determined ({reason}); inspect with `ee model status` / `ee index status`."
+    );
+    if let Some(note) = embedding_env_trap_note(trap_present, "unknown") {
+        message.push(' ');
+        message.push_str(&note);
+    }
+    CheckResult::ok("embedding_posture", message).advisory()
+}
+
+/// Advisory doctor check (bd-1et0v.8): honestly disclose the active retrieval
+/// mode (neural_local vs deterministic-hash) and warn when a foreign
+/// `EMBEDDING_MODEL` / `OPENAI_API_KEY` is set that ee silently ignores.
+/// Reuses the bd-1et0v.6 `EmbeddingPosture` helper (one source of truth) via
+/// [`get_index_status`]. Never flips top-line health.
+fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
+    let trap_present = present_embedding_trap_env_vars();
+    let Some(workspace_path) = workspace_path else {
+        return embedding_posture_unavailable_check(&trap_present, "no workspace path");
+    };
+    let options = IndexStatusOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        database_path: None,
+        index_dir: None,
+    };
+    match get_index_status(&options) {
+        Ok(report) => {
+            let posture = &report.embedding.posture;
+            embedding_posture_check_result(
+                posture.semantic,
+                posture.mode,
+                &posture.fast_model_id,
+                posture.fast_dimension,
+                posture.deterministic,
+                &trap_present,
+            )
+        }
+        Err(error) => {
+            embedding_posture_unavailable_check(&trap_present, &format!("index status: {error}"))
+        }
+    }
+}
+
 fn check_shard_fanout(workspace_path: Option<&Path>) -> CheckResult {
     let enabled =
         shard_fanout_enabled_from_env_value(read_env_var(EnvVar::ShardFanoutEnabled).as_deref());
@@ -5239,5 +5369,83 @@ mod tests {
         };
         assert_eq!(report.posture, Posture::Ok);
         assert!(report.overall_healthy);
+    }
+
+    #[test]
+    fn embedding_posture_semantic_is_info_advisory_and_topline_healthy() {
+        let check = embedding_posture_check_result(
+            true,
+            "neural_local",
+            "potion-multilingual-128M",
+            256,
+            true,
+            &[],
+        );
+        assert_eq!(check.severity, CheckSeverity::Ok);
+        assert_eq!(check.tier, CheckTier::Advisory);
+        assert!(check.is_topline_healthy());
+        assert!(check.message.contains("ready"));
+        assert!(check.message.contains("neural_local"));
+        assert!(check.message.contains("potion-multilingual-128M"));
+        assert!(check.message.contains("256d"));
+        assert!(check.message.contains("ee model status"));
+    }
+
+    #[test]
+    fn embedding_posture_hash_fallback_is_advisory_warning_but_never_flips_health() {
+        let check = embedding_posture_check_result(
+            false,
+            "deterministic_hash",
+            "fnv1a-256",
+            256,
+            true,
+            &[],
+        );
+        assert_eq!(check.severity, CheckSeverity::Warning);
+        assert_eq!(check.tier, CheckTier::Advisory);
+        // Advisory tier => never participates in the top-line memory verdict.
+        assert!(check.is_topline_healthy());
+        assert!(check.message.contains("deterministic-hash fallback"));
+        assert!(check.message.contains("embed_model_unavailable"));
+        assert!(check.repair.is_some());
+    }
+
+    #[test]
+    fn embedding_posture_discloses_the_env_trap() {
+        let check = embedding_posture_check_result(
+            true,
+            "neural_local",
+            "potion-multilingual-128M",
+            256,
+            true,
+            &["EMBEDDING_MODEL"],
+        );
+        assert!(check.message.contains("EMBEDDING_MODEL"));
+        assert!(check.message.contains("does not consume"));
+        assert!(check.message.contains("bundled local embedder"));
+        // Disclosure must not change the advisory/healthy posture.
+        assert_eq!(check.tier, CheckTier::Advisory);
+        assert!(check.is_topline_healthy());
+    }
+
+    #[test]
+    fn embedding_env_trap_note_pluralizes_and_is_empty_when_absent() {
+        assert!(embedding_env_trap_note(&[], "neural_local").is_none());
+        let one = embedding_env_trap_note(&["EMBEDDING_MODEL"], "hash")
+            .expect("one present var yields a note");
+        assert!(one.contains("consume it"));
+        let two = embedding_env_trap_note(&["EMBEDDING_MODEL", "OPENAI_API_KEY"], "hash")
+            .expect("two present vars yield a note");
+        assert!(two.contains("consume them"));
+        assert!(two.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn embedding_posture_unavailable_is_advisory_ok() {
+        let check = embedding_posture_unavailable_check(&[], "no workspace path");
+        assert_eq!(check.severity, CheckSeverity::Ok);
+        assert_eq!(check.tier, CheckTier::Advisory);
+        assert!(check.is_topline_healthy());
+        assert!(check.message.contains("could not be determined"));
     }
 }
