@@ -143,6 +143,7 @@ network access, a live GitHub release, or local Rust compilation.
 | `WIN-PS1-010` | MUST | `Show-AgentIntegration` cannot throw under `Set-StrictMode -Version Latest` when optional agent detection yields zero, one, or many scalar-like results. The installer must not report a false failure after installing `ee.exe`. | `install.ps1:725-783`, especially `install.ps1:772-777` | Static function-shape check in `scripts/windows-installer-static-check.ps1` proves the optional-agent `Where-Object` result is wrapped in `@()` before `.Count`; mocked runtime coverage in `scripts/windows-installer-mocked-flow-check.ps1` installs with a detected Codex marker and no "other" agents. | Yes | Static regression covered by `bd-3tprq.2`; runtime no-match flow covered by the `windows-installer-mocked-flow-conformance` job. |
 | `WIN-PS1-011` | SHOULD | Live GitHub release smoke is opt-in only. Default conformance stays deterministic, offline, and independent of current release availability. | README Windows snippet, `install.ps1:306-317`, `install.ps1:846-856`, `.github/workflows/ci.yml` `windows-installer-live-smoke` | `scripts/windows-installer-live-smoke.ps1` downloads the release `install.ps1` with `Invoke-WebRequest -OutFile`, installs to a runner-temp `-InstallDir`, logs `ee.test_event.v1`, and is gated by the manual `run_windows_installer_live_smoke` workflow input. | Yes for live path | Covered by the skipped-by-default `windows-installer-live-smoke` workflow job and audited by `ci_workflow.windows_live_smoke_ready`. |
 | `WIN-PS1-012` | MUST | Default installer tests do not compile Rust locally. The `-FromSource` path may be tested only through an approved remote/CI path or a mocked/static check. | `install.ps1:657-718`, AGENTS RCH policy | `scripts/windows-installer-static-check.ps1` is parser/static only; mocked release path remains the default for installer flow tests. | No for default checks | Static harness requires no Rust compilation, network, or live release. |
+| `WIN-PS1-013` | MUST | Release packaging smoke must prove the default Windows installer can reach semantic readiness on first use when explicitly opted in with `EE_INSTALL_SEMANTIC_SMOKE=require`; ordinary installer verification must remain concise and must not download the model by default. | `install.ps1:653-718`, `scripts/windows-installer-live-smoke.ps1:33`, `scripts/windows-installer-live-smoke.ps1:185`, `scripts/windows-installer-live-smoke.ps1:258-300`, `docs/testing-strategy.md` release installer semantic smoke section | `scripts/windows-installer-live-smoke.ps1` sets `EE_INSTALL_SEMANTIC_SMOKE=require`, installs the release binary, initializes a temporary workspace, remembers a semantic fact, rebuilds the index, and logs a `semantic_model_status` `ee.test_event.v1` event whose `semanticReadiness.state` is `available` and `mode` is `semantic`. | Yes for live path; network required | Covered by the skipped-by-default live smoke and the release installer smoke. Static conformance pins the opt-in variable and readiness vocabulary so this row cannot silently disappear. |
 
 ### Implementation Notes
 
@@ -166,6 +167,12 @@ network access, a live GitHub release, or local Rust compilation.
   fixture artifacts over loopback, uses a copied shell executable as the
   harmless `ee.exe` payload, and logs each branch as `ee.test_event.v1` without
   GitHub downloads or Rust compilation.
+- `bd-1et0v.24` release installer semantic smoke is intentionally live and
+  opt-in: `EE_INSTALL_SEMANTIC_SMOKE=require` may perform the one-time model2vec
+  download, then requires `semanticReadiness.state=available` and
+  `semanticReadiness.mode=semantic` in `ee model status --json`. Default
+  installer conformance must keep this disabled unless the release smoke asks
+  for it explicitly.
 - Source-install coverage must not run local Rust compilation from ordinary
   agent verification. Use an approved remote/CI lane or a mock/static harness.
 

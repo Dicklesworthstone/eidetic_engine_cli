@@ -295,7 +295,7 @@ if (Test-Path $releaseWorkflowPath) {
 
 if (Test-Path $conformancePath) {
     $conformanceText = Get-Content -Raw -Path $conformancePath
-    foreach ($rowId in @("WIN-PS1-003", "WIN-PS1-004", "WIN-PS1-005", "WIN-PS1-006", "WIN-PS1-007", "WIN-PS1-008", "WIN-PS1-009", "WIN-PS1-010", "WIN-PS1-012")) {
+    foreach ($rowId in @("WIN-PS1-003", "WIN-PS1-004", "WIN-PS1-005", "WIN-PS1-006", "WIN-PS1-007", "WIN-PS1-008", "WIN-PS1-009", "WIN-PS1-010", "WIN-PS1-012", "WIN-PS1-013")) {
         Assert-True `
             -Assertion "conformance_matrix_includes_$rowId" `
             -Condition ($conformanceText -match [regex]::Escape($rowId)) `
@@ -317,6 +317,15 @@ if (Test-Path $conformancePath) {
             $conformanceText -match 'EE_REQUIRE_PROVENANCE=1'
         ) `
         -Diagnosis "tests/CONFORMANCE.md must name -NoVerify, EE_SKIP_VERIFY=1, -RequireProvenance, and EE_REQUIRE_PROVENANCE=1"
+    Assert-True `
+        -Assertion "conformance_matrix_pins_semantic_smoke_vocabulary" `
+        -Condition (
+            $conformanceText -match 'EE_INSTALL_SEMANTIC_SMOKE=require' -and
+            $conformanceText -match 'semanticReadiness\.state=available' -and
+            $conformanceText -match 'semanticReadiness\.mode=semantic' -and
+            $conformanceText -match 'semantic_model_status'
+        ) `
+        -Diagnosis "tests/CONFORMANCE.md must pin EE_INSTALL_SEMANTIC_SMOKE=require plus semanticReadiness state/mode and semantic_model_status evidence for bd-1et0v.24"
 }
 
 if ($failures.Count -gt 0) {
