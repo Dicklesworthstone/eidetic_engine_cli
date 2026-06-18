@@ -841,6 +841,9 @@ pub fn ask_data_json(report: &AskReport) -> serde_json::Value {
     if report.conflict_detected {
         obj["_conflictDetected"] = serde_json::Value::Bool(true);
     }
+    if let Some(query_assist) = ask_query_assist_json(report) {
+        obj["queryAssist"] = query_assist;
+    }
 
     obj
 }
@@ -872,6 +875,158 @@ fn nearest_evidence_to_json(ne: &AskNearestEvidence) -> serde_json::Value {
         "text": ne.text,
         "score": ne.score,
     })
+}
+
+fn ask_query_assist_json(report: &AskReport) -> Option<serde_json::Value> {
+    if !report.abstained {
+        return None;
+    }
+    let nearest_evidence = report.nearest_evidence.as_deref().unwrap_or_default();
+    let weak_result_reason = if nearest_evidence.is_empty() {
+        "empty_results"
+    } else {
+        "no_confident_answer"
+    };
+    Some(serde_json::json!({
+        "schema": crate::core::search::QUERY_ASSIST_SCHEMA_V1,
+        "mode": "compact",
+        "weakResultReason": weak_result_reason,
+        "candidateCount": report.candidates_scanned,
+        "droppedBelowFloor": 0,
+        "relevanceFloor": serde_json::Value::Null,
+        "reformulations": ask_query_assist_reformulations(&report.question, nearest_evidence),
+        "didYouMean": nearest_evidence.iter().take(3).map(ask_query_assist_did_you_mean_json).collect::<Vec<_>>(),
+        "captureTemplate": ask_query_assist_capture_template_json(&report.question),
+    }))
+}
+
+fn ask_query_assist_did_you_mean_json(evidence: &AskNearestEvidence) -> serde_json::Value {
+    serde_json::json!({
+        "memoryId": &evidence.memory_id,
+        "score": evidence.score,
+        "source": "ask_nearest_evidence",
+        "candidateStatus": "below_confidence_threshold",
+        "content": &evidence.text,
+        "span": {
+            "byteStart": evidence.byte_start,
+            "byteEnd": evidence.byte_end,
+        },
+        "why": "Nearest extracted evidence span did not reach the ask confidence threshold.",
+    })
+}
+
+fn ask_query_assist_reformulations(
+    question: &str,
+    nearest_evidence: &[AskNearestEvidence],
+) -> Vec<serde_json::Value> {
+    let Some(first) = nearest_evidence.first() else {
+        return Vec::new();
+    };
+    let question_terms = ask_query_assist_terms(question)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let evidence_terms = ask_query_assist_terms(&first.text)
+        .into_iter()
+        .filter(|term| !question_terms.contains(term))
+        .take(4)
+        .collect::<Vec<_>>();
+    if evidence_terms.is_empty() {
+        return Vec::new();
+    }
+    let normalized_question = question.split_whitespace().collect::<Vec<_>>().join(" ");
+    let query = if normalized_question.is_empty() {
+        evidence_terms.join(" ")
+    } else {
+        format!("{normalized_question} {}", evidence_terms.join(" "))
+    };
+    vec![serde_json::json!({
+        "query": query,
+        "strategy": "nearest_evidence_terms",
+        "rationale": "Adds terms from the nearest ask evidence span that was below the confidence threshold.",
+        "matchedDocId": &first.memory_id,
+        "matchedMemoryId": &first.memory_id,
+    })]
+}
+
+fn ask_query_assist_capture_template_json(question: &str) -> serde_json::Value {
+    let clean_question = question.split_whitespace().collect::<Vec<_>>().join(" ");
+    let content = if clean_question.is_empty() {
+        "TODO: capture the missing memory this ask query needs.".to_owned()
+    } else {
+        format!("TODO: capture memory needed for ask query: {clean_question}")
+    };
+    let command = format!(
+        "ee remember --level semantic --kind note --tags query-gap,ask-miss --json {}",
+        ask_shell_quote(&content)
+    );
+    serde_json::json!({
+        "level": "semantic",
+        "kind": "note",
+        "tags": ["query-gap", "ask-miss"],
+        "content": &content,
+        "command": command,
+        "rationale": "Capture this missing demand explicitly so ee learn gaps can cluster repeated misses.",
+    })
+}
+
+fn ask_query_assist_terms(text: &str) -> Vec<String> {
+    let normalized = text
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    let mut seen = BTreeSet::new();
+    let mut terms = Vec::new();
+    for token in normalized.split_whitespace() {
+        if token.len() < 3 || ask_query_assist_stopword(token) {
+            continue;
+        }
+        if seen.insert(token.to_owned()) {
+            terms.push(token.to_owned());
+        }
+    }
+    terms
+}
+
+fn ask_query_assist_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "the"
+            | "and"
+            | "for"
+            | "with"
+            | "that"
+            | "this"
+            | "from"
+            | "into"
+            | "your"
+            | "you"
+            | "are"
+            | "was"
+            | "were"
+            | "has"
+            | "have"
+            | "had"
+            | "not"
+            | "but"
+            | "does"
+            | "exist"
+            | "memory"
+            | "query"
+            | "ask"
+    )
+}
+
+fn ask_shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 // ─── markdown renderer ────────────────────────────────────────────────────────
@@ -1178,6 +1333,51 @@ mod tests {
         let cits = json["citations"].as_array().unwrap();
         assert_eq!(cits.len(), 1);
         assert_eq!(cits[0]["memoryId"], "m1");
+    }
+
+    #[test]
+    fn ask_data_json_abstention_includes_query_assist() {
+        let report = AskReport {
+            question: "where is installer smoke documented".into(),
+            abstained: true,
+            answer_text: None,
+            confidence: 0.2,
+            confidence_components: AskConfidenceComponents {
+                top_span_score: 0.2,
+                corroboration: 1.0,
+                contradiction_penalty: 0.0,
+            },
+            citations: vec![],
+            sides: None,
+            nearest_evidence: Some(vec![AskNearestEvidence {
+                memory_id: "mem_installer_smoke".into(),
+                byte_start: 4,
+                byte_end: 42,
+                text: "release installers require live smoke validation".into(),
+                score: 0.2,
+            }]),
+            counterfactual_hint: Some("below threshold".into()),
+            semantic_degraded: true,
+            conflict_detected: false,
+            extractiveness_violated: false,
+            candidates_scanned: 1,
+        };
+        let json = ask_data_json(&report);
+
+        assert_eq!(
+            json["queryAssist"]["schema"],
+            crate::core::search::QUERY_ASSIST_SCHEMA_V1
+        );
+        assert_eq!(json["queryAssist"]["weakResultReason"], "no_confident_answer");
+        assert_eq!(
+            json["queryAssist"]["didYouMean"][0]["memoryId"],
+            "mem_installer_smoke"
+        );
+        assert!(
+            json["queryAssist"]["captureTemplate"]["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("ee remember"))
+        );
     }
 
     #[test]

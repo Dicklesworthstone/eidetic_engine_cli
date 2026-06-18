@@ -9226,6 +9226,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: search_response_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::search::QUERY_ASSIST_SCHEMA_V1,
+            version: "1",
+            description: "Deterministic query-assist guidance for weak or empty search and ask results",
+            category: "search",
+            definition: query_assist_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::learn::LEARN_GAPS_SCHEMA_V1,
             version: "1",
             description: "Query-miss demand clusters and remember templates for learning gaps",
@@ -10599,6 +10606,10 @@ fn query_request_schema_definition() -> String {
 
 fn search_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.search.v1.json").to_string()
+}
+
+fn query_assist_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.query_assist.v1.json").to_string()
 }
 
 fn learn_gaps_schema_definition() -> String {

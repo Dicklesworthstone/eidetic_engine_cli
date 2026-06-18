@@ -171,6 +171,7 @@ fn search_report(results: Vec<SearchHit>) -> SearchReport {
         ),
         relevance_floor_applied: Some(0.005),
         candidates_below_floor: 0,
+        query_assist: None,
         source_mode_requested: SearchSourceMode::Hybrid,
         source_mode_applied: SearchSourceMode::Hybrid,
         source_mode_fallback: false,

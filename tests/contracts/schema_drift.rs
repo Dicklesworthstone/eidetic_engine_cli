@@ -191,6 +191,7 @@ pub const CONTEXT_SCHEMAS: &[SchemaEntry] = &[
         "ee.search.results.v1",
         SchemaCategory::Search,
     ),
+    SchemaEntry::new("query_assist", "ee.query_assist.v1", SchemaCategory::Search),
 ];
 
 /// Economy and attention-budget schemas.

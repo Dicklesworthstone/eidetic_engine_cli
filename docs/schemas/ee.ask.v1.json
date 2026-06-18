@@ -93,6 +93,10 @@
     "_conflictDetected": {
       "type": "boolean",
       "description": "True when the top evidence clusters oppose each other. Corresponds to ask_conflicting_evidence in the envelope."
+    },
+    "queryAssist": {
+      "$ref": "#/$defs/queryAssist",
+      "description": "Deterministic query-assist guidance emitted when ask abstains."
     }
   },
   "$defs": {
@@ -192,6 +196,29 @@
           "type": "number",
           "minimum": 0,
           "maximum": 1
+        }
+      }
+    },
+    "queryAssist": {
+      "type": "object",
+      "required": ["schema", "weakResultReason", "reformulations", "didYouMean", "captureTemplate"],
+      "additionalProperties": true,
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "ee.query_assist.v1"
+        },
+        "weakResultReason": {
+          "type": "string"
+        },
+        "reformulations": {
+          "type": "array"
+        },
+        "didYouMean": {
+          "type": "array"
+        },
+        "captureTemplate": {
+          "type": "object"
         }
       }
     }

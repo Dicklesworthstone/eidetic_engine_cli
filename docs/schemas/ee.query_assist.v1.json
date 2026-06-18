@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.query_assist.v1.json",
+  "title": "ee.query_assist.v1",
+  "description": "Deterministic query-assist block emitted by weak or empty ee search and ee ask results.",
+  "type": "object",
+  "required": [
+    "schema",
+    "mode",
+    "weakResultReason",
+    "reformulations",
+    "didYouMean",
+    "captureTemplate"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.query_assist.v1"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["compact", "explain"]
+    },
+    "weakResultReason": {
+      "type": "string",
+      "enum": [
+        "empty_results",
+        "no_relevant_results",
+        "weak_query_recall",
+        "low_recall_after_floor",
+        "no_confident_answer"
+      ]
+    },
+    "candidateCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "droppedBelowFloor": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "relevanceFloor": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "reformulations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/reformulation"
+      }
+    },
+    "didYouMean": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/didYouMean"
+      }
+    },
+    "captureTemplate": {
+      "$ref": "#/$defs/captureTemplate"
+    }
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    },
+    "reformulation": {
+      "type": "object",
+      "required": ["query", "strategy", "rationale", "matchedDocId"],
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1
+        },
+        "strategy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        },
+        "matchedDocId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "matchedMemoryId": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "didYouMean": {
+      "type": "object",
+      "required": ["score", "source", "candidateStatus", "why"],
+      "additionalProperties": {
+        "$ref": "#/$defs/jsonValue"
+      },
+      "properties": {
+        "docId": {
+          "type": "string"
+        },
+        "memoryId": {
+          "type": "string"
+        },
+        "score": {
+          "type": "number"
+        },
+        "relevanceScore": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "scoreKind": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "candidateStatus": {
+          "type": "string",
+          "enum": ["below_relevance_floor", "below_confidence_threshold"]
+        },
+        "content": {
+          "type": "string"
+        },
+        "why": {
+          "type": "string"
+        },
+        "provenance": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/jsonValue"
+            }
+          }
+        }
+      }
+    },
+    "captureTemplate": {
+      "type": "object",
+      "required": ["level", "kind", "tags", "content", "command", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "type": "string",
+          "const": "semantic"
+        },
+        "kind": {
+          "type": "string",
+          "const": "note"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command": {
+          "type": "string",
+          "pattern": "^ee remember "
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

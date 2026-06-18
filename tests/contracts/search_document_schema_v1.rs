@@ -44,6 +44,7 @@ fn report_with_results(results: Vec<SearchHit>) -> SearchReport {
         runtime_profile: test_runtime_profile(),
         relevance_floor_applied: Some(0.0),
         candidates_below_floor: 0,
+        query_assist: None,
         source_mode_requested: SearchSourceMode::Hybrid,
         source_mode_applied: SearchSourceMode::Hybrid,
         source_mode_fallback: false,

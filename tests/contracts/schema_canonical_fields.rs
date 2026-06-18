@@ -518,6 +518,7 @@ fn search_surface_normalizes_legacy_content_preview_metadata() -> TestResult {
         ),
         relevance_floor_applied: None,
         candidates_below_floor: 0,
+        query_assist: None,
         source_mode_requested: SearchSourceMode::Hybrid,
         source_mode_applied: SearchSourceMode::Hybrid,
         source_mode_fallback: false,

@@ -69,6 +69,7 @@ pub const SEARCH_REVISION_TOKEN_SCHEMA_V1: &str = "ee.search.revision_token.v1";
 pub const SEARCH_SCORE_INTERVAL_SCHEMA_V1: &str = "ee.search.score_interval.v1";
 pub const SEARCH_SCORE_CALIBRATION_SCHEMA_V1: &str = "ee.search.score_calibration.v1";
 pub const SEARCH_SCORE_RECALIBRATION_SCHEMA_V1: &str = "ee.search.score_recalibration.v1";
+pub const QUERY_ASSIST_SCHEMA_V1: &str = "ee.query_assist.v1";
 const SEARCH_QUERY_MISS_AUDIT_SCHEMA_V1: &str = "ee.search.query_miss.v1";
 const INDEX_STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 const SEARCH_SCORE_COVERAGE_GUARANTEE: f32 = 0.95;
@@ -93,6 +94,11 @@ const SEARCH_MI_DEDUP_MIN_COSINE_SIMILARITY: f64 = 0.85;
 const SEARCH_MI_DEDUP_MIN_NORMALIZED_MI: f64 = 0.72;
 const QUERY_MISS_AUDIT_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 const QUERY_MISS_AUDIT_SAMPLE_RATE: f64 = 1.0;
+const QUERY_ASSIST_COMPACT_DID_YOU_MEAN_LIMIT: usize = 1;
+const QUERY_ASSIST_EXPLAIN_DID_YOU_MEAN_LIMIT: usize = 3;
+const QUERY_ASSIST_COMPACT_REFORMULATION_LIMIT: usize = 1;
+const QUERY_ASSIST_EXPLAIN_REFORMULATION_LIMIT: usize = 3;
+const QUERY_ASSIST_TERM_LIMIT: usize = 4;
 
 /// Character cap for the top-level `contentPreview` field added to each search
 /// result. Agents previously had to dig into `metadata.content` (or make an
@@ -525,6 +531,133 @@ fn default_workspace_index_dir(workspace_path: &Path) -> PathBuf {
         .join(DEFAULT_INDEX_SUBDIR)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueryAssistMode {
+    Compact,
+    Explain,
+}
+
+impl QueryAssistMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Explain => "explain",
+        }
+    }
+
+    #[must_use]
+    const fn did_you_mean_limit(self) -> usize {
+        match self {
+            Self::Compact => QUERY_ASSIST_COMPACT_DID_YOU_MEAN_LIMIT,
+            Self::Explain => QUERY_ASSIST_EXPLAIN_DID_YOU_MEAN_LIMIT,
+        }
+    }
+
+    #[must_use]
+    const fn reformulation_limit(self) -> usize {
+        match self {
+            Self::Compact => QUERY_ASSIST_COMPACT_REFORMULATION_LIMIT,
+            Self::Explain => QUERY_ASSIST_EXPLAIN_REFORMULATION_LIMIT,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct QueryAssistReport {
+    pub weak_result_reason: String,
+    pub mode: QueryAssistMode,
+    pub reformulations: Vec<QueryAssistReformulation>,
+    pub did_you_mean: Vec<SearchHit>,
+    pub capture_template: QueryAssistCaptureTemplate,
+    pub candidate_count: usize,
+    pub dropped_below_floor: usize,
+    pub relevance_floor: Option<f32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryAssistReformulation {
+    pub query: String,
+    pub strategy: &'static str,
+    pub rationale: String,
+    pub matched_doc_id: String,
+    pub matched_memory_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryAssistCaptureTemplate {
+    pub level: &'static str,
+    pub kind: &'static str,
+    pub tags: Vec<&'static str>,
+    pub content: String,
+    pub command: String,
+}
+
+impl QueryAssistCaptureTemplate {
+    #[must_use]
+    pub fn for_query(query: &str) -> Self {
+        let clean_query = query.split_whitespace().collect::<Vec<_>>().join(" ");
+        let content = if clean_query.is_empty() {
+            "TODO: capture the missing memory this search needs.".to_owned()
+        } else {
+            format!("TODO: capture memory needed for search query: {clean_query}")
+        };
+        let command = format!(
+            "ee remember --level semantic --kind note --tags query-gap,search-miss --json {}",
+            shell_quote(&content)
+        );
+        Self {
+            level: "semantic",
+            kind: "note",
+            tags: vec!["query-gap", "search-miss"],
+            content,
+            command,
+        }
+    }
+
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "level": self.level,
+            "kind": self.kind,
+            "tags": &self.tags,
+            "content": &self.content,
+            "command": &self.command,
+            "rationale": "Capture this missing demand explicitly so ee learn gaps can cluster repeated misses.",
+        })
+    }
+}
+
+impl QueryAssistReport {
+    #[must_use]
+    pub fn data_json(&self, output_redaction_enabled: bool) -> serde_json::Value {
+        serde_json::json!({
+            "schema": QUERY_ASSIST_SCHEMA_V1,
+            "mode": self.mode.as_str(),
+            "weakResultReason": &self.weak_result_reason,
+            "candidateCount": self.candidate_count,
+            "droppedBelowFloor": self.dropped_below_floor,
+            "relevanceFloor": optional_score_json(self.relevance_floor),
+            "reformulations": self.reformulations.iter().map(QueryAssistReformulation::data_json).collect::<Vec<_>>(),
+            "didYouMean": self.did_you_mean.iter().map(|hit| query_assist_did_you_mean_json(hit, output_redaction_enabled)).collect::<Vec<_>>(),
+            "captureTemplate": self.capture_template.data_json(),
+        })
+    }
+}
+
+impl QueryAssistReformulation {
+    #[must_use]
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "query": &self.query,
+            "strategy": self.strategy,
+            "rationale": &self.rationale,
+            "matchedDocId": &self.matched_doc_id,
+            "matchedMemoryId": &self.matched_memory_id,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SearchReport {
     pub status: SearchStatus,
@@ -542,6 +675,7 @@ pub struct SearchReport {
     /// (B1). Informational; agents can use this to decide whether to
     /// retry with a lower floor or different query.
     pub candidates_below_floor: usize,
+    pub query_assist: Option<QueryAssistReport>,
     pub source_mode_requested: SearchSourceMode,
     pub source_mode_applied: SearchSourceMode,
     pub source_mode_fallback: bool,
@@ -2092,7 +2226,7 @@ impl SearchReport {
             .collect();
         let consensus_conflicts = search_consensus_conflict_report(&self.query, &visible_results);
 
-        serde_json::json!({
+        let mut data = serde_json::json!({
             "command": "search",
             "status": self.status.as_str(),
             "query": &self.query,
@@ -2112,7 +2246,16 @@ impl SearchReport {
             "profileRuntime": self.runtime_profile.data_json(),
             "errors": self.errors,
             "degraded": search_degraded_data_json("search", &self.degraded),
-        })
+        });
+        if let Some(query_assist) = &self.query_assist
+            && let Some(data_object) = data.as_object_mut()
+        {
+            data_object.insert(
+                "queryAssist".to_owned(),
+                query_assist.data_json(output_redaction_enabled),
+            );
+        }
+        data
     }
 
     #[must_use]
@@ -3967,6 +4110,298 @@ fn search_display_visible_hits(hits: &[SearchHit]) -> Vec<SearchHit> {
         .collect()
 }
 
+fn query_assist_visible_candidates(options: &SearchOptions, hits: &[SearchHit]) -> Vec<SearchHit> {
+    let mut visible = hits
+        .iter()
+        .filter(|hit| query_assist_hit_visible(options, hit))
+        .cloned()
+        .collect::<Vec<_>>();
+    sort_search_hits_by_score_order(&mut visible);
+    visible
+}
+
+fn query_assist_hit_visible(options: &SearchOptions, hit: &SearchHit) -> bool {
+    if let Some(metadata) = hit.metadata.as_ref()
+        && metadata_bool(metadata, "tombstoned").unwrap_or(false)
+        && !options.include_tombstoned
+    {
+        return false;
+    }
+    match hit_indexed_validity_status(hit) {
+        Some("expired") if !options.include_expired => return false,
+        Some("future") if !options.include_future => return false,
+        Some("stale") if !options.include_stale => return false,
+        _ => {}
+    }
+    !matches!(
+        mesh_query_visibility(hit.metadata.as_ref()),
+        MeshQueryVisibility::Blocked
+    )
+}
+
+fn build_query_assist(
+    query: &str,
+    explain: bool,
+    kept: usize,
+    considered: usize,
+    floor: f32,
+    top_score_after_floor: Option<f32>,
+    dropped_below_floor: usize,
+    below_floor_candidates: &[SearchHit],
+) -> Option<QueryAssistReport> {
+    let weak_result_reason = classify_search_query_miss(
+        kept,
+        considered,
+        floor,
+        top_score_after_floor,
+    )
+    .map(SearchQueryMissReason::as_str)
+    .or_else(|| (kept == 0).then_some("empty_results"))?;
+    let mode = if explain {
+        QueryAssistMode::Explain
+    } else {
+        QueryAssistMode::Compact
+    };
+    let did_you_mean = below_floor_candidates
+        .iter()
+        .take(mode.did_you_mean_limit())
+        .cloned()
+        .collect::<Vec<_>>();
+    let reformulations =
+        query_assist_reformulations(query, &did_you_mean, mode.reformulation_limit());
+    Some(QueryAssistReport {
+        weak_result_reason: weak_result_reason.to_owned(),
+        mode,
+        reformulations,
+        did_you_mean,
+        capture_template: QueryAssistCaptureTemplate::for_query(query),
+        candidate_count: considered,
+        dropped_below_floor,
+        relevance_floor: Some(floor),
+    })
+}
+
+fn query_assist_reformulations(
+    query: &str,
+    candidates: &[SearchHit],
+    limit: usize,
+) -> Vec<QueryAssistReformulation> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let query_terms = query_assist_terms(query)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let normalized_query = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut seen = BTreeSet::new();
+    let mut reformulations = Vec::new();
+    for candidate in candidates {
+        let terms = query_assist_candidate_terms(candidate, &query_terms);
+        if terms.is_empty() {
+            continue;
+        }
+        let joined_terms = terms.join(" ");
+        let query_with_terms = if normalized_query.is_empty() {
+            joined_terms.clone()
+        } else {
+            format!("{normalized_query} {joined_terms}")
+        };
+        push_query_assist_reformulation(
+            &mut reformulations,
+            &mut seen,
+            limit,
+            candidate,
+            query_with_terms,
+            "nearest_memory_terms",
+            "Adds salient terms from a semantically near memory that was below the relevance floor.",
+        );
+        if reformulations.len() >= limit {
+            break;
+        }
+
+        if let Some(memory_kind_query) = query_assist_memory_kind_query(candidate, &terms) {
+            push_query_assist_reformulation(
+                &mut reformulations,
+                &mut seen,
+                limit,
+                candidate,
+                memory_kind_query,
+                "broader_memory_kind",
+                "Broadens the query toward the nearest matching memory's level or kind.",
+            );
+        }
+        if reformulations.len() >= limit {
+            break;
+        }
+
+        push_query_assist_reformulation(
+            &mut reformulations,
+            &mut seen,
+            limit,
+            candidate,
+            joined_terms,
+            "content_terms_only",
+            "Drops unmatched wording and searches only terms found in nearby memory content.",
+        );
+        if reformulations.len() >= limit {
+            break;
+        }
+    }
+    reformulations
+}
+
+fn push_query_assist_reformulation(
+    reformulations: &mut Vec<QueryAssistReformulation>,
+    seen: &mut BTreeSet<String>,
+    limit: usize,
+    candidate: &SearchHit,
+    query: String,
+    strategy: &'static str,
+    rationale: &str,
+) {
+    if reformulations.len() >= limit {
+        return;
+    }
+    let normalized = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() || !seen.insert(normalized.clone()) {
+        return;
+    }
+    reformulations.push(QueryAssistReformulation {
+        query: normalized,
+        strategy,
+        rationale: rationale.to_owned(),
+        matched_doc_id: candidate.doc_id.clone(),
+        matched_memory_id: candidate.memory_id().map(str::to_owned),
+    });
+}
+
+fn query_assist_candidate_terms(hit: &SearchHit, query_terms: &BTreeSet<String>) -> Vec<String> {
+    let Some(content) = hit.metadata.as_ref().and_then(search_hit_content_text) else {
+        return Vec::new();
+    };
+    query_assist_terms(&content)
+        .into_iter()
+        .filter(|term| !query_terms.contains(term))
+        .take(QUERY_ASSIST_TERM_LIMIT)
+        .collect()
+}
+
+fn query_assist_memory_kind_query(hit: &SearchHit, terms: &[String]) -> Option<String> {
+    let metadata = hit.metadata.as_ref()?;
+    let prefix = metadata_string(metadata, "kind")
+        .or_else(|| metadata_string(metadata, "level"))?
+        .replace('-', " ");
+    let mut parts = vec![prefix];
+    parts.extend(terms.iter().take(2).cloned());
+    Some(parts.join(" "))
+}
+
+fn query_assist_terms(text: &str) -> Vec<String> {
+    let normalized = text
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+    let mut seen = BTreeSet::new();
+    let mut terms = Vec::new();
+    for token in normalized.split_whitespace() {
+        if token.len() < 3 || query_assist_stopword(token) {
+            continue;
+        }
+        if seen.insert(token.to_owned()) {
+            terms.push(token.to_owned());
+        }
+    }
+    terms
+}
+
+fn query_assist_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "the"
+            | "and"
+            | "for"
+            | "with"
+            | "that"
+            | "this"
+            | "from"
+            | "into"
+            | "your"
+            | "you"
+            | "are"
+            | "was"
+            | "were"
+            | "has"
+            | "have"
+            | "had"
+            | "not"
+            | "but"
+            | "use"
+            | "run"
+            | "memory"
+            | "query"
+            | "search"
+    )
+}
+
+fn query_assist_did_you_mean_json(
+    hit: &SearchHit,
+    output_redaction_enabled: bool,
+) -> serde_json::Value {
+    let (provenance, provenance_redacted_patterns) =
+        hit.provenance_json(output_redaction_enabled);
+    let mut obj = serde_json::json!({
+        "docId": hit.doc_id,
+        "score": hit.score,
+        "relevanceScore": round_metric_f32(hit.relevance_score()),
+        "scoreKind": hit.score_kind(),
+        "source": hit.source.as_str(),
+        "candidateStatus": "below_relevance_floor",
+        "why": hit.why(),
+        "provenance": provenance,
+    });
+    if let Some(obj_map) = obj.as_object_mut() {
+        if let Some(memory_id) = hit.memory_id() {
+            obj_map.insert("memoryId".to_owned(), serde_json::json!(memory_id));
+        }
+        if let Some(ref meta) = hit.metadata {
+            let (metadata, mut redacted_patterns) =
+                public_search_metadata(meta, output_redaction_enabled);
+            redacted_patterns.extend(provenance_redacted_patterns);
+            if let Some(text) = search_hit_content_text(&metadata) {
+                let preview = search_content_preview(&text, SEARCH_CONTENT_PREVIEW_MAX_CHARS);
+                let truncated = preview.chars().count() > SEARCH_CONTENT_PREVIEW_MAX_CHARS;
+                obj_map.insert("content".to_owned(), serde_json::json!(preview));
+                if truncated {
+                    obj_map.insert("content_truncated".to_owned(), serde_json::json!(true));
+                }
+            }
+            obj_map.insert("metadata".to_owned(), metadata);
+            if !redacted_patterns.is_empty() {
+                obj_map.insert("contentRedacted".to_owned(), serde_json::json!(true));
+                obj_map.insert(
+                    "redactions".to_owned(),
+                    serde_json::json!(
+                        redacted_patterns
+                            .iter()
+                            .map(|pattern| serde_json::json!({
+                                "reason": pattern,
+                                "placeholder": crate::policy::redaction_placeholder(pattern),
+                            }))
+                            .collect::<Vec<_>>()
+                    ),
+                );
+            }
+        }
+    }
+    obj
+}
+
 fn search_hit_pack_item(index: usize, hit: &SearchHit) -> Option<PackDraftItem> {
     if matches!(
         mesh_query_visibility(hit.metadata.as_ref()),
@@ -5557,6 +5992,7 @@ fn run_search_inner_with_performance(
                 runtime_profile,
                 relevance_floor_applied: None,
                 candidates_below_floor: 0,
+                query_assist: None,
                 source_mode_requested: options.source_mode,
                 source_mode_applied: source_mode.applied,
                 source_mode_fallback: source_mode.fallback_applied,
@@ -5633,6 +6069,9 @@ fn run_search_inner_with_performance(
                     hit.score.is_finite() && hit.score >= per_hit_floor
                 });
             let dropped = below_floor.len();
+            let query_assist_visibility_start = Instant::now();
+            let query_assist_candidates = query_assist_visible_candidates(options, &below_floor);
+            trace.record_elapsed("search::queryAssistVisibility", query_assist_visibility_start);
             trace.record_elapsed("search::relevanceFloor", relevance_floor_start);
             let tombstone_start = Instant::now();
             let above_floor = apply_tombstone_visibility_collecting(
@@ -5742,6 +6181,30 @@ fn run_search_inner_with_performance(
             } else {
                 SearchStatus::Success
             };
+            let query_assist = build_query_assist(
+                &options.query,
+                options.explain,
+                kept,
+                pre_floor_count,
+                floor,
+                above_floor.first().map(|hit| hit.score),
+                dropped,
+                &query_assist_candidates,
+            );
+            if let Some(assist) = query_assist.as_ref() {
+                tracing::info!(
+                    target: "ee::search",
+                    event = "query_assist_generated",
+                    schema = QUERY_ASSIST_SCHEMA_V1,
+                    mode = assist.mode.as_str(),
+                    weak_result_reason = assist.weak_result_reason.as_str(),
+                    candidate_count = assist.candidate_count,
+                    did_you_mean_count = assist.did_you_mean.len(),
+                    reformulation_count = assist.reformulations.len(),
+                    dropped_below_floor = assist.dropped_below_floor,
+                    query_hash = %audit_query_hash(&options.query),
+                );
+            }
 
             let audit_workspace_start = Instant::now();
             // Bead bd-17c65.7.7 (G8): best-effort audit-log instrumentation.
@@ -5879,6 +6342,7 @@ fn run_search_inner_with_performance(
                     runtime_profile,
                     relevance_floor_applied: Some(floor),
                     candidates_below_floor: dropped,
+                    query_assist,
                     source_mode_requested: options.source_mode,
                     source_mode_applied: source_mode.applied,
                     source_mode_fallback: source_mode.fallback_applied,
@@ -5912,6 +6376,7 @@ fn run_search_inner_with_performance(
                     runtime_profile,
                     relevance_floor_applied: None,
                     candidates_below_floor: 0,
+                    query_assist: None,
                     source_mode_requested: options.source_mode,
                     source_mode_applied: source_mode.applied,
                     source_mode_fallback: source_mode.fallback_applied,
@@ -5993,6 +6458,7 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
     );
     let kept = above_floor.len();
     let dropped = below_floor.len();
+    let query_assist_candidates = query_assist_visible_candidates(options, &below_floor);
     let floor = user_floor_override.unwrap_or_else(|| {
         above_floor
             .first()
@@ -6043,6 +6509,16 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
     } else {
         SearchStatus::Success
     };
+    let query_assist = build_query_assist(
+        &options.query,
+        options.explain,
+        kept,
+        pre_floor_count,
+        floor,
+        above_floor.first().map(|hit| hit.score),
+        dropped,
+        &query_assist_candidates,
+    );
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
     let final_report = SearchReport {
         status,
@@ -6055,6 +6531,7 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
         runtime_profile,
         relevance_floor_applied: Some(floor),
         candidates_below_floor: dropped,
+        query_assist,
         source_mode_requested: options.source_mode,
         source_mode_applied: options.source_mode,
         source_mode_fallback: false,
@@ -8553,6 +9030,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: Some(0.05),
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::SemanticOnly,
             source_mode_applied: SearchSourceMode::SemanticOnly,
             source_mode_fallback: false,
@@ -8634,6 +9112,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: Some(0.0),
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::SemanticOnly,
             source_mode_applied: SearchSourceMode::SemanticOnly,
             source_mode_fallback: false,
@@ -8809,6 +9288,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -8864,6 +9344,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -9850,6 +10331,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -10100,6 +10582,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -10177,6 +10660,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -10632,6 +11116,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -10743,6 +11228,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -10904,6 +11390,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -11069,6 +11556,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -11180,6 +11668,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -11220,6 +11709,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -11269,6 +11759,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -11320,6 +11811,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -11375,6 +11867,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -11431,6 +11924,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -11488,6 +11982,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -12086,6 +12581,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -12138,6 +12634,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -12198,6 +12695,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -12269,6 +12767,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -12328,6 +12827,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -12380,6 +12880,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -12509,6 +13010,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -12572,6 +13074,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -12879,6 +13382,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -12913,6 +13417,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -12949,6 +13454,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -12982,6 +13488,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -13015,6 +13522,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
@@ -13513,6 +14021,72 @@ mod tests {
     }
 
     #[test]
+    fn query_assist_triggers_on_below_floor_candidate() {
+        let mut candidate = synthetic_hit("mem_semantic_release", 0.02);
+        candidate.metadata = Some(serde_json::json!({
+            "content": "Use installer live smoke validation before publishing release artifacts.",
+            "level": "procedural",
+            "kind": "rule",
+        }));
+        let assist = build_query_assist(
+            "installer validation",
+            true,
+            0,
+            1,
+            0.05,
+            None,
+            1,
+            &[candidate],
+        )
+        .expect("below-floor candidate should produce query assist");
+        let json = assist.data_json(true);
+
+        assert_eq!(json["schema"], QUERY_ASSIST_SCHEMA_V1);
+        assert_eq!(json["weakResultReason"], "no_relevant_results");
+        assert_eq!(json["mode"], "explain");
+        assert_eq!(json["didYouMean"][0]["memoryId"], "mem_semantic_release");
+        assert_eq!(
+            json["didYouMean"][0]["candidateStatus"],
+            "below_relevance_floor"
+        );
+        assert!(
+            json["reformulations"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty()),
+            "near-memory content terms should produce at least one reformulation"
+        );
+    }
+
+    #[test]
+    fn query_assist_capture_template_is_deterministic_for_empty_results() {
+        let first = build_query_assist("orbital stapler protocol", false, 0, 0, 0.05, None, 0, &[])
+            .expect("empty result should offer capture template");
+        let second =
+            build_query_assist("orbital stapler protocol", false, 0, 0, 0.05, None, 0, &[])
+                .expect("empty result should offer capture template");
+        let first_json = first.data_json(true);
+        let second_json = second.data_json(true);
+
+        assert_eq!(first_json, second_json);
+        assert_eq!(first_json["weakResultReason"], "empty_results");
+        assert_eq!(first_json["didYouMean"].as_array().map(Vec::len), Some(0));
+        assert_eq!(first_json["captureTemplate"]["level"], "semantic");
+        assert!(
+            first_json["captureTemplate"]["command"]
+                .as_str()
+                .is_some_and(|command| command.contains("ee remember"))
+        );
+    }
+
+    #[test]
+    fn query_assist_does_not_emit_for_good_results() {
+        assert!(
+            build_query_assist("release checklist", false, 3, 3, 0.05, Some(0.30), 0, &[])
+                .is_none()
+        );
+    }
+
+    #[test]
     fn search_query_miss_audit_details_are_hash_only_and_ttl_bounded() -> TestResult {
         let details = search_query_miss_audit_details(SearchQueryMissAuditDetails {
             query_hash: "blake3:abcdef1234567890",
@@ -13795,6 +14369,7 @@ mod tests {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
+            query_assist: None,
             source_mode_requested: SearchSourceMode::Hybrid,
             source_mode_applied: SearchSourceMode::Hybrid,
             source_mode_fallback: false,
