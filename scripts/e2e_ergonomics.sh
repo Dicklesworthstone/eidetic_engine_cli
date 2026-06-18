@@ -137,9 +137,11 @@ INDEX_JSON="${LAST_STDOUT}"
 assert_json_file "index_rebuild_succeeds" "${INDEX_JSON}" '.success == true'
 
 TASK="ergonomics alias parity canonical pack command"
-PACK_COMMON=(
+EE_GLOBAL_ARGS=(
     --workspace "${WORKSPACE}"
     --json
+)
+PACK_COMMON=(
     --source-mode lexical_only
     --profile compact
     --max-tokens 2000
@@ -148,13 +150,13 @@ PACK_COMMON=(
     --no-baseline-write
 )
 
-run_ee_json "03_pack" "${PACK_COMMON[@]}" pack "${TASK}"
+run_ee_json "03_pack" "${EE_GLOBAL_ARGS[@]}" pack "${PACK_COMMON[@]}" "${TASK}"
 PACK_JSON="${LAST_STDOUT}"
 assert_json_file "pack_succeeds" "${PACK_JSON}" '.success == true and .data.pack.hash'
 assert_json_file "pack_has_no_deprecated_alias" "${PACK_JSON}" \
     'all((.data.degraded // [])[]; .code != "deprecated_alias")'
 
-run_ee_json "04_context_alias" "${PACK_COMMON[@]}" context "${TASK}"
+run_ee_json "04_context_alias" "${EE_GLOBAL_ARGS[@]}" context "${PACK_COMMON[@]}" "${TASK}"
 CONTEXT_JSON="${LAST_STDOUT}"
 assert_json_file "context_succeeds" "${CONTEXT_JSON}" '.success == true and .data.pack.hash'
 assert_json_file "context_reports_deprecated_alias" "${CONTEXT_JSON}" \
