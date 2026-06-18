@@ -86,6 +86,7 @@ set -euo pipefail
 #   6.12 Ask E2E               - scripts/e2e_ask.sh
 #   6.127 Ergonomics E2E       - scripts/e2e_ergonomics.sh
 #   6.1295 Embedding Native E2E - scripts/e2e_embedding_native.sh
+#   6.1296 Bundled Embeddings E2E - scripts/e2e_bundled_embeddings.sh
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
@@ -1160,6 +1161,12 @@ run_stage "Doctor Health E2E (bd-1et0v.21)" "EE_E2E_TMPDIR=/private/tmp ./script
 # hash/lexical degradation path. Covers similar, remember-time dedupe,
 # curation dedupe proposals, rerank posture, and eval precision metrics.
 run_stage "Embedding Native E2E (bd-2vq2z.19)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_embedding_native.sh"
+
+# Gate 6.1296: bundled embeddings regression E2E (bd-1et0v.19). No-Cargo:
+# proves the analyst paraphrase regression, fresh semantic-ready posture,
+# honest hash fallback degradation, eval semantic-recall gain, and the
+# opt-in real-download lifecycle without downloading by default.
+run_stage "Bundled Embeddings E2E (bd-1et0v.19)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_bundled_embeddings.sh"
 
 # Gate 6.13: Dueling Wizards docs-bootstrap real-binary E2E (bd-1n0np.11.5).
 # Proves ee bootstrap docs --dry-run structural candidates (spans/hashes/anchors/

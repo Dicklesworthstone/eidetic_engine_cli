@@ -7290,6 +7290,10 @@ fn active_search_embedder_state() -> ActiveSearchEmbedderState {
     }
 }
 
+pub(crate) fn active_search_embedder_is_semantic() -> bool {
+    active_search_embedder_state() == ActiveSearchEmbedderState::ReadySemantic
+}
+
 /// One-line, agent-actionable hint for turning on semantic retrieval.
 pub(crate) const SEMANTIC_ENABLE_HINT: &str = "run `ee index reembed --workspace .`; default builds use Frankensearch model2vec download unless FRANKENSEARCH_OFFLINE blocks it";
 
@@ -7300,6 +7304,10 @@ pub(crate) const SEMANTIC_ENABLE_HINT: &str = "run `ee index reembed --workspace
 /// this lets the one-time onboarding path nudge the agent before search.
 /// (agent-UX item 6)
 pub(crate) fn semantic_retrieval_unavailable_reason() -> Option<String> {
+    if active_search_embedder_is_semantic() {
+        return None;
+    }
+
     match active_search_embedder_state() {
         ActiveSearchEmbedderState::ReadySemantic
         | ActiveSearchEmbedderState::PendingLocalDownload => None,
@@ -9626,6 +9634,14 @@ mod tests {
         assert_eq!(
             similar_semantic_unavailable_reason(&posture),
             "embedding posture mode=neural_local_pending source=ee_model2vec_download_pending semantic=false"
+        );
+    }
+
+    #[test]
+    fn active_search_embedder_is_semantic_matches_state_probe() {
+        assert_eq!(
+            active_search_embedder_is_semantic(),
+            active_search_embedder_state() == ActiveSearchEmbedderState::ReadySemantic
         );
     }
 

@@ -484,6 +484,26 @@ warnings, persisted embedding-dedup curation proposals, rerank posture
 `ee.test_event.v1` rows with stdout/stderr artifact hashes, retrieval order,
 degraded codes, and the measured top-1 precision delta.
 
+### Bundled Embeddings E2E
+
+`scripts/e2e_bundled_embeddings.sh` is the `bd-1et0v.19` real-binary,
+no-Cargo harness for proving default semantic retrieval with the bundled
+model2vec backend. The default verification runner invokes it with
+`EE_E2E_TMPDIR=/private/tmp`; by default it does not download model artifacts.
+Set `EE_EMBED_MODEL_FIXTURE_DIR` or `EE_EMBED_MODEL_DIR` to a pre-provisioned
+`potion-multilingual-128M` cache for the semantic path, or leave the cache
+absent to assert the documented hash/lexical fallback.
+
+The harness pins the analyst paraphrase regression by storing an RBLX
+bookings/FCF memory, querying a zero-ticker paraphrase, and requiring that the
+RBLX memory rank ahead of unrelated analyst memories when semantic retrieval is
+active. The same run asserts fresh-workspace semantic readiness, stable pack
+hashes, explicit `embed_model_unavailable` fallback degradation, and
+`ee eval run fx.bundled_embeddings.v1 --json` semantic-recall gain over a
+deterministic hash baseline. A real download lifecycle is opt-in only via
+`EE_E2E_ALLOW_REAL_DOWNLOAD=1`; that branch verifies clean JSON stdout,
+downloaded model identity, and a second cached fetch.
+
 ## Determinism Rules
 
 Tests must make nondeterminism impossible to miss:
