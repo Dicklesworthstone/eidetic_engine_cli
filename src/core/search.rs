@@ -15125,7 +15125,7 @@ mod tests {
             .map(|i| crate::search::ScoredResult {
                 doc_id: format!("mem_{i:04}"),
                 score: (100 - i) as f32,
-                source: ScoreSource::Hybrid,
+                source: crate::search::ScoreSource::Hybrid,
                 index: None,
                 fast_score: None,
                 quality_score: None,
