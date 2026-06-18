@@ -14,7 +14,7 @@ use serde::Serialize;
 #[cfg(unix)]
 use std::os::unix::{fs::FileTypeExt, net::UnixStream};
 
-use crate::config::{EnvVar, read_env_var, read_env_var_os, workspace_config};
+use crate::config::{EmbeddingTrapEnvVar, EnvVar, read_env_var, read_env_var_os, workspace_config};
 use crate::core::agent_detect::{AgentInventoryReport, AgentInventoryStatus};
 use crate::db::{
     CreateMemoryInput, DbConnection, ForeignKeyCheckResult, IntegrityCheckResult,
@@ -2803,22 +2803,14 @@ fn check_database(workspace_path: Option<&Path>) -> CheckResult {
     }
 }
 
-/// Foreign embedding-config environment variables ee does NOT consume.
-///
-/// ee uses its own bundled local embedder (ADR 0080) and never reads these.
-/// `check_embedding_posture` only DETECTS their presence (never the value) to
-/// warn an operator who set one expecting it to enable neural retrieval — the
-/// analyst trap (findings #1/#2). (Follow-up bd-1et0v.8: surface these in
-/// docs/env_vars.md as "detected-but-ignored".)
-const EMBEDDING_TRAP_ENV_VARS: &[&str] = &["EMBEDDING_MODEL", "OPENAI_API_KEY"];
-
 /// Presence-only scan of the foreign embedding-config env vars (never reads a
 /// value, so it is redaction-safe).
 fn present_embedding_trap_env_vars() -> Vec<&'static str> {
-    EMBEDDING_TRAP_ENV_VARS
+    EmbeddingTrapEnvVar::all()
         .iter()
         .copied()
-        .filter(|name| std::env::var_os(name).is_some())
+        .filter(|var| var.is_present())
+        .map(EmbeddingTrapEnvVar::name)
         .collect()
 }
 
@@ -2829,7 +2821,11 @@ fn embedding_env_trap_note(trap_present: &[&str], mode: &str) -> Option<String> 
         return None;
     }
     let names = trap_present.join(", ");
-    let pronoun = if trap_present.len() == 1 { "it" } else { "them" };
+    let pronoun = if trap_present.len() == 1 {
+        "it"
+    } else {
+        "them"
+    };
     Some(format!(
         "Note: {names} set but ee does not consume {pronoun} — ee uses its own bundled local embedder (current retrieval mode: {mode})."
     ))

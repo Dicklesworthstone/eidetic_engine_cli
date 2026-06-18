@@ -7,6 +7,61 @@
 use std::ffi::OsString;
 use std::str::FromStr;
 
+/// Foreign embedding-related environment variables that ee detects but ignores.
+///
+/// These are analyst traps from other embedding stacks. ee only checks whether
+/// they are present so `ee doctor` can disclose that they do not affect the
+/// bundled local embedder.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum EmbeddingTrapEnvVar {
+    /// `EMBEDDING_MODEL`
+    EmbeddingModel,
+    /// `OPENAI_API_KEY`
+    OpenAiApiKey,
+}
+
+impl EmbeddingTrapEnvVar {
+    /// Return all detected-but-ignored embedding variables in stable order.
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &[Self::EmbeddingModel, Self::OpenAiApiKey]
+    }
+
+    /// Stable environment variable name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::EmbeddingModel => "EMBEDDING_MODEL",
+            Self::OpenAiApiKey => "OPENAI_API_KEY",
+        }
+    }
+
+    /// Human-readable explanation for why this variable is only detected.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::EmbeddingModel => {
+                "`ee doctor` detects presence only; ee uses the bundled local embedder instead."
+            }
+            Self::OpenAiApiKey => {
+                "`ee doctor` detects presence only; local semantic retrieval never consumes API keys."
+            }
+        }
+    }
+
+    /// Broad documentation category for ignored embedding-config traps.
+    #[must_use]
+    pub const fn category(self) -> &'static str {
+        "embeddings"
+    }
+
+    /// Return whether this trap variable is present without exposing its value.
+    #[must_use]
+    pub fn is_present(self) -> bool {
+        std::env::var_os(self.name()).is_some()
+    }
+}
+
 /// Every `EE_*` environment variable honored by ee.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum EnvVar {
@@ -1012,7 +1067,7 @@ fn hash_os_value(value: &std::ffi::OsStr) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::EnvVar;
+    use super::{EmbeddingTrapEnvVar, EnvVar};
 
     type TestResult = Result<(), String>;
 
@@ -1038,6 +1093,36 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn embedding_trap_env_vars_are_registered_outside_the_runtime_ee_surface() -> TestResult {
+        let mut names = BTreeSet::new();
+        for var in EmbeddingTrapEnvVar::all() {
+            let name = var.name();
+            if name.starts_with("EE_") {
+                return Err(format!("{name} must not be a runtime EE_* override"));
+            }
+            if !names.insert(name) {
+                return Err(format!(
+                    "duplicate embedding trap env var registered: {name}"
+                ));
+            }
+            if var.category() != "embeddings" {
+                return Err(format!("{name} must be categorized as embeddings"));
+            }
+            if var.description().trim().is_empty() {
+                return Err(format!("{name} is missing a description"));
+            }
+        }
+        let expected = BTreeSet::from(["EMBEDDING_MODEL", "OPENAI_API_KEY"]);
+        if names == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "detected-but-ignored embedding env registry drifted: {names:?}"
+            ))
+        }
     }
 
     #[test]

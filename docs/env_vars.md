@@ -9,6 +9,17 @@ variable.
 `data.envOverrides[]`. Sensitive variables may report that they are set, but
 must not expose their current value.
 
+## Detected-but-ignored embedding variables
+
+These variables are not `EE_*` runtime controls. `ee doctor` detects only their
+presence so it can explain that they do not affect the bundled local embedder;
+values are never displayed or used for retrieval.
+
+| Name | Category | Value read? | Effect |
+|---|---|---|---|
+| `EMBEDDING_MODEL` | embeddings | no | Presence adds an `ee doctor` info note that the active retrieval mode still comes from ee's bundled local embedder. |
+| `OPENAI_API_KEY` | embeddings | no | Presence adds an `ee doctor` info note; local semantic retrieval never consumes API keys. |
+
 ## Runtime variables
 
 | Name | Category | Type | Default | Controls | Notes |

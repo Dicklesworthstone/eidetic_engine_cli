@@ -10,7 +10,9 @@ pub mod path;
 pub mod path_resolver;
 pub mod workspace;
 
-pub use env_registry::{EnvVar, is_set as env_var_is_set, read as read_env_var};
+pub use env_registry::{
+    EmbeddingTrapEnvVar, EnvVar, is_set as env_var_is_set, read as read_env_var,
+};
 pub use env_registry::{read_or_default as read_env_var_or_default, read_os as read_env_var_os};
 pub use file::{
     CacheConfig, CassConfig, ConfigFile, ConfigParseError, CurationConfig, FeedbackConfig,
