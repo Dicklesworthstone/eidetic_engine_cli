@@ -28,7 +28,8 @@ use crate::config::{
     GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY, GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
     GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
     GRAPH_PPR_ALPHA_KEY, GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY,
-    GRAPH_WITNESSES_RETENTION_DAYS_KEY, PathExpander, built_in_config, config_from_env,
+    GRAPH_WITNESSES_RETENTION_DAYS_KEY, PathExpander, SEARCH_GRAPH_WEIGHT_KEY,
+    SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_SEMANTIC_WEIGHT_KEY, built_in_config, config_from_env,
     merge_config,
 };
 
@@ -200,7 +201,7 @@ pub fn get_config(
     options: &ConfigSurfaceOptions,
     key: &str,
 ) -> Result<ConfigGetReport, ConfigSurfaceError> {
-    let spec = graph_key_spec(key).ok_or_else(|| ConfigSurfaceError::UnknownKey {
+    let spec = config_key_spec(key).ok_or_else(|| ConfigSurfaceError::UnknownKey {
         key: key.to_owned(),
     })?;
     let report = show_config(options, Some(spec.key))?;
@@ -226,7 +227,7 @@ pub fn set_config(
     value: &str,
     dry_run: bool,
 ) -> Result<ConfigSetReport, ConfigSurfaceError> {
-    let spec = graph_key_spec(key).ok_or_else(|| ConfigSurfaceError::UnknownKey {
+    let spec = config_key_spec(key).ok_or_else(|| ConfigSurfaceError::UnknownKey {
         key: key.to_owned(),
     })?;
     let scalar = parse_graph_value(spec, value)?;
@@ -398,7 +399,7 @@ fn filter_entries(
             .filter(|entry| entry.key.starts_with(&dotted_prefix))
             .collect());
     }
-    if graph_key_spec(pattern).is_some() {
+    if config_key_spec(pattern).is_some() {
         return Ok(entries
             .into_iter()
             .filter(|entry| entry.key == pattern)
@@ -717,6 +718,27 @@ struct GraphKeySpec {
     kind: GraphValueKind,
 }
 
+fn config_key_spec(key: &str) -> Option<GraphKeySpec> {
+    match key {
+        SEARCH_LEXICAL_WEIGHT_KEY => Some(GraphKeySpec {
+            key: SEARCH_LEXICAL_WEIGHT_KEY,
+            path: &["search", "lexical_weight"],
+            kind: GraphValueKind::UnitFloat,
+        }),
+        SEARCH_SEMANTIC_WEIGHT_KEY => Some(GraphKeySpec {
+            key: SEARCH_SEMANTIC_WEIGHT_KEY,
+            path: &["search", "semantic_weight"],
+            kind: GraphValueKind::UnitFloat,
+        }),
+        SEARCH_GRAPH_WEIGHT_KEY => Some(GraphKeySpec {
+            key: SEARCH_GRAPH_WEIGHT_KEY,
+            path: &["search", "graph_weight"],
+            kind: GraphValueKind::UnitFloat,
+        }),
+        _ => graph_key_spec(key),
+    }
+}
+
 fn graph_key_spec(key: &str) -> Option<GraphKeySpec> {
     match key {
         GRAPH_PPR_ALPHA_KEY => Some(GraphKeySpec {
@@ -1025,6 +1047,72 @@ mod tests {
             return Err(format!("unexpected source: {}", report.source));
         }
         Ok(())
+    }
+
+    #[test]
+    fn search_weight_get_reads_default_with_source() -> TestResult {
+        let temp = workspace()?;
+        let report = get_config(&options(temp.path()), "search.semantic_weight")
+            .map_err(|error| error.to_string())?;
+        if report.value != "0.45" {
+            return Err(format!(
+                "unexpected search.semantic_weight: {}",
+                report.value
+            ));
+        }
+        if report.source != "default" {
+            return Err(format!("unexpected source: {}", report.source));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn search_weight_set_round_trips_supported_keys() -> TestResult {
+        let temp = workspace()?;
+        let samples = [
+            ("search.lexical_weight", "0.95"),
+            ("search.semantic_weight", "0.05"),
+            ("search.graph_weight", "0.0"),
+        ];
+
+        for (key, value) in samples {
+            let report = set_config(&options(temp.path()), key, value, false)
+                .map_err(|error| format!("set {key}: {error}"))?;
+            if !report.applied && report.before.as_deref() != Some(report.value.as_str()) {
+                return Err(format!("{key} did not apply or report idempotence"));
+            }
+            let observed = get_config(&options(temp.path()), key)
+                .map_err(|error| format!("get {key}: {error}"))?;
+            if observed.value != report.value {
+                return Err(format!(
+                    "{key}: expected {}, got {}",
+                    report.value, observed.value
+                ));
+            }
+            if observed.source != "project" {
+                return Err(format!("{key}: unexpected source {}", observed.source));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn search_weight_set_rejects_invalid_ranges() -> TestResult {
+        let temp = workspace()?;
+        let error = match set_config(
+            &options(temp.path()),
+            "search.semantic_weight",
+            "1.5",
+            false,
+        ) {
+            Ok(report) => return Err(format!("invalid weight unexpectedly succeeded: {report:?}")),
+            Err(error) => error.to_string(),
+        };
+        if error.contains("0.0..=1.0") {
+            Ok(())
+        } else {
+            Err(format!("unexpected error: {error}"))
+        }
     }
 
     #[test]
