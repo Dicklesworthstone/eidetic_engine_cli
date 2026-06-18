@@ -4,8 +4,8 @@
 # Scenario: run a prebuilt ee binary against an isolated workspace and fixture
 # git/CASS inputs. Pin ambient capture suggestions, git-derived remember capture,
 # and session-arc review as proposal/accept-only flows with structured
-# ee.test_event.v1 logging. Capability gaps are explicit log_drop rows, never
-# silent passes.
+# ee.test_event.v1 logging. The capture features are closed; route gaps are
+# assertion failures, not capability skips.
 #
 # NOTE: no `set -e`; harness assertions accumulate and harness_summary owns the
 # exit code so failures still write artifacts.
@@ -165,7 +165,8 @@ assert_audit_mentions_capture() {
             tostring | test("curation|candidate|memory|review|capture|remember|audit"; "i")
         ' "$label audit timeline mentions the accepted capture path"
     else
-        log_drop 1 "audit timeline route absent: when wired, assert accepted capture writes an audit row for $label"
+        e2e_log_assert_eq "missing" "available" "$label audit timeline route available" || true
+        _harness_fail "$label: audit timeline route is required to prove accepted capture writes an audit row"
     fi
 }
 
@@ -239,7 +240,8 @@ if capture_suggest_available; then
     assert_eq "$after_suggest_candidates" "$before_suggest_candidates" \
         "capture suggest does not persist curation candidates by itself"
 else
-    log_drop 1 "bd-2vq2z.7 capture suggest route absent: when wired, assert one above-threshold read-only proposal with explicit accept/reject commands"
+    e2e_log_assert_eq "missing" "available" "capture suggest route available" || true
+    _harness_fail "bd-2vq2z.7 capture suggest route is required: assert one above-threshold read-only proposal with explicit accept/reject commands"
 fi
 
 step "review session proposes linked session-arc candidates and accept is audited"
@@ -279,7 +281,9 @@ if review_session_available; then
             "review session proposes anti-pattern plus rule pair" || true
         _harness_pass "review session proposes anti-pattern plus rule pair"
     else
-        log_drop 1 "bd-2vq2z.9 linked anti-pattern+rule classification not visible yet: assert both candidate kinds and their link once session-arc fields are wired"
+        e2e_log_assert_eq "anti=${anti_count:-0},rule=${rule_count:-0}" "anti>0,rule>0" \
+            "review session proposes anti-pattern plus rule pair" || true
+        _harness_fail "bd-2vq2z.9 session-arc review must expose linked anti-pattern plus rule candidates"
     fi
 
     if curate_apply_available; then
@@ -295,10 +299,12 @@ if review_session_available; then
             assert_audit_mentions_capture "$WS" "review-session accept"
         fi
     else
-        log_drop 1 "curate apply route absent: when wired, accept the first review-session candidate and assert curation audit"
+        e2e_log_assert_eq "missing" "available" "curate apply route available" || true
+        _harness_fail "curate apply route is required to accept the first review-session candidate and assert curation audit"
     fi
 else
-    log_drop 1 "bd-2vq2z.9 review session route absent: when wired, assert dry-run proposals, --propose curation writes, linked anti-pattern+rule pair, and audited accept"
+    e2e_log_assert_eq "missing" "available" "review session route available" || true
+    _harness_fail "bd-2vq2z.9 review session route is required: assert dry-run proposals, --propose curation writes, linked anti-pattern+rule pair, and audited accept"
 fi
 
 step "git commit capture proves dry-run default, apply gate, anchors, drift, and redaction"
@@ -369,7 +375,8 @@ if remember_git_capture_available; then
         and (.data.content | contains("Diff fingerprint: blake3:"))
     ' "remember --from-diff is proposal-only unless --apply is supplied"
 else
-    log_drop 1 "bd-2vq2z.8 remember --from-commit/--from-diff apply route absent: when wired, assert dry-run default, --apply persistence, file/symbol anchors, drift fingerprint, audit row, and secret redaction"
+    e2e_log_assert_eq "missing" "available" "remember git capture route available" || true
+    _harness_fail "bd-2vq2z.8 remember --from-commit/--from-diff route is required: assert dry-run default, --apply persistence, file/symbol anchors, drift fingerprint, audit row, and secret redaction"
 fi
 
 step "rerun capture suggestion after acceptance suppresses duplicate takeover"
@@ -384,7 +391,8 @@ if capture_suggest_available; then
         and ((.data.suppressedCount // 0) >= 1 or (.data.candidateCount // 0) <= 1)
     ' "rerun either suppresses duplicate suggestions or keeps one explicit proposal"
 else
-    log_drop 1 "bd-2vq2z.7 capture suggest rerun skipped: when wired, assert accepted lesson is not re-proposed as a takeover loop"
+    e2e_log_assert_eq "missing" "available" "capture suggest rerun route available" || true
+    _harness_fail "bd-2vq2z.7 capture suggest rerun is required: assert accepted lesson is not re-proposed as a takeover loop"
 fi
 
 end_temp_workspace
