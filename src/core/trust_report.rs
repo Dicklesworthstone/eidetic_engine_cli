@@ -824,4 +824,34 @@ mod tests {
             .iter()
             .any(|recommendation| recommendation.summary.contains("auto")));
     }
+
+    #[test]
+    fn empty_report_coerces_boundaries_without_false_recommendations() {
+        let report = build_trust_report(
+            "wsp_test".to_string(),
+            Vec::new(),
+            vec![feedback("missing_memory", "helpful", 1.0)],
+            BTreeSet::new(),
+            0,
+            0,
+        );
+
+        assert_eq!(report.memory_count, 0);
+        assert_eq!(report.memory_with_outcome_count, 0);
+        assert_eq!(report.outcome_event_count, 0);
+        assert_eq!(report.bucket_count, 1, "bucket count has a safe lower bound");
+        assert_eq!(report.buckets.len(), 1);
+        assert_eq!(report.buckets[0].posture, CalibrationPosture::NoOutcomeSignal);
+        assert_eq!(report.expected_calibration_error, 0.0);
+        assert!(report.most_helpful.is_empty());
+        assert!(report.most_harmful.is_empty());
+        assert!(
+            report.recommendations.is_empty(),
+            "an empty workspace should not invent trust actions"
+        );
+        assert_eq!(
+            report.data_json()["outcomeCoverage"]["ratio"],
+            serde_json::json!(0.0)
+        );
+    }
 }

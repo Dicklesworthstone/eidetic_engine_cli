@@ -716,6 +716,33 @@ mod tests {
     }
 
     #[test]
+    fn classifies_invalid_uri_and_missing_workspace_as_unverifiable() {
+        let invalid = assess_memory_provenance_health(
+            &memory(
+                "mem_invalid",
+                "invalid provenance",
+                Some("not a valid provenance uri".to_string()),
+            ),
+            Some(Path::new(".")),
+        );
+        assert_eq!(invalid.health, ProvenancePointerStatus::Unverifiable);
+        assert_eq!(invalid.pointers[0].scheme, "invalid");
+        assert_eq!(invalid.pointers[0].reason_code, "invalid_provenance_uri");
+
+        let no_workspace = assess_memory_provenance_health(
+            &memory(
+                "mem_no_workspace",
+                "workspace is required for relative file provenance",
+                Some("file://src/lib.rs#L1".to_string()),
+            ),
+            None,
+        );
+        assert_eq!(no_workspace.health, ProvenancePointerStatus::Unverifiable);
+        assert_eq!(no_workspace.pointers[0].scheme, "file");
+        assert_eq!(no_workspace.pointers[0].reason_code, "workspace_unavailable");
+    }
+
+    #[test]
     fn report_rolls_up_counts_deterministically() {
         let report = build_provenance_health_report(
             "wsp_test".to_string(),
