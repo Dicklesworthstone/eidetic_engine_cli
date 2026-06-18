@@ -1,15 +1,20 @@
 //! Read-only provenance snapshots for memory drift checks.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::fs;
+use std::path::{Component, Path};
 use std::process::Command;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::workspace::stable_workspace_id;
 use crate::db::{DbConnection, DbError, StoredMemory};
 use crate::models::memory_anchor::MemoryAnchorFreshnessTransition;
-use crate::models::{DomainError, MemoryAnchorFreshnessState, StoredMemoryAnchor};
+use crate::models::{
+    DomainError, MemoryAnchorFreshnessState, MemoryAnchorKind, MemoryAnchorSource,
+    StoredMemoryAnchor, extract_memory_anchor_surfaces,
+};
 
 pub const MEMORY_DRIFT_SNAPSHOT_SCHEMA_V1: &str = "ee.memory_drift.snapshot.v1";
 pub const MEMORY_DRIFT_QUEUE_SCHEMA_V1: &str = "ee.memory_drift.queue.v1";
@@ -1414,12 +1419,22 @@ fn memory_drift_report_hint_from_memory_and_anchors(
     memory: &StoredMemory,
     anchors: Vec<StoredMemoryAnchor>,
 ) -> MemoryDriftSelectionHint {
+    let captured_commit = captured_commit_for_memory(memory, &anchors);
+    let live_resolution = resolve_live_code_anchor_freshness(
+        workspace_path,
+        memory,
+        anchors,
+        captured_commit.as_deref(),
+    );
+    let anchors = live_resolution.anchors;
     let mut hint = memory_drift_report_hint_from_provenance_status(
         &memory.id,
         &memory.provenance_verification_status,
         memory.provenance_chain_hash.as_deref(),
     );
-    let anchor_status = memory_drift_status_from_stored_anchors(&anchors);
+    let anchor_status = live_resolution
+        .status
+        .or_else(|| memory_drift_status_from_stored_anchors(&anchors));
     if let Some((status, reason)) = anchor_status
         && status.severity_rank() > hint.drift_status.severity_rank()
     {
@@ -1433,7 +1448,6 @@ fn memory_drift_report_hint_from_memory_and_anchors(
                     | MemoryDriftStatus::MissingSource
                     | MemoryDriftStatus::StaleAnchor
             ));
-    let captured_commit = captured_commit_for_memory(memory, &anchors);
     let current_commit = if anchors.is_empty() && captured_commit.is_none() {
         None
     } else {
@@ -1463,6 +1477,192 @@ fn memory_drift_report_hint_from_memory_and_anchors(
         changed_regions,
         stale_anchor,
     )
+}
+
+struct LiveCodeAnchorResolution {
+    anchors: Vec<StoredMemoryAnchor>,
+    status: Option<(MemoryDriftStatus, &'static str)>,
+}
+
+fn resolve_live_code_anchor_freshness(
+    workspace_path: &Path,
+    memory: &StoredMemory,
+    mut anchors: Vec<StoredMemoryAnchor>,
+    captured_commit: Option<&str>,
+) -> LiveCodeAnchorResolution {
+    let normalized_values = normalized_code_anchor_values(memory);
+    let mut status = None;
+
+    for anchor in &mut anchors {
+        if anchor.anchor_kind != MemoryAnchorKind::Path {
+            continue;
+        }
+        let Some(normalized_path) =
+            normalized_values.get(&(anchor.anchor_kind, anchor.anchor_value_hash.clone()))
+        else {
+            continue;
+        };
+        let observed =
+            observe_path_anchor_freshness(workspace_path, normalized_path, anchor, captured_commit);
+        anchor.freshness_state = observed.freshness_state;
+        if observed.status != MemoryDriftStatus::Current {
+            status = max_memory_drift_status(status, Some((observed.status, observed.reason)));
+        }
+    }
+
+    LiveCodeAnchorResolution { anchors, status }
+}
+
+fn normalized_code_anchor_values(
+    memory: &StoredMemory,
+) -> BTreeMap<(MemoryAnchorKind, String), String> {
+    extract_memory_anchor_surfaces(
+        &memory.id,
+        &memory.content,
+        MemoryAnchorSource::Remember,
+        memory.provenance_uri.as_deref(),
+    )
+    .into_iter()
+    .map(|surface| {
+        (
+            (
+                surface.anchor.anchor_kind,
+                surface.anchor.anchor_value_hash.clone(),
+            ),
+            surface.normalized_value,
+        )
+    })
+    .collect()
+}
+
+struct ObservedPathAnchorFreshness {
+    status: MemoryDriftStatus,
+    reason: &'static str,
+    freshness_state: MemoryAnchorFreshnessState,
+}
+
+fn observe_path_anchor_freshness(
+    workspace_path: &Path,
+    normalized_path: &str,
+    anchor: &StoredMemoryAnchor,
+    captured_commit: Option<&str>,
+) -> ObservedPathAnchorFreshness {
+    let relative_path = Path::new(normalized_path);
+    if !is_safe_workspace_relative_path(relative_path) {
+        return observed_path_anchor_status(
+            MemoryDriftStatus::Unverifiable,
+            "code_anchor_path_unverifiable",
+        );
+    }
+
+    let source_path = workspace_path.join(relative_path);
+    let metadata = match fs::metadata(&source_path) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => {
+            return observed_path_anchor_status(
+                MemoryDriftStatus::Unverifiable,
+                "code_anchor_not_file",
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return observed_path_anchor_status(
+                MemoryDriftStatus::MissingSource,
+                "code_anchor_file_missing",
+            );
+        }
+        Err(_) => {
+            return observed_path_anchor_status(
+                MemoryDriftStatus::Unverifiable,
+                "code_anchor_file_unreadable",
+            );
+        }
+    };
+
+    let current_bytes = match fs::read(&source_path) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return observed_path_anchor_status(
+                MemoryDriftStatus::Unverifiable,
+                "code_anchor_file_unreadable",
+            );
+        }
+    };
+    let current_hash = memory_drift_content_hash(&current_bytes);
+
+    if let Some(commit) = captured_commit {
+        if let Some(captured_bytes) = git_blob_at_commit(workspace_path, commit, normalized_path) {
+            let captured_hash = memory_drift_content_hash(&captured_bytes);
+            if captured_hash != current_hash {
+                return observed_path_anchor_status(
+                    MemoryDriftStatus::Changed,
+                    "code_anchor_hash_changed",
+                );
+            }
+            return observed_path_anchor_status(
+                MemoryDriftStatus::Current,
+                "code_anchor_hash_current",
+            );
+        }
+        return observed_path_anchor_status(
+            MemoryDriftStatus::Unverifiable,
+            "code_anchor_capture_unavailable",
+        );
+    }
+
+    let source_modified_at = metadata.modified().ok().map(DateTime::<Utc>::from);
+    let anchor_updated_at = DateTime::parse_from_rfc3339(&anchor.updated_at)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc));
+    if let (Some(source_modified_at), Some(anchor_updated_at)) =
+        (source_modified_at, anchor_updated_at)
+        && source_modified_at > anchor_updated_at
+    {
+        return observed_path_anchor_status(
+            MemoryDriftStatus::Unverifiable,
+            "code_anchor_mtime_newer_than_anchor",
+        );
+    }
+
+    observed_path_anchor_status(
+        MemoryDriftStatus::Current,
+        "code_anchor_mtime_current",
+    )
+}
+
+fn observed_path_anchor_status(
+    status: MemoryDriftStatus,
+    reason: &'static str,
+) -> ObservedPathAnchorFreshness {
+    ObservedPathAnchorFreshness {
+        status,
+        reason,
+        freshness_state: freshness_state_for_drift(status),
+    }
+}
+
+fn max_memory_drift_status(
+    left: Option<(MemoryDriftStatus, &'static str)>,
+    right: Option<(MemoryDriftStatus, &'static str)>,
+) -> Option<(MemoryDriftStatus, &'static str)> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(status), None) | (None, Some(status)) => Some(status),
+        (Some(left), Some(right)) => {
+            if right.0.severity_rank() > left.0.severity_rank() {
+                Some(right)
+            } else {
+                Some(left)
+            }
+        }
+    }
+}
+
+fn is_safe_workspace_relative_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path.components().all(|component| {
+            matches!(component, Component::Normal(_) | Component::CurDir)
+        })
 }
 
 fn memory_drift_status_from_stored_anchors(
@@ -1567,6 +1767,10 @@ fn git_commit_distance(workspace_path: &Path, captured: &str, current: &str) -> 
 }
 
 fn git_output(workspace_path: &Path, args: &[&str]) -> Option<String> {
+    String::from_utf8(git_output_bytes(workspace_path, args)?).ok()
+}
+
+fn git_output_bytes(workspace_path: &Path, args: &[&str]) -> Option<Vec<u8>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(workspace_path)
@@ -1576,7 +1780,15 @@ fn git_output(workspace_path: &Path, args: &[&str]) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    String::from_utf8(output.stdout).ok()
+    Some(output.stdout)
+}
+
+fn git_blob_at_commit(workspace_path: &Path, commit: &str, normalized_path: &str) -> Option<Vec<u8>> {
+    if !is_hex_commit(commit) || !is_safe_workspace_relative_path(Path::new(normalized_path)) {
+        return None;
+    }
+    let object = format!("{commit}:{normalized_path}");
+    git_output_bytes(workspace_path, &["show", &object])
 }
 
 fn first_hex_commit(input: &str) -> Option<String> {
@@ -2671,7 +2883,8 @@ mod tests {
     }
 
     #[test]
-    fn code_anchor_report_exposes_commit_distance_and_changed_regions() -> Result<(), String> {
+    fn code_anchor_report_rechecks_live_file_hash_even_when_stored_anchor_is_current(
+    ) -> Result<(), String> {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let repo = tempdir.path();
         std::fs::create_dir_all(repo.join("src")).map_err(|error| error.to_string())?;
@@ -2738,9 +2951,9 @@ mod tests {
             provenance_uri: Some(format!("git-sha://{captured}")),
             trust_class: "agent_assertion".to_owned(),
             trust_subclass: None,
-            provenance_chain_hash: Some("blake3:changed".to_owned()),
+            provenance_chain_hash: Some("blake3:verified".to_owned()),
             provenance_chain_hash_version: "v1".to_owned(),
-            provenance_verification_status: "mismatch".to_owned(),
+            provenance_verification_status: "verified".to_owned(),
             provenance_verified_at: None,
             provenance_verification_note: None,
             created_at: "2026-06-18T00:00:00Z".to_owned(),
@@ -2752,6 +2965,7 @@ mod tests {
 
         let hint = memory_drift_report_hint_from_memory_and_anchors(repo, &memory, vec![anchor]);
         assert_eq!(hint.drift_status, MemoryDriftStatus::Changed);
+        assert_eq!(hint.top_reason, "code_anchor_hash_changed");
         assert_eq!(hint.freshness, "drifted");
         assert!(hint.stale_anchor);
         assert_eq!(hint.captured_at_commit.as_deref(), Some(captured.as_str()));
@@ -2759,7 +2973,7 @@ mod tests {
         assert_eq!(hint.commit_distance, Some(1));
         assert_eq!(hint.changed_regions, vec!["path:lib.rs:abcdef12"]);
         assert_eq!(hint.anchors.len(), 1);
-        assert_eq!(hint.anchors[0].freshness_state, "current");
+        assert_eq!(hint.anchors[0].freshness_state, "stale");
         assert_eq!(hint.anchors[0].freshness, "drifted");
         assert!(hint.anchors[0].stale_anchor);
         assert_eq!(
@@ -2768,6 +2982,71 @@ mod tests {
                 .and_then(serde_json::Value::as_bool),
             Some(true)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn code_anchor_report_marks_newer_mtime_suspect_without_commit_baseline(
+    ) -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path();
+        std::fs::create_dir_all(workspace.join("src")).map_err(|error| error.to_string())?;
+        std::fs::write(workspace.join("src/lib.rs"), "pub fn trust_probe() {}\n")
+            .map_err(|error| error.to_string())?;
+
+        let anchor_hash = crate::models::memory_anchor_value_hash(
+            crate::models::MemoryAnchorKind::Path,
+            "src/lib.rs",
+        );
+        let anchor = StoredMemoryAnchor {
+            memory_id: "mem_anchor".to_owned(),
+            anchor_kind: crate::models::MemoryAnchorKind::Path,
+            anchor_value_hash: anchor_hash.clone(),
+            redacted_anchor_value: "path:lib.rs:abcdef12".to_owned(),
+            confidence: 1.0,
+            source: crate::models::MemoryAnchorSource::Explicit,
+            provenance: "memory.content".to_owned(),
+            captured_span_hash: anchor_hash,
+            freshness_state: MemoryAnchorFreshnessState::Current,
+            generation: 7,
+            created_at: "1970-01-01T00:00:00Z".to_owned(),
+            updated_at: "1970-01-01T00:00:00Z".to_owned(),
+        };
+        let memory = StoredMemory {
+            id: "mem_anchor".to_owned(),
+            workspace_id: "wsp_anchor".to_owned(),
+            level: "episodic".to_owned(),
+            kind: "fact".to_owned(),
+            content: "Memory with ee-anchor:path:src/lib.rs but no git baseline.".to_owned(),
+            workflow_id: None,
+            confidence: 0.8,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_owned(),
+            trust_subclass: None,
+            provenance_chain_hash: Some("blake3:verified".to_owned()),
+            provenance_chain_hash_version: "v1".to_owned(),
+            provenance_verification_status: "verified".to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+            created_at: "1970-01-01T00:00:00Z".to_owned(),
+            updated_at: "1970-01-01T00:00:00Z".to_owned(),
+            tombstoned_at: None,
+            valid_from: None,
+            valid_to: None,
+        };
+
+        let hint =
+            memory_drift_report_hint_from_memory_and_anchors(workspace, &memory, vec![anchor]);
+        assert_eq!(hint.drift_status, MemoryDriftStatus::Unverifiable);
+        assert_eq!(hint.top_reason, "code_anchor_mtime_newer_than_anchor");
+        assert_eq!(hint.freshness, "unknown");
+        assert!(hint.stale_anchor);
+        assert_eq!(hint.anchors.len(), 1);
+        assert_eq!(hint.anchors[0].freshness_state, "suspect");
+        assert_eq!(hint.anchors[0].freshness, "unknown");
+        assert!(hint.anchors[0].stale_anchor);
         Ok(())
     }
 
