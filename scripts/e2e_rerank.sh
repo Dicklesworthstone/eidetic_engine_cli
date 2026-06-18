@@ -227,6 +227,17 @@ QUERY="release format checklist cargo clippy"
 PRECISE_SENTINEL="BD2VQ2Z6_PRECISE_RERANK_TARGET"
 LEXICAL_TRAP="BD2VQ2Z6_LEXICAL_TRAP"
 
+# bd-2vq2z.26: strict-model gate. The central lane that pre-provisions a real
+# reranker artifact sets EE_E2E_RERANK_REQUIRE_MODEL=1; in that mode a
+# fusion-only / degraded outcome is a HARD FAILURE so a stubbed or degraded run
+# can never pass off as real cross-encoder reranking. Default (0) keeps the
+# permissive fallback lane for environments without a cached artifact.
+REQUIRE_MODEL="${EE_E2E_RERANK_REQUIRE_MODEL:-0}"
+emit_event "note" "$(jq -cn \
+    --arg bead "bd-2vq2z.26" \
+    --arg requireModel "${REQUIRE_MODEL}" \
+    '{bead_id:$bead,surface:"rerank_e2e",label:"strict_model_gate",require_model:$requireModel,redaction_status:"local_workspace_artifacts_retained"}')"
+
 run_ee_json "init_workspace" init --json
 init_file="${LAST_STDOUT_FILE}"
 assert_jq_file "${init_file}" '.schema' "ee.response.v2" "init envelope schema"
@@ -284,8 +295,24 @@ case "${rerank_mode}" in
         assert_jq_file "${hybrid_file}" '(.data.rerank.rerankScoreCount | tonumber) > 0' "true" "reranked mode reports rerank scores"
         assert_jq_file "${hybrid_file}" '((.data.results // []) | map(select(.scoreKind == "reranked" and has("rerankScore"))) | length) > 0' "true" "reranked results expose scoreKind and rerankScore"
         assert_jq_file "${hybrid_file}" "(.data.results[0].content // \"\" | contains(\"${PRECISE_SENTINEL}\"))" "true" "rerank corrects top result to precise target"
+        # bd-2vq2z.26: prove a REAL precision_gain_at_1 > 0. The lexical baseline
+        # must NOT already rank the precise target first (the lexical trap wins
+        # on keyword frequency); reranking then moves the precise target to the
+        # top. A stub that fakes mode=reranked without moving the target fails
+        # this pair, so a degraded/stub run cannot pass the strict lane.
+        assert_jq_file "${lexical_file}" "((.data.results[0].content // \"\") | contains(\"${PRECISE_SENTINEL}\") | not)" "true" "lexical baseline mis-ranks precise target (precision_gain_at_1 headroom)"
+        lexical_top_precise="$(jq -r "((.data.results[0].content // \"\") | contains(\"${PRECISE_SENTINEL}\"))" "${lexical_file}")"
+        rerank_top_precise="$(jq -r "((.data.results[0].content // \"\") | contains(\"${PRECISE_SENTINEL}\"))" "${hybrid_file}")"
+        if [[ "${lexical_top_precise}" == "false" && "${rerank_top_precise}" == "true" ]]; then
+            record_pass "rerank yields positive precision_gain_at_1 (precise target promoted to rank 0)"
+        else
+            record_failure "rerank yields positive precision_gain_at_1" "lexical_top_precise=${lexical_top_precise} rerank_top_precise=${rerank_top_precise}"
+        fi
         ;;
     fusion_only_degraded)
+        if [[ "${REQUIRE_MODEL}" == "1" ]]; then
+            record_failure "strict rerank model required" "EE_E2E_RERANK_REQUIRE_MODEL=1 but rerank degraded to fusion_only_degraded; a pre-provisioned reranker artifact must enter mode=reranked and correct top-K"
+        fi
         assert_jq_file "${hybrid_file}" '.data.rerank.available' "false" "degraded mode reports unavailable"
         assert_jq_file "${hybrid_file}" '.data.rerank.degradedCode' "rerank_model_unavailable" "degraded mode names rerank_model_unavailable"
         assert_jq_file "${hybrid_file}" '((.data.degraded // .degraded // []) | map(.code) | contains(["rerank_model_unavailable"]))' "true" "degraded array includes rerank_model_unavailable"
@@ -304,6 +331,9 @@ case "${rerank_mode}" in
         fi
         ;;
     fusion_only)
+        if [[ "${REQUIRE_MODEL}" == "1" ]]; then
+            record_failure "strict rerank model required" "EE_E2E_RERANK_REQUIRE_MODEL=1 but rerank posture was fusion_only; a pre-provisioned reranker artifact must enter mode=reranked and correct top-K"
+        fi
         record_failure "hybrid rerank posture is decisive" "hybrid search returned fusion_only without rerank_model_unavailable"
         ;;
     *)
