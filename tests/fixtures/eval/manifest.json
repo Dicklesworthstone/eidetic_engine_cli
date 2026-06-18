@@ -16,6 +16,10 @@
       "path": "tests/fixtures/eval/async_migration"
     },
     {
+      "id": "fx.bundled_embeddings.v1",
+      "path": "tests/fixtures/eval/bundled_embeddings"
+    },
+    {
       "id": "fx.dangerous_cleanup.v1",
       "path": "tests/fixtures/eval/dangerous_cleanup"
     },

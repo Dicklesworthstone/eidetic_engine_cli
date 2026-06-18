@@ -1,0 +1,112 @@
+{
+  "schema": "ee.eval_fixture.v1",
+  "fixture_id": "fx.bundled_embeddings.v1",
+  "scenario_ids": [
+    "usr_bundled_embedding_analyst_paraphrase"
+  ],
+  "fixture_family": "bundled_embeddings",
+  "coverage_state": "implemented",
+  "journey": "Bundled local semantic retrieval surfaces the RBLX bookings and FCF memory for a faithful zero-ticker paraphrase instead of flat hash fallback noise.",
+  "owning_bead_ids": [
+    "bd-1et0v.19"
+  ],
+  "owning_gate_ids": [
+    "gate.4.frankensearch_contract",
+    "gate.14.executable_claims"
+  ],
+  "deterministic": {
+    "fixed_clock": "2026-06-18T00:00:00Z",
+    "deterministic_seed": "seed.bundled_embeddings.semantic_recall.v1",
+    "stable_ids": [
+      "mem_00000000000000000000000901",
+      "mem_00000000000000000000000902",
+      "mem_00000000000000000000000903"
+    ],
+    "workspace_fingerprints": [
+      "workspace.bundled_embeddings.v1"
+    ]
+  },
+  "source": {
+    "kind": "synthetic",
+    "path": "tests/fixtures/eval/bundled_embeddings/source_memory.json",
+    "source_hash": "staged:bd-1et0v.19",
+    "synthetic_secret_policy": "none"
+  },
+  "redaction": {
+    "classes_expected": [],
+    "secret_leak_assertions": [
+      "stdout does not contain token-like prefixes",
+      "stderr does not contain token-like prefixes",
+      "artifacts contain no synthetic secrets"
+    ]
+  },
+  "command_sequence": [
+    {
+      "step": 1,
+      "argv": [
+        "ee",
+        "eval",
+        "run",
+        "fx.bundled_embeddings.v1",
+        "--json"
+      ],
+      "cwd": "<repo>",
+      "expected_exit_code": 0,
+      "stdout_schema": "ee.response.v2",
+      "stderr_policy": "diagnostics_only",
+      "stdout_artifact_path": "target/ee-e2e/bundled_embeddings/<run-id>/01-eval-run.stdout.json",
+      "stderr_artifact_path": "target/ee-e2e/bundled_embeddings/<run-id>/01-eval-run.stderr.txt"
+    }
+  ],
+  "expected_outputs": [
+    {
+      "step": 1,
+      "schema": "ee.response.v2",
+      "required_fields": [
+        "data.command",
+        "data.report",
+        "data.report.semantic_recall",
+        "data.report.metrics"
+      ],
+      "absent_fields": [
+        "secret",
+        "token"
+      ]
+    }
+  ],
+  "semantic_recall_expectations": {
+    "schema": "ee.eval.semantic_recall_expectations.v1",
+    "deterministic_seed": "seed.bundled_embeddings.semantic_recall.v1",
+    "recall_at_k": 5,
+    "hash_baseline_recall_at_k_max": 0.0,
+    "semantic_recall_at_k_min": 1.0,
+    "minimum_recall_gain": 1.0,
+    "cases": [
+      {
+        "case_id": "analyst_rblx_zero_ticker_paraphrase",
+        "query": "video game virtual currency platform owner cash generation",
+        "expected_memory_ids": [
+          "mem_00000000000000000000000901"
+        ],
+        "hash_retrieved_ids": [
+          "mem_00000000000000000000000902",
+          "mem_00000000000000000000000903"
+        ],
+        "semantic_retrieved_ids": [
+          "mem_00000000000000000000000901",
+          "mem_00000000000000000000000902",
+          "mem_00000000000000000000000903"
+        ]
+      }
+    ]
+  },
+  "degraded_branches": [
+    {
+      "code": "embed_model_unavailable",
+      "description": "A missing or disabled bundled embedding model falls back honestly to lexical retrieval and documents the repair.",
+      "repair_action": "ee index reembed --workspace .",
+      "preserves_success_signal": true
+    }
+  ],
+  "agent_success_signal": "A fresh agent can trust that a meaning-only analyst paraphrase retrieves the RBLX memory when the bundled neural model is active, and can see the measured recall gap over hash fallback."
+}

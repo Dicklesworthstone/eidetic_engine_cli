@@ -37,6 +37,13 @@ pub const ASK_QUALITY_EXPECTATIONS_SCHEMA_V1: &str = "ee.eval.ask_quality_expect
 /// Schema version for ask-quality reports emitted by the eval harness.
 pub const ASK_REPORT_SCHEMA_V1: &str = "ee.eval.ask_report.v1";
 
+/// Schema version for bundled-embedding semantic recall expectations.
+pub const SEMANTIC_RECALL_EXPECTATIONS_SCHEMA_V1: &str =
+    "ee.eval.semantic_recall_expectations.v1";
+
+/// Schema version for bundled-embedding semantic recall reports.
+pub const SEMANTIC_RECALL_REPORT_SCHEMA_V1: &str = "ee.eval.semantic_recall_report.v1";
+
 /// Default fixture directory relative to project root.
 pub const DEFAULT_FIXTURE_DIR: &str = "tests/fixtures/eval";
 
@@ -83,6 +90,8 @@ pub struct FixtureScenario {
     pub ask_quality_expectations: Option<AskQualityExpectations>,
     #[serde(default)]
     pub structural_recall_expectations: Option<StructuralRecallExpectations>,
+    #[serde(default)]
+    pub semantic_recall_expectations: Option<SemanticRecallExpectations>,
     #[serde(default)]
     pub degraded_branches: Vec<DegradedBranch>,
     pub agent_success_signal: String,
@@ -245,6 +254,70 @@ pub struct StructuralRecallExpectations {
     pub structural_recall_at_10_min: f64,
     #[serde(default)]
     pub required_scenario_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SemanticRecallExpectations {
+    pub schema: String,
+    pub deterministic_seed: String,
+    #[serde(default = "default_semantic_recall_k")]
+    pub recall_at_k: u32,
+    pub hash_baseline_recall_at_k_max: f64,
+    pub semantic_recall_at_k_min: f64,
+    pub minimum_recall_gain: f64,
+    #[serde(default)]
+    pub cases: Vec<SemanticRecallCase>,
+}
+
+fn default_semantic_recall_k() -> u32 {
+    5
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SemanticRecallCase {
+    pub case_id: String,
+    pub query: String,
+    #[serde(default)]
+    pub expected_memory_ids: Vec<String>,
+    #[serde(default)]
+    pub hash_retrieved_ids: Vec<String>,
+    #[serde(default)]
+    pub semantic_retrieved_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SemanticRecallCaseReport {
+    pub case_id: String,
+    pub query: String,
+    pub expected_memory_ids: Vec<String>,
+    pub hash_retrieved_ids: Vec<String>,
+    pub semantic_retrieved_ids: Vec<String>,
+    pub hash_recall_at_k: f64,
+    pub semantic_recall_at_k: f64,
+    pub recall_gain: f64,
+    pub first_semantic_rank: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SemanticRecallReport {
+    pub schema: &'static str,
+    pub fixture_id: String,
+    pub deterministic_seed: String,
+    pub recall_at_k: u32,
+    pub case_count: u32,
+    pub hash_baseline_recall_at_k: f64,
+    pub semantic_recall_at_k: f64,
+    pub recall_gain: f64,
+    pub thresholds: SemanticRecallThresholds,
+    pub passed: bool,
+    pub cases: Vec<SemanticRecallCaseReport>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SemanticRecallThresholds {
+    pub hash_baseline_recall_at_k_max: f64,
+    pub semantic_recall_at_k_min: f64,
+    pub minimum_recall_gain: f64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -574,6 +647,8 @@ pub struct EvalRunReport {
     pub fixture_family: String,
     pub status: EvalRunStatus,
     pub metrics: FixtureMetrics,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub semantic_recall: Option<SemanticRecallReport>,
     pub duration_ms: f64,
     pub data_hash: String,
 }
@@ -586,6 +661,7 @@ impl EvalRunReport {
             fixture_family,
             status: EvalRunStatus::Pending,
             metrics: FixtureMetrics::default(),
+            semantic_recall: None,
             duration_ms: 0.0,
             data_hash: String::new(),
         }
@@ -820,7 +896,142 @@ pub fn validate_fixture_scenario(
     validate_structural_edges(source)?;
     validate_pack_quality_expectations(scenario, source)?;
     validate_ask_quality_expectations(scenario, source)?;
-    validate_structural_recall_expectations(scenario, source)
+    validate_structural_recall_expectations(scenario, source)?;
+    validate_semantic_recall_expectations(scenario, source)
+}
+
+fn validate_semantic_recall_expectations(
+    scenario: &FixtureScenario,
+    source: &SourceMemoryFile,
+) -> Result<(), DomainError> {
+    let Some(expectations) = &scenario.semantic_recall_expectations else {
+        return Ok(());
+    };
+
+    if expectations.schema != SEMANTIC_RECALL_EXPECTATIONS_SCHEMA_V1 {
+        return Err(fixture_validation_error(format!(
+            "semantic_recall_expectations schema `{}` must be `{}`",
+            expectations.schema, SEMANTIC_RECALL_EXPECTATIONS_SCHEMA_V1
+        )));
+    }
+    if expectations.deterministic_seed.trim().is_empty() {
+        return Err(fixture_validation_error(
+            "semantic_recall_expectations deterministic_seed must not be empty",
+        ));
+    }
+    if expectations.recall_at_k == 0 {
+        return Err(fixture_validation_error(
+            "semantic_recall_expectations recall_at_k must be positive",
+        ));
+    }
+    validate_score01(
+        expectations.hash_baseline_recall_at_k_max,
+        "semantic_recall_expectations.hash_baseline_recall_at_k_max",
+    )?;
+    validate_score01(
+        expectations.semantic_recall_at_k_min,
+        "semantic_recall_expectations.semantic_recall_at_k_min",
+    )?;
+    validate_score01(
+        expectations.minimum_recall_gain,
+        "semantic_recall_expectations.minimum_recall_gain",
+    )?;
+    if expectations.semantic_recall_at_k_min <= expectations.hash_baseline_recall_at_k_max {
+        return Err(fixture_validation_error(
+            "semantic_recall_expectations semantic_recall_at_k_min must exceed hash_baseline_recall_at_k_max",
+        ));
+    }
+    if expectations.cases.is_empty() {
+        return Err(fixture_validation_error(
+            "semantic_recall_expectations cases must not be empty",
+        ));
+    }
+
+    let source_ids = source_memory_ids(source)?;
+    let mut case_ids = HashSet::new();
+    for case in &expectations.cases {
+        validate_required_label(&case.case_id, "case_id", "<semantic_recall>")?;
+        if !case_ids.insert(case.case_id.as_str()) {
+            return Err(fixture_validation_error(format!(
+                "duplicate semantic recall case_id `{}`",
+                case.case_id
+            )));
+        }
+        validate_required_label(&case.query, "query", &case.case_id)?;
+        validate_semantic_memory_id_list(
+            &case.expected_memory_ids,
+            "expected_memory_ids",
+            &case.case_id,
+        )?;
+        validate_semantic_memory_id_list(
+            &case.hash_retrieved_ids,
+            "hash_retrieved_ids",
+            &case.case_id,
+        )?;
+        validate_semantic_memory_id_list(
+            &case.semantic_retrieved_ids,
+            "semantic_retrieved_ids",
+            &case.case_id,
+        )?;
+        validate_known_semantic_memory_ids(
+            &case.expected_memory_ids,
+            &source_ids,
+            "expected_memory_ids",
+            &case.case_id,
+        )?;
+        validate_known_semantic_memory_ids(
+            &case.hash_retrieved_ids,
+            &source_ids,
+            "hash_retrieved_ids",
+            &case.case_id,
+        )?;
+        validate_known_semantic_memory_ids(
+            &case.semantic_retrieved_ids,
+            &source_ids,
+            "semantic_retrieved_ids",
+            &case.case_id,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn validate_semantic_memory_id_list(
+    ids: &[String],
+    field: &str,
+    case_id: &str,
+) -> Result<(), DomainError> {
+    if ids.is_empty() {
+        return Err(fixture_validation_error(format!(
+            "semantic recall case `{case_id}` field `{field}` must not be empty"
+        )));
+    }
+    let mut seen = HashSet::new();
+    for id in ids {
+        validate_required_label(id, field, case_id)?;
+        if !seen.insert(id.as_str()) {
+            return Err(fixture_validation_error(format!(
+                "semantic recall case `{case_id}` field `{field}` contains duplicate id `{id}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_known_semantic_memory_ids(
+    ids: &[String],
+    source_ids: &HashSet<String>,
+    field: &str,
+    case_id: &str,
+) -> Result<(), DomainError> {
+    for id in ids {
+        if !source_ids.contains(id) {
+            return Err(fixture_validation_error(format!(
+                "semantic recall case `{case_id}` field `{field}` references unknown memory id `{id}`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_structural_edges(source: &SourceMemoryFile) -> Result<(), DomainError> {
@@ -1938,6 +2149,72 @@ pub fn compute_fixture_metrics(
     }
 }
 
+pub fn evaluate_semantic_recall_expectations(
+    fixture_id: &str,
+    expectations: &SemanticRecallExpectations,
+) -> SemanticRecallReport {
+    let k = usize::try_from(expectations.recall_at_k).unwrap_or(usize::MAX);
+    let cases = expectations
+        .cases
+        .iter()
+        .map(|case| {
+            let relevant = case
+                .expected_memory_ids
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>();
+            let hash_recall = recall_at_k(&case.hash_retrieved_ids, &relevant, k);
+            let semantic_recall = recall_at_k(&case.semantic_retrieved_ids, &relevant, k);
+            SemanticRecallCaseReport {
+                case_id: case.case_id.clone(),
+                query: case.query.clone(),
+                expected_memory_ids: case.expected_memory_ids.clone(),
+                hash_retrieved_ids: case.hash_retrieved_ids.clone(),
+                semantic_retrieved_ids: case.semantic_retrieved_ids.clone(),
+                hash_recall_at_k: hash_recall,
+                semantic_recall_at_k: semantic_recall,
+                recall_gain: semantic_recall - hash_recall,
+                first_semantic_rank: first_relevant_rank(&case.semantic_retrieved_ids, &relevant),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let case_count = cases.len();
+    let divisor = if case_count == 0 {
+        1.0
+    } else {
+        case_count as f64
+    };
+    let hash_baseline_recall_at_k =
+        cases.iter().map(|case| case.hash_recall_at_k).sum::<f64>() / divisor;
+    let semantic_recall_at_k =
+        cases.iter().map(|case| case.semantic_recall_at_k).sum::<f64>() / divisor;
+    let recall_gain = semantic_recall_at_k - hash_baseline_recall_at_k;
+    let thresholds = SemanticRecallThresholds {
+        hash_baseline_recall_at_k_max: expectations.hash_baseline_recall_at_k_max,
+        semantic_recall_at_k_min: expectations.semantic_recall_at_k_min,
+        minimum_recall_gain: expectations.minimum_recall_gain,
+    };
+    let passed = case_count > 0
+        && hash_baseline_recall_at_k <= thresholds.hash_baseline_recall_at_k_max
+        && semantic_recall_at_k >= thresholds.semantic_recall_at_k_min
+        && recall_gain >= thresholds.minimum_recall_gain;
+
+    SemanticRecallReport {
+        schema: SEMANTIC_RECALL_REPORT_SCHEMA_V1,
+        fixture_id: fixture_id.to_owned(),
+        deterministic_seed: expectations.deterministic_seed.clone(),
+        recall_at_k: expectations.recall_at_k,
+        case_count: u32::try_from(case_count).unwrap_or(u32::MAX),
+        hash_baseline_recall_at_k,
+        semantic_recall_at_k,
+        recall_gain,
+        thresholds,
+        passed,
+        cases,
+    }
+}
+
 /// Compute data hash for determinism verification.
 pub fn compute_data_hash(report: &EvalRunReport) -> String {
     let mut hasher = blake3::Hasher::new();
@@ -1952,6 +2229,24 @@ pub fn compute_data_hash(report: &EvalRunReport) -> String {
         }
         for id in &q.retrieved_ids {
             hasher.update(id.as_bytes());
+        }
+    }
+    if let Some(semantic_recall) = &report.semantic_recall {
+        hasher.update(semantic_recall.schema.as_bytes());
+        hasher.update(semantic_recall.deterministic_seed.as_bytes());
+        hasher.update(&semantic_recall.recall_at_k.to_le_bytes());
+        for case in &semantic_recall.cases {
+            hasher.update(case.case_id.as_bytes());
+            hasher.update(case.query.as_bytes());
+            for id in &case.expected_memory_ids {
+                hasher.update(id.as_bytes());
+            }
+            for id in &case.hash_retrieved_ids {
+                hasher.update(id.as_bytes());
+            }
+            for id in &case.semantic_retrieved_ids {
+                hasher.update(id.as_bytes());
+            }
         }
     }
 
@@ -3158,6 +3453,78 @@ mod tests {
     }
 
     #[test]
+    fn semantic_recall_expectations_measure_neural_gain() -> TestResult {
+        let expectations = SemanticRecallExpectations {
+            schema: SEMANTIC_RECALL_EXPECTATIONS_SCHEMA_V1.to_owned(),
+            deterministic_seed: "seed.bundled_embeddings.semantic_recall.v1".to_owned(),
+            recall_at_k: 3,
+            hash_baseline_recall_at_k_max: 0.0,
+            semantic_recall_at_k_min: 1.0,
+            minimum_recall_gain: 1.0,
+            cases: vec![SemanticRecallCase {
+                case_id: "analyst_paraphrase".to_owned(),
+                query: "video game virtual currency platform owner cash generation".to_owned(),
+                expected_memory_ids: vec!["mem_rblx".to_owned()],
+                hash_retrieved_ids: vec!["mem_snow".to_owned(), "mem_nke".to_owned()],
+                semantic_retrieved_ids: vec!["mem_rblx".to_owned(), "mem_snow".to_owned()],
+            }],
+        };
+
+        let report = evaluate_semantic_recall_expectations(
+            "fx.bundled_embeddings.v1",
+            &expectations,
+        );
+
+        ensure(report.schema, SEMANTIC_RECALL_REPORT_SCHEMA_V1, "schema")?;
+        ensure(report.passed, true, "report should pass")?;
+        ensure_close(
+            report.hash_baseline_recall_at_k,
+            0.0,
+            1e-9,
+            "hash baseline recall",
+        )?;
+        ensure_close(
+            report.semantic_recall_at_k,
+            1.0,
+            1e-9,
+            "semantic recall",
+        )?;
+        ensure_close(report.recall_gain, 1.0, 1e-9, "recall gain")?;
+        ensure(
+            report.cases[0].first_semantic_rank,
+            Some(1),
+            "semantic first rank",
+        )
+    }
+
+    #[test]
+    fn semantic_recall_expectations_fail_when_hash_is_not_beaten() -> TestResult {
+        let expectations = SemanticRecallExpectations {
+            schema: SEMANTIC_RECALL_EXPECTATIONS_SCHEMA_V1.to_owned(),
+            deterministic_seed: "seed.bundled_embeddings.semantic_recall.v1".to_owned(),
+            recall_at_k: 3,
+            hash_baseline_recall_at_k_max: 0.0,
+            semantic_recall_at_k_min: 1.0,
+            minimum_recall_gain: 1.0,
+            cases: vec![SemanticRecallCase {
+                case_id: "analyst_paraphrase".to_owned(),
+                query: "video game virtual currency platform owner cash generation".to_owned(),
+                expected_memory_ids: vec!["mem_rblx".to_owned()],
+                hash_retrieved_ids: vec!["mem_rblx".to_owned()],
+                semantic_retrieved_ids: vec!["mem_rblx".to_owned()],
+            }],
+        };
+
+        let report = evaluate_semantic_recall_expectations(
+            "fx.bundled_embeddings.v1",
+            &expectations,
+        );
+
+        ensure(report.passed, false, "report should fail without gain")?;
+        ensure_close(report.recall_gain, 0.0, 1e-9, "recall gain")
+    }
+
+    #[test]
     fn eval_run_status_strings_stable() -> TestResult {
         ensure(EvalRunStatus::Pending.as_str(), "pending", "pending")?;
         ensure(EvalRunStatus::Running.as_str(), "running", "running")?;
@@ -3178,7 +3545,17 @@ mod tests {
             "ee.eval_source_memory.v1",
             "source schema",
         )?;
-        ensure(EVAL_REPORT_SCHEMA_V1, "ee.eval.report.v1", "report schema")
+        ensure(EVAL_REPORT_SCHEMA_V1, "ee.eval.report.v1", "report schema")?;
+        ensure(
+            SEMANTIC_RECALL_EXPECTATIONS_SCHEMA_V1,
+            "ee.eval.semantic_recall_expectations.v1",
+            "semantic recall expectations schema",
+        )?;
+        ensure(
+            SEMANTIC_RECALL_REPORT_SCHEMA_V1,
+            "ee.eval.semantic_recall_report.v1",
+            "semantic recall report schema",
+        )
     }
 
     // ========================================================================

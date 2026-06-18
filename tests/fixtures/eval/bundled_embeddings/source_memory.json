@@ -1,0 +1,73 @@
+{
+  "schema": "ee.eval_source_memory.v1",
+  "fixture_id": "fx.bundled_embeddings.v1",
+  "source_kind": "synthetic",
+  "fixed_clock": "2026-06-18T00:00:00Z",
+  "memories": [
+    {
+      "id": "mem_00000000000000000000000901",
+      "level": "semantic",
+      "kind": "fact",
+      "trust_class": "human_explicit",
+      "confidence": 0.95,
+      "utility": 0.9,
+      "importance": 0.85,
+      "tags": [
+        "analyst",
+        "rblx",
+        "bookings",
+        "fcf"
+      ],
+      "content": "RBLX bookings/FCF watchlist: Roblox Robux engagement cohorts and creator marketplace economics signal durable bookings conversion and FCF resilience.",
+      "provenance_uri": "file://tests/fixtures/eval/bundled_embeddings/source_memory.json#rblx",
+      "expected_query_match": [
+        "RBLX bookings FCF watchlist",
+        "Roblox Robux creator marketplace"
+      ]
+    },
+    {
+      "id": "mem_00000000000000000000000902",
+      "level": "semantic",
+      "kind": "fact",
+      "trust_class": "synthetic_generated",
+      "confidence": 0.75,
+      "utility": 0.45,
+      "importance": 0.4,
+      "tags": [
+        "analyst",
+        "snowflake",
+        "warehouse"
+      ],
+      "content": "SNOW warehouse optimization watchlist: compute credits, retention cohorts, and data cloud workload consolidation shape net revenue expansion.",
+      "provenance_uri": "file://tests/fixtures/eval/bundled_embeddings/source_memory.json#snowflake",
+      "expected_query_match": []
+    },
+    {
+      "id": "mem_00000000000000000000000903",
+      "level": "semantic",
+      "kind": "fact",
+      "trust_class": "synthetic_generated",
+      "confidence": 0.7,
+      "utility": 0.4,
+      "importance": 0.35,
+      "tags": [
+        "analyst",
+        "retail",
+        "inventory"
+      ],
+      "content": "NKE margin watchlist: channel inventory, wholesale discounting, and direct-to-consumer mix drive gross margin pressure.",
+      "provenance_uri": "file://tests/fixtures/eval/bundled_embeddings/source_memory.json#nike",
+      "expected_query_match": []
+    }
+  ],
+  "secret_policy": {
+    "synthetic_secret_policy": "none",
+    "secret_like_values_present": false,
+    "blocked_classes": [
+      "api_token",
+      "github_token",
+      "cloud_access_key",
+      "private_key"
+    ]
+  }
+}

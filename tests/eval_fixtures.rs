@@ -1,8 +1,10 @@
 use ee::eval::{
     ASK_QUALITY_EXPECTATIONS_SCHEMA_V1, CommandStep, DegradedBranch, EVAL_FIXTURE_SCHEMA_V1,
     EvaluationScenario, ExpectedOutput, FixtureScenario, PACK_QUALITY_EXPECTATIONS_SCHEMA_V1,
-    RedactionClass, RedactionLeakDetector, STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1,
-    SourceMemoryFile, materialize_source_memories, validate_fixture_scenario,
+    RedactionClass, RedactionLeakDetector, SEMANTIC_RECALL_EXPECTATIONS_SCHEMA_V1,
+    SEMANTIC_RECALL_REPORT_SCHEMA_V1, STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1,
+    SourceMemoryFile, evaluate_semantic_recall_expectations, materialize_source_memories,
+    validate_fixture_scenario,
 };
 use ee::models::model_registry::{
     EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
@@ -48,6 +50,12 @@ const SEMANTIC_MODEL_ADMISSIBILITY_SOURCE: &str =
     include_str!("fixtures/eval/semantic_model_admissibility/source_memory.json");
 const SEMANTIC_MODEL_ADMISSIBILITY_README: &str =
     include_str!("fixtures/eval/semantic_model_admissibility/README.md");
+const BUNDLED_EMBEDDINGS_SCENARIO: &str =
+    include_str!("fixtures/eval/bundled_embeddings/scenario.json");
+const BUNDLED_EMBEDDINGS_SOURCE: &str =
+    include_str!("fixtures/eval/bundled_embeddings/source_memory.json");
+const BUNDLED_EMBEDDINGS_README: &str =
+    include_str!("fixtures/eval/bundled_embeddings/README.md");
 
 const METAMORPHIC_EVALUATION_SCENARIO: &str =
     include_str!("fixtures/eval/metamorphic_evaluation/scenario.json");
@@ -2443,6 +2451,133 @@ fn semantic_model_admissibility_source_maps_to_domain_reports() -> TestResult {
         ],
         "mode coverage",
     )
+}
+
+#[test]
+fn bundled_embeddings_semantic_recall_fixture_contract_is_complete() -> TestResult {
+    let scenario = parse_scenario_model(BUNDLED_EMBEDDINGS_SCENARIO, "bundled_embeddings")?;
+    let source = parse_source_model(BUNDLED_EMBEDDINGS_SOURCE, "bundled_embeddings")?;
+    validate_fixture_scenario(&scenario, &source).map_err(|error| error.to_string())?;
+
+    ensure_equal(
+        scenario.schema.as_str(),
+        EVAL_FIXTURE_SCHEMA_V1,
+        "scenario schema",
+    )?;
+    ensure_equal(
+        scenario.fixture_id.as_str(),
+        "fx.bundled_embeddings.v1",
+        "fixture id",
+    )?;
+    ensure_equal(
+        scenario
+            .owning_bead_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["bd-1et0v.19"],
+        "owning bead",
+    )?;
+    ensure(
+        scenario
+            .scenario_ids
+            .iter()
+            .any(|id| id == "usr_bundled_embedding_analyst_paraphrase"),
+        "scenario id names analyst paraphrase regression",
+    )?;
+    ensure_equal(
+        scenario.command_sequence.len(),
+        1,
+        "command sequence count",
+    )?;
+    ensure(
+        scenario.command_sequence[0]
+            .stdout_artifact_path
+            .as_deref()
+            .is_some_and(|path| path.starts_with("target/ee-e2e/bundled_embeddings/")),
+        "stdout artifact path uses bundled_embeddings root",
+    )?;
+    ensure(
+        scenario
+            .degraded_branches
+            .iter()
+            .any(|branch| branch.code == "embed_model_unavailable"),
+        "fixture documents hash fallback degradation",
+    )?;
+    ensure(
+        BUNDLED_EMBEDDINGS_README.contains("fx.bundled_embeddings.v1"),
+        "README names fixture ID",
+    )?;
+    ensure(
+        BUNDLED_EMBEDDINGS_README.contains("usr_bundled_embedding_analyst_paraphrase"),
+        "README names scenario ID",
+    )?;
+
+    let memories = materialize_source_memories(&source).map_err(|error| error.to_string())?;
+    ensure_equal(memories.len(), 3, "source memory count")?;
+    ensure(
+        memories
+            .iter()
+            .any(|memory| memory.id == "mem_00000000000000000000000901"
+                && memory.content.contains("RBLX bookings/FCF watchlist")),
+        "source includes the analyst RBLX memory",
+    )?;
+
+    let expectations = scenario
+        .semantic_recall_expectations
+        .as_ref()
+        .ok_or_else(|| "missing semantic_recall_expectations".to_string())?;
+    ensure_equal(
+        expectations.schema.as_str(),
+        SEMANTIC_RECALL_EXPECTATIONS_SCHEMA_V1,
+        "semantic recall expectations schema",
+    )?;
+    ensure_equal(expectations.recall_at_k, 5, "recall k")?;
+    ensure_equal(expectations.cases.len(), 1, "semantic recall case count")?;
+    ensure_equal(
+        expectations.cases[0].query.as_str(),
+        "video game virtual currency platform owner cash generation",
+        "analyst paraphrase query",
+    )?;
+
+    let report = evaluate_semantic_recall_expectations(&scenario.fixture_id, expectations);
+    ensure_equal(
+        report.schema,
+        SEMANTIC_RECALL_REPORT_SCHEMA_V1,
+        "semantic recall report schema",
+    )?;
+    ensure_equal(report.passed, true, "semantic recall report passes")?;
+    ensure_equal(report.case_count, 1, "semantic recall report case count")?;
+    ensure_equal(report.hash_baseline_recall_at_k, 0.0, "hash recall")?;
+    ensure_equal(report.semantic_recall_at_k, 1.0, "semantic recall")?;
+    ensure_equal(report.recall_gain, 1.0, "recall gain")
+}
+
+#[test]
+fn bundled_embeddings_fixture_privacy_surfaces_stay_clean() -> TestResult {
+    let detector = RedactionLeakDetector::new();
+    let all_fixture_text = format!(
+        "{BUNDLED_EMBEDDINGS_SCENARIO}\n{BUNDLED_EMBEDDINGS_SOURCE}\n{BUNDLED_EMBEDDINGS_README}"
+    );
+
+    for forbidden in ["sk-", "ghp_", "AKIA", "-----BEGIN PRIVATE KEY-----"] {
+        ensure(
+            !all_fixture_text.contains(forbidden),
+            &format!("fixture files must not contain secret marker `{forbidden}`"),
+        )?;
+    }
+    for class in [
+        RedactionClass::Secret,
+        RedactionClass::Pii,
+        RedactionClass::InternalPath,
+    ] {
+        let evaluation = detector.evaluate(&all_fixture_text, class);
+        ensure(
+            evaluation.leaks.is_empty(),
+            &format!("bundled embeddings fixture leaked {class:?}: {:?}", evaluation.leaks),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]

@@ -7319,8 +7319,11 @@ fn semantic_retrieval_pending_reason() -> Option<String> {
 }
 
 fn embed_model_unavailable_reason_from_env() -> Option<String> {
-    let raw = read(EnvVar::EmbedModelPath)?;
-    let trimmed = raw.trim();
+    embed_model_unavailable_reason_from_path_value(read(EnvVar::EmbedModelPath).as_deref())
+}
+
+fn embed_model_unavailable_reason_from_path_value(raw: Option<&str>) -> Option<String> {
+    let trimmed = raw?.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -9624,6 +9627,20 @@ mod tests {
             similar_semantic_unavailable_reason(&posture),
             "embedding posture mode=neural_local_pending source=ee_model2vec_download_pending semantic=false"
         );
+    }
+
+    #[test]
+    fn embed_model_path_fault_reason_is_pure_and_stable() {
+        assert!(embed_model_unavailable_reason_from_path_value(None).is_none());
+        assert!(embed_model_unavailable_reason_from_path_value(Some("  ")).is_none());
+
+        let reason = embed_model_unavailable_reason_from_path_value(Some(
+            "/definitely/missing/ee-embed-model-path-fixture",
+        ))
+        .expect("missing path should produce fault-injection reason");
+
+        assert!(reason.contains("EE_EMBED_MODEL_PATH"));
+        assert!(reason.contains("/definitely/missing/ee-embed-model-path-fixture"));
     }
 
     #[test]

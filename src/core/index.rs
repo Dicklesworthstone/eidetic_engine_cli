@@ -4978,6 +4978,28 @@ mod tests {
     }
 
     #[test]
+    fn hash_fallback_embedding_is_byte_identical_for_fixed_input() -> TestResult {
+        let embedder = HashEmbedder::default_256();
+        let first = crate::core::run_cli_future(async {
+            let cx = asupersync::Cx::for_testing();
+            embedder.embed(&cx, "RBLX bookings FCF watchlist").await
+        })
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+
+        let embedder = HashEmbedder::default_256();
+        let second = crate::core::run_cli_future(async {
+            let cx = asupersync::Cx::for_testing();
+            embedder.embed(&cx, "RBLX bookings FCF watchlist").await
+        })
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+
+        ensure(first == second, "hash embedding vector must be stable")?;
+        ensure(first.len() == 256, "hash embedding vector dimension")
+    }
+
+    #[test]
     fn semantic_stack_remains_fast_only_without_hash_quality_graft() -> TestResult {
         let stack = stack_with_hash_quality_fallback(EmbedderStack::from_parts(
             Arc::new(TestSemanticEmbedder::new("potion-multilingual-128M", 256))

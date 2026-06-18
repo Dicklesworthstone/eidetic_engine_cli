@@ -28,12 +28,15 @@ pub use runner::{
     PackQualityCase, PackQualityComparison, PackQualityCounterfactualCandidate,
     PackQualityOutcomeEvent, PackQualityOutcomeFeedbackReport, PackQualityOutcomeHypothesis,
     PackQualityOutcomeRateBucket, PackQualityReport, PackQualityVerdict, QueryMetrics,
-    STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1, SourceMemory, SourceMemoryFile, StructuralEdge,
-    StructuralRecallExpectations, compare_ask_quality, compare_pack_quality, compute_data_hash,
-    compute_fixture_metrics, compute_query_metrics, discover_fixtures, evaluate_ask_quality,
-    evaluate_pack_quality, evaluate_pack_quality_with_outcomes, list_fixtures, load_scenario,
-    load_source_memories, materialize_source_memories, summarize_pack_quality_outcomes,
-    validate_fixture_scenario,
+    SEMANTIC_RECALL_EXPECTATIONS_SCHEMA_V1, SEMANTIC_RECALL_REPORT_SCHEMA_V1,
+    STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1, SemanticRecallCase, SemanticRecallCaseReport,
+    SemanticRecallExpectations, SemanticRecallReport, SemanticRecallThresholds, SourceMemory,
+    SourceMemoryFile, StructuralEdge, StructuralRecallExpectations, compare_ask_quality,
+    compare_pack_quality, compute_data_hash, compute_fixture_metrics, compute_query_metrics,
+    discover_fixtures, evaluate_ask_quality, evaluate_pack_quality,
+    evaluate_pack_quality_with_outcomes, evaluate_semantic_recall_expectations, list_fixtures,
+    load_scenario, load_source_memories, materialize_source_memories,
+    summarize_pack_quality_outcomes, validate_fixture_scenario,
 };
 
 /// Schema version for release gate checks.
