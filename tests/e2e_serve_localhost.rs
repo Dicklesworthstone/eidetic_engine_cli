@@ -908,9 +908,19 @@ fn serve_doctor_endpoint_routes_to_cli_doctor_dispatch() -> TestResult {
     assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
     assert_eq!(payload["success"].as_bool(), Some(true));
     assert_eq!(payload["data"]["command"].as_str(), Some("doctor"));
+    assert_eq!(payload["fields"].as_str(), Some("doctor_concise"));
+    assert_eq!(payload["data"]["mode"].as_str(), Some("concise"));
     assert!(
-        payload["data"]["checks"].is_array(),
-        "doctor payload must carry real checks array: {payload}"
+        payload["data"]["coreChecks"].is_array(),
+        "doctor payload must carry real compact core checks: {payload}"
+    );
+    assert!(
+        payload["data"]["advisorySummary"].is_object(),
+        "doctor payload must carry the compact advisory summary: {payload}"
+    );
+    assert!(
+        payload["data"]["checks"].is_null(),
+        "default doctor endpoint must not return the exhaustive checks firehose: {payload}"
     );
     assert!(
         payload["data"]["businessLogicExecuted"].is_null(),

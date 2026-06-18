@@ -19,11 +19,11 @@ use crate::core::degraded_aggregation::{
 };
 use crate::core::degraded_honesty::{RepairCommandKind, classify_repair_command};
 use crate::core::doctor::{
-    CheckResult, CheckTier, DependencyBlockedFeature, DependencyContractEntry,
+    CheckResult, CheckSeverity, CheckTier, DependencyBlockedFeature, DependencyContractEntry,
     DependencyDiagnosticsReport, DependencyFeatureProfile, DependencyOptionalFeatureProfile,
     DependencySource, DoctorMeshAutoEnrollmentReport, DoctorReport, FixPlan,
-    FrankenDependencyHealth, FrankenHealthReport, IntegrityCanaryReport,
-    IntegrityDiagnosticCheck, IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport,
+    FrankenDependencyHealth, FrankenHealthReport, IntegrityCanaryReport, IntegrityDiagnosticCheck,
+    IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport,
 };
 use crate::core::health::{HealthReport, StructuralHealthDegradation, StructuralHealthReport};
 use crate::core::memory::{
@@ -4950,6 +4950,106 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
     b.finish()
 }
 
+/// Render the default compact doctor report as JSON (ee.response.v2 envelope).
+///
+/// The default doctor surface is meant for high-frequency agent readiness checks.
+/// Keep detailed worker, mesh, verification, and host-calibration diagnostics on
+/// `ee doctor --full`; this renderer exposes only the core verdict, actionable
+/// core repairs, and a one-line advisory summary.
+#[must_use]
+pub fn render_doctor_concise_json(report: &DoctorReport) -> String {
+    let core_checks = report
+        .checks
+        .iter()
+        .filter(|check| check.tier == CheckTier::Core)
+        .collect::<Vec<_>>();
+    let actionable = core_checks
+        .iter()
+        .copied()
+        .filter(|check| !check.severity.is_healthy())
+        .collect::<Vec<_>>();
+    let advisory_counts = DoctorAdvisoryCounts::from_checks(&report.checks);
+    let advisory_summary = doctor_advisory_summary_line(advisory_counts);
+
+    let mut b = JsonBuilder::with_capacity(384);
+    b.field_str("schema", RESPONSE_SCHEMA_V2);
+    b.field_bool("success", true);
+    b.field_str("fields", "doctor_concise");
+    b.field_object("data", |d| {
+        d.field_str("command", "doctor");
+        d.field_str("mode", "concise");
+        d.field_str("version", report.version);
+        d.field_str("posture", report.posture.as_str());
+        d.field_bool("healthy", report.overall_healthy);
+        d.field_str("fullCommand", "ee doctor --full --json");
+        d.field_array_of_objects("coreChecks", &core_checks, |obj, check| {
+            render_doctor_check_json(obj, check, true, false);
+        });
+        d.field_array_of_objects("actionable", &actionable, |obj, check| {
+            render_doctor_check_json(obj, check, true, true);
+        });
+        d.field_object("advisorySummary", |summary| {
+            summary.field_raw("total", &advisory_counts.total.to_string());
+            summary.field_raw("ok", &advisory_counts.ok.to_string());
+            summary.field_raw("warning", &advisory_counts.warning.to_string());
+            summary.field_raw("error", &advisory_counts.error.to_string());
+            summary.field_raw("nonOk", &advisory_counts.non_ok().to_string());
+            summary.field_str("summary", &advisory_summary);
+            summary.field_str("fullCommand", "ee doctor --full --json");
+        });
+    });
+    b.finish()
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DoctorAdvisoryCounts {
+    total: usize,
+    ok: usize,
+    warning: usize,
+    error: usize,
+}
+
+impl DoctorAdvisoryCounts {
+    fn from_checks(checks: &[CheckResult]) -> Self {
+        let mut counts = Self::default();
+        for check in checks
+            .iter()
+            .filter(|check| check.tier == CheckTier::Advisory)
+        {
+            counts.total += 1;
+            match check.severity {
+                CheckSeverity::Ok => counts.ok += 1,
+                CheckSeverity::Warning => counts.warning += 1,
+                CheckSeverity::Error => counts.error += 1,
+            }
+        }
+        counts
+    }
+
+    const fn non_ok(self) -> usize {
+        self.warning + self.error
+    }
+}
+
+fn doctor_advisory_summary_line(counts: DoctorAdvisoryCounts) -> String {
+    if counts.total == 0 {
+        return "advisories: none; full report: ee doctor --full --json".to_owned();
+    }
+
+    if counts.non_ok() == 0 {
+        return format!(
+            "advisories: {}/{} ok; full report: ee doctor --full --json",
+            counts.ok, counts.total
+        );
+    }
+
+    format!(
+        "advisories: {} non-ok of {}; full report: ee doctor --full --json",
+        counts.non_ok(),
+        counts.total
+    )
+}
+
 fn render_doctor_advisories_json(
     parent: &mut JsonBuilder,
     checks: &[CheckResult],
@@ -5075,6 +5175,46 @@ pub fn render_doctor_human(report: &DoctorReport) -> String {
     output
 }
 
+/// Render the default compact doctor report as human-readable text.
+#[must_use]
+pub fn render_doctor_concise_human(report: &DoctorReport) -> String {
+    let counts = DoctorAdvisoryCounts::from_checks(&report.checks);
+    let mut output = String::from("ee doctor\n\n");
+    let _ = writeln!(
+        output,
+        "posture: {} (healthy: {})",
+        report.posture.as_str(),
+        report.overall_healthy
+    );
+    output.push_str("core:\n");
+    for check in report
+        .checks
+        .iter()
+        .filter(|check| check.tier == CheckTier::Core)
+    {
+        let _ = writeln!(output, "  - {}: {}", check.name, check.severity.as_str());
+    }
+
+    let actionable = report
+        .checks
+        .iter()
+        .filter(|check| check.tier == CheckTier::Core && !check.severity.is_healthy())
+        .collect::<Vec<_>>();
+    if !actionable.is_empty() {
+        output.push_str("actionable:\n");
+        for check in actionable {
+            let _ = writeln!(output, "  - {}: {}", check.name, check.message);
+            if let Some(repair) = check.repair {
+                let _ = writeln!(output, "    repair: {repair}");
+            }
+        }
+    }
+
+    let _ = writeln!(output, "{}", doctor_advisory_summary_line(counts));
+    output.push_str("full: ee doctor --full --json\n");
+    output
+}
+
 fn render_doctor_mesh_auto_enrollment_json() -> String {
     let workspace_path = crate::core::status::default_workspace_path();
     let report = DoctorMeshAutoEnrollmentReport::gather(workspace_path.as_deref());
@@ -5090,6 +5230,12 @@ fn render_doctor_mesh_auto_enrollment_json() -> String {
 #[must_use]
 pub fn render_doctor_toon(report: &DoctorReport) -> String {
     render_toon_from_json(&render_doctor_json(report))
+}
+
+/// Render the default compact doctor report as TOON.
+#[must_use]
+pub fn render_doctor_concise_toon(report: &DoctorReport) -> String {
+    render_toon_from_json(&render_doctor_concise_json(report))
 }
 
 /// Render a doctor report as a deterministic Mermaid diagram.
@@ -17690,7 +17836,8 @@ mod tests {
         ShadowRunReport, build_aggregated_degradation, error_response_json, escape_json_string,
         help_text, human_status, render_agent_docs_json, render_agent_docs_toon,
         render_context_response_json, render_context_response_markdown,
-        render_context_response_toon, render_dependency_diagnostics_json, render_doctor_json,
+        render_context_response_toon, render_dependency_diagnostics_json,
+        render_doctor_concise_json, render_doctor_concise_toon, render_doctor_json,
         render_doctor_json_filtered, render_doctor_toon, render_handoff_create_json,
         render_handoff_create_toon, render_handoff_inspect_json, render_handoff_inspect_toon,
         render_handoff_preview_json, render_handoff_preview_toon, render_handoff_resume_json,
@@ -17716,11 +17863,11 @@ mod tests {
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::degraded_aggregation::AggregatedDegradation;
     use crate::core::doctor::{
-        CheckResult, CheckSeverity, CheckTier, DependencyContractEntry, DependencyDiagnosticsReport,
-        DependencyDiagnosticsSummary, DependencyDriftPolicy, DependencyFeatureProfile,
-        DependencySource, DoctorReport, Posture,
-        IntegrityCanaryReport, IntegrityDiagnosticCheck, IntegrityDiagnosticDegradation,
-        IntegrityDiagnosticsReport, IntegrityDiagnosticsStatus,
+        CheckResult, CheckSeverity, CheckTier, DependencyContractEntry,
+        DependencyDiagnosticsReport, DependencyDiagnosticsSummary, DependencyDriftPolicy,
+        DependencyFeatureProfile, DependencySource, DoctorReport, IntegrityCanaryReport,
+        IntegrityDiagnosticCheck, IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport,
+        IntegrityDiagnosticsStatus, Posture,
     };
     use crate::core::handoff::{
         CapsuleProfile, CreateReport as HandoffCreateReport, InspectReport as HandoffInspectReport,
@@ -21625,6 +21772,177 @@ mod tests {
     }
 
     #[test]
+    fn json_toon_parity_doctor_concise_decodes_to_same_json() -> TestResult {
+        let report = DoctorReport::gather();
+        let json = render_doctor_concise_json(&report);
+        let toon = render_doctor_concise_toon(&report);
+
+        let expected_json = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("doctor concise JSON should parse: {error}"))?;
+        let expected = serde_json::Value::from(toon::JsonValue::from(expected_json));
+        let decoded = toon::try_decode(&toon, None)
+            .map_err(|error| format!("doctor concise TOON should decode: {error}"))?;
+        let actual = serde_json::Value::from(decoded);
+
+        ensure_equal(
+            &actual,
+            &expected,
+            "decoded TOON matches concise doctor JSON",
+        )
+    }
+
+    #[test]
+    fn render_doctor_concise_json_omits_diagnostic_firehose() -> TestResult {
+        let mut report = DoctorReport::gather();
+        report.overall_healthy = false;
+        report.posture = Posture::DegradedRecoverable;
+        report.checks = vec![
+            CheckResult::ok("runtime", "runtime ok"),
+            CheckResult {
+                name: "database",
+                severity: CheckSeverity::Warning,
+                message: "database sidecar requires repair".to_owned(),
+                error_code: None,
+                repair: Some("ee init --workspace . --json"),
+                tier: CheckTier::Core,
+            },
+            CheckResult {
+                name: "cass",
+                severity: CheckSeverity::Warning,
+                message: "CASS binary found but capabilities are limited.".to_owned(),
+                error_code: None,
+                repair: Some("ee import cass --dry-run --json"),
+                tier: CheckTier::Advisory,
+            },
+            CheckResult::ok("rch_worker_pressure", "worker pressure ok").advisory(),
+        ];
+
+        let concise = render_doctor_concise_json(&report);
+        let full = render_doctor_json_filtered(&report, FieldProfile::Full);
+        let value = serde_json::from_str::<serde_json::Value>(&concise)
+            .map_err(|error| format!("doctor concise JSON should parse: {error}"))?;
+        let data = value["data"]
+            .as_object()
+            .ok_or_else(|| "doctor concise data must be an object".to_string())?;
+
+        ensure_equal(
+            &value["fields"],
+            &serde_json::json!("doctor_concise"),
+            "fields",
+        )?;
+        ensure_equal(&data["mode"], &serde_json::json!("concise"), "mode")?;
+        ensure_equal(
+            &data["posture"],
+            &serde_json::json!("degraded_recoverable"),
+            "posture",
+        )?;
+        ensure(
+            !data.contains_key("checks"),
+            "default concise omits full checks",
+        )?;
+        ensure(
+            !data.contains_key("meshAutoEnrollment"),
+            "default concise omits mesh firehose",
+        )?;
+        ensure(
+            !data.contains_key("rchWorkerPressure"),
+            "default concise omits RCH worker firehose",
+        )?;
+        ensure(
+            !data.contains_key("verificationPosture"),
+            "default concise omits verification posture firehose",
+        )?;
+        ensure(
+            !data.contains_key("verificationLedger"),
+            "default concise omits verification ledger firehose",
+        )?;
+        ensure(
+            !data.contains_key("hostCalibration"),
+            "default concise omits host calibration firehose",
+        )?;
+
+        let core_checks = data["coreChecks"]
+            .as_array()
+            .ok_or_else(|| "coreChecks must be an array".to_string())?;
+        ensure_equal(&core_checks.len(), &2usize, "core check count")?;
+        ensure_equal(
+            &core_checks[1]["name"],
+            &serde_json::json!("database"),
+            "core check name",
+        )?;
+
+        let actionable = data["actionable"]
+            .as_array()
+            .ok_or_else(|| "actionable must be an array".to_string())?;
+        ensure_equal(&actionable.len(), &1usize, "actionable core count")?;
+        ensure_equal(
+            &actionable[0]["repair"],
+            &serde_json::json!("ee init --workspace . --json"),
+            "actionable repair",
+        )?;
+
+        ensure_equal(
+            &data["advisorySummary"]["nonOk"],
+            &serde_json::json!(1),
+            "advisory non-ok count",
+        )?;
+        ensure_contains(
+            data["advisorySummary"]["summary"]
+                .as_str()
+                .unwrap_or_default(),
+            "1 non-ok of 2",
+            "advisory summary counts non-ok advisories",
+        )?;
+        ensure_contains(
+            data["advisorySummary"]["summary"]
+                .as_str()
+                .unwrap_or_default(),
+            "ee doctor --full --json",
+            "advisory summary points to full report",
+        )?;
+        ensure(concise.len() < 4096, "concise doctor JSON stays compact")?;
+        ensure(
+            concise.len() < full.len(),
+            "concise doctor JSON is smaller than full report",
+        )
+    }
+
+    #[test]
+    fn render_doctor_concise_json_handles_empty_check_set() -> TestResult {
+        let mut report = DoctorReport::gather();
+        report.overall_healthy = true;
+        report.posture = Posture::Ok;
+        report.checks.clear();
+
+        let json = render_doctor_concise_json(&report);
+        let value = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("doctor concise JSON should parse: {error}"))?;
+
+        ensure_equal(
+            &value["data"]["coreChecks"].as_array().map(Vec::len),
+            &Some(0),
+            "empty coreChecks",
+        )?;
+        ensure_equal(
+            &value["data"]["actionable"].as_array().map(Vec::len),
+            &Some(0),
+            "empty actionable",
+        )?;
+        ensure_equal(
+            &value["data"]["advisorySummary"]["total"],
+            &serde_json::json!(0),
+            "empty advisory total",
+        )?;
+        ensure_contains(
+            value["data"]["advisorySummary"]["summary"]
+                .as_str()
+                .unwrap_or_default(),
+            "advisories: none",
+            "empty advisory summary",
+        )
+    }
+
+    #[test]
     fn render_doctor_json_exposes_singleflight_posture() -> TestResult {
         let report = DoctorReport::gather();
         let json = render_doctor_json_filtered(&report, FieldProfile::Standard);
@@ -21695,8 +22013,16 @@ mod tests {
         let json = render_doctor_json_filtered(&report, FieldProfile::Standard);
         let value = serde_json::from_str::<serde_json::Value>(&json)
             .map_err(|error| format!("doctor JSON should parse: {error}"))?;
-        ensure_equal(&value["data"]["healthy"], &serde_json::json!(true), "healthy")?;
-        ensure_equal(&value["data"]["posture"], &serde_json::json!("ok"), "posture")?;
+        ensure_equal(
+            &value["data"]["healthy"],
+            &serde_json::json!(true),
+            "healthy",
+        )?;
+        ensure_equal(
+            &value["data"]["posture"],
+            &serde_json::json!("ok"),
+            "posture",
+        )?;
         ensure_equal(
             &value["data"]["checks"][0]["tier"],
             &serde_json::json!("core"),

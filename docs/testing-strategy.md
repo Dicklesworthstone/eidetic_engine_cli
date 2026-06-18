@@ -251,12 +251,26 @@ workspace/artifacts. The script proves:
 - `ee context` and canonical `ee pack` produce the same selected pack content
   for the same workspace/query, while only `ee context` reports the
   `deprecated_alias` info degradation with an `ee pack` repair hint.
-- A stale `ee` fixture earlier on PATH is reported by `ee doctor` as an
+- A stale `ee` fixture earlier on PATH is reported by `ee doctor --full` as an
   advisory-only `ee_install_path` finding that names the shadowed binary and
   offline/no-network repair path.
 - The PATH-shadow scenario does not change the clean doctor top-line posture;
   if upstream doctor-health work is not yet green, the script records that as a
   skipped green assertion and still enforces non-degrading parity.
+
+### Doctor Concise E2E
+
+`scripts/e2e_doctor_concise.sh` is the `bd-1et0v.15` real-binary, no-Cargo
+doctor-health harness. It emits `ee.test_event.v1` JSONL and retains its
+temporary workspace/artifacts. The script proves:
+
+- Default `ee doctor --json` emits the compact `doctor_concise` response with
+  core checks, actionable core repairs, and a one-line advisory summary.
+- Default doctor output omits the mesh/RCH/verification/host-calibration
+  diagnostic firehose and stays below the compact byte budget.
+- `ee doctor --full --json` keeps the exhaustive checks, advisory array,
+  15-row mesh auto-enrollment report, RCH worker pressure, and verification
+  posture/ledger blocks.
 
 ### RCH Stranded-Result Recovery
 

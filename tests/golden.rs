@@ -2035,7 +2035,15 @@ mod tests {
     #[test]
     fn agent_doctor_json_matches_golden() -> TestResult {
         assert_agent_stdout_golden(
-            &["--workspace", DOCTOR_GOLDEN_WORKSPACE, "doctor", "--json"],
+            &[
+                "--workspace",
+                DOCTOR_GOLDEN_WORKSPACE,
+                "--fields",
+                "standard",
+                "doctor",
+                "--full",
+                "--json",
+            ],
             "doctor.json",
             true,
         )

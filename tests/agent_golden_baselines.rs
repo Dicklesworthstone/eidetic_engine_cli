@@ -489,7 +489,15 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
         },
         ContractCase {
             name: "doctor_json",
-            args: &["--workspace", DOCTOR_GOLDEN_WORKSPACE, "doctor", "--json"],
+            args: &[
+                "--workspace",
+                DOCTOR_GOLDEN_WORKSPACE,
+                "--fields",
+                "standard",
+                "doctor",
+                "--full",
+                "--json",
+            ],
             category: "doctor",
             golden_name: "doctor_json",
             format: ContractFormat::Json,
@@ -502,7 +510,10 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             args: &[
                 "--workspace",
                 DOCTOR_GOLDEN_WORKSPACE,
+                "--fields",
+                "standard",
                 "doctor",
+                "--full",
                 "--format",
                 "toon",
             ],
@@ -1130,15 +1141,26 @@ fn check_toon_output_matches_golden() -> TestResult {
 
 #[test]
 fn doctor_json_output_matches_golden() -> TestResult {
-    let output = run_ee(&["--workspace", DOCTOR_GOLDEN_WORKSPACE, "doctor", "--json"])?;
+    let output = run_ee(&[
+        "--workspace",
+        DOCTOR_GOLDEN_WORKSPACE,
+        "--fields",
+        "standard",
+        "doctor",
+        "--full",
+        "--json",
+    ])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     ensure(
         output.status.success(),
-        format!("doctor --json should succeed; stderr: {stderr}"),
+        format!("doctor --full --json should succeed; stderr: {stderr}"),
     )?;
-    ensure(stderr.is_empty(), "doctor --json stderr must be empty")?;
+    ensure(
+        stderr.is_empty(),
+        "doctor --full --json stderr must be empty",
+    )?;
     ensure_starts_with(
         &stdout,
         "{\"schema\":\"ee.response.v2\"",
@@ -1155,7 +1177,10 @@ fn doctor_toon_output_matches_golden() -> TestResult {
     let output = run_ee(&[
         "--workspace",
         DOCTOR_GOLDEN_WORKSPACE,
+        "--fields",
+        "standard",
         "doctor",
+        "--full",
         "--format",
         "toon",
     ])?;

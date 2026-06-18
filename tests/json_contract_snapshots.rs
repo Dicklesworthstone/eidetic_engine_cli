@@ -440,7 +440,10 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "--json".to_string(),
             "--workspace".to_string(),
             workspace.clone(),
+            "--fields".to_string(),
+            "standard".to_string(),
             "doctor".to_string(),
+            "--full".to_string(),
         ],
     )?;
     assert_json_snapshot!("doctor_json_contract", doctor);

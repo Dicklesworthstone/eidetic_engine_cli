@@ -20,7 +20,7 @@ assert_jq "$STATUS_JSON" '.data.flightRecorder.retentionDays // 0' "7" "flight_r
 assert_jq "$STATUS_JSON" '.data.flightRecorder.redactionLevel // empty' "strict" "flight_recorder_status_redaction"
 assert_jq "$STATUS_JSON" '(.data.posture.subsystems // [] | map(.id) | index("flight_recorder") != null)' "true" "flight_recorder_status_posture_row"
 
-DOCTOR_JSON="$(ee_workspace doctor --json)"
+DOCTOR_JSON="$(ee_workspace doctor --full --json)"
 assert_jq "$DOCTOR_JSON" '.data.flightRecorder.schema // empty' "ee.flight_recorder.status.v1" "flight_recorder_doctor_schema"
 assert_jq "$DOCTOR_JSON" '(.data.checks // [] | map(.name) | index("flight_recorder") != null)' "true" "flight_recorder_doctor_check"
 assert_jq "$DOCTOR_JSON" '(.data.checks // [] | map(select(.name == "flight_recorder")) | .[0].message | contains("redaction=strict"))' "true" "flight_recorder_doctor_redaction"

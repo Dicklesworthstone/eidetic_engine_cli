@@ -381,8 +381,8 @@ fn toon_uses_fewer_bytes_than_json_for_status() -> TestResult {
 
 #[test]
 fn toon_removes_json_syntax_overhead_for_doctor() -> TestResult {
-    let json_output = run_ee(&["doctor", "--json"])?;
-    let toon_output = run_ee(&["doctor", "--format", "toon"])?;
+    let json_output = run_ee(&["doctor", "--full", "--json"])?;
+    let toon_output = run_ee(&["doctor", "--full", "--format", "toon"])?;
 
     ensure(json_output.status.success(), "JSON output should succeed")?;
     ensure(toon_output.status.success(), "TOON output should succeed")?;

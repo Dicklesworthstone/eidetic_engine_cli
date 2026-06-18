@@ -75,12 +75,12 @@ use crate::core::context_delta::{
     ContextDeltaItemSnapshot, ContextDeltaOptions, ContextDeltaPackSnapshot, compute_context_delta,
 };
 use crate::core::curate::{
-    CurateApplyOptions, CurateApplyReport, CurateAutoPromoteOptions, CurateCandidatesOptions,
-    CurateCandidatesReport, CurateDispositionOptions, CurateDispositionReport, CurateRetireOptions,
-    CurateReviewAction, CurateReviewOptions, CurateReviewReport, CurateShowOptions,
-    CurateShowReport, CurateTombstoneOptions, CurateUntombstoneOptions, CurateValidateOptions,
-    CurateValidateReport, DEFAULT_CAPTURE_SUGGESTION_LIMIT, CaptureSuggestOptions,
-    CaptureSuggestionsReport, ReflectionIngestOptions, ReflectionProposeOptions,
+    CaptureSuggestOptions, CaptureSuggestionsReport, CurateApplyOptions, CurateApplyReport,
+    CurateAutoPromoteOptions, CurateCandidatesOptions, CurateCandidatesReport,
+    CurateDispositionOptions, CurateDispositionReport, CurateRetireOptions, CurateReviewAction,
+    CurateReviewOptions, CurateReviewReport, CurateShowOptions, CurateShowReport,
+    CurateTombstoneOptions, CurateUntombstoneOptions, CurateValidateOptions, CurateValidateReport,
+    DEFAULT_CAPTURE_SUGGESTION_LIMIT, ReflectionIngestOptions, ReflectionProposeOptions,
     ReflectionRequestLedgerDiagnosticsOptions, ReviewSessionOptions, ReviewSessionReport,
     ReviewWorkspaceOptions, apply_curation_candidate, capture_suggestions,
     ingest_reflection_result, list_curation_candidates, list_reflection_request_ledger_diagnostics,
@@ -238,10 +238,9 @@ use crate::core::rule::{
 use crate::core::search::{
     SearchDedupMode, SearchDegradation, SearchOptions, SearchReport,
     SearchScoreRecalibrationReport, SearchSourceMode, SimilarError, SimilarOptions, SimilarReport,
-    TypedMemoryFieldFilter,
-    apply_memory_kind_and_typed_field_filters_to_report, elapsed_timing_json,
-    normalize_memory_kind_filter, recalibrate_search_score_calibration, run_diag_search,
-    run_search, run_search_with_performance, run_similar,
+    TypedMemoryFieldFilter, apply_memory_kind_and_typed_field_filters_to_report,
+    elapsed_timing_json, normalize_memory_kind_filter, recalibrate_search_score_calibration,
+    run_diag_search, run_search, run_search_with_performance, run_similar,
 };
 use crate::core::sentinel::{SentinelCheckContext, observe_sentinel_explicit};
 use crate::core::session_budget::{
@@ -8783,6 +8782,20 @@ pub struct DoctorArgs {
     )]
     pub quick: bool,
 
+    /// Emit the exhaustive doctor report, including worker pressure, mesh
+    /// auto-enrollment, verification ledger, host calibration, and every
+    /// advisory check. Without this flag `ee doctor` uses the compact
+    /// agent-facing readiness report.
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        conflicts_with_all = [
+            "fix_plan", "franken_health", "capabilities", "robot_docs", "undo",
+            "quick",
+        ],
+    )]
+    pub full: bool,
+
     /// Run only the named failure-mode detector (FM-style stable code,
     /// e.g. `state_files_orphaned_sock`, `workspace_config_malformed_toml`).
     /// May be repeated to filter to a subset. Mutually exclusive with
@@ -8792,7 +8805,9 @@ pub struct DoctorArgs {
     #[arg(
         long = "only",
         value_name = "FM_CODE",
-        conflicts_with_all = ["fix_plan", "franken_health", "capabilities", "robot_docs"],
+        conflicts_with_all = [
+            "fix_plan", "franken_health", "capabilities", "robot_docs", "full",
+        ],
     )]
     pub only: Vec<String>,
 
@@ -8806,7 +8821,9 @@ pub struct DoctorArgs {
     #[arg(
         long = "since",
         value_name = "RUN_ID",
-        conflicts_with_all = ["fix_plan", "franken_health", "capabilities", "robot_docs", "undo"],
+        conflicts_with_all = [
+            "fix_plan", "franken_health", "capabilities", "robot_docs", "undo", "full",
+        ],
     )]
     pub since: Option<String>,
 
@@ -8826,7 +8843,7 @@ pub struct DoctorArgs {
         action = ArgAction::SetTrue,
         conflicts_with_all = [
             "fix_plan", "franken_health", "capabilities", "robot_docs", "undo",
-            "quick", "only", "since",
+            "quick", "full", "only", "since",
         ],
     )]
     pub list_runs: bool,
@@ -8846,7 +8863,7 @@ pub struct DoctorArgs {
         value_name = "DAYS",
         conflicts_with_all = [
             "fix_plan", "franken_health", "capabilities", "robot_docs", "undo",
-            "quick", "only", "since", "list_runs",
+            "quick", "full", "only", "since", "list_runs",
         ],
     )]
     pub gc_plan: Option<u32>,
@@ -8865,7 +8882,7 @@ pub struct DoctorArgs {
         action = ArgAction::SetTrue,
         conflicts_with_all = [
             "fix_plan", "franken_health", "capabilities", "robot_docs", "undo",
-            "quick", "only", "since", "list_runs", "gc_plan",
+            "quick", "full", "only", "since", "list_runs", "gc_plan",
         ],
     )]
     pub robot_triage: bool,
@@ -8889,7 +8906,7 @@ pub struct DoctorArgs {
         num_args = 1..=2,
         conflicts_with_all = [
             "fix_plan", "franken_health", "capabilities", "robot_docs", "undo",
-            "quick", "only", "since", "list_runs", "gc_plan", "robot_triage",
+            "quick", "full", "only", "since", "list_runs", "gc_plan", "robot_triage",
         ],
     )]
     pub diff: Vec<String>,
@@ -8912,7 +8929,7 @@ pub struct DoctorArgs {
         action = ArgAction::SetTrue,
         conflicts_with_all = [
             "fix_plan", "franken_health", "capabilities", "robot_docs", "undo",
-            "quick", "only", "since", "list_runs", "gc_plan", "robot_triage", "diff",
+            "quick", "full", "only", "since", "list_runs", "gc_plan", "robot_triage", "diff",
         ],
     )]
     pub fix: bool,
@@ -12446,7 +12463,7 @@ where
         ))) => handle_coordination_evidence_ingest(&cli, args, stdout, stderr),
         Some(Command::Capture(CaptureCommand::Suggest(ref args))) => {
             handle_capture_suggest(&cli, args, stdout, stderr)
-        },
+        }
         Some(Command::Db(ref db_cmd)) => match db_cmd {
             DbCommand::Status(args) => handle_db_status(&cli, args, stdout),
             DbCommand::Inspect(args) => handle_db_inspect(&cli, args, stdout),
@@ -12680,7 +12697,11 @@ where
                 .workspace
                 .as_deref()
                 .map_or_else(DoctorReport::gather, DoctorReport::gather_for_workspace);
-            let profile = cli.fields_level().to_field_profile();
+            let profile = if args.full && !cli.fields_explicit {
+                output::FieldProfile::Full
+            } else {
+                cli.fields_level().to_field_profile()
+            };
             if args.franken_health {
                 let report = FrankenHealthReport::gather();
                 match cli.renderer() {
@@ -12729,18 +12750,38 @@ where
                 } else {
                     match cli.renderer() {
                         output::Renderer::Human | output::Renderer::Markdown => {
-                            write_stdout(stdout, &output::render_doctor_human(&report))
+                            if args.full {
+                                write_stdout(stdout, &output::render_doctor_human(&report))
+                            } else {
+                                write_stdout(stdout, &output::render_doctor_concise_human(&report))
+                            }
                         }
                         output::Renderer::Toon => {
-                            write_stdout(stdout, &(output::render_doctor_toon(&report) + "\n"))
+                            if args.full {
+                                write_stdout(stdout, &(output::render_doctor_toon(&report) + "\n"))
+                            } else {
+                                write_stdout(
+                                    stdout,
+                                    &(output::render_doctor_concise_toon(&report) + "\n"),
+                                )
+                            }
                         }
                         output::Renderer::Json
                         | output::Renderer::Jsonl
                         | output::Renderer::Compact
-                        | output::Renderer::Hook => write_stdout(
-                            stdout,
-                            &(output::render_doctor_json_filtered(&report, profile) + "\n"),
-                        ),
+                        | output::Renderer::Hook => {
+                            if args.full {
+                                write_stdout(
+                                    stdout,
+                                    &(output::render_doctor_json_filtered(&report, profile) + "\n"),
+                                )
+                            } else {
+                                write_stdout(
+                                    stdout,
+                                    &(output::render_doctor_concise_json(&report) + "\n"),
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -19032,8 +19073,14 @@ fn doctor_robot_docs_json() -> String {
                 {
                     "name": "ee doctor",
                     "kind": "subcommand",
-                    "purpose": "Run the default doctor health report.",
+                    "purpose": "Run the compact default doctor health report.",
                     "example": "ee doctor --json"
+                },
+                {
+                    "name": "ee doctor --full",
+                    "kind": "flag",
+                    "purpose": "Emit the exhaustive doctor report with detailed advisory subsystem diagnostics.",
+                    "example": "ee doctor --full --json"
                 },
                 {
                     "name": "ee doctor --fix-plan",
@@ -40952,9 +40999,7 @@ where
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &report.human_summary())
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(format_similar_toon(&report) + "\n"))
-            }
+            output::Renderer::Toon => write_stdout(stdout, &(format_similar_toon(&report) + "\n")),
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
@@ -59414,7 +59459,11 @@ mod tests {
         let human = report.human_output();
         ensure_contains(&human, "Near duplicates:", "human near duplicate heading")?;
         ensure_contains(&human, &duplicate_id, "human near duplicate id")?;
-        ensure_contains(&human, "similarity 0.973", "human near duplicate similarity")?;
+        ensure_contains(
+            &human,
+            "similarity 0.973",
+            "human near duplicate similarity",
+        )?;
 
         let json = serde_json::from_str::<serde_json::Value>(&report.json_output())
             .map_err(|error| error.to_string())?;
@@ -68116,7 +68165,14 @@ mod tests {
             .map_err(|error| format!("failed to create .ee dir: {error}"))?;
         let workspace = dir.path().to_string_lossy().into_owned();
 
-        let (exit, stdout, stderr) = invoke(&["ee", "--workspace", &workspace, "doctor", "--json"]);
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace,
+            "doctor",
+            "--full",
+            "--json",
+        ]);
         ensure_equal(&exit, &ProcessExitCode::Success, "doctor json exit")?;
         ensure(stderr.is_empty(), "doctor json stderr empty")?;
 
@@ -68138,6 +68194,67 @@ mod tests {
             workspace_check["message"].as_str().unwrap_or_default(),
             &workspace,
             "workspace check message includes explicit workspace",
+        )
+    }
+
+    #[test]
+    fn doctor_default_json_is_concise_and_full_json_is_exhaustive() -> TestResult {
+        let (exit, concise_stdout, concise_stderr) = invoke(&["ee", "doctor", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "doctor concise json exit")?;
+        ensure(
+            concise_stderr.is_empty(),
+            "doctor concise json stderr empty",
+        )?;
+        let concise = serde_json::from_str::<serde_json::Value>(&concise_stdout)
+            .map_err(|error| format!("doctor concise JSON should parse: {error}"))?;
+        ensure_equal(
+            &concise["fields"],
+            &serde_json::json!("doctor_concise"),
+            "default doctor fields",
+        )?;
+        ensure_equal(
+            &concise["data"]["mode"],
+            &serde_json::json!("concise"),
+            "default doctor mode",
+        )?;
+        ensure(
+            concise["data"].get("checks").is_none(),
+            "default doctor omits exhaustive checks",
+        )?;
+        ensure(
+            concise["data"].get("meshAutoEnrollment").is_none(),
+            "default doctor omits mesh diagnostics",
+        )?;
+        ensure(
+            concise["data"].get("rchWorkerPressure").is_none(),
+            "default doctor omits RCH worker diagnostics",
+        )?;
+
+        let (exit, full_stdout, full_stderr) = invoke(&["ee", "doctor", "--full", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "doctor full json exit")?;
+        ensure(full_stderr.is_empty(), "doctor full json stderr empty")?;
+        let full = serde_json::from_str::<serde_json::Value>(&full_stdout)
+            .map_err(|error| format!("doctor full JSON should parse: {error}"))?;
+        ensure_equal(
+            &full["fields"],
+            &serde_json::json!("full"),
+            "full doctor fields",
+        )?;
+        ensure(
+            full["data"].get("checks").is_some(),
+            "full doctor includes exhaustive checks",
+        )?;
+        ensure(
+            full["data"].get("meshAutoEnrollment").is_some(),
+            "full doctor includes mesh diagnostics",
+        )?;
+        ensure(
+            full["data"].get("rchWorkerPressure").is_some(),
+            "full doctor includes RCH worker diagnostics",
+        )?;
+        ensure(
+            concise_stdout.len() < full_stdout.len(),
+            "default doctor output is smaller than full output",
         )
     }
 
@@ -68167,12 +68284,24 @@ mod tests {
         match parsed.command {
             Some(Command::Doctor(ref args)) => {
                 ensure_equal(&args.fix_plan, &false, "fix_plan flag not set by default")?;
+                ensure_equal(&args.full, &false, "full flag not set by default")?;
                 ensure_equal(
                     &args.franken_health,
                     &false,
                     "franken_health flag not set by default",
                 )
             }
+            _ => Err("expected Doctor command".to_string()),
+        }
+    }
+
+    #[test]
+    fn doctor_accepts_full_flag() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "doctor", "--full"])
+            .map_err(|e| format!("failed to parse doctor --full: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Doctor(ref args)) => ensure_equal(&args.full, &true, "full flag set"),
             _ => Err("expected Doctor command".to_string()),
         }
     }
@@ -71686,8 +71815,8 @@ mod tests {
 
     #[test]
     fn similar_command_parses_advertised_flags() -> TestResult {
-        let memory_id = crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x4_000))
-            .to_string();
+        let memory_id =
+            crate::models::MemoryId::from_uuid(uuid::Uuid::from_u128(0x4_000)).to_string();
         let parsed = Cli::try_parse_from([
             "ee",
             "--json",
@@ -71768,7 +71897,11 @@ mod tests {
     fn similar_help_mentions_min_score_and_json_surface() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "help", "similar"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "similar help exit")?;
-        ensure_contains(&stdout, "Find memories semantically similar", "similar help")?;
+        ensure_contains(
+            &stdout,
+            "Find memories semantically similar",
+            "similar help",
+        )?;
         ensure_contains(&stdout, "--min-score", "similar help min score")?;
         ensure_contains(&stdout, "--json", "similar help json")?;
         ensure(

@@ -1383,7 +1383,7 @@ pub const STATUS_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
         condition: "storage or index capability is unavailable",
         jq: r#".data.degraded[]? | select(.code | test("storage|index"))"#,
-        next_action: "Use the reported repair field or run `ee doctor --json` for a full repair plan.",
+        next_action: "Use the reported repair field or run `ee doctor --full --json` for a full repair plan.",
     },
 ];
 
@@ -1391,7 +1391,7 @@ pub const DOCTOR_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
         condition: "one or more checks failed",
         jq: r#".data.checks[]? | select(.status != "ok") | {name, status, code, repair}"#,
-        next_action: "Apply failing check repairs in order and rerun `ee doctor --json`.",
+        next_action: "Apply failing check repairs in order and rerun `ee doctor --full --json`.",
     },
     FailureBranchEntry {
         condition: "doctor command itself returns an error envelope",
@@ -1730,7 +1730,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         title: "Collect repair actions",
         description: "Use doctor output as the stable source of repair commands for automation.",
         category: "diagnostics",
-        command: "ee doctor --json",
+        command: "ee doctor --full --json",
         jq: r#".data.checks[]? | select(.status != "ok") | {name, code, repair}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: DOCTOR_RECIPE_FAILURES,

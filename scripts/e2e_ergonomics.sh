@@ -404,13 +404,13 @@ chmod +x "${SHADOW_BIN_DIR}/ee"
 
 DOCTOR_PATH="${SHADOW_BIN_DIR}:${REAL_BIN_DIR}:${PATH}"
 step "doctor_clean" "capturing clean doctor top-line before PATH shadowing"
-run_ee_json "05_doctor_clean" --workspace "${WORKSPACE}" --json doctor
+run_ee_json "05_doctor_clean" --workspace "${WORKSPACE}" --json doctor --full
 DOCTOR_CLEAN_JSON="${LAST_STDOUT}"
 assert_ee_response_envelope "doctor_clean_envelope" "${DOCTOR_CLEAN_JSON}"
 assert_json_file "doctor_clean_succeeds" "${DOCTOR_CLEAN_JSON}" '.success == true'
 
 step "doctor_shadow" "running doctor with stale ee first on PATH; check must remain advisory-only"
-PATH="${DOCTOR_PATH}" run_ee_json "06_doctor_shadow" --workspace "${WORKSPACE}" --json doctor
+PATH="${DOCTOR_PATH}" run_ee_json "06_doctor_shadow" --workspace "${WORKSPACE}" --json doctor --full
 local_path_status="${LAST_RC}"
 DOCTOR_SHADOW_JSON="${ROOT}/06_doctor_shadow.stdout.json"
 assert_ee_response_envelope "doctor_shadow_envelope" "${DOCTOR_SHADOW_JSON}"

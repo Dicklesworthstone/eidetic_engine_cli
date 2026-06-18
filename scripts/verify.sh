@@ -1141,6 +1141,12 @@ run_stage "Journal Capture E2E (bd-1pi9m.6)" "./scripts/e2e_journal_capture.sh"
 # advisory-only and offline/no-network.
 run_stage "Ergonomics E2E (bd-1et0v.22)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_ergonomics.sh"
 
+# Gate 6.128: concise default doctor real-binary E2E (bd-1et0v.15). No-Cargo:
+# proves default `ee doctor --json` exposes only the compact core verdict,
+# actionable core repairs, and advisory summary while `ee doctor --full --json`
+# retains the exhaustive mesh/RCH/verification diagnostic blocks.
+run_stage "Doctor Concise E2E (bd-1et0v.15)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_doctor_concise.sh"
+
 # Gate 6.13: Dueling Wizards docs-bootstrap real-binary E2E (bd-1n0np.11.5).
 # Proves ee bootstrap docs --dry-run structural candidates (spans/hashes/anchors/
 # specificity), determinism, guard-rail rejection (oversize/symlink/missing as
