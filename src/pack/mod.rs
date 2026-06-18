@@ -4013,7 +4013,7 @@ pub fn render_context_markdown_with_analysis(
             if is_link_only_pack_item(item) {
                 continue;
             }
-            let section = item.section.as_str();
+            let section = context_render_section_key(item);
             if !by_section.contains_key(section) {
                 section_order.push(section);
             }
@@ -4264,12 +4264,23 @@ fn context_advisory_banner(
 
 fn context_section_display_name(section: &str) -> &str {
     match section {
+        "what_not_to_do" => "What NOT to do",
         "core" => "Core",
         "supporting" => "Supporting",
         "procedural" => "Procedural",
         "background" => "Background",
         "example" => "Example",
         other => other,
+    }
+}
+
+fn context_render_section_key(item: &PackDraftItem) -> &str {
+    if item.section == PackSection::Failures
+        && item.selected_in == PackSelectionPhase::AntiPatternFirst
+    {
+        "what_not_to_do"
+    } else {
+        item.section.as_str()
     }
 }
 
@@ -4726,6 +4737,7 @@ fn deterministic_pack_memory_bytes_peak(draft: &PackDraft, scanned_count: usize)
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PackSelectionPhase {
+    AntiPatternFirst,
     StrictMmr,
     CoverageFill,
     FacilityLocation,
@@ -4735,6 +4747,7 @@ impl PackSelectionPhase {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::AntiPatternFirst => "anti_pattern_first",
             Self::StrictMmr => "strict_mmr",
             Self::CoverageFill => "coverage_fill",
             Self::FacilityLocation => "facility_location",
@@ -5489,6 +5502,97 @@ fn assemble_mmr_draft(
     let mut selected_memory_ids = BTreeSet::new();
     let mut objective_value = 0.0_f32;
 
+    if let Some(candidate_index) = anti_pattern_first_mmr_candidate_index(
+        &candidates,
+        &scratch.max_selected_similarities,
+        used_tokens,
+        budget,
+        &quotas,
+        &section_usage,
+        &lod_usage,
+    ) {
+        let selected_max_similarity = scratch
+            .max_selected_similarities
+            .swap_remove(candidate_index);
+        let selection = candidates.swap_remove(candidate_index);
+        let marginal_gain =
+            strict_mmr_marginal_gain_from_similarity(&selection, selected_max_similarity);
+        let section_used = section_usage.tokens_for(selection.candidate.section);
+
+        if let Some(plan) = pack_lod_candidate_plan(
+            &selection.candidate,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+            &lod_usage,
+        ) {
+            let PackLodCandidatePlan { tier, candidate } = plan;
+            let candidate = mark_anti_pattern_first_candidate(candidate);
+            match used_tokens.checked_add(candidate.estimated_tokens) {
+                Some(total) => {
+                    let rank = next_rank;
+                    next_rank = next_rank
+                        .checked_add(1)
+                        .ok_or(PackValidationError::CandidateRankOverflow)?;
+                    objective_value += marginal_gain.max(0.0);
+                    scratch.draft.steps.push(PackSelectionStep {
+                        rank,
+                        memory_id: candidate.memory_id,
+                        marginal_gain,
+                        objective_value,
+                        token_cost: candidate.estimated_tokens,
+                        feasible: true,
+                        covered_features: certificate_features(&candidate),
+                    });
+                    tracing::debug!(
+                        target: "ee::pack::anti_pattern_first",
+                        profile = profile.as_str(),
+                        phase = PackSelectionPhase::AntiPatternFirst.as_str(),
+                        memory_id = %candidate.memory_id,
+                        tokens = candidate.estimated_tokens,
+                        rank,
+                        "selected reserved anti-pattern/failure/risk pack item"
+                    );
+                    used_tokens = total;
+                    let redactions = selection.redactions;
+                    section_usage.add_candidate(&candidate);
+                    lod_usage.add(tier, candidate.estimated_tokens);
+                    selected_memory_ids.insert(candidate.memory_id);
+                    let selected_signature = selection.signature.clone();
+                    scratch.selected_signatures.push(selection.signature);
+                    update_mmr_max_similarities(
+                        &mut scratch.max_selected_similarities,
+                        &candidates,
+                        &selected_signature,
+                    );
+                    scratch
+                        .draft
+                        .items
+                        .push(PackDraftItem::from_selected_candidate(
+                            rank,
+                            candidate,
+                            redactions,
+                            PackSelectionPhase::AntiPatternFirst,
+                        ));
+                }
+                None => {
+                    scratch.draft.omitted.push(PackOmission::from_candidate(
+                        &selection.candidate,
+                        PackOmissionReason::TokenBudgetExceeded,
+                        Some(minimal_budget_for_candidate(
+                            profile,
+                            used_tokens,
+                            section_used,
+                            selection.candidate.section,
+                            selection.candidate.estimated_tokens,
+                        )),
+                    ));
+                }
+            }
+        }
+    }
+
     while !candidates.is_empty() {
         let candidate_index =
             select_next_candidate_index(&candidates, &scratch.max_selected_similarities);
@@ -5809,6 +5913,97 @@ fn assemble_mmr_draft_reusing_workspace(
     let mut selected_memory_ids = BTreeSet::new();
     let mut objective_value = 0.0_f32;
 
+    if let Some(candidate_index) = anti_pattern_first_mmr_candidate_index(
+        &candidates,
+        &scratch.max_selected_similarities,
+        used_tokens,
+        budget,
+        &quotas,
+        &section_usage,
+        &lod_usage,
+    ) {
+        let selected_max_similarity = scratch
+            .max_selected_similarities
+            .swap_remove(candidate_index);
+        let selection = candidates.swap_remove(candidate_index);
+        let marginal_gain =
+            strict_mmr_marginal_gain_from_similarity(&selection, selected_max_similarity);
+        let section_used = section_usage.tokens_for(selection.candidate.section);
+
+        if let Some(plan) = pack_lod_candidate_plan(
+            &selection.candidate,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+            &lod_usage,
+        ) {
+            let PackLodCandidatePlan { tier, candidate } = plan;
+            let candidate = mark_anti_pattern_first_candidate(candidate);
+            match used_tokens.checked_add(candidate.estimated_tokens) {
+                Some(total) => {
+                    let rank = next_rank;
+                    next_rank = next_rank
+                        .checked_add(1)
+                        .ok_or(PackValidationError::CandidateRankOverflow)?;
+                    objective_value += marginal_gain.max(0.0);
+                    scratch.draft.steps.push(PackSelectionStep {
+                        rank,
+                        memory_id: candidate.memory_id,
+                        marginal_gain,
+                        objective_value,
+                        token_cost: candidate.estimated_tokens,
+                        feasible: true,
+                        covered_features: certificate_features(&candidate),
+                    });
+                    tracing::debug!(
+                        target: "ee::pack::anti_pattern_first",
+                        profile = profile.as_str(),
+                        phase = PackSelectionPhase::AntiPatternFirst.as_str(),
+                        memory_id = %candidate.memory_id,
+                        tokens = candidate.estimated_tokens,
+                        rank,
+                        "selected reserved anti-pattern/failure/risk pack item"
+                    );
+                    used_tokens = total;
+                    let redactions = selection.redactions;
+                    section_usage.add_candidate(&candidate);
+                    lod_usage.add(tier, candidate.estimated_tokens);
+                    selected_memory_ids.insert(candidate.memory_id);
+                    let selected_signature = selection.signature.clone();
+                    scratch.selected_signatures.push(selection.signature);
+                    update_mmr_max_similarities(
+                        &mut scratch.max_selected_similarities,
+                        &candidates,
+                        &selected_signature,
+                    );
+                    scratch
+                        .draft
+                        .items
+                        .push(PackDraftItem::from_selected_candidate(
+                            rank,
+                            candidate,
+                            redactions,
+                            PackSelectionPhase::AntiPatternFirst,
+                        ));
+                }
+                None => {
+                    scratch.draft.omitted.push(PackOmission::from_candidate(
+                        &selection.candidate,
+                        PackOmissionReason::TokenBudgetExceeded,
+                        Some(minimal_budget_for_candidate(
+                            profile,
+                            used_tokens,
+                            section_used,
+                            selection.candidate.section,
+                            selection.candidate.estimated_tokens,
+                        )),
+                    ));
+                }
+            }
+        }
+    }
+
     while !candidates.is_empty() {
         let candidate_index =
             select_next_candidate_index(&candidates, &scratch.max_selected_similarities);
@@ -6106,6 +6301,98 @@ fn assemble_facility_location_draft(
     let mut scratch = PackDraftScratch::with_candidate_capacity(candidate_count);
     let mut objective_value = 0.0_f32;
 
+    if let Some(profile_index) = anti_pattern_first_facility_candidate_index(
+        &candidates,
+        &active,
+        &current_coverages,
+        &similarity_cache,
+        used_tokens,
+        budget,
+        &quotas,
+        &section_usage,
+        &lod_usage,
+    ) {
+        if active.get(profile_index).copied().unwrap_or(false) {
+            let marginal_gain = facility_marginal_gain_cached(
+                profile_index,
+                &candidates,
+                &current_coverages,
+                &similarity_cache,
+            );
+            active[profile_index] = false;
+            remaining_count = remaining_count.saturating_sub(1);
+            if let Some(candidate_profile) = candidates.get_mut(profile_index)
+                && let Some(candidate) = candidate_profile.candidate.take()
+            {
+                let redactions = std::mem::take(&mut candidate_profile.redactions);
+                if let Some(plan) = pack_lod_candidate_plan(
+                    &candidate,
+                    used_tokens,
+                    budget,
+                    &quotas,
+                    &section_usage,
+                    &lod_usage,
+                ) {
+                    let PackLodCandidatePlan { tier, candidate } = plan;
+                    let candidate = mark_anti_pattern_first_candidate(candidate);
+                    let rank = next_rank;
+                    next_rank = next_rank
+                        .checked_add(1)
+                        .ok_or(PackValidationError::CandidateRankOverflow)?;
+                    used_tokens = used_tokens
+                        .checked_add(candidate.estimated_tokens)
+                        .ok_or(PackValidationError::CandidateRankOverflow)?;
+                    section_usage.add_candidate(&candidate);
+                    lod_usage.add(tier, candidate.estimated_tokens);
+                    objective_value = update_facility_coverages_cached(
+                        &candidates,
+                        &mut current_coverages,
+                        &similarity_cache,
+                        profile_index,
+                    );
+                    selector.advance_round();
+                    let covered_features = certificate_features(&candidate);
+                    scratch.steps.push(PackSelectionStep {
+                        rank,
+                        memory_id: candidate.memory_id,
+                        marginal_gain,
+                        objective_value,
+                        token_cost: candidate.estimated_tokens,
+                        feasible: true,
+                        covered_features,
+                    });
+                    tracing::debug!(
+                        target: "ee::pack::anti_pattern_first",
+                        profile = profile.as_str(),
+                        phase = PackSelectionPhase::AntiPatternFirst.as_str(),
+                        memory_id = %candidate.memory_id,
+                        tokens = candidate.estimated_tokens,
+                        rank,
+                        "selected reserved anti-pattern/failure/risk pack item"
+                    );
+                    scratch.items.push(PackDraftItem::from_selected_candidate(
+                        rank,
+                        candidate,
+                        redactions,
+                        PackSelectionPhase::AntiPatternFirst,
+                    ));
+                } else {
+                    scratch.omitted.push(PackOmission::from_candidate(
+                        &candidate,
+                        PackOmissionReason::TokenBudgetExceeded,
+                        Some(minimal_budget_for_candidate(
+                            profile,
+                            used_tokens,
+                            section_usage.tokens_for(candidate.section),
+                            candidate.section,
+                            candidate.estimated_tokens,
+                        )),
+                    ));
+                }
+            }
+        }
+    }
+
     while remaining_count > 0 {
         let Some((profile_index, marginal_gain)) = selector.select(
             &candidates,
@@ -6310,6 +6597,98 @@ fn assemble_facility_location_draft_reusing_workspace(
     let mut next_rank = 1_u32;
     let mut objective_value = 0.0_f32;
 
+    if let Some(profile_index) = anti_pattern_first_facility_candidate_index(
+        &candidates,
+        &active,
+        &current_coverages,
+        &similarity_cache,
+        used_tokens,
+        budget,
+        &quotas,
+        &section_usage,
+        &lod_usage,
+    ) {
+        if active.get(profile_index).copied().unwrap_or(false) {
+            let marginal_gain = facility_marginal_gain_cached(
+                profile_index,
+                &candidates,
+                &current_coverages,
+                &similarity_cache,
+            );
+            active[profile_index] = false;
+            remaining_count = remaining_count.saturating_sub(1);
+            if let Some(candidate_profile) = candidates.get_mut(profile_index)
+                && let Some(candidate) = candidate_profile.candidate.take()
+            {
+                let redactions = std::mem::take(&mut candidate_profile.redactions);
+                if let Some(plan) = pack_lod_candidate_plan(
+                    &candidate,
+                    used_tokens,
+                    budget,
+                    &quotas,
+                    &section_usage,
+                    &lod_usage,
+                ) {
+                    let PackLodCandidatePlan { tier, candidate } = plan;
+                    let candidate = mark_anti_pattern_first_candidate(candidate);
+                    let rank = next_rank;
+                    next_rank = next_rank
+                        .checked_add(1)
+                        .ok_or(PackValidationError::CandidateRankOverflow)?;
+                    used_tokens = used_tokens
+                        .checked_add(candidate.estimated_tokens)
+                        .ok_or(PackValidationError::CandidateRankOverflow)?;
+                    section_usage.add_candidate(&candidate);
+                    lod_usage.add(tier, candidate.estimated_tokens);
+                    objective_value = update_facility_coverages_cached(
+                        &candidates,
+                        &mut current_coverages,
+                        &similarity_cache,
+                        profile_index,
+                    );
+                    selector.advance_round();
+                    let covered_features = certificate_features(&candidate);
+                    scratch.steps.push(PackSelectionStep {
+                        rank,
+                        memory_id: candidate.memory_id,
+                        marginal_gain,
+                        objective_value,
+                        token_cost: candidate.estimated_tokens,
+                        feasible: true,
+                        covered_features,
+                    });
+                    tracing::debug!(
+                        target: "ee::pack::anti_pattern_first",
+                        profile = profile.as_str(),
+                        phase = PackSelectionPhase::AntiPatternFirst.as_str(),
+                        memory_id = %candidate.memory_id,
+                        tokens = candidate.estimated_tokens,
+                        rank,
+                        "selected reserved anti-pattern/failure/risk pack item"
+                    );
+                    scratch.items.push(PackDraftItem::from_selected_candidate(
+                        rank,
+                        candidate,
+                        redactions,
+                        PackSelectionPhase::AntiPatternFirst,
+                    ));
+                } else {
+                    scratch.omitted.push(PackOmission::from_candidate(
+                        &candidate,
+                        PackOmissionReason::TokenBudgetExceeded,
+                        Some(minimal_budget_for_candidate(
+                            profile,
+                            used_tokens,
+                            section_usage.tokens_for(candidate.section),
+                            candidate.section,
+                            candidate.estimated_tokens,
+                        )),
+                    ));
+                }
+            }
+        }
+    }
+
     while remaining_count > 0 {
         let Some((profile_index, marginal_gain)) = selector.select(
             &candidates,
@@ -6503,11 +6882,140 @@ const fn selection_phase_contributes_to_objective(
     phase: PackSelectionPhase,
 ) -> bool {
     match objective {
-        PackSelectionObjective::MmrRedundancy => matches!(phase, PackSelectionPhase::StrictMmr),
+        PackSelectionObjective::MmrRedundancy => matches!(
+            phase,
+            PackSelectionPhase::AntiPatternFirst | PackSelectionPhase::StrictMmr
+        ),
         PackSelectionObjective::FacilityLocation => {
-            matches!(phase, PackSelectionPhase::FacilityLocation)
+            matches!(
+                phase,
+                PackSelectionPhase::AntiPatternFirst | PackSelectionPhase::FacilityLocation
+            )
         }
     }
+}
+
+fn anti_pattern_first_mmr_candidate_index(
+    candidates: &[MmrCandidate],
+    max_selected_similarities: &[f32],
+    used_tokens: u32,
+    budget: TokenBudget,
+    quotas: &SectionQuotas,
+    section_usage: &SectionTokenUsage,
+    lod_usage: &PackLodBudgetState,
+) -> Option<usize> {
+    debug_assert_eq!(candidates.len(), max_selected_similarities.len());
+    let mut best: Option<usize> = None;
+    for (candidate_index, selection) in candidates.iter().enumerate() {
+        if !is_anti_pattern_first_candidate(&selection.candidate) {
+            continue;
+        }
+        if strict_mmr_marginal_gain_from_similarity(
+            selection,
+            max_selected_similarities[candidate_index],
+        ) <= 0.0
+        {
+            continue;
+        }
+        if pack_lod_candidate_plan(
+            &selection.candidate,
+            used_tokens,
+            budget,
+            quotas,
+            section_usage,
+            lod_usage,
+        )
+        .is_none()
+        {
+            continue;
+        }
+        let replaces_best = match best {
+            None => true,
+            Some(best_index) => {
+                compare_candidates(&selection.candidate, &candidates[best_index].candidate)
+                    == Ordering::Less
+            }
+        };
+        if replaces_best {
+            best = Some(candidate_index);
+        }
+    }
+    best
+}
+
+fn anti_pattern_first_facility_candidate_index(
+    candidates: &[FacilityCandidateProfile],
+    active: &[bool],
+    current_coverages: &[f32],
+    similarity_cache: &FacilitySimilarityCache,
+    used_tokens: u32,
+    budget: TokenBudget,
+    quotas: &SectionQuotas,
+    section_usage: &SectionTokenUsage,
+    lod_usage: &PackLodBudgetState,
+) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (profile_index, profile) in candidates.iter().enumerate() {
+        if !active.get(profile_index).copied().unwrap_or(false) {
+            continue;
+        }
+        let Some(candidate) = profile.candidate.as_ref() else {
+            continue;
+        };
+        if !is_anti_pattern_first_candidate(candidate) {
+            continue;
+        }
+        if facility_marginal_gain_cached(
+            profile_index,
+            candidates,
+            current_coverages,
+            similarity_cache,
+        ) <= FACILITY_LOCATION_EPSILON
+        {
+            continue;
+        }
+        if pack_lod_candidate_plan(
+            candidate,
+            used_tokens,
+            budget,
+            quotas,
+            section_usage,
+            lod_usage,
+        )
+        .is_none()
+        {
+            continue;
+        }
+        let replaces_best = match best {
+            None => true,
+            Some(best_index) => {
+                match candidates[best_index].candidate.as_ref() {
+                    Some(best_candidate) => {
+                        compare_candidates(candidate, best_candidate) == Ordering::Less
+                    }
+                    None => true,
+                }
+            }
+        };
+        if replaces_best {
+            best = Some(profile_index);
+        }
+    }
+    best
+}
+
+fn is_anti_pattern_first_candidate(candidate: &PackCandidate) -> bool {
+    candidate.section == PackSection::Failures
+        && candidate.relevance.into_inner() >= DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR
+}
+
+fn mark_anti_pattern_first_candidate(mut candidate: PackCandidate) -> PackCandidate {
+    const PREFIX: &str =
+        "What NOT to do: selected from the reserved anti-pattern/failure/risk slice before action. ";
+    if !candidate.why.starts_with("What NOT to do:") {
+        candidate.why = format!("{PREFIX}{}", candidate.why);
+    }
+    candidate
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -11352,6 +11860,156 @@ mod tests {
             &draft.omitted.len(),
             &0,
             "no candidate omitted when fill can use budget",
+        )
+    }
+
+    #[test]
+    fn anti_pattern_first_reserves_failure_slice_under_tight_budget() -> TestResult {
+        let budget =
+            TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let anti_pattern = candidate_in_section(
+            90,
+            PackSection::Failures,
+            0.60,
+            0.90,
+            10,
+            "Do not run local Cargo builds during code-first swarm batches.",
+        )?
+        .with_diversity_key("anti-pattern:local-cargo");
+        let primary_rule = candidate_in_section(
+            1,
+            PackSection::ProceduralRules,
+            1.00,
+            0.80,
+            15,
+            "Use the central batch verifier for Rust proof.",
+        )?
+        .with_diversity_key("rule:central-verify");
+        let squeezed_rule = candidate_in_section(
+            2,
+            PackSection::ProceduralRules,
+            0.99,
+            0.80,
+            15,
+            "Keep commits small and push after each leaf.",
+        )?
+        .with_diversity_key("rule:commit-stream");
+
+        let draft = assemble_classic_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare code-first swarm verification",
+            budget,
+            vec![primary_rule, squeezed_rule, anti_pattern],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        let first = draft
+            .items
+            .first()
+            .ok_or_else(|| "expected reserved anti-pattern item".to_owned())?;
+        ensure_equal(
+            &first.memory_id,
+            &memory_id(90),
+            "anti-pattern selected before higher-scoring action rules",
+        )?;
+        ensure_equal(
+            &first.section,
+            &PackSection::Failures,
+            "canonical section remains failures",
+        )?;
+        ensure_equal(
+            &first.selected_in,
+            &PackSelectionPhase::AntiPatternFirst,
+            "selectedIn marks the reserved slice",
+        )?;
+        ensure_contains(
+            &first.why,
+            "What NOT to do:",
+            "reserved slice why marker",
+        )?;
+        ensure_equal(
+            &super::context_render_section_key(first),
+            &"what_not_to_do",
+            "markdown render section key",
+        )?;
+        ensure_equal(
+            &super::context_section_display_name(super::context_render_section_key(first)),
+            &"What NOT to do",
+            "markdown reserved section label",
+        )?;
+        ensure(
+            draft
+                .selection_audit
+                .steps
+                .first()
+                .is_some_and(|step| step.objective_value > 0.0),
+            "reserved anti-pattern contributes to the selection audit objective",
+        )
+    }
+
+    #[test]
+    fn anti_pattern_first_applies_to_submodular_profile() -> TestResult {
+        let budget =
+            TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let anti_pattern = candidate_in_section(
+            91,
+            PackSection::Failures,
+            0.55,
+            0.90,
+            10,
+            "Do not bypass provenance checks when applying prior fixes.",
+        )?
+        .with_diversity_key("risk:provenance-bypass");
+        let action_rule = candidate_in_section(
+            3,
+            PackSection::ProceduralRules,
+            1.00,
+            0.85,
+            10,
+            "Inspect provenance before trusting memory-derived fixes.",
+        )?
+        .with_diversity_key("rule:provenance");
+        let evidence = candidate_in_section(
+            4,
+            PackSection::Evidence,
+            0.80,
+            0.75,
+            10,
+            "A prior fix regressed when provenance was not checked.",
+        )?
+        .with_diversity_key("evidence:provenance");
+
+        let draft = assemble_draft_with_profile(
+            ContextPackProfile::Submodular,
+            "apply memory-derived fix",
+            budget,
+            vec![action_rule, evidence, anti_pattern],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        let first = draft
+            .items
+            .first()
+            .ok_or_else(|| "expected reserved submodular anti-pattern item".to_owned())?;
+        ensure_equal(
+            &draft.selection_audit.objective,
+            &PackSelectionObjective::FacilityLocation,
+            "submodular objective retained",
+        )?;
+        ensure_equal(
+            &first.memory_id,
+            &memory_id(91),
+            "submodular profile reserves the relevant failure item first",
+        )?;
+        ensure_equal(
+            &first.selected_in,
+            &PackSelectionPhase::AntiPatternFirst,
+            "submodular selectedIn marker",
+        )?;
+        ensure_contains(
+            &first.why,
+            "reserved anti-pattern/failure/risk slice",
+            "submodular why marker",
         )
     }
 
