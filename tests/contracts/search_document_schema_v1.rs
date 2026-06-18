@@ -96,6 +96,44 @@ fn full_emitted_search_document() -> Result<Value, String> {
         .ok_or_else(|| "missing emitted search result".to_string())
 }
 
+fn reranked_emitted_search_document() -> Result<Value, String> {
+    let report = report_with_results(vec![SearchHit {
+        doc_id: "mem_search_document_reranked".to_string(),
+        score: 0.88,
+        source: ScoreSource::Reranked,
+        fast_score: Some(0.61),
+        quality_score: Some(0.73),
+        lexical_score: Some(0.44),
+        rerank_score: Some(0.88),
+        metadata: Some(serde_json::json!({
+            "level": "semantic",
+            "kind": "fact",
+            "provenance_uri": "file://README.md#L92",
+            "scoreInterval": [0.80, 0.93],
+            "coverageGuarantee": 0.95,
+            "calibrated": true,
+            "valid_from": "2026-06-18T00:00:00Z",
+            "validity_status": "current",
+            "validity_window_kind": "open"
+        })),
+        explanation: Some(ScoreExplanation {
+            summary: "Reranked by local cross-encoder with score 0.8800.".to_string(),
+            factors: vec![ScoreFactor {
+                name: "rerank".to_string(),
+                value: 0.88,
+                contribution: "cross-encoder score".to_string(),
+                source_field: "rerankScore".to_string(),
+                formula: "score = rerank_score".to_string(),
+            }],
+        }),
+    }]);
+    report
+        .data_json()
+        .pointer("/results/0")
+        .cloned()
+        .ok_or_else(|| "missing reranked search result".to_string())
+}
+
 fn minimal_emitted_search_document() -> Result<Value, String> {
     let report = report_with_results(vec![SearchHit {
         doc_id: "doc_minimal".to_string(),
@@ -120,6 +158,45 @@ fn search_document_v1_validates_full_real_emission() -> TestResult {
     let schema = read_schema()?;
     let document = full_emitted_search_document()?;
     validate_json_schema(&document, &schema, "$")
+}
+
+#[test]
+fn search_document_v1_validates_reranked_real_emission() -> TestResult {
+    let schema = read_schema()?;
+    let document = reranked_emitted_search_document()?;
+
+    validate_json_schema(&document, &schema, "$")?;
+
+    if document.pointer("/source").and_then(Value::as_str) != Some("reranked") {
+        return Err(format!(
+            "reranked search document should expose source=reranked, got {:?}",
+            document.pointer("/source")
+        ));
+    }
+    if document.pointer("/scoreKind").and_then(Value::as_str) != Some("reranked") {
+        return Err(format!(
+            "reranked search document should expose scoreKind=reranked, got {:?}",
+            document.pointer("/scoreKind")
+        ));
+    }
+    let rerank_score = document
+        .pointer("/rerankScore")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| "reranked search document must include rerankScore".to_string())?;
+    let relevance_score = document
+        .pointer("/relevanceScore")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| "reranked search document must include relevanceScore".to_string())?;
+    if (rerank_score - 0.88).abs() > 0.000_001 {
+        return Err(format!("unexpected rerankScore {rerank_score}"));
+    }
+    if (relevance_score - 0.88).abs() > 0.000_001 {
+        return Err(format!(
+            "reranked relevanceScore should preserve unit rerank score, got {relevance_score}"
+        ));
+    }
+
+    Ok(())
 }
 
 #[test]
@@ -169,7 +246,11 @@ fn search_document_v1_requires_interpretable_score_fields() -> TestResult {
     let schema = read_schema()?;
     let document = full_emitted_search_document()?;
 
-    if document.pointer("/relevanceScore").and_then(Value::as_f64).is_none() {
+    if document
+        .pointer("/relevanceScore")
+        .and_then(Value::as_f64)
+        .is_none()
+    {
         return Err("emitted search document must include relevanceScore".to_string());
     }
     if document.pointer("/scoreKind").and_then(Value::as_str) != Some("rrf_fused") {

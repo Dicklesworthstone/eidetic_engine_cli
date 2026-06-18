@@ -321,6 +321,80 @@ fn search_score_explanation_includes_primary_score_component() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn search_score_explanation_preserves_rerank_component() -> TestResult {
+    let result = ScoredResult {
+        doc_id: "rerank-test".to_owned(),
+        score: 0.92,
+        source: ScoreSource::Reranked,
+        index: Some(1),
+        fast_score: Some(0.41),
+        quality_score: Some(0.58),
+        lexical_score: Some(1.7),
+        rerank_score: Some(0.92),
+        explanation: None,
+        metadata: None,
+    };
+
+    let explanation = SearchScoreExplanation::from_scored_result(&result);
+    let rerank_component = explanation
+        .components
+        .iter()
+        .find(|component| component.name == "rerank_score")
+        .ok_or_else(|| "reranked result must expose rerank_score component".to_string())?;
+
+    ensure_equal(&explanation.source, &"reranked", "source name")?;
+    ensure(
+        (explanation.final_score - 0.92).abs() < 0.001,
+        "final score should preserve rerank score",
+    )?;
+    ensure_equal(
+        &rerank_component.source,
+        &"structural",
+        "rerank component source",
+    )?;
+    ensure(
+        (rerank_component.value - 0.92).abs() < 0.001,
+        "rerank component value should preserve rerank score",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn search_score_explanation_sanitizes_non_finite_rerank_component() -> TestResult {
+    let result = ScoredResult {
+        doc_id: "rerank-non-finite".to_owned(),
+        score: f32::NAN,
+        source: ScoreSource::Reranked,
+        index: Some(2),
+        fast_score: None,
+        quality_score: None,
+        lexical_score: None,
+        rerank_score: Some(f32::INFINITY),
+        explanation: None,
+        metadata: None,
+    };
+
+    let explanation = SearchScoreExplanation::from_scored_result(&result);
+    let rerank_component = explanation
+        .components
+        .iter()
+        .find(|component| component.name == "rerank_score")
+        .ok_or_else(|| "reranked result must expose rerank_score component".to_string())?;
+
+    ensure_equal(
+        &explanation.final_score,
+        &0.0,
+        "non-finite final score is sanitized",
+    )?;
+    ensure_equal(
+        &rerank_component.value,
+        &0.0,
+        "non-finite rerank score is sanitized",
+    )?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // CanonicalSearchDocument conversion conformance
 // ---------------------------------------------------------------------------
