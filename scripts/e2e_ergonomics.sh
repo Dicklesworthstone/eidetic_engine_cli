@@ -16,6 +16,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 if ! command -v jq >/dev/null 2>&1; then
     echo "e2e_ergonomics: jq is required" >&2
+    printf '%s\n' '{"schema":"ee.test_event.v1","test_id":"ergonomics_e2e","kind":"assert_result","fields":{"label":"jq_available","status":"fail","first_failure_diagnosis":"jq executable missing before harness init","stdout_artifact_path":"","stderr_artifact_path":"stderr","schema_validation_status":"not_run","redaction_status":"not_run"}}' >&2
     exit 3
 fi
 
@@ -28,6 +29,7 @@ fi
 if [[ -z "${REAL_EE}" || ! -x "${REAL_EE}" ]]; then
     echo "e2e_ergonomics: ee binary not found or not executable: ${EE_BIN}" >&2
     echo "e2e_ergonomics: provide EE_BIN or EE_BINARY pointing at a prebuilt ee" >&2
+    printf '%s\n' '{"schema":"ee.test_event.v1","test_id":"ergonomics_e2e","kind":"assert_result","fields":{"label":"ee_binary_available","status":"fail","first_failure_diagnosis":"prebuilt ee binary missing before harness init","stdout_artifact_path":"","stderr_artifact_path":"stderr","schema_validation_status":"not_run","redaction_status":"not_run"}}' >&2
     exit 3
 fi
 
@@ -40,56 +42,229 @@ mkdir -p "${WORKSPACE}" "${LOG_DIR}"
 : >"${EVENT_LOG}"
 
 FAILURES=0
+TEST_ID="ergonomics_e2e"
+REDACTION_STATUS="local_workspace_artifacts_retained"
 
 now_ms() {
     python3 -c 'import time; print(int(time.time() * 1000))'
 }
 
-log_event() {
-    local phase="$1" status="$2" detail="${3:-}" command="${4:-}"
+now_iso() {
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+args_json() {
+    if [[ "$#" -eq 0 ]]; then
+        printf '[]'
+        return
+    fi
+    printf '%s\0' "$@" | jq -Rs 'split("\u0000")[:-1]'
+}
+
+sanitized_env_json() {
+    local path_mode="default"
+    if [[ -n "${SHADOW_BIN_DIR:-}" && ":${PATH}:" == *":${SHADOW_BIN_DIR}:"* ]]; then
+        path_mode="shadow_first"
+    fi
+    jq -cn \
+        --arg eeBin "$(basename "${REAL_EE}")" \
+        --arg pathMode "${path_mode}" \
+        --arg eeE2eTmpdir "$([[ -n "${EE_E2E_TMPDIR:-}" ]] && echo set || echo unset)" \
+        --arg tmpdir "$([[ -n "${TMPDIR:-}" ]] && echo set || echo unset)" \
+        --arg cargoTarget "$([[ -n "${CARGO_TARGET_DIR:-}" ]] && echo set || echo unset)" \
+        '{
+          HOME: "[unchanged]",
+          PATH: $pathMode,
+          EE_BIN_BASENAME: $eeBin,
+          EE_E2E_TMPDIR: $eeE2eTmpdir,
+          TMPDIR: $tmpdir,
+          CARGO_TARGET_DIR: $cargoTarget
+        }'
+}
+
+log_note() {
+    local label="$1" status="$2" detail="${3:-}"
+    local sanitized_env
+    sanitized_env="$(sanitized_env_json)"
     jq -cn \
         --arg schema "ee.test_event.v1" \
-        --arg beadId "bd-1et0v.22" \
-        --arg surface "ergonomics_e2e" \
-        --arg phase "${phase}" \
+        --arg ts "$(now_iso)" \
+        --arg testId "${TEST_ID}" \
+        --arg label "${label}" \
         --arg status "${status}" \
         --arg detail "${detail}" \
-        --arg command "${command}" \
         --arg workspace "${WORKSPACE}" \
         --arg artifactDir "${ROOT}" \
+        --argjson sanitizedEnv "${sanitized_env}" \
         '{
           schema: $schema,
-          beadId: $beadId,
-          surface: $surface,
-          phase: $phase,
-          status: $status,
-          detail: $detail,
-          command: $command,
-          workspace: $workspace,
-          artifactDir: $artifactDir,
-          ts: (now | todateiso8601)
+          ts: $ts,
+          test_id: $testId,
+          kind: "note",
+          fields: {
+            bead_id: "bd-1et0v.22",
+            surface: "ergonomics_e2e",
+            label: $label,
+            status: $status,
+            detail: $detail,
+            workspace: $workspace,
+            artifact_dir: $artifactDir,
+            sanitized_env: $sanitizedEnv,
+            redaction_status: "local_workspace_artifacts_retained"
+          }
+        }' >>"${EVENT_LOG}"
+}
+
+emit_command_start() {
+    local label="$1"
+    shift
+    local args sanitized_env
+    args="$(args_json "$@")"
+    sanitized_env="$(sanitized_env_json)"
+    jq -cn \
+        --arg schema "ee.test_event.v1" \
+        --arg ts "$(now_iso)" \
+        --arg testId "${TEST_ID}" \
+        --argjson args "${args}" \
+        --arg label "${label}" \
+        --arg workspace "${WORKSPACE}" \
+        --argjson sanitizedEnv "${sanitized_env}" \
+        '{
+          schema: $schema,
+          ts: $ts,
+          test_id: $testId,
+          kind: "command_start",
+          command: "ee",
+          args: $args,
+          fields: {
+            bead_id: "bd-1et0v.22",
+            surface: "ergonomics_e2e",
+            label: $label,
+            cwd: "[REPO_ROOT]",
+            workspace: $workspace,
+            sanitized_env: $sanitizedEnv
+          }
+        }' >>"${EVENT_LOG}"
+}
+
+emit_command_end() {
+    local label="$1" exit_code="$2" elapsed_ms="$3" stdout_file="$4" stderr_file="$5"
+    local schema_validation_status="$6" redaction_status="$7" first_failure_diagnosis="$8"
+    shift 8
+    local args sanitized_env stdout_bytes stderr_bytes
+    args="$(args_json "$@")"
+    sanitized_env="$(sanitized_env_json)"
+    stdout_bytes="$(wc -c <"${stdout_file}" | tr -d ' ')"
+    stderr_bytes="$(wc -c <"${stderr_file}" | tr -d ' ')"
+    jq -cn \
+        --arg schema "ee.test_event.v1" \
+        --arg ts "$(now_iso)" \
+        --arg testId "${TEST_ID}" \
+        --argjson args "${args}" \
+        --arg label "${label}" \
+        --argjson exitCode "${exit_code}" \
+        --argjson elapsedMs "${elapsed_ms}" \
+        --arg stdoutArtifact "${stdout_file}" \
+        --arg stderrArtifact "${stderr_file}" \
+        --arg schemaValidationStatus "${schema_validation_status}" \
+        --arg redactionStatus "${redaction_status}" \
+        --arg firstFailureDiagnosis "${first_failure_diagnosis}" \
+        --argjson stdoutBytes "${stdout_bytes}" \
+        --argjson stderrBytes "${stderr_bytes}" \
+        --argjson sanitizedEnv "${sanitized_env}" \
+        '{
+          schema: $schema,
+          ts: $ts,
+          test_id: $testId,
+          kind: "command_end",
+          command: "ee",
+          args: $args,
+          exit_code: $exitCode,
+          elapsed_ms: $elapsedMs,
+          fields: {
+            bead_id: "bd-1et0v.22",
+            surface: "ergonomics_e2e",
+            label: $label,
+            cwd: "[REPO_ROOT]",
+            workspace: "[WORKSPACE]",
+            sanitized_env: $sanitizedEnv,
+            stdout_artifact_path: $stdoutArtifact,
+            stderr_artifact_path: $stderrArtifact,
+            stdout_bytes: $stdoutBytes,
+            stderr_bytes: $stderrBytes,
+            schema_validation_status: $schemaValidationStatus,
+            redaction_status: $redactionStatus,
+            first_failure_diagnosis: $firstFailureDiagnosis,
+            rch_status: "not_run_by_harness"
+          }
+        }' >>"${EVENT_LOG}"
+}
+
+emit_assert_result() {
+    local kind="$1" label="$2" status="$3" detail="$4" stdout_file="${5:-}" stderr_file="${6:-}"
+    local schema_validation_status="${7:-not_run}" first_failure_diagnosis="${8:-none}"
+    local sanitized_env
+    sanitized_env="$(sanitized_env_json)"
+    jq -cn \
+        --arg schema "ee.test_event.v1" \
+        --arg ts "$(now_iso)" \
+        --arg testId "${TEST_ID}" \
+        --arg kind "${kind}" \
+        --arg label "${label}" \
+        --arg status "${status}" \
+        --arg detail "${detail}" \
+        --arg workspace "${WORKSPACE}" \
+        --arg stdoutArtifact "${stdout_file}" \
+        --arg stderrArtifact "${stderr_file}" \
+        --arg schemaValidationStatus "${schema_validation_status}" \
+        --arg redactionStatus "${REDACTION_STATUS}" \
+        --arg firstFailureDiagnosis "${first_failure_diagnosis}" \
+        --argjson sanitizedEnv "${sanitized_env}" \
+        '{
+          schema: $schema,
+          ts: $ts,
+          test_id: $testId,
+          kind: $kind,
+          fields: {
+            bead_id: "bd-1et0v.22",
+            surface: "ergonomics_e2e",
+            label: $label,
+            status: $status,
+            detail: $detail,
+            cwd: "[REPO_ROOT]",
+            workspace: $workspace,
+            sanitized_env: $sanitizedEnv,
+            stdout_artifact_path: $stdoutArtifact,
+            stderr_artifact_path: $stderrArtifact,
+            schema_validation_status: $schemaValidationStatus,
+            redaction_status: $redactionStatus,
+            first_failure_diagnosis: $firstFailureDiagnosis
+          }
         }' >>"${EVENT_LOG}"
 }
 
 fail() {
     local label="$1" detail="${2:-}"
     FAILURES=$((FAILURES + 1))
-    log_event "${label}" "fail" "${detail}"
+    emit_assert_result "assert_result" "${label}" "fail" "${detail}" "" "" "not_run" "${detail:-assertion failed}"
     printf '[ergonomics-e2e][FAIL] %s %s\n' "${label}" "${detail}" >&2
 }
 
 pass() {
     local label="$1" detail="${2:-}"
-    log_event "${label}" "pass" "${detail}"
+    emit_assert_result "assert_ok" "${label}" "pass" "${detail}" "" "" "not_run" "none"
     printf '[ergonomics-e2e][PASS] %s %s\n' "${label}" "${detail}" >&2
 }
 
 assert_json_file() {
     local label="$1" file="$2" filter="$3"
     if jq -e "${filter}" "${file}" >/dev/null 2>&1; then
-        pass "${label}" "${filter}"
+        emit_assert_result "assert_ok" "${label}" "pass" "${filter}" "${file}" "" "passed" "none"
+        printf '[ergonomics-e2e][PASS] %s %s\n' "${label}" "${filter}" >&2
     else
-        fail "${label}" "filter failed: ${filter}; file=${file}"
+        FAILURES=$((FAILURES + 1))
+        emit_assert_result "assert_result" "${label}" "fail" "filter failed: ${filter}" "${file}" "" "failed" "json assertion failed for ${label}"
+        printf '[ergonomics-e2e][FAIL] %s filter failed: %s; file=%s\n' "${label}" "${filter}" "${file}" >&2
     fi
 }
 
@@ -100,14 +275,24 @@ run_ee_json() {
     local stderr_file="${ROOT}/${label}.stderr.txt"
     local start elapsed rc
     start="$(now_ms)"
-    log_event "${label}" "start" "$*" "ee $*"
+    emit_command_start "${label}" "$@"
     "${REAL_EE}" "$@" >"${stdout_file}" 2>"${stderr_file}"
     rc=$?
     elapsed=$(( $(now_ms) - start ))
+    local schema_validation_status="failed"
+    local first_failure_diagnosis="none"
+    if jq -e 'type == "object" and (.schema? | type == "string")' "${stdout_file}" >/dev/null 2>&1; then
+        schema_validation_status="passed"
+    elif [[ "${rc}" -eq 0 ]]; then
+        first_failure_diagnosis="stdout was not an ee JSON envelope"
+    fi
     if [[ "${rc}" -eq 0 ]]; then
-        log_event "${label}" "ok" "rc=${rc} elapsed_ms=${elapsed}" "ee $*"
+        emit_command_end "${label}" "${rc}" "${elapsed}" "${stdout_file}" "${stderr_file}" \
+            "${schema_validation_status}" "${REDACTION_STATUS}" "${first_failure_diagnosis}" "$@"
     else
-        log_event "${label}" "fail" "rc=${rc} elapsed_ms=${elapsed} stderr=${stderr_file}" "ee $*"
+        first_failure_diagnosis="command exited non-zero"
+        emit_command_end "${label}" "${rc}" "${elapsed}" "${stdout_file}" "${stderr_file}" \
+            "${schema_validation_status}" "${REDACTION_STATUS}" "${first_failure_diagnosis}" "$@"
         FAILURES=$((FAILURES + 1))
     fi
     LAST_STDOUT="${stdout_file}"
@@ -115,7 +300,7 @@ run_ee_json() {
     LAST_RC="${rc}"
 }
 
-log_event "ergonomics_e2e" "start" "root=${ROOT}"
+log_note "ergonomics_e2e" "start" "root=${ROOT}"
 
 run_ee_json "00_init" --workspace "${WORKSPACE}" --json init
 INIT_JSON="${LAST_STDOUT}"
@@ -185,6 +370,7 @@ case "${1:-}" in
     ;;
   *)
     echo "shadow fixture should only be used for version probing" >&2
+    echo '{"schema":"ee.test_event.v1","test_id":"ergonomics_e2e","kind":"assert_result","fields":{"label":"shadow_fixture_misuse","status":"fail","first_failure_diagnosis":"shadow ee fixture received a non-version command","stdout_artifact_path":"","stderr_artifact_path":"stderr","schema_validation_status":"not_run","redaction_status":"not_run"}}' >&2
     exit 42
     ;;
 esac
@@ -196,13 +382,9 @@ run_ee_json "05_doctor_clean" --workspace "${WORKSPACE}" --json doctor
 DOCTOR_CLEAN_JSON="${LAST_STDOUT}"
 assert_json_file "doctor_clean_succeeds" "${DOCTOR_CLEAN_JSON}" '.success == true'
 
-local_path_status="$(PATH="${DOCTOR_PATH}" "${REAL_EE}" --workspace "${WORKSPACE}" --json doctor >"${ROOT}/06_doctor_shadow.stdout.json" 2>"${ROOT}/06_doctor_shadow.stderr.txt"; echo "$?")"
-log_event "06_doctor_shadow" "$([[ "${local_path_status}" == "0" ]] && echo ok || echo fail)" \
-    "rc=${local_path_status}" "PATH=<shadow>:<real> ee doctor --json"
+PATH="${DOCTOR_PATH}" run_ee_json "06_doctor_shadow" --workspace "${WORKSPACE}" --json doctor
+local_path_status="${LAST_RC}"
 DOCTOR_SHADOW_JSON="${ROOT}/06_doctor_shadow.stdout.json"
-if [[ "${local_path_status}" != "0" ]]; then
-    FAILURES=$((FAILURES + 1))
-fi
 assert_json_file "doctor_shadow_succeeds" "${DOCTOR_SHADOW_JSON}" '.success == true'
 assert_json_file "path_shadow_advisory_present" "${DOCTOR_SHADOW_JSON}" \
     'any(.data.checks[]?; .name == "ee_install_path" and .severity == "warning" and ((.message // "") | contains("current_binary_shadowed")) and ((.message // "") | contains("0.5.0")) and ((.message // "") | contains("no network lookup")))'
@@ -221,7 +403,7 @@ if jq -e '.data.posture == "ok" or .data.posture == "ready" or .data.posture.ove
     assert_json_file "path_shadow_core_health_stays_green" "${DOCTOR_SHADOW_JSON}" \
         '.data.posture == "ok" or .data.posture == "ready" or .data.posture.overall == "ok" or .data.posture.overall == "ready"'
 else
-    log_event "path_shadow_core_health_stays_green" "skipped" \
+    log_note "path_shadow_core_health_stays_green" "skipped" \
         "clean doctor is not green yet; asserted non-degrading parity instead"
 fi
 
@@ -243,10 +425,13 @@ jq -cn \
       verdict: (if $failures == 0 then "PASS" else "FAIL" end)
     }' >"${SUMMARY}"
 
-log_event "ergonomics_e2e" "$([[ "${FAILURES}" -eq 0 ]] && echo ok || echo fail)" "summary=${SUMMARY}"
+log_note "ergonomics_e2e" "$([[ "${FAILURES}" -eq 0 ]] && echo ok || echo fail)" "summary=${SUMMARY}"
 printf 'ergonomics e2e artifacts: %s\n' "${ROOT}" >&2
 cat "${SUMMARY}"
 
 if [[ "${FAILURES}" -ne 0 ]]; then
+    emit_assert_result "assert_result" "ergonomics_e2e_summary" "fail" \
+        "stdout_artifact_path=${SUMMARY} stderr_artifact_path=${EVENT_LOG}" \
+        "${SUMMARY}" "${EVENT_LOG}" "passed" "one or more ergonomics assertions failed"
     exit 1
 fi
