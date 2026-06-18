@@ -48136,6 +48136,7 @@ fn persist_remember_sentinels(
             message: format!("Failed to persist memory sentinel metadata: {error}"),
             repair: Some("ee doctor --workspace . --json".to_string()),
         })
+        .map(|_| ())
 }
 
 fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, DomainError> {
@@ -48161,7 +48162,7 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, Do
         let merged_tags = merge_remember_git_tags(args.tags.as_deref(), &candidate.tags);
         let tag_ref = (!merged_tags.is_empty()).then_some(merged_tags.as_str());
         let kind = if args.kind == "fact" {
-            candidate.kind.as_str()
+            candidate.kind
         } else {
             args.kind.as_str()
         };
