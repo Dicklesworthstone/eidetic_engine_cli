@@ -407,6 +407,51 @@ else
         "clean doctor is not green yet; asserted non-degrading parity instead"
 fi
 
+assert_event_log_contract() {
+    local label="event_log_contract_complete"
+    local expected_commands=7
+    if jq -s -e --arg testId "${TEST_ID}" --arg redactionStatus "${REDACTION_STATUS}" --argjson expectedCommands "${expected_commands}" '
+        length > 0
+        and all(.[]; .schema == "ee.test_event.v1" and .test_id == $testId and (.kind | type == "string"))
+        and ([.[] | select(.kind == "command_start")] | length) == $expectedCommands
+        and ([.[] | select(.kind == "command_end")] | length) == $expectedCommands
+        and all(.[] | select(.kind == "command_start");
+            .command == "ee"
+            and (.args | type == "array")
+            and (.fields.label | type == "string" and length > 0)
+            and (.fields.sanitized_env | type == "object")
+        )
+        and all(.[] | select(.kind == "command_end");
+            .command == "ee"
+            and (.args | type == "array")
+            and (.exit_code | type == "number")
+            and (.elapsed_ms | type == "number")
+            and (.fields.stdout_artifact_path | type == "string" and length > 0)
+            and (.fields.stderr_artifact_path | type == "string" and length > 0)
+            and ((.fields.schema_validation_status == "passed") or (.fields.schema_validation_status == "failed"))
+            and .fields.redaction_status == $redactionStatus
+            and (.fields.first_failure_diagnosis | type == "string" and length > 0)
+            and .fields.rch_status == "not_run_by_harness"
+            and (.fields.sanitized_env | type == "object")
+        )
+        and all(.[] | select(.kind == "assert_ok" or .kind == "assert_result");
+            (.fields.label | type == "string" and length > 0)
+            and ((.fields.status == "pass") or (.fields.status == "fail"))
+            and (.fields.schema_validation_status | type == "string")
+            and (.fields.redaction_status | type == "string")
+            and (.fields.first_failure_diagnosis | type == "string" and length > 0)
+        )
+        and any(.[]; .kind == "assert_ok" and .fields.label == "alias_pack_content_parity")
+        and any(.[]; .kind == "assert_ok" and .fields.label == "path_shadow_does_not_change_top_line")
+    ' "${EVENT_LOG}" >/dev/null 2>&1; then
+        pass "${label}" "event log has complete command/assert evidence"
+    else
+        fail "${label}" "event log missing required command/assert evidence; event_log=${EVENT_LOG}"
+    fi
+}
+
+assert_event_log_contract
+
 SUMMARY="${ROOT}/summary.json"
 jq -cn \
     --arg schema "ee.test_event.v1.summary" \
