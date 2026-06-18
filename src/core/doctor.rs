@@ -3601,23 +3601,24 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
         },
         default_feature_profile: DependencyFeatureProfile {
             default_features: false,
-            features: &["hash", "storage", "model2vec", "lexical", "fts5"],
+            features: &[
+                "hash",
+                "storage",
+                "model2vec",
+                "download",
+                "lexical",
+                "fts5",
+                "rerank",
+            ],
         },
         optional_feature_profiles: &[],
-        blocked_features: &[
-            DependencyBlockedFeature {
-                name: "fastembed",
-                forbidden_crates: &["tokio", "tokio-util", "hyper", "tower", "reqwest"],
-                action: "block_embed_quality_until_upstream_has_clean_local_profile",
-            },
-            DependencyBlockedFeature {
-                name: "download_api",
-                forbidden_crates: &["reqwest"],
-                action: "no_network_stack_in_core",
-            },
-        ],
+        blocked_features: &[DependencyBlockedFeature {
+            name: "fastembed",
+            forbidden_crates: &["tokio", "tokio-util", "hyper", "tower", "reqwest"],
+            action: "block_embed_quality_until_upstream_has_clean_local_profile",
+        }],
         forbidden_transitive_dependencies: &[],
-        minimum_smoke_test: "search/index smoke tests with deterministic hash embeddings",
+        minimum_smoke_test: "search/index smoke tests with bundled Model2Vec posture, rerank posture, and deterministic hash fallback",
         degradation_code: "search_unavailable",
         status_fields: &["capabilities.search", "index.generation", "degraded[].code"],
         diagnostic_command: "ee index status --json",
@@ -5435,7 +5436,7 @@ mod tests {
         )?;
         ensure(
             report.summary.blocked_feature_count,
-            8,
+            7,
             "blocked feature count",
         )?;
 
@@ -5485,6 +5486,55 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn frankensearch_default_contract_allows_asupersync_download_path() -> TestResult {
+        let report = DependencyDiagnosticsReport::gather();
+        let frankensearch = report
+            .entries
+            .iter()
+            .find(|entry| entry.name == "frankensearch")
+            .ok_or_else(|| "frankensearch dependency row missing".to_string())?;
+        let default_features = frankensearch.default_feature_profile.features;
+
+        for expected_feature in [
+            "hash",
+            "storage",
+            "model2vec",
+            "download",
+            "lexical",
+            "fts5",
+            "rerank",
+        ] {
+            ensure(
+                default_features.contains(&expected_feature),
+                true,
+                &format!("frankensearch default feature `{expected_feature}` present"),
+            )?;
+        }
+
+        ensure(
+            default_features.contains(&"fastembed"),
+            false,
+            "frankensearch default profile does not enable fastembed",
+        )?;
+        ensure(
+            frankensearch
+                .blocked_features
+                .iter()
+                .any(|feature| feature.name == "download_api"),
+            false,
+            "asupersync-backed frankensearch/download is not reported as blocked",
+        )?;
+        ensure(
+            frankensearch
+                .blocked_features
+                .iter()
+                .any(|feature| feature.name == "fastembed"),
+            true,
+            "fastembed remains blocked until its forbidden tree is clean",
+        )
     }
 
     #[test]

@@ -162,8 +162,10 @@
           "hash",
           "storage",
           "model2vec",
+          "download",
           "lexical",
-          "fts5"
+          "fts5",
+          "rerank"
         ]
       },
       "optional_feature_profiles": [],
@@ -178,17 +180,10 @@
             "reqwest"
           ],
           "action": "block_embed_quality_until_upstream_has_clean_local_profile"
-        },
-        {
-          "name": "download_api",
-          "forbidden_crates": [
-            "reqwest"
-          ],
-          "action": "no_network_stack_in_core"
         }
       ],
       "forbidden_transitive_dependencies": [],
-      "minimum_smoke_test": "search/index smoke tests with deterministic hash embeddings",
+      "minimum_smoke_test": "search/index smoke tests with bundled Model2Vec posture, rerank posture, and deterministic hash fallback",
       "degradation_code": "search_unavailable",
       "status_fields": [
         "capabilities.search",

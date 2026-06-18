@@ -1230,6 +1230,15 @@ fn doctor_franken_health_json_matches_golden() -> TestResult {
         "\"schema\":\"ee.doctor.franken_health.v1\"",
         "franken health data schema",
     )?;
+    ensure_contains(
+        &stdout,
+        "\"features\":[\"hash\",\"storage\",\"model2vec\",\"download\",\"lexical\",\"fts5\",\"rerank\"]",
+        "frankensearch franken-health default features include download and rerank",
+    )?;
+    ensure(
+        !stdout.contains("\"download_api\""),
+        "franken health must not report the allowed download path as a blocked API",
+    )?;
 
     assert_golden("dependencies", "doctor_franken_health", &stdout)
 }
@@ -1267,6 +1276,15 @@ fn diag_dependencies_json_matches_golden() -> TestResult {
         &stdout,
         "\"forbiddenCrates\":[",
         "dependency diagnostics forbidden crates",
+    )?;
+    ensure_contains(
+        &stdout,
+        "\"features\":[\"hash\",\"storage\",\"model2vec\",\"download\",\"lexical\",\"fts5\",\"rerank\"]",
+        "frankensearch dependency diagnostics default features include download and rerank",
+    )?;
+    ensure(
+        !stdout.contains("\"download_api\""),
+        "diag dependencies must not report the allowed download path as a blocked API",
     )?;
 
     assert_golden("dependencies", "diag_dependencies", &stdout)

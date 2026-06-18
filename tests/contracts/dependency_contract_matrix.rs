@@ -292,6 +292,70 @@ fn accepted_default_rows_do_not_admit_forbidden_transitives() -> TestResult {
 }
 
 #[test]
+fn frankensearch_default_profile_matches_enabled_download_contract() -> TestResult {
+    let matrix = load_matrix()?;
+    let entry = find_entry(&matrix, "frankensearch")?;
+    let default_profile = object(
+        entry
+            .get("default_feature_profile")
+            .ok_or_else(|| "frankensearch.default_feature_profile is required".to_string())?,
+        "frankensearch.default_feature_profile",
+    )?;
+    let default_features: BTreeSet<String> =
+        strings(default_profile, "features")?.into_iter().collect();
+
+    for expected in [
+        "hash",
+        "storage",
+        "model2vec",
+        "download",
+        "lexical",
+        "fts5",
+        "rerank",
+    ] {
+        ensure(
+            default_features.contains(expected),
+            format!("frankensearch default profile must include `{expected}`"),
+        )?;
+    }
+    ensure(
+        !default_features.contains("fastembed"),
+        "frankensearch default profile must not enable forbidden fastembed",
+    )?;
+
+    let blocked_names: BTreeSet<String> = array(entry, "blocked_features")?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            object(value, &format!("frankensearch.blocked_features[{index}]"))
+                .and_then(|feature| string(feature, "name"))
+                .map(ToOwned::to_owned)
+        })
+        .collect::<Result<_, _>>()?;
+    ensure(
+        blocked_names.contains("fastembed"),
+        "frankensearch must keep the fastembed blocked feature gate",
+    )?;
+    ensure(
+        !blocked_names.contains("download_api"),
+        "asupersync-backed frankensearch/download must not be reported as a blocked reqwest API",
+    )?;
+
+    let cargo_toml = read_text(CARGO_TOML_PATH)?;
+    ensure(
+        cargo_toml
+            .contains("embed-fast = [\"frankensearch/model2vec\", \"frankensearch/download\"]"),
+        "Cargo embed-fast feature must keep the frankensearch/download edge",
+    )?;
+    ensure(
+        cargo_toml.contains(
+            "features = [\"hash\", \"storage\", \"model2vec\", \"download\", \"rerank\"]",
+        ),
+        "Cargo frankensearch dependency must keep download and rerank enabled by default",
+    )
+}
+
+#[test]
 fn dependency_diagnostic_commands_parse_on_current_cli_surface() -> TestResult {
     let matrix = load_matrix()?;
     let root = object(&matrix, "matrix root")?;
