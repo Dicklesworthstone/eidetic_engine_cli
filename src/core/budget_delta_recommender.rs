@@ -225,7 +225,7 @@ pub fn build_host_calibration_posture(
     probe: &HostResourceProbeReport,
     configured_profile: OperatingProfile,
 ) -> HostCalibrationPostureReport {
-    let host_class_report = classify_host_profile(probe, &HostClassificationOptions::default());
+    let host_class_report = classify_host_profile(probe, &HostClassificationOptions::live_probe());
     let recommendation = recommend_budget_deltas(&host_class_report, configured_profile);
     let mut reason_codes = host_class_report
         .reason_codes
@@ -400,7 +400,13 @@ const fn surface_value(surface: BudgetSurface, profile: OperatingProfile) -> u64
 
 #[cfg(test)]
 mod tests {
+    use super::super::profile::{
+        CpuProbe, EnvironmentProbe, HOST_PROFILE_PROBE_SCHEMA_V1, HostTopologyProbe, MemoryProbe,
+        PathCapacityProbe, RchTopologyProbe, WorkspaceProbe,
+    };
     use super::*;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
 
     fn host_class_report(
         host_class: HostClass,
@@ -418,6 +424,95 @@ mod tests {
             repair_actions: Vec::new(),
             degraded: Vec::new(),
         }
+    }
+
+    fn live_probe(
+        logical_cores: u32,
+        memory_gib: u64,
+        cargo_target_external: bool,
+    ) -> HostResourceProbeReport {
+        HostResourceProbeReport {
+            schema: HOST_PROFILE_PROBE_SCHEMA_V1,
+            side_effect_free: true,
+            redaction: "label_only_paths_presence_only_env",
+            complete: true,
+            workspace: WorkspaceProbe {
+                label: "workspace",
+                initialized: true,
+                redaction: "path_not_emitted",
+            },
+            cpu: CpuProbe {
+                logical_cores: Some(logical_cores),
+                physical_cores: Some(logical_cores.saturating_div(2).max(1)),
+                source: "unit_test",
+            },
+            memory: MemoryProbe {
+                total_bytes: Some(memory_gib * GIB),
+                available_bytes: Some(memory_gib * GIB),
+                cgroup_limit_bytes: None,
+                source: "unit_test",
+            },
+            paths: vec![PathCapacityProbe {
+                label: "cargo_target",
+                role: "cargo_target_dir",
+                path: None,
+                exists: true,
+                nearest_existing_ancestor: false,
+                same_filesystem_as_workspace: Some(!cargo_target_external),
+                total_bytes: Some(512 * GIB),
+                available_bytes: Some(512 * GIB),
+                redaction: "path_not_emitted",
+            }],
+            tools: Vec::new(),
+            environment: EnvironmentProbe {
+                tmpdir_configured: true,
+                cargo_target_dir_configured: cargo_target_external,
+                rch_hint_configured: false,
+                redaction: "presence_only",
+            },
+            topology: HostTopologyProbe {
+                rch: RchTopologyProbe {
+                    available: true,
+                    status: "available_not_queried",
+                    posture: "ok",
+                    source: "unit_test",
+                    message: "RCH available for live-probe unit test.".to_owned(),
+                    repair: None,
+                },
+            },
+            degraded: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn live_gathered_posture_uses_fresh_calibration_not_missing_fallback() {
+        let probe = live_probe(32, 256, true);
+        let posture = build_host_calibration_posture(&probe, OperatingProfile::Swarm);
+
+        assert_eq!(
+            posture.calibration_freshness,
+            HostCalibrationFreshness::Fresh
+        );
+        assert_eq!(posture.host_class, HostClass::Local256Gb);
+        assert_eq!(posture.recommended_profile, OperatingProfile::Swarm);
+        assert_eq!(posture.effective_profile, OperatingProfile::Swarm);
+        assert!(posture.budget_deltas.iter().all(|delta| {
+            delta.reason_code == reason_code::NO_CHANGE
+                && delta.effective_profile == OperatingProfile::Swarm
+        }));
+        assert!(
+            !posture
+                .reason_codes
+                .iter()
+                .any(|code| code.contains("calibration_missing")),
+            "live gathered posture must not report missing calibration: {:?}",
+            posture.reason_codes
+        );
+        assert!(
+            posture.degraded.is_empty(),
+            "fresh live gathered posture must not emit calibration degradations: {:?}",
+            posture.degraded
+        );
     }
 
     #[test]

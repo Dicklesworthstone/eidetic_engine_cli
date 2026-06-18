@@ -299,6 +299,16 @@ impl Default for HostClassificationOptions {
     }
 }
 
+impl HostClassificationOptions {
+    #[must_use]
+    pub const fn live_probe() -> Self {
+        Self {
+            calibration_freshness: HostCalibrationFreshness::Fresh,
+            synthetic_fixture_profile: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HostClassReport {
