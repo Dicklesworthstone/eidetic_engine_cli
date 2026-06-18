@@ -1836,6 +1836,96 @@ mod tests {
     }
 
     #[test]
+    fn parse_eql_query_defaults_rerank_off_for_minimal_query() -> TestResult {
+        let query = parse_eql_query(&serde_json::json!({
+            "q": "semantic rerank fixture"
+        }))
+        .map_err(|error| error.to_string())?;
+
+        ensure(!query.rerank, "rerank should default to false")?;
+        ensure(
+            query.limit == 10,
+            "minimal query should keep the default limit boundary",
+        )
+    }
+
+    #[test]
+    fn parse_eql_query_accepts_explicit_rerank_modes() -> TestResult {
+        let enabled = parse_eql_query(&serde_json::json!({
+            "q": "semantic rerank fixture",
+            "rerank": true,
+            "speed": "quality"
+        }))
+        .map_err(|error| error.to_string())?;
+        ensure(enabled.rerank, "rerank=true should enable rerank intent")?;
+        ensure(
+            enabled.speed == EqlSpeedMode::Quality,
+            "rerank query should preserve the requested quality speed mode",
+        )?;
+
+        let disabled = parse_eql_query(&serde_json::json!({
+            "q": "semantic rerank fixture",
+            "rerank": false,
+            "speed": "instant"
+        }))
+        .map_err(|error| error.to_string())?;
+        ensure(
+            !disabled.rerank,
+            "rerank=false should explicitly disable rerank intent",
+        )?;
+        ensure(
+            disabled.speed == EqlSpeedMode::Instant,
+            "rerank=false query should still preserve the requested speed mode",
+        )
+    }
+
+    #[test]
+    fn parse_eql_query_preserves_rerank_with_limit_boundary() -> TestResult {
+        let query = parse_eql_query(&serde_json::json!({
+            "q": "semantic rerank fixture",
+            "rerank": true,
+            "limit": u32::MAX
+        }))
+        .map_err(|error| error.to_string())?;
+
+        ensure(query.rerank, "rerank should survive max limit parsing")?;
+        ensure(
+            query.limit == u32::MAX,
+            "rerank query should preserve the u32 limit boundary",
+        )
+    }
+
+    #[test]
+    fn parse_eql_query_rejects_empty_query_even_when_rerank_requested() -> TestResult {
+        let error = parse_eql_query(&serde_json::json!({
+            "q": "   ",
+            "rerank": true
+        }))
+        .expect_err("empty query text must be rejected");
+
+        ensure(error.field == "q", "empty query should fail on q")?;
+        ensure(
+            error.message.contains("must not be empty"),
+            "empty query error should explain the boundary",
+        )
+    }
+
+    #[test]
+    fn parse_eql_query_rejects_non_boolean_rerank() -> TestResult {
+        let error = parse_eql_query(&serde_json::json!({
+            "q": "semantic rerank fixture",
+            "rerank": "auto"
+        }))
+        .expect_err("non-boolean rerank must be rejected");
+
+        ensure(error.field == "rerank", "rerank type error field")?;
+        ensure(
+            error.message.contains("expected a boolean"),
+            "rerank type error should explain expected boolean",
+        )
+    }
+
+    #[test]
     fn memory_scope_stats_carry_excluded_memory_ids() {
         let mut stats =
             MemoryScopeStats::new(MemoryScope::Verified, true, Some("BlueLake".to_owned()), 2);

@@ -13,6 +13,7 @@
 #   ./scripts/e2e_advanced.sh backup_restore # Run only backup/restore scenario
 #   ./scripts/e2e_advanced.sh daemon_recovery # Run only daemon recovery scenario
 #   ./scripts/e2e_advanced.sh multi_agent_writers # Run only multi-agent writer scenario
+#   ./scripts/e2e_advanced.sh embedding_native_rerank # Run only rerank fallback scenario
 #   ./scripts/e2e_advanced.sh --list       # List available scenarios
 #   ./scripts/e2e_advanced.sh --help       # Show this help
 #
@@ -71,6 +72,7 @@ SCENARIOS=(
     "daemon_recovery"
     "multi_agent_writers"
     "backup_restore"
+    "embedding_native_rerank"
 )
 
 # ============================================================================
@@ -818,6 +820,64 @@ scenario_multi_agent_writers() {
         log_fail "cargo test --test e2e_multi_agent_writers failed with exit ${exit_code}"
         log_fail "stdout: ${stdout_file}"
         log_fail "stderr: ${stderr_file}"
+    fi
+
+    TESTS_RUN=$((TESTS_RUN + passed + failed))
+    TESTS_PASSED=$((TESTS_PASSED + passed))
+    TESTS_FAILED=$((TESTS_FAILED + failed))
+
+    [[ ${failed} -eq 0 ]]
+}
+
+scenario_embedding_native_rerank() {
+    log_step "Running scenario: embedding_native_rerank"
+    local passed=0
+    local failed=0
+    local scenario="embedding_native_rerank"
+    local step="script"
+    local stdout_file="${ARTIFACTS_DIR}/${scenario}_${step}_stdout.txt"
+    local stderr_file="${ARTIFACTS_DIR}/${scenario}_${step}_stderr.txt"
+    local log_dir="${ARTIFACTS_DIR}/${scenario}_logs"
+    local step_start
+    step_start=$(now_ms)
+    local exit_code=0
+
+    mkdir -p "${TEST_WORKSPACE}/tmp" "${log_dir}"
+
+    env \
+        HOME="${TEST_HOME}" \
+        EE_BIN="${EE_BINARY}" \
+        EE_E2E_TMPDIR="${TEST_WORKSPACE}/tmp" \
+        EE_E2E_KEEP=1 \
+        EE_E2E_KEEP_ARTIFACTS=1 \
+        LOG_DIR="${log_dir}" \
+        EE_TEST_LOG_PATH="${log_dir}/events.jsonl" \
+        "${REPO_ROOT}/scripts/e2e_embedding_native_rerank.sh" \
+        >"${stdout_file}" 2>"${stderr_file}" || exit_code=$?
+
+    local elapsed
+    elapsed=$(elapsed_ms "${step_start}")
+
+    {
+        echo "## ${scenario}/${step}"
+        echo "Command: scripts/e2e_embedding_native_rerank.sh"
+        echo "Exit code: ${exit_code}"
+        echo "Elapsed: ${elapsed}ms"
+        echo "Stdout: ${stdout_file}"
+        echo "Stderr: ${stderr_file}"
+        echo "Structured log: ${log_dir}/events.jsonl"
+        echo ""
+    } >> "${LOG_FILE}"
+
+    if [[ "${exit_code}" -eq 0 ]]; then
+        ((passed++))
+        log_pass "scripts/e2e_embedding_native_rerank.sh"
+    else
+        ((failed++))
+        log_fail "scripts/e2e_embedding_native_rerank.sh failed with exit ${exit_code}"
+        log_fail "stdout: ${stdout_file}"
+        log_fail "stderr: ${stderr_file}"
+        log_fail "structured log: ${log_dir}/events.jsonl"
     fi
 
     TESTS_RUN=$((TESTS_RUN + passed + failed))
