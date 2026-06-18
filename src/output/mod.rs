@@ -25,7 +25,9 @@ use crate::core::doctor::{
     FrankenDependencyHealth, FrankenHealthReport, IntegrityCanaryReport, IntegrityDiagnosticCheck,
     IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport,
 };
-use crate::core::health::{HealthReport, StructuralHealthDegradation, StructuralHealthReport};
+use crate::core::health::{
+    HealthReport, HealthScorecardReport, StructuralHealthDegradation, StructuralHealthReport,
+};
 use crate::core::memory::{
     MemoryDetails, MemoryHistoryReport, MemoryListReport, MemoryShowReport, memory_validity,
 };
@@ -7211,6 +7213,67 @@ pub fn render_structural_health_toon(report: &StructuralHealthReport) -> String 
     render_toon_from_json(&render_structural_health_json(report))
 }
 
+/// Render the memory-health scorecard as canonical JSON wrapped in the
+/// `ee.response.v2` envelope.
+#[must_use]
+pub fn render_health_scorecard_json(report: &HealthScorecardReport) -> String {
+    match serde_json::to_string(report) {
+        Ok(raw) => ResponseEnvelope::success().data_raw(&raw).finish(),
+        Err(_) => r#"{"schema":"ee.error.v2","error":{"code":"serialization_failed","message":"Failed to serialize response","severity":"high","details":{"recovery":[]},"nonRecoverable":false}}"#.to_owned(),
+    }
+}
+
+#[must_use]
+pub fn render_health_scorecard_toon(report: &HealthScorecardReport) -> String {
+    render_toon_from_json(&render_health_scorecard_json(report))
+}
+
+#[must_use]
+pub fn render_health_scorecard_human(report: &HealthScorecardReport) -> String {
+    let mut output = format!(
+        "ee health scorecard\n\nScore: {} ({})\nTrend: {}",
+        report.score, report.status, report.trend.direction
+    );
+    if let Some(previous) = report.trend.previous_score {
+        let _ = write!(
+            output,
+            " ({} -> {}, delta {:+})",
+            previous, report.trend.current_score, report.trend.delta
+        );
+    }
+    output.push('\n');
+
+    output.push_str("\nSub-scores:\n");
+    for sub_score in &report.sub_scores {
+        output.push_str(&format!(
+            "  {:<10} {:>3} {} - {}\n",
+            sub_score.name, sub_score.score, sub_score.status, sub_score.rationale
+        ));
+    }
+
+    if !report.top_actions.is_empty() {
+        output.push_str("\nTop actions:\n");
+        for action in &report.top_actions {
+            output.push_str(&format!(
+                "  {}. {} - {}\n     {}\n",
+                action.rank, action.title, action.reason, action.command
+            ));
+        }
+    }
+
+    if !report.degraded.is_empty() {
+        output.push_str("\nDegraded signals:\n");
+        for degraded in &report.degraded {
+            output.push_str(&format!(
+                "  [{}] {} - {}\n",
+                degraded.severity, degraded.code, degraded.message
+            ));
+        }
+    }
+
+    output
+}
+
 fn render_schema_value_json(value: &serde_json::Value) -> String {
     serde_json::to_string(value)
         .unwrap_or_else(|_| r#"{"schema":"ee.error.v2","error":{"code":"serialization_failed","message":"Failed to serialize response","severity":"high","details":{"recovery":[]},"nonRecoverable":false}}"#.to_owned())
@@ -10070,6 +10133,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: health_structural_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::health::HEALTH_SCORECARD_SCHEMA_V1,
+            version: "1",
+            description: "Trend-aware memory-health scorecard combining coverage, freshness, trust, redundancy, and graph signals.",
+            category: "ops",
+            definition: health_scorecard_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.hooks.git_readiness.v1",
             version: "1",
             description: "Read-only diagnostic report for local Git hook-chain readiness before agent commits and pushes.",
@@ -11478,6 +11548,10 @@ fn graph_rule_provenance_ego_schema_definition() -> String {
 
 fn health_structural_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.health.structural.v1.json").to_string()
+}
+
+fn health_scorecard_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.health_scorecard.v1.json").to_string()
 }
 
 fn hooks_git_readiness_schema_definition() -> String {

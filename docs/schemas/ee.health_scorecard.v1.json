@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.health_scorecard.v1.json",
+  "title": "ee.health_scorecard.v1",
+  "description": "Trend-aware memory-health scorecard combining coverage, freshness, trust, redundancy, and graph signals.",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "version",
+    "workspaceId",
+    "workspacePath",
+    "databasePath",
+    "score",
+    "status",
+    "subScores",
+    "trend",
+    "topActions",
+    "snapshot",
+    "evidence",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.health_scorecard.v1"},
+    "command": {"type": "string", "const": "health scorecard"},
+    "version": {"type": "string"},
+    "workspaceId": {"type": "string"},
+    "workspacePath": {"type": "string"},
+    "databasePath": {"type": "string"},
+    "score": {"type": "integer", "minimum": 0, "maximum": 100},
+    "status": {
+      "type": "string",
+      "enum": ["ok", "degraded_recoverable", "degraded_required", "blocked"]
+    },
+    "subScores": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/subScore"},
+      "minItems": 5
+    },
+    "trend": {"$ref": "#/$defs/trend"},
+    "topActions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/action"},
+      "maxItems": 3
+    },
+    "snapshot": {"$ref": "#/$defs/snapshot"},
+    "evidence": {"$ref": "#/$defs/jsonObject"},
+    "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
+  },
+  "field_presets": {
+    "minimal": ["schema", "score", "status"],
+    "summary": ["schema", "score", "status", "trend", "topActions"],
+    "standard": ["schema", "score", "status", "subScores", "trend", "topActions", "snapshot", "evidence", "degraded"],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "schema": "ee.health_scorecard.v1",
+      "command": "health scorecard",
+      "version": "0.5.0",
+      "workspaceId": "wsp_example",
+      "workspacePath": "/repo",
+      "databasePath": "/repo/.ee/ee.db",
+      "score": 72,
+      "status": "degraded_recoverable",
+      "subScores": [
+        {
+          "name": "coverage",
+          "score": 68,
+          "weight": 0.25,
+          "status": "degraded_recoverable",
+          "current": 12,
+          "target": 17,
+          "rationale": "Demand met by existing memories versus query-miss and debt evidence.",
+          "signals": ["memories=12", "gapClusters=2"]
+        },
+        {
+          "name": "freshness",
+          "score": 63,
+          "weight": 0.2,
+          "status": "degraded_required",
+          "current": 9,
+          "target": 12,
+          "rationale": "Provenance verification and stale-anchor debt for active memories.",
+          "signals": ["missingProvenance=2"]
+        },
+        {
+          "name": "trust",
+          "score": 75,
+          "weight": 0.2,
+          "status": "degraded_recoverable",
+          "current": 10,
+          "target": 12,
+          "rationale": "Trust-class calibration and low-trust memories that still win retrieval.",
+          "signals": ["lowTrust=2"]
+        },
+        {
+          "name": "redundancy",
+          "score": 82,
+          "weight": 0.15,
+          "status": "degraded_recoverable",
+          "current": 10,
+          "target": 12,
+          "rationale": "Exact duplicate burden that can dilute retrieval and curation queues.",
+          "signals": ["duplicateGroups=1"]
+        },
+        {
+          "name": "graph",
+          "score": 76,
+          "weight": 0.2,
+          "status": "degraded_recoverable",
+          "current": 8,
+          "target": 12,
+          "rationale": "Structural coherence from k-truss support and contradiction clusters.",
+          "signals": ["contradictionClusters=1"]
+        }
+      ],
+      "trend": {
+        "direction": "declining",
+        "delta": -9,
+        "currentScore": 72,
+        "previousScore": 81,
+        "snapshotCount": 3,
+        "source": "debt_snapshots",
+        "latestSnapshotDay": "2026-06-18",
+        "latestSnapshotHash": "blake3:abc"
+      },
+      "topActions": [
+        {
+          "rank": 1,
+          "id": "health_scorecard.coverage",
+          "subScore": "coverage",
+          "title": "Close repeated query-miss gaps",
+          "reason": "Coverage is limited by retained miss demand or unretrieved/orphan debt.",
+          "command": "ee learn gaps --workspace . --limit 5 --json",
+          "expectedImpact": 8
+        }
+      ],
+      "snapshot": {
+        "requested": false,
+        "recordedThisRun": false,
+        "status": "not_requested",
+        "snapshotDay": null,
+        "reportHash": null,
+        "inserted": null,
+        "historyCount": 3,
+        "nextCommand": "ee steward run --job memory_debt_snapshot --workspace . --json"
+      },
+      "evidence": {
+        "memoryCount": 12,
+        "queryMissCount": 4,
+        "gapCount": 2,
+        "debtItemCount": 5
+      },
+      "degraded": []
+    }
+  ],
+  "$defs": {
+    "subScore": {
+      "type": "object",
+      "required": ["name", "score", "weight", "status", "current", "target", "rationale", "signals"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "weight": {"type": "number", "minimum": 0},
+        "status": {"type": "string"},
+        "current": {"type": "number"},
+        "target": {"type": "number"},
+        "rationale": {"type": "string"},
+        "signals": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "trend": {
+      "type": "object",
+      "required": [
+        "direction",
+        "delta",
+        "currentScore",
+        "previousScore",
+        "snapshotCount",
+        "source",
+        "latestSnapshotDay",
+        "latestSnapshotHash"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "direction": {"type": "string", "enum": ["improving", "declining", "flat", "no_baseline"]},
+        "delta": {"type": "integer"},
+        "currentScore": {"type": "integer", "minimum": 0, "maximum": 100},
+        "previousScore": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+        "snapshotCount": {"type": "integer", "minimum": 0},
+        "source": {"type": "string"},
+        "latestSnapshotDay": {"type": ["string", "null"]},
+        "latestSnapshotHash": {"type": ["string", "null"]}
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": ["rank", "id", "subScore", "title", "reason", "command", "expectedImpact"],
+      "additionalProperties": false,
+      "properties": {
+        "rank": {"type": "integer", "minimum": 1, "maximum": 3},
+        "id": {"type": "string"},
+        "subScore": {"type": "string"},
+        "title": {"type": "string"},
+        "reason": {"type": "string"},
+        "command": {"type": "string"},
+        "expectedImpact": {"type": "number", "minimum": 0}
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "required": [
+        "requested",
+        "recordedThisRun",
+        "status",
+        "snapshotDay",
+        "reportHash",
+        "inserted",
+        "historyCount",
+        "nextCommand"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "requested": {"type": "boolean"},
+        "recordedThisRun": {"type": "boolean"},
+        "status": {"type": "string"},
+        "snapshotDay": {"type": ["string", "null"]},
+        "reportHash": {"type": ["string", "null"]},
+        "inserted": {"type": ["boolean", "null"]},
+        "historyCount": {"type": "integer", "minimum": 0},
+        "nextCommand": {"type": "string"}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {"type": "string"},
+        "message": {"type": "string"},
+        "repair": {"type": "string"}
+      }
+    },
+    "jsonObject": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}
