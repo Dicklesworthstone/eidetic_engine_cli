@@ -144,11 +144,11 @@ pub fn config_knobs() -> &'static [ConfigKnob] {
             category: "search",
             effect: "Intended fusion weight for the vector (semantic) tier when combining ranked result lists.",
             valid_range: "0.0 ..= 1.0",
-            // The analyst's trap: the name implies neural semantics, but the
-            // default vector tier is deterministic hash embedding.
-            status: ConfigRuntimeStatus::ForwardLooking,
+            // The analyst's trap: this setting is active, but the name does
+            // not guarantee a neural vector tier.
+            status: ConfigRuntimeStatus::Active,
             caveat: Some(
-                "Does NOT imply neural semantic search: the default vector tier uses deterministic hash embeddings, not a neural model. Check `ee index status` for the active embedding mode (see ADR 0070 and the bundled-embeddings work, bd-1et0v).",
+                "Does not imply neural semantic search by itself: this weights the active vector tier, which may be a neural model or the deterministic hash fallback. Check `ee index status` for the active embedding mode (see ADR 0070 and the bundled-embeddings work, bd-1et0v).",
             ),
         },
         ConfigKnob {
@@ -178,6 +178,8 @@ pub struct ConfigExplanation {
     pub effective_value: Option<String>,
     /// The layer that supplied the effective value (`cli|...|default`).
     pub source_layer: &'static str,
+    /// Advisory lint findings relevant to this key.
+    pub lint_findings: Vec<ConfigLintFinding>,
 }
 
 impl ConfigExplanation {
@@ -194,7 +196,24 @@ impl ConfigExplanation {
             "caveat": self.knob.caveat,
             "effectiveValue": self.effective_value,
             "sourceLayer": self.source_layer,
+            "lintFindings": self
+                .lint_findings
+                .iter()
+                .map(ConfigLintFinding::data_json)
+                .collect::<Vec<_>>(),
         })
+    }
+
+    /// Attach advisory config-lint findings for this key, preserving only
+    /// findings that actually refer to the explained key.
+    #[must_use]
+    pub fn with_lint_findings(mut self, findings: &[ConfigLintFinding]) -> Self {
+        self.lint_findings = findings
+            .iter()
+            .filter(|finding| finding.key == self.knob.key)
+            .cloned()
+            .collect();
+        self
     }
 }
 
@@ -211,6 +230,7 @@ pub fn explain(
         knob: *knob,
         effective_value,
         source_layer: source.map_or("unknown", ConfigValueSource::as_str),
+        lint_findings: Vec::new(),
     })
 }
 
@@ -237,6 +257,17 @@ impl ConfigLintFinding {
             message: message.into(),
             severity: CONFIG_LINT_SEVERITY,
         }
+    }
+
+    /// Render the advisory finding in the `ee.config_explain.v1` shape.
+    #[must_use]
+    pub fn data_json(&self) -> Value {
+        json!({
+            "code": self.code,
+            "key": self.key,
+            "message": self.message,
+            "severity": self.severity,
+        })
     }
 }
 
@@ -386,11 +417,11 @@ mod tests {
     #[test]
     fn semantic_weight_knob_is_honest_about_neural() {
         let knob = knob_for_key(SEARCH_SEMANTIC_WEIGHT_KEY).expect("semantic_weight is covered");
-        assert_eq!(knob.status, ConfigRuntimeStatus::ForwardLooking);
+        assert_eq!(knob.status, ConfigRuntimeStatus::Active);
         let caveat = knob.caveat.expect("semantic_weight must carry a caveat");
         assert!(
-            caveat.contains("hash") && caveat.contains("neural"),
-            "caveat must explain the hash-vs-neural truth"
+            caveat.contains("vector") && caveat.contains("neural"),
+            "caveat must explain the vector-vs-neural truth"
         );
     }
 
@@ -406,8 +437,13 @@ mod tests {
         assert_eq!(value["key"], SEARCH_SEMANTIC_WEIGHT_KEY);
         assert_eq!(value["effectiveValue"], "0.45");
         assert_eq!(value["sourceLayer"], "project");
-        assert_eq!(value["status"], "forward_looking");
+        assert_eq!(value["status"], "active");
         assert!(value["caveat"].is_string());
+        assert_eq!(
+            value["lintFindings"].as_array().map(Vec::len),
+            Some(0),
+            "explanations always carry a deterministic lintFindings array"
+        );
     }
 
     #[test]
@@ -421,6 +457,46 @@ mod tests {
             explain(MESH_ENABLED_KEY, None, None).expect("known key explains even when unset");
         assert_eq!(explanation.source_layer, "unknown");
         assert_eq!(explanation.data_json()["effectiveValue"], Value::Null);
+    }
+
+    #[test]
+    fn explain_can_attach_key_scoped_lint_findings() {
+        let facts = ConfigLintFacts {
+            semantic_weight: Some(0.45),
+            neural_tier_active: false,
+            search_mode: Some("lexical".to_owned()),
+            embedding_model_path: Some((
+                "embedding.model_path".to_owned(),
+                "/no/such".to_owned(),
+                false,
+            )),
+            env_vars: vec![("EMBEDDING_MODEL".to_owned(), false)],
+        };
+        let findings = run_config_lint(&facts);
+        let explanation = explain(
+            SEARCH_SEMANTIC_WEIGHT_KEY,
+            Some("0.45".to_owned()),
+            Some(ConfigValueSource::Project),
+        )
+        .expect("known key explains")
+        .with_lint_findings(&findings);
+        let json = explanation.data_json();
+        let attached = json["lintFindings"]
+            .as_array()
+            .expect("lint findings array");
+        assert_eq!(attached.len(), 2);
+        assert!(
+            attached
+                .iter()
+                .all(|finding| finding["key"] == SEARCH_SEMANTIC_WEIGHT_KEY),
+            "only findings for the explained key are attached"
+        );
+        assert!(
+            attached
+                .iter()
+                .all(|finding| finding["severity"] == CONFIG_LINT_SEVERITY),
+            "config-explain lint findings remain advisory-only"
+        );
     }
 
     #[test]

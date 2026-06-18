@@ -12,7 +12,10 @@
     "effect",
     "validRange",
     "status",
-    "sourceLayer"
+    "caveat",
+    "effectiveValue",
+    "sourceLayer",
+    "lintFindings"
   ],
   "properties": {
     "schema": {
