@@ -8110,12 +8110,19 @@ fn search_hit_from_scored_result(
 }
 
 fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
-    hits.sort_by(|left, right| right.score.total_cmp(&left.score));
+    // bd-2vq2z.30: when a reranker ran, its order must survive to the output.
+    // frankensearch returns reranked candidates carrying `rerank_score` but
+    // leaves the original fusion value in `.score`; sorting purely by `.score`
+    // here discarded the rerank order, making reranking cosmetic. Reranked hits
+    // now sort ahead of fusion-only hits and amongst themselves by descending
+    // rerank score; fusion-only hits keep the prior descending `.score` order,
+    // so non-reranked queries are unchanged.
+    hits.sort_by(rerank_aware_hit_order);
     let mut run_start = 0_usize;
     while run_start < hits.len() {
         let mut run_end = run_start + 1;
         while run_end < hits.len()
-            && hits[run_start].score.total_cmp(&hits[run_end].score) == std::cmp::Ordering::Equal
+            && rerank_aware_hit_order(&hits[run_start], &hits[run_end]) == std::cmp::Ordering::Equal
         {
             run_end += 1;
         }
@@ -8123,6 +8130,20 @@ fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
             sort_search_hit_score_tie_by_doc_id(&mut hits[run_start..run_end]);
         }
         run_start = run_end;
+    }
+}
+
+/// Ranking order for final search hits (bd-2vq2z.30). Reranked hits (those
+/// carrying a `rerank_score`) outrank fusion-only hits and order amongst
+/// themselves by descending rerank score, so a reranker's decision survives to
+/// the output instead of being discarded by a fusion-score re-sort. Fusion-only
+/// hits fall back to descending fusion `.score`.
+fn rerank_aware_hit_order(left: &SearchHit, right: &SearchHit) -> std::cmp::Ordering {
+    match (left.rerank_score, right.rerank_score) {
+        (Some(left_rerank), Some(right_rerank)) => right_rerank.total_cmp(&left_rerank),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => right.score.total_cmp(&left.score),
     }
 }
 
@@ -15056,6 +15077,107 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn rerank_step_reorders_top_k_when_reranker_available() -> TestResult {
+        // bd-2vq2z.29: positive-path proof that the rerank-apply helper ee wires
+        // via `searcher.with_reranker(...)` — frankensearch::rerank::rerank_step —
+        // actually REORDERS the top-K when a reranker is available, not just that
+        // search degrades when the model is absent. A deterministic stub reranker
+        // scores candidates so the LAST one ranks highest (full reversal).
+        //
+        // Scope: this proves the apply-helper reorders the candidate set. ee's
+        // end-to-end search pipeline currently re-sorts reranked hits by the
+        // fusion `hit.score` and discards this order — tracked separately as
+        // bd-2vq2z.30. A real cross-encoder model fixture is exercised by
+        // scripts/e2e_rerank.sh, not unit tests.
+        struct StubReverseReranker;
+        impl frankensearch::SyncRerank for StubReverseReranker {
+            fn rerank_sync(
+                &self,
+                _query: &str,
+                documents: &[frankensearch::RerankDocument],
+            ) -> frankensearch::SearchResult<Vec<frankensearch::RerankScore>> {
+                // Later candidates score higher -> the reranker reverses order.
+                Ok(documents
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, document)| frankensearch::RerankScore {
+                        doc_id: document.doc_id.clone(),
+                        score: rank as f32,
+                        original_rank: rank,
+                        raw_logit: None,
+                    })
+                    .collect())
+            }
+            fn id(&self) -> &str {
+                "stub-reverse-reranker"
+            }
+            fn model_name(&self) -> &str {
+                "stub-reverse-reranker"
+            }
+        }
+
+        // Fusion order: mem_0000 (highest fusion score) .. mem_0005 (lowest).
+        let mut candidates: Vec<crate::search::ScoredResult> = (0..6)
+            .map(|i| crate::search::ScoredResult {
+                doc_id: format!("mem_{i:04}"),
+                score: (100 - i) as f32,
+                source: ScoreSource::Hybrid,
+                index: None,
+                fast_score: None,
+                quality_score: None,
+                lexical_score: Some((100 - i) as f32),
+                rerank_score: None,
+                explanation: None,
+                metadata: None,
+            })
+            .collect();
+        let fusion_order: Vec<String> = candidates.iter().map(|hit| hit.doc_id.clone()).collect();
+        let candidate_count = candidates.len();
+
+        let reranker: Arc<dyn Reranker> =
+            Arc::new(frankensearch::SyncRerankerAdapter(StubReverseReranker));
+
+        let (reranked_order, top_rerank_score) = crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            frankensearch::rerank::rerank_step(
+                &cx,
+                reranker.as_ref(),
+                "release format checklist",
+                &mut candidates,
+                |doc_id: &str| Some(format!("text body for {doc_id}")),
+                candidate_count,
+                5,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let order: Vec<String> = candidates.iter().map(|hit| hit.doc_id.clone()).collect();
+            Ok::<(Vec<String>, Option<f32>), String>((order, candidates[0].rerank_score))
+        })
+        .map_err(|error| error.to_string())??;
+
+        assert_ne!(
+            reranked_order, fusion_order,
+            "rerank must reorder the top-K (got the fusion order unchanged)"
+        );
+        assert_eq!(
+            reranked_order.first().map(String::as_str),
+            Some("mem_0005"),
+            "stub scored the last candidate highest, so it must rank first after rerank"
+        );
+        assert_eq!(
+            reranked_order.last().map(String::as_str),
+            Some("mem_0000"),
+            "stub scored the first candidate lowest, so it must rank last after rerank"
+        );
+        assert!(
+            top_rerank_score.is_some(),
+            "the reranked top candidate must carry a rerank_score"
+        );
+        Ok(())
     }
 
     #[test]
