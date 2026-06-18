@@ -46,14 +46,16 @@
 //! makes it unit-testable in isolation.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::core::house_rules::{
-    HouseRulesQuotaInput, house_rules_quota, select_within_house_rules_quota,
+    house_rules_quota, select_within_house_rules_quota, HouseRulesQuotaInput,
 };
+use crate::db::{CreateWorkspaceInput, DbConnection, StoredMemory};
 
 pub use crate::models::GLOBAL_MEMORY_SCHEMA_V1;
 
@@ -70,6 +72,9 @@ pub const GLOBAL_PROVENANCE_LANE: &str = "global";
 
 /// Directory name of the separate global store under the user data root.
 pub const GLOBAL_STORE_DIRNAME: &str = "global";
+
+/// Default ee user-data suffix under `$HOME` when `XDG_DATA_HOME` is absent.
+pub const DEFAULT_USER_DATA_SUFFIX: &str = ".local/share/ee";
 
 /// Default fan-in budget for the global tier, in basis points of the pack
 /// budget (1500 bp = 15%). A small bounded slice so global rules never crowd
@@ -120,6 +125,40 @@ impl GlobalStorePaths {
             None => Self::from_data_root(user_data_root),
         }
     }
+}
+
+/// Resolve the ee user-data root from environment values without touching the
+/// filesystem. `XDG_DATA_HOME=/tmp/data` maps to `/tmp/data/ee`; otherwise
+/// `HOME=/home/a` maps to `/home/a/.local/share/ee`.
+#[must_use]
+pub fn default_user_data_root_from_values(
+    xdg_data_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Option<PathBuf> {
+    xdg_data_home
+        .filter(|value| !value.is_empty())
+        .map(|root| PathBuf::from(root).join("ee"))
+        .or_else(|| {
+            home.filter(|value| !value.is_empty())
+                .map(|root| PathBuf::from(root).join(DEFAULT_USER_DATA_SUFFIX))
+        })
+}
+
+/// Resolve the current process' default ee user-data root.
+///
+/// This intentionally uses XDG/HOME rather than a workspace-local `.ee` path:
+/// the global tier follows the user across repositories.
+pub fn default_user_data_root_from_env() -> Result<PathBuf, String> {
+    default_user_data_root_from_values(
+        std::env::var_os("XDG_DATA_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+    .ok_or_else(|| "global memory store requires XDG_DATA_HOME or HOME".to_owned())
+}
+
+/// Resolve the current process' default separate global-store paths.
+pub fn default_global_store_paths_from_env() -> Result<GlobalStorePaths, String> {
+    default_user_data_root_from_env().map(|root| GlobalStorePaths::from_data_root(&root))
 }
 
 /// Why the global tier is or is not included in a retrieval. Each "off" reason
@@ -438,9 +477,179 @@ impl GlobalMemoryStoreMetadata {
     }
 }
 
+/// Display name for the single workspace row inside the user-global store.
+pub const GLOBAL_WORKSPACE_NAME: &str = "ee-global";
+
+/// The store-root path string used as the workspace key for the global store.
+///
+/// `remember`/search derive the workspace id from this same path
+/// ([`crate::db::DbConnection::get_workspace_by_path`]), so writes and reads
+/// agree on a single stable global workspace.
+#[must_use]
+pub fn global_workspace_key(paths: &GlobalStorePaths) -> String {
+    paths.root.to_string_lossy().into_owned()
+}
+
+/// Deterministic workspace id for the global store, matching the id `remember`
+/// derives from the store root so the write path (a `remember` pointed at the
+/// global db) and the read path resolve the same workspace.
+#[must_use]
+pub fn global_workspace_id(paths: &GlobalStorePaths) -> String {
+    crate::core::curate::stable_workspace_id(&paths.root)
+}
+
+/// Open the separate user-global store at `paths`, creating the directory,
+/// database, schema, and the single stable global workspace row if absent.
+///
+/// This is the real storage engine for the user-global memory tier (ADR 0083,
+/// bd-1pq3c): the global store is a standalone `ee.db` with full schema parity
+/// to a workspace store, so the engine reuses [`DbConnection`]/`migrate` and a
+/// deterministic workspace id derived from the store root. It mirrors the
+/// `ee init` create→migrate→workspace flow so a `remember` pointed at the
+/// returned database writes into the same workspace this returns.
+///
+/// Idempotent: re-opening an existing store returns the existing workspace id.
+///
+/// # Errors
+///
+/// Returns a message when the directory, database, migration, or workspace row
+/// cannot be created.
+pub fn open_or_create_global_store(
+    paths: &GlobalStorePaths,
+) -> Result<(DbConnection, String), String> {
+    std::fs::create_dir_all(&paths.root).map_err(|error| {
+        format!(
+            "failed to create global store directory {}: {error}",
+            paths.root.display()
+        )
+    })?;
+    let connection = DbConnection::open_file(&paths.database_path)
+        .map_err(|error| format!("failed to open global store database: {error}"))?;
+    connection
+        .migrate()
+        .map_err(|error| format!("failed to migrate global store database: {error}"))?;
+    let workspace_id = ensure_global_workspace_row(&connection, paths)?;
+    Ok((connection, workspace_id))
+}
+
+/// Ensure the single global workspace row exists, returning its id. Resolves an
+/// existing row by path first so the id stays stable across calls.
+fn ensure_global_workspace_row(
+    connection: &DbConnection,
+    paths: &GlobalStorePaths,
+) -> Result<String, String> {
+    let workspace_key = global_workspace_key(paths);
+    if let Some(existing) = connection
+        .get_workspace_by_path(&workspace_key)
+        .map_err(|error| format!("failed to check global workspace row: {error}"))?
+    {
+        return Ok(existing.id);
+    }
+    let workspace_id = global_workspace_id(paths);
+    connection
+        .insert_workspace(
+            &workspace_id,
+            &CreateWorkspaceInput {
+                path: workspace_key,
+                name: Some(GLOBAL_WORKSPACE_NAME.to_owned()),
+            },
+        )
+        .map_err(|error| format!("failed to create global workspace row: {error}"))?;
+    Ok(workspace_id)
+}
+
+/// Read memories persisted in the user-global store (read-only).
+///
+/// Returns an empty vector when the store does not exist yet (no `remember
+/// --global` has run), so callers can include the global tier unconditionally
+/// without a pre-existence check. Resolves the workspace by path so it reads
+/// exactly what the write path persisted.
+///
+/// # Errors
+///
+/// Returns a message when an existing store cannot be opened or queried.
+pub fn read_global_store_memories(
+    paths: &GlobalStorePaths,
+    include_tombstoned: bool,
+) -> Result<Vec<StoredMemory>, String> {
+    if !paths.database_path.exists() {
+        return Ok(Vec::new());
+    }
+    let connection = DbConnection::open_file(&paths.database_path)
+        .map_err(|error| format!("failed to open global store database: {error}"))?;
+    connection
+        .migrate()
+        .map_err(|error| format!("failed to migrate global store database: {error}"))?;
+    let workspace_key = global_workspace_key(paths);
+    let Some(workspace) = connection
+        .get_workspace_by_path(&workspace_key)
+        .map_err(|error| format!("failed to resolve global workspace row: {error}"))?
+    else {
+        return Ok(Vec::new());
+    };
+    connection
+        .list_memories(&workspace.id, None, include_tombstoned)
+        .map_err(|error| format!("failed to list global store memories: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_store_create_is_idempotent_and_persists_memories() -> Result<(), String> {
+        use crate::db::CreateMemoryInput;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let paths = GlobalStorePaths::from_root(&tempdir.path().join("global"));
+
+        // Reading before any write returns empty — the store does not exist yet,
+        // so callers can include the global tier without a pre-existence check.
+        assert!(read_global_store_memories(&paths, false)?.is_empty());
+
+        // First open creates the directory, database, schema, and workspace row.
+        let (connection, workspace_id) = open_or_create_global_store(&paths)?;
+        assert!(paths.database_path.exists());
+        assert_eq!(workspace_id, global_workspace_id(&paths));
+
+        // Write a memory into the same store `remember --global` targets.
+        connection
+            .insert_memory(
+                "mem_global0000000000000000000001",
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "note".to_owned(),
+                    content: "always run cargo fmt --check before release".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.0,
+                    importance: 0.0,
+                    provenance_uri: None,
+                    trust_class: "self".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["global".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        // Re-opening is idempotent: the workspace id stays stable.
+        let (_again, workspace_id_again) = open_or_create_global_store(&paths)?;
+        assert_eq!(workspace_id, workspace_id_again);
+
+        // The write persists and is read back from a fresh connection.
+        let memories = read_global_store_memories(&paths, false)?;
+        assert_eq!(memories.len(), 1);
+        assert_eq!(
+            memories[0].content,
+            "always run cargo fmt --check before release"
+        );
+        assert_eq!(memories[0].workspace_id, workspace_id);
+        Ok(())
+    }
 
     fn candidate(id: &str, lane: MemoryLane, key: &str, hash: &str) -> LaneCandidate {
         LaneCandidate {
