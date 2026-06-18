@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.config_explain.v1.json",
+  "title": "ee.config_explain.v1",
+  "description": "Self-explaining config block for `ee config explain <key>`: what a setting affects at runtime, its effective value, the layer that set it (cli|environment|project|user|default), its valid range, an honest runtime status (active|forward_looking|inert), and a truth-in-labeling caveat when the name could mislead (e.g. search.semantic_weight). Optionally carries advisory config-lint findings. See bd-2vq2z.15.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "key",
+    "category",
+    "effect",
+    "validRange",
+    "status",
+    "sourceLayer"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.config_explain.v1",
+      "description": "Schema identifier."
+    },
+    "key": {
+      "type": "string",
+      "description": "The fully-qualified config key (e.g. search.semantic_weight)."
+    },
+    "category": {
+      "type": "string",
+      "description": "Coarse grouping category (search, pack, storage, mesh, ...)."
+    },
+    "effect": {
+      "type": "string",
+      "description": "What the knob affects at runtime, in one sentence."
+    },
+    "validRange": {
+      "type": "string",
+      "description": "Valid range / accepted values, human-readable."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["active", "forward_looking", "inert"],
+      "description": "Honest runtime status: active (wired now), forward_looking (parsed but not yet wired), or inert (no effect given other settings)."
+    },
+    "caveat": {
+      "type": ["string", "null"],
+      "description": "Truth-in-labeling caveat when the key name could mislead, else null."
+    },
+    "effectiveValue": {
+      "type": ["string", "null"],
+      "description": "The current effective value rendered as a string, or null when unset."
+    },
+    "sourceLayer": {
+      "type": "string",
+      "enum": ["cli", "environment", "project", "user", "default", "unknown"],
+      "description": "Which config layer supplied the effective value."
+    },
+    "lintFindings": {
+      "type": "array",
+      "description": "Advisory config-lint findings relevant to this key. Advisory only; never degrades health.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "key", "message", "severity"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable machine code for the finding class."
+          },
+          "key": {
+            "type": "string",
+            "description": "The config key the finding concerns."
+          },
+          "message": {
+            "type": "string",
+            "description": "Advisory, human-readable explanation."
+          },
+          "severity": {
+            "type": "string",
+            "const": "advisory",
+            "description": "Always advisory: config-lint never flips core health."
+          }
+        }
+      }
+    }
+  }
+}
