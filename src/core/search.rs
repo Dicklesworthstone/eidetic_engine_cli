@@ -6228,13 +6228,13 @@ fn resolve_search_rerank_runtime(
     let entry = match entry_result {
         Ok(Some(entry)) => entry,
         Ok(None) => {
-            // bd-2vq2z.24/.26: no reranker is registered yet. Mirror the
-            // embedding model's auto-provision behavior instead of giving up
-            // immediately — route first-use provisioning through the shared
-            // `ee model` entry point. On success the freshly-registered entry
-            // is loaded (mode=reranked); when provisioning is unavailable
-            // (offline / no cached artifact / no network fetch in this build)
-            // degrade honestly to fusion-only with an actionable repair hint.
+            // bd-2vq2z.24/.26/.28: no reranker is registered yet. The reranker
+            // has no bundled artifact and no network fetch, so before giving up
+            // we probe the default model-store cache for an artifact the
+            // operator already fetched and, if present, register it on first
+            // use (mode=reranked) — real available-when-cached auto-provision.
+            // When no cached artifact exists we degrade honestly to fusion-only
+            // with a repair hint pointing at the `--from-file` fetch.
             match auto_provision_default_reranker_entry(options, &workspace_id, &database_path) {
                 Ok(Some(entry)) => {
                     tracing::info!(
@@ -6246,13 +6246,13 @@ fn resolve_search_rerank_runtime(
                 }
                 Ok(None) => {
                     degraded.push(SearchDegradation::rerank_model_unavailable(
-                        "No available reranker model is registered for this workspace, and first-use auto-provisioning registered none.",
+                        "No reranker model is registered, and no cached default reranker artifact was found to auto-provision.",
                     ));
                     return SearchRerankRuntime::disabled();
                 }
                 Err(error) => {
                     degraded.push(SearchDegradation::rerank_model_unavailable(&format!(
-                        "First-use auto-provisioning of the default reranker did not complete: {error}"
+                        "Auto-provisioning the cached default reranker did not complete: {error}"
                     )));
                     return SearchRerankRuntime::disabled();
                 }
@@ -6306,19 +6306,27 @@ fn selected_available_reranker_entry(
     Ok(entries.into_iter().next())
 }
 
-/// First-use auto-provision of the default local reranker (bd-2vq2z.24/.26).
+/// First-use auto-provision of the default local reranker (bd-2vq2z.24/.26,
+/// bd-2vq2z.28).
 ///
-/// Mirrors the embedding model's provisioning path: route through the SAME
-/// `crate::core::model` provisioning entry point that backs `ee model fetch`,
-/// then re-select the now-`Available` reranker entry. Returns:
-/// - `Ok(Some(entry))` when provisioning registered an `Available` reranker
-///   (search then loads it and enters `mode=reranked`);
-/// - `Ok(None)` when provisioning reported success but no `Available` entry
-///   materialized;
-/// - `Err(message)` when provisioning could not complete (offline / no cached
-///   artifact / no network model fetch in this build) — the caller surfaces it
-///   as an honest `rerank_model_unavailable` degradation and falls back to
-///   fusion-only ranking.
+/// The reranker has no bundled artifact and no network fetch (only the
+/// embedding model is bundled, via the frankensearch manifest). So the only
+/// real source for an "available-when-available" auto-provision is a reranker
+/// artifact an operator already fetched into the default model-store cache.
+/// This probes that cache and, when the artifact is present on disk, registers
+/// it through the SAME `crate::core::model` provisioning entry point that
+/// `ee model fetch rerank-default --from-file ...` uses, then re-selects the
+/// now-`Available` entry. Returns:
+/// - `Ok(Some(entry))` when a cached artifact was found and registered (search
+///   loads it and enters `mode=reranked`) — i.e. available-when-cached;
+/// - `Ok(None)` when no cached artifact exists, so the caller emits an honest
+///   `rerank_model_unavailable` degradation pointing at the `--from-file` fetch;
+/// - `Err(message)` when a cached artifact exists but could not be verified or
+///   registered (corrupt / hash-mismatched artifact, or a registry error).
+///
+/// Crucially this is NOT a fake auto-provision: it never claims success without
+/// a real artifact on disk that `fetch_rerank_model` validates against the
+/// bundled manifest.
 fn auto_provision_default_reranker_entry(
     options: &SearchOptions,
     workspace_id: &str,
@@ -6326,16 +6334,49 @@ fn auto_provision_default_reranker_entry(
 ) -> Result<Option<StoredModelRegistryEntry>, String> {
     let manifest =
         crate::core::model::bundled_rerank_model_manifest().map_err(|error| error.to_string())?;
+    // Probe the default model-store cache for a previously-fetched artifact.
+    let Some(cached_artifact) = default_cached_reranker_artifact_path(&manifest.model_id) else {
+        return Ok(None);
+    };
+    if !cached_artifact.is_file() {
+        // No cached artifact on disk: honest degrade upstream, never a fake
+        // provision.
+        return Ok(None);
+    }
+    // Cache hit: register the artifact through the shared provisioning entry
+    // point (which re-verifies it against the bundled manifest), then re-select
+    // the now-`Available` entry so search enters `mode=reranked`.
     let fetch_options = crate::core::model::ModelFetchOptions {
         workspace_path: options.workspace_path.as_path(),
         database_path: Some(database_path),
         model_id: manifest.model_id.as_str(),
-        from_file: None,
+        from_file: Some(cached_artifact.as_path()),
         model_store_root: None,
     };
     crate::core::model::fetch_rerank_model(&fetch_options).map_err(|error| error.to_string())?;
     let connection = DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
     selected_available_reranker_entry(&connection, workspace_id)
+}
+
+/// Default on-disk location of a cached default-reranker artifact, mirroring
+/// `crate::core::model::default_model_store_root` + `fetch_rerank_model`
+/// (`$HOME/.local/share/ee/models/rerank/<model_id>/rerank-default-v1.tar.zst`;
+/// see `src/core/model.rs` `stored_dir.join(DEFAULT_RERANK_MODEL_ARTIFACT_NAME)`
+/// and the artifact-name constant). Returns `None` when `HOME` is unset, which
+/// matches the model store's own resolution failure (so the caller degrades
+/// honestly rather than panicking).
+fn default_cached_reranker_artifact_path(model_id: &str) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("ee")
+            .join("models")
+            .join("rerank")
+            .join(model_id)
+            .join("rerank-default-v1.tar.zst"),
+    )
 }
 
 fn load_search_reranker(entry: &StoredModelRegistryEntry) -> Result<Arc<dyn Reranker>, String> {
@@ -14969,11 +15010,11 @@ mod tests {
     }
 
     #[test]
-    fn default_reranker_offline_provision_reports_network_unavailable() {
-        // bd-2vq2z.24/.26: first-use auto-provision routes through the shared
-        // model provisioning entry point. In builds without a network model
-        // fetch it must return an actionable offline error (so search degrades
-        // honestly to fusion-only) rather than silently succeeding.
+    fn default_reranker_fetch_without_from_file_reports_network_unavailable() {
+        // bd-2vq2z.28: the reranker has no network/bundled fetch — fetch_rerank_model
+        // errors unconditionally without --from-file. This is WHY auto-provision
+        // must probe the on-disk cache and pass a real artifact as from_file
+        // rather than calling fetch with None (which can never succeed).
         let tempdir = tempfile::tempdir().expect("tempdir");
         let workspace = tempdir.path();
         let database_path = workspace.join("registry.db");
@@ -14986,49 +15027,35 @@ mod tests {
             model_store_root: None,
         };
         let error = crate::core::model::fetch_rerank_model(&fetch_options)
-            .expect_err("offline auto-provision must not succeed without artifact or network");
+            .expect_err("rerank fetch without --from-file must not succeed");
         assert!(
-            error.to_string().contains("Network model fetch is not available"),
+            error
+                .to_string()
+                .contains("Network model fetch is not available"),
             "expected offline network-unavailable error, got: {error}"
         );
     }
 
     #[test]
-    fn auto_provision_default_reranker_entry_degrades_offline() {
-        // bd-2vq2z.24/.26: the search-side first-use auto-provision helper
-        // returns an actionable Err (not a silent Ok) when no reranker can be
-        // provisioned, so resolve_search_rerank_runtime degrades to fusion-only
-        // with an honest rerank_model_unavailable note.
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let workspace = tempdir.path().to_path_buf();
-        let database_path = workspace.join("registry.db");
-        let options = SearchOptions {
-            workspace_path: workspace.clone(),
-            database_path: Some(database_path.clone()),
-            index_dir: None,
-            query: "rerank auto-provision".to_string(),
-            limit: 10,
-            speed: SpeedMode::Default,
-            explain: false,
-            as_of: None,
-            include_tombstoned: false,
-            include_expired: false,
-            include_future: false,
-            include_stale: false,
-            relevance_floor: None,
-            dedup_mode: SearchDedupMode::DocId,
-            source_mode: SearchSourceMode::Hybrid,
-            strict_source_mode: false,
-            memory_scope: MemoryScope::Swarm,
-            strict_scope: false,
-        };
-        let error =
-            auto_provision_default_reranker_entry(&options, "ws_rerank_test", &database_path)
-                .expect_err("offline auto-provision helper must return Err");
-        assert!(
-            error.contains("Network model fetch is not available"),
-            "expected offline network-unavailable error, got: {error}"
-        );
+    fn default_cached_reranker_artifact_path_targets_model_store() {
+        // bd-2vq2z.28: auto-provision is available-when-cached, so the probe must
+        // target the same model-store layout fetch_rerank_model writes to
+        // ($HOME/.local/share/ee/models/rerank/<model_id>/rerank-default-v1.tar.zst).
+        // A wrong probe location would silently never discover a cached artifact.
+        if let Some(path) = default_cached_reranker_artifact_path("rerank-default-v1") {
+            let suffix = Path::new(".local")
+                .join("share")
+                .join("ee")
+                .join("models")
+                .join("rerank")
+                .join("rerank-default-v1")
+                .join("rerank-default-v1.tar.zst");
+            assert!(
+                path.ends_with(&suffix),
+                "cache probe must target the model store layout, got: {}",
+                path.display()
+            );
+        }
     }
 
     #[test]
