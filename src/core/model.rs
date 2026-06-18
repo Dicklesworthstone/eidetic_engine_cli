@@ -17,9 +17,10 @@ use sha2::{Digest, Sha256};
 use crate::config::workspace_fingerprint;
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::index::{
-    DEFAULT_INDEX_SUBDIR, EmbeddingPosture, IndexHealth, IndexStatusOptions,
-    current_embedding_posture, default_embedder_model_root, ensure_loaded_embedding_registry_record,
-    get_index_status_with_connection, potion_model_destination_dir, POTION_MODEL_NAME,
+    DEFAULT_INDEX_SUBDIR, EmbeddingPosture, IndexHealth, IndexStatusOptions, IndexStatusReport,
+    POTION_MODEL_NAME, current_embedding_posture, default_embedder_model_root,
+    ensure_loaded_embedding_registry_record, get_index_status_with_connection,
+    potion_model_destination_dir,
 };
 use crate::db::{
     CreateEmbeddingMetadataInput, CreateModelRegistryInput, DbConnection, DbError,
@@ -2510,21 +2511,22 @@ fn fetch_bundled_embedding_model(
         download_embedding_manifest(&manifest, &stored_path)?;
     }
 
-    let loaded = Model2VecEmbedder::load_with_name(&stored_path, POTION_MODEL_NAME).map_err(|error| {
-        DomainError::Configuration {
-            message: format!(
-                "Bundled embedding model downloaded to {} but failed to load: {error}",
-                stored_path.display()
-            ),
-            repair: Some(format!("ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}")),
-        }
-    })?;
-    ensure_loaded_embedding_registry_record(&connection, &workspace_id, &loaded).map_err(|error| {
-        DomainError::Storage {
+    let loaded =
+        Model2VecEmbedder::load_with_name(&stored_path, POTION_MODEL_NAME).map_err(|error| {
+            DomainError::Configuration {
+                message: format!(
+                    "Bundled embedding model downloaded to {} but failed to load: {error}",
+                    stored_path.display()
+                ),
+                repair: Some(format!("ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}")),
+            }
+        })?;
+    ensure_loaded_embedding_registry_record(&connection, &workspace_id, &loaded).map_err(
+        |error| DomainError::Storage {
             message: format!("Failed to register downloaded bundled embedding model: {error}"),
             repair: Some("ee model status --workspace . --json".to_string()),
-        }
-    })?;
+        },
+    )?;
 
     let registry_entry = connection
         .find_model_registry_entry(
@@ -3937,14 +3939,10 @@ mod tests {
             "degradation code",
         )?;
         ensure(
-            report
-                .model_lifecycle
-                .models
-                .iter()
-                .any(|entry| {
-                    entry.model_id == BUNDLED_EMBEDDING_MODEL_ID
-                        && entry.registry_status == "unavailable"
-                }),
+            report.model_lifecycle.models.iter().any(|entry| {
+                entry.model_id == BUNDLED_EMBEDDING_MODEL_ID
+                    && entry.registry_status == "unavailable"
+            }),
             "bundled embedding row is declared unavailable until downloaded",
         )
     }
@@ -4285,16 +4283,42 @@ mod tests {
     }
 
     #[test]
-    fn model_status_and_reembed_share_byte_identical_embedding_posture() -> TestResult {
+    fn model_reembed_and_index_status_share_byte_identical_embedding_posture() -> TestResult {
         let posture =
             fixture_embedding_posture(true, "registry_observed", "potion-multilingual-128M", 256)
                 .with_vector_coverage(EmbeddingVectorCoverage::new(7, 11));
         let active = ModelStatusActive::from_embedding_posture(posture.clone(), None);
-        let reembed = ReembedEmbeddingSummary::from_posture(posture);
+        let reembed = ReembedEmbeddingSummary::from_posture(posture.clone());
+        let index_status = IndexStatusReport {
+            health: IndexHealth::Ready,
+            index_dir: PathBuf::from("/tmp/ee-index"),
+            database_path: PathBuf::from("/tmp/ee.db"),
+            embedding: Some(posture.clone()),
+            index_exists: true,
+            index_file_count: 4,
+            index_size_bytes: 128,
+            db_memory_count: 7,
+            db_session_count: 0,
+            db_generation: Some(11),
+            index_generation: Some(11),
+            last_rebuild_at: Some("2026-06-18T00:00:00Z".to_owned()),
+            last_check_error: None,
+            repair_hint: None,
+            elapsed_ms: 1.0,
+        };
+        let expected = posture.data_json();
 
         ensure(
-            active.data_json()["posture"] == reembed.data_json()["posture"],
-            "model status active and index reembed should emit byte-identical posture JSON",
+            active.data_json()["posture"] == expected,
+            "model status active should emit the shared posture serializer",
+        )?;
+        ensure(
+            reembed.data_json()["posture"] == expected,
+            "index reembed should emit the shared posture serializer",
+        )?;
+        ensure(
+            index_status.data_json()["embedding"] == expected,
+            "index status should emit the shared posture serializer",
         )?;
         ensure(
             active.data_json()["posture"]["schema"] == EMBEDDING_POSTURE_SCHEMA_V1,
@@ -4367,7 +4391,10 @@ mod tests {
         })
         .map_err(|error| format!("list: {error:?}"))?;
 
-        ensure(report.entries.len() == 2, "reranker plus bundled embedding listed")?;
+        ensure(
+            report.entries.len() == 2,
+            "reranker plus bundled embedding listed",
+        )?;
         ensure(report.degradations.len() == 1, "degradation count")?;
         ensure(
             report.degradations[0].code == "model_registry_no_available_entry",

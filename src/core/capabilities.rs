@@ -8,9 +8,7 @@ use std::path::Path;
 use crate::models::CapabilityStatus;
 
 use super::build_info;
-use super::index::{
-    EmbeddingPosture, IndexStatusOptions, IndexStatusReport, get_index_status,
-};
+use super::index::{EmbeddingPosture, IndexStatusOptions, IndexStatusReport, get_index_status};
 use super::status::{
     default_workspace_path, probe_cass_capability, probe_graph_capability, probe_mesh_capability,
     probe_runtime_capability, probe_search_capability, probe_storage_capability,
@@ -797,6 +795,35 @@ mod tests {
             Some("2026-06-18T00:00:00Z".to_owned()),
             "last rebuild timestamp",
         )?;
-        ensure(summary.embedding, Some(posture), "runtime embedding posture")
+        let summary_posture = summary
+            .embedding
+            .as_ref()
+            .ok_or_else(|| "runtime embedding posture missing".to_string())?;
+        ensure(
+            summary_posture.data_json(),
+            posture.data_json(),
+            "capabilities should carry byte-identical runtime embedding posture",
+        )?;
+        ensure(
+            summary.embedding,
+            Some(posture),
+            "runtime embedding posture",
+        )
+    }
+
+    #[test]
+    fn index_capability_summary_handles_absent_status_without_fake_posture() -> TestResult {
+        let summary = IndexCapabilitySummary::from_index_status(None);
+
+        ensure(
+            summary.last_full_rebuild_at,
+            None,
+            "absent index status should not fake rebuild timestamp",
+        )?;
+        ensure(
+            summary.embedding,
+            None,
+            "absent index status should not fake embedding posture",
+        )
     }
 }
