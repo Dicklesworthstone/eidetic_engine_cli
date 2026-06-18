@@ -151,8 +151,62 @@ fn normalize_remember(json: &Value) -> Value {
         "memoryId": "<MEMORY_ID>",
         "persisted": json.pointer("/data/persisted").and_then(Value::as_bool),
         "indexStatus": json.pointer("/data/index_status").and_then(Value::as_str),
+        "nearDuplicates": normalize_near_duplicates(json),
         "degradedCodes": degraded_codes(json),
     })
+}
+
+fn normalize_near_duplicates(json: &Value) -> Value {
+    Value::Array(
+        json.pointer("/data/near_duplicates")
+            .and_then(Value::as_array)
+            .map(|duplicates| {
+                duplicates
+                    .iter()
+                    .map(|duplicate| {
+                        json!({
+                            "memoryId": "<EXISTING_MEMORY_ID>",
+                            "similarity": rounded_json_f64(
+                                duplicate.get("similarity").and_then(Value::as_f64),
+                            ),
+                            "threshold": rounded_json_f64(
+                                duplicate.get("threshold").and_then(Value::as_f64),
+                            ),
+                            "hammingDistance": duplicate
+                                .get("hammingDistance")
+                                .or_else(|| duplicate.get("hamming_distance"))
+                                .and_then(Value::as_u64),
+                            "source": duplicate.get("source").and_then(Value::as_str),
+                            "nextActions": normalize_near_duplicate_next_actions(duplicate),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+    )
+}
+
+fn normalize_near_duplicate_next_actions(duplicate: &Value) -> Value {
+    Value::Array(
+        duplicate
+            .get("nextActions")
+            .or_else(|| duplicate.get("next_actions"))
+            .and_then(Value::as_array)
+            .map(|actions| {
+                actions
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|action| {
+                        if action.starts_with("ee memory link <new-memory-id> ") {
+                            json!("ee memory link <new-memory-id> <EXISTING_MEMORY_ID>")
+                        } else {
+                            json!(action)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+    )
 }
 
 fn artifact_dir() -> Result<PathBuf, String> {
@@ -397,6 +451,30 @@ fn remember_insert_dedup_real_binary_pins_durable_link_and_perf_events() -> Test
     let enabled_duplicate_json =
         stdout_json(&enabled_duplicate.output, "enabled duplicate remember")?;
     let duplicate_id = memory_id(&enabled_duplicate_json, "enabled duplicate")?;
+    let near_duplicates = enabled_duplicate_json
+        .pointer("/data/near_duplicates")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "enabled duplicate remember missing near_duplicates array".to_owned())?;
+    ensure_equal(
+        &near_duplicates.len(),
+        &1_usize,
+        "enabled duplicate near duplicate count",
+    )?;
+    ensure_equal(
+        &near_duplicates[0].get("memory_id").and_then(Value::as_str),
+        &Some(source_id.as_str()),
+        "enabled duplicate near duplicate existing id",
+    )?;
+    ensure_equal(
+        &near_duplicates[0].get("source").and_then(Value::as_str),
+        &Some("embedding_reuse"),
+        "enabled duplicate near duplicate source",
+    )?;
+    ensure_equal(
+        &near_duplicates[0].get("hammingDistance").and_then(Value::as_u64),
+        &Some(0),
+        "enabled duplicate near duplicate hamming distance",
+    )?;
 
     let false_positive = run_ee(
         &enabled_workspace,

@@ -2432,33 +2432,44 @@ pub fn list_curation_candidates(
     let status = parse_optional_status(options.status)?;
     let target_memory_id = parse_optional_memory_id(options.target_memory_id)?;
     validate_list_window(options.limit)?;
+    let synthesize_dedup =
+        should_synthesize_mi_dedup_candidates(candidate_type.as_deref(), status.as_deref());
 
     let connection = open_existing_database(&prepared.database_path)?;
+    let query_target_memory_id = if synthesize_dedup {
+        None
+    } else {
+        target_memory_id.as_deref()
+    };
     let stored = connection
         .list_curation_candidates(
             &prepared.workspace_id,
             candidate_type.as_deref(),
             status.as_deref(),
-            target_memory_id.as_deref(),
+            query_target_memory_id,
         )
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list curation candidates: {error}"),
             repair: Some("ee doctor".to_owned()),
         })?;
     let mut stored = stored;
-    if should_synthesize_mi_dedup_candidates(candidate_type.as_deref(), status.as_deref()) {
-        append_embedding_dedup_candidates(
+    let mut durable_mutation = false;
+    if synthesize_dedup {
+        durable_mutation |= append_embedding_dedup_candidates(
             &connection,
             &prepared.workspace_id,
             target_memory_id.as_deref(),
             &mut stored,
-        )?;
-        append_mi_dedup_candidates(
+        )? > 0;
+        durable_mutation |= append_mi_dedup_candidates(
             &connection,
             &prepared.workspace_id,
             target_memory_id.as_deref(),
             &mut stored,
-        )?;
+        )? > 0;
+    }
+    if let (true, Some(target)) = (synthesize_dedup, target_memory_id.as_deref()) {
+        stored.retain(|candidate| dedup_candidate_matches_target(candidate, target));
     }
     let now = Utc::now().to_rfc3339();
     let sort_mode = parse_curate_candidate_sort_mode(options.sort)?;
@@ -2512,7 +2523,7 @@ pub fn list_curation_candidates(
         limit: options.limit,
         offset: options.offset,
         truncated,
-        durable_mutation: false,
+        durable_mutation,
         filter: CurateCandidatesFilter {
             candidate_type,
             status,
@@ -3186,7 +3197,7 @@ fn append_mi_dedup_candidates(
     workspace_id: &str,
     target_memory_id: Option<&str>,
     stored: &mut Vec<StoredCurationCandidate>,
-) -> Result<(), DomainError> {
+) -> Result<usize, DomainError> {
     let memories = connection
         .list_memories(workspace_id, None, false)
         .map_err(|error| DomainError::Storage {
@@ -3201,24 +3212,27 @@ fn append_mi_dedup_candidates(
         .iter()
         .map(|candidate| candidate.id.clone())
         .collect::<BTreeSet<_>>();
+    let mut appended_count = 0_usize;
     for proposal in mi_dedup_proposals_from_memories(workspace_id, &memories) {
         if existing_ids.contains(&proposal.id) {
             continue;
         }
-        if target_memory_id.is_some_and(|target| {
-            proposal.target_memory_id.as_deref() != Some(target)
-                && !proposal
-                    .source_id
-                    .as_deref()
-                    .unwrap_or_default()
-                    .split(',')
-                    .any(|id| id == target)
-        }) {
+        if target_memory_id.is_some_and(|target| !dedup_candidate_matches_target(&proposal, target))
+        {
+            continue;
+        }
+        if !persist_synthetic_dedup_candidate(
+            connection,
+            workspace_id,
+            &proposal,
+            "mutual_information_dedup",
+        )? {
             continue;
         }
         stored.push(proposal);
+        appended_count = appended_count.saturating_add(1);
     }
-    Ok(())
+    Ok(appended_count)
 }
 
 fn append_embedding_dedup_candidates(
@@ -3226,7 +3240,7 @@ fn append_embedding_dedup_candidates(
     workspace_id: &str,
     target_memory_id: Option<&str>,
     stored: &mut Vec<StoredCurationCandidate>,
-) -> Result<(), DomainError> {
+) -> Result<usize, DomainError> {
     let memories = connection
         .list_memories(workspace_id, None, false)
         .map_err(|error| DomainError::Storage {
@@ -3256,15 +3270,16 @@ fn append_embedding_dedup_candidates(
         if existing_ids.contains(&proposal.id) {
             continue;
         }
-        if target_memory_id.is_some_and(|target| {
-            proposal.target_memory_id.as_deref() != Some(target)
-                && !proposal
-                    .source_id
-                    .as_deref()
-                    .unwrap_or_default()
-                    .split(',')
-                    .any(|id| id == target)
-        }) {
+        if target_memory_id.is_some_and(|target| !dedup_candidate_matches_target(&proposal, target))
+        {
+            continue;
+        }
+        if !persist_synthetic_dedup_candidate(
+            connection,
+            workspace_id,
+            &proposal,
+            "embedding_dedup",
+        )? {
             continue;
         }
         stored.push(proposal);
@@ -3281,7 +3296,122 @@ fn append_embedding_dedup_candidates(
         proposal_count = appended_count,
         "synthesized embedding dedup curation candidates"
     );
-    Ok(())
+    Ok(appended_count)
+}
+
+fn dedup_candidate_matches_target(
+    candidate: &StoredCurationCandidate,
+    target_memory_id: &str,
+) -> bool {
+    candidate.target_memory_id.as_deref() == Some(target_memory_id)
+        || candidate
+            .source_id
+            .as_deref()
+            .unwrap_or_default()
+            .split(',')
+            .any(|id| id == target_memory_id)
+}
+
+fn persist_synthetic_dedup_candidate(
+    connection: &DbConnection,
+    workspace_id: &str,
+    candidate: &StoredCurationCandidate,
+    proposal_source: &str,
+) -> Result<bool, DomainError> {
+    if connection
+        .get_curation_candidate(workspace_id, &candidate.id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to check existing dedupe curation candidate: {error}"),
+            repair: Some("ee curate show <candidate-id> --json".to_owned()),
+        })?
+        .is_some()
+    {
+        return Ok(false);
+    }
+
+    let result = connection.with_transaction(|| {
+        if connection
+            .get_curation_candidate(workspace_id, &candidate.id)?
+            .is_some()
+        {
+            return Ok(false);
+        }
+
+        connection.insert_curation_candidate(
+            &candidate.id,
+            &CreateCurationCandidateInput {
+                workspace_id: workspace_id.to_owned(),
+                candidate_type: candidate.candidate_type.clone(),
+                target_memory_id: candidate.target_memory_id.clone(),
+                proposed_content: candidate.proposed_content.clone(),
+                proposed_confidence: candidate.proposed_confidence,
+                proposed_trust_class: candidate.proposed_trust_class.clone(),
+                source_type: candidate.source_type.clone(),
+                source_id: candidate.source_id.clone(),
+                reason: candidate.reason.clone(),
+                confidence: candidate.confidence,
+                status: Some(CandidateStatus::Pending.as_str().to_owned()),
+                created_at: Some(candidate.created_at.clone()),
+                ttl_expires_at: candidate.ttl_expires_at.clone(),
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
+            },
+        )?;
+
+        let audit_id = generate_audit_id();
+        connection.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_owned()),
+                actor: Some(proposed_by_for_candidate(proposal_source)),
+                action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
+                target_type: Some("curation_candidate".to_owned()),
+                target_id: Some(candidate.id.clone()),
+                details: Some(synthetic_dedup_candidate_audit_details(
+                    candidate,
+                    proposal_source,
+                )),
+            },
+        )?;
+        Ok(true)
+    });
+
+    let inserted = result.map_err(|error| DomainError::Storage {
+        message: format!("Failed to persist dedupe curation candidate: {error}"),
+        repair: Some("ee doctor".to_owned()),
+    })?;
+
+    if inserted {
+        tracing::info!(
+            target: "ee::curate",
+            surface = "curate_dedupe",
+            proposal_source,
+            candidate_id = %candidate.id,
+            target_memory_id = candidate.target_memory_id.as_deref().unwrap_or(""),
+            "persisted dedupe curation candidate"
+        );
+    }
+    Ok(inserted)
+}
+
+fn synthetic_dedup_candidate_audit_details(
+    candidate: &StoredCurationCandidate,
+    proposal_source: &str,
+) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.curation_candidate_create.v1",
+        "candidateId": candidate.id.as_str(),
+        "candidateType": candidate.candidate_type.as_str(),
+        "proposalSource": proposal_source,
+        "targetMemoryId": candidate.target_memory_id.as_deref(),
+        "sourceType": candidate.source_type.as_str(),
+        "sourceId": candidate.source_id.as_deref(),
+        "confidence": candidate.confidence,
+        "reason": candidate.reason.as_str(),
+        "dedupeSource": curation_candidate_dedupe_source(candidate),
+        "derivationMetadata": candidate.derivation_metadata_json.as_deref(),
+    })
+    .to_string()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3415,7 +3545,7 @@ fn embedding_dedup_candidate_from_cluster(
         target_memory_id: Some(target_memory_id.clone()),
         proposed_content: Some(canonical_memory.content.clone()),
         proposed_confidence: Some(best_signal.cosine_similarity.clamp(0.0, 1.0)),
-        proposed_trust_class: Some("derived".to_owned()),
+        proposed_trust_class: Some(TrustClass::AgentAssertion.as_str().to_owned()),
         source_type: CandidateSource::RuleEngine.as_str().to_owned(),
         source_id: Some(member_csv),
         reason,
@@ -3684,7 +3814,7 @@ fn mi_dedup_candidate_from_cluster(
         target_memory_id: Some(target_memory_id),
         proposed_content,
         proposed_confidence: Some(best_pair.normalized_mi as f32),
-        proposed_trust_class: Some("derived".to_owned()),
+        proposed_trust_class: Some(TrustClass::AgentAssertion.as_str().to_owned()),
         source_type: CandidateSource::RuleEngine.as_str().to_owned(),
         source_id: Some(member_csv),
         reason,
@@ -13024,11 +13154,31 @@ fn proposed_kind_for_candidate_type(candidate_type: &str) -> Option<String> {
 }
 
 fn curation_candidate_dedupe_source(stored: &StoredCurationCandidate) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(stored.derivation_metadata_json.as_deref()?)
-        .ok()?
-        .get("dedupeSource")?
-        .as_str()
-        .map(str::to_owned)
+    if let Some(source) = stored
+        .derivation_metadata_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|value| {
+            value
+                .get("dedupeSource")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+    {
+        Some(source)
+    } else if stored
+        .reason
+        .starts_with("Embedding dedup proposal:")
+    {
+        Some("embedding".to_owned())
+    } else if stored
+        .reason
+        .starts_with("Paraphrase dedup proposal:")
+    {
+        Some("mutual_information".to_owned())
+    } else {
+        None
+    }
 }
 
 fn proposal_source_for_candidate(stored: &StoredCurationCandidate) -> String {
@@ -17808,6 +17958,14 @@ mod tests {
         })
         .map_err(|error| error.message())?;
 
+        assert!(
+            report.durable_mutation,
+            "first synthetic MI dedupe list must persist candidates"
+        );
+        assert!(
+            !second.durable_mutation,
+            "second MI dedupe list must reuse persisted candidates"
+        );
         assert_eq!(
             report.filter.candidate_type.as_deref(),
             Some("paraphrase_dedup_proposal")
@@ -17881,9 +18039,18 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         for (memory_id, content) in [
-            (&memory_ids[0], "canonical alpha cedar remote proof"),
-            (&memory_ids[1], "bravo basalt semantic guard"),
-            (&memory_ids[2], "crimson delta ambient signal"),
+            (
+                &memory_ids[0],
+                "Run `cargo fmt --check` before release in src/core/curate.rs when editing dedupe curation candidates.",
+            ),
+            (
+                &memory_ids[1],
+                "Use `cargo fmt --check` before release after dedupe curation changes in src/core/curate.rs.",
+            ),
+            (
+                &memory_ids[2],
+                "Verify `cargo fmt --check` before release for src/core/curate.rs dedupe curation edits.",
+            ),
             (&memory_ids[3], "manual unrelated related edge"),
         ] {
             connection
@@ -17997,11 +18164,15 @@ mod tests {
 
         assert_eq!(report.total_count, 1);
         assert_eq!(report.returned_count, 1);
+        assert!(
+            report.durable_mutation,
+            "first embedding dedupe list must persist the candidate"
+        );
         let candidate = &report.candidates[0];
         assert_eq!(candidate.candidate_type, "paraphrase_dedup_proposal");
         assert_eq!(candidate.proposal_source, "embedding_dedup");
         assert_eq!(candidate.audit.proposed_by, "embedding_dedup:v1");
-        assert_eq!(candidate.trust_class.as_deref(), Some("derived"));
+        assert_eq!(candidate.trust_class.as_deref(), Some("agent_assertion"));
         assert_eq!(candidate.target_memory_id.as_deref(), Some(memory_ids[0].as_str()));
         assert_eq!(
             candidate.member_memory_ids,
@@ -18055,7 +18226,82 @@ mod tests {
         })
         .map_err(|error| error.message())?;
         assert_eq!(target_filtered.returned_count, 1);
+        assert!(!target_filtered.durable_mutation);
         assert_eq!(manual_only_filtered.returned_count, 0);
+        assert!(!manual_only_filtered.durable_mutation);
+
+        let replay = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_type: Some("dedup"),
+            status: Some("pending"),
+            target_memory_id: None,
+            limit: 10,
+            offset: 0,
+            sort: "confidence",
+            group_duplicates: false,
+        })
+        .map_err(|error| error.message())?;
+        assert!(!replay.durable_mutation);
+        assert_eq!(replay.returned_count, 1);
+        assert_eq!(replay.candidates[0].id, candidate.id);
+
+        {
+            let audit_connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            let create_audits = audit_connection
+                .list_audit_by_target("curation_candidate", &candidate.id, Some(10))
+                .map_err(|error| error.to_string())?;
+            assert!(
+                create_audits.iter().any(|audit| {
+                    audit.action == audit_actions::CURATION_CANDIDATE_CREATE
+                        && audit.actor.as_deref() == Some("embedding_dedup:v1")
+                }),
+                "embedding dedupe persistence must audit curation_candidate.create"
+            );
+        }
+
+        let show = show_curation_candidate(&super::CurateShowOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate.id,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(show.candidate.id, candidate.id);
+        assert_eq!(show.candidate.proposal_source, "embedding_dedup");
+        assert!(!show.durable_mutation);
+
+        let validation = validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate.id,
+            actor: Some("DarkFalcon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(validation.validation.status, "passed");
+        assert_eq!(validation.validation.decision, "approved");
+        assert!(validation.durable_mutation);
+
+        let applied = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate.id,
+            actor: Some("DarkFalcon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(applied.application.status, "applied");
+        assert_eq!(applied.application.decision, "update_memory");
+        assert!(applied.durable_mutation);
+        assert_eq!(
+            applied
+                .target_after
+                .as_ref()
+                .map(|memory| memory.trust_class.as_str()),
+            Some("agent_assertion")
+        );
         Ok(())
     }
 

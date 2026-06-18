@@ -46661,6 +46661,21 @@ impl RememberMemoryReport {
                 candidate.candidate_id
             ));
         }
+        if !self.near_duplicates.is_empty() {
+            output.push_str("  Near duplicates:\n");
+            for duplicate in &self.near_duplicates {
+                output.push_str(&format!(
+                    "    - {} similarity {:.3} (threshold {:.3}, source {})\n",
+                    duplicate.memory_id,
+                    duplicate.similarity,
+                    duplicate.threshold,
+                    duplicate.source
+                ));
+            }
+            output.push_str(
+                "  Next: review near_duplicates before reinforcing, linking, or keeping both\n",
+            );
+        }
         if let Some(index_job_id) = &self.index_job_id {
             output.push_str(&format!("  Index job: {index_job_id}\n"));
         }
@@ -46729,11 +46744,12 @@ impl RememberMemoryReport {
         let auto_link_degradations_json = self.auto_link_degradations_json();
         let curation_candidate_json = self.curation_candidate_json();
         let curation_candidate_degradations_json = self.curation_candidate_degradations_json();
+        let near_duplicates_json = self.near_duplicates_json();
         let policy_bypass_json = self.policy_bypass_json();
         let degraded_json = self.remember_degraded_json();
 
         let mut json = format!(
-            r#"{{"schema":"ee.response.v2","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","memoryId":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"producer":{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"redaction_status":"{}","policy_bypass_used":{},"policy_bypass":{},"degraded":{}}}"#,
+            r#"{{"schema":"ee.response.v2","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","memoryId":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"producer":{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"near_duplicates":{},"redaction_status":"{}","policy_bypass_used":{},"policy_bypass":{},"degraded":{}}}"#,
             self.version,
             self.memory_id,
             self.memory_id,
@@ -46768,6 +46784,7 @@ impl RememberMemoryReport {
             curation_candidate_json,
             escape_json_string(&self.curation_candidate_status),
             curation_candidate_degradations_json,
+            near_duplicates_json,
             escape_json_string(&self.redaction_status),
             self.policy_bypass.is_some(),
             policy_bypass_json,
@@ -46912,6 +46929,37 @@ impl RememberMemoryReport {
                     escape_json_string(&degradation.severity),
                     escape_json_string(&degradation.message),
                     escape_json_string(&degradation.repair)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{items}]")
+    }
+
+    fn near_duplicates_json(&self) -> String {
+        use crate::output::escape_json_string;
+
+        let items = self
+            .near_duplicates
+            .iter()
+            .map(|duplicate| {
+                let next_actions = duplicate
+                    .next_actions
+                    .iter()
+                    .map(|action| format!("\"{}\"", escape_json_string(action)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    r#"{{"memory_id":"{}","memoryId":"{}","similarity":{},"threshold":{},"hamming_distance":{},"hammingDistance":{},"source":"{}","next_actions":[{}],"nextActions":[{}]}}"#,
+                    escape_json_string(&duplicate.memory_id),
+                    escape_json_string(&duplicate.memory_id),
+                    duplicate.similarity,
+                    duplicate.threshold,
+                    duplicate.hamming_distance,
+                    duplicate.hamming_distance,
+                    escape_json_string(&duplicate.source),
+                    next_actions,
+                    next_actions
                 )
             })
             .collect::<Vec<_>>()
@@ -47069,9 +47117,10 @@ pub fn infer_note_level_kind(content: &str) -> (&'static str, &'static str) {
     let contains_rule_marker = ["must", "always", "never", "should", "required"]
         .iter()
         .any(|marker| {
+            let marker = *marker;
             words
                 .iter()
-                .any(|word| word.trim_matches(|ch: char| !ch.is_ascii_alphabetic()) == *marker)
+                .any(|word| word.trim_matches(|ch: char| !ch.is_ascii_alphabetic()) == marker)
         });
     if starts_with_rule_verb || contains_rule_marker {
         return ("procedural", "rule");
@@ -47100,9 +47149,10 @@ pub fn infer_note_level_kind(content: &str) -> (&'static str, &'static str) {
     let contains_past_marker = ["was", "were", "did", "ran", "fixed", "changed"]
         .iter()
         .any(|marker| {
+            let marker = *marker;
             words
                 .iter()
-                .any(|word| word.trim_matches(|ch: char| !ch.is_ascii_alphabetic()) == *marker)
+                .any(|word| word.trim_matches(|ch: char| !ch.is_ascii_alphabetic()) == marker)
         });
     if contains_year && contains_past_marker {
         return ("episodic", "event");
@@ -59177,6 +59227,96 @@ mod tests {
         ensure(
             haystack.ends_with(suffix),
             format!("{context}: expected output to end with {suffix:?}, got {haystack:?}"),
+        )
+    }
+
+    #[test]
+    fn remember_output_surfaces_near_duplicates() -> TestResult {
+        let duplicate_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x2_005)).to_string();
+        let report = crate::core::memory::RememberMemoryReport {
+            version: "test",
+            memory_id: MemoryId::from_uuid(uuid::Uuid::from_u128(0x2_006)),
+            workspace_id: "ws_cli_remember_near_duplicate".to_owned(),
+            workspace_path: PathBuf::from("/tmp/ee-near-duplicate"),
+            database_path: PathBuf::from("/tmp/ee-near-duplicate.db"),
+            content: "Run cargo fmt before release.".to_owned(),
+            workflow_id: None,
+            level: crate::models::MemoryLevel::Procedural,
+            kind: crate::models::MemoryKind::Rule,
+            confidence: 0.88,
+            tags: vec!["release".to_owned()],
+            source: None,
+            producer: crate::models::ProducerMetadata::manual_remember(
+                None,
+                Some("2026-06-18T00:00:00Z"),
+            ),
+            valid_from: None,
+            valid_to: None,
+            validity_status: "active".to_owned(),
+            validity_window_kind: "unbounded".to_owned(),
+            dry_run: false,
+            persisted: true,
+            revision_number: 1,
+            revision_group_id: None,
+            audit_id: Some("audit_nearduplicate0000000000001".to_owned()),
+            index_job_id: None,
+            index_status: "queued".to_owned(),
+            effect_ids: Vec::new(),
+            suggested_links: Vec::new(),
+            suggested_link_status: "not_requested".to_owned(),
+            suggested_link_degradations: Vec::new(),
+            redaction_status: "clean".to_owned(),
+            policy_bypass: None,
+            auto_links: Vec::new(),
+            auto_link_status: "not_requested".to_owned(),
+            auto_link_degradations: Vec::new(),
+            curation_candidate: None,
+            curation_candidate_status: "not_requested".to_owned(),
+            curation_candidate_degradations: Vec::new(),
+            near_duplicates: vec![crate::core::memory::RememberNearDuplicate {
+                memory_id: duplicate_id.clone(),
+                similarity: 0.973,
+                threshold: 0.920,
+                hamming_distance: 3,
+                source: "embedding_dedup".to_owned(),
+                next_actions: vec![
+                    "review_existing_memory".to_owned(),
+                    "link_or_keep_both".to_owned(),
+                ],
+            }],
+        };
+
+        let human = report.human_output();
+        ensure_contains(&human, "Near duplicates:", "human near duplicate heading")?;
+        ensure_contains(&human, &duplicate_id, "human near duplicate id")?;
+        ensure_contains(&human, "similarity 0.973", "human near duplicate similarity")?;
+
+        let json = serde_json::from_str::<serde_json::Value>(&report.json_output())
+            .map_err(|error| error.to_string())?;
+        let near_duplicates = json
+            .pointer("/data/near_duplicates")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "near_duplicates must be a JSON array".to_owned())?;
+        ensure_equal(&near_duplicates.len(), &1, "near duplicate JSON count")?;
+        ensure_equal(
+            &near_duplicates[0]["memory_id"],
+            &serde_json::json!(duplicate_id),
+            "near duplicate snake_case id",
+        )?;
+        ensure_equal(
+            &near_duplicates[0]["memoryId"],
+            &serde_json::json!(duplicate_id),
+            "near duplicate camelCase id",
+        )?;
+        ensure_equal(
+            &near_duplicates[0]["hamming_distance"],
+            &serde_json::json!(3),
+            "near duplicate hamming distance",
+        )?;
+        ensure_equal(
+            &near_duplicates[0]["next_actions"],
+            &serde_json::json!(["review_existing_memory", "link_or_keep_both"]),
+            "near duplicate next actions",
         )
     }
 

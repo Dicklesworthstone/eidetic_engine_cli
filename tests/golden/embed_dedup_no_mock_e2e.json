@@ -13,6 +13,7 @@
         "memoryId": "<MEMORY_ID>",
         "persisted": true,
         "indexStatus": "pending",
+        "nearDuplicates": [],
         "degradedCodes": []
       },
       {
@@ -22,6 +23,7 @@
         "memoryId": "<MEMORY_ID>",
         "persisted": true,
         "indexStatus": "pending",
+        "nearDuplicates": [],
         "degradedCodes": []
       }
     ],
@@ -42,6 +44,7 @@
         "memoryId": "<MEMORY_ID>",
         "persisted": true,
         "indexStatus": "pending",
+        "nearDuplicates": [],
         "degradedCodes": []
       },
       {
@@ -51,6 +54,20 @@
         "memoryId": "<MEMORY_ID>",
         "persisted": true,
         "indexStatus": "pending",
+        "nearDuplicates": [
+          {
+            "memoryId": "<EXISTING_MEMORY_ID>",
+            "similarity": 1.0,
+            "threshold": 0.97,
+            "hammingDistance": 0,
+            "source": "embedding_reuse",
+            "nextActions": [
+              "ee remember --reinforce <same-content>",
+              "ee memory link <new-memory-id> <EXISTING_MEMORY_ID>",
+              "ee curate candidates --type paraphrase_dedup_proposal --json"
+            ]
+          }
+        ],
         "degradedCodes": []
       }
     ],
@@ -89,6 +106,7 @@
       "memoryId": "<MEMORY_ID>",
       "persisted": true,
       "indexStatus": "pending",
+      "nearDuplicates": [],
       "degradedCodes": []
     },
     "dedupLinks": []
