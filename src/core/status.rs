@@ -7126,6 +7126,7 @@ mod tests {
             last_check_error: None,
             repair_hint: Some("ee index rebuild --workspace ."),
             elapsed_ms: 1.0,
+            embedding: None,
         };
 
         let asset = DerivedAssetReport::from_index_status(&report);
