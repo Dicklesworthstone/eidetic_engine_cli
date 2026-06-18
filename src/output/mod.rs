@@ -9878,7 +9878,7 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
         SchemaEntry {
             id: "ee.hook.harness_install.v1",
             version: "1",
-            description: "Agent-harness hook generation/install plan for recall injection and failure capture.",
+            description: "Agent-harness hook generation/install plan for ambient context injection, preflight checks, and failure capture.",
             category: "ops",
             definition: hook_harness_install_schema_definition,
         },

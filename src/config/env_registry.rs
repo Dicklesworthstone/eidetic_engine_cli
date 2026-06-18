@@ -14,6 +14,12 @@ pub enum EnvVar {
     AgentName,
     /// `EE_AGENT_MODE`
     AgentMode,
+    /// `EE_AMBIENT_CONTEXT`
+    AmbientContext,
+    /// `EE_AMBIENT_CONTEXT_STATE_DIR`
+    AmbientContextStateDir,
+    /// `EE_AMBIENT_CONTEXT_VERBOSITY`
+    AmbientContextVerbosity,
     /// `EE_ADAPTIVE_BACKOFF_MS`
     AdaptiveBackoffMs,
     /// `EE_ADAPTIVE_NOISY_P99_MS`
@@ -235,6 +241,9 @@ impl EnvVar {
         &[
             Self::AgentName,
             Self::AgentMode,
+            Self::AmbientContext,
+            Self::AmbientContextStateDir,
+            Self::AmbientContextVerbosity,
             Self::AdaptiveBackoffMs,
             Self::AdaptiveNoisyP99Ms,
             Self::AuditLaneBatchMax,
@@ -350,6 +359,9 @@ impl EnvVar {
         match self {
             Self::AgentName => "EE_AGENT_NAME",
             Self::AgentMode => "EE_AGENT_MODE",
+            Self::AmbientContext => "EE_AMBIENT_CONTEXT",
+            Self::AmbientContextStateDir => "EE_AMBIENT_CONTEXT_STATE_DIR",
+            Self::AmbientContextVerbosity => "EE_AMBIENT_CONTEXT_VERBOSITY",
             Self::AdaptiveBackoffMs => "EE_ADAPTIVE_BACKOFF_MS",
             Self::AdaptiveNoisyP99Ms => "EE_ADAPTIVE_NOISY_P99_MS",
             Self::AuditLaneBatchMax => "EE_AUDIT_LANE_BATCH_MAX",
@@ -471,6 +483,13 @@ impl EnvVar {
         match self {
             Self::AgentName => "Identify the current agent for scoped memory retrieval.",
             Self::AgentMode => "Use agent-oriented output defaults.",
+            Self::AmbientContext => "Enable or disable proactive ambient context hook injection.",
+            Self::AmbientContextStateDir => {
+                "Override the ambient hook de-duplication state directory."
+            }
+            Self::AmbientContextVerbosity => {
+                "Select quiet, standard, or verbose ambient hook budgets."
+            }
             Self::AdaptiveBackoffMs => {
                 "Override the SRR5 noisy-neighbor soft backoff delay in milliseconds."
             }
@@ -722,6 +741,8 @@ impl EnvVar {
     #[must_use]
     pub const fn default_value(self) -> Option<&'static str> {
         match self {
+            Self::AmbientContext => Some("true"),
+            Self::AmbientContextVerbosity => Some("standard"),
             Self::AdaptiveBackoffMs => Some("25"),
             Self::AdaptiveNoisyP99Ms => Some("200"),
             Self::MeshMode => Some("off"),
@@ -797,6 +818,9 @@ impl EnvVar {
     #[must_use]
     pub const fn category(self) -> &'static str {
         match self {
+            Self::AmbientContext | Self::AmbientContextStateDir | Self::AmbientContextVerbosity => {
+                "hooks"
+            }
             Self::CassBinary => "integration",
             Self::CurationAutoPromoteConfidenceFloor
             | Self::CurationAutoPromoteMaxPerRun
@@ -1011,6 +1035,42 @@ mod tests {
         for var in EnvVar::all() {
             if !names.insert(var.name()) {
                 return Err(format!("duplicate env var registered: {}", var.name()));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ambient_context_env_vars_are_registered_with_defaults() -> TestResult {
+        let expected = [
+            (EnvVar::AmbientContext, "EE_AMBIENT_CONTEXT", Some("true")),
+            (
+                EnvVar::AmbientContextVerbosity,
+                "EE_AMBIENT_CONTEXT_VERBOSITY",
+                Some("standard"),
+            ),
+            (
+                EnvVar::AmbientContextStateDir,
+                "EE_AMBIENT_CONTEXT_STATE_DIR",
+                None,
+            ),
+        ];
+
+        for (var, name, default) in expected {
+            if !EnvVar::all().contains(&var) {
+                return Err(format!("{name} missing from registry order"));
+            }
+            if var.name() != name {
+                return Err(format!("unexpected env name for {var:?}: {}", var.name()));
+            }
+            if var.default_value() != default {
+                return Err(format!("{name} default drifted"));
+            }
+            if var.category() != "hooks" {
+                return Err(format!("{name} must be categorized as hooks"));
+            }
+            if !var.exposes_value() {
+                return Err(format!("{name} should expose non-secret effective values"));
             }
         }
         Ok(())

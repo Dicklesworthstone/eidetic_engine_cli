@@ -15,6 +15,9 @@ must not expose their current value.
 |---|---|---|---|---|---|
 | `EE_AGENT_NAME` | output | string | none | Identify the current agent for scoped memory retrieval. | Used by agent-aware memory and context surfaces. |
 | `EE_AGENT_MODE` | output | boolean flag | none | Use agent-oriented output defaults. | Optimizes renderer auto-detection for agent consumption. |
+| `EE_AMBIENT_CONTEXT` | hooks | boolean flag | `true` | Enable or disable proactive ambient context hook injection. | Set to `false`, `0`, `off`, `no`, `disable`, or `disabled` to make generated harness hooks suppress all ambient injections. |
+| `EE_AMBIENT_CONTEXT_STATE_DIR` | hooks | path | none | Override the ambient hook de-duplication state directory. | Defaults to `<workspace>/.ee/hook-state` in the generated hook scripts; the directory stores only per-session injection fingerprints. |
+| `EE_AMBIENT_CONTEXT_VERBOSITY` | hooks | enum (`quiet`, `standard`, `verbose`) | `standard` | Select quiet, standard, or verbose ambient hook budgets. | `quiet` suppresses SessionStart orient and lowers pre-edit recall budget; `verbose` raises the bounded orient/recall ceilings. |
 | `EE_ADAPTIVE_BACKOFF_MS` | tuning | integer milliseconds | `25` | Override the SRR5 noisy-neighbor soft backoff delay in milliseconds. | Applied only when swarm adaptive scheduling is enabled; backoff is advisory and must not alter retrieval results. |
 | `EE_ADAPTIVE_NOISY_P99_MS` | tuning | integer milliseconds | `200` | Override the SRR5 per-agent p99 latency threshold for noisy-neighbor backoff. | Used by the adaptive scheduler to decide when a single agent should receive advisory delay. |
 | `EE_AUDIT_LANE_BATCH_MAX` | tuning | integer count | `64` | Override the audit-lane writer batch size before flushing. | Used by the audit-lane writer once foreground audit emission is enabled; preserving the default keeps existing direct insert behavior unchanged. |

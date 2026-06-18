@@ -35,7 +35,7 @@ pub const GIT_HOOK_AHEAD_RISK_SCHEMA_V1: &str = "ee.hooks.git_readiness.ahead_ri
 pub const HARNESS_HOOK_INSTALL_SCHEMA_V1: &str = "ee.hook.harness_install.v1";
 
 /// Schema for proactive ambient context hook injection (bd-2vq2z.10).
-pub const AMBIENT_CONTEXT_SCHEMA_V1: &str = "ee.ambient_context.v1";
+pub const AMBIENT_CONTEXT_SCHEMA_V1: &str = crate::models::AMBIENT_CONTEXT_SCHEMA_V1;
 
 /// Schema for harness conformance simulation cases and reports.
 pub const HARNESS_CONFORMANCE_SCHEMA_V1: &str = "ee.harness_conformance.v1";
