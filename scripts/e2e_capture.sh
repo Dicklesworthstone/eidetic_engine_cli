@@ -236,6 +236,8 @@ if capture_suggest_available; then
         "capture suggest reject command preserves source workspace"
     assert_jq "$suggest_out" ".data.nextAction | contains(\"--workspace\") and contains(\"$WS\")" \
         "capture suggest next action preserves source workspace"
+    assert_jq "$suggest_out" '.data.nextAction | contains(" && ee curate accept ")' \
+        "capture suggest next action is copy-pasteable shell"
     after_suggest_candidates="$(candidate_count "$WS")"
     assert_eq "$after_suggest_candidates" "$before_suggest_candidates" \
         "capture suggest does not persist curation candidates by itself"

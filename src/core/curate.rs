@@ -2858,7 +2858,7 @@ pub fn capture_suggestions(
         "no capture suggestions proposed".to_owned()
     } else {
         format!(
-            "ee review session {session_arg} --workspace {workspace_arg} --propose --json; then ee curate accept <candidate-id> --workspace {workspace_arg} --json"
+            "ee review session {session_arg} --workspace {workspace_arg} --propose --json && ee curate accept <candidate-id> --workspace {workspace_arg} --json"
         )
     };
 
@@ -17274,6 +17274,12 @@ mod tests {
             suggestion.reject_command,
             format!(
                 "{expected_review} && ee curate reject {candidate_arg} --workspace {workspace_arg} --json"
+            )
+        );
+        assert_eq!(
+            report.next_action,
+            format!(
+                "{expected_review} && ee curate accept <candidate-id> --workspace {workspace_arg} --json"
             )
         );
 
