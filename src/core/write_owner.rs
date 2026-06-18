@@ -45,11 +45,13 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::cx::Cx;
+use asupersync::time::sleep as asupersync_sleep;
+use asupersync::Outcome;
 use crossbeam_queue::ArrayQueue;
 use serde::Serialize;
 
@@ -73,6 +75,9 @@ pub const WRITE_SPOOL_BACKPRESSURE_SCHEMA_V1: &str = "ee.write_spool.backpressur
 
 /// Schema for the durable write-spool crash-recovery state marker.
 pub const WRITE_SPOOL_RECOVERY_STATE_SCHEMA_V1: &str = "ee.write_spool.recovery_state.v1";
+
+/// Redaction posture for group-commit write-intake telemetry.
+pub const WRITE_GROUP_COMMIT_REDACTION_STATUS: &str = "counts_latencies_no_content";
 
 /// Schema for write-immune per-source write stream statistics.
 pub const WRITE_IMMUNE_SOURCE_STATS_SCHEMA_V1: &str = "ee.write_immune.source_stats.v1";
@@ -103,6 +108,17 @@ const WRITE_SPOOL_RECOVERY_STATE_REPLAY_REQUIRED: &str = "uncommitted_write_repl
 const WRITE_SPOOL_RECOVERY_TEMP_CREATE_ATTEMPTS: usize = 16;
 
 static WRITE_SPOOL_RECOVERY_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static WRITE_GROUP_COMMIT_BATCHES: AtomicU64 = AtomicU64::new(0);
+static WRITE_GROUP_COMMIT_BATCH_WRITES: AtomicU64 = AtomicU64::new(0);
+static WRITE_GROUP_COMMIT_WRITES_COALESCED: AtomicU64 = AtomicU64::new(0);
+static WRITE_GROUP_COMMIT_FSYNC_COUNT: AtomicU64 = AtomicU64::new(0);
+static WRITE_GROUP_COMMIT_FSYNC_SAVED: AtomicU64 = AtomicU64::new(0);
+static WRITE_GROUP_COMMIT_LATENCY_TOTAL_US: AtomicU64 = AtomicU64::new(0);
+static WRITE_GROUP_COMMIT_LATENCY_MAX_US: AtomicU64 = AtomicU64::new(0);
+static WRITE_GROUP_COMMIT_FALLBACK_DISABLED: AtomicU64 = AtomicU64::new(0);
+static WRITE_GROUP_COMMIT_FALLBACK_DEGRADED: AtomicU64 = AtomicU64::new(0);
+static WRITE_GROUP_COMMIT_FALLBACK_OVERSIZED: AtomicU64 = AtomicU64::new(0);
+static WRITE_GROUP_COMMIT_FALLBACK_SINGLE_WRITER: AtomicU64 = AtomicU64::new(0);
 
 /// Default channel capacity for write requests.
 pub const DEFAULT_CHANNEL_CAPACITY: usize = 64;
@@ -452,7 +468,7 @@ pub struct WriteRequest {
     /// Oneshot sender for the result.
     pub response_tx: oneshot::Sender<WriteResult>,
     /// Arrival timestamp for fairness tracking.
-    pub arrived_at: std::time::Instant,
+    pub arrived_at: Instant,
 }
 
 /// Types of write operations that flow through the owner.
@@ -504,6 +520,59 @@ impl WriteOperation {
             Self::LinkCreate { .. } => "link_create",
             Self::OutcomeRecord { .. } => "outcome_record",
             Self::Custom { .. } => "custom",
+        }
+    }
+
+    /// Conservative byte estimate used only for bounded group-commit intake.
+    #[must_use]
+    pub fn estimated_payload_bytes(&self) -> usize {
+        match self {
+            Self::MemoryCreate {
+                workspace_id,
+                content,
+                level,
+                kind,
+                tags,
+                source_id,
+                trust_class,
+                provenance_uri,
+                ..
+            } => {
+                workspace_id.len()
+                    .saturating_add(content.len())
+                    .saturating_add(level.len())
+                    .saturating_add(kind.len())
+                    .saturating_add(tags.iter().map(String::len).sum::<usize>())
+                    .saturating_add(source_id.as_ref().map_or(0, String::len))
+                    .saturating_add(trust_class.len())
+                    .saturating_add(provenance_uri.as_ref().map_or(0, String::len))
+            }
+            Self::LinkCreate {
+                workspace_id,
+                source_id,
+                target_id,
+                relation,
+            } => workspace_id
+                .len()
+                .saturating_add(source_id.len())
+                .saturating_add(target_id.len())
+                .saturating_add(relation.len()),
+            Self::OutcomeRecord {
+                workspace_id,
+                memory_id,
+                outcome_type,
+                details,
+            } => workspace_id
+                .len()
+                .saturating_add(memory_id.len())
+                .saturating_add(outcome_type.len())
+                .saturating_add(details.as_ref().map_or(0, String::len)),
+            Self::Custom {
+                operation_type,
+                payload,
+            } => operation_type
+                .len()
+                .saturating_add(serde_json::to_vec(payload).map_or(usize::MAX / 2, |bytes| bytes.len())),
         }
     }
 
@@ -1067,6 +1136,357 @@ impl WriteResult {
     }
 }
 
+/// Breakdown of group-commit fallback reasons.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct WriteGroupCommitFallbackReasons {
+    /// Group commit disabled by merged runtime config.
+    pub disabled: u64,
+    /// Storage posture or runtime context required the per-write path.
+    pub degraded: u64,
+    /// The write exceeded `max_inflight_bytes`.
+    pub oversized: u64,
+    /// No sibling write arrived before the batch closed.
+    pub single_writer: u64,
+}
+
+/// Redaction-safe `ee.write_group_commit.v1` telemetry.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteGroupCommitTelemetry {
+    /// Schema identifier.
+    pub schema: &'static str,
+    /// Wall-clock generation time for this snapshot.
+    pub generated_at: String,
+    /// Whether merged runtime config enables group-commit intake.
+    pub enabled: bool,
+    /// Telemetry redaction posture.
+    pub redaction_status: &'static str,
+    /// Number of batch commit boundaries executed while enabled.
+    pub batches: u64,
+    /// Number of writes that shared a commit boundary with at least one sibling.
+    pub writes_coalesced: u64,
+    /// Average row count across enabled batch boundaries.
+    pub avg_batch_size: f64,
+    /// Number of durable commit callbacks invoked by the intake.
+    pub fsync_count: u64,
+    /// Commit callbacks avoided by coalescing N writes into one callback.
+    pub fsync_saved: u64,
+    /// Approximate commit latency p50 in microseconds.
+    pub commit_latency_p50_us: u64,
+    /// Approximate commit latency p99 in microseconds.
+    pub commit_latency_p99_us: u64,
+    /// Total fallback count across all reasons.
+    pub fallback_count: u64,
+    /// Per-reason fallback counters.
+    pub fallback_reasons: WriteGroupCommitFallbackReasons,
+}
+
+/// Result returned by the write-owner group-commit loop.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteGroupCommitRunReport {
+    /// Redaction-safe telemetry accumulated by this run.
+    pub telemetry: WriteGroupCommitTelemetry,
+    /// Number of successful durable commit boundaries.
+    ///
+    /// Generation semantics: one successful batch callback represents exactly
+    /// one durable transaction boundary and advances the DB generation once,
+    /// regardless of the number of writes in that batch. A failed batch resolves
+    /// every accepted request with the same failure and advances no generation.
+    pub generation_advances: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WriteGroupCommitFallbackReason {
+    Disabled,
+    Degraded,
+    Oversized,
+    SingleWriter,
+}
+
+#[derive(Debug, Default)]
+struct WriteGroupCommitAccumulator {
+    enabled: bool,
+    batches: u64,
+    batch_writes: u64,
+    writes_coalesced: u64,
+    fsync_count: u64,
+    fsync_saved: u64,
+    latencies_us: Vec<u64>,
+    fallback_reasons: WriteGroupCommitFallbackReasons,
+    generation_advances: u64,
+}
+
+impl WriteGroupCommitAccumulator {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            ..Self::default()
+        }
+    }
+
+    fn record_commit(
+        &mut self,
+        row_count: usize,
+        latency_us: u64,
+        fallback: Option<WriteGroupCommitFallbackReason>,
+        generation_advanced: bool,
+    ) {
+        let row_count_u64 = u64::try_from(row_count).unwrap_or(u64::MAX);
+        self.fsync_count = self.fsync_count.saturating_add(1);
+        self.latencies_us.push(latency_us);
+
+        if self.enabled {
+            self.batches = self.batches.saturating_add(1);
+            self.batch_writes = self.batch_writes.saturating_add(row_count_u64);
+            if row_count > 1 {
+                self.writes_coalesced = self.writes_coalesced.saturating_add(row_count_u64);
+                self.fsync_saved = self
+                    .fsync_saved
+                    .saturating_add(row_count_u64.saturating_sub(1));
+            }
+        }
+
+        if generation_advanced {
+            self.generation_advances = self.generation_advances.saturating_add(1);
+        }
+
+        if let Some(reason) = fallback {
+            self.record_fallback(reason, row_count_u64);
+        }
+    }
+
+    fn record_fallback(&mut self, reason: WriteGroupCommitFallbackReason, count: u64) {
+        match reason {
+            WriteGroupCommitFallbackReason::Disabled => {
+                self.fallback_reasons.disabled =
+                    self.fallback_reasons.disabled.saturating_add(count);
+            }
+            WriteGroupCommitFallbackReason::Degraded => {
+                self.fallback_reasons.degraded =
+                    self.fallback_reasons.degraded.saturating_add(count);
+            }
+            WriteGroupCommitFallbackReason::Oversized => {
+                self.fallback_reasons.oversized =
+                    self.fallback_reasons.oversized.saturating_add(count);
+            }
+            WriteGroupCommitFallbackReason::SingleWriter => {
+                self.fallback_reasons.single_writer =
+                    self.fallback_reasons.single_writer.saturating_add(count);
+            }
+        }
+    }
+
+    fn into_report(self) -> WriteGroupCommitRunReport {
+        let telemetry = self.telemetry(write_group_commit_generated_at());
+        WriteGroupCommitRunReport {
+            telemetry,
+            generation_advances: self.generation_advances,
+        }
+    }
+
+    fn telemetry(&self, generated_at: String) -> WriteGroupCommitTelemetry {
+        let fallback_count = write_group_commit_fallback_count(&self.fallback_reasons);
+        let avg_batch_size = if self.batches == 0 {
+            0.0
+        } else {
+            self.batch_writes as f64 / self.batches as f64
+        };
+        WriteGroupCommitTelemetry {
+            schema: crate::models::WRITE_GROUP_COMMIT_SCHEMA_V1,
+            generated_at,
+            enabled: self.enabled,
+            redaction_status: WRITE_GROUP_COMMIT_REDACTION_STATUS,
+            batches: self.batches,
+            writes_coalesced: self.writes_coalesced,
+            avg_batch_size,
+            fsync_count: self.fsync_count,
+            fsync_saved: self.fsync_saved,
+            commit_latency_p50_us: write_group_commit_percentile(&self.latencies_us, 50),
+            commit_latency_p99_us: write_group_commit_percentile(&self.latencies_us, 99),
+            fallback_count,
+            fallback_reasons: self.fallback_reasons.clone(),
+        }
+    }
+}
+
+/// Snapshot process-local group-commit telemetry for status/diagnostics.
+#[must_use]
+pub fn write_group_commit_telemetry(workspace_path: Option<&Path>) -> WriteGroupCommitTelemetry {
+    let config = workspace_path
+        .and_then(crate::config::workspace_config)
+        .map(|config| WriteHotPathConfig::from_write_config(&config.write))
+        .unwrap_or_default();
+    write_group_commit_telemetry_for_config(config.enabled)
+}
+
+/// Run a one-shot durable write through the group-commit intake accounting.
+///
+/// One-shot CLI invocations normally close as a single-writer fallback because
+/// there is no long-lived actor to accumulate siblings. The wrapped write still
+/// executes through the existing direct DB path, preserving byte-identical
+/// public response envelopes while exposing the same counters the daemon intake
+/// uses.
+pub fn run_one_shot_write_intake<T, F>(
+    workspace_path: &Path,
+    operation: &WriteOperation,
+    write: F,
+) -> Result<T, DomainError>
+where
+    F: FnOnce() -> Result<T, DomainError>,
+{
+    let config = crate::config::workspace_config(workspace_path)
+        .map(|config| WriteHotPathConfig::from_write_config(&config.write))
+        .unwrap_or_default();
+    let payload_bytes = operation.estimated_payload_bytes();
+    let fallback = if !config.enabled {
+        WriteGroupCommitFallbackReason::Disabled
+    } else if workspace_write_replay_required(workspace_path) {
+        WriteGroupCommitFallbackReason::Degraded
+    } else if payload_bytes > config.max_inflight_bytes.max(1) {
+        WriteGroupCommitFallbackReason::Oversized
+    } else {
+        WriteGroupCommitFallbackReason::SingleWriter
+    };
+    let started = Instant::now();
+    let result = write();
+    record_write_group_commit_global(
+        config.enabled,
+        1,
+        duration_micros_saturating(started.elapsed()),
+        Some(fallback),
+        result.is_ok(),
+    );
+    result
+}
+
+fn write_group_commit_telemetry_for_config(enabled: bool) -> WriteGroupCommitTelemetry {
+    let batches = WRITE_GROUP_COMMIT_BATCHES.load(Ordering::Acquire);
+    let batch_writes = WRITE_GROUP_COMMIT_BATCH_WRITES.load(Ordering::Acquire);
+    let fallback_reasons = WriteGroupCommitFallbackReasons {
+        disabled: WRITE_GROUP_COMMIT_FALLBACK_DISABLED.load(Ordering::Acquire),
+        degraded: WRITE_GROUP_COMMIT_FALLBACK_DEGRADED.load(Ordering::Acquire),
+        oversized: WRITE_GROUP_COMMIT_FALLBACK_OVERSIZED.load(Ordering::Acquire),
+        single_writer: WRITE_GROUP_COMMIT_FALLBACK_SINGLE_WRITER.load(Ordering::Acquire),
+    };
+    let fsync_count = WRITE_GROUP_COMMIT_FSYNC_COUNT.load(Ordering::Acquire);
+    let latency_total = WRITE_GROUP_COMMIT_LATENCY_TOTAL_US.load(Ordering::Acquire);
+    let latency_avg = if fsync_count == 0 {
+        0
+    } else {
+        latency_total / fsync_count
+    };
+    WriteGroupCommitTelemetry {
+        schema: crate::models::WRITE_GROUP_COMMIT_SCHEMA_V1,
+        generated_at: write_group_commit_generated_at(),
+        enabled,
+        redaction_status: WRITE_GROUP_COMMIT_REDACTION_STATUS,
+        batches,
+        writes_coalesced: WRITE_GROUP_COMMIT_WRITES_COALESCED.load(Ordering::Acquire),
+        avg_batch_size: if batches == 0 {
+            0.0
+        } else {
+            batch_writes as f64 / batches as f64
+        },
+        fsync_count,
+        fsync_saved: WRITE_GROUP_COMMIT_FSYNC_SAVED.load(Ordering::Acquire),
+        commit_latency_p50_us: latency_avg,
+        commit_latency_p99_us: WRITE_GROUP_COMMIT_LATENCY_MAX_US.load(Ordering::Acquire),
+        fallback_count: write_group_commit_fallback_count(&fallback_reasons),
+        fallback_reasons,
+    }
+}
+
+fn record_write_group_commit_global(
+    enabled: bool,
+    row_count: usize,
+    latency_us: u64,
+    fallback: Option<WriteGroupCommitFallbackReason>,
+    generation_advanced: bool,
+) {
+    let row_count_u64 = u64::try_from(row_count).unwrap_or(u64::MAX);
+    WRITE_GROUP_COMMIT_FSYNC_COUNT.fetch_add(1, Ordering::AcqRel);
+    WRITE_GROUP_COMMIT_LATENCY_TOTAL_US.fetch_add(latency_us, Ordering::AcqRel);
+    fetch_max_atomic(&WRITE_GROUP_COMMIT_LATENCY_MAX_US, latency_us);
+
+    if enabled {
+        WRITE_GROUP_COMMIT_BATCHES.fetch_add(1, Ordering::AcqRel);
+        WRITE_GROUP_COMMIT_BATCH_WRITES.fetch_add(row_count_u64, Ordering::AcqRel);
+        if row_count > 1 {
+            WRITE_GROUP_COMMIT_WRITES_COALESCED.fetch_add(row_count_u64, Ordering::AcqRel);
+            WRITE_GROUP_COMMIT_FSYNC_SAVED
+                .fetch_add(row_count_u64.saturating_sub(1), Ordering::AcqRel);
+        }
+    }
+
+    if generation_advanced {
+        tracing::trace!(
+            target: "ee::write_group_commit",
+            row_count,
+            latency_us,
+            "write group-commit generation advanced"
+        );
+    }
+
+    match fallback {
+        Some(WriteGroupCommitFallbackReason::Disabled) => {
+            WRITE_GROUP_COMMIT_FALLBACK_DISABLED.fetch_add(row_count_u64, Ordering::AcqRel);
+        }
+        Some(WriteGroupCommitFallbackReason::Degraded) => {
+            WRITE_GROUP_COMMIT_FALLBACK_DEGRADED.fetch_add(row_count_u64, Ordering::AcqRel);
+        }
+        Some(WriteGroupCommitFallbackReason::Oversized) => {
+            WRITE_GROUP_COMMIT_FALLBACK_OVERSIZED.fetch_add(row_count_u64, Ordering::AcqRel);
+        }
+        Some(WriteGroupCommitFallbackReason::SingleWriter) => {
+            WRITE_GROUP_COMMIT_FALLBACK_SINGLE_WRITER.fetch_add(row_count_u64, Ordering::AcqRel);
+        }
+        None => {}
+    }
+}
+
+fn fetch_max_atomic(target: &AtomicU64, candidate: u64) {
+    let mut current = target.load(Ordering::Acquire);
+    while candidate > current {
+        match target.compare_exchange_weak(current, candidate, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn write_group_commit_generated_at() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+fn duration_micros_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn write_group_commit_fallback_count(reasons: &WriteGroupCommitFallbackReasons) -> u64 {
+    reasons
+        .disabled
+        .saturating_add(reasons.degraded)
+        .saturating_add(reasons.oversized)
+        .saturating_add(reasons.single_writer)
+}
+
+fn write_group_commit_percentile(latencies: &[u64], percentile: usize) -> u64 {
+    if latencies.is_empty() {
+        return 0;
+    }
+    let mut sorted = latencies.to_vec();
+    sorted.sort_unstable();
+    let rank = sorted
+        .len()
+        .saturating_mul(percentile)
+        .saturating_add(99)
+        / 100;
+    let index = rank.saturating_sub(1).min(sorted.len().saturating_sub(1));
+    sorted[index]
+}
+
 /// Status of the write owner actor.
 #[derive(Clone, Debug, Serialize)]
 pub struct WriteOwnerStatus {
@@ -1116,7 +1536,7 @@ impl WriteHandle {
         let request = WriteRequest {
             operation,
             response_tx,
-            arrived_at: std::time::Instant::now(),
+            arrived_at: Instant::now(),
         };
 
         // Phase 1: Reserve a slot in the channel
@@ -1153,7 +1573,7 @@ impl WriteHandle {
         let request = WriteRequest {
             operation,
             response_tx,
-            arrived_at: std::time::Instant::now(),
+            arrived_at: Instant::now(),
         };
 
         match self.tx.try_send(request) {
@@ -1233,19 +1653,219 @@ impl WriteOwner {
     where
         F: FnMut(WriteOperation) -> WriteResult,
     {
-        while let Ok(request) = self.rx.recv(cx).await {
-            let wait_ms = duration_millis_saturating(request.arrived_at.elapsed());
-            self.stats.total_processed += 1;
-            self.stats.total_wait_ms += wait_ms;
-            if wait_ms > self.stats.max_wait_ms {
-                self.stats.max_wait_ms = wait_ms;
+        let _ = self
+            .run_group_commit(cx, WriteHotPathConfig::default(), |operations| {
+                let mut results = Vec::with_capacity(operations.len());
+                for operation in operations.iter().cloned() {
+                    results.push(process(operation));
+                }
+                Ok(results)
+            })
+            .await;
+    }
+
+    /// Run the write owner with bounded group-commit coalescing.
+    ///
+    /// When `config.enabled` is false this degenerates to the original
+    /// per-write FIFO loop and records `disabled` fallbacks. When enabled, the
+    /// owner waits up to `group_commit_max_us` for sibling requests, closes the
+    /// batch at `group_commit_max_rows` or `max_inflight_bytes`, then invokes
+    /// `process_batch` once for that durable transaction boundary.
+    pub async fn run_group_commit<F>(
+        mut self,
+        cx: &Cx,
+        config: WriteHotPathConfig,
+        mut process_batch: F,
+    ) -> Outcome<WriteGroupCommitRunReport, DomainError>
+    where
+        F: FnMut(&[WriteOperation]) -> Result<Vec<WriteResult>, DomainError>,
+    {
+        let mut accumulator = WriteGroupCommitAccumulator::new(config.enabled);
+        let mut pending = VecDeque::new();
+
+        loop {
+            let first = match pending.pop_front() {
+                Some(request) => request,
+                None => match self.rx.recv(cx).await {
+                    Ok(request) => request,
+                    Err(mpsc::RecvError::Disconnected) => break,
+                    Err(mpsc::RecvError::Cancelled) | Err(mpsc::RecvError::Empty) => {
+                        let error = write_group_commit_cancelled_error();
+                        self.fail_available_requests(cx, error.clone());
+                        return Outcome::Err(error);
+                    }
+                },
+            };
+
+            if cx.checkpoint().is_err() {
+                let error = write_group_commit_cancelled_error();
+                self.fail_request_group(
+                    cx,
+                    std::iter::once(first).chain(pending.drain(..)),
+                    &error,
+                );
+                self.fail_available_requests(cx, error.clone());
+                return Outcome::Err(error);
             }
-            self.stats.record_operation(&request.operation);
 
-            let result = process(request.operation);
+            let mut batch = vec![first];
+            let mut batch_bytes = batch[0].operation.estimated_payload_bytes();
+            let max_batch_rows = config.group_commit_max_rows.max(1);
+            let max_inflight_bytes = config.max_inflight_bytes.max(1);
+            let fallback = if !config.enabled {
+                Some(WriteGroupCommitFallbackReason::Disabled)
+            } else if batch_bytes > max_inflight_bytes {
+                Some(WriteGroupCommitFallbackReason::Oversized)
+            } else {
+                self.drain_group_commit_candidates(
+                    &mut batch,
+                    &mut pending,
+                    &config,
+                    &mut batch_bytes,
+                );
+                if batch.len() < max_batch_rows && config.group_commit_max_us > 0 {
+                    asupersync_sleep(
+                        cx.now(),
+                        Duration::from_micros(config.group_commit_max_us),
+                    )
+                    .await;
+                    if cx.checkpoint().is_err() {
+                        let error = write_group_commit_cancelled_error();
+                        self.fail_request_group(
+                            cx,
+                            batch.into_iter().chain(pending.drain(..)),
+                            &error,
+                        );
+                        self.fail_available_requests(cx, error.clone());
+                        return Outcome::Err(error);
+                    }
+                    self.drain_group_commit_candidates(
+                        &mut batch,
+                        &mut pending,
+                        &config,
+                        &mut batch_bytes,
+                    );
+                }
+                if batch.len() == 1 {
+                    Some(WriteGroupCommitFallbackReason::SingleWriter)
+                } else {
+                    None
+                }
+            };
 
-            // Send response (ignore if receiver dropped)
-            let _ = request.response_tx.send(cx, result);
+            let batch = order_group_commit_requests(batch, max_batch_rows);
+            for request in &batch {
+                self.record_request_stats(request);
+            }
+            let operations = batch
+                .iter()
+                .map(|request| request.operation.clone())
+                .collect::<Vec<_>>();
+            let started = Instant::now();
+            let outcome = process_batch(&operations);
+            let latency_us = duration_micros_saturating(started.elapsed());
+            let (results, generation_advanced) = match outcome {
+                Ok(results) if results.len() == batch.len() => (results, true),
+                Ok(results) => {
+                    let error = DomainError::Storage {
+                        message: format!(
+                            "group-commit callback returned {} result(s) for {} write(s)",
+                            results.len(),
+                            batch.len()
+                        ),
+                        repair: Some("Retry the write through the per-write path.".to_owned()),
+                    };
+                    (vec![WriteResult::Failed { error }; batch.len()], false)
+                }
+                Err(error) => (vec![WriteResult::Failed { error }; batch.len()], false),
+            };
+
+            accumulator.record_commit(batch.len(), latency_us, fallback, generation_advanced);
+            record_write_group_commit_global(
+                config.enabled,
+                batch.len(),
+                latency_us,
+                fallback,
+                generation_advanced,
+            );
+
+            for (request, result) in batch.into_iter().zip(results) {
+                let _ = request.response_tx.send(cx, result);
+            }
+        }
+
+        Outcome::Ok(accumulator.into_report())
+    }
+
+    fn record_request_stats(&mut self, request: &WriteRequest) {
+        let wait_ms = duration_millis_saturating(request.arrived_at.elapsed());
+        self.stats.total_processed = self.stats.total_processed.saturating_add(1);
+        self.stats.total_wait_ms = self.stats.total_wait_ms.saturating_add(wait_ms);
+        if wait_ms > self.stats.max_wait_ms {
+            self.stats.max_wait_ms = wait_ms;
+        }
+        self.stats.record_operation(&request.operation);
+    }
+
+    fn drain_group_commit_candidates(
+        &mut self,
+        batch: &mut Vec<WriteRequest>,
+        pending: &mut VecDeque<WriteRequest>,
+        config: &WriteHotPathConfig,
+        batch_bytes: &mut usize,
+    ) {
+        let max_batch_rows = config.group_commit_max_rows.max(1);
+        let max_inflight_bytes = config.max_inflight_bytes.max(1);
+        while batch.len() < max_batch_rows {
+            let Some(request) = pending.pop_front() else {
+                break;
+            };
+            let request_bytes = request.operation.estimated_payload_bytes();
+            if batch_bytes.saturating_add(request_bytes) > max_inflight_bytes {
+                pending.push_front(request);
+                return;
+            }
+            *batch_bytes = batch_bytes.saturating_add(request_bytes);
+            batch.push(request);
+        }
+        while batch.len() < max_batch_rows {
+            let request = match self.rx.try_recv() {
+                Ok(request) => request,
+                Err(mpsc::RecvError::Empty) | Err(mpsc::RecvError::Disconnected) => return,
+                Err(mpsc::RecvError::Cancelled) => return,
+            };
+            let request_bytes = request.operation.estimated_payload_bytes();
+            if batch_bytes.saturating_add(request_bytes) > max_inflight_bytes {
+                pending.push_back(request);
+                return;
+            }
+            *batch_bytes = batch_bytes.saturating_add(request_bytes);
+            batch.push(request);
+        }
+    }
+
+    fn fail_available_requests(&mut self, cx: &Cx, error: DomainError) {
+        while let Ok(request) = self.rx.try_recv() {
+            let _ = request.response_tx.send(
+                cx,
+                WriteResult::Failed {
+                    error: error.clone(),
+                },
+            );
+        }
+    }
+
+    fn fail_request_group<I>(&self, cx: &Cx, requests: I, error: &DomainError)
+    where
+        I: IntoIterator<Item = WriteRequest>,
+    {
+        for request in requests {
+            let _ = request.response_tx.send(
+                cx,
+                WriteResult::Failed {
+                    error: error.clone(),
+                },
+            );
         }
     }
 
@@ -1272,6 +1892,41 @@ impl WriteOwner {
     #[must_use]
     pub fn source_write_stats(&self, config: WriteStreamStatsConfig) -> Vec<SourceWriteStats> {
         self.stats.source_write_stats(config)
+    }
+}
+
+fn order_group_commit_requests(
+    requests: Vec<WriteRequest>,
+    max_rows: usize,
+) -> Vec<WriteRequest> {
+    if requests.len() <= 1 {
+        return requests;
+    }
+    let queue = WriteHotPathQueue::new(requests.len());
+    for request in requests {
+        if let Err(request) = queue.try_enqueue(request) {
+            let mut ordered = queue
+                .drain_group_commit(max_rows)
+                .rows
+                .into_iter()
+                .map(|entry| entry.payload)
+                .collect::<Vec<_>>();
+            ordered.push(request);
+            return ordered;
+        }
+    }
+    queue
+        .drain_group_commit(max_rows)
+        .rows
+        .into_iter()
+        .map(|entry| entry.payload)
+        .collect()
+}
+
+fn write_group_commit_cancelled_error() -> DomainError {
+    DomainError::Storage {
+        message: "write group-commit intake cancelled before commit".to_owned(),
+        repair: Some("Retry the write after restarting the write owner actor.".to_owned()),
     }
 }
 
@@ -3652,6 +4307,159 @@ mod tests {
         assert!(!owner.status().running);
         assert_eq!(owner.status().queue_depth, 2);
 
+        Ok(())
+    }
+
+    fn group_commit_test_operation(index: usize) -> WriteOperation {
+        WriteOperation::Custom {
+            operation_type: "group_commit_test".to_owned(),
+            payload: serde_json::json!({ "index": index }),
+        }
+    }
+
+    fn expect_success_id(
+        receiver: &mut oneshot::Receiver<WriteResult>,
+    ) -> Result<Option<String>, String> {
+        match receiver.try_recv().map_err(|error| error.to_string())? {
+            WriteResult::Success { entity_id } => Ok(entity_id),
+            other => Err(format!("expected success result, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn write_owner_group_commit_coalesces_fifo_requests_into_one_fsync() -> Result<(), String> {
+        let (owner, handle) = WriteOwner::new(8);
+        let mut receivers = Vec::new();
+        for index in 0..3 {
+            receivers.push(
+                handle
+                    .try_submit(group_commit_test_operation(index))
+                    .ok_or_else(|| format!("request {index} should enqueue"))?,
+            );
+        }
+        drop(handle);
+
+        let mut fsync_count = 0_u64;
+        let outcome = crate::core::run_cli_future(async {
+            let cx = Cx::for_testing();
+            owner
+                .run_group_commit(&cx, WriteHotPathConfig::enabled(8, 8, 0, 1), |operations| {
+                    fsync_count = fsync_count.saturating_add(1);
+                    Ok(operations
+                        .iter()
+                        .enumerate()
+                        .map(|(index, operation)| WriteResult::Success {
+                            entity_id: Some(format!("{}-{index}", operation.operation_type())),
+                        })
+                        .collect())
+                })
+                .await
+        })
+        .map_err(|error| error.to_string())?;
+        let Outcome::Ok(report) = outcome else {
+            return Err(format!("group-commit run should succeed: {outcome:?}"));
+        };
+
+        assert_eq!(fsync_count, 1);
+        assert_eq!(report.generation_advances, 1);
+        assert_eq!(report.telemetry.batches, 1);
+        assert_eq!(report.telemetry.writes_coalesced, 3);
+        assert_eq!(report.telemetry.fsync_count, 1);
+        assert_eq!(report.telemetry.fsync_saved, 2);
+        assert_eq!(report.telemetry.fallback_count, 0);
+        assert_eq!(
+            receivers
+                .iter_mut()
+                .map(expect_success_id)
+                .collect::<Result<Vec<_>, _>>()?,
+            vec![
+                Some("custom-0".to_owned()),
+                Some("custom-1".to_owned()),
+                Some("custom-2".to_owned()),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn write_owner_group_commit_disabled_preserves_per_write_fsyncs() -> Result<(), String> {
+        let (owner, handle) = WriteOwner::new(8);
+        let mut receivers = Vec::new();
+        for index in 0..3 {
+            receivers.push(
+                handle
+                    .try_submit(group_commit_test_operation(index))
+                    .ok_or_else(|| format!("request {index} should enqueue"))?,
+            );
+        }
+        drop(handle);
+
+        let mut callbacks = 0_u64;
+        let outcome = crate::core::run_cli_future(async {
+            let cx = Cx::for_testing();
+            owner
+                .run_group_commit(&cx, WriteHotPathConfig::default(), |operations| {
+                    callbacks = callbacks.saturating_add(1);
+                    Ok(vec![WriteResult::Success {
+                        entity_id: Some(format!("rows-{}", operations.len())),
+                    }])
+                })
+                .await
+        })
+        .map_err(|error| error.to_string())?;
+        let Outcome::Ok(report) = outcome else {
+            return Err(format!("disabled run should succeed: {outcome:?}"));
+        };
+
+        assert_eq!(callbacks, 3);
+        assert!(!report.telemetry.enabled);
+        assert_eq!(report.telemetry.batches, 0);
+        assert_eq!(report.telemetry.fsync_count, 3);
+        assert_eq!(report.telemetry.fallback_reasons.disabled, 3);
+        assert_eq!(report.generation_advances, 3);
+        for receiver in &mut receivers {
+            assert_eq!(expect_success_id(receiver)?, Some("rows-1".to_owned()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn write_owner_group_commit_batch_failure_resolves_all_followers() -> Result<(), String> {
+        let (owner, handle) = WriteOwner::new(4);
+        let mut first = handle
+            .try_submit(group_commit_test_operation(0))
+            .ok_or_else(|| "first request should enqueue".to_owned())?;
+        let mut second = handle
+            .try_submit(group_commit_test_operation(1))
+            .ok_or_else(|| "second request should enqueue".to_owned())?;
+        drop(handle);
+
+        let outcome = crate::core::run_cli_future(async {
+            let cx = Cx::for_testing();
+            owner
+                .run_group_commit(&cx, WriteHotPathConfig::enabled(4, 4, 0, 1), |_| {
+                    Err(DomainError::Storage {
+                        message: "simulated batch rollback".to_owned(),
+                        repair: None,
+                    })
+                })
+                .await
+        })
+        .map_err(|error| error.to_string())?;
+        let Outcome::Ok(report) = outcome else {
+            return Err(format!("failed batch should resolve and keep owner ok: {outcome:?}"));
+        };
+
+        assert_eq!(report.generation_advances, 0);
+        assert_eq!(report.telemetry.fsync_count, 1);
+        for receiver in [&mut first, &mut second] {
+            match receiver.try_recv().map_err(|error| error.to_string())? {
+                WriteResult::Failed { error } => {
+                    assert!(error.message().contains("simulated batch rollback"));
+                }
+                other => return Err(format!("expected failed write result, got {other:?}")),
+            }
+        }
         Ok(())
     }
 

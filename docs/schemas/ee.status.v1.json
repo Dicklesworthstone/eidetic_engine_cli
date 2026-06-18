@@ -32,6 +32,7 @@
         "curationHealth",
         "feedbackHealth",
         "singleFlight",
+        "writeGroupCommit",
         "graphCompute",
         "graphSnapshotArtifact",
         "derivedAssets",
@@ -59,6 +60,7 @@
         "curationHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "feedbackHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "singleFlight": {"$ref": "#/$defs/singleFlightPosture"},
+        "writeGroupCommit": {"$ref": "#/$defs/writeGroupCommitTelemetry"},
         "flightRecorder": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "graphCompute": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "graphSnapshotArtifact": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
@@ -71,8 +73,8 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "workspace"],
-    "summary": ["command", "version", "workspace", "posture", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "capabilities"],
-    "standard": ["command", "version", "workspace", "posture", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "capabilities", "runtime", "read_pool", "wal", "shardFanout", "packBudgetBuckets", "memoryHealth", "curationHealth", "feedbackHealth", "graphCompute", "graphSnapshotArtifact", "search", "derivedAssets", "agentInventory", "degraded"],
+    "summary": ["command", "version", "workspace", "posture", "singleFlight", "writeGroupCommit", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "capabilities"],
+    "standard": ["command", "version", "workspace", "posture", "singleFlight", "writeGroupCommit", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "capabilities", "runtime", "read_pool", "wal", "shardFanout", "packBudgetBuckets", "memoryHealth", "curationHealth", "feedbackHealth", "graphCompute", "graphSnapshotArtifact", "search", "derivedAssets", "agentInventory", "degraded"],
     "full": ["*"]
   },
   "$defs": {
@@ -255,6 +257,50 @@
     "singleFlightStatus": {
       "type": "string",
       "enum": ["idle", "active", "observed_failures", "state_poisoned", "unconfigured"]
+    },
+    "writeGroupCommitTelemetry": {
+      "type": "object",
+      "required": [
+        "schema",
+        "generatedAt",
+        "enabled",
+        "redactionStatus",
+        "batches",
+        "writesCoalesced",
+        "avgBatchSize",
+        "fsyncCount",
+        "fsyncSaved",
+        "commitLatencyP50Us",
+        "commitLatencyP99Us",
+        "fallbackCount",
+        "fallbackReasons"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.write_group_commit.v1"},
+        "generatedAt": {"type": "string", "format": "date-time"},
+        "enabled": {"type": "boolean"},
+        "redactionStatus": {"type": "string", "const": "counts_latencies_no_content"},
+        "batches": {"type": "integer", "minimum": 0},
+        "writesCoalesced": {"type": "integer", "minimum": 0},
+        "avgBatchSize": {"type": "number", "minimum": 0},
+        "fsyncCount": {"type": "integer", "minimum": 0},
+        "fsyncSaved": {"type": "integer", "minimum": 0},
+        "commitLatencyP50Us": {"type": "integer", "minimum": 0},
+        "commitLatencyP99Us": {"type": "integer", "minimum": 0},
+        "fallbackCount": {"type": "integer", "minimum": 0},
+        "fallbackReasons": {
+          "type": "object",
+          "required": ["disabled", "degraded", "oversized", "single_writer"],
+          "additionalProperties": false,
+          "properties": {
+            "disabled": {"type": "integer", "minimum": 0},
+            "degraded": {"type": "integer", "minimum": 0},
+            "oversized": {"type": "integer", "minimum": 0},
+            "single_writer": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
     },
     "singleFlightPosture": {
       "type": "object",

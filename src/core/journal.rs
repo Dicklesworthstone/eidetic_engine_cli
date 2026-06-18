@@ -624,7 +624,7 @@ pub fn append_journal_entry(
     let workspace_id = stable_workspace_id(&workspace_path);
     ensure_workspace(&connection, &workspace_id, &workspace_path)?;
 
-    let stored = persist_prepared_entry(&connection, &workspace_id, options, &prepared)?;
+    let stored = persist_prepared_entry(&connection, &workspace_path, &workspace_id, options, &prepared)?;
     let entry = JournalEntryRecord::from_stored(&stored)?;
     let mut degraded = Vec::new();
     if prepared.truncated {
@@ -716,7 +716,7 @@ pub fn append_journal_entries_stdin(
                 // Per-line independent persistence: each insert is its own
                 // implicit transaction, so a storage failure on this line
                 // reports here without rolling back earlier lines.
-                persist_prepared_entry(&connection, &workspace_id, options, &prepared)
+                persist_prepared_entry(&connection, &workspace_path, &workspace_id, options, &prepared)
                     .map(|stored| (prepared, stored))
                     .map_err(|error| {
                         JournalValidationError::new("journal_storage_failed", error.to_string())
@@ -2328,6 +2328,7 @@ fn parse_journal_line(line: &str) -> Result<JournalEntryDraft, JournalValidation
 
 fn persist_prepared_entry(
     connection: &DbConnection,
+    workspace_path: &Path,
     workspace_id: &str,
     options: &JournalAppendOptions<'_>,
     prepared: &PreparedJournalEntry,
@@ -2344,12 +2345,27 @@ fn persist_prepared_entry(
         redaction_report: prepared.redaction_report_json.clone(),
         instruction_risk: prepared.instruction_risk.as_str().to_owned(),
     };
-    connection
-        .insert_journal_entry(&input)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to store journal entry: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })
+    let write_operation = crate::core::write_owner::WriteOperation::Custom {
+        operation_type: "journal_append".to_owned(),
+        payload: serde_json::json!({
+            "workspaceId": workspace_id,
+            "kind": input.kind.as_str(),
+            "bodyBytes": input.body.len(),
+            "structuredBytes": input.structured.as_ref().map_or(0, String::len),
+        }),
+    };
+    crate::core::write_owner::run_one_shot_write_intake(
+        workspace_path,
+        &write_operation,
+        || {
+            connection
+                .insert_journal_entry(&input)
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to store journal entry: {error}"),
+                    repair: Some("ee doctor".to_owned()),
+                })
+        },
+    )
 }
 
 fn effective_database_path(workspace_path: &Path, database_path: Option<&Path>) -> PathBuf {

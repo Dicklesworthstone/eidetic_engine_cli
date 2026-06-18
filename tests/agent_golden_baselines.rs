@@ -257,6 +257,12 @@ fn scrub_volatile_fields(value: &mut Value) {
                     *version = Value::String("<scrubbed:eeVersion>".to_owned());
                 }
             }
+            if map.get("schema").and_then(Value::as_str) == Some("ee.write_group_commit.v1") {
+                if let Some(generated_at) = map.get_mut("generatedAt") {
+                    *generated_at =
+                        Value::String("<scrubbed:writeGroupCommit.generatedAt>".to_owned());
+                }
+            }
             for key in [
                 "hostCalibration",
                 "qos",
@@ -1674,6 +1680,24 @@ fn fixture_lexical_ram_tier() -> LexicalRamTierResult {
     )
 }
 
+fn fixture_write_group_commit() -> crate::core::write_owner::WriteGroupCommitTelemetry {
+    crate::core::write_owner::WriteGroupCommitTelemetry {
+        schema: crate::models::WRITE_GROUP_COMMIT_SCHEMA_V1,
+        generated_at: "2026-06-15T04:22:00Z".to_owned(),
+        enabled: false,
+        redaction_status: crate::core::write_owner::WRITE_GROUP_COMMIT_REDACTION_STATUS,
+        batches: 0,
+        writes_coalesced: 0,
+        avg_batch_size: 0.0,
+        fsync_count: 0,
+        fsync_saved: 0,
+        commit_latency_p50_us: 0,
+        commit_latency_p99_us: 0,
+        fallback_count: 0,
+        fallback_reasons: crate::core::write_owner::WriteGroupCommitFallbackReasons::default(),
+    }
+}
+
 fn status_missing_db_report() -> StatusReport {
     StatusReport {
         version: env!("CARGO_PKG_VERSION"),
@@ -1687,6 +1711,7 @@ fn status_missing_db_report() -> StatusReport {
         capabilities: fixture_capabilities(CapabilityStatus::Pending, CapabilityStatus::Pending),
         runtime: fixture_runtime_report(),
         read_pool: ReadPoolStatusReport::default(),
+        write_group_commit: fixture_write_group_commit(),
         wal: WalStatusReport::default(),
         shard_fanout: fixture_shard_fanout(),
         pack_budget_buckets: PackBudgetBucketReport::default(),
@@ -1763,6 +1788,7 @@ fn status_pending_migration_report() -> StatusReport {
         capabilities: fixture_capabilities(CapabilityStatus::Degraded, CapabilityStatus::Degraded),
         runtime: fixture_runtime_report(),
         read_pool: ReadPoolStatusReport::default(),
+        write_group_commit: fixture_write_group_commit(),
         wal: WalStatusReport::default(),
         shard_fanout: fixture_shard_fanout(),
         pack_budget_buckets: PackBudgetBucketReport::default(),
@@ -1839,6 +1865,7 @@ fn status_stale_index_lexical_only_report() -> StatusReport {
         capabilities: fixture_capabilities(CapabilityStatus::Ready, CapabilityStatus::Degraded),
         runtime: fixture_runtime_report(),
         read_pool: ReadPoolStatusReport::default(),
+        write_group_commit: fixture_write_group_commit(),
         wal: WalStatusReport::default(),
         shard_fanout: fixture_shard_fanout(),
         pack_budget_buckets: PackBudgetBucketReport::default(),
@@ -1904,6 +1931,7 @@ fn status_search_unimplemented_report() -> StatusReport {
         ),
         runtime: fixture_runtime_report(),
         read_pool: ReadPoolStatusReport::default(),
+        write_group_commit: fixture_write_group_commit(),
         wal: WalStatusReport::default(),
         shard_fanout: fixture_shard_fanout(),
         pack_budget_buckets: PackBudgetBucketReport::default(),

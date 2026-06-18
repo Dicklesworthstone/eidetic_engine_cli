@@ -862,6 +862,13 @@ impl OutcomeIdSource<'_> {
     }
 }
 
+fn outcome_write_intake_workspace_path(database_path: &Path) -> &Path {
+    database_path
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or_else(|| Path::new("."))
+}
+
 fn record_outcome_inner(
     options: &OutcomeRecordOptions<'_>,
     id_source: &mut OutcomeIdSource<'_>,
@@ -1072,27 +1079,40 @@ fn record_outcome_inner(
         let raw_event_hash = raw_feedback_event_hash(&event_id, &feedback_input)?;
         let reason = quarantine.reason.clone();
         trace_sprt_quarantine("persistence", 0, &[]);
-        let audit_id = insert_feedback_quarantine_audited_with_id(
-            &connection,
-            &quarantine_id,
-            &CreateFeedbackQuarantineInput {
-                workspace_id: target.workspace_id.clone(),
-                source_id: source_id.clone().unwrap_or_else(|| "unknown".to_owned()),
-                target_type: target_type.clone(),
-                target_id: target_id.clone(),
-                signal: signal.clone(),
-                weight,
-                source_type: source_type.clone(),
-                proposed_event_id: Some(event_id.clone()),
-                recorded_at: Utc::now().to_rfc3339(),
-                reason,
-                event_reason: feedback_input.reason.clone(),
-                evidence_json: feedback_input.evidence_json.clone(),
-                session_id: feedback_input.session_id.clone(),
-                raw_event_hash: raw_event_hash.clone(),
+        let quarantine_input = CreateFeedbackQuarantineInput {
+            workspace_id: target.workspace_id.clone(),
+            source_id: source_id.clone().unwrap_or_else(|| "unknown".to_owned()),
+            target_type: target_type.clone(),
+            target_id: target_id.clone(),
+            signal: signal.clone(),
+            weight,
+            source_type: source_type.clone(),
+            proposed_event_id: Some(event_id.clone()),
+            recorded_at: Utc::now().to_rfc3339(),
+            reason,
+            event_reason: feedback_input.reason.clone(),
+            evidence_json: feedback_input.evidence_json.clone(),
+            session_id: feedback_input.session_id.clone(),
+            raw_event_hash: raw_event_hash.clone(),
+        };
+        let write_operation = crate::core::write_owner::WriteOperation::OutcomeRecord {
+            workspace_id: target.workspace_id.clone(),
+            memory_id: target_id.clone(),
+            outcome_type: signal.clone(),
+            details: feedback_input.reason.clone(),
+        };
+        let audit_id = crate::core::write_owner::run_one_shot_write_intake(
+            outcome_write_intake_workspace_path(options.database_path),
+            &write_operation,
+            || {
+                insert_feedback_quarantine_audited_with_id(
+                    &connection,
+                    &quarantine_id,
+                    &quarantine_input,
+                    options.actor.as_deref(),
+                    id_source.next_audit_id(),
+                )
             },
-            options.actor.as_deref(),
-            id_source.next_audit_id(),
         )?;
         if let Some(decision) = &sprt {
             insert_sprt_quarantine_decision_audit(
@@ -1162,20 +1182,33 @@ fn record_outcome_inner(
     }
 
     trace_sprt_quarantine("persistence", 0, &[]);
-    let audit_id = insert_feedback_event_audited_with_id(
-        &connection,
-        &event_id,
-        &AuditedFeedbackEventInput {
-            event: feedback_input.clone(),
-            actor: options.actor.clone(),
-            details: Some(outcome_audit_details(&event_id, &feedback_input)),
+    let audited_feedback = AuditedFeedbackEventInput {
+        event: feedback_input.clone(),
+        actor: options.actor.clone(),
+        details: Some(outcome_audit_details(&event_id, &feedback_input)),
+    };
+    let write_operation = crate::core::write_owner::WriteOperation::OutcomeRecord {
+        workspace_id: target.workspace_id.clone(),
+        memory_id: target_id.clone(),
+        outcome_type: signal.clone(),
+        details: feedback_input.reason.clone(),
+    };
+    let audit_id = crate::core::write_owner::run_one_shot_write_intake(
+        outcome_write_intake_workspace_path(options.database_path),
+        &write_operation,
+        || {
+            insert_feedback_event_audited_with_id(
+                &connection,
+                &event_id,
+                &audited_feedback,
+                id_source.next_audit_id(),
+            )
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to record feedback event: {error}"),
+                repair: Some("ee doctor".to_string()),
+            })
         },
-        id_source.next_audit_id(),
-    )
-    .map_err(|error| DomainError::Storage {
-        message: format!("Failed to record feedback event: {error}"),
-        repair: Some("ee doctor".to_string()),
-    })?;
+    )?;
 
     if let Some(decision) = &sprt {
         insert_sprt_quarantine_decision_audit(

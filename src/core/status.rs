@@ -1790,6 +1790,7 @@ pub struct StatusReport {
     pub capabilities: CapabilityReport,
     pub runtime: RuntimeReport,
     pub read_pool: ReadPoolStatusReport,
+    pub write_group_commit: super::write_owner::WriteGroupCommitTelemetry,
     pub wal: WalStatusReport,
     pub shard_fanout: ShardFanoutStatusReport,
     pub pack_budget_buckets: PackBudgetBucketReport,
@@ -2156,6 +2157,8 @@ impl StatusReport {
         let runtime = RuntimeReport::gather();
         let read_pool =
             ReadPoolStatusReport::gather_for_workspace(options.workspace_path.as_deref());
+        let write_group_commit =
+            super::write_owner::write_group_commit_telemetry(options.workspace_path.as_deref());
         let wal = WalStatusReport::gather_with_connection(
             options.workspace_path.as_deref(),
             status_connection_ref,
@@ -2274,6 +2277,7 @@ impl StatusReport {
             capabilities,
             runtime,
             read_pool,
+            write_group_commit,
             wal,
             shard_fanout,
             pack_budget_buckets,

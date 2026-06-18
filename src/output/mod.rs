@@ -1631,6 +1631,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "workspace",
                 "posture",
                 "singleFlight",
+                "writeGroupCommit",
                 "flightRecorder",
                 "qos",
                 "rchWorkerPressure",
@@ -1645,6 +1646,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "workspace",
                 "posture",
                 "singleFlight",
+                "writeGroupCommit",
                 "flightRecorder",
                 "qos",
                 "rchWorkerPressure",
@@ -3704,6 +3706,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
         render_read_pool_status_json(d, &report.read_pool);
+        render_write_group_commit_status_json(d, &report.write_group_commit);
         render_wal_status_json(d, &report.wal);
         render_shard_fanout_status_json(d, &report.shard_fanout);
         render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
@@ -4111,6 +4114,41 @@ fn render_read_pool_status_json(
                 pool.field_raw("checkpoint_blocked_by", "null");
             }
         }
+    });
+}
+
+fn render_write_group_commit_status_json(
+    parent: &mut JsonBuilder,
+    report: &crate::core::write_owner::WriteGroupCommitTelemetry,
+) {
+    parent.field_object("writeGroupCommit", |write| {
+        write.field_str("schema", report.schema);
+        write.field_str("generatedAt", &report.generated_at);
+        write.field_bool("enabled", report.enabled);
+        write.field_str("redactionStatus", report.redaction_status);
+        write.field_raw("batches", &report.batches.to_string());
+        write.field_raw("writesCoalesced", &report.writes_coalesced.to_string());
+        write.field_raw("avgBatchSize", &score_json(report.avg_batch_size as f32));
+        write.field_raw("fsyncCount", &report.fsync_count.to_string());
+        write.field_raw("fsyncSaved", &report.fsync_saved.to_string());
+        write.field_raw(
+            "commitLatencyP50Us",
+            &report.commit_latency_p50_us.to_string(),
+        );
+        write.field_raw(
+            "commitLatencyP99Us",
+            &report.commit_latency_p99_us.to_string(),
+        );
+        write.field_raw("fallbackCount", &report.fallback_count.to_string());
+        write.field_object("fallbackReasons", |reasons| {
+            reasons.field_raw("disabled", &report.fallback_reasons.disabled.to_string());
+            reasons.field_raw("degraded", &report.fallback_reasons.degraded.to_string());
+            reasons.field_raw("oversized", &report.fallback_reasons.oversized.to_string());
+            reasons.field_raw(
+                "single_writer",
+                &report.fallback_reasons.single_writer.to_string(),
+            );
+        });
     });
 }
 
@@ -4744,6 +4782,7 @@ pub fn render_status_json_with_meta(
             r.field_str("asyncBoundary", report.runtime.async_boundary);
         });
         render_read_pool_status_json(d, &report.read_pool);
+        render_write_group_commit_status_json(d, &report.write_group_commit);
         render_wal_status_json(d, &report.wal);
         render_shard_fanout_status_json(d, &report.shard_fanout);
         render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
@@ -14211,6 +14250,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
         if profile.include_summary_metrics() {
             render_status_posture_json(d, &report.posture);
             render_singleflight_posture_json(d, &report.singleflight_posture);
+            render_write_group_commit_status_json(d, &report.write_group_commit);
             render_flight_recorder_status_json(d, &report.flight_recorder);
             render_qos_status_json(d, &report.qos_posture, profile.include_verbose_details());
             render_rch_worker_pressure_json(d, &report.rch_worker_pressure);

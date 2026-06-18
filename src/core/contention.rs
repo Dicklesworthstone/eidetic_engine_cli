@@ -54,6 +54,17 @@ pub struct GroupCommitInput {
     pub fsync_saved: u64,
 }
 
+impl From<&crate::core::write_owner::WriteGroupCommitTelemetry> for GroupCommitInput {
+    fn from(report: &crate::core::write_owner::WriteGroupCommitTelemetry) -> Self {
+        Self {
+            enabled: report.enabled,
+            batches: report.batches,
+            writes_coalesced: report.writes_coalesced,
+            fsync_saved: report.fsync_saved,
+        }
+    }
+}
+
 /// Optional future-feature input: incremental-index intake counters
 /// (Track C, bd-d67os.5..8). Absent until that lands.
 #[derive(Clone, Debug, Default)]

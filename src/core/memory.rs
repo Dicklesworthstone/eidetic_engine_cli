@@ -1495,19 +1495,36 @@ fn remember_memory_inner_with_store(
     )
     .map_err(|error| remember_usage_error(format!("typed field extraction failed: {error}")))?;
 
-    store_remembered_memory_with_retry(
-        &connection,
-        &memory_id,
-        &audit_id,
-        &index_job_id,
-        &memory_input,
-        typed_fields_json.as_deref(),
-        &embed_dedup_decision,
-        embed_dedup_link_id.as_deref(),
-        &audit_details,
-        &index_input,
-        policy_bypass.as_ref(),
-        audit_lane,
+    let write_operation = crate::core::write_owner::WriteOperation::MemoryCreate {
+        workspace_id: prepared.workspace_id.clone(),
+        content: prepared.content.clone(),
+        level: prepared.level.as_str().to_owned(),
+        kind: prepared.kind.as_str().to_owned(),
+        tags: prepared.tags.clone(),
+        source_id: None,
+        trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+        provenance_uri: prepared.provenance_uri.clone(),
+        observed_at_ms: u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+    };
+    crate::core::write_owner::run_one_shot_write_intake(
+        &prepared.workspace_path,
+        &write_operation,
+        || {
+            store_remembered_memory_with_retry(
+                &connection,
+                &memory_id,
+                &audit_id,
+                &index_job_id,
+                &memory_input,
+                typed_fields_json.as_deref(),
+                &embed_dedup_decision,
+                embed_dedup_link_id.as_deref(),
+                &audit_details,
+                &index_input,
+                policy_bypass.as_ref(),
+                audit_lane,
+            )
+        },
     )?;
 
     append_remember_audit_jsonl(&prepared, &audit_id, &memory_id, &memory_input)?;
