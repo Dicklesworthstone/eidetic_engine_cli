@@ -2915,17 +2915,20 @@ fn check_embedding_posture(workspace_path: Option<&Path>) -> CheckResult {
         index_dir: None,
     };
     match get_index_status(&options) {
-        Ok(report) => {
-            let posture = &report.embedding.posture;
-            embedding_posture_check_result(
+        Ok(report) => match &report.embedding {
+            Some(posture) => embedding_posture_check_result(
                 posture.semantic,
                 posture.mode,
                 &posture.fast_model_id,
                 posture.fast_dimension,
                 posture.deterministic,
                 &trap_present,
-            )
-        }
+            ),
+            None => embedding_posture_unavailable_check(
+                &trap_present,
+                "index has no embedding posture yet (run `ee index rebuild`)",
+            ),
+        },
         Err(error) => {
             embedding_posture_unavailable_check(&trap_present, &format!("index status: {error}"))
         }
