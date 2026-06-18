@@ -6228,10 +6228,35 @@ fn resolve_search_rerank_runtime(
     let entry = match entry_result {
         Ok(Some(entry)) => entry,
         Ok(None) => {
-            degraded.push(SearchDegradation::rerank_model_unavailable(
-                "No available reranker model is registered for this workspace.",
-            ));
-            return SearchRerankRuntime::disabled();
+            // bd-2vq2z.24/.26: no reranker is registered yet. Mirror the
+            // embedding model's auto-provision behavior instead of giving up
+            // immediately — route first-use provisioning through the shared
+            // `ee model` entry point. On success the freshly-registered entry
+            // is loaded (mode=reranked); when provisioning is unavailable
+            // (offline / no cached artifact / no network fetch in this build)
+            // degrade honestly to fusion-only with an actionable repair hint.
+            match auto_provision_default_reranker_entry(options, &workspace_id, &database_path) {
+                Ok(Some(entry)) => {
+                    tracing::info!(
+                        target: "ee::search::rerank",
+                        event = "rerank_model_auto_provisioned",
+                        model_id = %entry.model_name,
+                    );
+                    entry
+                }
+                Ok(None) => {
+                    degraded.push(SearchDegradation::rerank_model_unavailable(
+                        "No available reranker model is registered for this workspace, and first-use auto-provisioning registered none.",
+                    ));
+                    return SearchRerankRuntime::disabled();
+                }
+                Err(error) => {
+                    degraded.push(SearchDegradation::rerank_model_unavailable(&format!(
+                        "First-use auto-provisioning of the default reranker did not complete: {error}"
+                    )));
+                    return SearchRerankRuntime::disabled();
+                }
+            }
         }
         Err(error) => {
             degraded.push(SearchDegradation::rerank_model_unavailable(&format!(
@@ -6279,6 +6304,38 @@ fn selected_available_reranker_entry(
             .then_with(|| left.id.cmp(&right.id))
     });
     Ok(entries.into_iter().next())
+}
+
+/// First-use auto-provision of the default local reranker (bd-2vq2z.24/.26).
+///
+/// Mirrors the embedding model's provisioning path: route through the SAME
+/// `crate::core::model` provisioning entry point that backs `ee model fetch`,
+/// then re-select the now-`Available` reranker entry. Returns:
+/// - `Ok(Some(entry))` when provisioning registered an `Available` reranker
+///   (search then loads it and enters `mode=reranked`);
+/// - `Ok(None)` when provisioning reported success but no `Available` entry
+///   materialized;
+/// - `Err(message)` when provisioning could not complete (offline / no cached
+///   artifact / no network model fetch in this build) — the caller surfaces it
+///   as an honest `rerank_model_unavailable` degradation and falls back to
+///   fusion-only ranking.
+fn auto_provision_default_reranker_entry(
+    options: &SearchOptions,
+    workspace_id: &str,
+    database_path: &Path,
+) -> Result<Option<StoredModelRegistryEntry>, String> {
+    let manifest =
+        crate::core::model::bundled_rerank_model_manifest().map_err(|error| error.to_string())?;
+    let fetch_options = crate::core::model::ModelFetchOptions {
+        workspace_path: options.workspace_path.as_path(),
+        database_path: Some(database_path),
+        model_id: manifest.model_id.as_str(),
+        from_file: None,
+        model_store_root: None,
+    };
+    crate::core::model::fetch_rerank_model(&fetch_options).map_err(|error| error.to_string())?;
+    let connection = DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+    selected_available_reranker_entry(&connection, workspace_id)
 }
 
 fn load_search_reranker(entry: &StoredModelRegistryEntry) -> Result<Arc<dyn Reranker>, String> {
