@@ -10843,6 +10843,27 @@ pub enum HookCommand {
     /// Inspect local Git hooks for Agent Mail identity and preflight readiness.
     #[command(name = "git-readiness")]
     GitReadiness(GitHookReadinessArgs),
+    /// Report installed ambient harness hook posture without writing settings.
+    Status(HarnessHookStatusArgs),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum HarnessHookTargetArg {
+    ClaudeCode,
+    Codex,
+    Gemini,
+}
+
+impl HarnessHookTargetArg {
+    #[must_use]
+    pub const fn into_hook_target(self) -> crate::hooks::HarnessHookTarget {
+        match self {
+            Self::ClaudeCode => crate::hooks::HarnessHookTarget::ClaudeCode,
+            Self::Codex => crate::hooks::HarnessHookTarget::Codex,
+            Self::Gemini => crate::hooks::HarnessHookTarget::Gemini,
+        }
+    }
 }
 
 /// Arguments for `ee hook <harness>`.
@@ -10860,11 +10881,31 @@ pub struct HarnessHookArgs {
     #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["install", "print"])]
     pub undo: bool,
 
+    /// Select the on-by-default ambient context profile explicitly.
+    #[arg(long = "ambient", action = ArgAction::SetTrue)]
+    pub ambient: bool,
+
     /// Override the harness settings path.
     #[arg(long = "settings-path", value_name = "PATH")]
     pub settings_path: Option<PathBuf>,
 
     /// Override the absolute path of the ee binary embedded in hook commands.
+    #[arg(long = "ee-binary", value_name = "PATH")]
+    pub ee_binary: Option<PathBuf>,
+}
+
+/// Arguments for `ee hook status`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct HarnessHookStatusArgs {
+    /// Harness whose ee-managed ambient hooks should be inspected.
+    #[arg(long = "harness", value_enum, default_value = "codex")]
+    pub harness: HarnessHookTargetArg,
+
+    /// Override the harness settings path.
+    #[arg(long = "settings-path", value_name = "PATH")]
+    pub settings_path: Option<PathBuf>,
+
+    /// Override the absolute path of the ee binary embedded in expected hook commands.
     #[arg(long = "ee-binary", value_name = "PATH")]
     pub ee_binary: Option<PathBuf>,
 }
@@ -13355,6 +13396,9 @@ where
         Some(Command::Hook(HookCommand::GitReadiness(ref args))) => {
             handle_hook_git_readiness(&cli, args, stdout, stderr)
         }
+        Some(Command::Hook(HookCommand::Status(ref args))) => {
+            handle_hook_status(&cli, args, stdout, stderr)
+        }
         Some(Command::Model(ref model_cmd)) => {
             handle_model_command(&cli, model_cmd, stdout, stderr)
         }
@@ -13846,6 +13890,49 @@ where
     }
 }
 
+fn handle_hook_status<W, E>(
+    cli: &Cli,
+    args: &HarnessHookStatusArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = crate::hooks::HarnessHookInstallOptions {
+        target: args.harness.into_hook_target(),
+        workspace: cli.resolve_workspace(),
+        settings_path: args.settings_path.clone(),
+        install: false,
+        undo: false,
+        ee_binary_path: args.ee_binary.clone(),
+    };
+    let report = match crate::hooks::generate_harness_hook_install(&options) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_hook_status_human(&report))
+        }
+        output::Renderer::Toon => {
+            let json = hook_status_response_json(&report);
+            write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&json.to_string()) + "\n"),
+            )
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = hook_status_response_json(&report);
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
 fn hook_harness_response_json(
     report: &crate::hooks::HarnessHookInstallReport,
 ) -> serde_json::Value {
@@ -13855,6 +13942,30 @@ fn hook_harness_response_json(
         "data": {
             "command": format!("hook {}", report.harness),
             "harnessInstall": report,
+        },
+        "degraded": [],
+    })
+}
+
+fn hook_status_response_json(report: &crate::hooks::HarnessHookInstallReport) -> serde_json::Value {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": {
+            "command": "hook status",
+            "harness": &report.harness,
+            "settingsPath": &report.settings_path,
+            "ambientContext": &report.ambient_context,
+            "installAudit": &report.install_audit,
+            "snippets": report.snippets.iter().map(|snippet| {
+                serde_json::json!({
+                    "id": &snippet.id,
+                    "event": &snippet.event,
+                    "matcher": &snippet.matcher,
+                    "installable": snippet.installable,
+                    "purpose": &snippet.purpose,
+                })
+            }).collect::<Vec<_>>(),
         },
         "degraded": [],
     })
@@ -13886,6 +13997,7 @@ fn render_hook_harness_human(report: &crate::hooks::HarnessHookInstallReport) ->
     for item in &report.plan {
         out.push_str(&format!("  plan {}: {}\n", item.action, item.reason));
     }
+    out.push_str(&render_ambient_context_summary(report));
     for snippet in &report.snippets {
         out.push_str(&format!(
             "\n[{}] {}{}\n{}\n",
@@ -13898,6 +14010,61 @@ fn render_hook_harness_human(report: &crate::hooks::HarnessHookInstallReport) ->
                 .unwrap_or_default(),
             snippet.command
         ));
+    }
+    out
+}
+
+fn render_hook_status_human(report: &crate::hooks::HarnessHookInstallReport) -> String {
+    let mut out = format!(
+        "{} hook status: {} ({})\n",
+        report.harness_display_name, report.install_audit.status, report.schema
+    );
+    if let Some(path) = &report.settings_path {
+        out.push_str(&format!("  settings: {path}\n"));
+    }
+    out.push_str(&format!(
+        "  hooks: fresh={} stale={} missing={}\n",
+        report.install_audit.hook_fresh_count,
+        report.install_audit.hook_stale_count,
+        report.install_audit.hook_missing_count
+    ));
+    out.push_str(&render_ambient_context_summary(report));
+    for finding in &report.install_audit.findings {
+        out.push_str(&format!(
+            "  finding [{}]: {} Repair: {}\n",
+            finding.code, finding.message, finding.repair
+        ));
+    }
+    out
+}
+
+fn render_ambient_context_summary(report: &crate::hooks::HarnessHookInstallReport) -> String {
+    let ambient = &report.ambient_context;
+    let mut out = format!(
+        "  ambient: schema={} enabledByDefault={} readOnly={} provenance={}\n",
+        ambient.schema, ambient.enabled_by_default, ambient.read_only, ambient.provenance_tag
+    );
+    if !ambient.budgets.is_empty() {
+        out.push_str("  ambient budgets:\n");
+        for budget in &ambient.budgets {
+            let max_paths = budget
+                .max_paths
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".to_owned());
+            out.push_str(&format!(
+                "    - {}: maxTokens={} maxPaths={}\n",
+                budget.surface, budget.max_tokens, max_paths
+            ));
+        }
+    }
+    if !ambient.controls.is_empty() {
+        out.push_str("  ambient controls:\n");
+        for control in &ambient.controls {
+            out.push_str(&format!(
+                "    - {} default={}: {}\n",
+                control.env_var, control.default_value, control.description
+            ));
+        }
     }
     out
 }
@@ -57779,6 +57946,7 @@ impl NormalizedInvocation {
                     HookCommand::Gemini(_) => "hook gemini".to_string(),
                     HookCommand::PreflightShell(_) => "hook preflight-shell".to_string(),
                     HookCommand::GitReadiness(_) => "hook git-readiness".to_string(),
+                    HookCommand::Status(_) => "hook status".to_string(),
                 },
                 Command::Model(model) => match model {
                     ModelCommand::Status(_) => "model status".to_string(),
@@ -67661,6 +67829,85 @@ mod tests {
             }
             _ => Err("expected HookCommand::GitReadiness".to_string()),
         }
+    }
+
+    #[test]
+    fn hook_harness_ambient_flag_parses() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "hook", "codex", "--ambient", "--print"])
+            .map_err(|e| format!("failed to parse hook codex --ambient: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Hook(HookCommand::Codex(ref args))) => {
+                ensure_equal(&args.ambient, &true, "ambient flag")
+            }
+            _ => Err("expected HookCommand::Codex".to_string()),
+        }
+    }
+
+    #[test]
+    fn hook_status_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "hook",
+            "status",
+            "--harness",
+            "codex",
+            "--settings-path",
+            ".codex/hooks.json",
+        ])
+        .map_err(|e| format!("failed to parse hook status: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Hook(HookCommand::Status(ref args))) => {
+                ensure_equal(
+                    &args.harness,
+                    &super::HarnessHookTargetArg::Codex,
+                    "status harness",
+                )?;
+                ensure_equal(
+                    &args.settings_path,
+                    &Some(PathBuf::from(".codex/hooks.json")),
+                    "settings-path",
+                )
+            }
+            _ => Err("expected HookCommand::Status".to_string()),
+        }
+    }
+
+    #[test]
+    fn hook_status_json_contract_includes_ambient_context() -> TestResult {
+        let report =
+            crate::hooks::generate_harness_hook_install(&crate::hooks::HarnessHookInstallOptions {
+                target: crate::hooks::HarnessHookTarget::Codex,
+                workspace: PathBuf::from("."),
+                settings_path: Some(PathBuf::from(".codex/hooks.json")),
+                install: false,
+                undo: false,
+                ee_binary_path: Some(PathBuf::from("/usr/local/bin/ee")),
+            })
+            .map_err(|error| error.message())?;
+        let response = hook_status_response_json(&report);
+
+        ensure_equal(
+            &response["schema"],
+            &serde_json::json!("ee.response.v2"),
+            "response schema",
+        )?;
+        ensure_equal(
+            &response["data"]["command"],
+            &serde_json::json!("hook status"),
+            "command",
+        )?;
+        ensure_equal(
+            &response["data"]["ambientContext"]["schema"],
+            &serde_json::json!("ee.ambient_context.v1"),
+            "ambient schema",
+        )?;
+        ensure_equal(
+            &response["data"]["installAudit"]["readOnly"],
+            &serde_json::json!(true),
+            "status audit read-only",
+        )
     }
 
     #[test]
