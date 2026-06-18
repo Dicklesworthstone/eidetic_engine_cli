@@ -11,13 +11,14 @@ use std::process::Command;
 
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
 const EFFECT_SOURCE: &str = include_str!("../src/core/effect.rs");
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 384;
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 388;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",
     "daemon foreground non-decay",
     "daemon start",
     "daemon stop",
+    "orient decisions",
     "review session --propose",
 ];
 
@@ -503,6 +504,39 @@ fn effect_manifest_has_no_undocumented_extra_cli_paths() -> TestResult {
             "effect manifest has unexpected command paths not emitted by CLI normalization: {manifest_only:?}"
         ))
     }
+}
+
+#[test]
+fn effect_manifest_covers_recent_read_only_surfaces() -> TestResult {
+    use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
+
+    let manifest = EffectManifest::build();
+    for command in [
+        "diag toolchain-provenance",
+        "hook status",
+        "similar",
+        "timeline",
+    ] {
+        let effect = manifest
+            .get(command)
+            .ok_or_else(|| format!("{command} not in manifest"))?;
+        ensure(
+            effect.default_effect,
+            EffectClass::ReadOnly,
+            &format!("{command} is read-only"),
+        )?;
+        ensure(
+            effect.mutation_contract.side_effect_class,
+            SideEffectClass::ReadOnly,
+            &format!("{command} has read-only side-effect class"),
+        )?;
+        ensure(
+            effect.write_surfaces.is_empty(),
+            true,
+            &format!("{command} has no write surfaces"),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]

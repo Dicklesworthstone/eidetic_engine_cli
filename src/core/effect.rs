@@ -1293,6 +1293,10 @@ impl EffectManifest {
                 "Inspect explicit read-fence and write-immune diagnostics",
             ),
             CommandEffect::read_only_db("diag streams", "Show streams status"),
+            CommandEffect::read_only(
+                "diag toolchain-provenance",
+                "Inspect observed toolchain provenance without mutating state",
+            ),
             CommandEffect::read_only_db("diag tripwire", "Inspect tripwire diagnostics"),
             CommandEffect::read_only_db("diag write-owner", "Inspect write-owner diagnostics"),
             CommandEffect::read_only_db("diag write-spool", "Inspect write-spool diagnostics"),
@@ -1387,6 +1391,10 @@ impl EffectManifest {
                 "hook gemini",
                 "Report Gemini harness hook support posture without guessing",
             ),
+            CommandEffect::read_only(
+                "hook status",
+                "Inspect managed harness hook posture without mutating settings",
+            ),
             CommandEffect::read_only_db(
                 "impact",
                 "Estimate impact from persisted graph and memory state",
@@ -1433,6 +1441,10 @@ impl EffectManifest {
             CommandEffect::read_only_db(
                 "recall",
                 "Code-anchored reverse lookup from paths, symbols, or a git diff to anchored memories",
+            ),
+            CommandEffect::read_only_db(
+                "similar",
+                "Find embedding-native nearest-neighbor memories for a persisted seed memory",
             ),
             CommandEffect::read_only_db(
                 "learn agenda",
@@ -1645,6 +1657,10 @@ impl EffectManifest {
                 "Render a swarm work packet without mutating coordination state",
             ),
             CommandEffect::read_only_db("task-frame show", "Show passive task-frame state"),
+            CommandEffect::read_only_db(
+                "timeline",
+                "Reconstruct read-only memory state for a topic at a historical timestamp",
+            ),
             CommandEffect::read_only_db("tripwire list", "List persisted tripwire rules"),
             CommandEffect::read_only("update", "Plan update without mutation"),
             CommandEffect::read_only_db(
