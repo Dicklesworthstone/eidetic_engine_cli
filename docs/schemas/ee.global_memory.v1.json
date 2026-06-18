@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.global_memory.v1.json",
+  "title": "ee.global_memory.v1",
+  "description": "Redaction-safe store-metadata for the user-global memory tier: the separate local store at <user-data-root>/global/ (its own ee.db + index) that follows the user across every workspace. Paths, flags, schema version, and a content census only; never memory content. See ADR 0081 (docs/adr/0081-user-global-memory-store.md) and bd-2vq2z.13.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "databasePath",
+    "indexDir",
+    "present",
+    "enabled",
+    "participating",
+    "schemaVersion",
+    "memoryCount"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.global_memory.v1",
+      "description": "Schema identifier."
+    },
+    "databasePath": {
+      "type": "string",
+      "description": "Absolute path to the global store database (<user-data-root>/global/ee.db)."
+    },
+    "indexDir": {
+      "type": "string",
+      "description": "Absolute path to the global store's derived search-index directory."
+    },
+    "present": {
+      "type": "boolean",
+      "description": "Whether the global store exists on disk."
+    },
+    "enabled": {
+      "type": "boolean",
+      "description": "Whether [memory] include_global is enabled store-wide."
+    },
+    "participating": {
+      "type": "boolean",
+      "description": "Whether the current workspace participates in the global tier (the hard privacy boundary: participate=false blocks both contribute and consume)."
+    },
+    "schemaVersion": {
+      "type": "string",
+      "description": "The schema/migration version of the global store; parity with the workspace store."
+    },
+    "memoryCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of memories in the global store."
+    },
+    "lastModified": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "RFC 3339 last-modified timestamp of the store, or null when unknown."
+    }
+  }
+}
