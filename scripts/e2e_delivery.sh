@@ -176,6 +176,10 @@ assert_jq "anti_pattern_reserved_item" "$ROOT/pack_antipattern_1.json" \
   "any(.data.pack.items[]?; .memoryId == \"$ANTI_MEMORY_ID\" and .section == \"failures\" and .selectedIn == \"anti_pattern_first\" and ((.why // \"\") | contains(\"What NOT to do\")) and ((.provenance // []) | length >= 1))" \
   "$ANTI_BEAD"
 
+assert_jq "anti_pattern_provenance_uri" "$ROOT/pack_antipattern_1.json" \
+  "any(.data.pack.items[]?; .memoryId == \"$ANTI_MEMORY_ID\" and any(.provenance[]?; .uri == \"test://bd-2vq2z.11/anti-pattern-first\"))" \
+  "$ANTI_BEAD"
+
 assert_jq "anti_pattern_markdown_section" "$ROOT/pack_antipattern_1.json" \
   '(.data.pack.text // "") | contains("## What NOT to do")' \
   "$ANTI_BEAD"

@@ -12080,6 +12080,57 @@ mod tests {
     }
 
     #[test]
+    fn anti_pattern_first_accepts_exact_relevance_floor_boundary() -> TestResult {
+        let budget = TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let boundary_failure = candidate_in_section(
+            95,
+            PackSection::Failures,
+            DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR,
+            0.95,
+            10,
+            "Do not run local Cargo builds during code-first swarm batches.",
+        )?
+        .with_diversity_key("anti-pattern:local-cargo");
+        let primary_rule = candidate_in_section(
+            15,
+            PackSection::ProceduralRules,
+            1.00,
+            0.80,
+            10,
+            "Use central batch verification for code-first swarm changes.",
+        )?
+        .with_diversity_key("rule:central-verify");
+
+        let draft = assemble_classic_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare code-first swarm verification",
+            budget,
+            vec![primary_rule, boundary_failure],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        let first = draft
+            .items
+            .first()
+            .ok_or_else(|| "expected exact-floor anti-pattern item".to_owned())?;
+        ensure_equal(
+            &first.memory_id,
+            &memory_id(95),
+            "exact-floor failure candidate is eligible for the reserved slice",
+        )?;
+        ensure_equal(
+            &first.selected_in,
+            &PackSelectionPhase::AntiPatternFirst,
+            "exact-floor candidate receives anti-pattern-first marker",
+        )?;
+        ensure_contains(
+            &first.why,
+            "What NOT to do:",
+            "exact-floor candidate why marker",
+        )
+    }
+
+    #[test]
     fn anti_pattern_first_respects_failure_section_quota_boundary() -> TestResult {
         let budget = TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
         let oversized_failure = candidate_in_section(
