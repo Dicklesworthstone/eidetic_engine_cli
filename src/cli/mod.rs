@@ -169,12 +169,13 @@ use crate::core::legacy_import::{LegacyImportScanOptions, scan_eidetic_legacy_so
 use crate::core::memory::{
     ExpireMemoryOptions, GetMemoryOptions, ListMemoriesOptions, MemoryExpireReport,
     MemoryLevelOptions, MemoryLevelReport, MemoryLinkMode, MemoryLinkOptions, MemoryLinkReport,
-    MemoryReviseReport, MemoryTagsMode, MemoryTagsOptions, MemoryTagsReport, RememberBatchOptions,
-    RememberMemoryOptions, RememberMemoryReport, RememberOutcome, RememberWriteControls,
-    ReviseMemoryOptions, ReviseReason, WorkflowCloseOptions, WorkflowCloseReport,
-    WorkflowCreateOptions, close_workflow, create_workflow, expire_memory, get_memory_details,
-    list_memories, remember_memory_batch_stdin, remember_memory_with_controls, revise_memory,
-    update_memory_level, update_memory_link, update_memory_tags,
+    MemoryReviseReport, MemoryTagsMode, MemoryTagsOptions, MemoryTagsReport, MemoryTimelineOptions,
+    RememberBatchOptions, RememberMemoryOptions, RememberMemoryReport, RememberOutcome,
+    RememberWriteControls, ReviseMemoryOptions, ReviseReason, WorkflowCloseOptions,
+    WorkflowCloseReport, WorkflowCreateOptions, build_memory_timeline, close_workflow,
+    create_workflow, expire_memory, get_memory_details, list_memories, remember_memory_batch_stdin,
+    remember_memory_with_controls, revise_memory, update_memory_level, update_memory_link,
+    update_memory_tags,
 };
 use crate::core::orient::{OrientDecisionOptions, orient_decisions};
 use crate::core::outcome::{
@@ -999,6 +1000,8 @@ pub enum Command {
     Procedure(ProcedureCommand),
     /// Code-anchored memory recall: reverse lookup from paths, symbols, or a git diff to anchored memories (ADR 0064).
     Recall(RecallArgs),
+    /// Reconstruct what was known about a topic at an RFC3339 as-of time.
+    Timeline(TimelineArgs),
     /// Record agent activity for outcomes and replay.
     #[command(subcommand)]
     Recorder(RecorderCommand),
@@ -5758,6 +5761,26 @@ pub struct RecallArgs {
     /// Resume a budget-truncated page sequence from a continuation cursor.
     #[arg(long, value_name = "CURSOR")]
     pub cursor: Option<String>,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee timeline`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct TimelineArgs {
+    /// Topic to reconstruct from memory content, kind, level, and tags.
+    #[arg(value_name = "TOPIC")]
+    pub topic: String,
+
+    /// RFC3339 timestamp for the historical as-of view.
+    #[arg(long = "as-of", value_name = "RFC3339")]
+    pub as_of: String,
+
+    /// Maximum rows per timeline section.
+    #[arg(long, value_name = "N", default_value_t = 20)]
+    pub limit: u32,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -13363,6 +13386,7 @@ where
         Some(Command::Perf(ref perf_cmd)) => handle_perf_command(&cli, perf_cmd, stdout, stderr),
         Some(Command::Proximity(ref args)) => handle_proximity(&cli, args, stdout, stderr),
         Some(Command::Recall(ref args)) => handle_recall(&cli, args, stdout, stderr),
+        Some(Command::Timeline(ref args)) => handle_timeline(&cli, args, stdout, stderr),
         Some(Command::Preflight(PreflightCommand::Run(ref args))) => {
             handle_preflight_run(&cli, args, stdout, stderr)
         }
@@ -42176,6 +42200,53 @@ where
     }
 }
 
+fn handle_timeline<W, E>(
+    cli: &Cli,
+    args: &TimelineArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace_path = cli.resolve_workspace();
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    let report = match build_memory_timeline(&MemoryTimelineOptions {
+        database_path: &database_path,
+        workspace_path: &workspace_path,
+        topic: &args.topic,
+        as_of: &args.as_of,
+        limit: args.limit,
+    }) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+
+    let envelope = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": report.data_json(),
+        "degraded": [],
+    });
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_output())
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&envelope.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(envelope.to_string() + "\n")),
+    }
+}
+
 fn write_journal_data_json<W>(stdout: &mut W, data: &serde_json::Value) -> ProcessExitCode
 where
     W: Write,
@@ -57796,6 +57867,7 @@ const COMMAND_NAMES: &[&str] = &[
     "status",
     "support",
     "swarm",
+    "timeline",
     "tripwire",
     "update",
     "verification",
@@ -58365,6 +58437,7 @@ impl NormalizedInvocation {
                 },
                 Command::Proximity(_) => "proximity".to_string(),
                 Command::Recall(_) => "recall".to_string(),
+                Command::Timeline(_) => "timeline".to_string(),
                 Command::Preflight(preflight) => match preflight {
                     PreflightCommand::Run(_) => "preflight run".to_string(),
                     PreflightCommand::Show(_) => "preflight show".to_string(),

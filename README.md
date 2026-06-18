@@ -435,7 +435,7 @@ Current top-level groups:
 |---|---|
 | Core memory loop | `init`, `remember`, `decide`, `search`, `ask`, `pack`, `why`, `status`, `doctor`, `capabilities`, `check`, `health` |
 | Memory lifecycle | `memory`, `rule`, `curate`, `review`, `playbook`, `procedure`, `workflow`, `outcome`, `outcome-quarantine` |
-| Packing and retrieval | `recall`, `similar`, `lens`, `context-show`, `show`, `link`, `tag`, `history`, `proximity`, `insights`, `subscribe` |
+| Packing and retrieval | `recall`, `timeline`, `similar`, `lens`, `context-show`, `show`, `link`, `tag`, `history`, `proximity`, `insights`, `subscribe` |
 | Graph and structure | `graph`, `causal`, `economy`, `focus`, `learn`, `lab`, `rehearse`, `rationale`, `situation`, `task-frame` |
 | Storage and derived assets | `db`, `migrate`, `index`, `model`, `schema`, `backup`, `export`, `artifact`, `config`, `workspace` |
 | Diagnostics and release gates | `diag`, `eval`, `perf`, `preflight`, `tripwire`, `verify`, `verification`, `audit`, `claim`, `certificate`, `demo` |
@@ -462,6 +462,7 @@ Current top-level groups:
 | `ee similar <memory-id> [--limit N] [--min-score T] [--explain] [--json]` | Find embedding-native nearest-neighbor memories for a seed memory; degrades to lexical similarity with an explicit degraded note when semantic vectors are unavailable |
 | `ee ask "<question>" [--require-confidence T] [--json]` | Direct extractive answer from stored memories, with citations, conflict sides, calibrated abstention, and exit 6 fail-closed mode |
 | `ee recall --path <glob>` / `--symbol <name>` / `--diff <ref>` | Fetch memories anchored to a code surface before editing; returns `ee.recall.v1` under the standard response envelope |
+| `ee timeline "<topic>" --as-of <RFC3339> --json` | Reconstruct read-only memory state for a topic at a historical timestamp; returns `ee.timeline.v1` under the standard response envelope |
 | `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b]` | Capture a durable memory |
 | `ee decide record "<topic>" --chosen <x> --alternative <y> --rationale "<why>" [--revisit-by <RFC3339\|+ND>]` | Record a decision-kind memory with typed fields and fork protection |
 | `ee decide list [--about <text>] [--include-superseded] --json` | Review current decision heads or full supersede history before proposing architecture changes |

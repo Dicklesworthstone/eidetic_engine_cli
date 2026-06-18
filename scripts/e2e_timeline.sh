@@ -127,7 +127,7 @@ if ee_has_timeline_cli; then
     assert_jq "$limited_out" '.data.truncated == true and .data.totalMemoriesThen >= 2' \
         "timeline limit preserves totals and marks truncation"
 else
-    log_drop 1 "bd-2vq2z.16 timeline CLI route pending: when wired, assert ee.timeline.v1 reconstructs as-of memories, changesSince, decisionsInEffect, and limit truncation"
+    log_drop 1 "bd-2vq2z.16 installed ee binary lacks timeline route; source-built ee asserts ee.timeline.v1 memoriesThen, changesSince, decisionsInEffect, and limit truncation"
 fi
 
 end_temp_workspace
