@@ -153,6 +153,7 @@ data:
     EE_WORKSPACE_REGISTRY,paths,Override the workspace alias registry database path.,null,false,unset
   index:
     last_full_rebuild_at: null
+    embedding: null
   output:
     formats[8]{name,available,machineReadable,description}:
       json,true,true,Canonical stable response envelope

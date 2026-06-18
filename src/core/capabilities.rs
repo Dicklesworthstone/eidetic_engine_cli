@@ -8,7 +8,9 @@ use std::path::Path;
 use crate::models::CapabilityStatus;
 
 use super::build_info;
-use super::index::{IndexStatusOptions, get_index_status};
+use super::index::{
+    EmbeddingPosture, IndexStatusOptions, IndexStatusReport, get_index_status,
+};
 use super::status::{
     default_workspace_path, probe_cass_capability, probe_graph_capability, probe_mesh_capability,
     probe_runtime_capability, probe_search_capability, probe_storage_capability,
@@ -184,23 +186,35 @@ impl ToonOutputCapability {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IndexCapabilitySummary {
     pub last_full_rebuild_at: Option<String>,
+    pub embedding: Option<EmbeddingPosture>,
 }
 
 impl IndexCapabilitySummary {
     #[must_use]
     pub fn gather(workspace_path: Option<&Path>) -> Self {
-        let last_full_rebuild_at = workspace_path.and_then(|workspace_path| {
+        let index_status = workspace_path.and_then(|workspace_path| {
             get_index_status(&IndexStatusOptions {
                 workspace_path: workspace_path.to_path_buf(),
                 database_path: None,
                 index_dir: None,
             })
             .ok()
-            .and_then(|report| report.last_rebuild_at)
         });
 
+        Self::from_index_status(index_status)
+    }
+
+    fn from_index_status(index_status: Option<IndexStatusReport>) -> Self {
+        let Some(report) = index_status else {
+            return Self {
+                last_full_rebuild_at: None,
+                embedding: None,
+            };
+        };
+
         Self {
-            last_full_rebuild_at,
+            last_full_rebuild_at: report.last_rebuild_at,
+            embedding: report.embedding,
         }
     }
 }
@@ -741,5 +755,48 @@ mod tests {
             4,
             "toon supported profiles",
         )
+    }
+
+    #[test]
+    fn index_capability_summary_carries_runtime_embedding_posture() -> TestResult {
+        let posture = EmbeddingPosture {
+            schema: "ee.embedding_posture.v1",
+            mode: "neural_local",
+            semantic: true,
+            source: "test_registry".to_owned(),
+            fast_model_id: "potion-multilingual-128M".to_owned(),
+            fast_dimension: 256,
+            quality_model_id: None,
+            quality_dimension: None,
+            deterministic: true,
+            registered_model_count: 1,
+            available_model_count: 1,
+            selected_registry_model: None,
+            vector_coverage: super::super::index::EmbeddingVectorCoverage::new(2, 3),
+        };
+        let summary = IndexCapabilitySummary::from_index_status(Some(IndexStatusReport {
+            health: super::super::index::IndexHealth::Ready,
+            index_dir: std::path::PathBuf::from("/tmp/ee-index"),
+            database_path: std::path::PathBuf::from("/tmp/ee.db"),
+            embedding: Some(posture.clone()),
+            index_exists: true,
+            index_file_count: 4,
+            index_size_bytes: 128,
+            db_memory_count: 2,
+            db_session_count: 0,
+            db_generation: Some(7),
+            index_generation: Some(7),
+            last_rebuild_at: Some("2026-06-18T00:00:00Z".to_owned()),
+            last_check_error: None,
+            repair_hint: None,
+            elapsed_ms: 1.0,
+        }));
+
+        ensure(
+            summary.last_full_rebuild_at,
+            Some("2026-06-18T00:00:00Z".to_owned()),
+            "last rebuild timestamp",
+        )?;
+        ensure(summary.embedding, Some(posture), "runtime embedding posture")
     }
 }

@@ -8696,6 +8696,10 @@ fn write_capabilities_index_block(builder: &mut JsonBuilder, report: &Capabiliti
             Some(timestamp) => index.field_str("last_full_rebuild_at", timestamp),
             None => index.field_raw("last_full_rebuild_at", "null"),
         };
+        match report.index.embedding.as_ref() {
+            Some(embedding) => index.field_raw("embedding", &embedding.data_json().to_string()),
+            None => index.field_raw("embedding", "null"),
+        };
     });
 }
 
@@ -8893,6 +8897,13 @@ pub fn render_capabilities_human(report: &CapabilitiesReport) -> String {
             output.push_str(&format!("  Last full rebuild: {timestamp}\n"));
         }
         None => output.push_str("  Last full rebuild: <not recorded>\n"),
+    }
+    match report.index.embedding.as_ref() {
+        Some(embedding) => output.push_str(&format!(
+            "  Embedding mode: {} (semantic: {}, source: {})\n",
+            embedding.mode, embedding.semantic, embedding.source
+        )),
+        None => output.push_str("  Embedding mode: unavailable\n"),
     }
 
     output.push_str("\nCommands:\n");
