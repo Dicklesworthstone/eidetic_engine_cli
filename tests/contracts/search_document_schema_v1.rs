@@ -164,6 +164,37 @@ fn search_document_v1_validator_rejects_missing_calibration_fields() -> TestResu
     Ok(())
 }
 
+#[test]
+fn search_document_v1_requires_interpretable_score_fields() -> TestResult {
+    let schema = read_schema()?;
+    let document = full_emitted_search_document()?;
+
+    if document.pointer("/relevanceScore").and_then(Value::as_f64).is_none() {
+        return Err("emitted search document must include relevanceScore".to_string());
+    }
+    if document.pointer("/scoreKind").and_then(Value::as_str) != Some("rrf_fused") {
+        return Err(format!(
+            "hybrid search document should expose scoreKind=rrf_fused, got {:?}",
+            document.pointer("/scoreKind")
+        ));
+    }
+
+    for field in ["relevanceScore", "scoreKind"] {
+        let mut missing = document.clone();
+        missing
+            .as_object_mut()
+            .ok_or_else(|| "document is not an object".to_string())?
+            .remove(field);
+
+        match validate_json_schema(&missing, &schema, "$") {
+            Ok(()) => return Err(format!("validator accepted document missing {field}")),
+            Err(_) => {}
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_json_schema(value: &Value, schema: &Value, path: &str) -> TestResult {
     if let Some(options) = schema.get("oneOf").and_then(Value::as_array) {
         if options

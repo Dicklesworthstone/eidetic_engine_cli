@@ -226,7 +226,7 @@ Every returned memory answers six questions:
 - **What supports it?** Provenance URI(s).
 - **How fresh?** Recency decay term.
 - **How reliable?** Confidence, evidence count, harmful-feedback weight.
-- **What scores mattered?** Component breakdown.
+- **What scores mattered?** Raw score, `scoreKind`, normalized `relevanceScore`, and component breakdown.
 - **What would change the decision?** Counterfactual hint when available.
 
 ### 6. Search Indexes Are Derived Assets

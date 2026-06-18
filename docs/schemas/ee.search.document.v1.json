@@ -7,6 +7,8 @@
   "required": [
     "docId",
     "score",
+    "relevanceScore",
+    "scoreKind",
     "scoreInterval",
     "coverageGuarantee",
     "calibrated",
@@ -26,6 +28,20 @@
     },
     "score": {
       "type": "number"
+    },
+    "relevanceScore": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Deterministic 0..1 relevance projection for agent interpretation. Hybrid/RRF scores are rescaled from their small raw magnitude; unit-normalized sources are clamped."
+    },
+    "scoreKind": {
+      "type": "string",
+      "enum": [
+        "unit_normalized",
+        "rrf_fused"
+      ],
+      "description": "Interpretation tag for the raw score field. Use relevanceScore for cross-source relevance; score remains the retrieval engine's raw ranking score."
     },
     "scoreInterval": {
       "type": "array",
