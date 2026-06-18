@@ -142,14 +142,17 @@ Run `cargo tree -e features` and grep for these crates. CI must fail if any appe
 
 ```toml
 [features]
-default = ["fts5", "json", "embed-fast", "lexical-bm25"]
-fts5 = ["fsqlite-ext-fts5"]
-json = ["fsqlite-ext-json"]
-embed-fast = ["frankensearch/model2vec"]
+default = ["fts5", "json", "embed-fast", "lexical-bm25", "graph"]
+fts5 = ["frankensearch/fts5"]
+json = [] # reserved; JSON output is unconditional today
+embed-fast = ["frankensearch/model2vec", "frankensearch/download"]
 # embed-quality is intentionally not exposed until frankensearch/fastembed is forbidden-dep clean.
 lexical-bm25 = ["frankensearch/lexical"]
+graph = []
+differential-networkx = []
 mcp = []  # gates the in-tree stdio MCP adapter; intentionally no rust-mcp-sdk/Tokio dependency
 serve = []
+science-analytics = []
 ```
 
 ---
@@ -520,7 +523,7 @@ Acceptance gate:
 
 ### Product Principles (Apply When In Doubt)
 
-- **Local first** — no cloud dependency required; remote APIs and model downloads are explicit opt-in
+- **Local first** — no cloud dependency required; remote APIs stay explicit opt-in. The pinned local Model2Vec embedding model may download automatically once and then runs from the local cache; air-gapped hosts can pre-populate the cache or use deterministic hash fallback.
 - **Harness agnostic** — works from any shell; never assumes control of the agent loop
 - **CLI first, daemon later** — no core command may require the daemon in v1
 - **Deterministic by default** — same DB + indexes + config + query → stable JSON output

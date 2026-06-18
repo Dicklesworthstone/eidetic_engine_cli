@@ -4,9 +4,10 @@
 # Exercises embedder-degraded paths against a real ee binary in a fresh
 # workspace. The fault-injection knob is EE_EMBED_MODEL_PATH: pointing it at a
 # missing model should leave lexical search available while surfacing the more
-# precise embed_model_unavailable degraded code. The default hash-fallback
-# embedder is also semantic=false, so search and pack must surface the same
-# degraded code instead of silently serving lexical-only rankings.
+# precise embed_model_unavailable degraded code. The default path is
+# neural-local when the bundled Model2Vec cache/download is available; if an
+# environment still falls back to deterministic hash, that fallback must be
+# explicit rather than a silent lexical-only ranking.
 
 set -euo pipefail
 
@@ -115,31 +116,50 @@ assert_jq "$missing_pack_out" '((.data.pack.items // []) | length) > 0' "true" \
     "pack still has lexical fallback items"
 
 # ---------------------------------------------------------------------------
-log_step "Default hash fallback is explicit in search degraded output"
+log_step "Default embedding path is either neural-local or explicitly degraded"
 default_search_out=$(ee_workspace search "cargo workspace" --json)
 assert_jq "$default_search_out" '.success' "true" \
-    "search succeeds with default hash fallback"
+    "search succeeds with default embedding path"
 assert_jq "$default_search_out" '((.data.results // []) | length) > 0' "true" \
-    "default hash fallback still returns lexical results"
-assert_jq "$default_search_out" "$has_embed_model_unavailable" "true" \
-    "default hash fallback carries embed_model_unavailable"
-assert_jq "$default_search_out" \
-    '(.data.degraded[] | select(.code == "embed_model_unavailable") | .message | contains("hash fallback"))' \
-    "true" "default degraded message names hash fallback"
+    "default embedding path returns results"
+assert_jq "$default_search_out" "$has_lexical_unavailable" "false" \
+    "default embedding path keeps lexical fallback available"
+default_search_embed_degraded=$(
+    printf '%s' "$default_search_out" \
+        | jq -r '[.data.degraded[]? | select(.code == "embed_model_unavailable")] | length'
+)
+if [ "$default_search_embed_degraded" = "0" ]; then
+    record_pass "default search uses neural-local without embed_model_unavailable"
+else
+    assert_jq "$default_search_out" \
+        '(.data.degraded[] | select(.code == "embed_model_unavailable") | .details.lexicalAvailable)' \
+        "true" "default degraded search remains lexical-capable"
+    assert_jq "$default_search_out" \
+        '(.data.degraded[] | select(.code == "embed_model_unavailable") | .message | test("model|download|hash fallback"))' \
+        "true" "default degraded search explains model/download/hash fallback"
+fi
 
 # ---------------------------------------------------------------------------
-log_step "Pack surfaces lexical-only advisory for default hash fallback"
+log_step "Pack default path is either neural-local or explicitly degraded"
 pack_out=$(ee_workspace pack "cargo workspace info" \
     --max-tokens 2000 \
     --json)
-assert_jq "$pack_out" '.success' "true" "pack succeeds with default hash fallback"
-assert_jq "$pack_out" "$has_embed_model_unavailable" "true" \
-    "pack carries embed_model_unavailable"
+assert_jq "$pack_out" '.success' "true" "pack succeeds with default embedding path"
 assert_jq "$pack_out" '((.data.pack.items // []) | length) > 0' "true" \
-    "pack still has lexical fallback items"
-assert_jq "$pack_out" \
-    '(.data.pack.advisoryBanner.summary // "" | contains("lexical-only"))' \
-    "true" "pack advisory banner names lexical-only ranking"
+    "pack has default-path items"
+default_pack_embed_degraded=$(
+    printf '%s' "$pack_out" \
+        | jq -r '[.data.degraded[]? | select(.code == "embed_model_unavailable")] | length'
+)
+if [ "$default_pack_embed_degraded" = "0" ]; then
+    record_pass "default pack uses neural-local without embed_model_unavailable"
+else
+    assert_jq "$pack_out" "$has_embed_model_unavailable" "true" \
+        "pack carries embed_model_unavailable when default path is degraded"
+    assert_jq "$pack_out" \
+        '(.data.pack.advisoryBanner.summary // "" | contains("lexical"))' \
+        "true" "pack advisory banner names lexical fallback when degraded"
+fi
 
 # ---------------------------------------------------------------------------
 log_step "Tracing target fires under EE_LOG_JSON=1"

@@ -262,13 +262,14 @@ working binary, which can serve as a reference profile for EE-001:
 
 ### Default Feature Composition Hint For EE-001
 
-Per AGENTS.md the default feature set is
-`["fts5", "json", "embed-fast", "lexical-bm25"]`, expanding to:
+Per AGENTS.md and Cargo.toml the default feature set is
+`["fts5", "json", "embed-fast", "lexical-bm25", "graph"]`, expanding to:
 
-- `fsqlite-ext-fts5` enabled (covered by `fsqlite/fts5`).
-- `fsqlite-ext-json` enabled (covered by `fsqlite/json`).
+- `frankensearch/fts5` enabled for FTS5-backed lexical fallback.
+- `json` reserved as an ee feature; JSON output is unconditional today.
 - `frankensearch/model2vec` and `frankensearch/download` enabled.
 - `frankensearch/lexical` enabled.
+- `graph` enabled for the in-tree FrankenNetworkX graph surface.
 
 The `fsqlite/linux-asupersync-uring` default needs an explicit decision: it is
 Linux-only. Either (a) keep `fsqlite` at default features and let non-Linux

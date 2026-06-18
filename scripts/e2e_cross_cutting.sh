@@ -88,6 +88,11 @@ harness_init "cross_cutting"
 require_tool jq
 require_tool python3
 
+step "neural-local default docs contract is wired"
+run_static_command \
+    "neural-local default docs contract passes" \
+    env EE_BIN="$EE_BIN" "$REPO_ROOT/scripts/e2e_neural_default_docs_contract.sh"
+
 step "cross-cutting manifests parse"
 for manifest in \
     "$MIGRATION_MANIFEST" \

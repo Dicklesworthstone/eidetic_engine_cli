@@ -1,6 +1,7 @@
 //! Static contract tests for the neural-local default docs slice (bd-1et0v.23).
 
 const README: &str = include_str!("../README.md");
+const AGENTS: &str = include_str!("../AGENTS.md");
 const TAXONOMY: &str = include_str!("../docs/degraded_code_taxonomy.md");
 const DEGRADED_CODES: &str = include_str!("../docs/degraded_codes.md");
 const ENV_VARS: &str = include_str!("../docs/env_vars.md");
@@ -11,8 +12,7 @@ const ADR_0080: &str = include_str!("../docs/adr/0080-bundled-default-embedder.m
 const FEATURE_FLAGS: &str = include_str!("../docs/feature_flag_registry.md");
 const DEP_MATRIX: &str = include_str!("../docs/dependency-contract-matrix.md");
 const DEP_RESEARCH: &str = include_str!("../docs/dependency-research-notes.md");
-const FIXTURE: &str =
-    include_str!("fixtures/failure_modes/embed_model_unavailable.json");
+const FIXTURE: &str = include_str!("fixtures/failure_modes/embed_model_unavailable.json");
 
 type TestResult = Result<(), String>;
 
@@ -47,6 +47,21 @@ fn readme_and_agent_docs_present_neural_local_as_default() -> TestResult {
         "README troubleshooting",
     )?;
     ensure(
+        AGENTS,
+        r#"default = ["fts5", "json", "embed-fast", "lexical-bm25", "graph"]"#,
+        "AGENTS default feature list",
+    )?;
+    ensure(
+        AGENTS,
+        r#"embed-fast = ["frankensearch/model2vec", "frankensearch/download"]"#,
+        "AGENTS embed-fast download feature",
+    )?;
+    ensure(
+        AGENTS,
+        "The pinned local Model2Vec embedding model may download automatically once",
+        "AGENTS local-first model download wording",
+    )?;
+    ensure(
         LIFECYCLE,
         "Default builds are expected to report semantic readiness",
         "model lifecycle docs",
@@ -70,6 +85,22 @@ fn degraded_taxonomy_and_catalog_describe_fallback_not_missing_feature() -> Test
         "EE_EMBED_MODEL_PATH=/nonexistent/model",
         "failure-mode fixture",
     )?;
+    ensure(
+        FIXTURE,
+        "The default semantic path is neural-local via Frankensearch Model2Vec",
+        "failure-mode fixture default semantic path",
+    )?;
+    ensure(
+        FIXTURE,
+        "potion-multilingual-128M",
+        "failure-mode fixture bundled model",
+    )?;
+    if FIXTURE.contains("default frankensearch_hash_fallback") {
+        return Err(
+            "embed_model_unavailable fixture still describes hash fallback as the default"
+                .to_owned(),
+        );
+    }
     if TAXONOMY.contains("Build-time: no dense embedder feature compiled") {
         return Err(
             "embed_model_unavailable taxonomy still names the old no-dense-feature trigger"
@@ -103,7 +134,7 @@ fn env_and_dependency_docs_match_the_manifest_feature_shape() -> TestResult {
     )?;
     ensure(
         DEP_RESEARCH,
-        "`embed-fast` -> `frankensearch/model2vec` + `frankensearch/download`",
+        "`embed-fast` → `frankensearch/model2vec` + `frankensearch/download`",
         "dependency research notes",
     )
 }
