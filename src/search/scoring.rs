@@ -12,10 +12,21 @@ use crate::models::MemoryAnchorFreshnessState;
 
 /// Default recency time constant from the retrieval contract.
 pub const DEFAULT_RECENCY_TAU_DAYS: f32 = 30.0;
-/// Default floor for the code-coupled freshness drift penalty (ADR 0056,
-/// bd-1n0np.3.7). A drifted anchor ranks DOWN but never vanishes: the
-/// multiplier is clamped to `[floor, 1.0]`.
+/// Lower bound the code-coupled freshness drift multiplier is clamped to
+/// (ADR 0056, bd-1n0np.3.7). A `floor` of `1.0` means "no penalty"; a smaller
+/// floor lets a drifted anchor rank DOWN but never vanish. Use
+/// [`stale_anchor_floor`] to derive this from the configurable
+/// `stale_anchor_penalty`.
 pub const DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR: f32 = 0.4;
+/// Default `stale_anchor_penalty` for the retrieval contract (bd-2vq2z.1,
+/// Phase-6 pass 2 — supersedes ADR 0056 part B). `0.0` means **FLAG, DON'T
+/// PENALIZE**: a memory whose code anchor drifted is surfaced via its freshness
+/// flag but keeps its rank, because a memory about code that just changed is
+/// often exactly what the agent wants when touching that code again. Operators
+/// may opt into a small tie-breaker via `[retrieval] stale_anchor_penalty`; even
+/// then a drifted memory never vanishes (the multiplier floors at `1.0 -
+/// penalty`).
+pub const DEFAULT_STALE_ANCHOR_PENALTY: f32 = 0.0;
 /// Default confidence floor from the retrieval contract.
 pub const DEFAULT_CONFIDENCE_FLOOR: f32 = 0.1;
 /// Default lower bound for the utility multiplier.
@@ -48,6 +59,12 @@ pub struct SearchScoringConfig {
     pub redundancy_lambda: f32,
     pub anchor_match_bias_cap: f32,
     pub bead_affinity_bias_cap: f32,
+    /// Opt-in rank reduction for a memory whose code anchor drifted
+    /// (bd-2vq2z.1). `0.0` (the default) means FLAG, DON'T PENALIZE: a drifted
+    /// anchor keeps its rank and is surfaced only via its freshness flag. A
+    /// value `p` in `(0.0, 1.0]` lets a `Stale` anchor fall at most to
+    /// `1.0 - p` (a small tie-breaker), never vanishing.
+    pub stale_anchor_penalty: f32,
 }
 
 impl Default for SearchScoringConfig {
@@ -63,6 +80,7 @@ impl Default for SearchScoringConfig {
             redundancy_lambda: DEFAULT_REDUNDANCY_LAMBDA,
             anchor_match_bias_cap: DEFAULT_ANCHOR_MATCH_BIAS_CAP,
             bead_affinity_bias_cap: DEFAULT_BEAD_AFFINITY_BIAS_CAP,
+            stale_anchor_penalty: DEFAULT_STALE_ANCHOR_PENALTY,
         }
     }
 }
@@ -443,11 +461,15 @@ impl SearchScoreComponents {
             + finite_unit(signals.graph_centrality.unwrap_or(0.0))
                 * finite_nonnegative(config.graph_centrality_weight);
         let redundancy = redundancy_multiplier(signals.redundancy, config.redundancy_lambda);
-        // Code-coupled freshness drift penalty (bd-1n0np.3.7): a drifted anchored
-        // memory ranks DOWN (never vanishes). `None` is neutral (1.0), so this is
-        // behavior-preserving for callers that do not supply a freshness state.
+        // Code-coupled freshness drift signal (bd-2vq2z.1, Phase-6 pass 2 —
+        // supersedes ADR 0056 part B). FLAG, DON'T PENALIZE: the default
+        // `stale_anchor_penalty` of 0.0 yields a neutral 1.0 multiplier, so a
+        // drifted anchored memory keeps its rank (the drift is surfaced via the
+        // freshness flag, not suppressed). An operator may opt into a small
+        // tie-breaker via `[retrieval] stale_anchor_penalty`. `None` (unanchored
+        // or unknown freshness) is neutral (1.0).
         let freshness_drift = signals.freshness_drift.map_or(1.0, |state| {
-            freshness_drift_multiplier(state, DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR)
+            freshness_drift_multiplier(state, stale_anchor_floor(config.stale_anchor_penalty))
         });
         let multiplicative_score = base
             * recency
@@ -576,6 +598,20 @@ pub fn final_score(signals: SearchScoringSignals, config: SearchScoringConfig) -
 /// [`bead_affinity_score`]; the live ranking path multiplies it in once the
 /// scoring pipeline is wired into retrieval.
 #[must_use]
+/// Convert a configurable `stale_anchor_penalty` (the opt-in rank reduction for
+/// a drifted code anchor; clamped to `0.0..=1.0`) into the `floor` consumed by
+/// [`freshness_drift_multiplier`].
+///
+/// bd-2vq2z.1 (Phase-6 pass 2) makes anchor drift a FLAG, not a rank penalty:
+/// the default penalty of `0.0` maps to a floor of `1.0`, so a `Stale` anchor
+/// keeps a neutral `1.0` multiplier (no suppression). A penalty `p` lets a
+/// `Stale` anchor fall at most to `1.0 - p` (a small tie-breaker), and the
+/// multiplier never reaches zero, so a drifted memory never vanishes.
+#[must_use]
+pub fn stale_anchor_floor(stale_anchor_penalty: f32) -> f32 {
+    (1.0 - finite_unit(stale_anchor_penalty)).clamp(0.0, 1.0)
+}
+
 pub fn freshness_drift_multiplier(state: MemoryAnchorFreshnessState, floor: f32) -> f32 {
     let floor = finite_unit(floor);
     match state {
@@ -719,9 +755,10 @@ mod tests {
         AnchorMatchCandidateSignals, AnchorMatchContext, BeadAffinityCandidateSignals,
         BeadAffinityContext, DEFAULT_ANCHOR_MATCH_BIAS_CAP, DEFAULT_BEAD_AFFINITY_BIAS_CAP,
         DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR, DEFAULT_GRAPH_CENTRALITY_WEIGHT,
-        DEFAULT_RECENCY_TAU_DAYS, RetrievalMaturity, SearchScoreComponents, SearchScoringConfig,
-        SearchScoringSignals, SpeedMode, anchor_match_score, bead_affinity_score, final_score,
-        freshness_drift_multiplier,
+        DEFAULT_RECENCY_TAU_DAYS, DEFAULT_STALE_ANCHOR_PENALTY, RetrievalMaturity,
+        SearchScoreComponents, SearchScoringConfig, SearchScoringSignals, SpeedMode,
+        anchor_match_score, bead_affinity_score, final_score, freshness_drift_multiplier,
+        stale_anchor_floor,
     };
     use crate::models::MemoryAnchorFreshnessState;
 
@@ -1205,23 +1242,30 @@ mod tests {
     }
 
     #[test]
-    fn from_signals_applies_freshness_drift_penalty() {
+    fn stale_anchor_floor_maps_penalty_to_clamped_floor() {
+        // bd-2vq2z.1: penalty 0.0 -> neutral floor 1.0 (flag, don't penalize).
+        assert_eq!(stale_anchor_floor(DEFAULT_STALE_ANCHOR_PENALTY), 1.0);
+        assert_eq!(stale_anchor_floor(0.0), 1.0);
+        assert!((stale_anchor_floor(0.6) - 0.4).abs() < 1e-6);
+        assert_eq!(stale_anchor_floor(1.0), 0.0);
+        // Out-of-range penalties are clamped into the unit interval.
+        assert_eq!(stale_anchor_floor(2.0), 0.0);
+        assert_eq!(stale_anchor_floor(-1.0), 1.0);
+        assert_eq!(stale_anchor_floor(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn from_signals_flags_drift_without_penalizing_by_default() {
+        // bd-2vq2z.1 (Phase-6 pass 2): the DEFAULT retrieval contract FLAGS a
+        // drifted anchor but does NOT rank it down. A stale anchored memory keeps
+        // the same final score as a neutral one under the default config.
         let config = SearchScoringConfig::default();
+        assert_eq!(config.stale_anchor_penalty, DEFAULT_STALE_ANCHOR_PENALTY);
         let base = SearchScoringSignals::new(1.0, RetrievalMaturity::Semantic);
 
-        // No freshness state is neutral, identical to an explicitly current one.
         let neutral = SearchScoreComponents::from_signals(base, config);
         assert_eq!(neutral.freshness_drift, 1.0);
-        let current = SearchScoreComponents::from_signals(
-            SearchScoringSignals {
-                freshness_drift: Some(MemoryAnchorFreshnessState::Current),
-                ..base
-            },
-            config,
-        );
-        assert_eq!(current.final_score, neutral.final_score);
 
-        // A stale anchored memory ranks DOWN to the floor but never vanishes.
         let stale = SearchScoreComponents::from_signals(
             SearchScoringSignals {
                 freshness_drift: Some(MemoryAnchorFreshnessState::Stale),
@@ -1229,8 +1273,36 @@ mod tests {
             },
             config,
         );
-        assert_eq!(stale.freshness_drift, DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR);
+        assert_eq!(
+            stale.freshness_drift, 1.0,
+            "default penalty 0.0 leaves a stale anchor un-penalized (flag, don't penalize)"
+        );
+        assert_eq!(
+            stale.final_score, neutral.final_score,
+            "a drifted memory keeps its rank under the default config"
+        );
+    }
+
+    #[test]
+    fn from_signals_applies_opt_in_stale_anchor_penalty() {
+        // An operator may opt into a small tie-breaker. With penalty p, a Stale
+        // anchor's multiplier falls to 1.0 - p, and never vanishes.
+        let config = SearchScoringConfig {
+            stale_anchor_penalty: 0.6,
+            ..SearchScoringConfig::default()
+        };
+        let base = SearchScoringSignals::new(1.0, RetrievalMaturity::Semantic);
+
+        let neutral = SearchScoreComponents::from_signals(base, config);
+        let stale = SearchScoreComponents::from_signals(
+            SearchScoringSignals {
+                freshness_drift: Some(MemoryAnchorFreshnessState::Stale),
+                ..base
+            },
+            config,
+        );
+        assert!((stale.freshness_drift - DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR).abs() < 1e-6);
         assert!(stale.final_score < neutral.final_score);
-        assert!(stale.final_score > 0.0);
+        assert!(stale.final_score > 0.0, "penalized but never vanishes");
     }
 }

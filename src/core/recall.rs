@@ -13,7 +13,7 @@
 //! edit, so everything here degrades instead of erroring.
 
 use crate::models::{MemoryAnchorFreshnessState, MemoryAnchorKind};
-use crate::search::scoring::{DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR, freshness_drift_multiplier};
+use crate::search::scoring::{freshness_drift_multiplier, stale_anchor_floor};
 
 /// Response payload schema carried under `ee.response.v2` `data.recall`.
 pub const RECALL_SCHEMA_V1: &str = "ee.recall.v1";
@@ -111,6 +111,13 @@ pub struct RecallQuery {
     pub max_tokens: Option<u32>,
     /// Rank offset for continuation (decoded from a validated cursor).
     pub offset: usize,
+    /// Opt-in rank reduction for a drifted (`suspect | stale`) code anchor
+    /// (bd-2vq2z.1, Phase-6 pass 2 — supersedes ADR 0056 part B). The default of
+    /// `0.0` means FLAG, DON'T PENALIZE: a drifted memory keeps its rank and is
+    /// surfaced only via its `freshness_state`. The CLI resolves this from
+    /// `[retrieval] stale_anchor_penalty`; `RecallQuery::default()` leaves it at
+    /// `0.0`, the neutral value. It never participates in the cursor query hash.
+    pub stale_anchor_penalty: f32,
 }
 
 /// The anchor a memory was recalled through.
@@ -639,7 +646,10 @@ pub fn evaluate_recall(
     }
 
     // Rank (ADR §3): score descending, stable tie-break by memory id.
-    let mut scored: Vec<RecallItem> = filtered.into_iter().map(score_row).collect();
+    let mut scored: Vec<RecallItem> = filtered
+        .into_iter()
+        .map(|row| score_row(row, query.stale_anchor_penalty))
+        .collect();
     scored.sort_by(|left, right| {
         right
             .score
@@ -711,9 +721,13 @@ fn anchor_row_preference(row: &RecallCandidateRow) -> (u8, MemoryAnchorKind, Str
     )
 }
 
-fn score_row(row: &RecallCandidateRow) -> RecallItem {
+fn score_row(row: &RecallCandidateRow, stale_anchor_penalty: f32) -> RecallItem {
+    // bd-2vq2z.1 (Phase-6 pass 2): drift is a FLAG, not a rank penalty. With the
+    // default `stale_anchor_penalty` of 0.0 the floor is 1.0, so a drifted anchor
+    // keeps its rank and is surfaced only via `freshness_state`. An operator may
+    // opt into a small tie-breaker via `[retrieval] stale_anchor_penalty`.
     let freshness =
-        freshness_drift_multiplier(row.freshness_state, DEFAULT_FRESHNESS_DRIFT_PENALTY_FLOOR);
+        freshness_drift_multiplier(row.freshness_state, stale_anchor_floor(stale_anchor_penalty));
     let confidence = row.confidence.clamp(0.0, 1.0);
     let level_tilt = recall_level_tilt(&row.level);
     let kind_bonus = recall_kind_bonus(&row.kind);
@@ -1604,6 +1618,77 @@ mod tests {
         assert_eq!(report.items.len(), 1);
         assert_eq!(report.items[0].anchor.kind, "symbol");
         assert_eq!(report.items[0].freshness_state, "current");
+    }
+
+    #[test]
+    fn drifted_anchor_is_flagged_not_penalized_by_default() {
+        // bd-2vq2z.1 (Phase-6 pass 2): with the default stale_anchor_penalty of
+        // 0.0, a stale-anchored memory keeps the SAME freshness multiplier (and
+        // therefore the same score, all else equal) as a current one. The drift
+        // is surfaced via `freshness_state`, never by suppressing the rank.
+        let mut stale = row("mem_stale", Some("src/a.rs"), None);
+        stale.freshness_state = MemoryAnchorFreshnessState::Stale;
+        let current = row("mem_current", Some("src/a.rs"), None);
+
+        let report = evaluate_recall(
+            &path_query(&["src/*.rs"]),
+            &[stale.clone(), current.clone()],
+            Some(7),
+            7,
+        );
+        let stale_item = report
+            .items
+            .iter()
+            .find(|item| item.memory_id == "mem_stale")
+            .expect("stale memory present (flagged, not suppressed)");
+        let current_item = report
+            .items
+            .iter()
+            .find(|item| item.memory_id == "mem_current")
+            .expect("current memory present");
+        assert_eq!(
+            stale_item.freshness_state, "stale",
+            "the drift is still surfaced as a flag"
+        );
+        assert_eq!(
+            stale_item.score_components.freshness, 1.0,
+            "default penalty 0.0 -> neutral freshness multiplier (flag, don't penalize)"
+        );
+        assert_eq!(
+            stale_item.score_components.freshness, current_item.score_components.freshness,
+            "a drifted memory keeps its rank under the default config"
+        );
+    }
+
+    #[test]
+    fn opt_in_stale_anchor_penalty_ranks_drift_down_without_vanishing() {
+        // An operator may opt into a small tie-breaker. With a configured penalty
+        // the stale anchor ranks below an otherwise-identical fresh one, but its
+        // score stays strictly positive (it never vanishes).
+        let mut stale = row("mem_stale", Some("src/a.rs"), None);
+        stale.freshness_state = MemoryAnchorFreshnessState::Stale;
+        let current = row("mem_current", Some("src/a.rs"), None);
+
+        let mut query = path_query(&["src/*.rs"]);
+        query.stale_anchor_penalty = 0.6;
+        let report = evaluate_recall(&query, &[stale.clone(), current.clone()], Some(7), 7);
+        let stale_item = report
+            .items
+            .iter()
+            .find(|item| item.memory_id == "mem_stale")
+            .expect("stale memory present");
+        let current_item = report
+            .items
+            .iter()
+            .find(|item| item.memory_id == "mem_current")
+            .expect("current memory present");
+        assert!(
+            stale_item.score < current_item.score,
+            "an opt-in penalty ranks the drifted memory below the fresh one"
+        );
+        assert!(stale_item.score > 0.0, "penalized but never vanishes");
+        // Ordering: the fresh memory sorts first.
+        assert_eq!(report.items[0].memory_id, "mem_current");
     }
 
     #[test]

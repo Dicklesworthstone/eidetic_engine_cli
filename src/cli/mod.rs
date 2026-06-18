@@ -41724,6 +41724,11 @@ where
         stale_only: args.stale,
         max_tokens: args.budget_tokens,
         offset: 0,
+        // bd-2vq2z.1 (Phase-6 pass 2): drift is a FLAG, not a rank penalty. The
+        // neutral default keeps drifted memories at their natural rank; the
+        // `[retrieval] stale_anchor_penalty` TOML wiring is the remaining leaf
+        // step that will resolve an operator override here.
+        stale_anchor_penalty: crate::search::scoring::DEFAULT_STALE_ANCHOR_PENALTY,
     };
     let query_echo = RecallQueryEcho {
         paths: args.paths.clone(),
