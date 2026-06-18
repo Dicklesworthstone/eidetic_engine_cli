@@ -2571,10 +2571,10 @@ fn bundled_embeddings_fixture_privacy_surfaces_stay_clean() -> TestResult {
         RedactionClass::Pii,
         RedactionClass::InternalPath,
     ] {
-        let evaluation = detector.evaluate(&all_fixture_text, class);
+        let leaks = detector.detect_leaks_in_classes(&all_fixture_text, &[class]);
         ensure(
-            evaluation.leaks.is_empty(),
-            &format!("bundled embeddings fixture leaked {class:?}: {:?}", evaluation.leaks),
+            leaks.is_empty(),
+            &format!("bundled embeddings fixture leaked {class:?}: {:?}", leaks),
         )?;
     }
     Ok(())
