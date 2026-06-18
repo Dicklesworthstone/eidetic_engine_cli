@@ -333,7 +333,10 @@ RS
     git commit -q -m "capture: redact secret-bearing diff evidence"
 )
 if remember_git_capture_available; then
-    before_git_memories="$(memory_list_count "$WS")"
+    fixture_init_out="$(ee_json --workspace "$FIXTURE_REPO" init --json)"
+    assert_jq "$fixture_init_out" '.schema == "ee.response.v2" and .success == true' \
+        "fixture git repo workspace init succeeds"
+    before_git_memories="$(memory_list_count "$FIXTURE_REPO")"
     dry_commit="$(ee_json --workspace "$FIXTURE_REPO" remember --from-commit HEAD --json)"
     assert_jq "$dry_commit" '.schema == "ee.response.v2" and .success == true' \
         "remember --from-commit default dry-run succeeds"
@@ -344,7 +347,7 @@ if remember_git_capture_available; then
         and (.data.content | contains("Mode: commit."))
         and (.data.content | contains("Diff fingerprint: blake3:"))
     ' "remember --from-commit defaults to no stored memory under dry-run"
-    after_dry_git_memories="$(memory_list_count "$WS")"
+    after_dry_git_memories="$(memory_list_count "$FIXTURE_REPO")"
     assert_eq "$after_dry_git_memories" "$before_git_memories" \
         "remember --from-commit dry-run does not mutate memory"
 
