@@ -904,10 +904,10 @@ pub fn rebuild_index(
 
     let db = DbConnection::open_file(&database_path)?;
     let workspace_id = get_default_workspace_id(&db)?;
-    let db_stats = get_db_stats(&db)?;
+    let (_, _, db_generation) = get_db_stats(&db)?;
     let source_generation = db
         .get_workspace_generation(&workspace_id)?
-        .or(db_stats.generation);
+        .or(db_generation);
 
     let memories = db.list_memories_for_retrieval_with_global(&workspace_id, None, false)?;
     let sessions = db.list_sessions(&workspace_id)?;
@@ -1030,10 +1030,10 @@ pub fn reembed_index(
 
     let db = DbConnection::open_file(&database_path)?;
     let workspace_id = get_default_workspace_id(&db)?;
-    let db_stats = get_db_stats(&db)?;
+    let (_, _, db_generation) = get_db_stats(&db)?;
     let source_generation = db
         .get_workspace_generation(&workspace_id)?
-        .or(db_stats.generation);
+        .or(db_generation);
 
     let memories = db.list_memories_for_retrieval_with_global(&workspace_id, None, false)?;
     let sessions = db.list_sessions(&workspace_id)?;
@@ -1393,7 +1393,7 @@ pub(crate) fn process_pending_index_jobs_coalesced(
 
     let published_generation = db
         .get_workspace_generation(workspace_id)?
-        .or(get_db_stats(db)?.generation)
+        .or(get_db_stats(db)?.2)
         .unwrap_or_else(|| u64::from(documents_total));
 
     let holder_id = generate_index_holder_id();
@@ -1530,7 +1530,7 @@ fn process_one_index_job(
     // though the job had already applied synchronously. (agent-UX item 5)
     let published_generation = db
         .get_workspace_generation(&job.workspace_id)?
-        .or(get_db_stats(db)?.generation)
+        .or(get_db_stats(db)?.2)
         .unwrap_or_else(|| u64::from(documents_total));
 
     // Acquire index publish lock to prevent concurrent publish races.
@@ -4145,7 +4145,13 @@ pub(crate) fn get_index_status_with_connection(
     // Check index directory
     let (index_exists, index_file_count, index_size_bytes) = inspect_index_dir(&index_dir)?;
 
-    let (db_stats, embedding) = if database_path.exists() {
+    // Fast-path degraded states: when the index is missing/corrupt, we can
+    // report health without scanning DB tables for counts/generation.
+    let (db_memory_count, db_session_count, db_generation, embedding) = if !index_exists
+        || index_file_count == 0
+    {
+        (0, 0, None, None)
+    } else if database_path.exists() {
         let owned_connection;
         let db = if let Some(connection) = connection {
             connection
@@ -4153,21 +4159,12 @@ pub(crate) fn get_index_status_with_connection(
             owned_connection = DbConnection::open_file(&database_path)?;
             &owned_connection
         };
-
-        let db_stats = get_db_stats(db)?;
-        let embedding = if index_exists && index_file_count > 0 {
-            index_status_embedding_posture(db, &options.workspace_path, &index_dir)?
-        } else {
-            None
-        };
-        (Some(db_stats), embedding)
+        let (memory_count, session_count, generation) = get_db_stats(db)?;
+        let embedding = index_status_embedding_posture(db, &options.workspace_path, &index_dir)?;
+        (memory_count, session_count, generation, embedding)
     } else {
-        (None, None)
+        (0, 0, None, None)
     };
-    let db_memory_count = db_stats.as_ref().map_or(0, |stats| stats.memory_count);
-    let db_session_count = db_stats.as_ref().map_or(0, |stats| stats.session_count);
-    let db_generation = db_stats.as_ref().and_then(|stats| stats.generation);
-    let source_document_count = db_stats.as_ref().map(|stats| stats.source_document_count);
 
     // Read index metadata if available.
     let (index_generation, last_rebuild_at, last_check_error) = read_index_metadata(&index_dir);
@@ -4179,7 +4176,6 @@ pub(crate) fn get_index_status_with_connection(
         db_generation,
         index_generation,
         last_check_error.is_some(),
-        source_document_count,
     );
 
     let repair_hint = match health {
@@ -4574,14 +4570,7 @@ fn inspect_index_dir(index_dir: &Path) -> Result<(bool, u32, u64), std::io::Erro
     Ok((true, file_count, total_size))
 }
 
-struct IndexDbStats {
-    memory_count: u32,
-    session_count: u32,
-    source_document_count: u64,
-    generation: Option<u64>,
-}
-
-fn get_db_stats(db: &DbConnection) -> Result<IndexDbStats, DbError> {
+fn get_db_stats(db: &DbConnection) -> Result<(u32, u32, Option<u64>), DbError> {
     let memory_count = db
         .query("SELECT COUNT(*) FROM memories", &[])?
         .first()
@@ -4643,12 +4632,7 @@ fn get_db_stats(db: &DbConnection) -> Result<IndexDbStats, DbError> {
 
     let generation = workspace_generation.or(Some(source_document_count.max(audit_count)));
 
-    Ok(IndexDbStats {
-        memory_count,
-        session_count,
-        source_document_count,
-        generation,
-    })
+    Ok((memory_count, session_count, generation))
 }
 
 fn read_index_metadata(index_dir: &Path) -> (Option<u64>, Option<String>, Option<String>) {
@@ -4785,18 +4769,13 @@ fn determine_health(
     db_generation: Option<u64>,
     index_generation: Option<u64>,
     metadata_corrupt: bool,
-    source_document_count: Option<u64>,
 ) -> IndexHealth {
     if metadata_corrupt {
         return IndexHealth::Corrupt;
     }
 
     if !index_exists || index_file_count == 0 {
-        return if source_document_count == Some(0) {
-            IndexHealth::Ready
-        } else {
-            IndexHealth::Missing
-        };
+        return IndexHealth::Missing;
     }
 
     match (db_generation, index_generation) {
@@ -5725,9 +5704,9 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let stats = get_db_stats(&connection).map_err(|error| error.to_string())?;
+        let (_, _, generation) = get_db_stats(&connection).map_err(|error| error.to_string())?;
         ensure(
-            stats.generation == Some(1),
+            generation == Some(1),
             "source generation should include unaudited source documents",
         )?;
 
@@ -5769,9 +5748,8 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let generation_before = get_db_stats(&connection)
-            .map_err(|error| error.to_string())?
-            .generation;
+        let (_, _, generation_before) =
+            get_db_stats(&connection).map_err(|error| error.to_string())?;
         ensure(
             generation_before == Some(1),
             "baseline generation should track the single source document",
@@ -5793,9 +5771,8 @@ mod tests {
                 .map_err(|error| error.to_string())?;
         }
 
-        let generation_after = get_db_stats(&connection)
-            .map_err(|error| error.to_string())?
-            .generation;
+        let (_, _, generation_after) =
+            get_db_stats(&connection).map_err(|error| error.to_string())?;
         ensure(
             generation_after == generation_before,
             format!(
@@ -6133,78 +6110,59 @@ mod tests {
 
     #[test]
     fn cache_invalidation_missing_index_detected() {
-        let health = determine_health(false, 0, Some(10), Some(10), false, Some(1));
+        let health = determine_health(false, 0, Some(10), Some(10), false);
         assert_eq!(health, IndexHealth::Missing);
         assert_eq!(health.degradation_code(), Some("index_missing"));
     }
 
     #[test]
-    fn cache_invalidation_missing_index_ready_for_empty_workspace() {
-        let health = determine_health(false, 0, Some(10), None, false, Some(0));
-        assert_eq!(health, IndexHealth::Ready);
-        assert_eq!(health.degradation_code(), None);
-    }
-
-    #[test]
-    fn cache_invalidation_missing_index_degraded_when_db_unknown() {
-        let health = determine_health(false, 0, None, None, false, None);
-        assert_eq!(health, IndexHealth::Missing);
-    }
-
-    #[test]
     fn cache_invalidation_empty_index_detected() {
-        let health = determine_health(true, 0, Some(10), Some(10), false, Some(1));
+        let health = determine_health(true, 0, Some(10), Some(10), false);
         assert_eq!(health, IndexHealth::Missing);
-    }
-
-    #[test]
-    fn cache_invalidation_empty_index_ready_for_empty_workspace() {
-        let health = determine_health(true, 0, Some(10), None, false, Some(0));
-        assert_eq!(health, IndexHealth::Ready);
     }
 
     #[test]
     fn cache_invalidation_stale_when_db_ahead() {
-        let health = determine_health(true, 5, Some(12), Some(9), false, Some(1));
+        let health = determine_health(true, 5, Some(12), Some(9), false);
         assert_eq!(health, IndexHealth::Stale);
         assert_eq!(health.degradation_code(), Some("index_stale"));
     }
 
     #[test]
     fn cache_invalidation_stale_when_index_has_no_generation() {
-        let health = determine_health(true, 5, Some(12), None, false, Some(1));
+        let health = determine_health(true, 5, Some(12), None, false);
         assert_eq!(health, IndexHealth::Stale);
     }
 
     #[test]
     fn cache_invalidation_corrupt_when_metadata_parse_fails() {
-        let health = determine_health(true, 5, Some(12), None, true, Some(0));
+        let health = determine_health(true, 5, Some(12), None, true);
         assert_eq!(health, IndexHealth::Corrupt);
         assert_eq!(health.degradation_code(), Some("index_corrupt"));
     }
 
     #[test]
     fn cache_invalidation_ready_when_generations_match() {
-        let health = determine_health(true, 5, Some(10), Some(10), false, Some(1));
+        let health = determine_health(true, 5, Some(10), Some(10), false);
         assert_eq!(health, IndexHealth::Ready);
         assert_eq!(health.degradation_code(), None);
     }
 
     #[test]
     fn cache_invalidation_ready_when_index_ahead() {
-        let health = determine_health(true, 5, Some(8), Some(10), false, Some(1));
+        let health = determine_health(true, 5, Some(8), Some(10), false);
         assert_eq!(health, IndexHealth::Ready);
     }
 
     #[test]
     fn cache_invalidation_ready_when_no_generations_tracked() {
-        let health = determine_health(true, 5, None, None, false, Some(1));
+        let health = determine_health(true, 5, None, None, false);
         assert_eq!(health, IndexHealth::Ready);
     }
 
     #[test]
     fn cache_invalidation_ready_when_db_has_no_generation() {
-        let health = determine_health(true, 5, None, Some(10), false, Some(1));
+        let health = determine_health(true, 5, None, Some(10), false);
         assert_eq!(health, IndexHealth::Ready);
     }
 
@@ -6297,41 +6255,6 @@ mod tests {
     }
 
     #[test]
-    fn index_status_report_ready_empty_workspace_has_no_rebuild_hint() {
-        let report = IndexStatusReport {
-            health: IndexHealth::Ready,
-            index_dir: PathBuf::from("/tmp/index"),
-            database_path: PathBuf::from("/tmp/ee.db"),
-            embedding: None,
-            index_exists: true,
-            index_file_count: 0,
-            index_size_bytes: 0,
-            db_memory_count: 0,
-            db_session_count: 0,
-            db_generation: Some(0),
-            index_generation: None,
-            last_rebuild_at: None,
-            last_check_error: None,
-            repair_hint: None,
-            elapsed_ms: 1.0,
-        };
-
-        let json = report.data_json();
-        assert_eq!(json["health"], "ready");
-        assert!(json["degradationCode"].is_null());
-        assert!(
-            json["degraded"]
-                .as_array()
-                .is_some_and(std::vec::Vec::is_empty)
-        );
-        assert!(json["repairHint"].is_null());
-
-        let summary = report.human_summary();
-        assert!(summary.contains("READY"));
-        assert!(!summary.contains("rebuild"));
-    }
-
-    #[test]
     fn index_status_embedding_posture_uses_requested_workspace_path() -> TestResult {
         let root = unique_test_dir("status-workspace-selector");
         let workspace_a = root.join("workspace-a");
@@ -6403,8 +6326,7 @@ mod tests {
     #[test]
     fn cache_invalidation_boundary_condition_equal_generations() {
         for generation in [0_u64, 1, 100, u64::MAX] {
-            let health =
-                determine_health(true, 1, Some(generation), Some(generation), false, Some(1));
+            let health = determine_health(true, 1, Some(generation), Some(generation), false);
             assert_eq!(
                 health,
                 IndexHealth::Ready,
@@ -6415,7 +6337,7 @@ mod tests {
 
     #[test]
     fn cache_invalidation_boundary_condition_db_one_ahead() {
-        let health = determine_health(true, 1, Some(1), Some(0), false, Some(1));
+        let health = determine_health(true, 1, Some(1), Some(0), false);
         assert_eq!(health, IndexHealth::Stale);
     }
 
