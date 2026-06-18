@@ -312,6 +312,38 @@ pub const DEFAULT_RELEVANCE_FLOOR: f32 = 0.05;
 /// passes; rank ~190 single-arm RRF gets filtered).
 pub const DEFAULT_RELEVANCE_FLOOR_HYBRID: f32 = 0.005;
 
+/// Reference maximum magnitude for an RRF-fused `Hybrid` score (bd-1et0v.11).
+///
+/// Two arms each contributing the rank-1 reciprocal `1/(k+1)` at the canonical
+/// `k=60` give `2/61 ≈ 0.0328`. A top hybrid hit lands at this magnitude, so
+/// dividing a raw hybrid score by it yields a self-describing `relevanceScore`
+/// near `1.0` — the fix for an agent misreading the inherent `~0.03` RRF
+/// magnitude as "no match". Scores above it (three contributing arms) clamp to
+/// `1.0`; this is an interpretability reference, not a ranking input.
+pub const RRF_HYBRID_TYPICAL_MAX: f32 = 2.0 / 61.0;
+
+/// Deterministic normalized relevance score in `0.0..=1.0` (bd-1et0v.11).
+///
+/// Maps a raw [`SearchHit::score`] to a self-describing `0..1` value an agent
+/// can read as "how relevant". `score` magnitudes differ by [`ScoreSource`]:
+/// cosine-domain sources are already unit-normalized and only need clamping,
+/// while `Hybrid` carries an RRF-fused magnitude topping out near
+/// [`RRF_HYBRID_TYPICAL_MAX`] (`~0.033`). Dividing the hybrid magnitude by that
+/// reference rescales a top hit to `~1.0` so an agent does not misread the
+/// inherent `~0.03` RRF score as "no match". Pure and order-preserving within a
+/// source — an interpretability projection, never a ranking input.
+#[must_use]
+pub fn normalized_relevance_score(source: ScoreSource, raw_score: f32) -> f32 {
+    let normalized = match source {
+        ScoreSource::Hybrid => raw_score / RRF_HYBRID_TYPICAL_MAX,
+        ScoreSource::Lexical
+        | ScoreSource::SemanticFast
+        | ScoreSource::SemanticQuality
+        | ScoreSource::Reranked => raw_score,
+    };
+    normalized.clamp(0.0, 1.0)
+}
+
 /// Per-source default relevance floor.
 ///
 /// Returns [`DEFAULT_RELEVANCE_FLOOR_HYBRID`] for `Hybrid` (RRF-fused)
@@ -728,6 +760,26 @@ pub struct SearchHit {
     pub rerank_score: Option<f32>,
     pub metadata: Option<serde_json::Value>,
     pub explanation: Option<ScoreExplanation>,
+}
+
+impl SearchHit {
+    /// Deterministic normalized relevance score in `0.0..=1.0` (bd-1et0v.11).
+    ///
+    /// See [`normalized_relevance_score`]. Surfaced as `relevanceScore` so an
+    /// agent reads relevance from a uniform `0..1` scale instead of the raw,
+    /// source-dependent `score`.
+    #[must_use]
+    pub fn relevance_score(&self) -> f32 {
+        normalized_relevance_score(self.source, self.score)
+    }
+
+    /// Interpretation tag for the raw `score` scale (bd-1et0v.11).
+    ///
+    /// See [`ScoreSource::score_kind`]. Surfaced as `scoreKind`.
+    #[must_use]
+    pub const fn score_kind(&self) -> &'static str {
+        self.source.score_kind()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1621,6 +1673,23 @@ impl ScoreSource {
             Self::Reranked => "reranked",
         }
     }
+
+    /// Interpretation tag for the raw `score` scale (bd-1et0v.11).
+    ///
+    /// Cosine-domain sources are already unit-normalized (`0.0..=1.0`), so
+    /// `unit_normalized`. `Hybrid` carries an RRF-fused magnitude that tops out
+    /// near [`RRF_HYBRID_TYPICAL_MAX`] (`~0.033`), so `rrf_fused` — the tag tells
+    /// an agent the raw `score` is *not* a probability and must be read via
+    /// `relevanceScore`, not at face value.
+    #[must_use]
+    pub const fn score_kind(self) -> &'static str {
+        match self {
+            Self::Hybrid => "rrf_fused",
+            Self::Lexical | Self::SemanticFast | Self::SemanticQuality | Self::Reranked => {
+                "unit_normalized"
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1780,6 +1849,8 @@ impl SearchReport {
                 let mut obj = serde_json::json!({
                     "docId": hit.doc_id,
                     "score": hit.score,
+                    "relevanceScore": round_metric_f32(hit.relevance_score()),
+                    "scoreKind": hit.score_kind(),
                     "scoreInterval": search_hit_score_interval_json(hit),
                     "coverageGuarantee": search_hit_coverage_guarantee_json(hit),
                     "calibrated": search_hit_calibrated_json(hit),
@@ -12626,6 +12697,41 @@ mod tests {
                 source,
             );
         }
+    }
+
+    #[test]
+    fn normalized_relevance_score_rescales_rrf_and_tags_kind() {
+        // bd-1et0v.11: a top hybrid hit scores at the RRF-fused magnitude
+        // (~0.0328), which an agent misreads as "no match". The normalized
+        // relevanceScore must rescale that to ~1.0 and tag it `rrf_fused`,
+        // while unit-normalized sources pass through unchanged and tag
+        // `unit_normalized`.
+        let top_hybrid = normalized_relevance_score(ScoreSource::Hybrid, RRF_HYBRID_TYPICAL_MAX);
+        assert!(
+            (top_hybrid - 1.0).abs() < 1e-6,
+            "top hybrid RRF score should normalize to ~1.0, got {top_hybrid}",
+        );
+        assert_eq!(ScoreSource::Hybrid.score_kind(), "rrf_fused");
+
+        // Hybrid magnitudes above the reference (3+ contributing arms) clamp.
+        assert!((normalized_relevance_score(ScoreSource::Hybrid, 0.06) - 1.0).abs() < f32::EPSILON);
+
+        // Cosine/BM25-domain sources are already 0..=1: pass through, only
+        // clamp out-of-range, and tag `unit_normalized`.
+        for source in [
+            ScoreSource::Lexical,
+            ScoreSource::SemanticFast,
+            ScoreSource::SemanticQuality,
+            ScoreSource::Reranked,
+        ] {
+            assert!(
+                (normalized_relevance_score(source, 0.42) - 0.42).abs() < f32::EPSILON,
+                "{source:?} should pass a 0..=1 score through unchanged",
+            );
+            assert_eq!(source.score_kind(), "unit_normalized", "{source:?}");
+        }
+        assert!((normalized_relevance_score(ScoreSource::Lexical, 1.5) - 1.0).abs() < f32::EPSILON);
+        assert!((normalized_relevance_score(ScoreSource::Lexical, -0.3) - 0.0).abs() < f32::EPSILON);
     }
 
     #[test]
