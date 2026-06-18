@@ -841,6 +841,7 @@ fn remember_memory_inner(
             documents_total: 1,
             documents_indexed: 0,
             error: None,
+            fallback_to_full: None,
         }
     } else {
         process_remember_index_job_with_retry(&connection, &index_job_id, &index_dir)?
@@ -1307,6 +1308,7 @@ fn remember_index_job_queued_after_contention(
             "search index publish deferred after contention retries: {}",
             error.to_string()
         )),
+        fallback_to_full: None,
     }
 }
 
