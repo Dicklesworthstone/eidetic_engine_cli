@@ -15,7 +15,8 @@ use serde::Serialize;
 use toml_edit::{DocumentMut, Item};
 
 use crate::config::{
-    ConfigFile, ConfigLayers, ConfigShowEntry, ConfigShowReport, EnvironmentConfigError,
+    built_in_config, config_from_env, merge_config, ConfigFile, ConfigLayers, ConfigShowEntry,
+    ConfigShowReport, EnvironmentConfigError, PathExpander,
     GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY, GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY,
     GRAPH_CURATE_ONION_DECAY_MAX_KEY, GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY,
     GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY, GRAPH_FEATURE_LOAD_BEARING_ENABLED_KEY,
@@ -28,9 +29,8 @@ use crate::config::{
     GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY, GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
     GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
     GRAPH_PPR_ALPHA_KEY, GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY,
-    GRAPH_WITNESSES_RETENTION_DAYS_KEY, PathExpander, SEARCH_GRAPH_WEIGHT_KEY,
-    SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_SEMANTIC_WEIGHT_KEY, built_in_config, config_from_env,
-    merge_config,
+    GRAPH_WITNESSES_RETENTION_DAYS_KEY, SEARCH_GRAPH_WEIGHT_KEY, SEARCH_LEXICAL_WEIGHT_KEY,
+    SEARCH_RERANK_KEY, SEARCH_RERANK_TOP_K_KEY, SEARCH_SEMANTIC_WEIGHT_KEY,
 };
 
 pub const CONFIG_GET_SCHEMA_V1: &str = "ee.config.get.v1";
@@ -709,6 +709,8 @@ enum GraphValueKind {
     PositiveFloat,
     NonNegativeFloat,
     UnsignedInteger,
+    PositiveInteger,
+    RerankMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -734,6 +736,16 @@ fn config_key_spec(key: &str) -> Option<GraphKeySpec> {
             key: SEARCH_GRAPH_WEIGHT_KEY,
             path: &["search", "graph_weight"],
             kind: GraphValueKind::UnitFloat,
+        }),
+        SEARCH_RERANK_KEY => Some(GraphKeySpec {
+            key: SEARCH_RERANK_KEY,
+            path: &["search", "rerank"],
+            kind: GraphValueKind::RerankMode,
+        }),
+        SEARCH_RERANK_TOP_K_KEY => Some(GraphKeySpec {
+            key: SEARCH_RERANK_TOP_K_KEY,
+            path: &["search", "rerank_top_k"],
+            kind: GraphValueKind::PositiveInteger,
         }),
         _ => graph_key_spec(key),
     }
@@ -870,6 +882,7 @@ enum TomlScalar {
     Bool(bool),
     Float(f64),
     Integer(i64),
+    String(&'static str),
 }
 
 impl TomlScalar {
@@ -878,6 +891,7 @@ impl TomlScalar {
             Self::Bool(value) => value.to_string(),
             Self::Float(value) => value.to_string(),
             Self::Integer(value) => value.to_string(),
+            Self::String(value) => value.to_string(),
         }
     }
 }
@@ -936,6 +950,23 @@ fn parse_graph_value(spec: GraphKeySpec, raw: &str) -> Result<TomlScalar, Config
                 ))
             }
         }
+        GraphValueKind::PositiveInteger => {
+            let value = raw
+                .parse::<u64>()
+                .map_err(|_| invalid_value(spec, raw, "a positive integer"))?;
+            if value == 0 {
+                Err(invalid_value(spec, raw, "a positive integer"))
+            } else if value <= i64::MAX as u64 {
+                Ok(TomlScalar::Integer(value as i64))
+            } else {
+                Err(invalid_value(spec, raw, "a positive integer <= i64::MAX"))
+            }
+        }
+        GraphValueKind::RerankMode => match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(TomlScalar::String("auto")),
+            "off" => Ok(TomlScalar::String("off")),
+            _ => Err(invalid_value(spec, raw, "`auto` or `off`")),
+        },
     }
 }
 
@@ -977,6 +1008,8 @@ fn item_value_for_report(item: &Item) -> String {
         value.to_string()
     } else if let Some(value) = item.as_bool() {
         value.to_string()
+    } else if let Some(value) = item.as_str() {
+        value.to_string()
     } else {
         item.type_name().to_string()
     }
@@ -994,14 +1027,15 @@ fn set_toml_value(document: &mut DocumentMut, path: &[&str], value: TomlScalar) 
         TomlScalar::Bool(value) => toml_edit::value(value),
         TomlScalar::Float(value) => toml_edit::value(value),
         TomlScalar::Integer(value) => toml_edit::value(value),
+        TomlScalar::String(value) => toml_edit::value(value),
     };
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigSurfaceOptions, ensure_config_write_path_is_regular_or_missing, get_config,
-        graph_config_keys, publish_config_temp_file, set_config, show_config,
+        ensure_config_write_path_is_regular_or_missing, get_config, graph_config_keys,
+        publish_config_temp_file, set_config, show_config, ConfigSurfaceOptions,
     };
     use std::fs;
 
@@ -1067,6 +1101,29 @@ mod tests {
     }
 
     #[test]
+    fn rerank_get_reads_defaults_with_source() -> TestResult {
+        let temp = workspace()?;
+        let mode = get_config(&options(temp.path()), "search.rerank")
+            .map_err(|error| error.to_string())?;
+        let top_k = get_config(&options(temp.path()), "search.rerank_top_k")
+            .map_err(|error| error.to_string())?;
+
+        if mode.value != "auto" {
+            return Err(format!("unexpected search.rerank: {}", mode.value));
+        }
+        if mode.source != "default" {
+            return Err(format!("unexpected rerank source: {}", mode.source));
+        }
+        if top_k.value != "50" {
+            return Err(format!("unexpected search.rerank_top_k: {}", top_k.value));
+        }
+        if top_k.source != "default" {
+            return Err(format!("unexpected rerank_top_k source: {}", top_k.source));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn search_weight_set_round_trips_supported_keys() -> TestResult {
         let temp = workspace()?;
         let samples = [
@@ -1074,6 +1131,32 @@ mod tests {
             ("search.semantic_weight", "0.05"),
             ("search.graph_weight", "0.0"),
         ];
+
+        for (key, value) in samples {
+            let report = set_config(&options(temp.path()), key, value, false)
+                .map_err(|error| format!("set {key}: {error}"))?;
+            if !report.applied && report.before.as_deref() != Some(report.value.as_str()) {
+                return Err(format!("{key} did not apply or report idempotence"));
+            }
+            let observed = get_config(&options(temp.path()), key)
+                .map_err(|error| format!("get {key}: {error}"))?;
+            if observed.value != report.value {
+                return Err(format!(
+                    "{key}: expected {}, got {}",
+                    report.value, observed.value
+                ));
+            }
+            if observed.source != "project" {
+                return Err(format!("{key}: unexpected source {}", observed.source));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rerank_set_round_trips_supported_keys() -> TestResult {
+        let temp = workspace()?;
+        let samples = [("search.rerank", "off"), ("search.rerank_top_k", "7")];
 
         for (key, value) in samples {
             let report = set_config(&options(temp.path()), key, value, false)
@@ -1113,6 +1196,36 @@ mod tests {
         } else {
             Err(format!("unexpected error: {error}"))
         }
+    }
+
+    #[test]
+    fn rerank_set_rejects_invalid_values() -> TestResult {
+        let temp = workspace()?;
+        let mode_error = match set_config(&options(temp.path()), "search.rerank", "always", false) {
+            Ok(report) => {
+                return Err(format!(
+                    "invalid rerank mode unexpectedly succeeded: {report:?}"
+                ))
+            }
+            Err(error) => error.to_string(),
+        };
+        if !mode_error.contains("`auto` or `off`") {
+            return Err(format!("unexpected rerank mode error: {mode_error}"));
+        }
+
+        let top_k_error = match set_config(&options(temp.path()), "search.rerank_top_k", "0", false)
+        {
+            Ok(report) => {
+                return Err(format!(
+                    "invalid rerank top-k unexpectedly succeeded: {report:?}"
+                ));
+            }
+            Err(error) => error.to_string(),
+        };
+        if !top_k_error.contains("positive integer") {
+            return Err(format!("unexpected rerank top-k error: {top_k_error}"));
+        }
+        Ok(())
     }
 
     #[test]

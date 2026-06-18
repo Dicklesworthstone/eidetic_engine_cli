@@ -23,9 +23,9 @@ use super::file::{
     GraphPprConfig, GraphWitnessesConfig, HandoffConfig, JournalConfig, LearnConfig,
     LearnDecayConfig, MeshCommandMode, MeshConfig, OutputRedactionConfig, PackConfig,
     PackL2CacheConfig, PolicyConfig, PrimerConfig, PrivacyConfig, ReadPoolConfig, RedactionConfig,
-    RedactionDefaultsConfig, RuntimeConfig, SearchConfig, SearchLexicalRamTierConfig, SearchSpeed,
-    SecretDetectorConfig, StorageConfig, SwarmAdaptiveConfig, SwarmConfig, TaskLensConfig,
-    TrustConfig,
+    RedactionDefaultsConfig, RuntimeConfig, SearchConfig, SearchLexicalRamTierConfig,
+    SearchRerankMode, SearchSpeed, SecretDetectorConfig, StorageConfig, SwarmAdaptiveConfig,
+    SwarmConfig, TaskLensConfig, TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -49,6 +49,8 @@ pub const SEARCH_DEFAULT_SPEED_KEY: &str = "search.default_speed";
 pub const SEARCH_LEXICAL_WEIGHT_KEY: &str = "search.lexical_weight";
 pub const SEARCH_SEMANTIC_WEIGHT_KEY: &str = "search.semantic_weight";
 pub const SEARCH_GRAPH_WEIGHT_KEY: &str = "search.graph_weight";
+pub const SEARCH_RERANK_KEY: &str = "search.rerank";
+pub const SEARCH_RERANK_TOP_K_KEY: &str = "search.rerank_top_k";
 pub const SEARCH_QUERY_MISS_RETENTION_DAYS_KEY: &str = "search.query_miss_retention_days";
 pub const SEARCH_LEXICAL_RAM_TIER_ENABLED_KEY: &str = "search.lexical_ram_tier.enabled";
 pub const SEARCH_LEXICAL_RAM_TIER_REQUEST_HUGEPAGES_KEY: &str =
@@ -348,6 +350,20 @@ impl MergedConfig {
                 SEARCH_GRAPH_WEIGHT_KEY,
                 weight.to_string(),
                 self.source(SEARCH_GRAPH_WEIGHT_KEY),
+            ));
+        }
+        if let Some(mode) = self.values.search.rerank {
+            entries.push(ConfigShowEntry::new(
+                SEARCH_RERANK_KEY,
+                mode.as_str().to_owned(),
+                self.source(SEARCH_RERANK_KEY),
+            ));
+        }
+        if let Some(top_k) = self.values.search.rerank_top_k {
+            entries.push(ConfigShowEntry::new(
+                SEARCH_RERANK_TOP_K_KEY,
+                top_k.to_string(),
+                self.source(SEARCH_RERANK_TOP_K_KEY),
             ));
         }
         if let Some(enabled) = self.values.search.lexical_ram_tier.enabled {
@@ -1027,6 +1043,8 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             lexical_weight: Some(0.45),
             semantic_weight: Some(0.45),
             graph_weight: Some(0.10),
+            rerank: Some(SearchRerankMode::Auto),
+            rerank_top_k: Some(50),
             query_miss_retention_days: Some(30),
             lexical_ram_tier: SearchLexicalRamTierConfig {
                 enabled: Some(false),
@@ -1577,6 +1595,24 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.search.graph_weight,
                 &layers.user.search.graph_weight,
                 &layers.defaults.search.graph_weight,
+            ),
+            rerank: pick_field(
+                &mut sources,
+                SEARCH_RERANK_KEY,
+                &layers.cli.search.rerank,
+                &layers.environment.search.rerank,
+                &layers.project.search.rerank,
+                &layers.user.search.rerank,
+                &layers.defaults.search.rerank,
+            ),
+            rerank_top_k: pick_field(
+                &mut sources,
+                SEARCH_RERANK_TOP_K_KEY,
+                &layers.cli.search.rerank_top_k,
+                &layers.environment.search.rerank_top_k,
+                &layers.project.search.rerank_top_k,
+                &layers.user.search.rerank_top_k,
+                &layers.defaults.search.rerank_top_k,
             ),
             query_miss_retention_days: pick_field(
                 &mut sources,
@@ -2581,9 +2617,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        CACHE_PACK_L2_DIRECTORY_KEY, CACHE_PACK_L2_ENABLED_KEY, CACHE_PACK_L2_MAX_AGE_DAYS_KEY,
-        CACHE_PACK_L2_MAX_BYTES_KEY, CURATION_SPECIFICITY_MIN_KEY, ConfigLayers, ConfigValueSource,
-        EnvironmentConfigError, GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY,
+        built_in_config, config_from_env, merge_config, ConfigLayers, ConfigValueSource,
+        EnvironmentConfigError, CACHE_PACK_L2_DIRECTORY_KEY, CACHE_PACK_L2_ENABLED_KEY,
+        CACHE_PACK_L2_MAX_AGE_DAYS_KEY, CACHE_PACK_L2_MAX_BYTES_KEY, CURATION_SPECIFICITY_MIN_KEY,
+        GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY,
         GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY, GRAPH_CURATE_ONION_DECAY_MAX_KEY,
         GRAPH_FEATURE_PPR_ENABLED_KEY, GRAPH_GOMORY_HU_SAMPLE_SIZE_KEY,
         GRAPH_GOMORY_HU_SAMPLE_THRESHOLD_KEY, GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY,
@@ -2598,12 +2635,13 @@ mod tests {
         POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY, SEARCH_DEFAULT_SPEED_KEY,
         SEARCH_LEXICAL_RAM_TIER_ENABLED_KEY, SEARCH_LEXICAL_RAM_TIER_POPULATE_ON_OPEN_KEY,
         SEARCH_LEXICAL_RAM_TIER_REQUEST_HUGEPAGES_KEY, SEARCH_QUERY_MISS_RETENTION_DAYS_KEY,
-        STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY, STORAGE_READ_POOL_ACQUIRE_TIMEOUT_MS_KEY,
+        SEARCH_RERANK_KEY, SEARCH_RERANK_TOP_K_KEY, STORAGE_DATABASE_PATH_KEY,
+        STORAGE_INDEX_DIR_KEY, STORAGE_READ_POOL_ACQUIRE_TIMEOUT_MS_KEY,
         STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY, STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY,
         STORAGE_READ_POOL_PIN_SNAPSHOT_KEY, STORAGE_READ_POOL_SIZE_KEY, SWARM_ADAPTIVE_ENABLED_KEY,
         SWARM_ADAPTIVE_NOISY_NEIGHBOR_BACKOFF_MS_KEY, SWARM_ADAPTIVE_NOISY_NEIGHBOR_P99_MS_KEY,
         SWARM_ADAPTIVE_PREFETCH_BUDGET_MS_KEY, SWARM_ADAPTIVE_PREFETCH_TOP_K_KEY,
-        SWARM_ADAPTIVE_SIMILARITY_THRESHOLD_KEY, built_in_config, config_from_env, merge_config,
+        SWARM_ADAPTIVE_SIMILARITY_THRESHOLD_KEY,
     };
     use crate::config::file::TaskLensConfig;
     use crate::config::{
@@ -2611,8 +2649,8 @@ mod tests {
         GraphFeatureFlagsConfig, GraphGomoryHuConfig, GraphHealthConfig, GraphMemoryConfig,
         GraphPprConfig, LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig, PackConfig,
         PackL2CacheConfig, PathExpander, PolicyConfig, ReadPoolConfig, SearchConfig,
-        SearchLexicalRamTierConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
-        SwarmAdaptiveConfig, SwarmConfig,
+        SearchLexicalRamTierConfig, SearchRerankMode, SearchSpeed, SecretDetectorConfig,
+        StorageConfig, SwarmAdaptiveConfig, SwarmConfig,
     };
     use crate::models::{TaskLens, TaskLensInput, TaskLensOverlay};
 
@@ -2691,6 +2729,16 @@ mod tests {
             &defaults.search.lexical_ram_tier.enabled,
             &Some(false),
             "lexical RAM tier default off",
+        )?;
+        ensure_equal(
+            &defaults.search.rerank,
+            &Some(SearchRerankMode::Auto),
+            "rerank default auto",
+        )?;
+        ensure_equal(
+            &defaults.search.rerank_top_k,
+            &Some(50),
+            "rerank top-k default",
         )?;
         ensure_equal(
             &defaults.search.lexical_ram_tier.request_hugepages,
@@ -3178,6 +3226,8 @@ mod tests {
             },
             search: SearchConfig {
                 default_speed: Some(SearchSpeed::Thorough),
+                rerank: Some(SearchRerankMode::Off),
+                rerank_top_k: Some(7),
                 query_miss_retention_days: Some(21),
                 lexical_ram_tier: SearchLexicalRamTierConfig {
                     enabled: Some(false),
@@ -3379,6 +3429,26 @@ mod tests {
             &merged.source(STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY),
             &Some(ConfigValueSource::Default),
             "read pool max pin duration source",
+        )?;
+        ensure_equal(
+            &merged.values.search.rerank,
+            &Some(SearchRerankMode::Off),
+            "project rerank mode",
+        )?;
+        ensure_equal(
+            &merged.source(SEARCH_RERANK_KEY),
+            &Some(ConfigValueSource::Project),
+            "rerank source",
+        )?;
+        ensure_equal(
+            &merged.values.search.rerank_top_k,
+            &Some(7),
+            "project rerank top-k",
+        )?;
+        ensure_equal(
+            &merged.source(SEARCH_RERANK_TOP_K_KEY),
+            &Some(ConfigValueSource::Project),
+            "rerank top-k source",
         )?;
         ensure_equal(
             &merged.values.storage.read_pool.acquire_timeout_ms,
@@ -3796,6 +3866,8 @@ mod tests {
             SEARCH_LEXICAL_RAM_TIER_ENABLED_KEY,
             SEARCH_LEXICAL_RAM_TIER_REQUEST_HUGEPAGES_KEY,
             SEARCH_LEXICAL_RAM_TIER_POPULATE_ON_OPEN_KEY,
+            SEARCH_RERANK_KEY,
+            SEARCH_RERANK_TOP_K_KEY,
         ] {
             if !keys.contains(&expected) {
                 return Err(format!("show report missing {expected}"));

@@ -4209,14 +4209,10 @@ fn build_query_assist(
     dropped_below_floor: usize,
     below_floor_candidates: &[SearchHit],
 ) -> Option<QueryAssistReport> {
-    let weak_result_reason = classify_search_query_miss(
-        kept,
-        considered,
-        floor,
-        top_score_after_floor,
-    )
-    .map(SearchQueryMissReason::as_str)
-    .or_else(|| (kept == 0).then_some("empty_results"))?;
+    let weak_result_reason =
+        classify_search_query_miss(kept, considered, floor, top_score_after_floor)
+            .map(SearchQueryMissReason::as_str)
+            .or_else(|| (kept == 0).then_some("empty_results"))?;
     let mode = if explain {
         QueryAssistMode::Explain
     } else {
@@ -4413,8 +4409,7 @@ fn query_assist_did_you_mean_json(
     hit: &SearchHit,
     output_redaction_enabled: bool,
 ) -> serde_json::Value {
-    let (provenance, provenance_redacted_patterns) =
-        hit.provenance_json(output_redaction_enabled);
+    let (provenance, provenance_redacted_patterns) = hit.provenance_json(output_redaction_enabled);
     let mut obj = serde_json::json!({
         "docId": hit.doc_id,
         "score": hit.score,
@@ -4850,10 +4845,7 @@ fn search_rerank_posture_json(
     hits: &[&SearchHit],
     degraded: &[SearchDegradation],
 ) -> serde_json::Value {
-    let rerank_score_count = hits
-        .iter()
-        .filter(|hit| hit.rerank_score.is_some())
-        .count();
+    let rerank_score_count = hits.iter().filter(|hit| hit.rerank_score.is_some()).count();
     let unavailable = degraded
         .iter()
         .find(|degradation| degradation.code == "rerank_model_unavailable");
@@ -5883,11 +5875,12 @@ pub fn run_context_search_with_preloaded_memories_and_workspace_state(
 pub fn run_similar(options: &SimilarOptions) -> Result<SimilarReport, SimilarError> {
     let database_path = options.resolve_database_path();
     let connection = DbConnection::open_file(&database_path)?;
-    let target = connection
-        .get_memory(&options.memory_id)?
-        .ok_or_else(|| SimilarError::MemoryNotFound {
-            memory_id: options.memory_id.clone(),
-        })?;
+    let target =
+        connection
+            .get_memory(&options.memory_id)?
+            .ok_or_else(|| SimilarError::MemoryNotFound {
+                memory_id: options.memory_id.clone(),
+            })?;
     let index_dir = options.resolve_index_dir();
     let mut embedding_posture =
         current_embedding_posture(&connection, &target.workspace_id, &index_dir)?;
@@ -5933,7 +5926,8 @@ pub fn run_similar(options: &SimilarOptions) -> Result<SimilarReport, SimilarErr
     )?;
     if initial_semantic_request_capable
         && !embedding_posture.semantic
-        && let Ok(updated) = current_embedding_posture(&connection, &target.workspace_id, &index_dir)
+        && let Ok(updated) =
+            current_embedding_posture(&connection, &target.workspace_id, &index_dir)
     {
         embedding_posture = updated;
     }
@@ -5973,7 +5967,11 @@ pub fn run_similar(options: &SimilarOptions) -> Result<SimilarReport, SimilarErr
     })
 }
 
-fn remove_similar_target_and_truncate(report: &mut SearchReport, target_memory_id: &str, limit: u32) {
+fn remove_similar_target_and_truncate(
+    report: &mut SearchReport,
+    target_memory_id: &str,
+    limit: u32,
+) {
     report
         .results
         .retain(|hit| hit.memory_id() != Some(target_memory_id));
@@ -5987,13 +5985,17 @@ fn remove_similar_target_and_truncate(report: &mut SearchReport, target_memory_i
 }
 
 fn sanitize_similar_target_query_degradations(report: &mut SearchReport, target_memory_id: &str) {
-    let floor = report.relevance_floor_applied.unwrap_or(DEFAULT_RELEVANCE_FLOOR);
+    let floor = report
+        .relevance_floor_applied
+        .unwrap_or(DEFAULT_RELEVANCE_FLOOR);
     for degradation in &mut report.degraded {
         if degradation.code == "no_relevant_results" {
             degradation.message = format!(
                 "No memories scored above similarity floor {floor:.4} for target memory `{target_memory_id}`."
             );
-            degradation.repair = Some("Lower --min-score or rebuild the index after adding related memories.".to_string());
+            degradation.repair = Some(
+                "Lower --min-score or rebuild the index after adding related memories.".to_string(),
+            );
         }
     }
 }
@@ -6041,12 +6043,13 @@ impl SearchRerankRuntime {
         reranker: Arc<dyn Reranker>,
         text_provider: SearchRerankTextProvider,
         model_id: String,
+        top_k: usize,
     ) -> Self {
         Self {
             reranker: Some(reranker),
             text_provider: Some(text_provider),
             model_id: Some(model_id),
-            top_k: DEFAULT_SEARCH_RERANK_TOP_K,
+            top_k,
         }
     }
 
@@ -6126,6 +6129,14 @@ fn resolve_search_rerank_runtime(
         return SearchRerankRuntime::disabled();
     }
 
+    let (configured_mode, configured_top_k) = resolve_search_rerank_config(&options.workspace_path);
+    if configured_mode == crate::config::SearchRerankMode::Off {
+        // `[search] rerank = "off"` (bd-2vq2z.23): the operator opted out of the
+        // local cross-encoder, so do not look up or load a reranker model and do
+        // not emit a `rerank_model_unavailable` degradation.
+        return SearchRerankRuntime::disabled();
+    }
+
     let database_path = options.resolve_database_path();
     let workspace_root = default_workspace_root(&options.workspace_path);
     let workspace_id = crate::core::curate::stable_workspace_id(&workspace_root);
@@ -6169,12 +6180,13 @@ fn resolve_search_rerank_runtime(
                 target: "ee::search::rerank",
                 event = "rerank_model_resolved",
                 model_id = %entry.model_name,
-                top_k = DEFAULT_SEARCH_RERANK_TOP_K,
+                top_k = configured_top_k,
             );
             SearchRerankRuntime::enabled(
                 reranker,
                 SearchRerankTextProvider::new(database_path, &options.workspace_path, options),
                 entry.model_name,
+                configured_top_k,
             )
         }
         Err(error) => {
@@ -6480,7 +6492,10 @@ fn run_search_inner_with_performance(
             let dropped = below_floor.len();
             let query_assist_visibility_start = Instant::now();
             let query_assist_candidates = query_assist_visible_candidates(options, &below_floor);
-            trace.record_elapsed("search::queryAssistVisibility", query_assist_visibility_start);
+            trace.record_elapsed(
+                "search::queryAssistVisibility",
+                query_assist_visibility_start,
+            );
             trace.record_elapsed("search::relevanceFloor", relevance_floor_start);
             let tombstone_start = Instant::now();
             let above_floor = apply_tombstone_visibility_collecting(
@@ -7025,7 +7040,10 @@ fn push_model_lifecycle_search_degradation(
     }
     // Dedup by code only: resolve_source_mode may already have pushed the same
     // code with a different message (different call path, same root cause).
-    if degraded.iter().any(|existing| existing.code == degradation.code) {
+    if degraded
+        .iter()
+        .any(|existing| existing.code == degradation.code)
+    {
         return;
     }
     degraded.push(SearchDegradation::from_model_lifecycle(&degradation));
@@ -7102,6 +7120,33 @@ fn resolve_lexical_ram_tier_config_for_search(workspace_path: &Path) -> LexicalR
             _ => None,
         },
         |_name, _raw| {},
+    )
+}
+
+/// Resolve the effective `[search] rerank` mode and candidate-pool
+/// `rerank_top_k` for `workspace_path`, defaulting to auto /
+/// [`DEFAULT_SEARCH_RERANK_TOP_K`] when config is unreadable or unset
+/// (bd-2vq2z.23). `rerank = "off"` suppresses the reranker entirely; a
+/// positive `rerank_top_k` overrides the candidate-pool collect limit.
+fn resolve_search_rerank_config(workspace_path: &Path) -> (crate::config::SearchRerankMode, usize) {
+    if let Ok(merged) = crate::core::config_surface::merged_workspace_config(workspace_path) {
+        let mode = merged
+            .values
+            .search
+            .rerank
+            .unwrap_or(crate::config::SearchRerankMode::Auto);
+        let top_k = merged
+            .values
+            .search
+            .rerank_top_k
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|&candidate| candidate > 0)
+            .unwrap_or(DEFAULT_SEARCH_RERANK_TOP_K);
+        return (mode, top_k);
+    }
+    (
+        crate::config::SearchRerankMode::Auto,
+        DEFAULT_SEARCH_RERANK_TOP_K,
     )
 }
 
@@ -7827,8 +7872,12 @@ fn configured_fusion_adjustment(
         return None;
     }
 
-    let configured_mix =
-        weighted_component_mix(weights, lexical_component, semantic_component, graph_component);
+    let configured_mix = weighted_component_mix(
+        weights,
+        lexical_component,
+        semantic_component,
+        graph_component,
+    );
     if !configured_mix.is_finite() {
         return None;
     }
@@ -8468,16 +8517,18 @@ fn search_sync_with_performance(
 
             let collect_start = Instant::now();
             let collect_limit = rerank_runtime_owned.collect_limit(limit);
-            let search_result = if let Some(text_provider) = rerank_runtime_owned.text_provider.clone()
-            {
-                searcher
-                    .search_collect_with_text(&cx, &query_owned, collect_limit, move |doc_id| {
-                        text_provider.text_for_doc(doc_id)
-                    })
-                    .await
-            } else {
-                searcher.search_collect(&cx, &query_owned, collect_limit).await
-            };
+            let search_result =
+                if let Some(text_provider) = rerank_runtime_owned.text_provider.clone() {
+                    searcher
+                        .search_collect_with_text(&cx, &query_owned, collect_limit, move |doc_id| {
+                            text_provider.text_for_doc(doc_id)
+                        })
+                        .await
+                } else {
+                    searcher
+                        .search_collect(&cx, &query_owned, collect_limit)
+                        .await
+                };
             push_search_performance_timing(
                 &async_timings,
                 "searchSync::searchCollect",
@@ -9722,7 +9773,10 @@ mod tests {
             json["targetMemoryId"],
             serde_json::json!("mem_00000000000000000000000001")
         );
-        assert_eq!(json["results"][0]["memoryId"], "mem_00000000000000000000000002");
+        assert_eq!(
+            json["results"][0]["memoryId"],
+            "mem_00000000000000000000000002"
+        );
         assert_eq!(json["results"][0]["schema"], serde_json::Value::Null);
         assert_eq!(
             json["request"]["similarityMode"],
@@ -9923,8 +9977,14 @@ mod tests {
 
         assert!(!similar.semantic_available);
         assert!(similar.lexical_fallback);
-        assert_eq!(similar.report.source_mode_requested, SearchSourceMode::SemanticOnly);
-        assert_eq!(similar.report.source_mode_applied, SearchSourceMode::LexicalOnly);
+        assert_eq!(
+            similar.report.source_mode_requested,
+            SearchSourceMode::SemanticOnly
+        );
+        assert_eq!(
+            similar.report.source_mode_applied,
+            SearchSourceMode::LexicalOnly
+        );
         assert!(similar.report.source_mode_fallback);
         assert!(
             similar
@@ -14541,11 +14601,12 @@ mod tests {
         }
         assert_eq!(ScoreSource::Reranked.score_kind(), "reranked");
         assert!(
-            (normalized_relevance_score(ScoreSource::Reranked, 0.42) - 0.42).abs()
-                < f32::EPSILON
+            (normalized_relevance_score(ScoreSource::Reranked, 0.42) - 0.42).abs() < f32::EPSILON
         );
         assert!((normalized_relevance_score(ScoreSource::Lexical, 1.5) - 1.0).abs() < f32::EPSILON);
-        assert!((normalized_relevance_score(ScoreSource::Lexical, -0.3) - 0.0).abs() < f32::EPSILON);
+        assert!(
+            (normalized_relevance_score(ScoreSource::Lexical, -0.3) - 0.0).abs() < f32::EPSILON
+        );
     }
 
     #[test]
@@ -14616,7 +14677,10 @@ mod tests {
     #[test]
     fn reranked_score_kind_is_stable() {
         assert_eq!(ScoreSource::Reranked.score_kind(), "reranked");
-        assert_eq!(synthetic_reranked_hit("mem_rerank", 0.91).score_kind(), "reranked");
+        assert_eq!(
+            synthetic_reranked_hit("mem_rerank", 0.91).score_kind(),
+            "reranked"
+        );
     }
 
     #[test]
@@ -14642,6 +14706,32 @@ mod tests {
         assert!(json["results"][0].get("rerankScore").is_some());
         assert_eq!(json["results"][1]["scoreKind"], "rrf_fused");
         assert!(json["results"][1].get("rerankScore").is_none());
+    }
+
+    #[test]
+    fn resolve_search_rerank_config_reads_off_and_top_k() {
+        // bd-2vq2z.23: `[search] rerank = "off"` + `rerank_top_k` resolve from
+        // the workspace config (not the hard-coded auto/DEFAULT).
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace = tempdir.path();
+        std::fs::create_dir_all(workspace.join(".ee")).expect("create .ee");
+        std::fs::write(
+            workspace.join(".ee").join("config.toml"),
+            "[search]\nrerank = \"off\"\nrerank_top_k = 12\n",
+        )
+        .expect("write config.toml");
+
+        let (mode, top_k) = resolve_search_rerank_config(workspace);
+        assert_eq!(mode, crate::config::SearchRerankMode::Off);
+        assert_eq!(top_k, 12);
+    }
+
+    #[test]
+    fn resolve_search_rerank_config_defaults_to_auto_when_unset() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let (mode, top_k) = resolve_search_rerank_config(tempdir.path());
+        assert_eq!(mode, crate::config::SearchRerankMode::Auto);
+        assert_eq!(top_k, DEFAULT_SEARCH_RERANK_TOP_K);
     }
 
     #[test]

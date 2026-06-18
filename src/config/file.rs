@@ -13,8 +13,8 @@ use regex_lite::Regex;
 use toml_edit::{DocumentMut, Item, Table, Value};
 
 use crate::models::{
-    MAX_WORKSPACE_TASK_LENSES, RedactionLevel, TASK_LENS_VERSION, TaskLens, TaskLensInput,
-    TaskLensOverlay, TrustClass,
+    RedactionLevel, TaskLens, TaskLensInput, TaskLensOverlay, TrustClass,
+    MAX_WORKSPACE_TASK_LENSES, TASK_LENS_VERSION,
 };
 
 use super::path::{PathExpander, PathExpansionError};
@@ -224,6 +224,8 @@ pub struct SearchConfig {
     pub lexical_weight: Option<f64>,
     pub semantic_weight: Option<f64>,
     pub graph_weight: Option<f64>,
+    pub rerank: Option<SearchRerankMode>,
+    pub rerank_top_k: Option<u64>,
     pub query_miss_retention_days: Option<u64>,
     pub lexical_ram_tier: SearchLexicalRamTierConfig,
 }
@@ -235,6 +237,8 @@ impl SearchConfig {
             lexical_weight: optional_unit_float(document, "search", "lexical_weight")?,
             semantic_weight: optional_unit_float(document, "search", "semantic_weight")?,
             graph_weight: optional_unit_float(document, "search", "graph_weight")?,
+            rerank: optional_search_rerank_mode(document, "search", "rerank")?,
+            rerank_top_k: optional_u64(document, "search", "rerank_top_k")?,
             query_miss_retention_days: optional_u64(
                 document,
                 "search",
@@ -261,6 +265,38 @@ impl SearchLexicalRamTierConfig {
             request_hugepages: optional_bool_path(document, SECTIONS, "request_hugepages")?,
             populate_on_open: optional_bool_path(document, SECTIONS, "populate_on_open")?,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchRerankMode {
+    Auto,
+    Off,
+}
+
+impl SearchRerankMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl FromStr for SearchRerankMode {
+    type Err = ConfigParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match normalized_config_enum_token(input).as_str() {
+            "auto" => Ok(Self::Auto),
+            "off" => Ok(Self::Off),
+            _ => Err(ConfigParseError::InvalidValue {
+                key: "search.rerank".to_string(),
+                value: input.to_string(),
+                message: "expected one of `auto` or `off`".to_string(),
+            }),
+        }
     }
 }
 
@@ -1727,6 +1763,17 @@ fn optional_search_speed(
     }
 }
 
+fn optional_search_rerank_mode(
+    document: &DocumentMut,
+    section: &str,
+    key: &str,
+) -> Result<Option<SearchRerankMode>, ConfigParseError> {
+    match optional_string(document, section, key)? {
+        Some(value) => value.parse().map(Some),
+        None => Ok(None),
+    }
+}
+
 fn optional_mesh_command_mode(
     document: &DocumentMut,
     section: &str,
@@ -2341,8 +2388,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        ConfigFile, ConfigParseError, MeshCommandMode, MeshLane, MeshLaneDecision,
-        MeshRedactionDecision, MeshTrustLane, PathExpander, SearchSpeed, optional_string_array,
+        optional_string_array, ConfigFile, ConfigParseError, MeshCommandMode, MeshLane,
+        MeshLaneDecision, MeshRedactionDecision, MeshTrustLane, PathExpander, SearchSpeed,
     };
     use crate::models::{RedactionLevel, TrustClass};
 

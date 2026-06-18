@@ -24,12 +24,13 @@
 //! config to these cores in the follow-on leaves.
 
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::config::merge::{
     ConfigValueSource, MESH_ENABLED_KEY, PACK_DEFAULT_MAX_TOKENS_KEY, PACK_MMR_LAMBDA_KEY,
     SEARCH_DEFAULT_SPEED_KEY, SEARCH_GRAPH_WEIGHT_KEY, SEARCH_LEXICAL_WEIGHT_KEY,
-    SEARCH_SEMANTIC_WEIGHT_KEY, STORAGE_DATABASE_PATH_KEY,
+    SEARCH_RERANK_KEY, SEARCH_RERANK_TOP_K_KEY, SEARCH_SEMANTIC_WEIGHT_KEY,
+    STORAGE_DATABASE_PATH_KEY,
 };
 
 /// Schema identifier for the config-explain block.
@@ -136,6 +137,22 @@ pub fn config_knobs() -> &'static [ConfigKnob] {
             category: "search",
             effect: "Fusion weight applied to the lexical (BM25/FTS) tier when combining ranked result lists.",
             valid_range: "0.0 ..= 1.0",
+            status: ConfigRuntimeStatus::Active,
+            caveat: None,
+        },
+        ConfigKnob {
+            key: SEARCH_RERANK_KEY,
+            category: "search",
+            effect: "Controls whether the local reranker is auto-used when an available model is registered, or fully disabled before model lookup.",
+            valid_range: "auto | off",
+            status: ConfigRuntimeStatus::Active,
+            caveat: None,
+        },
+        ConfigKnob {
+            key: SEARCH_RERANK_TOP_K_KEY,
+            category: "search",
+            effect: "Candidate pool size collected for reranking before truncating to the requested search limit.",
+            valid_range: "positive integer",
             status: ConfigRuntimeStatus::Active,
             caveat: None,
         },
@@ -426,6 +443,25 @@ mod tests {
     }
 
     #[test]
+    fn rerank_knobs_are_active_and_specific() {
+        let mode = knob_for_key(SEARCH_RERANK_KEY).expect("search.rerank is covered");
+        assert_eq!(mode.status, ConfigRuntimeStatus::Active);
+        assert_eq!(mode.valid_range, "auto | off");
+        assert!(
+            mode.effect.contains("disabled before model lookup"),
+            "rerank mode must document that off suppresses lookup"
+        );
+
+        let top_k = knob_for_key(SEARCH_RERANK_TOP_K_KEY).expect("rerank_top_k is covered");
+        assert_eq!(top_k.status, ConfigRuntimeStatus::Active);
+        assert_eq!(top_k.valid_range, "positive integer");
+        assert!(
+            top_k.effect.contains("Candidate pool size"),
+            "rerank_top_k must describe the collect-limit effect"
+        );
+    }
+
+    #[test]
     fn explain_reports_effect_value_and_source_layer() {
         let explanation = explain(
             SEARCH_SEMANTIC_WEIGHT_KEY,
@@ -472,7 +508,9 @@ mod tests {
         assert_eq!(value["effectiveValue"], Value::Null);
         assert_eq!(value["sourceLayer"], "unknown");
         assert!(
-            value["effect"].as_str().is_some_and(|text| !text.is_empty()),
+            value["effect"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
             "effect must be populated for human-facing explain output"
         );
         assert!(
@@ -577,7 +615,9 @@ mod tests {
             "findings for other keys/env vars must not leak into this key"
         );
         assert_eq!(
-            unrelated.data_json()["lintFindings"].as_array().map(Vec::len),
+            unrelated.data_json()["lintFindings"]
+                .as_array()
+                .map(Vec::len),
             Some(0)
         );
     }

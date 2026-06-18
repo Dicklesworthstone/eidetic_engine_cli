@@ -11,7 +11,7 @@ pub mod path_resolver;
 pub mod workspace;
 
 pub use env_registry::{
-    EmbeddingTrapEnvVar, EnvVar, is_set as env_var_is_set, read as read_env_var,
+    is_set as env_var_is_set, read as read_env_var, EmbeddingTrapEnvVar, EnvVar,
 };
 pub use env_registry::{read_or_default as read_env_var_or_default, read_os as read_env_var_os};
 pub use file::{
@@ -24,15 +24,16 @@ pub use file::{
     MeshRedactionDecision, MeshRedactionPolicyConfig, MeshTrustLane, OutputRedactionConfig,
     PackConfig, PackL2CacheConfig, PolicyConfig, PrimerConfig, PrivacyConfig, ReadPoolConfig,
     RedactionConfig, RedactionDefaultsConfig, RuntimeConfig, SearchConfig,
-    SearchLexicalRamTierConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
+    SearchLexicalRamTierConfig, SearchRerankMode, SearchSpeed, SecretDetectorConfig, StorageConfig,
     SwarmAdaptiveConfig, SwarmConfig, TrustConfig,
 };
 pub use merge::{
+    built_in_config, config_from_env, merge_config, ConfigLayers, ConfigShowEntry,
+    ConfigShowReport, ConfigValueSource, EnvironmentConfigError, MergedConfig,
     CACHE_PACK_L2_DIRECTORY_KEY, CACHE_PACK_L2_ENABLED_KEY, CACHE_PACK_L2_MAX_AGE_DAYS_KEY,
     CACHE_PACK_L2_MAX_BYTES_KEY, CASS_BINARY_KEY, CASS_ENABLED_KEY, CASS_SINCE_KEY,
     CURATION_DECAY_HALF_LIFE_DAYS_KEY, CURATION_DUPLICATE_SIMILARITY_KEY,
-    CURATION_HARMFUL_WEIGHT_KEY, ConfigLayers, ConfigShowEntry, ConfigShowReport,
-    ConfigValueSource, EnvironmentConfigError, FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY,
+    CURATION_HARMFUL_WEIGHT_KEY, FEEDBACK_HARMFUL_BURST_WINDOW_SECONDS_KEY,
     FEEDBACK_HARMFUL_PER_SOURCE_PER_HOUR_KEY, GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY,
     GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY, GRAPH_CURATE_ONION_DECAY_MAX_KEY,
     GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY, GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY,
@@ -52,35 +53,35 @@ pub use merge::{
     LEARN_DECAY_FORGET_THRESHOLD_KEY, LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY,
     LEARN_DECAY_SEMANTIC_FACT_HALF_LIFE_DAYS_KEY, LEARN_DECAY_WORKING_HALF_LIFE_DAYS_KEY,
     MESH_COMMAND_MODE_KEY, MESH_ENABLED_KEY, MESH_PEER_GROUP_BINDINGS_KEY, MESH_PEER_POLICIES_KEY,
-    MergedConfig, PACK_CANDIDATE_POOL_KEY, PACK_DEFAULT_FORMAT_KEY, PACK_DEFAULT_MAX_TOKENS_KEY,
+    PACK_CANDIDATE_POOL_KEY, PACK_DEFAULT_FORMAT_KEY, PACK_DEFAULT_MAX_TOKENS_KEY,
     PACK_DEFAULT_PROFILE_KEY, PACK_MMR_LAMBDA_KEY, POLICY_OUTPUT_REDACTION_ENABLED_KEY,
     POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY, POLICY_SECRET_DETECTOR_ALLOW_REGEX_KEY,
-    PRIVACY_REDACT_SECRETS_KEY, PRIVACY_REDACTION_CLASSES_KEY, RUNTIME_DAEMON_KEY,
+    PRIVACY_REDACTION_CLASSES_KEY, PRIVACY_REDACT_SECRETS_KEY, RUNTIME_DAEMON_KEY,
     RUNTIME_IMPORT_BATCH_SIZE_KEY, RUNTIME_JOB_BUDGET_MS_KEY, SEARCH_DEFAULT_SPEED_KEY,
     SEARCH_GRAPH_WEIGHT_KEY, SEARCH_LEXICAL_RAM_TIER_ENABLED_KEY,
     SEARCH_LEXICAL_RAM_TIER_POPULATE_ON_OPEN_KEY, SEARCH_LEXICAL_RAM_TIER_REQUEST_HUGEPAGES_KEY,
-    SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_QUERY_MISS_RETENTION_DAYS_KEY, SEARCH_SEMANTIC_WEIGHT_KEY,
-    STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY, STORAGE_JSONL_EXPORT_KEY,
-    STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY, STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY,
-    STORAGE_READ_POOL_PIN_SNAPSHOT_KEY, STORAGE_READ_POOL_SIZE_KEY, SWARM_ADAPTIVE_ENABLED_KEY,
+    SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_QUERY_MISS_RETENTION_DAYS_KEY, SEARCH_RERANK_KEY,
+    SEARCH_RERANK_TOP_K_KEY, SEARCH_SEMANTIC_WEIGHT_KEY, STORAGE_DATABASE_PATH_KEY,
+    STORAGE_INDEX_DIR_KEY, STORAGE_JSONL_EXPORT_KEY, STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY,
+    STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY, STORAGE_READ_POOL_PIN_SNAPSHOT_KEY,
+    STORAGE_READ_POOL_SIZE_KEY, SWARM_ADAPTIVE_ENABLED_KEY,
     SWARM_ADAPTIVE_NOISY_NEIGHBOR_BACKOFF_MS_KEY, SWARM_ADAPTIVE_NOISY_NEIGHBOR_P99_MS_KEY,
     SWARM_ADAPTIVE_PREFETCH_BUDGET_MS_KEY, SWARM_ADAPTIVE_PREFETCH_TOP_K_KEY,
     SWARM_ADAPTIVE_SIMILARITY_THRESHOLD_KEY, TRUST_DEFAULT_CLASS_KEY,
-    TRUST_PROMPT_INJECTION_GUARD_KEY, TRUST_TEAM_MEMBERS_KEY, built_in_config, config_from_env,
-    merge_config,
+    TRUST_PROMPT_INJECTION_GUARD_KEY, TRUST_TEAM_MEMBERS_KEY,
 };
 pub use path::{PathExpander, PathExpansionError};
 pub use path_resolver::{
-    PlatformDataDirError, UNIX_XDG_DATA_UNAVAILABLE_CODE, WINDOWS_APPDATA_UNAVAILABLE_CODE,
     resolve_dir_unix_xdg, resolve_dir_windows_appdata, resolve_dir_windows_localappdata,
+    PlatformDataDirError, UNIX_XDG_DATA_UNAVAILABLE_CODE, WINDOWS_APPDATA_UNAVAILABLE_CODE,
 };
 pub use workspace::{
-    WORKSPACE_ENV_VAR, WORKSPACE_MARKER, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity,
-    WorkspaceError, WorkspaceLocation, WorkspaceResolution, WorkspaceResolutionMode,
-    WorkspaceResolutionRequest, WorkspaceResolutionSource, WorkspaceScope, WorkspaceScopeKind,
     derive_workspace_scope, diagnose_workspace_resolution, discover, discover_all,
     discover_from_current_dir, resolve_workspace, workspace_fingerprint,
-    workspace_scope_from_repository_root,
+    workspace_scope_from_repository_root, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity,
+    WorkspaceError, WorkspaceLocation, WorkspaceResolution, WorkspaceResolutionMode,
+    WorkspaceResolutionRequest, WorkspaceResolutionSource, WorkspaceScope, WorkspaceScopeKind,
+    WORKSPACE_ENV_VAR, WORKSPACE_MARKER,
 };
 
 pub const SUBSYSTEM: &str = "config";
@@ -300,9 +301,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        RedactionDefaultSurface, first_existing_config_symlink_component,
-        open_workspace_config_file_for_read, subsystem_name, trace_minhash_rank_centrality_config,
-        workspace_output_redaction_enabled, workspace_redaction_default,
+        first_existing_config_symlink_component, open_workspace_config_file_for_read,
+        subsystem_name, trace_minhash_rank_centrality_config, workspace_output_redaction_enabled,
+        workspace_redaction_default, RedactionDefaultSurface,
     };
     use crate::models::RedactionLevel;
 
