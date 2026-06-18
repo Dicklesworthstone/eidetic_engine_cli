@@ -266,6 +266,87 @@ fn search_hit_fields_are_camel_case_when_populated() -> TestResult {
 }
 
 #[test]
+fn search_report_data_json_exposes_rerank_posture_contract() -> TestResult {
+    let report = SearchReport {
+        status: SearchStatus::Success,
+        query: "rerank contract".to_string(),
+        requested_limit: 5,
+        results: vec![SearchHit {
+            doc_id: "mem_reranked".to_string(),
+            score: 0.91,
+            source: ScoreSource::Reranked,
+            fast_score: Some(0.72),
+            quality_score: Some(0.83),
+            lexical_score: Some(0.41),
+            rerank_score: Some(0.91),
+            metadata: None,
+            explanation: None,
+        }],
+        elapsed_ms: 2.0,
+        errors: Vec::new(),
+        degraded: Vec::new(),
+        runtime_profile: test_runtime_profile(),
+        relevance_floor_applied: None,
+        candidates_below_floor: 0,
+        query_assist: None,
+        source_mode_requested: SearchSourceMode::Hybrid,
+        source_mode_applied: SearchSourceMode::Hybrid,
+        source_mode_fallback: false,
+        strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+    };
+
+    let json = report.data_json();
+    let rerank = json
+        .get("rerank")
+        .ok_or_else(|| "search report missing rerank posture block".to_string())?;
+
+    ensure(
+        rerank.get("schema").and_then(Value::as_str) == Some("ee.rerank_posture.v1"),
+        "rerank.schema should be ee.rerank_posture.v1",
+    )?;
+    ensure(
+        rerank.get("mode").and_then(Value::as_str) == Some("reranked"),
+        "rerank.mode should report reranked when rerankScore is present",
+    )?;
+    ensure(
+        rerank.get("scoreKind").and_then(Value::as_str) == Some("reranked"),
+        "rerank.scoreKind should report reranked",
+    )?;
+    ensure(
+        rerank.get("available").and_then(Value::as_bool) == Some(true),
+        "rerank.available should be true for reranked hits",
+    )?;
+    ensure(
+        rerank.get("rerankScoreCount").and_then(Value::as_u64) == Some(1),
+        "rerank.rerankScoreCount should count reranked hits",
+    )?;
+    ensure(
+        json.pointer("/metrics/sourceCounts/reranked")
+            .and_then(Value::as_u64)
+            == Some(1),
+        "metrics.sourceCounts.reranked should count reranked hits",
+    )?;
+    ensure(
+        json.pointer("/metrics/fieldCoverage/rerankScoreCount")
+            .and_then(Value::as_u64)
+            == Some(1),
+        "metrics.fieldCoverage.rerankScoreCount should count rerank scores",
+    )?;
+
+    for field in ["rerank_score_count", "score_kind", "degraded_code"] {
+        reject_field(rerank, field, "search.rerank")?;
+    }
+    if let Some(bad_key) = contains_snake_case_key(&json, "search") {
+        return Err(format!("snake_case key found: {bad_key}"));
+    }
+
+    Ok(())
+}
+
+#[test]
 fn field_naming_contract_is_stable() -> TestResult {
     // This test documents the expected camelCase field names for search output.
     // If these assertions fail, the field naming contract has drifted.
@@ -279,6 +360,7 @@ fn field_naming_contract_is_stable() -> TestResult {
         "request",
         "scopeStats",
         "metrics",
+        "rerank",
         "errors",
     ];
 
@@ -308,6 +390,16 @@ fn field_naming_contract_is_stable() -> TestResult {
         "strictSourceMode",
         "memoryScope",
         "strictScope",
+    ];
+    let expected_rerank_fields = [
+        "schema",
+        "mode",
+        "configured",
+        "topK",
+        "rerankScoreCount",
+        "scoreKind",
+        "available",
+        "degradedCode",
     ];
 
     let expected_scope_stats_fields = [
@@ -355,6 +447,7 @@ fn field_naming_contract_is_stable() -> TestResult {
         "memory_scope",
         "strict_scope",
     ];
+    let forbidden_rerank_fields = ["top_k", "rerank_score_count", "score_kind", "degraded_code"];
     let forbidden_scope_stats_fields = [
         "scope_applied",
         "strict_scope",
@@ -467,6 +560,17 @@ fn field_naming_contract_is_stable() -> TestResult {
     }
     for field in forbidden_metrics_fields {
         reject_field(metrics, field, "search.metrics")?;
+    }
+
+    let rerank = &json["rerank"];
+    for field in expected_rerank_fields {
+        ensure(
+            rerank.get(field).is_some(),
+            format!("rerank missing expected field: {field}"),
+        )?;
+    }
+    for field in forbidden_rerank_fields {
+        reject_field(rerank, field, "search.rerank")?;
     }
 
     let scope_stats = &json["scopeStats"];
