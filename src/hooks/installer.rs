@@ -2389,7 +2389,7 @@ print(json.dumps(payload, separators=(",", ":")))
 }
 
 fn session_end_capture_python() -> &'static str {
-    r#"import hashlib, json, os, subprocess, sys
+    r####"import hashlib, json, os, subprocess, sys
 ee = sys.argv[1]
 SCHEMA = "ee.ambient_context.v1"
 SURFACE = "session_end_capture_suggest"
@@ -2477,7 +2477,7 @@ header = f"<!-- ee ambient_context schema={SCHEMA} surface={SURFACE} maxSuggesti
 event = data.get("hook_event_name") or data.get("hookEventName") or "SessionEnd"
 payload = {"hookSpecificOutput": {"hookEventName": event, "additionalContext": header + "\n" + text}}
 print(json.dumps(payload, separators=(",", ":")))
-"#
+"####
 }
 
 fn pre_bash_preflight_python() -> &'static str {
