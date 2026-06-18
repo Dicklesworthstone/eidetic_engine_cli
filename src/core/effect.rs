@@ -1289,6 +1289,10 @@ impl EffectManifest {
                 "Preview a resource admission decision from explicit inputs",
             ),
             CommandEffect::read_only_db("diag plan-cache", "Inspect plan-cache diagnostics"),
+            CommandEffect::read_only_db(
+                "diag provenance",
+                "Inspect live provenance freshness diagnostics",
+            ),
             CommandEffect::read_only_db("diag quarantine list", "List quarantine entries"),
             CommandEffect::read_only_db("diag quarantine show", "Show single quarantine entry"),
             CommandEffect::read_only_db("diag search", "Inspect search diagnostics"),
@@ -1664,6 +1668,10 @@ impl EffectManifest {
             CommandEffect::read_only_db(
                 "timeline",
                 "Reconstruct read-only memory state for a topic at a historical timestamp",
+            ),
+            CommandEffect::read_only_db(
+                "trust report",
+                "Audit confidence calibration and outcome-backed reliability",
             ),
             CommandEffect::read_only_db("tripwire list", "List persisted tripwire rules"),
             CommandEffect::read_only("update", "Plan update without mutation"),
@@ -3580,6 +3588,8 @@ mod tests {
             "db status",
             "audit timeline",
             "curate candidates",
+            "diag provenance",
+            "trust report",
             "swarm brief",
         ];
 
