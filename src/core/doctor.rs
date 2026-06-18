@@ -112,6 +112,23 @@ impl CheckSeverity {
     }
 }
 
+/// Whether a doctor check participates in the top-line memory health verdict.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckTier {
+    Core,
+    Advisory,
+}
+
+impl CheckTier {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Advisory => "advisory",
+        }
+    }
+}
+
 /// Three-state aggregate posture for `ee doctor` / `ee status`.
 ///
 /// Bead bd-17c65.5.1 (E1). Replaces the boolean `healthy` field that
@@ -121,16 +138,19 @@ impl CheckSeverity {
 /// continue; new consumers should read `posture`).
 ///
 /// Aggregation rule (`Posture::from_checks`):
-/// - any check `severity == Error` (critical) → [`Posture::Blocked`]
-/// - any check `severity == Warning` (and not marked transient) →
+/// - any core check `severity == Error` (critical) → [`Posture::Blocked`]
+/// - any core check `severity == Warning` (and not marked transient) →
 ///   [`Posture::DegradedRecoverable`]
 /// - else → [`Posture::Ok`]
+///
+/// Advisory checks remain visible in `checks[]` but do not drive the top-line
+/// memory-recall verdict. They cover operator ergonomics and optional
+/// subsystem posture such as PATH shadowing.
 ///
 /// Transient warnings (e.g. an index that is 100ms behind writes and
 /// resolves itself on the next sync) are marked at the check site;
 /// they DO NOT downgrade the aggregate posture below `ok`. The check
-/// remains visible in `checks[]` with `severity: "info"` and
-/// `transient: true` for diagnostic readers.
+/// remains visible in `checks[]` for diagnostic readers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Posture {
     /// Every check is `ok` (or `info` with `transient: true`).
@@ -166,6 +186,9 @@ impl Posture {
     ) -> Self {
         let mut any_warning = false;
         for check in checks {
+            if check.tier == CheckTier::Advisory {
+                continue;
+            }
             match check.severity {
                 CheckSeverity::Error => return Self::Blocked,
                 CheckSeverity::Warning => {
@@ -193,6 +216,7 @@ pub struct CheckResult {
     pub message: String,
     pub error_code: Option<ErrorCode>,
     pub repair: Option<&'static str>,
+    pub tier: CheckTier,
 }
 
 impl CheckResult {
@@ -204,6 +228,7 @@ impl CheckResult {
             message: message.into(),
             error_code: None,
             repair: None,
+            tier: CheckTier::Core,
         }
     }
 
@@ -215,6 +240,7 @@ impl CheckResult {
             message: message.into(),
             error_code: Some(error_code),
             repair: error_code.default_repair,
+            tier: CheckTier::Core,
         }
     }
 
@@ -226,7 +252,19 @@ impl CheckResult {
             message: message.into(),
             error_code: Some(error_code),
             repair: error_code.default_repair,
+            tier: CheckTier::Core,
         }
+    }
+
+    #[must_use]
+    pub fn advisory(mut self) -> Self {
+        self.tier = CheckTier::Advisory;
+        self
+    }
+
+    #[must_use]
+    pub fn is_topline_healthy(&self) -> bool {
+        self.tier == CheckTier::Advisory || self.severity.is_healthy()
     }
 }
 
@@ -284,6 +322,7 @@ impl DoctorReport {
         let flight_recorder = gather_flight_recorder_status(workspace_path);
         let checks = vec![
             check_runtime(),
+            check_ee_install_path(),
             check_workspace(workspace_path),
             check_database(workspace_path),
             check_shard_fanout(workspace_path),
@@ -297,7 +336,7 @@ impl DoctorReport {
             check_cass(),
         ];
 
-        let overall_healthy = checks.iter().all(|c| c.severity.is_healthy());
+        let overall_healthy = checks.iter().all(CheckResult::is_topline_healthy);
         // E1: aggregate into three-state posture. For now no transient
         // predicate (the existing severity calibration already moves
         // truly transient signals to `Ok`); future bead E2 / E3 can
@@ -2546,6 +2585,140 @@ fn check_runtime() -> CheckResult {
     }
 }
 
+fn check_ee_install_path() -> CheckResult {
+    let options = super::install::InstallCheckOptions {
+        offline: true,
+        ..Default::default()
+    };
+    let report = super::install::check_install(&options);
+    ee_install_path_check_from_report(&report)
+}
+
+fn ee_install_path_check_from_report(report: &crate::models::InstallCheckReport) -> CheckResult {
+    let findings = report
+        .findings
+        .iter()
+        .filter(|finding| ee_install_path_finding_is_doctor_advisory(finding.code))
+        .collect::<Vec<_>>();
+
+    if findings.is_empty() {
+        return CheckResult::ok(
+            "ee_install_path",
+            format!(
+                "ee install posture is advisory-only and local: {}, PATH status {}, no shadowed or stale ee binary detected.",
+                ee_install_path_version_summary(report),
+                report.path.status.as_str()
+            ),
+        )
+        .advisory();
+    }
+
+    let finding_summary = findings
+        .iter()
+        .take(3)
+        .map(|finding| format!("{}: {}", finding.code.as_str(), finding.message))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let omitted = findings.len().saturating_sub(3);
+    let finding_summary = if omitted == 0 {
+        finding_summary
+    } else {
+        format!("{finding_summary}; {omitted} additional install advisory finding(s) omitted")
+    };
+
+    CheckResult {
+        name: "ee_install_path",
+        severity: CheckSeverity::Warning,
+        message: format!(
+            "Advisory-only ee install posture needs attention: {finding_summary}. {}; PATH status {}; {}. This check uses only local PATH/source evidence and performs no network lookup.",
+            ee_install_path_version_summary(report),
+            report.path.status.as_str(),
+            ee_install_path_binary_summary(report)
+        ),
+        error_code: None,
+        repair: Some(
+            "Run `ee install check --json --offline` and fix PATH ordering or adopt a verified release artifact; do not use local Cargo.",
+        ),
+        tier: CheckTier::Advisory,
+    }
+}
+
+fn ee_install_path_finding_is_doctor_advisory(code: crate::models::InstallFindingCode) -> bool {
+    use crate::models::InstallFindingCode;
+    matches!(
+        code,
+        InstallFindingCode::BinaryNotOnPath
+            | InstallFindingCode::CurrentBinaryShadowed
+            | InstallFindingCode::DuplicatePathBinary
+            | InstallFindingCode::InstalledBinaryStale
+            | InstallFindingCode::InstalledVersionUnknown
+            | InstallFindingCode::PathBinaryVersionMismatch
+    )
+}
+
+fn ee_install_path_binary_summary(report: &crate::models::InstallCheckReport) -> String {
+    if report.path.binaries.is_empty() {
+        return "No ee binary was found on PATH".to_owned();
+    }
+
+    let rendered = report
+        .path
+        .binaries
+        .iter()
+        .take(4)
+        .map(|binary| {
+            let version = binary.version.as_deref().map_or_else(
+                || {
+                    format!(
+                        "version {}",
+                        binary.version_status.as_deref().unwrap_or("unknown")
+                    )
+                },
+                |version| format!("version {version}"),
+            );
+            let current = if binary.is_current_binary {
+                ", current process"
+            } else {
+                ""
+            };
+            format!("#{} {} ({version}{current})", binary.ordinal, binary.path)
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let omitted = report.path.binaries.len().saturating_sub(4);
+    if omitted == 0 {
+        format!("PATH ee binaries: {rendered}")
+    } else {
+        format!(
+            "PATH ee binaries: {rendered}; {omitted} additional PATH ee binary/binaries omitted"
+        )
+    }
+}
+
+fn ee_install_path_version_summary(report: &crate::models::InstallCheckReport) -> String {
+    let source = &report.freshness.source_version;
+    let installed = &report.freshness.installed_version;
+    format!(
+        "running version {}; local source version {} via {}{}; installed/current version {} via {}{}; freshness {}",
+        report.version,
+        source.version.as_deref().unwrap_or("unknown"),
+        source.source,
+        source
+            .path
+            .as_deref()
+            .map(|path| format!(" at {path}"))
+            .unwrap_or_default(),
+        installed.version.as_deref().unwrap_or("unknown"),
+        installed.source,
+        installed
+            .path
+            .as_deref()
+            .map(|path| format!(" at {path}"))
+            .unwrap_or_default(),
+        report.freshness.verdict.as_str()
+    )
+}
+
 fn check_workspace(workspace_path: Option<&Path>) -> CheckResult {
     let Some(workspace_path) = workspace_path else {
         return CheckResult::warning(
@@ -2790,6 +2963,7 @@ fn lexical_ram_tier_check_from_result(result: &LexicalRamTierResult) -> CheckRes
         repair: Some(
             "Inspect `ee status --json` search.lexicalRamTier and lexical RAM-tier env/config.",
         ),
+        tier: CheckTier::Core,
     }
 }
 
@@ -2864,6 +3038,7 @@ fn graph_numa_pin_check_from_result(result: &NumaPinResult) -> CheckResult {
         ),
         error_code: None,
         repair: Some("Inspect `ee status --json` graph.numaPin and graph NUMA env/config."),
+        tier: CheckTier::Core,
     }
 }
 
@@ -2903,6 +3078,7 @@ fn check_daemon_socket_reachable_at(socket_path: &Path) -> CheckResult {
                     ),
                     error_code: None,
                     repair: Some("Inspect `ee daemon status --json` and restart the daemon."),
+                    tier: CheckTier::Core,
                 };
             }
 
@@ -2923,6 +3099,7 @@ fn check_daemon_socket_reachable_at(socket_path: &Path) -> CheckResult {
                     ),
                     error_code: None,
                     repair: Some("Inspect `ee daemon status --json` and restart the daemon."),
+                    tier: CheckTier::Core,
                 },
             }
         }
@@ -2944,6 +3121,7 @@ fn check_daemon_socket_reachable_at(socket_path: &Path) -> CheckResult {
             repair: Some(
                 "Inspect `ee daemon status --json` and the daemon socket parent directory.",
             ),
+            tier: CheckTier::Core,
         },
     }
 }
@@ -3018,6 +3196,7 @@ fn check_rch_worker_pressure(report: &RchWorkerPressureReport) -> CheckResult {
             ),
             error_code: None,
             repair: Some("rch status --workers --jobs --json"),
+            tier: CheckTier::Core,
         },
         "pressure_policy_denied" => CheckResult {
             name: "rch_worker_pressure",
@@ -3025,6 +3204,7 @@ fn check_rch_worker_pressure(report: &RchWorkerPressureReport) -> CheckResult {
             message: "RCH worker admission was denied by pressure policy.".to_string(),
             error_code: None,
             repair: Some("rch status --workers --jobs --json"),
+            tier: CheckTier::Core,
         },
         "telemetry_stale" => CheckResult {
             name: "rch_worker_pressure",
@@ -3035,6 +3215,7 @@ fn check_rch_worker_pressure(report: &RchWorkerPressureReport) -> CheckResult {
             ),
             error_code: None,
             repair: Some("rch status --workers --jobs --json"),
+            tier: CheckTier::Core,
         },
         "pressure_degraded" => CheckResult {
             name: "rch_worker_pressure",
@@ -3045,6 +3226,7 @@ fn check_rch_worker_pressure(report: &RchWorkerPressureReport) -> CheckResult {
             ),
             error_code: None,
             repair: Some("rch status --workers --jobs --json"),
+            tier: CheckTier::Core,
         },
         _ => CheckResult {
             name: "rch_worker_pressure",
@@ -3055,6 +3237,7 @@ fn check_rch_worker_pressure(report: &RchWorkerPressureReport) -> CheckResult {
             ),
             error_code: None,
             repair: Some("rch status --workers --jobs --json"),
+            tier: CheckTier::Core,
         },
     }
 }
@@ -3070,6 +3253,7 @@ fn check_rch_verify_ledger(report: &RchVerifyLedgerStatusReport) -> CheckResult 
             ),
             error_code: None,
             repair: Some("ee verify rch blockers --workspace . --json"),
+            tier: CheckTier::Core,
         },
         "clear" => CheckResult::ok(
             "verification_ledger",
@@ -3088,6 +3272,7 @@ fn check_rch_verify_ledger(report: &RchVerifyLedgerStatusReport) -> CheckResult 
             ),
             error_code: None,
             repair: Some("ee doctor --workspace . --json"),
+            tier: CheckTier::Core,
         },
     }
 }
@@ -3418,6 +3603,12 @@ pub const DEPENDENCY_CONTRACT_ENTRIES: &[DependencyContractEntry] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{
+        CurrentBinary, InstallCheckReport, InstallFinding, InstallFindingCode,
+        InstallFreshnessReport, InstallFreshnessVerdict, InstallPathAnalysis, InstallPathStatus,
+        InstallPermissionCheck, InstallPermissionStatus, InstallTarget, InstallVersionEvidence,
+        PathBinary, UpdateSourcePosture,
+    };
 
     type TestResult = Result<(), String>;
     const TEST_WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
@@ -3428,6 +3619,133 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn install_report_with_shadowed_path() -> InstallCheckReport {
+        InstallCheckReport {
+            command: "install check".to_owned(),
+            schema: crate::models::INSTALL_CHECK_SCHEMA_V1.to_owned(),
+            version: "0.12.0".to_owned(),
+            current_binary: CurrentBinary {
+                path: Some("/Users/alice/.local/bin/ee".to_owned()),
+                version: "0.12.0".to_owned(),
+                source: "running_process".to_owned(),
+            },
+            target: InstallTarget {
+                target_triple: "x86_64-pc-windows-msvc".to_owned(),
+                supported: true,
+                binary_name: "ee".to_owned(),
+                executable_name: "ee.exe".to_owned(),
+                install_dir: "/Users/alice/.local/bin".to_owned(),
+                install_path: "/Users/alice/.local/bin/ee".to_owned(),
+            },
+            path: InstallPathAnalysis {
+                status: InstallPathStatus::Duplicate,
+                path_entries: vec![
+                    "/opt/old-ee".to_owned(),
+                    "/Users/alice/.local/bin".to_owned(),
+                ],
+                binaries: vec![
+                    PathBinary {
+                        path: "/opt/old-ee/ee".to_owned(),
+                        ordinal: 0,
+                        is_current_binary: false,
+                        version: Some("0.5.0".to_owned()),
+                        version_status: Some("reported".to_owned()),
+                    },
+                    PathBinary {
+                        path: "/Users/alice/.local/bin/ee".to_owned(),
+                        ordinal: 1,
+                        is_current_binary: true,
+                        version: Some("0.12.0".to_owned()),
+                        version_status: Some("reported".to_owned()),
+                    },
+                ],
+                first_binary: Some("/opt/old-ee/ee".to_owned()),
+                current_binary_on_path: true,
+                duplicate_count: 2,
+            },
+            permissions: InstallPermissionCheck {
+                status: InstallPermissionStatus::Writable,
+                install_dir: "/Users/alice/.local/bin".to_owned(),
+                target_path: "/Users/alice/.local/bin/ee".to_owned(),
+                exists: true,
+                writable: true,
+            },
+            update_source: UpdateSourcePosture {
+                configured: false,
+                offline: true,
+                source: None,
+                status: "offline_no_manifest".to_owned(),
+            },
+            freshness: InstallFreshnessReport {
+                schema: crate::models::INSTALL_FRESHNESS_SCHEMA_V1.to_owned(),
+                verdict: InstallFreshnessVerdict::ShadowedBinary,
+                authoritative: false,
+                comparison: "equal".to_owned(),
+                source_version: InstallVersionEvidence {
+                    version: Some("0.12.0".to_owned()),
+                    source: "cargo_toml".to_owned(),
+                    status: "ok".to_owned(),
+                    path: Some("/repo/Cargo.toml".to_owned()),
+                    path_class: Some("host_local_path".to_owned()),
+                },
+                installed_version: InstallVersionEvidence {
+                    version: Some("0.12.0".to_owned()),
+                    source: "current_binary".to_owned(),
+                    status: "ok".to_owned(),
+                    path: Some("/Users/alice/.local/bin/ee".to_owned()),
+                    path_class: Some("host_local_path".to_owned()),
+                },
+                path_status: InstallPathStatus::Duplicate,
+                required_surfaces: vec!["install_check".to_owned()],
+                missing_required_surfaces: Vec::new(),
+                blocking_findings: vec![InstallFindingCode::CurrentBinaryShadowed],
+                repair: "Run the first ee binary from the intended install target.".to_owned(),
+            },
+            findings: vec![
+                InstallFinding::warning(
+                    InstallFindingCode::DuplicatePathBinary,
+                    "2 'ee' binaries were found in PATH",
+                    "remove stale PATH entries or move the intended ee earlier",
+                ),
+                InstallFinding::warning(
+                    InstallFindingCode::PathBinaryVersionMismatch,
+                    "1 PATH ee binary reports a different version than the running binary (0.12.0): /opt/old-ee/ee=0.5.0",
+                    "remove or replace stale PATH binaries",
+                ),
+                InstallFinding::error(
+                    InstallFindingCode::CurrentBinaryShadowed,
+                    "the running ee binary (/Users/alice/.local/bin/ee) is shadowed by the first PATH binary (/opt/old-ee/ee)",
+                    "fix PATH ordering before trusting shell-invoked ee",
+                ),
+            ],
+        }
+    }
+
+    fn clean_install_report() -> InstallCheckReport {
+        let mut report = install_report_with_shadowed_path();
+        report.path.status = InstallPathStatus::Ok;
+        report.path.binaries = vec![PathBinary {
+            path: "/Users/alice/.local/bin/ee".to_owned(),
+            ordinal: 0,
+            is_current_binary: true,
+            version: Some("0.12.0".to_owned()),
+            version_status: Some("reported".to_owned()),
+        }];
+        report.path.first_binary = Some("/Users/alice/.local/bin/ee".to_owned());
+        report.path.duplicate_count = 1;
+        report.freshness.verdict = InstallFreshnessVerdict::Fresh;
+        report.freshness.authoritative = true;
+        report.freshness.path_status = InstallPathStatus::Ok;
+        report.freshness.blocking_findings.clear();
+        report.freshness.repair = "Installed ee matches the local source version.".to_owned();
+        report.findings = vec![InstallFinding::info(
+            InstallFindingCode::NoUpdateSourceConfigured,
+            "No update source is configured; install check remains local-only.",
+            "Configure an update manifest when release automation is available.",
+        )];
+        report
     }
 
     fn mesh_auto_enrollment_problem_probe() -> DoctorMeshAutoEnrollmentProbe {
@@ -3719,6 +4037,13 @@ mod tests {
             "runtime is ok",
         )?;
 
+        let install_path = report.checks.iter().find(|c| c.name == "ee_install_path");
+        ensure(
+            install_path.map(|c| c.tier),
+            Some(CheckTier::Advisory),
+            "ee install PATH check is advisory",
+        )?;
+
         Ok(())
     }
 
@@ -3726,12 +4051,12 @@ mod tests {
     fn doctor_report_overall_healthy_reflects_all_checks() -> TestResult {
         let report = DoctorReport::gather_with_workspace(None);
 
-        let has_issues = report.checks.iter().any(|c| !c.severity.is_healthy());
+        let has_topline_issues = report.checks.iter().any(|c| !c.is_topline_healthy());
 
         ensure(
             report.overall_healthy,
-            !has_issues,
-            "overall_healthy matches check status",
+            !has_topline_issues,
+            "overall_healthy matches core check status",
         )
     }
 
@@ -3739,7 +4064,8 @@ mod tests {
     fn check_result_ok_has_no_error_code() -> TestResult {
         let check = CheckResult::ok("test", "All good");
         ensure(check.error_code.is_none(), true, "ok has no error code")?;
-        ensure(check.repair.is_none(), true, "ok has no repair")
+        ensure(check.repair.is_none(), true, "ok has no repair")?;
+        ensure(check.tier, CheckTier::Core, "ok defaults to core")
     }
 
     #[test]
@@ -3747,6 +4073,85 @@ mod tests {
         let check = CheckResult::warning("test", "Issue found", error_codes::DATABASE_NOT_FOUND);
         ensure(check.error_code.is_some(), true, "warning has error code")?;
         ensure(check.repair.is_some(), true, "warning has repair from code")
+    }
+
+    #[test]
+    fn ee_install_path_advisory_names_shadowing_paths_versions_and_repair() -> TestResult {
+        let report = install_report_with_shadowed_path();
+        let check = ee_install_path_check_from_report(&report);
+
+        ensure(check.name, "ee_install_path", "check name")?;
+        ensure(check.tier, CheckTier::Advisory, "check is advisory")?;
+        ensure(check.severity, CheckSeverity::Warning, "check severity")?;
+        ensure(
+            check.is_topline_healthy(),
+            true,
+            "install PATH warnings do not affect top-line memory health",
+        )?;
+        ensure(
+            check.error_code,
+            None,
+            "advisory does not invent error code",
+        )?;
+        ensure(check.repair.is_some(), true, "repair hint is present")?;
+
+        for needle in [
+            "duplicate_path_binary",
+            "current_binary_shadowed",
+            "path_binary_version_mismatch",
+            "/opt/old-ee/ee",
+            "0.5.0",
+            "/Users/alice/.local/bin/ee",
+            "0.12.0",
+            "local source version 0.12.0",
+            "freshness shadowed_binary",
+            "no network lookup",
+        ] {
+            ensure(
+                check.message.contains(needle),
+                true,
+                &format!("message includes {needle}"),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn ee_install_path_clean_report_is_advisory_ok() -> TestResult {
+        let report = clean_install_report();
+        let check = ee_install_path_check_from_report(&report);
+
+        ensure(check.name, "ee_install_path", "check name")?;
+        ensure(check.tier, CheckTier::Advisory, "check is advisory")?;
+        ensure(check.severity, CheckSeverity::Ok, "clean severity")?;
+        ensure(
+            check
+                .message
+                .contains("no shadowed or stale ee binary detected"),
+            true,
+            "clean message",
+        )
+    }
+
+    #[test]
+    fn posture_ignores_advisory_install_path_warning() -> TestResult {
+        let checks = vec![
+            CheckResult::ok("runtime", "ok"),
+            CheckResult::ok("database", "ok"),
+            ee_install_path_check_from_report(&install_report_with_shadowed_path()),
+        ];
+
+        ensure(
+            Posture::from_checks(&checks, None),
+            Posture::Ok,
+            "advisory warning ignored by posture",
+        )?;
+        ensure(
+            checks.iter().all(CheckResult::is_topline_healthy),
+            true,
+            "advisory warning ignored by legacy healthy bool",
+        )
     }
 
     #[test]
