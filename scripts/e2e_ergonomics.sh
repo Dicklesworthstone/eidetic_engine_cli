@@ -115,6 +115,12 @@ log_note() {
         }' >>"${EVENT_LOG}"
 }
 
+step() {
+    local label="$1" detail="${2:-}"
+    log_note "${label}" "step" "${detail}"
+    printf '[ergonomics-e2e][STEP] %s %s\n' "${label}" "${detail}" >&2
+}
+
 emit_command_start() {
     local label="$1"
     shift
@@ -268,6 +274,12 @@ assert_json_file() {
     fi
 }
 
+assert_ee_response_envelope() {
+    local label="$1" file="$2"
+    assert_json_file "${label}" "${file}" \
+        '.schema == "ee.response.v2" and (.success | type == "boolean") and (.data | type == "object")'
+}
+
 run_ee_json() {
     local label="$1"
     shift
@@ -302,10 +314,13 @@ run_ee_json() {
 
 log_note "ergonomics_e2e" "start" "root=${ROOT}"
 
+step "init_workspace" "initializing isolated workspace and expecting ee.response.v2 JSON"
 run_ee_json "00_init" --workspace "${WORKSPACE}" --json init
 INIT_JSON="${LAST_STDOUT}"
+assert_ee_response_envelope "init_envelope" "${INIT_JSON}"
 assert_json_file "init_succeeds" "${INIT_JSON}" '.success == true'
 
+step "remember_fixture" "recording deterministic alias-parity memory fixture"
 run_ee_json "01_remember_alias_rule" --workspace "${WORKSPACE}" --json remember \
     --level procedural \
     --kind rule \
@@ -315,10 +330,13 @@ run_ee_json "01_remember_alias_rule" --workspace "${WORKSPACE}" --json remember 
     --no-propose-candidates \
     "Ergonomics alias parity fixture: use ee pack as the canonical context command."
 REMEMBER_JSON="${LAST_STDOUT}"
+assert_ee_response_envelope "remember_envelope" "${REMEMBER_JSON}"
 assert_json_file "remember_succeeds" "${REMEMBER_JSON}" '.success == true'
 
+step "rebuild_index" "rebuilding index so pack/context run against real ee search state"
 run_ee_json "02_index_rebuild" --workspace "${WORKSPACE}" --json index rebuild
 INDEX_JSON="${LAST_STDOUT}"
+assert_ee_response_envelope "index_rebuild_envelope" "${INDEX_JSON}"
 assert_json_file "index_rebuild_succeeds" "${INDEX_JSON}" '.success == true'
 
 TASK="ergonomics alias parity canonical pack command"
@@ -335,19 +353,25 @@ PACK_COMMON=(
     --no-baseline-write
 )
 
+step "run_pack" "running canonical ee pack JSON path"
 run_ee_json "03_pack" "${EE_GLOBAL_ARGS[@]}" pack "${PACK_COMMON[@]}" "${TASK}"
 PACK_JSON="${LAST_STDOUT}"
+assert_ee_response_envelope "pack_envelope" "${PACK_JSON}"
 assert_json_file "pack_succeeds" "${PACK_JSON}" '.success == true and .data.pack.hash'
 assert_json_file "pack_has_no_deprecated_alias" "${PACK_JSON}" \
     'all((.data.degraded // [])[]; .code != "deprecated_alias")'
 
+step "run_context_alias" "running deprecated ee context alias and expecting only deprecated_alias metadata"
 run_ee_json "04_context_alias" "${EE_GLOBAL_ARGS[@]}" context "${PACK_COMMON[@]}" "${TASK}"
 CONTEXT_JSON="${LAST_STDOUT}"
+assert_ee_response_envelope "context_envelope" "${CONTEXT_JSON}"
 assert_json_file "context_succeeds" "${CONTEXT_JSON}" '.success == true and .data.pack.hash'
 assert_json_file "context_reports_deprecated_alias" "${CONTEXT_JSON}" \
     'any((.data.degraded // [])[]; .code == "deprecated_alias" and .severity == "info")'
 assert_json_file "context_names_pack_as_canonical" "${CONTEXT_JSON}" \
     'any((.data.degraded // [])[]; .code == "deprecated_alias" and ((.message // "") | contains("canonical `ee pack`")) and ((.repair // "") | contains("ee pack")))'
+assert_json_file "context_degraded_entries_are_only_alias" "${CONTEXT_JSON}" \
+    '((.data.degraded // []) | length == 1 and .[0].code == "deprecated_alias" and .[0].severity == "info")'
 
 if jq -e --slurp '
     .[0].data.pack.hash == .[1].data.pack.hash
@@ -359,6 +383,7 @@ else
     fail "alias_pack_content_parity" "pack=${PACK_JSON} context=${CONTEXT_JSON}"
 fi
 
+step "prepare_shadow_fixture" "creating older shadow ee that may only answer version probes"
 SHADOW_BIN_DIR="${ROOT}/shadow-bin"
 REAL_BIN_DIR="$(dirname "${REAL_EE}")"
 mkdir -p "${SHADOW_BIN_DIR}" "${ROOT}/install-dir"
@@ -378,18 +403,31 @@ EOS
 chmod +x "${SHADOW_BIN_DIR}/ee"
 
 DOCTOR_PATH="${SHADOW_BIN_DIR}:${REAL_BIN_DIR}:${PATH}"
+step "doctor_clean" "capturing clean doctor top-line before PATH shadowing"
 run_ee_json "05_doctor_clean" --workspace "${WORKSPACE}" --json doctor
 DOCTOR_CLEAN_JSON="${LAST_STDOUT}"
+assert_ee_response_envelope "doctor_clean_envelope" "${DOCTOR_CLEAN_JSON}"
 assert_json_file "doctor_clean_succeeds" "${DOCTOR_CLEAN_JSON}" '.success == true'
 
+step "doctor_shadow" "running doctor with stale ee first on PATH; check must remain advisory-only"
 PATH="${DOCTOR_PATH}" run_ee_json "06_doctor_shadow" --workspace "${WORKSPACE}" --json doctor
 local_path_status="${LAST_RC}"
 DOCTOR_SHADOW_JSON="${ROOT}/06_doctor_shadow.stdout.json"
+assert_ee_response_envelope "doctor_shadow_envelope" "${DOCTOR_SHADOW_JSON}"
 assert_json_file "doctor_shadow_succeeds" "${DOCTOR_SHADOW_JSON}" '.success == true'
 assert_json_file "path_shadow_advisory_present" "${DOCTOR_SHADOW_JSON}" \
     'any(.data.checks[]?; .name == "ee_install_path" and .severity == "warning" and ((.message // "") | contains("current_binary_shadowed")) and ((.message // "") | contains("0.5.0")) and ((.message // "") | contains("no network lookup")))'
+assert_json_file "path_shadow_is_advisory_tier" "${DOCTOR_SHADOW_JSON}" \
+    'any(.data.checks[]?; .name == "ee_install_path" and .tier == "advisory" and .severity == "warning")'
 assert_json_file "path_shadow_repair_hint_present" "${DOCTOR_SHADOW_JSON}" \
     'any(.data.checks[]?; .name == "ee_install_path" and ((.repair // "") | contains("ee install check --json --offline")) and ((.repair // "") | contains("do not use local Cargo")))'
+assert_json_file "path_shadow_fixture_not_used_for_non_version_command" "${DOCTOR_SHADOW_JSON}" \
+    '.success == true'
+if grep -q "shadow fixture should only be used" "${ROOT}/06_doctor_shadow.stderr.txt"; then
+    fail "path_shadow_fixture_misuse_absent" "doctor invoked shadow fixture for a non-version command"
+else
+    pass "path_shadow_fixture_misuse_absent" "shadow fixture was not asked to run doctor"
+fi
 
 if jq -e --slurp '.[0].data.posture == .[1].data.posture and .[0].data.healthy == .[1].data.healthy' \
     "${DOCTOR_CLEAN_JSON}" "${DOCTOR_SHADOW_JSON}" >/dev/null 2>&1; then
@@ -443,6 +481,8 @@ assert_event_log_contract() {
         )
         and any(.[]; .kind == "assert_ok" and .fields.label == "alias_pack_content_parity")
         and any(.[]; .kind == "assert_ok" and .fields.label == "path_shadow_does_not_change_top_line")
+        and any(.[]; .kind == "note" and .fields.label == "run_context_alias" and .fields.status == "step")
+        and any(.[]; .kind == "note" and .fields.label == "doctor_shadow" and .fields.status == "step")
     ' "${EVENT_LOG}" >/dev/null 2>&1; then
         pass "${label}" "event log has complete command/assert evidence"
     else

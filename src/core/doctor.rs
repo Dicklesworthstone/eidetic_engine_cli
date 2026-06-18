@@ -4303,6 +4303,132 @@ mod tests {
     }
 
     #[test]
+    fn ee_install_path_missing_path_binary_reports_empty_path_without_core_degradation()
+    -> TestResult {
+        let mut report = clean_install_report();
+        report.path.status = InstallPathStatus::Missing;
+        report.path.path_entries = Vec::new();
+        report.path.binaries = Vec::new();
+        report.path.first_binary = None;
+        report.path.current_binary_on_path = false;
+        report.path.duplicate_count = 0;
+        report.freshness.verdict = InstallFreshnessVerdict::PathBinaryMissing;
+        report.freshness.authoritative = false;
+        report.freshness.path_status = InstallPathStatus::Missing;
+        report.freshness.blocking_findings = vec![InstallFindingCode::BinaryNotOnPath];
+        report.findings = vec![InstallFinding::warning(
+            InstallFindingCode::BinaryNotOnPath,
+            "no 'ee' binary was found in PATH",
+            "Install into a PATH directory or update PATH explicitly after install.",
+        )];
+
+        let check = ee_install_path_check_from_report(&report);
+
+        ensure(check.tier, CheckTier::Advisory, "check is advisory")?;
+        ensure(check.severity, CheckSeverity::Warning, "check severity")?;
+        ensure(
+            check.is_topline_healthy(),
+            true,
+            "missing PATH binary remains advisory-only",
+        )?;
+        ensure(
+            check.message.contains("binary_not_on_path"),
+            true,
+            "finding code included",
+        )?;
+        ensure(
+            check.message.contains("No ee binary was found on PATH"),
+            true,
+            "empty PATH summary included",
+        )?;
+        ensure(
+            check.message.contains("freshness path_binary_missing"),
+            true,
+            "freshness verdict included",
+        )
+    }
+
+    #[test]
+    fn ee_install_path_omits_extra_path_binaries_deterministically() -> TestResult {
+        let mut report = install_report_with_shadowed_path();
+        report.path.binaries.extend([
+            PathBinary {
+                path: "/opt/backup-ee/ee".to_owned(),
+                ordinal: 2,
+                is_current_binary: false,
+                version: None,
+                version_status: Some("unparseable".to_owned()),
+            },
+            PathBinary {
+                path: "/nix/store/ee/bin/ee".to_owned(),
+                ordinal: 3,
+                is_current_binary: false,
+                version: Some("0.10.0".to_owned()),
+                version_status: Some("reported".to_owned()),
+            },
+            PathBinary {
+                path: "/tmp/extra-ee/ee".to_owned(),
+                ordinal: 4,
+                is_current_binary: false,
+                version: Some("0.11.0".to_owned()),
+                version_status: Some("reported".to_owned()),
+            },
+        ]);
+        report.path.duplicate_count = report.path.binaries.len();
+
+        let check = ee_install_path_check_from_report(&report);
+
+        ensure(
+            check.message.contains("#0 /opt/old-ee/ee"),
+            true,
+            "first binary shown",
+        )?;
+        ensure(
+            check.message.contains("#3 /nix/store/ee/bin/ee"),
+            true,
+            "fourth binary shown",
+        )?;
+        ensure(
+            check.message.contains("/tmp/extra-ee/ee"),
+            false,
+            "fifth binary omitted from bounded summary",
+        )?;
+        ensure(
+            check
+                .message
+                .contains("1 additional PATH ee binary/binaries omitted"),
+            true,
+            "omitted count included",
+        )
+    }
+
+    #[test]
+    fn ee_install_path_non_path_install_errors_do_not_become_doctor_degradations() -> TestResult {
+        let mut report = clean_install_report();
+        report.findings = vec![InstallFinding::error(
+            InstallFindingCode::InstallDirNotWritable,
+            "install target is not writable",
+            "Choose a writable --install-dir.",
+        )];
+
+        let check = ee_install_path_check_from_report(&report);
+
+        ensure(check.name, "ee_install_path", "check name")?;
+        ensure(check.tier, CheckTier::Advisory, "check is advisory")?;
+        ensure(
+            check.severity,
+            CheckSeverity::Ok,
+            "non-PATH finding ignored",
+        )?;
+        ensure(
+            check.message.contains("install_dir_not_writable"),
+            false,
+            "non-PATH install error not surfaced through PATH advisory",
+        )?;
+        ensure(check.is_topline_healthy(), true, "top-line remains healthy")
+    }
+
+    #[test]
     fn posture_ignores_advisory_install_path_warning() -> TestResult {
         let checks = vec![
             CheckResult::ok("runtime", "ok"),
@@ -5444,7 +5570,11 @@ mod tests {
         assert!(check.is_topline_healthy());
         assert!(check.message.contains("pending first-use download"));
         assert!(check.message.contains("degraded-but-improving"));
-        assert!(!check.message.contains("Degraded code: embed_model_unavailable"));
+        assert!(
+            !check
+                .message
+                .contains("Degraded code: embed_model_unavailable")
+        );
         assert!(check.repair.is_some());
     }
 
