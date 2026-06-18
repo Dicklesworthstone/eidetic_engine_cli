@@ -334,6 +334,18 @@ impl OperationPostureReport {
     }
 }
 
+/// Subsystem ids that constitute the CORE memory store/retrieve loop.
+///
+/// Only these drive the top-line `overall` posture (ADR 0081, bd-1et0v.12):
+/// they answer "can ee store and retrieve memory right now?". Every other
+/// subsystem (`graph_compute`, `rch_worker_pressure`, `shard_fanout`,
+/// `flight_recorder`, `singleflight`, `maintenance`, `agent_detection`,
+/// `curate`, `feedback`, …) is ADVISORY — it stays visible as its own row but
+/// never degrades the top-line unless it actually breaks the memory loop. Keep
+/// this list in sync with ADR 0081 and the doctor CORE checks
+/// (src/core/doctor.rs `gather_with_workspace`).
+pub const CORE_SUBSYSTEM_IDS: &[&str] = &["runtime", "storage", "search", "memory", "pack"];
+
 /// Workspace posture with aggregate, operation, and fixed subsystem rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspacePostureReport {
@@ -343,6 +355,9 @@ pub struct WorkspacePostureReport {
 }
 
 impl WorkspacePostureReport {
+    /// Build a report whose top-line `overall` aggregates **every** subsystem
+    /// row. Retained for callers/tests that want the unfiltered aggregate;
+    /// the live `ee status` surface uses [`Self::new_core_overall`].
     #[must_use]
     pub fn new(
         subsystems: Vec<SubsystemPostureReport>,
@@ -354,6 +369,32 @@ impl WorkspacePostureReport {
             .collect::<Vec<_>>();
         Self {
             overall: SubsystemPostureStatus::aggregate(&statuses),
+            this_operation,
+            subsystems,
+        }
+    }
+
+    /// Build a report whose top-line `overall` aggregates **CORE subsystems
+    /// only** ([`CORE_SUBSYSTEM_IDS`], ADR 0081 / bd-1et0v.12).
+    ///
+    /// Advisory subsystem rows remain present in `subsystems` with their own
+    /// statuses but do not degrade `overall`, so a working memory store reports
+    /// `overall: ok` even when an optional subsystem (NUMA pin, RCH worker
+    /// pressure, CASS, …) is degraded. This mirrors the doctor surface, where
+    /// `Posture::from_checks` skips advisory checks; the two surfaces therefore
+    /// agree on a clean-with-advisories workspace.
+    #[must_use]
+    pub fn new_core_overall(
+        subsystems: Vec<SubsystemPostureReport>,
+        this_operation: OperationPostureReport,
+    ) -> Self {
+        let core_statuses = subsystems
+            .iter()
+            .filter(|subsystem| CORE_SUBSYSTEM_IDS.contains(&subsystem.id))
+            .map(|subsystem| subsystem.status)
+            .collect::<Vec<_>>();
+        Self {
+            overall: SubsystemPostureStatus::aggregate(&core_statuses),
             this_operation,
             subsystems,
         }
@@ -582,5 +623,70 @@ mod tests {
             "operation",
         )?;
         ensure(report.subsystems.len(), 2, "subsystem count")
+    }
+
+    #[test]
+    fn core_overall_ignores_advisory_subsystem_degradation() -> TestResult {
+        // ADR 0081 / bd-1et0v.12: advisory subsystem rows stay visible but
+        // never degrade the top-line `overall`.
+        use SubsystemPostureStatus as S;
+        let subsystems = vec![
+            SubsystemPostureReport::new("runtime", S::Ok),
+            SubsystemPostureReport::new("storage", S::Ok),
+            SubsystemPostureReport::new("search", S::Ok),
+            SubsystemPostureReport::new("memory", S::Ok),
+            SubsystemPostureReport::new("pack", S::Ok),
+            // Advisory subsystems are degraded but must not flip the top-line.
+            SubsystemPostureReport::new("graph_compute", S::Unimplemented),
+            SubsystemPostureReport::new("rch_worker_pressure", S::DegradedRecoverable),
+        ];
+        let operation = OperationPostureReport::ok(["runtime"]);
+        let core = WorkspacePostureReport::new_core_overall(subsystems.clone(), operation.clone());
+        ensure(
+            core.overall,
+            S::Ok,
+            "advisory degradation must not flip overall",
+        )?;
+        ensure(
+            core.subsystems.len(),
+            7,
+            "advisory rows remain visible in subsystems",
+        )?;
+        // Sanity: the unfiltered constructor WOULD degrade on the same rows.
+        let unfiltered = WorkspacePostureReport::new(subsystems, operation);
+        ensure(
+            unfiltered.overall,
+            S::DegradedRecoverable,
+            "unfiltered aggregate still includes advisory rows",
+        )
+    }
+
+    #[test]
+    fn core_overall_still_degrades_on_core_subsystem() -> TestResult {
+        // A genuine CORE subsystem failure must still drive the top-line.
+        use SubsystemPostureStatus as S;
+        let subsystems = vec![
+            SubsystemPostureReport::new("runtime", S::Ok),
+            SubsystemPostureReport::new("storage", S::DegradedRecoverable),
+            SubsystemPostureReport::new("graph_compute", S::Ok),
+        ];
+        let report = WorkspacePostureReport::new_core_overall(
+            subsystems,
+            OperationPostureReport::ok(["storage"]),
+        );
+        ensure(
+            report.overall,
+            S::DegradedRecoverable,
+            "core subsystem degradation drives overall",
+        )
+    }
+
+    #[test]
+    fn core_subsystem_ids_are_the_memory_loop() -> TestResult {
+        ensure(
+            CORE_SUBSYSTEM_IDS,
+            &["runtime", "storage", "search", "memory", "pack"][..],
+            "core subsystem set is the store/retrieve memory loop",
+        )
     }
 }

@@ -32,8 +32,8 @@ expression: doctor
       }
     ],
     "command": "doctor",
-    "healthy": false,
-    "posture": "degraded_recoverable",
+    "healthy": true,
+    "posture": "ok",
     "version": "0.1.0"
   },
   "fields": "standard",

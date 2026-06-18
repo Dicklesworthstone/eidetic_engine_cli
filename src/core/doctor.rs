@@ -320,20 +320,36 @@ impl DoctorReport {
         let verification_ledger = gather_rch_verify_ledger_status(workspace_path);
         let host_calibration = gather_host_calibration_status(workspace_path);
         let flight_recorder = gather_flight_recorder_status(workspace_path);
+        // CORE vs ADVISORY tiering (ADR 0081, bd-1et0v.12). CORE checks
+        // (runtime / workspace / database / search index) answer the single
+        // question "can ee store and retrieve memory right now?" and drive the
+        // top-line posture + overall_healthy. ADVISORY checks (`.advisory()`)
+        // report optional-subsystem and operator-ergonomics posture; they stay
+        // visible in `checks[]` but NEVER flip the top-line unless they actually
+        // break the memory loop. This call site is the single source of truth
+        // for the CORE/ADVISORY split — keep it in sync with ADR 0081 and the
+        // status-surface CORE subsystem set (src/core/status.rs). Check ORDER is
+        // preserved (goldens assert it); the tier is what changed, not position.
+        //
+        // CORE:     check_runtime, check_workspace, check_database, check_search_index
+        // ADVISORY: check_ee_install_path (advisory via its own builder, bd-1et0v.18),
+        //           check_shard_fanout, check_flight_recorder, check_lexical_ram_tier,
+        //           check_graph_numa_pin, check_daemon_socket_reachable,
+        //           check_rch_worker_pressure, check_rch_verify_ledger, check_cass
         let checks = vec![
             check_runtime(),
             check_ee_install_path(),
             check_workspace(workspace_path),
             check_database(workspace_path),
-            check_shard_fanout(workspace_path),
-            check_flight_recorder(&flight_recorder),
+            check_shard_fanout(workspace_path).advisory(),
+            check_flight_recorder(&flight_recorder).advisory(),
             check_search_index(workspace_path),
-            check_lexical_ram_tier(workspace_path),
-            check_graph_numa_pin(workspace_path),
-            check_daemon_socket_reachable(),
-            check_rch_worker_pressure(&rch_worker_pressure),
-            check_rch_verify_ledger(&verification_ledger),
-            check_cass(),
+            check_lexical_ram_tier(workspace_path).advisory(),
+            check_graph_numa_pin(workspace_path).advisory(),
+            check_daemon_socket_reachable().advisory(),
+            check_rch_worker_pressure(&rch_worker_pressure).advisory(),
+            check_rch_verify_ledger(&verification_ledger).advisory(),
+            check_cass().advisory(),
         ];
 
         let overall_healthy = checks.iter().all(CheckResult::is_topline_healthy);
@@ -5133,6 +5149,71 @@ mod tests {
     fn posture_empty_check_set_is_ok() {
         let checks: Vec<CheckResult> = Vec::new();
         assert_eq!(Posture::from_checks(&checks, None), Posture::Ok);
+    }
+
+    #[test]
+    fn posture_ignores_advisory_warnings_but_not_core() {
+        // ADR 0081 / bd-1et0v.12: advisory subsystem warnings (cass, numa,
+        // rch worker pressure, …) must never flip the top-line; a CORE warning
+        // still degrades. This is the analyst-finding-#4 regression.
+        use crate::models::error_codes::INDEX_STALE;
+        let advisory_only = vec![
+            CheckResult::ok("runtime", "ok"),
+            CheckResult::ok("workspace", "ok"),
+            CheckResult::ok("database", "ok"),
+            CheckResult::ok("search_index", "ok"),
+            CheckResult::warning("cass", "missing binary", INDEX_STALE).advisory(),
+            CheckResult::warning("graph_numa_pin", "unsupported platform", INDEX_STALE).advisory(),
+            CheckResult::warning("rch_worker_pressure", "fleet pressure", INDEX_STALE).advisory(),
+        ];
+        assert_eq!(
+            Posture::from_checks(&advisory_only, None),
+            Posture::Ok,
+            "advisory warnings must not degrade the top-line"
+        );
+        assert!(
+            advisory_only.iter().all(CheckResult::is_topline_healthy),
+            "advisory warnings must not flip overall_healthy"
+        );
+
+        let core_warning = vec![
+            CheckResult::ok("runtime", "ok"),
+            CheckResult::warning("search_index", "stale", INDEX_STALE),
+            CheckResult::warning("cass", "missing binary", INDEX_STALE).advisory(),
+        ];
+        assert_eq!(
+            Posture::from_checks(&core_warning, None),
+            Posture::DegradedRecoverable,
+            "a CORE warning still degrades even when advisory warnings are present"
+        );
+    }
+
+    #[test]
+    fn gathered_checks_only_core_loop_drives_topline() {
+        // ADR 0081 / bd-1et0v.12: only the store/retrieve memory loop is CORE.
+        // Every other gathered check must be ADVISORY so optional subsystems
+        // never flip the top-line. Partition test — robust to which advisory
+        // checks happen to be present in this environment.
+        const CORE: &[&str] = &["runtime", "workspace", "database", "search_index"];
+        let report = DoctorReport::gather_with_workspace(None);
+        for check in &report.checks {
+            let expected = if CORE.contains(&check.name) {
+                CheckTier::Core
+            } else {
+                CheckTier::Advisory
+            };
+            assert_eq!(
+                check.tier, expected,
+                "check `{}` has the wrong tier (CORE = the memory loop only)",
+                check.name
+            );
+        }
+        for core in CORE {
+            assert!(
+                report.checks.iter().any(|check| &check.name == core),
+                "core check `{core}` must always be present"
+            );
+        }
     }
 
     #[test]

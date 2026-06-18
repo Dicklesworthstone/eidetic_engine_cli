@@ -3410,7 +3410,13 @@ fn status_posture_report(
             .collect(),
     };
 
-    WorkspacePostureReport::new(subsystems, operation)
+    // ADR 0081 / bd-1et0v.12: the top-line `overall` aggregates CORE subsystems
+    // only (runtime/storage/search/memory/pack). Advisory subsystem rows above
+    // (graph_compute, rch_worker_pressure, shard_fanout, flight_recorder,
+    // singleflight, maintenance, agent_detection, curate, feedback) stay visible
+    // but never flip the top-line — keeping `ee status` green on a working store
+    // and consistent with `ee doctor`.
+    WorkspacePostureReport::new_core_overall(subsystems, operation)
 }
 
 fn posture_row(
