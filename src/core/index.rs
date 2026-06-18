@@ -1364,6 +1364,9 @@ pub(crate) fn process_pending_index_jobs_coalesced(
     job_limit: Option<u32>,
 ) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError> {
     const COALESCED_MODE: &str = "coalesced_full_rebuild";
+    // bd-d67os.7: mode reported when the coalesced batch applied its K touched
+    // docs as a single incremental merge step instead of a full rebuild.
+    const COALESCED_INCREMENTAL_MODE: &str = "coalesced_incremental";
     let pending = db.list_pending_search_index_jobs(workspace_id, job_limit)?;
     let mut claimed = Vec::new();
     let mut reports = Vec::new();
@@ -1419,21 +1422,48 @@ pub(crate) fn process_pending_index_jobs_coalesced(
         .or(get_db_stats(db)?.2)
         .unwrap_or_else(|| u64::from(documents_total));
 
+    // bd-d67os.7: when every coalesced job is a simple single-document upsert to
+    // a doc that is currently present, and the index already exists, apply the K
+    // touched docs as ONE incremental merge step instead of a full rebuild — this
+    // is where group-commit (Track B) and incremental intake (Track C) compound.
+    // Any FullRebuild job, deleted/missing target, absent index, or incremental
+    // error falls back to the proven full-rebuild path, so the published index
+    // state is always correct; only the all-upsert case takes the merge path.
+    let incremental_batch = coalesced_incremental_batch(&claimed, &indexable_docs);
+    let mut processing_mode = COALESCED_MODE;
     let holder_id = generate_index_holder_id();
     acquire_index_publish_lock(db, workspace_id, &holder_id)?;
-    let build_result = (|| -> Result<(), String> {
-        let _recovery_action =
-            recover_interrupted_publish(index_dir).map_err(|error| error.to_string())?;
-        let staging_dir =
-            create_publish_staging_dir(index_dir).map_err(|error| error.to_string())?;
-        build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs).and_then(
-            |_stats| {
-                write_index_metadata(&staging_dir, published_generation, documents_total)
-                    .and_then(|()| publish_staged_index(index_dir, &staging_dir))
-                    .map_err(|error| error.to_string())
-            },
-        )
-    })();
+    let incremental_outcome = match incremental_batch {
+        Some(documents) => apply_incremental_index_batch_sync(
+            index_dir,
+            default_embedder_stack(),
+            documents,
+            published_generation,
+            documents_total,
+        ),
+        None => IncrementalApplyOutcome::FullRebuildRequired,
+    };
+    let build_result = match incremental_outcome {
+        IncrementalApplyOutcome::Applied { .. } => {
+            processing_mode = COALESCED_INCREMENTAL_MODE;
+            Ok(())
+        }
+        IncrementalApplyOutcome::Fallback { .. } | IncrementalApplyOutcome::FullRebuildRequired => {
+            (|| -> Result<(), String> {
+                let _recovery_action =
+                    recover_interrupted_publish(index_dir).map_err(|error| error.to_string())?;
+                let staging_dir =
+                    create_publish_staging_dir(index_dir).map_err(|error| error.to_string())?;
+                build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs).and_then(
+                    |_stats| {
+                        write_index_metadata(&staging_dir, published_generation, documents_total)
+                            .and_then(|()| publish_staged_index(index_dir, &staging_dir))
+                            .map_err(|error| error.to_string())
+                    },
+                )
+            })()
+        }
+    };
     release_index_publish_lock(db, workspace_id, &holder_id);
 
     match build_result {
@@ -1447,7 +1477,7 @@ pub(crate) fn process_pending_index_jobs_coalesced(
                     document_source: job.document_source.clone(),
                     document_id: job.document_id.clone(),
                     outcome: "completed".to_owned(),
-                    processing_mode: COALESCED_MODE.to_owned(),
+                    processing_mode: processing_mode.to_owned(),
                     fallback_to_full: None,
                     documents_total,
                     documents_indexed: documents_total,
@@ -1468,7 +1498,7 @@ pub(crate) fn process_pending_index_jobs_coalesced(
                     document_source: job.document_source.clone(),
                     document_id: job.document_id.clone(),
                     outcome: "failed".to_owned(),
-                    processing_mode: COALESCED_MODE.to_owned(),
+                    processing_mode: processing_mode.to_owned(),
                     fallback_to_full: None,
                     documents_total,
                     documents_indexed: 0,
@@ -1736,6 +1766,36 @@ fn incremental_document_id_for_job(job: &StoredSearchIndexJob) -> Option<&str> {
         .filter(|document_id| !document_id.is_empty())
 }
 
+/// bd-d67os.7: the deduplicated set of currently-present documents touched by a
+/// coalesced batch, IFF every claimed job is a simple single-document /
+/// incremental upsert whose target document currently exists in the corpus.
+/// Returns `None` — forcing the proven full-rebuild path — for any full-rebuild
+/// job, a deleted/missing target, or an empty batch, so the incremental merge
+/// path can never weaken the published index state.
+fn coalesced_incremental_batch(
+    claimed: &[StoredSearchIndexJob],
+    indexable_docs: &[crate::search::IndexableDocument],
+) -> Option<Vec<crate::search::IndexableDocument>> {
+    let mut documents = Vec::with_capacity(claimed.len());
+    let mut seen = std::collections::BTreeSet::new();
+    for job in claimed {
+        if !matches!(
+            job.job_type_enum(),
+            Some(SearchIndexJobType::Incremental | SearchIndexJobType::SingleDocument)
+        ) {
+            return None;
+        }
+        let document_id = incremental_document_id_for_job(job)?;
+        let document = indexable_docs
+            .iter()
+            .find(|candidate| candidate.id.as_str() == document_id)?;
+        if seen.insert(document_id.to_owned()) {
+            documents.push(document.clone());
+        }
+    }
+    (!documents.is_empty()).then_some(documents)
+}
+
 fn missing_incremental_target_reason(job: &StoredSearchIndexJob) -> IncrementalFallbackReason {
     if job.documents_total > 1 {
         IncrementalFallbackReason::DeltaOverThreshold
@@ -1833,6 +1893,104 @@ fn apply_incremental_index_change_sync(
             reason: IncrementalFallbackReason::ForcedReindex,
             detail: "incremental index result was not captured".to_owned(),
         })
+}
+
+/// bd-d67os.7: synchronous wrapper for a coalesced-batch incremental merge.
+/// Mirrors [`apply_incremental_index_change_sync`] but upserts K documents into
+/// the existing index in one publish step; any error/panic degrades to a
+/// `Fallback`, which the caller turns into a full rebuild.
+fn apply_incremental_index_batch_sync(
+    index_dir: &Path,
+    stack: EmbedderStack,
+    documents: Vec<crate::search::IndexableDocument>,
+    generation: u64,
+    documents_total: u32,
+) -> IncrementalApplyOutcome {
+    let index_dir_owned = index_dir.to_path_buf();
+    let result_holder: Arc<Mutex<Option<IncrementalApplyOutcome>>> = Arc::new(Mutex::new(None));
+    let task_result = Arc::clone(&result_holder);
+    let runtime_error_result = Arc::clone(&result_holder);
+
+    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let runtime_result = crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            let outcome = match apply_incremental_index_batch(
+                &cx,
+                &index_dir_owned,
+                stack,
+                &documents,
+                generation,
+                documents_total,
+            )
+            .await
+            {
+                Ok(documents_indexed) => IncrementalApplyOutcome::Applied { documents_indexed },
+                Err(fallback) => IncrementalApplyOutcome::Fallback {
+                    reason: fallback.reason,
+                    detail: fallback.detail,
+                },
+            };
+            if let Ok(mut guard) = task_result.lock() {
+                *guard = Some(outcome);
+            }
+        });
+
+        if let Err(error) = runtime_result
+            && let Ok(mut guard) = runtime_error_result.lock()
+        {
+            *guard = Some(IncrementalApplyOutcome::Fallback {
+                reason: IncrementalFallbackReason::ForcedReindex,
+                detail: format!("incremental batch index runtime failed: {error}"),
+            });
+        }
+    }));
+
+    if panic_result.is_err() {
+        return IncrementalApplyOutcome::Fallback {
+            reason: IncrementalFallbackReason::ForcedReindex,
+            detail: "incremental batch index intake panicked".to_owned(),
+        };
+    }
+
+    result_holder
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take())
+        .unwrap_or_else(|| IncrementalApplyOutcome::Fallback {
+            reason: IncrementalFallbackReason::ForcedReindex,
+            detail: "incremental batch index result was not captured".to_owned(),
+        })
+}
+
+/// bd-d67os.7: upsert every document in a coalesced batch into the existing
+/// index, then publish metadata once. Each `upsert_incremental_document` is the
+/// same per-document merge the single-write path uses, so the resulting index
+/// state matches a full rebuild of the same corpus; metadata-existence is still
+/// validated up front so an absent/stale index degrades to a full rebuild.
+async fn apply_incremental_index_batch(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    stack: EmbedderStack,
+    documents: &[crate::search::IndexableDocument],
+    generation: u64,
+    documents_total: u32,
+) -> Result<u32, IncrementalFallback> {
+    validate_incremental_index_metadata(index_dir, generation)?;
+    for document in documents {
+        upsert_incremental_document(cx, index_dir, stack.clone(), document).await?;
+    }
+    write_index_metadata(index_dir, generation, documents_total).map_err(|error| {
+        incremental_fallback(
+            IncrementalFallbackReason::TierUnavailable,
+            format!("failed to write incremental batch index metadata: {error}"),
+        )
+    })?;
+    u32::try_from(documents.len()).map_err(|_| {
+        incremental_fallback(
+            IncrementalFallbackReason::DeltaOverThreshold,
+            "incremental batch document count exceeds u32".to_owned(),
+        )
+    })
 }
 
 async fn apply_incremental_index_change(
