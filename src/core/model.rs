@@ -3226,8 +3226,8 @@ mod tests {
     fn ensure_bundled_registers_once_and_is_idempotent() -> TestResult {
         let (_temp, workspace_path) = make_workspace()?;
         let (database_path, workspace_id) = fresh_db_for_workspace(&workspace_path)?;
-        let connection = DbConnection::open_file(&database_path)
-            .map_err(|error| format!("open db: {error}"))?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| format!("open db: {error}"))?;
 
         // Fresh workspace: registers exactly one declared bundled entry.
         let inserted = ensure_bundled_embedding_model_registered(&connection, &workspace_id)
@@ -3285,8 +3285,8 @@ mod tests {
             ModelRegistryStatus::Available,
         )?;
 
-        let connection = DbConnection::open_file(&database_path)
-            .map_err(|error| format!("open db: {error}"))?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| format!("open db: {error}"))?;
         let inserted = ensure_bundled_embedding_model_registered(&connection, &workspace_id)
             .map_err(|error| format!("ensure: {error}"))?;
         ensure(!inserted, "ensure is a no-op when an entry already exists")?;

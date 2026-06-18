@@ -18,6 +18,10 @@ use crate::models::model_registry::{
     EmbeddingMetadataRecord, EmbeddingPooling, ModelDistanceMetric, ModelProvider, ModelPurpose,
     ModelRegistryStatus,
 };
+use crate::models::{
+    EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
+    EMBEDDING_POSTURE_SCHEMA_V1,
+};
 use crate::search::{
     CanonicalSearchDocument, Embedder, EmbedderStack, HashEmbedder, IndexBuilder,
     artifact_to_document, memory_to_document_with_context_anchors_and_typed_fields,
@@ -371,6 +375,7 @@ pub struct IndexProcessingReport {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReembedEmbeddingSummary {
+    pub posture: EmbeddingPosture,
     pub fast_model_id: String,
     pub fast_dimension: usize,
     pub quality_model_id: Option<String>,
@@ -381,6 +386,39 @@ pub struct ReembedEmbeddingSummary {
     pub available_model_count: usize,
     pub selected_registry_model: Option<ReembedRegistryModelSummary>,
     pub source: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmbeddingPosture {
+    pub schema: &'static str,
+    pub mode: &'static str,
+    pub semantic: bool,
+    pub source: String,
+    pub fast_model_id: String,
+    pub fast_dimension: usize,
+    pub quality_model_id: Option<String>,
+    pub quality_dimension: Option<usize>,
+    pub deterministic: bool,
+    pub registered_model_count: usize,
+    pub available_model_count: usize,
+    pub selected_registry_model: Option<EmbeddingPostureRegistryModel>,
+    pub vector_coverage: EmbeddingVectorCoverage,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmbeddingPostureRegistryModel {
+    pub id: String,
+    pub provider: String,
+    pub model_name: String,
+    pub status: String,
+    pub dimension: u32,
+    pub deterministic: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EmbeddingVectorCoverage {
+    pub embedded: usize,
+    pub total: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -578,8 +616,29 @@ impl IndexReembedReport {
 
 impl ReembedEmbeddingSummary {
     #[must_use]
+    pub(crate) fn from_posture(posture: EmbeddingPosture) -> Self {
+        Self {
+            fast_model_id: posture.fast_model_id.clone(),
+            fast_dimension: posture.fast_dimension,
+            quality_model_id: posture.quality_model_id.clone(),
+            quality_dimension: posture.quality_dimension,
+            deterministic: posture.deterministic,
+            semantic: posture.semantic,
+            registered_model_count: posture.registered_model_count,
+            available_model_count: posture.available_model_count,
+            selected_registry_model: posture
+                .selected_registry_model
+                .as_ref()
+                .map(ReembedRegistryModelSummary::from_posture),
+            source: posture.source.clone(),
+            posture,
+        }
+    }
+
+    #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
+            "posture": self.posture.data_json(),
             "fast_model_id": self.fast_model_id,
             "fast_dimension": self.fast_dimension,
             "quality_model_id": self.quality_model_id,
@@ -594,7 +653,77 @@ impl ReembedEmbeddingSummary {
     }
 }
 
+impl EmbeddingPosture {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": self.schema,
+            "mode": self.mode,
+            "semantic": self.semantic,
+            "source": self.source,
+            "fast_model_id": self.fast_model_id,
+            "fast_dimension": self.fast_dimension,
+            "quality_model_id": self.quality_model_id,
+            "quality_dimension": self.quality_dimension,
+            "deterministic": self.deterministic,
+            "registered_model_count": self.registered_model_count,
+            "available_model_count": self.available_model_count,
+            "selected_registry_model": self
+                .selected_registry_model
+                .as_ref()
+                .map(EmbeddingPostureRegistryModel::data_json),
+            "vector_coverage": self.vector_coverage.data_json(),
+        })
+    }
+
+    #[must_use]
+    pub fn with_vector_coverage(mut self, vector_coverage: EmbeddingVectorCoverage) -> Self {
+        self.vector_coverage = vector_coverage;
+        self
+    }
+}
+
+impl EmbeddingPostureRegistryModel {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "provider": self.provider,
+            "model_name": self.model_name,
+            "status": self.status,
+            "dimension": self.dimension,
+            "deterministic": self.deterministic,
+        })
+    }
+}
+
+impl EmbeddingVectorCoverage {
+    #[must_use]
+    pub const fn new(embedded: usize, total: usize) -> Self {
+        Self { embedded, total }
+    }
+
+    #[must_use]
+    pub fn data_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "embedded": self.embedded,
+            "total": self.total,
+        })
+    }
+}
+
 impl ReembedRegistryModelSummary {
+    fn from_posture(model: &EmbeddingPostureRegistryModel) -> Self {
+        Self {
+            id: model.id.clone(),
+            provider: model.provider.clone(),
+            model_name: model.model_name.clone(),
+            status: model.status.clone(),
+            dimension: model.dimension,
+            deterministic: model.deterministic,
+        }
+    }
+
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
@@ -904,7 +1033,6 @@ pub fn reembed_index(
     let artifacts = db.list_artifacts(&workspace_id, None)?;
     let stack = default_embedder_stack();
     ensure_active_embedding_registry_record(&db, &workspace_id, &stack)?;
-    let embedding = reembed_embedding_summary(&db, &workspace_id, &stack)?;
 
     let memory_docs = memory_documents_with_anchors(&db, &memories)?;
     let session_docs: Vec<CanonicalSearchDocument> =
@@ -914,6 +1042,9 @@ pub fn reembed_index(
 
     let (memories_indexed, sessions_indexed, artifacts_indexed, documents_total) =
         checked_document_counts(memory_docs.len(), session_docs.len(), artifact_docs.len())?;
+    let current_vector_coverage =
+        embedding_vector_coverage(&index_dir, documents_total, read_fast_vector_record_count);
+    let embedding = reembed_embedding_summary(&db, &workspace_id, &stack, current_vector_coverage)?;
     let idempotency_key = reembed_idempotency_key(
         &workspace_id,
         &embedding.fast_model_id,
@@ -1008,6 +1139,16 @@ pub fn reembed_index(
                 write_index_metadata(&staging_dir, published_generation, documents_total)
                     .and_then(|()| publish_staged_index(&index_dir, &staging_dir))?;
                 db.complete_search_index_job(&job_id, documents_total)?;
+                let published_coverage = EmbeddingVectorCoverage::new(
+                    usize::try_from(documents_total).unwrap_or(usize::MAX),
+                    usize::try_from(documents_total).unwrap_or(usize::MAX),
+                );
+                let published_embedding = ReembedEmbeddingSummary::from_posture(
+                    embedding
+                        .posture
+                        .clone()
+                        .with_vector_coverage(published_coverage),
+                );
 
                 Ok(IndexReembedReport {
                     status: IndexReembedStatus::Success,
@@ -1016,7 +1157,7 @@ pub fn reembed_index(
                     job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
                     document_source: None,
                     embedding_scope: "all_documents".to_owned(),
-                    embedding,
+                    embedding: published_embedding,
                     memories_indexed,
                     sessions_indexed,
                     artifacts_indexed,
@@ -2769,14 +2910,52 @@ fn reembed_embedding_summary(
     db: &DbConnection,
     workspace_id: &str,
     stack: &EmbedderStack,
+    vector_coverage: EmbeddingVectorCoverage,
 ) -> Result<ReembedEmbeddingSummary, IndexRebuildError> {
+    Ok(ReembedEmbeddingSummary::from_posture(
+        embedding_posture_from_stack(db, workspace_id, stack, vector_coverage)?,
+    ))
+}
+
+pub(crate) fn current_embedding_posture(
+    db: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+) -> Result<EmbeddingPosture, DbError> {
+    let stack = default_search_embedder_stack();
+    let documents_total = current_indexable_document_count(db, workspace_id)?;
+    let vector_coverage =
+        embedding_vector_coverage(index_dir, documents_total, read_fast_vector_record_count);
+    embedding_posture_from_stack(db, workspace_id, &stack, vector_coverage)
+}
+
+pub(crate) fn embedding_posture_from_stack(
+    db: &DbConnection,
+    workspace_id: &str,
+    stack: &EmbedderStack,
+    vector_coverage: EmbeddingVectorCoverage,
+) -> Result<EmbeddingPosture, DbError> {
     let fast_embedder = stack.fast();
     let quality_embedder = stack.quality();
     let records = db.list_embedding_metadata_records(workspace_id)?;
+    Ok(embedding_posture_from_records(
+        fast_embedder,
+        quality_embedder,
+        &records,
+        vector_coverage,
+    ))
+}
+
+fn embedding_posture_from_records(
+    fast_embedder: &dyn crate::search::Embedder,
+    quality_embedder: Option<&dyn crate::search::Embedder>,
+    records: &[crate::db::StoredEmbeddingMetadataRecord],
+    vector_coverage: EmbeddingVectorCoverage,
+) -> EmbeddingPosture {
     let selected_registry_model = records
         .iter()
         .find(|record| record.registry.status.as_str() == "available")
-        .map(|record| ReembedRegistryModelSummary {
+        .map(|record| EmbeddingPostureRegistryModel {
             id: record.registry.id.clone(),
             provider: record.registry.provider.as_str().to_owned(),
             model_name: record.registry.model_name.clone(),
@@ -2795,20 +2974,57 @@ fn reembed_embedding_summary(
     } else {
         "frankensearch_hash_fallback"
     };
+    let semantic = fast_embedder.is_semantic()
+        || quality_embedder.is_some_and(|embedder| embedder.is_semantic());
+    let mode = if semantic {
+        EMBEDDING_POSTURE_MODE_NEURAL_LOCAL
+    } else {
+        EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH
+    };
 
-    Ok(ReembedEmbeddingSummary {
+    EmbeddingPosture {
+        schema: EMBEDDING_POSTURE_SCHEMA_V1,
+        mode,
+        semantic,
+        source: source.to_owned(),
         fast_model_id: fast_embedder.id().to_owned(),
         fast_dimension: fast_embedder.dimension(),
         quality_model_id: quality_embedder.map(|embedder| embedder.id().to_owned()),
         quality_dimension: quality_embedder.map(|embedder| embedder.dimension()),
         deterministic: true,
-        semantic: fast_embedder.is_semantic()
-            || quality_embedder.is_some_and(|embedder| embedder.is_semantic()),
         registered_model_count: records.len(),
         available_model_count,
         selected_registry_model,
-        source: source.to_owned(),
-    })
+        vector_coverage,
+    }
+}
+
+fn embedding_vector_coverage(
+    index_dir: &Path,
+    documents_total: u32,
+    read_embedded: impl FnOnce(&Path) -> Option<usize>,
+) -> EmbeddingVectorCoverage {
+    EmbeddingVectorCoverage::new(
+        read_embedded(index_dir).unwrap_or(0),
+        usize::try_from(documents_total).unwrap_or(usize::MAX),
+    )
+}
+
+fn read_fast_vector_record_count(index_dir: &Path) -> Option<usize> {
+    open_fast_vector_index(index_dir)
+        .ok()
+        .map(|index| index.record_count())
+}
+
+fn current_indexable_document_count(db: &DbConnection, workspace_id: &str) -> Result<u32, DbError> {
+    let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false)?;
+    let sessions = db.list_sessions(workspace_id)?;
+    let artifacts = db.count_artifacts(workspace_id)?;
+    let memory_count = u32::try_from(memories.len()).unwrap_or(u32::MAX);
+    let session_count = u32::try_from(sessions.len()).unwrap_or(u32::MAX);
+    Ok(memory_count
+        .saturating_add(session_count)
+        .saturating_add(artifacts))
 }
 
 fn reembed_idempotency_key(
@@ -4072,6 +4288,24 @@ mod tests {
         RuntimeProfileReport::for_profile(OperatingProfile::Workstation, "test_fixture")
     }
 
+    fn fixture_hash_embedding_posture() -> EmbeddingPosture {
+        EmbeddingPosture {
+            schema: EMBEDDING_POSTURE_SCHEMA_V1,
+            mode: EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH,
+            semantic: false,
+            source: "frankensearch_hash_fallback".to_owned(),
+            fast_model_id: "fnv1a-256".to_owned(),
+            fast_dimension: 256,
+            quality_model_id: Some("fnv1a-384".to_owned()),
+            quality_dimension: Some(384),
+            deterministic: true,
+            registered_model_count: 0,
+            available_model_count: 0,
+            selected_registry_model: None,
+            vector_coverage: EmbeddingVectorCoverage::new(0, 10),
+        }
+    }
+
     fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
         if condition {
             Ok(())
@@ -4123,8 +4357,13 @@ mod tests {
         ));
         ensure_active_embedding_registry_record(&connection, workspace_id, &stack)
             .map_err(|error| error.to_string())?;
-        let summary = reembed_embedding_summary(&connection, workspace_id, &stack)
-            .map_err(|error| error.to_string())?;
+        let summary = reembed_embedding_summary(
+            &connection,
+            workspace_id,
+            &stack,
+            EmbeddingVectorCoverage::new(2, 3),
+        )
+        .map_err(|error| error.to_string())?;
 
         ensure(summary.semantic, "summary should report semantic=true")?;
         ensure(
@@ -4142,6 +4381,74 @@ mod tests {
         ensure(
             summary.source == "registry_observed",
             "registered semantic model should use registry_observed source",
+        )?;
+        ensure(
+            summary.posture.schema == EMBEDDING_POSTURE_SCHEMA_V1,
+            "summary should carry the shared posture schema",
+        )?;
+        ensure(
+            summary.posture.mode == EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
+            "semantic summary should use neural_local posture mode",
+        )?;
+        ensure(
+            summary.posture.vector_coverage == EmbeddingVectorCoverage::new(2, 3),
+            "summary should preserve vector coverage",
+        )
+    }
+
+    #[test]
+    fn embedding_posture_serializer_is_stable_and_schema_pinned() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_21234567890123456789012345";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-posture-serializer-test".to_owned(),
+                    name: Some("posture serializer test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let stack = stack_with_hash_quality_fallback(EmbedderStack::from_parts(
+            Arc::new(TestSemanticEmbedder::new("potion-multilingual-128M", 256))
+                as Arc<dyn crate::search::Embedder>,
+            None,
+        ));
+        ensure_active_embedding_registry_record(&connection, workspace_id, &stack)
+            .map_err(|error| error.to_string())?;
+
+        let posture = embedding_posture_from_stack(
+            &connection,
+            workspace_id,
+            &stack,
+            EmbeddingVectorCoverage::new(7, 11),
+        )
+        .map_err(|error| error.to_string())?;
+        let json = posture.data_json();
+
+        ensure(
+            json == posture.data_json(),
+            "posture serializer should be deterministic across calls",
+        )?;
+        ensure(
+            json["schema"] == EMBEDDING_POSTURE_SCHEMA_V1,
+            "posture schema should be pinned",
+        )?;
+        ensure(
+            json["mode"] == EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
+            "semantic posture should report neural_local mode",
+        )?;
+        ensure(json["semantic"] == true, "semantic flag")?;
+        ensure(json["source"] == "registry_observed", "registry source")?;
+        ensure(
+            json["selected_registry_model"]["model_name"] == "potion-multilingual-128M",
+            "selected registry model should identify the active semantic model",
+        )?;
+        ensure(
+            json["vector_coverage"] == serde_json::json!({"embedded": 7, "total": 11}),
+            "posture should include vector coverage",
         )
     }
 
@@ -4690,18 +4997,7 @@ mod tests {
             job_type: "full_rebuild".to_owned(),
             document_source: None,
             embedding_scope: "all_documents".to_owned(),
-            embedding: ReembedEmbeddingSummary {
-                fast_model_id: "fnv1a-256".to_owned(),
-                fast_dimension: 256,
-                quality_model_id: Some("fnv1a-384".to_owned()),
-                quality_dimension: Some(384),
-                deterministic: true,
-                semantic: false,
-                registered_model_count: 0,
-                available_model_count: 0,
-                selected_registry_model: None,
-                source: "frankensearch_hash_fallback".to_owned(),
-            },
+            embedding: ReembedEmbeddingSummary::from_posture(fixture_hash_embedding_posture()),
             memories_indexed: 5,
             sessions_indexed: 3,
             artifacts_indexed: 2,
@@ -4724,6 +5020,14 @@ mod tests {
         assert_eq!(json["embedding"]["fast_model_id"], "fnv1a-256");
         assert_eq!(json["embedding"]["quality_model_id"], "fnv1a-384");
         assert_eq!(json["embedding"]["deterministic"], true);
+        assert_eq!(
+            json["embedding"]["posture"]["schema"],
+            EMBEDDING_POSTURE_SCHEMA_V1
+        );
+        assert_eq!(
+            json["embedding"]["posture"]["vector_coverage"],
+            serde_json::json!({"embedded": 0, "total": 10})
+        );
         assert_eq!(json["memories_indexed"], 5);
         assert_eq!(json["sessions_indexed"], 3);
         assert_eq!(json["artifacts_indexed"], 2);
