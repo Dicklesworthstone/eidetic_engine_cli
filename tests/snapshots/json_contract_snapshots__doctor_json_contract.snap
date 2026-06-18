@@ -4,31 +4,44 @@ expression: doctor
 ---
 {
   "data": {
+    "advisories": [
+      {
+        "message": "CASS binary not found in trusted locations.",
+        "name": "cass",
+        "severity": "warning",
+        "tier": "advisory"
+      }
+    ],
     "checks": [
       {
         "message": "Asupersync runtime initialized successfully.",
         "name": "runtime",
-        "severity": "ok"
+        "severity": "ok",
+        "tier": "core"
       },
       {
         "message": "Workspace inspected at [WORKSPACE].",
         "name": "workspace",
-        "severity": "ok"
+        "severity": "ok",
+        "tier": "core"
       },
       {
         "message": "Database opened and schema is current at [DATABASE].",
         "name": "database",
-        "severity": "ok"
+        "severity": "ok",
+        "tier": "core"
       },
       {
         "message": "Search index is ready at [INDEX].",
         "name": "search_index",
-        "severity": "ok"
+        "severity": "ok",
+        "tier": "core"
       },
       {
         "message": "CASS binary not found in trusted locations.",
         "name": "cass",
-        "severity": "warning"
+        "severity": "warning",
+        "tier": "advisory"
       }
     ],
     "command": "doctor",
