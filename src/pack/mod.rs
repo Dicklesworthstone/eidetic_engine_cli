@@ -5506,14 +5506,15 @@ fn assemble_mmr_draft(
 
     if options.include_anti_pattern_first
         && let Some(candidate_index) = anti_pattern_first_mmr_candidate_index(
-        &candidates,
-        &scratch.max_selected_similarities,
-        used_tokens,
-        budget,
-        &quotas,
-        &section_usage,
-        &lod_usage,
-    ) {
+            &candidates,
+            &scratch.max_selected_similarities,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+            &lod_usage,
+        )
+    {
         let selected_max_similarity = scratch
             .max_selected_similarities
             .swap_remove(candidate_index);
@@ -5918,14 +5919,15 @@ fn assemble_mmr_draft_reusing_workspace(
 
     if options.include_anti_pattern_first
         && let Some(candidate_index) = anti_pattern_first_mmr_candidate_index(
-        &candidates,
-        &scratch.max_selected_similarities,
-        used_tokens,
-        budget,
-        &quotas,
-        &section_usage,
-        &lod_usage,
-    ) {
+            &candidates,
+            &scratch.max_selected_similarities,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+            &lod_usage,
+        )
+    {
         let selected_max_similarity = scratch
             .max_selected_similarities
             .swap_remove(candidate_index);
@@ -6307,16 +6309,17 @@ fn assemble_facility_location_draft(
 
     if options.include_anti_pattern_first
         && let Some(profile_index) = anti_pattern_first_facility_candidate_index(
-        &candidates,
-        &active,
-        &current_coverages,
-        &similarity_cache,
-        used_tokens,
-        budget,
-        &quotas,
-        &section_usage,
-        &lod_usage,
-    ) {
+            &candidates,
+            &active,
+            &current_coverages,
+            &similarity_cache,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+            &lod_usage,
+        )
+    {
         if active.get(profile_index).copied().unwrap_or(false) {
             let marginal_gain = facility_marginal_gain_cached(
                 profile_index,
@@ -6604,16 +6607,17 @@ fn assemble_facility_location_draft_reusing_workspace(
 
     if options.include_anti_pattern_first
         && let Some(profile_index) = anti_pattern_first_facility_candidate_index(
-        &candidates,
-        &active,
-        &current_coverages,
-        &similarity_cache,
-        used_tokens,
-        budget,
-        &quotas,
-        &section_usage,
-        &lod_usage,
-    ) {
+            &candidates,
+            &active,
+            &current_coverages,
+            &similarity_cache,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+            &lod_usage,
+        )
+    {
         if active.get(profile_index).copied().unwrap_or(false) {
             let marginal_gain = facility_marginal_gain_cached(
                 profile_index,
@@ -6994,14 +6998,12 @@ fn anti_pattern_first_facility_candidate_index(
         }
         let replaces_best = match best {
             None => true,
-            Some(best_index) => {
-                match candidates[best_index].candidate.as_ref() {
-                    Some(best_candidate) => {
-                        compare_candidates(candidate, best_candidate) == Ordering::Less
-                    }
-                    None => true,
+            Some(best_index) => match candidates[best_index].candidate.as_ref() {
+                Some(best_candidate) => {
+                    compare_candidates(candidate, best_candidate) == Ordering::Less
                 }
-            }
+                None => true,
+            },
         };
         if replaces_best {
             best = Some(profile_index);
@@ -7016,8 +7018,7 @@ fn is_anti_pattern_first_candidate(candidate: &PackCandidate) -> bool {
 }
 
 fn mark_anti_pattern_first_candidate(mut candidate: PackCandidate) -> PackCandidate {
-    const PREFIX: &str =
-        "What NOT to do: selected from the reserved anti-pattern/failure/risk slice before action. ";
+    const PREFIX: &str = "What NOT to do: selected from the reserved anti-pattern/failure/risk slice before action. ";
     if !candidate.why.starts_with("What NOT to do:") {
         candidate.why = format!("{PREFIX}{}", candidate.why);
     }
@@ -8803,11 +8804,11 @@ mod tests {
         CHARACTER_HEURISTIC_CHARS_PER_TOKEN_NUMERATOR, CONTEXT_COMMAND, CandidateSignature,
         ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
         ContextResponseDegradation, ContextResponseSeverity, DEFAULT_CHARS_PER_TOKEN,
-        FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR, PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE,
-        PACK_ASSEMBLY_SLOW_CODE, PACK_REVISION_TOKEN_SCHEMA_V1, PackArenaWorkspace,
-        PackArenaWorkspaceKey, PackAssemblyOptions, PackAssemblySlo, PackAssemblySloActuals,
-        PackAssemblySloStatus, PackCacheGovernor, PackCacheStatus, PackCandidate,
-        PackCandidateInput, PackDraft, PackDraftItem, PackHotset, PackHotsetEntry,
+        DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR, FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR,
+        PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE, PACK_ASSEMBLY_SLOW_CODE, PACK_REVISION_TOKEN_SCHEMA_V1,
+        PackArenaWorkspace, PackArenaWorkspaceKey, PackAssemblyOptions, PackAssemblySlo,
+        PackAssemblySloActuals, PackAssemblySloStatus, PackCacheGovernor, PackCacheStatus,
+        PackCandidate, PackCandidateInput, PackDraft, PackDraftItem, PackHotset, PackHotsetEntry,
         PackHotsetEntryKind, PackItemRedaction, PackOmissionReason, PackProvenance,
         PackRejectionStage, PackResourceProfile, PackRevisionMeshMetadata, PackScoreBreakdown,
         PackSection, PackSelectedItem, PackSelectionAudit, PackSelectionObjective,
@@ -11871,8 +11872,7 @@ mod tests {
 
     #[test]
     fn anti_pattern_first_reserves_failure_slice_under_tight_budget() -> TestResult {
-        let budget =
-            TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let budget = TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
         let anti_pattern = candidate_in_section(
             90,
             PackSection::Failures,
@@ -11928,11 +11928,7 @@ mod tests {
             &PackSelectionPhase::AntiPatternFirst,
             "selectedIn marks the reserved slice",
         )?;
-        ensure_contains(
-            &first.why,
-            "What NOT to do:",
-            "reserved slice why marker",
-        )?;
+        ensure_contains(&first.why, "What NOT to do:", "reserved slice why marker")?;
         ensure_equal(
             &super::context_render_section_key(first),
             &"what_not_to_do",
@@ -11954,9 +11950,191 @@ mod tests {
     }
 
     #[test]
+    fn anti_pattern_first_empty_candidate_pool_stays_empty() -> TestResult {
+        let budget = TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
+
+        let draft = assemble_classic_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare code-first swarm verification",
+            budget,
+            Vec::<PackCandidate>::new(),
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        ensure_equal(&draft.items.len(), &0, "empty pool selects no items")?;
+        ensure_equal(&draft.omitted.len(), &0, "empty pool omits no items")?;
+        ensure_equal(&draft.used_tokens, &0, "empty pool uses no budget")
+    }
+
+    #[test]
+    fn anti_pattern_first_no_failure_candidates_uses_normal_mmr() -> TestResult {
+        let budget = TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let primary_rule = candidate_in_section(
+            11,
+            PackSection::ProceduralRules,
+            1.00,
+            0.80,
+            10,
+            "Use central batch verification for code-first swarm changes.",
+        )?
+        .with_diversity_key("rule:central-verify");
+        let supporting_evidence = candidate_in_section(
+            12,
+            PackSection::Evidence,
+            0.70,
+            0.70,
+            10,
+            "Central verification caught prior swarm integration failures.",
+        )?
+        .with_diversity_key("evidence:central-verify");
+
+        let draft = assemble_classic_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare code-first swarm verification",
+            budget,
+            vec![supporting_evidence, primary_rule],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        let first = draft
+            .items
+            .first()
+            .ok_or_else(|| "expected ordinary selected rule".to_owned())?;
+        ensure_equal(
+            &first.memory_id,
+            &memory_id(11),
+            "ordinary MMR still chooses the strongest action item",
+        )?;
+        ensure_equal(
+            &first.selected_in,
+            &PackSelectionPhase::StrictMmr,
+            "no failure candidates means no reserved phase",
+        )?;
+        ensure(
+            draft
+                .items
+                .iter()
+                .all(|item| item.selected_in != PackSelectionPhase::AntiPatternFirst),
+            "non-failure candidates never receive the anti-pattern-first marker",
+        )?;
+        ensure(
+            draft
+                .items
+                .iter()
+                .all(|item| !item.why.contains("What NOT to do:")),
+            "non-failure candidates are not rewritten as safety warnings",
+        )
+    }
+
+    #[test]
+    fn anti_pattern_first_rejects_below_floor_failure_from_reserved_slice() -> TestResult {
+        let budget = TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let below_floor_failure = candidate_in_section(
+            93,
+            PackSection::Failures,
+            DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR / 2.0,
+            0.95,
+            8,
+            "Do not cargo build locally when the task is unrelated.",
+        )?
+        .with_diversity_key("anti-pattern:unrelated-local-cargo");
+        let primary_rule = candidate_in_section(
+            13,
+            PackSection::ProceduralRules,
+            1.00,
+            0.80,
+            10,
+            "Use central batch verification for code-first swarm changes.",
+        )?
+        .with_diversity_key("rule:central-verify");
+
+        let draft = assemble_classic_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare code-first swarm verification",
+            budget,
+            vec![below_floor_failure, primary_rule],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        ensure_equal(
+            &draft.items.first().map(|item| item.memory_id),
+            &Some(memory_id(13)),
+            "below-floor safety candidate does not jump ahead of the relevant rule",
+        )?;
+        ensure(
+            draft
+                .items
+                .iter()
+                .filter(|item| item.memory_id == memory_id(93))
+                .all(|item| item.selected_in != PackSelectionPhase::AntiPatternFirst),
+            "below-floor failure may remain eligible later, but not in the reserved slice",
+        )?;
+        ensure(
+            draft
+                .items
+                .iter()
+                .filter(|item| item.memory_id == memory_id(93))
+                .all(|item| !item.why.contains("What NOT to do:")),
+            "below-floor failure why text is not rewritten as reserved safety guidance",
+        )
+    }
+
+    #[test]
+    fn anti_pattern_first_respects_failure_section_quota_boundary() -> TestResult {
+        let budget = TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let oversized_failure = candidate_in_section(
+            94,
+            PackSection::Failures,
+            1.00,
+            0.95,
+            11,
+            "Do not run local Cargo builds during code-first swarm batches.",
+        )?
+        .with_diversity_key("anti-pattern:local-cargo");
+        let primary_rule = candidate_in_section(
+            14,
+            PackSection::ProceduralRules,
+            0.90,
+            0.80,
+            10,
+            "Use central batch verification for code-first swarm changes.",
+        )?
+        .with_diversity_key("rule:central-verify");
+
+        let draft = assemble_classic_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare code-first swarm verification",
+            budget,
+            vec![oversized_failure, primary_rule],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+
+        ensure(
+            draft
+                .items
+                .iter()
+                .all(|item| item.memory_id != memory_id(94)),
+            "failure candidate that exceeds the 20 percent balanced slice is not packed",
+        )?;
+        ensure(
+            draft.omitted.iter().any(|omission| {
+                omission.memory_id == memory_id(94)
+                    && omission.reason == PackOmissionReason::TokenBudgetExceeded
+            }),
+            "oversized failure is reported as a budget omission",
+        )?;
+        ensure(
+            draft
+                .items
+                .iter()
+                .all(|item| item.selected_in != PackSelectionPhase::AntiPatternFirst),
+            "quota-infeasible failure cannot be marked as anti-pattern-first",
+        )
+    }
+
+    #[test]
     fn anti_pattern_first_can_be_disabled_without_filtering_failures() -> TestResult {
-        let budget =
-            TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let budget = TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
         let anti_pattern = candidate_in_section(
             92,
             PackSection::Failures,
@@ -12019,8 +12197,7 @@ mod tests {
 
     #[test]
     fn anti_pattern_first_applies_to_submodular_profile() -> TestResult {
-        let budget =
-            TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let budget = TokenBudget::new(50).map_err(|error| format!("budget rejected: {error:?}"))?;
         let anti_pattern = candidate_in_section(
             91,
             PackSection::Failures,
