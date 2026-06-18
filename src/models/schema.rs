@@ -106,6 +106,9 @@ pub const AMBIENT_CONTEXT_SCHEMA_V1: &str = "ee.ambient_context.v1";
 /// Schema identifier for provenance freshness diagnostics (bd-2vq2z.2).
 pub const PROVENANCE_HEALTH_SCHEMA_V1: &str = "ee.provenance_health.v1";
 
+/// Schema identifier for trust calibration diagnostics (bd-2vq2z.3).
+pub const TRUST_REPORT_SCHEMA_V1: &str = "ee.trust_report.v1";
+
 /// All known schema identifiers for validation.
 pub const KNOWN_SCHEMAS: &[&str] = &[
     RESPONSE_SCHEMA_V0,
@@ -192,6 +195,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     EMBEDDING_POSTURE_SCHEMA_V1,
     AMBIENT_CONTEXT_SCHEMA_V1,
     PROVENANCE_HEALTH_SCHEMA_V1,
+    TRUST_REPORT_SCHEMA_V1,
     // Active learning agenda and experiment schemas (EE-440)
     LEARNING_QUESTION_SCHEMA_V1,
     UNCERTAINTY_ESTIMATE_SCHEMA_V1,

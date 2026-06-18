@@ -6,9 +6,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use crate::db::{DbConnection, DbError, StoredFeedbackEvent, StoredMemory};
-
-/// Stable schema for `ee trust report` response data.
-pub const TRUST_REPORT_SCHEMA_V1: &str = "ee.trust_report.v1";
+use crate::models::TRUST_REPORT_SCHEMA_V1;
 
 const DEFAULT_BUCKET_COUNT: usize = 5;
 const DEFAULT_LEADERBOARD_LIMIT: usize = 10;
