@@ -116,8 +116,8 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
             "event": "model_status_observed",
             "registeredCount": status_data.get("registeredCount"),
             "availableCount": status_data.get("availableCount"),
-            "activeSource": status_data.pointer("/active/source"),
-            "semanticReadiness": status_data.pointer("/modelLifecycle/semanticReadiness/state"),
+            "activeSource": status_data.get("active").and_then(|v| v.pointer("/source")),
+            "semanticReadiness": status_data.get("modelLifecycle").and_then(|v| v.pointer("/semanticReadiness/state")),
         }),
     )?;
 
@@ -138,7 +138,7 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
     )?;
     ensure_eq_str(
         status_data
-            .pointer("/active/source")
+            .get("active").and_then(|v| v.pointer("/source"))
             .and_then(Value::as_str)
             .ok_or_else(|| "missing active.source".to_string())?,
         "frankensearch_hash_fallback",
@@ -146,14 +146,14 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
     )?;
     ensure_eq_bool(
         status_data
-            .pointer("/active/semantic")
+            .get("active").and_then(|v| v.pointer("/semantic"))
             .and_then(Value::as_bool)
             .ok_or_else(|| "missing active.semantic".to_string())?,
         false,
         "status active.semantic before artifact download",
     )?;
     let lifecycle_models = status_data
-        .pointer("/modelLifecycle/models")
+        .get("modelLifecycle").and_then(|v| v.pointer("/models"))
         .and_then(Value::as_array)
         .ok_or_else(|| "missing modelLifecycle.models".to_string())?;
     let lifecycle_entry = find_object_by_string(
@@ -174,7 +174,7 @@ fn model_cli_auto_declares_bundled_embedding_without_claiming_download() -> Test
     )?;
     ensure_eq_u64(
         lifecycle_entry
-            .pointer("/embeddingMetadata/dimension")
+            .get("embeddingMetadata").and_then(|v| v.pointer("/dimension"))
             .and_then(Value::as_u64)
             .ok_or_else(|| "missing embeddingMetadata.dimension".to_string())?,
         u64::from(BUNDLED_EMBEDDING_DIMENSION),
