@@ -11,7 +11,7 @@ use std::process::Command;
 
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
 const EFFECT_SOURCE: &str = include_str!("../src/core/effect.rs");
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 388;
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 392;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",
@@ -1398,7 +1398,10 @@ fn effect_manifest_runtime_classifier_covers_v6h4_command_classes() -> TestResul
         ("import cass", RuntimeClass::MultiStage, true),
         ("remember", RuntimeClass::MultiStage, true),
         ("backup create", RuntimeClass::MultiStage, true),
-        ("daemon", RuntimeClass::Supervised, true),
+        // daemon reclassified Supervised -> MultiStage when the supervised job
+        // registry was retired (e4dec185 fix(daemon): retire unavailable job
+        // registry); the expectation lagged that peer change.
+        ("daemon", RuntimeClass::MultiStage, true),
     ] {
         let effect = manifest
             .get(command)

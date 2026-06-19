@@ -3488,6 +3488,12 @@ pub enum DiagCommand {
     Claims(DiagClaimsArgs),
     /// Seed deterministic causal evidence for diagnostic fixture replay.
     CausalEdge(DiagCausalEdgeArgs),
+    /// Report write/read contention posture: write-lock queue, read-pool,
+    /// single-flight, and group-commit coalescing. With `--use-daemon`, reads
+    /// the running daemon's live in-process counters over its socket (the only
+    /// way to observe real coalescing/contention under load; a one-shot CLI
+    /// snapshot sees single-writer fallbacks only). bd-d67os.12.
+    Contention(DiagContentionArgs),
     /// Seed a deterministic curation candidate for diagnostic fixture replay.
     CurationCandidate(DiagCurationCandidateArgs),
     /// Copy the workspace database and apply a deterministic diagnostic skew.
@@ -4704,6 +4710,20 @@ pub struct DiagWriteOwnerArgs {
     /// Number of deterministic write requests to enqueue without running the owner.
     #[arg(long, default_value_t = 0, value_name = "N")]
     pub enqueue: u32,
+}
+
+/// Arguments for `ee diag contention`.
+#[derive(Clone, Debug, PartialEq, Parser)]
+pub struct DiagContentionArgs {
+    /// Query the running daemon for live in-process contention telemetry over
+    /// its socket. When the daemon is not running, falls back to the
+    /// process-local snapshot and records the daemon source as unavailable.
+    #[arg(long = "use-daemon", action = ArgAction::SetTrue)]
+    pub use_daemon: bool,
+
+    /// Explicit daemon socket path. Defaults to the platform per-UID socket.
+    #[arg(long = "daemon-socket", value_name = "PATH")]
+    pub daemon_socket: Option<PathBuf>,
 }
 
 /// Arguments for `ee diag store-integrity`.
@@ -12625,6 +12645,7 @@ where
             DiagCommand::BuildAdmission(args) => handle_diag_build_admission(&cli, args, stdout),
             DiagCommand::Claims(args) => handle_diag_claims(&cli, args, stdout),
             DiagCommand::CausalEdge(args) => handle_diag_causal_edge(&cli, args, stdout, stderr),
+            DiagCommand::Contention(args) => handle_diag_contention(&cli, args, stdout),
             DiagCommand::CurationCandidate(args) => {
                 handle_diag_curation_candidate(&cli, args, stdout, stderr)
             }
@@ -27210,6 +27231,173 @@ fn diag_environment_attestation_response_json(report: &EnvironmentAttestationRep
         "degraded": &report.degraded,
     })
     .to_string()
+}
+
+/// Build the `ee.diag.contention.v1` report from telemetry the current process
+/// can read directly. Group-commit and single-flight counters are
+/// process-global, so they reflect this process's own activity; write-owner
+/// queue depth and read-pool stats need a live actor/pool handle and are left
+/// as `unavailableSources` gaps. Returned as a serialized JSON value so the
+/// daemon-query and in-process paths share one render path. bd-d67os.12.
+fn contention_report_value_in_process() -> serde_json::Value {
+    let group_commit = crate::core::write_owner::write_group_commit_telemetry(None);
+    let singleflight = crate::core::singleflight::singleflight_posture_report();
+    let inputs = crate::core::contention::ContentionInputs {
+        singleflight: Some(singleflight),
+        group_commit: Some((&group_commit).into()),
+        ..crate::core::contention::ContentionInputs::default()
+    };
+    let report = crate::core::contention::build_contention_report(&inputs);
+    serde_json::to_value(report).unwrap_or(serde_json::Value::Null)
+}
+
+/// Query the running daemon for its live in-process contention telemetry over
+/// the Unix socket. The daemon process accumulates real group-commit coalescing
+/// that a one-shot CLI snapshot (single-writer fallback) cannot observe.
+/// Returns the daemon's serialized `ee.diag.contention.v1` report on success,
+/// or `None` (recording a degraded entry) when the daemon is unreachable or
+/// errors, so the caller falls back to the in-process snapshot. bd-d67os.12.
+#[cfg(unix)]
+fn contention_report_value_from_daemon(
+    args: &DiagContentionArgs,
+    degraded: &mut Vec<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let socket_path = args
+        .daemon_socket
+        .clone()
+        .unwrap_or_else(crate::daemon::default_daemon_socket_path);
+    let request = crate::daemon::protocol::DaemonRequest::new(
+        format!("diag-contention-{}", std::process::id()),
+        "ee-diag-contention",
+        crate::daemon::server::METHOD_TELEMETRY,
+        serde_json::json!({}),
+    );
+    match crate::daemon::server::client_round_trip(&socket_path, &request) {
+        Ok(response) => {
+            let result = response.result;
+            let error = response.error;
+            if let Some(error) = error {
+                degraded.push(serde_json::json!({
+                    "severity": "warning",
+                    "code": error.code,
+                    "message": format!("daemon telemetry error: {}", error.message),
+                    "repair": "ee diag contention",
+                }));
+                None
+            } else {
+                result
+            }
+        }
+        Err(error) => {
+            degraded.push(serde_json::json!({
+                "severity": "warning",
+                "code": crate::daemon::DAEMON_SOCKET_UNAVAILABLE_CODE,
+                "message": format!("daemon unavailable, used in-process snapshot: {error}"),
+                "repair": "ee daemon start",
+            }));
+            None
+        }
+    }
+}
+
+/// Non-Unix stub: daemon telemetry requires a Unix-domain socket, so this
+/// platform always falls back to the in-process snapshot.
+#[cfg(not(unix))]
+fn contention_report_value_from_daemon(
+    _args: &DiagContentionArgs,
+    degraded: &mut Vec<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    degraded.push(serde_json::json!({
+        "severity": "warning",
+        "code": "daemon_socket_unavailable",
+        "message": "daemon telemetry requires a Unix socket; used in-process snapshot",
+        "repair": "ee diag contention",
+    }));
+    None
+}
+
+fn handle_diag_contention<W>(
+    cli: &Cli,
+    args: &DiagContentionArgs,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let mut degraded: Vec<serde_json::Value> = Vec::new();
+    let report_value = if args.use_daemon {
+        contention_report_value_from_daemon(args, &mut degraded)
+            .unwrap_or_else(contention_report_value_in_process)
+    } else {
+        contention_report_value_in_process()
+    };
+    let response = serde_json::json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": {
+            "command": "diag contention",
+            "report": report_value,
+        },
+        "degraded": degraded,
+    });
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_diag_contention_human(&response))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&response.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+    }
+}
+
+fn render_diag_contention_human(response: &serde_json::Value) -> String {
+    let report = response
+        .pointer("/data/report")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let posture = report
+        .get("overallPosture")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let mut out = format!("contention diagnostics\n\noverall posture: {posture}\n");
+    if let Some(findings) = report
+        .get("topContention")
+        .and_then(serde_json::Value::as_array)
+    {
+        out.push_str(&format!("top contention findings: {}\n", findings.len()));
+    }
+    if let Some(gaps) = report
+        .get("unavailableSources")
+        .and_then(serde_json::Value::as_array)
+        && !gaps.is_empty()
+    {
+        out.push_str(&format!("unavailable sources: {}\n", gaps.len()));
+    }
+    out.push_str("\nUse --json for the full ee.diag.contention.v1 report.\n");
+    for entry in response
+        .get("degraded")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        out.push_str(&format!(
+            "\n{}: {}\n",
+            entry
+                .get("severity")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("warning"),
+            entry
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("contention degraded"),
+        ));
+    }
+    out
 }
 
 fn handle_diag_plan_cache<W>(cli: &Cli, stdout: &mut W) -> ProcessExitCode
@@ -58802,6 +58990,7 @@ impl NormalizedInvocation {
                     DiagCommand::Artifacts(_) => "diag artifacts".to_string(),
                     DiagCommand::BuildAdmission(_) => "diag build-admission".to_string(),
                     DiagCommand::CausalEdge(_) => "diag causal-edge".to_string(),
+                    DiagCommand::Contention(_) => "diag contention".to_string(),
                     DiagCommand::Claims(_) => "diag claims".to_string(),
                     DiagCommand::CurationCandidate(_) => "diag curation-candidate".to_string(),
                     DiagCommand::DatabaseSkew(_) => "diag database-skew".to_string(),
@@ -76528,6 +76717,21 @@ mod tests {
         assert_eq!(super::closest_prefix("xyzzy", candidates, 2), None);
         // Exact match
         assert_eq!(super::closest_prefix("mem", candidates, 2), Some("mem"));
+    }
+
+    #[test]
+    fn contention_report_value_in_process_is_well_formed() {
+        let value = super::contention_report_value_in_process();
+        assert_eq!(
+            value.get("schemaTag").and_then(serde_json::Value::as_str),
+            Some(crate::models::contention::CONTENTION_DIAG_SCHEMA_V1),
+            "in-process contention snapshot is an ee.diag.contention.v1 report"
+        );
+        // The two process-global sources the CLI reads directly are present;
+        // overallPosture is always emitted.
+        assert!(value.get("groupCommit").is_some());
+        assert!(value.get("singleflight").is_some());
+        assert!(value.get("overallPosture").is_some());
     }
 
     #[test]

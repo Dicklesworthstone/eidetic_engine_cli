@@ -1255,6 +1255,7 @@ impl EffectManifest {
             ),
             CommandEffect::read_only_db("diag causal-edge", "Inspect causal-edge diagnostics"),
             CommandEffect::read_only_db("diag claims", "Inspect claim diagnostics"),
+            CommandEffect::read_only_db("diag contention", "Inspect contention diagnostics"),
             CommandEffect::read_only_db(
                 "diag curation-candidate",
                 "Inspect curation-candidate diagnostics",

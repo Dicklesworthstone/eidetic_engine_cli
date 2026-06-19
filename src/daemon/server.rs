@@ -85,6 +85,21 @@ pub const DAEMON_CONTEXT_DEADLINE_EXCEEDED_CODE: &str = "daemon_context_deadline
 /// produce an `ee.response.v2` envelope.
 pub const DAEMON_CONTEXT_EXECUTION_FAILED_CODE: &str = "daemon_context_execution_failed";
 
+/// Method dispatch name for the live in-process contention telemetry
+/// snapshot. Because the handler runs INSIDE the long-lived daemon process,
+/// the group-commit / singleflight counters it returns reflect real
+/// accumulated load — coalescing that a one-shot `ee` CLI invocation
+/// (single-writer fallback, process-local atomics reset per process) can
+/// never observe. Surfaced to operators via `ee diag contention --use-daemon`.
+/// bd-d67os.12.
+pub const METHOD_TELEMETRY: &str = "ee.daemon.telemetry";
+
+/// Error code returned when the daemon fails to serialize its live
+/// contention telemetry snapshot into the `ee.diag.contention.v1` result
+/// payload. Non-fatal to the daemon; the client falls back to the
+/// in-process snapshot path. bd-d67os.12.
+pub const DAEMON_TELEMETRY_ENCODE_FAILED_CODE: &str = "daemon_telemetry_encode_failed";
+
 /// Error code returned when a request's `method` field does not match
 /// any registered handler.
 pub const DAEMON_UNKNOWN_METHOD_CODE: &str = "daemon_unknown_method";
@@ -1630,7 +1645,44 @@ fn dispatch_with_echo_policy_and_workspace(
             )
         }
         METHOD_CONTEXT => dispatch_context(request, shutdown),
+        METHOD_TELEMETRY => dispatch_telemetry(request),
         _ => unreachable!("registered daemon methods are handled above"),
+    }
+}
+
+/// Dispatch `ee.daemon.telemetry`: snapshot the daemon process's live,
+/// process-global contention telemetry and return it as a serialized
+/// `ee.diag.contention.v1` report. Running inside the daemon process is the
+/// whole point — the group-commit counters here reflect real coalescing
+/// accumulated across many writes, which a one-shot CLI invocation (a
+/// single-writer fallback with its own zeroed atomics) cannot see. Sources
+/// that require a live actor/pool handle (write-owner queue depth/wait,
+/// read-pool stats, ledger lock-wait percentiles) are left `None` and surface
+/// as `unavailableSources` in the report; they are wired in a follow-up once
+/// their process-global accessors are threaded through. bd-d67os.12.
+fn dispatch_telemetry(request: &DaemonRequest) -> DaemonResponse {
+    let group_commit = crate::core::write_owner::write_group_commit_telemetry(None);
+    let singleflight = crate::core::singleflight::singleflight_posture_report();
+    let inputs = crate::core::contention::ContentionInputs {
+        singleflight: Some(singleflight),
+        group_commit: Some((&group_commit).into()),
+        ..crate::core::contention::ContentionInputs::default()
+    };
+    let report = crate::core::contention::build_contention_report(&inputs);
+    match serde_json::to_value(&report) {
+        Ok(result) => DaemonResponse::ok(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            result,
+        ),
+        Err(error) => DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_TELEMETRY_ENCODE_FAILED_CODE,
+            format!("failed to serialize contention telemetry: {error}"),
+        ),
     }
 }
 
@@ -2093,7 +2145,9 @@ fn parse_daemon_pack_output_profile(
 
 fn daemon_method_authority(method: &str) -> Option<DaemonAuthority> {
     match method {
-        METHOD_CAPABILITIES | METHOD_ECHO | METHOD_SHUTDOWN => Some(DaemonAuthority::SameUid),
+        METHOD_CAPABILITIES | METHOD_ECHO | METHOD_SHUTDOWN | METHOD_TELEMETRY => {
+            Some(DaemonAuthority::SameUid)
+        }
         METHOD_CONTEXT => Some(DaemonAuthority::SameUidWorkspace),
         _ => None,
     }
@@ -2152,13 +2206,15 @@ fn daemon_capabilities_result() -> serde_json::Value {
             METHOD_CAPABILITIES,
             METHOD_CONTEXT,
             METHOD_ECHO,
-            METHOD_SHUTDOWN
+            METHOD_SHUTDOWN,
+            METHOD_TELEMETRY
         ],
         "authorization": {
             "ee.daemon.capabilities": daemon_method_authority(METHOD_CAPABILITIES).expect("registered method").as_wire_label(),
             "ee.daemon.context": daemon_method_authority(METHOD_CONTEXT).expect("registered method").as_wire_label(),
             "ee.daemon.echo": daemon_method_authority(METHOD_ECHO).expect("registered method").as_wire_label(),
-            "ee.daemon.shutdown": daemon_method_authority(METHOD_SHUTDOWN).expect("registered method").as_wire_label()
+            "ee.daemon.shutdown": daemon_method_authority(METHOD_SHUTDOWN).expect("registered method").as_wire_label(),
+            "ee.daemon.telemetry": daemon_method_authority(METHOD_TELEMETRY).expect("registered method").as_wire_label()
         },
         "forward_compat": {
             "v1_unknown_fields": "rejected",
@@ -2645,8 +2701,15 @@ mod tests {
                 METHOD_CAPABILITIES,
                 METHOD_CONTEXT,
                 METHOD_ECHO,
-                METHOD_SHUTDOWN
+                METHOD_SHUTDOWN,
+                METHOD_TELEMETRY
             ]))
+        );
+        assert_eq!(
+            result
+                .pointer("/authorization/ee.daemon.telemetry")
+                .and_then(serde_json::Value::as_str),
+            Some(DaemonAuthority::SameUid.as_wire_label())
         );
         assert_eq!(
             result
@@ -2677,6 +2740,51 @@ mod tests {
                 .pointer("/authorization/ee.daemon.shutdown")
                 .and_then(serde_json::Value::as_str),
             Some(DaemonAuthority::SameUid.as_wire_label())
+        );
+    }
+
+    #[test]
+    fn dispatch_telemetry_returns_contention_report() {
+        let request = DaemonRequest::new(
+            "req-telemetry-001",
+            TEST_AGENT_ID,
+            METHOD_TELEMETRY,
+            serde_json::json!({}),
+        );
+        let response = dispatch(&request);
+        assert!(
+            response.error.is_none(),
+            "telemetry dispatch should succeed: {:?}",
+            response.error
+        );
+        let result = response.result.as_ref().expect("telemetry returns result");
+        assert_eq!(
+            result.get("schemaTag").and_then(serde_json::Value::as_str),
+            Some(crate::models::contention::CONTENTION_DIAG_SCHEMA_V1),
+            "telemetry result is an ee.diag.contention.v1 report"
+        );
+        // The report always carries an overall posture, and the two
+        // process-global sources the daemon snapshots (group-commit,
+        // singleflight) are present rather than listed as unavailable.
+        assert!(
+            result.get("overallPosture").is_some(),
+            "report carries an overall posture"
+        );
+        assert!(
+            result.get("singleflight").is_some(),
+            "singleflight posture is snapshotted in-process"
+        );
+        assert!(
+            result.get("groupCommit").is_some(),
+            "group-commit telemetry is snapshotted in-process"
+        );
+    }
+
+    #[test]
+    fn telemetry_method_is_same_uid_authorized() {
+        assert_eq!(
+            daemon_method_authority(METHOD_TELEMETRY),
+            Some(DaemonAuthority::SameUid)
         );
     }
 
