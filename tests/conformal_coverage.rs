@@ -1,6 +1,6 @@
 use ee::core::conformal::{
-    DEFAULT_CONFORMAL_COVERAGE, WhyConformalCandidate, conformal_score_interval,
-    split_conformal_quantile, why_conformal_confidence_intervals,
+    DEFAULT_CONFORMAL_COVERAGE, MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES, WhyConformalCandidate,
+    conformal_score_interval, split_conformal_quantile, why_conformal_confidence_intervals,
 };
 
 type TestResult = Result<(), String>;
@@ -115,4 +115,52 @@ fn why_prediction_set_deduplicates_by_best_score() -> TestResult {
         .find(|entry| entry.memory_id == "mem_dup")
         .ok_or_else(|| "deduplicated candidate missing".to_owned())?;
     ensure(duplicate.score == 0.90, "dedupe must retain best score")
+}
+
+#[cfg(unix)]
+#[test]
+fn why_conformal_ignores_symlinked_workspace_calibration_file() -> TestResult {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = temp.path().join("workspace");
+    let calibration_dir = workspace.join(".ee").join("search");
+    std::fs::create_dir_all(&calibration_dir).map_err(|error| error.to_string())?;
+
+    let outside = temp.path().join("outside-calibration.jsonl");
+    let mut rows = (0..MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES)
+        .map(|_| serde_json::json!({"nonconformityScore": 0.05}).to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    rows.push('\n');
+    std::fs::write(&outside, rows).map_err(|error| error.to_string())?;
+    symlink(&outside, calibration_dir.join("calibration.jsonl"))
+        .map_err(|error| error.to_string())?;
+
+    let report = why_conformal_confidence_intervals(
+        Some(&workspace),
+        "mem_target",
+        0.80,
+        [WhyConformalCandidate {
+            memory_id: "mem_other".to_owned(),
+            score: 0.70,
+            source: "link:supports".to_owned(),
+        }],
+    );
+
+    ensure(
+        report.calibration_sample_count == 0,
+        "symlinked calibration file must not contribute samples",
+    )?;
+    ensure(
+        report.calibration_status == "conservative_insufficient_calibration",
+        format!(
+            "symlinked calibration should fall back conservatively, got {}",
+            report.calibration_status
+        ),
+    )?;
+    ensure(
+        report.nonconformity_quantile == 1.0,
+        "symlinked calibration should not narrow conformal quantile",
+    )
 }

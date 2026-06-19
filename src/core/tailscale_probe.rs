@@ -991,10 +991,10 @@ fn parse_tailscale_version(raw: &str) -> Option<String> {
         return None;
     }
     let tailscale_commit = lines.next()?;
-    let other_commit = lines.next()?;
+    let version_metadata = lines.next()?;
     let go_version = lines.next()?;
     if !has_commit_suffix(tailscale_commit, "tailscale commit:")
-        || !has_commit_suffix(other_commit, "other commit:")
+        || !has_version_metadata_line(version_metadata, version)
         || !has_go_version_suffix(go_version)
         || lines.next().is_some()
     {
@@ -1017,6 +1017,23 @@ fn has_commit_suffix(line: &str, prefix: &str) -> bool {
     };
     let value = value.trim();
     value.len() == 40 && value.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+fn has_version_metadata_line(line: &str, parsed_version: &str) -> bool {
+    has_commit_suffix(line, "other commit:") || has_long_version_suffix(line, parsed_version)
+}
+
+fn has_long_version_suffix(line: &str, parsed_version: &str) -> bool {
+    let Some(value) = line.strip_prefix("long version:") else {
+        return false;
+    };
+    let value = value.trim();
+    if value == parsed_version {
+        return true;
+    }
+    value
+        .strip_prefix(parsed_version)
+        .is_some_and(|suffix| suffix.starts_with('-') && suffix.len() > 1)
 }
 
 fn has_go_version_suffix(line: &str) -> bool {
@@ -1304,6 +1321,26 @@ mod tests {
     #[test]
     fn malformed_binary_version_marks_binary_inauthentic() {
         let binary = classify_binary("/usr/local/bin/tailscale", "definitely not tailscale");
+        assert!(!binary.authentic);
+        assert_eq!(binary.parsed_version, None);
+    }
+
+    #[test]
+    fn current_tailscale_long_version_output_is_authentic() {
+        let binary = classify_binary(
+            "/opt/homebrew/bin/tailscale",
+            "1.98.5\n  tailscale commit: 295179bf294d3d076397bcef6815b1d6854e197d\n  long version: 1.98.5-t295179bf2\n  go version: go1.26.3\n",
+        );
+        assert!(binary.authentic);
+        assert_eq!(binary.parsed_version.as_deref(), Some("1.98.5"));
+    }
+
+    #[test]
+    fn mismatched_long_version_output_is_inauthentic() {
+        let binary = classify_binary(
+            "/opt/homebrew/bin/tailscale",
+            "1.98.5\n  tailscale commit: 295179bf294d3d076397bcef6815b1d6854e197d\n  long version: 1.98.6-t295179bf2\n  go version: go1.26.3\n",
+        );
         assert!(!binary.authentic);
         assert_eq!(binary.parsed_version, None);
     }

@@ -463,18 +463,21 @@ pub struct InstallPlanReport {
 /// Compare package versions conservatively without pulling in a semver parser.
 #[must_use]
 pub fn compare_versions(current: &str, target: &str) -> Ordering {
-    let current_parts = version_parts(current);
-    let target_parts = version_parts(target);
-    let width = current_parts.len().max(target_parts.len());
+    let current_version = ParsedVersion::parse(current);
+    let target_version = ParsedVersion::parse(target);
+    let width = current_version.core.len().max(target_version.core.len());
     for index in 0..width {
-        let left = current_parts.get(index).copied().unwrap_or(0);
-        let right = target_parts.get(index).copied().unwrap_or(0);
+        let left = current_version.core.get(index).copied().unwrap_or(0);
+        let right = target_version.core.get(index).copied().unwrap_or(0);
         match left.cmp(&right) {
             Ordering::Equal => {}
             ordering => return ordering,
         }
     }
-    Ordering::Equal
+    compare_prerelease(
+        current_version.prerelease.as_deref(),
+        target_version.prerelease.as_deref(),
+    )
 }
 
 #[must_use]
@@ -505,11 +508,103 @@ pub fn findings_status(findings: &[InstallFinding]) -> InstallPlanStatus {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct ParsedVersion {
+    core: Vec<u64>,
+    prerelease: Option<Vec<PrereleaseIdentifier>>,
+}
+
+impl ParsedVersion {
+    fn parse(version: &str) -> Self {
+        let trimmed = version.trim().trim_start_matches('v');
+        let without_build = trimmed.split_once('+').map_or(trimmed, |(core, _)| core);
+        let (core, prerelease) = without_build
+            .split_once('-')
+            .map_or((without_build, None), |(core, prerelease)| {
+                (core, Some(prerelease))
+            });
+
+        Self {
+            core: version_parts(core),
+            prerelease: prerelease.and_then(parse_prerelease_identifiers),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum PrereleaseIdentifier {
+    Numeric(u64),
+    Text(String),
+}
+
+fn parse_prerelease_identifiers(prerelease: &str) -> Option<Vec<PrereleaseIdentifier>> {
+    let identifiers = prerelease
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            if part.chars().all(|ch| ch.is_ascii_digit()) {
+                part.parse::<u64>()
+                    .map(PrereleaseIdentifier::Numeric)
+                    .unwrap_or_else(|_| PrereleaseIdentifier::Text(part.to_owned()))
+            } else {
+                PrereleaseIdentifier::Text(part.to_owned())
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if identifiers.is_empty() {
+        None
+    } else {
+        Some(identifiers)
+    }
+}
+
+fn compare_prerelease(
+    current: Option<&[PrereleaseIdentifier]>,
+    target: Option<&[PrereleaseIdentifier]>,
+) -> Ordering {
+    match (current, target) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(current), Some(target)) => compare_prerelease_identifiers(current, target),
+    }
+}
+
+fn compare_prerelease_identifiers(
+    current: &[PrereleaseIdentifier],
+    target: &[PrereleaseIdentifier],
+) -> Ordering {
+    let width = current.len().max(target.len());
+    for index in 0..width {
+        let Some(left) = current.get(index) else {
+            return Ordering::Less;
+        };
+        let Some(right) = target.get(index) else {
+            return Ordering::Greater;
+        };
+        let ordering = match (left, right) {
+            (PrereleaseIdentifier::Numeric(left), PrereleaseIdentifier::Numeric(right)) => {
+                left.cmp(right)
+            }
+            (PrereleaseIdentifier::Numeric(_), PrereleaseIdentifier::Text(_)) => Ordering::Less,
+            (PrereleaseIdentifier::Text(_), PrereleaseIdentifier::Numeric(_)) => Ordering::Greater,
+            (PrereleaseIdentifier::Text(left), PrereleaseIdentifier::Text(right)) => {
+                left.cmp(right)
+            }
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
 fn version_parts(version: &str) -> Vec<u64> {
     version
         .trim()
         .trim_start_matches('v')
-        .split(['.', '-', '+'])
+        .split('.')
         .map(|part| {
             part.chars()
                 .take_while(|ch| ch.is_ascii_digit())
@@ -562,6 +657,26 @@ mod tests {
             compare_versions("0.2.0", "0.2.0+build"),
             Ordering::Equal,
             "build metadata ignored",
+        )?;
+        ensure_equal(
+            compare_versions("0.2.0-alpha", "0.2.0"),
+            Ordering::Less,
+            "prerelease sorts before stable",
+        )?;
+        ensure_equal(
+            compare_versions("0.2.0", "0.2.0-rc.1"),
+            Ordering::Greater,
+            "stable sorts after prerelease",
+        )?;
+        ensure_equal(
+            compare_versions("0.2.0-alpha.2", "0.2.0-alpha.10"),
+            Ordering::Less,
+            "numeric prerelease identifiers sort numerically",
+        )?;
+        ensure_equal(
+            compare_versions("0.2.0-alpha", "0.2.0-alpha+build"),
+            Ordering::Equal,
+            "build metadata ignored after prerelease",
         )
     }
 

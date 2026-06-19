@@ -30,14 +30,32 @@ fn utility_inverse_backfill_rejects_degenerate_inputs() {
         (-0.1, 2.0),
         (1.1, 2.0),
         (0.8, 0.0),
-        (0.0, 2.0),
-        (1.0, 2.0),
     ] {
         assert!(
             BetaPosterior::from_utility_inverse(confidence, weight).is_none(),
             "confidence={confidence:?}, weight={weight:?} should be rejected"
         );
     }
+}
+
+#[test]
+fn utility_inverse_backfill_preserves_endpoint_confidence_without_zero_parameters() -> TestResult {
+    let low = BetaPosterior::from_utility_inverse(0.0, 2.0)
+        .ok_or_else(|| "0.0 confidence should fit to positive beta parameters".to_owned())?;
+    let high = BetaPosterior::from_utility_inverse(1.0, 2.0)
+        .ok_or_else(|| "1.0 confidence should fit to positive beta parameters".to_owned())?;
+
+    assert!(low.alpha() > 0.0, "low endpoint alpha must stay positive");
+    assert!(low.beta() > 0.0, "low endpoint beta must stay positive");
+    assert!(high.alpha() > 0.0, "high endpoint alpha must stay positive");
+    assert!(high.beta() > 0.0, "high endpoint beta must stay positive");
+    assert!(low.mean() < 1.0e-8, "low endpoint mean was {}", low.mean());
+    assert!(
+        high.mean() > 1.0 - 1.0e-8,
+        "high endpoint mean was {}",
+        high.mean()
+    );
+    Ok(())
 }
 
 #[test]

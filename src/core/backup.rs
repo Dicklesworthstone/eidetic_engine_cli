@@ -1173,34 +1173,17 @@ fn backup_list_manifest_is_file(
 }
 
 fn backup_list_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(None);
-            }
-            Err(error) => {
-                return Err(DomainError::Storage {
-                    message: format!(
-                        "failed to inspect backup list path component '{}': {error}",
-                        current.display()
-                    ),
-                    repair: Some(
-                        "inspect filesystem permissions or choose another --output-dir".to_owned(),
-                    ),
-                });
-            }
+    super::path_safety::first_existing_symlink_component(path).map_err(|error| {
+        DomainError::Storage {
+            message: format!(
+                "failed to inspect backup list path '{}': {error}",
+                path.display()
+            ),
+            repair: Some(
+                "inspect filesystem permissions or choose another --output-dir".to_owned(),
+            ),
         }
-    }
-    Ok(None)
+    })
 }
 
 /// Inspect one backup manifest without checking artifact hashes.
@@ -5634,6 +5617,18 @@ mod tests {
             "listed backup id",
         )?;
         ensure_equal(entry.issue_count, 0, "listed issue count")
+    }
+
+    #[test]
+    fn backup_list_symlink_scan_accepts_absolute_roots() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let canonical_root = fs::canonicalize(tempdir.path()).map_err(|error| error.to_string())?;
+        let candidate = canonical_root.join("missing-backup-root");
+
+        let result = backup_list_symlink_component(&candidate)
+            .map_err(|error| format!("absolute backup list scan should not fail: {error:?}"))?;
+
+        ensure_equal(result, None, "absolute backup list symlink scan result")
     }
 
     #[cfg(unix)]

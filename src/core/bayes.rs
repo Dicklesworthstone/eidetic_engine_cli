@@ -50,6 +50,8 @@ pub const DEFAULT_PRIOR_BETA: f64 = 0.5;
 pub const DEFAULT_HARMFUL_WEIGHT: f64 = 2.5;
 /// ADR 0032 transition confidence level.
 const TRUST_TRANSITION_CI_LEVEL: f64 = 0.90;
+/// Small open-interval floor for inverse-fitting legacy scalar confidence.
+const UTILITY_INVERSE_ENDPOINT_EPSILON: f64 = 1.0e-9;
 
 /// Canonical feedback signal used when replaying feedback events into a
 /// Beta-Bernoulli posterior.
@@ -115,7 +117,8 @@ impl BetaPosterior {
     ///
     /// `total_weight` is the total pseudo-evidence assigned to the legacy
     /// scalar. For example, `confidence=0.8` and `total_weight=2.0` maps to
-    /// `(alpha=1.6, beta=0.4)`.
+    /// `(alpha=1.6, beta=0.4)`. Endpoint confidence values are projected into
+    /// the closest open-interval value because Beta parameters must be positive.
     #[must_use]
     pub fn from_utility_inverse(confidence: f64, total_weight: f64) -> Option<Self> {
         if !confidence.is_finite()
@@ -125,6 +128,10 @@ impl BetaPosterior {
         {
             return None;
         }
+        let confidence = confidence.clamp(
+            UTILITY_INVERSE_ENDPOINT_EPSILON,
+            1.0 - UTILITY_INVERSE_ENDPOINT_EPSILON,
+        );
         let alpha = confidence * total_weight;
         let beta = (1.0 - confidence) * total_weight;
         Self::new(alpha, beta)

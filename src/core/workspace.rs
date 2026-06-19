@@ -31,6 +31,7 @@ use crate::core::hygiene_classifier::{
 };
 use crate::core::hygiene_coordination::{
     AgentMailCoordinationInput, HygieneCoordinationOverlay, overlay_coordination_state,
+    path_matches_pattern, reservation_is_expired,
 };
 use crate::core::swarm_brief::{
     AGENT_MAIL_SNAPSHOT_MAX_BYTES, SystemSwarmBriefCommandRunner, WorkspaceGitSnapshot,
@@ -684,6 +685,8 @@ pub fn build_workspace_hygiene_report(
     let beads_metadata_signal = detect_beads_metadata_signal(&options.workspace_path);
     let agent_mail_input =
         load_agent_mail_coordination_input(options.agent_mail_snapshot_path.as_deref());
+    let now = Utc::now();
+    let beads_reservations = beads_reservations_from_agent_mail_input(&agent_mail_input, now);
 
     let mut report = build_workspace_hygiene_report_from_inputs(WorkspaceHygieneReportInputs {
         workspace_path: &options.workspace_path,
@@ -692,9 +695,9 @@ pub fn build_workspace_hygiene_report(
         jsonl_content: jsonl_content.as_deref(),
         self_agent_name: options.self_agent_name.as_deref(),
         beads_metadata_signal,
-        beads_reservations: &[],
+        beads_reservations: &beads_reservations,
         agent_mail_input: &agent_mail_input,
-        now: Utc::now(),
+        now,
     });
     attach_workspace_hygiene_symbol_risk_summary_from_dirty_paths(
         &mut report,
@@ -1288,6 +1291,35 @@ fn load_agent_mail_coordination_input(path: Option<&Path>) -> AgentMailCoordinat
         reservations,
         active_agents,
     }
+}
+
+fn beads_reservations_from_agent_mail_input(
+    input: &AgentMailCoordinationInput,
+    now: DateTime<Utc>,
+) -> Vec<BeadsReservationHolder> {
+    let AgentMailCoordinationInput::Available { reservations, .. } = input else {
+        return Vec::new();
+    };
+
+    let mut beads_reservations = reservations
+        .iter()
+        .filter(|reservation| {
+            path_matches_pattern(BEADS_JSONL_RELATIVE_PATH, &reservation.path_pattern)
+                && !reservation_is_expired(reservation, now)
+        })
+        .map(|reservation| BeadsReservationHolder {
+            agent_name: reservation.holder_agent.clone(),
+            exclusive: reservation.exclusive,
+            expires_ts_rfc3339: reservation.expires_at.clone().unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+    beads_reservations.sort_by(|left, right| {
+        left.agent_name
+            .cmp(&right.agent_name)
+            .then_with(|| left.exclusive.cmp(&right.exclusive))
+            .then_with(|| left.expires_ts_rfc3339.cmp(&right.expires_ts_rfc3339))
+    });
+    beads_reservations
 }
 
 fn read_agent_mail_snapshot(path: &Path) -> io::Result<String> {
@@ -3258,6 +3290,79 @@ mod tests {
             BeadsMetadataSignal::DbDirtyPendingFlush
         );
         assert_eq!(report.beads_state.reservation_holders.len(), 1);
+    }
+
+    #[test]
+    fn hygiene_report_derives_beads_reservation_overlay_from_agent_mail_snapshot() {
+        let now = DateTime::parse_from_rfc3339("2026-05-18T08:00:00Z")
+            .expect("valid test timestamp")
+            .with_timezone(&Utc);
+        let agent_mail = AgentMailCoordinationInput::Available {
+            reservations: vec![
+                AgentMailReservation {
+                    path_pattern: BEADS_JSONL_RELATIVE_PATH.to_owned(),
+                    holder_agent: "OtherAgent".to_owned(),
+                    exclusive: true,
+                    expires_at: Some("2026-05-18T09:00:00Z".to_owned()),
+                    reservation_id: Some("beads-reservation".to_owned()),
+                    bead_id: None,
+                    thread_id: None,
+                },
+                AgentMailReservation {
+                    path_pattern: "src/core/workspace.rs".to_owned(),
+                    holder_agent: "SourceAgent".to_owned(),
+                    exclusive: true,
+                    expires_at: Some("2026-05-18T09:00:00Z".to_owned()),
+                    reservation_id: Some("source-reservation".to_owned()),
+                    bead_id: None,
+                    thread_id: None,
+                },
+                AgentMailReservation {
+                    path_pattern: BEADS_JSONL_RELATIVE_PATH.to_owned(),
+                    holder_agent: "ExpiredAgent".to_owned(),
+                    exclusive: true,
+                    expires_at: Some("2026-05-18T07:59:59Z".to_owned()),
+                    reservation_id: Some("expired-beads-reservation".to_owned()),
+                    bead_id: None,
+                    thread_id: None,
+                },
+            ],
+            active_agents: vec![ActiveAgent {
+                name: "OtherAgent".to_owned(),
+                last_active_at: Some("2026-05-18T07:55:00Z".to_owned()),
+            }],
+        };
+        let beads_reservations = beads_reservations_from_agent_mail_input(&agent_mail, now);
+        let report = build_workspace_hygiene_report_from_inputs(WorkspaceHygieneReportInputs {
+            workspace_path: Path::new("/repo"),
+            snapshot: hygiene_snapshot(vec![status_entry(BEADS_JSONL_RELATIVE_PATH, ".", "M")]),
+            classifier_config: &HygieneClassifierConfig::default(),
+            jsonl_content: Some(b"{\"id\":\"bd-test\",\"title\":\"test\"}\n"),
+            self_agent_name: Some("IvoryCondor"),
+            beads_metadata_signal: BeadsMetadataSignal::Unknown,
+            beads_reservations: &beads_reservations,
+            agent_mail_input: &agent_mail,
+            now,
+        });
+
+        assert_eq!(beads_reservations.len(), 1);
+        assert_eq!(beads_reservations[0].agent_name, "OtherAgent");
+        assert_eq!(
+            report.beads_state.classification,
+            crate::core::hygiene_beads_state::BeadsClassification::BeadsReservedByOtherAgent
+        );
+        assert_eq!(
+            report.beads_state.reservation_holders[0].agent_name,
+            "OtherAgent"
+        );
+        assert!(
+            report
+                .coordination
+                .blocked_by_coordination
+                .iter()
+                .any(|blocked| blocked.path == BEADS_JSONL_RELATIVE_PATH),
+            "general coordination overlay should also block the dirty Beads path"
+        );
     }
 
     #[test]

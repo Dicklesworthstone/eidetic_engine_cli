@@ -115,6 +115,10 @@ fn good_version_output() -> &'static str {
     "1.66.0\n  tailscale commit: 0123456789abcdef0123456789abcdef01234567\n  other commit: 89abcdef0123456789abcdef0123456789abcdef\n  go version: go1.22.3\n"
 }
 
+fn current_long_version_output() -> &'static str {
+    "1.98.5\n  tailscale commit: 295179bf294d3d076397bcef6815b1d6854e197d\n  long version: 1.98.5-t295179bf2\n  go version: go1.26.3\n"
+}
+
 fn cli_probe_config(binary_path: &str) -> TailscaleCliProbeConfig {
     TailscaleCliProbeConfig {
         mesh_enabled: true,
@@ -301,6 +305,14 @@ fn local_probe_accepts_binary_with_well_formed_version_output() -> TestResult {
     let binary = good_binary();
     assert!(binary.authentic);
     assert_eq!(binary.parsed_version.as_deref(), Some("1.66.0"));
+    Ok(())
+}
+
+#[test]
+fn local_probe_accepts_binary_with_current_long_version_output() -> TestResult {
+    let binary = classify_binary("/opt/homebrew/bin/tailscale", current_long_version_output());
+    assert!(binary.authentic);
+    assert_eq!(binary.parsed_version.as_deref(), Some("1.98.5"));
     Ok(())
 }
 
@@ -722,6 +734,40 @@ fn cli_probe_classifies_healthy_status_and_prefs_payloads() -> TestResult {
     assert!(report.binary_authentic);
     assert_eq!(report.shields_up, Some(false));
     assert_eq!(report.probe_elapsed_ms, 12);
+    assert_eq!(
+        runner.calls,
+        vec![
+            "--version",
+            "status --json --self=true --peers=true",
+            "debug localapi /localapi/v0/prefs"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_probe_continues_after_current_long_version_output() -> TestResult {
+    let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+    runner.version = Some(TailscaleCliCommandOutput::success(
+        current_long_version_output(),
+        3,
+    ));
+    runner.status = Some(TailscaleCliCommandOutput::success(healthy_status(), 4));
+    runner.prefs = Some(TailscaleCliCommandOutput::success(
+        br#"{"ShieldsUp": false}"#.as_slice(),
+        5,
+    ));
+
+    let report = probe_tailscale_cli_with_runner(
+        &cli_probe_config("/opt/homebrew/bin/tailscale"),
+        &mut runner,
+    );
+
+    assert!(report.installed);
+    assert!(report.daemon_reachable);
+    assert!(report.authenticated);
+    assert!(report.binary_authentic);
+    assert_eq!(report.version.as_deref(), Some("1.98.5"));
     assert_eq!(
         runner.calls,
         vec![

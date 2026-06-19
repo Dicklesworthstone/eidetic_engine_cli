@@ -250,7 +250,10 @@ fn compare_observations(
         .then_with(|| left.reservation_id.cmp(&right.reservation_id))
 }
 
-fn reservation_is_expired(reservation: &AgentMailReservation, now: DateTime<Utc>) -> bool {
+pub(crate) fn reservation_is_expired(
+    reservation: &AgentMailReservation,
+    now: DateTime<Utc>,
+) -> bool {
     let Some(expires_at) = reservation.expires_at.as_deref() else {
         return false;
     };
@@ -260,7 +263,7 @@ fn reservation_is_expired(reservation: &AgentMailReservation, now: DateTime<Utc>
     parsed.with_timezone(&Utc) <= now
 }
 
-fn path_matches_pattern(path: &str, pattern: &str) -> bool {
+pub(crate) fn path_matches_pattern(path: &str, pattern: &str) -> bool {
     path == pattern || wildcard_match(path.as_bytes(), pattern.as_bytes())
 }
 

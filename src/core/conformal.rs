@@ -6,7 +6,7 @@
 
 use std::{
     collections::BTreeMap,
-    fs::File,
+    fs::{self, File},
     io::{BufRead, BufReader, Read},
     path::Path,
 };
@@ -188,7 +188,7 @@ fn load_conformal_nonconformity_scores(workspace_path: &Path) -> Vec<f32> {
         .join(".ee")
         .join("search")
         .join("calibration.jsonl");
-    let Ok(file) = File::open(path) else {
+    let Some(file) = open_conformal_calibration_file_no_follow(&path) else {
         return Vec::new();
     };
     let reader = BufReader::new(file.take(CONFORMAL_CALIBRATION_MAX_BYTES));
@@ -205,6 +205,30 @@ fn load_conformal_nonconformity_scores(workspace_path: &Path) -> Vec<f32> {
         })
         .collect()
 }
+
+fn open_conformal_calibration_file_no_follow(path: &Path) -> Option<File> {
+    if super::path_safety::path_has_symlink_component(path).ok()? {
+        return None;
+    }
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_conformal_calibration_open_no_follow(&mut options);
+    options.open(path).ok()
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_conformal_calibration_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_conformal_calibration_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn conformal_nonconformity_from_value(value: &Value) -> Option<f32> {
     number_at(value, &["nonconformityScore", "nonconformity_score"])

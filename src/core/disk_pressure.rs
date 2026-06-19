@@ -31,6 +31,7 @@ const WARNING_PERCENT_USED: f64 = 85.0;
 const DEGRADED_PERCENT_USED: f64 = 95.0;
 const BLOCKED_PERCENT_USED: f64 = 99.0;
 const SECONDS_PER_DAY: u64 = 86_400;
+const TMP_E2E_WORKSPACE_PREFIXES: &[&str] = &["ee-e2e"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DiskPressureOptions {
@@ -367,6 +368,7 @@ struct ArtifactRetentionRootSpec {
     category: &'static str,
     path: PathBuf,
     path_source: &'static str,
+    direct_child_prefixes: &'static [&'static str],
     retention_reason: &'static str,
     default_ttl_days: Option<u64>,
     bead_closeout_required: bool,
@@ -921,6 +923,7 @@ fn artifact_retention_specs(workspace: &Path) -> Vec<ArtifactRetentionRootSpec> 
             category: "verification_audit_artifacts",
             path: workspace.join("tests/audit_artifacts"),
             path_source: "workspace/tests/audit_artifacts",
+            direct_child_prefixes: &[],
             retention_reason: "install, release, and verification audit JSON evidence",
             default_ttl_days: None,
             bead_closeout_required: true,
@@ -932,6 +935,7 @@ fn artifact_retention_specs(workspace: &Path) -> Vec<ArtifactRetentionRootSpec> 
             category: "e2e_retained_workspaces",
             path: cargo_target.join("ee-e2e"),
             path_source: "CARGO_TARGET_DIR/ee-e2e",
+            direct_child_prefixes: &[],
             retention_reason: "E2E command dossiers and retained workspaces",
             default_ttl_days: Some(14),
             bead_closeout_required: false,
@@ -943,6 +947,7 @@ fn artifact_retention_specs(workspace: &Path) -> Vec<ArtifactRetentionRootSpec> 
             category: "e2e_retained_workspaces",
             path: workspace.join("target/ee-e2e"),
             path_source: "workspace/target/ee-e2e",
+            direct_child_prefixes: &[],
             retention_reason: "legacy or fallback E2E artifact root",
             default_ttl_days: Some(14),
             bead_closeout_required: false,
@@ -954,6 +959,7 @@ fn artifact_retention_specs(workspace: &Path) -> Vec<ArtifactRetentionRootSpec> 
             category: "golden_artifacts",
             path: cargo_target.join("ee-golden-artifacts"),
             path_source: "CARGO_TARGET_DIR/ee-golden-artifacts",
+            direct_child_prefixes: &[],
             retention_reason: "generated golden comparison artifacts",
             default_ttl_days: Some(30),
             bead_closeout_required: true,
@@ -965,6 +971,7 @@ fn artifact_retention_specs(workspace: &Path) -> Vec<ArtifactRetentionRootSpec> 
             category: "benchmark_artifacts",
             path: cargo_target.join("ee-bench"),
             path_source: "CARGO_TARGET_DIR/ee-bench",
+            direct_child_prefixes: &[],
             retention_reason: "benchmark and performance regression JSON artifacts",
             default_ttl_days: Some(30),
             bead_closeout_required: true,
@@ -975,7 +982,8 @@ fn artifact_retention_specs(workspace: &Path) -> Vec<ArtifactRetentionRootSpec> 
             label: "tmp_e2e_workspaces",
             category: "e2e_retained_workspaces",
             path: tmpdir.clone(),
-            path_source: "TMPDIR",
+            path_source: "TMPDIR/ee-e2e*",
+            direct_child_prefixes: TMP_E2E_WORKSPACE_PREFIXES,
             retention_reason: "temporary E2E workspaces and J1 stdout/stderr side artifacts",
             default_ttl_days: Some(7),
             bead_closeout_required: false,
@@ -987,6 +995,7 @@ fn artifact_retention_specs(workspace: &Path) -> Vec<ArtifactRetentionRootSpec> 
             category: "support_bundles",
             path: workspace.join(".ee/support-bundles"),
             path_source: "workspace/.ee/support-bundles",
+            direct_child_prefixes: &[],
             retention_reason: "redacted diagnostic support bundles",
             default_ttl_days: Some(30),
             bead_closeout_required: true,
@@ -1001,6 +1010,7 @@ fn artifact_retention_specs(workspace: &Path) -> Vec<ArtifactRetentionRootSpec> 
             category: "j1_jsonl_log",
             path,
             path_source: "EE_TEST_LOG_PATH",
+            direct_child_prefixes: &[],
             retention_reason: "current structured J1 JSONL event log",
             default_ttl_days: Some(30),
             bead_closeout_required: true,
@@ -1018,6 +1028,7 @@ fn artifact_retention_specs(workspace: &Path) -> Vec<ArtifactRetentionRootSpec> 
             category: "retention_manifest",
             path,
             path_source: "EPIC_RETENTION_MANIFEST|EE_E2E_RETENTION_MANIFEST",
+            direct_child_prefixes: &[],
             retention_reason: "current per-run retained-artifact manifest",
             default_ttl_days: Some(30),
             bead_closeout_required: true,
@@ -1036,12 +1047,31 @@ fn inspect_artifact_retention_root(
     consumer_entry_limit: usize,
     now_unix_seconds: u64,
 ) -> ArtifactRetentionRoot {
-    let exists = spec.path.exists();
-    let kind = file_kind(&spec.path);
-    let scan = if exists {
-        scan_artifact_retention_path(&spec.path, consumer_depth, consumer_entry_limit)
+    let base_exists = spec.path.exists();
+    let filtered = !spec.direct_child_prefixes.is_empty();
+    let kind = if filtered {
+        "path_pattern"
+    } else {
+        file_kind(&spec.path)
+    };
+    let scan = if base_exists {
+        if spec.direct_child_prefixes.is_empty() {
+            scan_artifact_retention_path(&spec.path, consumer_depth, consumer_entry_limit)
+        } else {
+            scan_artifact_retention_matching_children(
+                &spec.path,
+                spec.direct_child_prefixes,
+                consumer_depth,
+                consumer_entry_limit,
+            )
+        }
     } else {
         ArtifactRetentionScan::default()
+    };
+    let exists = if filtered {
+        scan.artifact_count > 0
+    } else {
+        base_exists
     };
     let age_days = scan
         .latest_modified_unix_seconds
@@ -1057,16 +1087,26 @@ fn inspect_artifact_retention_root(
         spec.bead_closeout_required,
     );
 
+    let path = if let Some(prefix) = spec.direct_child_prefixes.first() {
+        path_to_string(&spec.path.join(format!("{prefix}*")))
+    } else {
+        path_to_string(&spec.path)
+    };
+
     ArtifactRetentionRoot {
         label: spec.label,
         category: spec.category,
-        path: path_to_string(&spec.path),
+        path,
         path_source: spec.path_source,
         exists,
         kind,
         bytes: scan.bytes,
         artifact_count: scan.artifact_count,
-        measurement: "bounded_recursive_metadata",
+        measurement: if filtered {
+            "filtered_bounded_recursive_metadata"
+        } else {
+            "bounded_recursive_metadata"
+        },
         truncated: scan.truncated,
         retention_reason: spec.retention_reason,
         default_ttl_days: spec.default_ttl_days,
@@ -1080,13 +1120,24 @@ fn inspect_artifact_retention_root(
         contains_retention_manifest: scan.contains_retention_manifest,
         posture,
         recommended_action,
-        top_consumers: top_consumers(
-            spec.label,
-            &spec.path,
-            top_limit,
-            consumer_depth,
-            consumer_entry_limit,
-        ),
+        top_consumers: if spec.direct_child_prefixes.is_empty() {
+            top_consumers(
+                spec.label,
+                &spec.path,
+                top_limit,
+                consumer_depth,
+                consumer_entry_limit,
+            )
+        } else {
+            top_matching_child_consumers(
+                spec.label,
+                &spec.path,
+                spec.direct_child_prefixes,
+                top_limit,
+                consumer_depth,
+                consumer_entry_limit,
+            )
+        },
     }
 }
 
@@ -1512,6 +1563,45 @@ fn top_consumers(
     entries
 }
 
+fn top_matching_child_consumers(
+    root_label: &'static str,
+    root: &Path,
+    child_prefixes: &[&str],
+    top_limit: usize,
+    max_depth: usize,
+    entry_limit: usize,
+) -> Vec<DiskPressureTopConsumer> {
+    if child_prefixes.is_empty() || !path_is_directory_no_follow(root) {
+        return Vec::new();
+    }
+    let mut entries = Vec::new();
+    let Ok(children) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    for child in children.flatten() {
+        let path = child.path();
+        if !path_file_name_starts_with_any(&path, child_prefixes) {
+            continue;
+        }
+        let (bytes, truncated) = bounded_size(&path, max_depth, entry_limit);
+        let kind = file_kind(&path);
+        entries.push(DiskPressureTopConsumer {
+            root_label,
+            path: path_to_string(&path),
+            kind,
+            bytes,
+            measurement: "filtered_bounded_recursive_metadata",
+            truncated,
+        });
+        if entries.len() >= entry_limit {
+            break;
+        }
+    }
+    entries.sort_by_key(|entry| Reverse(entry.bytes));
+    entries.truncate(top_limit);
+    entries
+}
+
 fn gather_agent_harness_log_classifications(
     workspace: &Path,
     specs: &[(RootSpec, PathBuf)],
@@ -1760,6 +1850,59 @@ fn scan_artifact_retention_path(
     }
 
     scan
+}
+
+fn scan_artifact_retention_matching_children(
+    root: &Path,
+    child_prefixes: &[&str],
+    max_depth: usize,
+    entry_limit: usize,
+) -> ArtifactRetentionScan {
+    if child_prefixes.is_empty() || !path_is_directory_no_follow(root) {
+        return ArtifactRetentionScan::default();
+    }
+    let Ok(children) = fs::read_dir(root) else {
+        return ArtifactRetentionScan::default();
+    };
+
+    let mut scan = ArtifactRetentionScan::default();
+    let mut matched = 0usize;
+    for child in children.flatten() {
+        let path = child.path();
+        if !path_file_name_starts_with_any(&path, child_prefixes) {
+            continue;
+        }
+        if matched >= entry_limit {
+            scan.truncated = true;
+            break;
+        }
+        matched = matched.saturating_add(1);
+        let child_scan =
+            scan_artifact_retention_path(&path, max_depth.saturating_sub(1), entry_limit);
+        scan.bytes = scan.bytes.saturating_add(child_scan.bytes);
+        scan.artifact_count = scan
+            .artifact_count
+            .saturating_add(child_scan.artifact_count);
+        scan.latest_modified_unix_seconds = match (
+            scan.latest_modified_unix_seconds,
+            child_scan.latest_modified_unix_seconds,
+        ) {
+            (Some(left), Some(right)) => Some(left.max(right)),
+            (None, Some(right)) => Some(right),
+            (Some(left), None) => Some(left),
+            (None, None) => None,
+        };
+        scan.contains_retention_manifest |= child_scan.contains_retention_manifest;
+        scan.truncated |= child_scan.truncated;
+    }
+
+    scan
+}
+
+fn path_file_name_starts_with_any(path: &Path, prefixes: &[&str]) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| prefixes.iter().any(|prefix| name.starts_with(prefix)))
 }
 
 fn bounded_size(path: &Path, max_depth: usize, entry_limit: usize) -> (u64, bool) {
@@ -2518,12 +2661,113 @@ mod tests {
     }
 
     #[test]
+    fn tmp_e2e_artifact_retention_scans_only_named_e2e_children() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let tmp_root = temp_dir.path().join("tmp");
+        let e2e_workspace = tmp_root.join("ee-e2e-capture.ABC123");
+        let unrelated_workspace = tmp_root.join("unrelated-cache");
+        fs::create_dir_all(&e2e_workspace).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&unrelated_workspace).map_err(|error| error.to_string())?;
+        fs::write(e2e_workspace.join("stdout.txt"), b"artifact")
+            .map_err(|error| error.to_string())?;
+        fs::write(tmp_root.join("ee-e2e-stderr.XYZ789"), b"log")
+            .map_err(|error| error.to_string())?;
+        fs::File::create(unrelated_workspace.join("large-unrelated.bin"))
+            .map_err(|error| error.to_string())?
+            .set_len(2 * MIB)
+            .map_err(|error| error.to_string())?;
+        let spec = ArtifactRetentionRootSpec {
+            label: "tmp_e2e_workspaces",
+            category: "e2e_retained_workspaces",
+            path: tmp_root.clone(),
+            path_source: "TMPDIR/ee-e2e*",
+            direct_child_prefixes: TMP_E2E_WORKSPACE_PREFIXES,
+            retention_reason: "temporary E2E workspaces",
+            default_ttl_days: Some(7),
+            bead_closeout_required: false,
+            warning_bytes: 5 * GIB,
+            degraded_bytes: 20 * GIB,
+        };
+
+        let root = inspect_artifact_retention_root(
+            &spec,
+            5,
+            3,
+            100,
+            current_unix_seconds().saturating_add(8 * SECONDS_PER_DAY),
+        );
+
+        ensure(
+            root.recommended_action,
+            ArtifactRetentionActionKind::EligibleForHumanCleanup,
+            "expired e2e artifacts",
+        )?;
+        ensure(root.exists, true, "matching e2e artifacts exist")?;
+        ensure(root.kind, "path_pattern", "filtered root kind")?;
+        ensure(
+            root.measurement,
+            "filtered_bounded_recursive_metadata",
+            "filtered root measurement",
+        )?;
+        ensure(
+            root.path.clone(),
+            path_to_string(&tmp_root.join("ee-e2e*")),
+            "reported path pattern",
+        )?;
+        ensure(
+            root.bytes < MIB,
+            true,
+            "unrelated tmp files must not count toward filtered E2E bytes",
+        )?;
+        ensure(
+            root.top_consumers
+                .iter()
+                .any(|consumer| consumer.path.contains("unrelated-cache")),
+            false,
+            "unrelated tmp files must not appear as top E2E consumers",
+        )?;
+
+        let unrelated_only_tmp_root = temp_dir.path().join("unrelated-only-tmp");
+        fs::create_dir_all(&unrelated_only_tmp_root).map_err(|error| error.to_string())?;
+        fs::write(unrelated_only_tmp_root.join("not-an-e2e-artifact"), b"tmp")
+            .map_err(|error| error.to_string())?;
+        let unrelated_only_spec = ArtifactRetentionRootSpec {
+            path: unrelated_only_tmp_root,
+            ..spec
+        };
+        let unrelated_only_root = inspect_artifact_retention_root(
+            &unrelated_only_spec,
+            5,
+            3,
+            100,
+            current_unix_seconds().saturating_add(8 * SECONDS_PER_DAY),
+        );
+
+        ensure(
+            unrelated_only_root.exists,
+            false,
+            "filtered root without matching e2e children",
+        )?;
+        ensure(
+            unrelated_only_root.artifact_count,
+            0,
+            "unrelated-only artifact count",
+        )?;
+        ensure(
+            unrelated_only_root.recommended_action,
+            ArtifactRetentionActionKind::Keep,
+            "unrelated-only action",
+        )
+    }
+
+    #[test]
     fn artifact_retention_actions_are_preservation_only() -> TestResult {
         let normal_spec = ArtifactRetentionRootSpec {
             label: "fixture",
             category: "fixture",
             path: PathBuf::from("/tmp/ee-artifact-retention-fixture"),
             path_source: "fixture",
+            direct_child_prefixes: &[],
             retention_reason: "fixture",
             default_ttl_days: None,
             bead_closeout_required: false,

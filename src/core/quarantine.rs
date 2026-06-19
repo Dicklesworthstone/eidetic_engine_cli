@@ -517,6 +517,9 @@ fn apply_quarantine_row(
     states: &mut BTreeMap<String, SourceTrustState>,
     row: &StoredFeedbackQuarantine,
 ) {
+    if row.status != "pending" {
+        return;
+    }
     let Some(source_id) = normalized_source_id(Some(&row.source_id)) else {
         return;
     };
@@ -524,9 +527,7 @@ fn apply_quarantine_row(
         .entry(source_id.clone())
         .or_insert_with(|| SourceTrustState::new(source_id));
     state.record_import();
-    if row.status == "pending" {
-        state.record_quarantine();
-    }
+    state.record_quarantine();
 }
 
 fn apply_trust_quarantine_row(
@@ -739,6 +740,54 @@ mod tests {
         ensure(report.summary.healthy_count, 0, "healthy count cleared")?;
         ensure(report.summary.total_sources, 1, "active total sources")?;
         ensure(report.summary.blocked_count, 1, "blocked count retained")
+    }
+
+    #[test]
+    fn reviewed_feedback_quarantine_rows_do_not_dilute_live_feedback_rate() -> TestResult {
+        let mut states = BTreeMap::<String, SourceTrustState>::new();
+        let mut live_state = SourceTrustState::new("agent://noisy");
+        live_state.record_import();
+        live_state.record_harmful();
+        states.insert(live_state.source_id.clone(), live_state);
+
+        for status in ["released", "rejected"] {
+            apply_quarantine_row(
+                &mut states,
+                &StoredFeedbackQuarantine {
+                    id: format!("fq_{status}"),
+                    workspace_id: "workspace".to_owned(),
+                    source_id: "agent://noisy".to_owned(),
+                    target_type: "memory".to_owned(),
+                    target_id: "mem_1".to_owned(),
+                    signal: "harmful".to_owned(),
+                    weight: 1.0,
+                    source_type: "automated_check".to_owned(),
+                    proposed_event_id: None,
+                    recorded_at: "2026-05-06T00:00:00Z".to_owned(),
+                    reason: "reviewed row".to_owned(),
+                    event_reason: None,
+                    evidence_json: None,
+                    session_id: None,
+                    raw_event_hash: "blake3:reviewed".to_owned(),
+                    status: status.to_owned(),
+                    reviewed_at: Some("2026-05-06T01:00:00Z".to_owned()),
+                    reviewed_by: Some("tester".to_owned()),
+                    released_feedback_event_id: None,
+                },
+            );
+        }
+
+        let state = states
+            .get("agent://noisy")
+            .ok_or_else(|| "source state missing".to_owned())?;
+        ensure(state.total_imports, 1, "reviewed rows do not add imports")?;
+        ensure(state.harmful_count, 1, "live harmful event retained")?;
+        ensure(
+            state.quarantine_count,
+            0,
+            "reviewed rows do not add quarantine holds",
+        )?;
+        ensure(state.negative_rate(), 1.0, "negative rate is not diluted")
     }
 
     #[test]

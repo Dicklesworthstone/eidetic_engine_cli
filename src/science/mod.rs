@@ -1101,11 +1101,11 @@ fn load_evaluation_snapshot(path: &Path) -> Result<EvaluationSnapshot, DriftDegr
 /// `src/eval/runner.rs::read_eval_fixture_file` and the just-landed
 /// `src/core/jsonl_import.rs::read_jsonl_source_bounded`:
 ///
-///   1. `fs::metadata` rejects obviously oversized files up front (cheap
-///      stat — no allocation),
-///   2. `File::open` + `.take(MAX + 1)` pins peak allocation to MAX + 1
-///      bytes regardless of TOCTOU growth between the stat and the open,
-///   3. the post-read length check distinguishes "exactly at the limit"
+///   1. `fs::symlink_metadata` rejects obviously oversized files up front
+///      without following a final symlink (cheap stat — no allocation),
+///   2. `OpenOptions` + `O_NOFOLLOW` + `.take(MAX + 1)` pins peak allocation to
+///      MAX + 1 bytes regardless of TOCTOU growth between the stat and open,
+///   3. the post-open/read length checks distinguish "exactly at the limit"
 ///      from "grew during the read" and emits a clear oversize error.
 ///
 /// `read_to_end` followed by `String::from_utf8` is used (rather than
@@ -1116,7 +1116,7 @@ fn load_evaluation_snapshot(path: &Path) -> Result<EvaluationSnapshot, DriftDegr
 fn read_evaluation_snapshot_bounded(path: &Path) -> Result<String, DriftDegradation> {
     use std::io::Read;
 
-    let metadata = std::fs::metadata(path).map_err(|error| DriftDegradation {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| DriftDegradation {
         code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
         message: format!(
             "Evaluation snapshot {} could not be read: {error}",
@@ -1125,6 +1125,17 @@ fn read_evaluation_snapshot_bounded(path: &Path) -> Result<String, DriftDegradat
         severity: "high".to_string(),
         repair: "Pass readable --baseline and --current snapshot paths.".to_string(),
     })?;
+    if !metadata.file_type().is_file() {
+        return Err(DriftDegradation {
+            code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+            message: format!(
+                "Evaluation snapshot {} is not a regular file.",
+                path.display()
+            ),
+            severity: "high".to_string(),
+            repair: "Pass readable --baseline and --current snapshot paths.".to_string(),
+        });
+    }
     if metadata.len() > EVALUATION_SNAPSHOT_MAX_BYTES {
         return Err(DriftDegradation {
             code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
@@ -1138,7 +1149,8 @@ fn read_evaluation_snapshot_bounded(path: &Path) -> Result<String, DriftDegradat
             repair: "Pass a smaller evaluation snapshot or split it into chunks.".to_string(),
         });
     }
-    let file = std::fs::File::open(path).map_err(|error| DriftDegradation {
+    let file = open_evaluation_snapshot_file_no_follow(path)?;
+    let opened_metadata = file.metadata().map_err(|error| DriftDegradation {
         code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
         message: format!(
             "Evaluation snapshot {} could not be read: {error}",
@@ -1147,6 +1159,30 @@ fn read_evaluation_snapshot_bounded(path: &Path) -> Result<String, DriftDegradat
         severity: "high".to_string(),
         repair: "Pass readable --baseline and --current snapshot paths.".to_string(),
     })?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(DriftDegradation {
+            code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+            message: format!(
+                "Evaluation snapshot {} is not a regular file after open.",
+                path.display()
+            ),
+            severity: "high".to_string(),
+            repair: "Pass readable --baseline and --current snapshot paths.".to_string(),
+        });
+    }
+    if opened_metadata.len() > EVALUATION_SNAPSHOT_MAX_BYTES {
+        return Err(DriftDegradation {
+            code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+            message: format!(
+                "Evaluation snapshot {} is too large: {} bytes exceeds the {} byte limit",
+                path.display(),
+                opened_metadata.len(),
+                EVALUATION_SNAPSHOT_MAX_BYTES,
+            ),
+            severity: "high".to_string(),
+            repair: "Pass a smaller evaluation snapshot or split it into chunks.".to_string(),
+        });
+    }
     let mut bytes = Vec::new();
     file.take(EVALUATION_SNAPSHOT_MAX_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)
@@ -1182,6 +1218,31 @@ fn read_evaluation_snapshot_bounded(path: &Path) -> Result<String, DriftDegradat
         repair: "Persist evaluation snapshots as UTF-8 JSON.".to_string(),
     })
 }
+
+fn open_evaluation_snapshot_file_no_follow(path: &Path) -> Result<std::fs::File, DriftDegradation> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    configure_evaluation_snapshot_open_no_follow(&mut options);
+    options.open(path).map_err(|error| DriftDegradation {
+        code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+        message: format!(
+            "Evaluation snapshot {} could not be read: {error}",
+            path.display()
+        ),
+        severity: "high".to_string(),
+        repair: "Pass readable --baseline and --current snapshot paths.".to_string(),
+    })
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_evaluation_snapshot_open_no_follow(options: &mut std::fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_evaluation_snapshot_open_no_follow(_options: &mut std::fs::OpenOptions) {}
 
 fn snapshot_id(json: &serde_json::Value, path: &Path) -> String {
     for pointer in [
@@ -2409,6 +2470,42 @@ mod tests {
             error.message.contains("symlinked path component"),
             true,
             "symlinked snapshot error message",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_evaluation_snapshot_bounded_rejects_final_symlink() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_snapshot = temp.path().join("real.json");
+        let linked_snapshot = temp.path().join("linked.json");
+        write_eval_snapshot(&real_snapshot, "real_snapshot", 0.8)?;
+        symlink(&real_snapshot, &linked_snapshot).map_err(|error| error.to_string())?;
+
+        let error = read_evaluation_snapshot_bounded(&linked_snapshot)
+            .map(|text| format!("unexpected snapshot text: {text}"))
+            .expect_err("bounded snapshot read must not follow final symlink");
+
+        ensure(
+            error.code,
+            DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+            "final symlink read code",
+        )?;
+        ensure(
+            error.message.contains("not a regular file")
+                || error.message.contains("could not be read"),
+            true,
+            "final symlink read error message",
+        )?;
+        ensure(
+            std::fs::symlink_metadata(&linked_snapshot)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            true,
+            "rejected symlink remains in place",
         )
     }
 
