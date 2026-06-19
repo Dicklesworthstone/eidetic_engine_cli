@@ -19118,6 +19118,9 @@ where
             prev_was_format = false;
             continue;
         }
+        if s == "--" {
+            return false;
+        }
         if s == "--json" || s == "-j" || s == "--robot" {
             return true;
         }
@@ -59349,6 +59352,16 @@ impl NormalizedInvocation {
                     RehearseCommand::PromotePlan(_) => "rehearse promote-plan".to_string(),
                 },
                 Command::Review(review) => match review {
+                    // `review session --propose` (without `--dry-run`) persists
+                    // curation candidates via review_session_proposals
+                    // (curate.rs) — a durable write. The normalized command path
+                    // must be flag-sensitive so it reaches the durable effect
+                    // entry ("review session --propose") instead of the
+                    // read-only "review session" entry. A dry-run preview or a
+                    // plain analysis stays read-only. (bd-d67os.17)
+                    ReviewCommand::Session(args) if args.propose && !args.dry_run => {
+                        "review session --propose".to_string()
+                    }
                     ReviewCommand::Session(_) => "review session".to_string(),
                     ReviewCommand::Workspace(_) => "review workspace".to_string(),
                 },
@@ -63468,6 +63481,13 @@ mod tests {
             ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| e.to_string())?;
         fs::write(&key_path, pkcs8.as_ref())
             .map_err(|error| format!("failed to write certificate signing key: {error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("failed to privatize certificate signing key: {error}"))?;
+        }
 
         let (sign_exit, sign_stdout, sign_stderr) = invoke(&[
             "ee",
@@ -69012,6 +69032,20 @@ mod tests {
             "format json error env",
         )?;
         ensure(stderr.is_empty(), "format json error stderr must be empty")
+    }
+
+    #[test]
+    fn stream_isolation_error_ignores_machine_flags_after_separator() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "badcmd", "--", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "separator error exit")?;
+        ensure(
+            stdout.is_empty(),
+            "separator positional must not force JSON stdout",
+        )?;
+        ensure(
+            !stderr.is_empty(),
+            "separator positional should preserve human stderr error",
+        )
     }
 
     #[test]
@@ -76025,6 +76059,63 @@ mod tests {
             &invocation.command_path,
             &"memory list".to_string(),
             "nested command_path",
+        )
+    }
+
+    #[test]
+    fn review_session_propose_resolves_to_durable_effect() -> TestResult {
+        // bd-d67os.17: `ee review session --propose` persists curation candidates
+        // (curate.rs review_session_proposals), so its normalized command path
+        // must reach the durable effect entry. The effect manifest is the
+        // agent-safety source of truth, so a stale read-only classification would
+        // advertise a durable write as safe. A plain `review session` and a
+        // `--propose --dry-run` preview must stay read-only.
+        let manifest = crate::core::effect::EffectManifest::build();
+
+        let effect_for = |argv: &[&str]| -> Result<(String, bool), String> {
+            let cli = Cli::try_parse_from(argv.iter().copied())
+                .map_err(|error| format!("parse {argv:?}: {error}"))?;
+            let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
+            let path = super::NormalizedInvocation::from_cli(&cli, &args).command_path;
+            let effect = manifest
+                .get(&path)
+                .ok_or_else(|| format!("no effect manifest entry for {path:?}"))?;
+            Ok((path, effect.default_effect.is_mutating()))
+        };
+
+        let (propose_path, propose_mutates) =
+            effect_for(&["ee", "review", "session", "--propose"])?;
+        ensure_equal(
+            &propose_path,
+            &"review session --propose".to_string(),
+            "propose command_path",
+        )?;
+        ensure(
+            propose_mutates,
+            "review session --propose must classify as a durable mutation",
+        )?;
+
+        let (plain_path, plain_mutates) = effect_for(&["ee", "review", "session"])?;
+        ensure_equal(
+            &plain_path,
+            &"review session".to_string(),
+            "plain command_path",
+        )?;
+        ensure(
+            !plain_mutates,
+            "review session (no --propose) must stay read-only",
+        )?;
+
+        let (dry_path, dry_mutates) =
+            effect_for(&["ee", "review", "session", "--propose", "--dry-run"])?;
+        ensure_equal(
+            &dry_path,
+            &"review session".to_string(),
+            "dry-run propose must stay on the read-only path",
+        )?;
+        ensure(
+            !dry_mutates,
+            "review session --propose --dry-run previews without persisting",
         )
     }
 
