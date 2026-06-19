@@ -2069,14 +2069,40 @@ fn stable_import_id(source_id: &str) -> String {
 }
 
 fn index_required_action(workspace_path: &Path, database_path: Option<&Path>) -> String {
-    let workspace = workspace_path.to_string_lossy();
+    let workspace_text = workspace_path.to_string_lossy();
+    let workspace = shell_quote_command_arg(workspace_text.as_ref());
     let Some(database_path) = database_path else {
         return format!("ee index rebuild --workspace {workspace}");
     };
-    format!(
-        "ee index rebuild --workspace {workspace} --database {}",
-        database_path.to_string_lossy()
-    )
+    let database_text = database_path.to_string_lossy();
+    let database = shell_quote_command_arg(database_text.as_ref());
+    format!("ee index rebuild --workspace {workspace} --database {database}")
+}
+
+fn shell_quote_command_arg(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    if value.bytes().all(|byte| {
+        matches!(
+            byte,
+            b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'_'
+                | b'-'
+                | b'.'
+                | b'/'
+                | b':'
+                | b'@'
+                | b'+'
+                | b'='
+        )
+    }) {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn stable_uuid(input: &str) -> Uuid {
@@ -3508,6 +3534,21 @@ mod tests {
             index_job_id.starts_with("sidx_") && index_job_id.len() == 31,
             "search index job id shape",
         )
+    }
+
+    #[test]
+    fn index_required_action_shell_quotes_unsafe_paths() -> TestResult {
+        let action = index_required_action(
+            Path::new("/tmp/work dir/it's"),
+            Some(Path::new("/tmp/db path/ee$(bad).db")),
+        );
+        let expected = concat!(
+            "ee index rebuild --workspace '/tmp/work dir/it'\\''s' ",
+            "--database '/tmp/db path/ee$(bad).db'"
+        )
+        .to_string();
+
+        ensure_equal(&action, &expected, "quoted index required action")
     }
 
     #[test]

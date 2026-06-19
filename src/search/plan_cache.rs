@@ -741,11 +741,13 @@ impl PlanCache {
 }
 
 fn compute_hit_rate(hits: u64, misses: u64) -> Option<f64> {
-    let total = hits.checked_add(misses)?;
-    if total == 0 {
+    let hits = hits as f64;
+    let misses = misses as f64;
+    let total = hits + misses;
+    if total == 0.0 || !total.is_finite() {
         return None;
     }
-    Some((hits as f64) / (total as f64))
+    Some((hits / total).clamp(0.0, 1.0))
 }
 
 #[cfg(test)]
@@ -1132,5 +1134,16 @@ mod tests {
     #[test]
     fn compute_hit_rate_returns_one_when_only_hits() {
         assert_eq!(compute_hit_rate(5, 0), Some(1.0));
+    }
+
+    #[test]
+    fn compute_hit_rate_handles_large_counters_without_integer_overflow() {
+        let rate = compute_hit_rate(u64::MAX, u64::MAX)
+            .expect("large observed counters still have a rate");
+
+        assert!(
+            (rate - 0.5).abs() < 1e-12,
+            "hit_rate should not disappear when integer totals overflow"
+        );
     }
 }

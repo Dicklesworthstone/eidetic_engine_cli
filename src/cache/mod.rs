@@ -19,28 +19,30 @@ pub struct CacheStats {
 impl CacheStats {
     #[must_use]
     pub fn hit_rate(&self) -> f64 {
-        let total = self.hits + self.misses;
-        if total == 0 {
+        let hits = self.hits as f64;
+        let misses = self.misses as f64;
+        let total = hits + misses;
+        if total == 0.0 || !total.is_finite() {
             0.0
         } else {
-            self.hits as f64 / total as f64
+            (hits / total).clamp(0.0, 1.0)
         }
     }
 
     pub fn record_hit(&mut self) {
-        self.hits += 1;
+        self.hits = self.hits.saturating_add(1);
     }
 
     pub fn record_miss(&mut self) {
-        self.misses += 1;
+        self.misses = self.misses.saturating_add(1);
     }
 
     pub fn record_eviction(&mut self) {
-        self.evictions += 1;
+        self.evictions = self.evictions.saturating_add(1);
     }
 
     pub fn record_promotion(&mut self) {
-        self.promotions += 1;
+        self.promotions = self.promotions.saturating_add(1);
     }
 }
 
@@ -547,7 +549,7 @@ where
         self.pressure = assess_pressure(self.primary.len(), &self.budget);
         self.fallback_active = self.pressure == MemoryPressure::Critical;
         if self.fallback_active && !was_active {
-            self.fallback_activations += 1;
+            self.fallback_activations = self.fallback_activations.saturating_add(1);
         }
     }
 }
@@ -639,8 +641,59 @@ impl CacheDegradationReport {
 #[cfg(test)]
 mod tests {
     use super::{
-        CacheBudget, CacheFallbackPolicy, CachePolicy, FallbackCache, LruCache, MemoryPressure,
+        CacheBudget, CacheFallbackPolicy, CachePolicy, CacheStats, FallbackCache, LruCache,
+        MemoryPressure,
     };
+
+    #[test]
+    fn cache_stats_hit_rate_handles_large_counters_without_overflow() {
+        let stats = CacheStats {
+            hits: u64::MAX,
+            misses: u64::MAX,
+            evictions: 0,
+            promotions: 0,
+        };
+
+        assert!(
+            (stats.hit_rate() - 0.5).abs() < 1e-12,
+            "hit_rate should use an unsaturated denominator"
+        );
+    }
+
+    #[test]
+    fn cache_stats_large_counters_saturate_at_max() {
+        let mut stats = CacheStats {
+            hits: u64::MAX,
+            misses: u64::MAX,
+            evictions: u64::MAX,
+            promotions: u64::MAX,
+        };
+
+        stats.record_hit();
+        stats.record_miss();
+        stats.record_eviction();
+        stats.record_promotion();
+
+        assert_eq!(stats.hits, u64::MAX);
+        assert_eq!(stats.misses, u64::MAX);
+        assert_eq!(stats.evictions, u64::MAX);
+        assert_eq!(stats.promotions, u64::MAX);
+    }
+
+    #[test]
+    fn fallback_cache_large_counters_activation_counter_saturates_at_max() {
+        let budget = CacheBudget::new(1, usize::MAX).with_watermarks(0.0, 1.0);
+        let mut cache = FallbackCache::new(
+            Box::new(LruCache::new(1)),
+            CacheFallbackPolicy::NoCache,
+            budget,
+        );
+        cache.fallback_activations = u64::MAX;
+
+        cache.put("a", 1);
+
+        assert_eq!(cache.fallback_activations(), u64::MAX);
+    }
 
     #[test]
     fn fallback_cache_recovers_after_pressure_drops_below_critical() {

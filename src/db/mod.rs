@@ -6643,6 +6643,130 @@ CREATE INDEX IF NOT EXISTS idx_debt_snapshots_workspace_created
     "blake3:v082_memory_debt_snapshots_2026_06_15",
 );
 
+/// V083: generation tracking for error fingerprints.
+///
+/// `error_fingerprints` is a source table for error-recall derived documents.
+/// V073 already advanced workspace generations for repair-link writes, but
+/// fingerprint-only observations (`ee diagnose-error --record` without links)
+/// could leave caches and derived freshness at the old generation. This
+/// forward migration installs the missing triggers and repairs the generation
+/// floor for rows written before the triggers existed.
+pub const V083_ERROR_FINGERPRINT_GENERATION_TRIGGERS: Migration = Migration::new(
+    83,
+    "error_fingerprint_generation_triggers",
+    r#"
+CREATE TRIGGER IF NOT EXISTS trg_workspace_generations_error_fingerprints_insert
+AFTER INSERT ON error_fingerprints
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.created_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.created_at
+     WHERE workspace_id = NEW.workspace_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_workspace_generations_error_fingerprints_update
+AFTER UPDATE ON error_fingerprints
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.updated_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = NEW.workspace_id;
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = OLD.workspace_id
+       AND OLD.workspace_id <> NEW.workspace_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_workspace_generations_error_fingerprints_delete
+AFTER DELETE ON error_fingerprints
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id = OLD.workspace_id;
+END;
+
+INSERT INTO workspace_generations (workspace_id, generation, updated_at)
+SELECT
+    w.id,
+    (
+        COALESCE(memory_counts.row_count, 0)
+        + COALESCE(candidate_counts.row_count, 0)
+        + COALESCE(tag_counts.row_count, 0)
+        + COALESCE(link_counts.row_count, 0)
+        + COALESCE(error_fingerprint_counts.row_count, 0)
+        + COALESCE(error_repair_link_counts.row_count, 0)
+    ) AS generation,
+    w.updated_at
+FROM workspaces w
+LEFT JOIN (
+    SELECT workspace_id, COUNT(*) AS row_count
+    FROM memories
+    GROUP BY workspace_id
+) AS memory_counts
+    ON memory_counts.workspace_id = w.id
+LEFT JOIN (
+    SELECT workspace_id, COUNT(*) AS row_count
+    FROM curation_candidates
+    GROUP BY workspace_id
+) AS candidate_counts
+    ON candidate_counts.workspace_id = w.id
+LEFT JOIN (
+    SELECT m.workspace_id, COUNT(*) AS row_count
+    FROM memory_tags mt
+    JOIN memories m ON m.id = mt.memory_id
+    GROUP BY m.workspace_id
+) AS tag_counts
+    ON tag_counts.workspace_id = w.id
+LEFT JOIN (
+    SELECT workspace_id, COUNT(DISTINCT link_id) AS row_count
+    FROM (
+        SELECT src.workspace_id AS workspace_id, ml.id AS link_id
+        FROM memory_links ml
+        JOIN memories src ON src.id = ml.src_memory_id
+        UNION ALL
+        SELECT dst.workspace_id AS workspace_id, ml.id AS link_id
+        FROM memory_links ml
+        JOIN memories dst ON dst.id = ml.dst_memory_id
+    ) AS link_workspaces
+    GROUP BY workspace_id
+) AS link_counts
+    ON link_counts.workspace_id = w.id
+LEFT JOIN (
+    SELECT workspace_id, COUNT(*) AS row_count
+    FROM error_fingerprints
+    GROUP BY workspace_id
+) AS error_fingerprint_counts
+    ON error_fingerprint_counts.workspace_id = w.id
+LEFT JOIN (
+    SELECT workspace_id, COUNT(*) AS row_count
+    FROM error_repair_links
+    GROUP BY workspace_id
+) AS error_repair_link_counts
+    ON error_repair_link_counts.workspace_id = w.id
+ON CONFLICT(workspace_id) DO UPDATE SET
+    generation = CASE
+        WHEN workspace_generations.generation < excluded.generation
+        THEN excluded.generation
+        ELSE workspace_generations.generation
+    END,
+    updated_at = CASE
+        WHEN workspace_generations.generation < excluded.generation
+        THEN excluded.updated_at
+        ELSE workspace_generations.updated_at
+    END;
+"#,
+    "blake3:v083_error_fingerprint_generation_triggers_2026_06_19",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -6727,6 +6851,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V080_WORKSPACE_GENERATION_FLOOR_REBUILD,
     V081_AUDIT_LOG_WORKSPACE_TIMELINE_INDEX,
     V082_MEMORY_DEBT_SNAPSHOTS,
+    V083_ERROR_FINGERPRINT_GENERATION_TRIGGERS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -24320,6 +24445,43 @@ mod tests {
         }
     }
 
+    fn generation_error_fingerprint(
+        workspace_id: &str,
+        fingerprint_key: &str,
+        updated_at: &str,
+    ) -> super::StoredErrorFingerprint {
+        super::StoredErrorFingerprint {
+            fingerprint_key: fingerprint_key.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            tool: "rustc".to_owned(),
+            canonical_code: Some("E0277".to_owned()),
+            message_template_signature:
+                "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            location_shape: None,
+            stderr_simhash: "0123456789abcdef0123456789abcdef".to_owned(),
+            version_hints: None,
+            created_at: "2026-06-19T00:00:00Z".to_owned(),
+            updated_at: updated_at.to_owned(),
+        }
+    }
+
+    fn generation_error_repair_link(
+        workspace_id: &str,
+        fingerprint_key: &str,
+    ) -> super::CreateErrorRepairLinkInput {
+        super::CreateErrorRepairLinkInput {
+            link_id: "erl_gen00000000000000000000001".to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            fingerprint_key: fingerprint_key.to_owned(),
+            link_kind: "repair".to_owned(),
+            target_id: "mem_gen00000000000000000000001".to_owned(),
+            outcome: "helpful".to_owned(),
+            evidence_ref: Some("rch:proof-generation".to_owned()),
+            stale_version_warning: None,
+            created_by: Some("db-generation-test".to_owned()),
+        }
+    }
+
     fn workspace_generation(
         connection: &DbConnection,
         workspace_id: &str,
@@ -24436,14 +24598,109 @@ mod tests {
             "curation candidate insert bumps generation",
         )?;
 
+        let fingerprint_key = "rustc:E0277";
+        connection.upsert_error_fingerprint(&generation_error_fingerprint(
+            workspace_id,
+            fingerprint_key,
+            "2026-06-19T00:00:00Z",
+        ))?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &5,
+            "error fingerprint insert bumps generation",
+        )?;
+
+        let mut refreshed_fingerprint =
+            generation_error_fingerprint(workspace_id, fingerprint_key, "2026-06-19T00:00:01Z");
+        refreshed_fingerprint.version_hints = Some("rustc 1.95".to_owned());
+        connection.upsert_error_fingerprint(&refreshed_fingerprint)?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &6,
+            "error fingerprint update bumps generation",
+        )?;
+
+        let mut repair_link = generation_error_repair_link(workspace_id, fingerprint_key);
+        connection.upsert_error_repair_link(&repair_link)?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &7,
+            "error repair link insert bumps generation",
+        )?;
+
+        repair_link.evidence_ref = Some("rch:proof-generation-refreshed".to_owned());
+        connection.upsert_error_repair_link(&repair_link)?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &8,
+            "error repair link update bumps generation",
+        )?;
+
         ensure(
             connection.tombstone_memory("mem_gen00000000000000000000002")?,
             "tombstone should update the target memory",
         )?;
         ensure_equal(
             &workspace_generation(&connection, workspace_id)?,
-            &5,
+            &9,
             "memory tombstone bumps generation",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn error_fingerprint_generation_repair_catches_pre_trigger_rows() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 82)?;
+        let workspace_id = "wsp_gen00000000000000000000000";
+        let fingerprint_key = "rustc:E0277";
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/tmp/error-fingerprint-generation".to_owned(),
+                name: Some("error fingerprint generation".to_owned()),
+            },
+        )?;
+
+        connection.upsert_error_fingerprint(&generation_error_fingerprint(
+            workspace_id,
+            fingerprint_key,
+            "2026-06-19T00:00:00Z",
+        ))?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &0,
+            "pre-V083 fingerprint-only write did not bump generation",
+        )?;
+
+        connection.upsert_error_repair_link(&generation_error_repair_link(
+            workspace_id,
+            fingerprint_key,
+        ))?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &1,
+            "pre-V083 repair-link trigger still bumps generation",
+        )?;
+
+        connection.apply_migration(
+            &super::V083_ERROR_FINGERPRINT_GENERATION_TRIGGERS,
+            "2026-06-19T00:00:02Z",
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &2,
+            "V083 repairs the source-row floor for pre-trigger error recall rows",
+        )?;
+
+        let refreshed =
+            generation_error_fingerprint(workspace_id, fingerprint_key, "2026-06-19T00:00:03Z");
+        connection.upsert_error_fingerprint(&refreshed)?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &3,
+            "V083 installed live fingerprint update trigger",
         )?;
 
         Ok(())
