@@ -214,6 +214,14 @@ fn classification_for<'a>(data: &'a Value, algorithm: &str) -> Result<&'a Value,
         .ok_or_else(|| format!("classification for {algorithm} missing"))
 }
 
+fn degraded_entry_for<'a>(data: &'a Value, code: &str) -> Result<&'a Value, String> {
+    data.as_array()
+        .ok_or_else(|| "degraded array missing".to_string())?
+        .iter()
+        .find(|entry| entry.get("code").and_then(Value::as_str) == Some(code))
+        .ok_or_else(|| format!("degraded entry {code} missing"))
+}
+
 #[test]
 fn graph_witnesses_prune_preserves_active_and_fresh_rows() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
@@ -370,6 +378,120 @@ fn graph_witnesses_prune_preserves_active_and_fresh_rows() -> TestResult {
     ensure(
         remaining_algorithms.contains(&"same_day_hits"),
         "same-day witness should remain",
+    )?;
+    conn.close().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn graph_witnesses_prune_degrades_but_keeps_unparseable_recorded_at() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = tempdir.path();
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?;
+    let (database_path, workspace_id) = seed_witness_fixture(workspace)?;
+
+    let conn = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    set_witness_recorded_at(
+        &conn,
+        &workspace_id,
+        "gsnap_archivednewwitnessret001",
+        "same_day_hits",
+        "not a timestamp",
+    )?;
+    conn.close().map_err(|error| error.to_string())?;
+
+    let dry_run_output = run_ee(&[
+        "--workspace",
+        workspace_arg,
+        "maintenance",
+        "graph-witnesses-prune",
+        "--dry-run",
+        "--json",
+    ])?;
+    let dry_run_json = stdout_json(&dry_run_output, "graph witnesses prune unparseable dry run")?;
+    let dry_run_data = dry_run_json
+        .get("data")
+        .ok_or_else(|| "dry-run response missing data".to_string())?;
+
+    ensure_json_eq(
+        &dry_run_json["success"],
+        Value::Bool(true),
+        "unparseable dry-run still succeeds",
+    )?;
+    let top_degraded = degraded_entry_for(
+        &dry_run_json["degraded"],
+        "graph_witness_unparseable_recorded_at",
+    )?;
+    ensure_json_eq(
+        &top_degraded["severity"],
+        Value::String("medium".to_string()),
+        "top-level degraded severity",
+    )?;
+    degraded_entry_for(
+        &dry_run_data["degraded"],
+        "graph_witness_unparseable_recorded_at",
+    )?;
+    ensure_json_eq(
+        &dry_run_data["summary"]["keepUnparseableRecordedAtCount"],
+        Value::from(1),
+        "dry-run unparseable keep count",
+    )?;
+    ensure_json_eq(
+        &dry_run_data["summary"]["pruneCount"],
+        Value::from(1),
+        "dry-run still reports expired prune candidate",
+    )?;
+
+    let malformed = classification_for(dry_run_data, "same_day_hits")?;
+    ensure_json_eq(
+        &malformed["action"]["kind"],
+        Value::String("keep".to_string()),
+        "malformed witness action",
+    )?;
+    ensure_json_eq(
+        &malformed["action"]["reason"]["code"],
+        Value::String("unparseable_recorded_at".to_string()),
+        "malformed witness keep reason",
+    )?;
+
+    let apply_output = run_ee(&[
+        "--workspace",
+        workspace_arg,
+        "maintenance",
+        "graph-witnesses-prune",
+        "--json",
+    ])?;
+    let apply_json = stdout_json(&apply_output, "graph witnesses prune unparseable apply")?;
+    let apply_data = apply_json
+        .get("data")
+        .ok_or_else(|| "apply response missing data".to_string())?;
+    degraded_entry_for(
+        &apply_json["degraded"],
+        "graph_witness_unparseable_recorded_at",
+    )?;
+    ensure_json_eq(
+        &apply_data["summary"]["deletedCount"],
+        Value::from(1),
+        "apply deletes only expired parseable witness",
+    )?;
+
+    let conn = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+    let remaining = conn
+        .list_graph_algorithm_witnesses_with_snapshot_active(&workspace_id)
+        .map_err(|error| format!("list remaining witnesses: {error}"))?;
+    let remaining_algorithms = remaining
+        .iter()
+        .map(|(witness, _)| witness.algorithm.as_str())
+        .collect::<Vec<_>>();
+    ensure(
+        !remaining_algorithms.contains(&"expired_pagerank"),
+        "expired parseable witness should be deleted",
+    )?;
+    ensure(
+        remaining_algorithms.contains(&"same_day_hits"),
+        "unparseable witness should be kept",
     )?;
     conn.close().map_err(|error| error.to_string())?;
     Ok(())

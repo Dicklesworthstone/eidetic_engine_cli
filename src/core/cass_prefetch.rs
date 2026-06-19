@@ -945,12 +945,16 @@ impl SpeculativePrefetch for RecencyWeightedFrequencyPredictor {
         history: &CassPrefetchHistory,
         top_k: usize,
     ) -> Vec<CassPrefetchCandidate> {
-        // Defense in depth (bd-1suaa): an oversized history is refused in
-        // O(1) here too, so a DIRECT (ungated) caller cannot drive the
-        // O(N) loop below with an attacker-controlled length. The gated
-        // entry point reports CASS_PREFETCH_HISTORY_OVERSIZED_CODE; the
-        // bare trait method has no degraded channel, so it just declines.
-        if top_k == 0 || history.is_empty() || history.recent_first.len() > MAX_PREFETCH_HISTORY {
+        // Defense in depth (bd-1suaa, bd-3mhyr): an oversized history is
+        // refused here too, so a DIRECT (ungated) caller cannot drive the
+        // O(N) loop below with an attacker-controlled length, and cannot
+        // surface an over-cap `topic_id` as a candidate. The admission
+        // check short-circuits in O(1) on the count cap and bounds the
+        // per-observation `topic_id` byte scan at MAX_PREFETCH_HISTORY, so
+        // the work stays bounded regardless of input. The gated entry point
+        // reports CASS_PREFETCH_HISTORY_OVERSIZED_CODE; the bare trait
+        // method has no degraded channel, so it just declines.
+        if top_k == 0 || history.is_empty() || !history.is_within_admission_bounds() {
             return Vec::new();
         }
 
@@ -1804,6 +1808,39 @@ mod tests {
         let gated = predictor.predict_next_n_gated(&history, PrefetchGeneration::default(), 3);
         assert!(gated.candidates.is_empty());
         assert_eq!(gated.degraded, Some(CASS_PREFETCH_HISTORY_OVERSIZED_CODE));
+    }
+
+    #[test]
+    fn bare_predict_next_n_refuses_oversized_topic_id_bd_3mhyr() {
+        // Regression pin (bd-3mhyr): the bare, ungated predict_next_n must
+        // decline a history that is within the COUNT cap but carries an
+        // over-cap topic_id, matching the defense-in-depth contract on the
+        // trait. Before the fix the bare path only checked
+        // recent_first.len() > MAX_PREFETCH_HISTORY, so an oversized
+        // topic_id within the count bound could be emitted as a candidate.
+        let predictor = RecencyWeightedFrequencyPredictor::new();
+        let huge = "x".repeat(MAX_PREFETCH_TOPIC_ID_BYTES + 1);
+        let history = CassPrefetchHistory::from_topics(
+            test_agent_scope(),
+            ["current".to_owned(), huge.clone(), huge.clone()],
+        );
+        // The count is within bounds, so the count-only guard would admit
+        // it; only the topic_id byte-length check refuses it.
+        assert!(history.recent_first.len() <= MAX_PREFETCH_HISTORY);
+        assert!(!history.is_within_admission_bounds());
+
+        let candidates = predictor.predict_next_n(&history, 3);
+        assert!(
+            candidates.is_empty(),
+            "bare predictor must decline an out-of-bounds history, got {} candidate(s)",
+            candidates.len()
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.topic_id.as_str().len() <= MAX_PREFETCH_TOPIC_ID_BYTES),
+            "bare predictor must never surface an over-cap topic_id"
+        );
     }
 
     #[test]

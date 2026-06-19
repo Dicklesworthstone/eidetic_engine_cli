@@ -431,13 +431,14 @@ pub fn register_artifact(
 pub fn inspect_artifact(
     options: &ArtifactInspectOptions<'_>,
 ) -> Result<ArtifactInspectReport, DomainError> {
-    let database_path =
-        resolved_database_path(options.workspace_path, options.database_path, false)?;
+    let workspace_path = resolve_workspace_path(options.workspace_path, false)?;
+    let database_path = resolved_database_path(&workspace_path, options.database_path, false)?;
     let connection =
         DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
             message: format!("Failed to open database: {error}"),
             repair: Some("ee init --workspace .".to_string()),
         })?;
+    let workspace_id = selected_workspace_id(&connection, &workspace_path)?;
     let artifact = connection
         .get_artifact(options.artifact_id)
         .map_err(|error| DomainError::Storage {
@@ -445,7 +446,7 @@ pub fn inspect_artifact(
             repair: Some("ee doctor".to_string()),
         })?;
     let artifact = match artifact {
-        Some(artifact) => {
+        Some(artifact) if artifact.workspace_id == workspace_id => {
             let links = connection
                 .list_artifact_links(&artifact.id)
                 .map_err(|error| DomainError::Storage {
@@ -454,6 +455,7 @@ pub fn inspect_artifact(
                 })?;
             Some(ArtifactView { artifact, links })
         }
+        Some(_) => None,
         None => None,
     };
 
@@ -469,19 +471,12 @@ pub fn list_artifacts(
 ) -> Result<ArtifactListReport, DomainError> {
     let workspace_path = resolve_workspace_path(options.workspace_path, false)?;
     let database_path = resolved_database_path(&workspace_path, options.database_path, false)?;
-    let workspace_id = stable_workspace_id(&workspace_path);
     let connection =
         DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
             message: format!("Failed to open database: {error}"),
             repair: Some("ee init --workspace .".to_string()),
         })?;
-    let workspace_id = connection
-        .get_workspace_by_path(&workspace_path.to_string_lossy())
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to query workspace: {error}"),
-            repair: Some("ee doctor".to_string()),
-        })?
-        .map_or(workspace_id, |workspace| workspace.id);
+    let workspace_id = selected_workspace_id(&connection, &workspace_path)?;
     let artifacts = connection
         .list_artifacts(&workspace_id, options.limit)
         .map_err(|error| DomainError::Storage {
@@ -512,6 +507,20 @@ pub fn list_artifacts(
         artifacts: views,
         total_count,
     })
+}
+
+fn selected_workspace_id(
+    connection: &DbConnection,
+    workspace_path: &Path,
+) -> Result<String, DomainError> {
+    let workspace_id = stable_workspace_id(workspace_path);
+    let stored_workspace = connection
+        .get_workspace_by_path(&workspace_path.to_string_lossy())
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query workspace: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+    Ok(stored_workspace.map_or(workspace_id, |workspace| workspace.id))
 }
 
 impl PreparedArtifact {
@@ -1761,6 +1770,61 @@ mod tests {
         ensure(
             report.artifact.artifact.snippet.is_none(),
             "binary snippet omitted",
+        )
+    }
+
+    #[test]
+    fn artifact_inspect_is_scoped_to_selected_workspace() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_a = dir.path().join("workspace-a");
+        let workspace_b = dir.path().join("workspace-b");
+        std::fs::create_dir_all(workspace_a.join(".ee")).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&workspace_b).map_err(|error| error.to_string())?;
+        let db_path = workspace_a.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let file = workspace_a.join("build.log");
+        std::fs::write(&file, "build ok").map_err(|error| error.to_string())?;
+
+        let register = register_artifact(&ArtifactRegisterOptions {
+            workspace_path: &workspace_a,
+            database_path: Some(&db_path),
+            path: Some(Path::new("build.log")),
+            external_ref: None,
+            content_hash: None,
+            size_bytes: None,
+            artifact_type: "log",
+            title: None,
+            provenance_uri: None,
+            max_bytes: Some(DEFAULT_MAX_ARTIFACT_BYTES),
+            snippet_chars: Some(DEFAULT_SNIPPET_CHARS),
+            dry_run: false,
+            memory_links: Vec::new(),
+            pack_links: Vec::new(),
+        })
+        .map_err(|error| error.message())?;
+
+        let same_workspace = inspect_artifact(&ArtifactInspectOptions {
+            workspace_path: &workspace_a,
+            database_path: Some(&db_path),
+            artifact_id: &register.artifact.artifact.id,
+        })
+        .map_err(|error| error.message())?;
+        ensure(
+            same_workspace.found(),
+            "same workspace can inspect artifact",
+        )?;
+
+        let other_workspace = inspect_artifact(&ArtifactInspectOptions {
+            workspace_path: &workspace_b,
+            database_path: Some(&db_path),
+            artifact_id: &register.artifact.artifact.id,
+        })
+        .map_err(|error| error.message())?;
+        ensure(
+            !other_workspace.found(),
+            "artifact inspect should not cross workspace boundaries",
         )
     }
 }

@@ -9157,7 +9157,7 @@ fn candidate_from_hit_preloaded(
     subspans.freshness_provenance += provenance_start.elapsed();
     let provenance = provenance?;
     let construction_start = Instant::now();
-    let Some(relevance) = unit_score(hit.score) else {
+    let Some(relevance) = pack_candidate_relevance_from_search_hit(hit) else {
         subspans.candidate_construction += construction_start.elapsed();
         return None;
     };
@@ -9169,7 +9169,7 @@ fn candidate_from_hit_preloaded(
     let why = candidate_selection_why(
         source.query,
         hit.source.as_str(),
-        hit.score,
+        relevance.into_inner(),
         memory.utility,
         artifact_id.as_deref(),
     );
@@ -9659,6 +9659,10 @@ fn section_for_memory(memory: &StoredMemory) -> PackSection {
 fn diversity_key_for_memory(memory: &StoredMemory, tags: &[String]) -> String {
     let tag = tags.first().map_or("untagged", String::as_str);
     format!("{}:{}:{}", memory.level, memory.kind, tag)
+}
+
+fn pack_candidate_relevance_from_search_hit(hit: &SearchHit) -> Option<UnitScore> {
+    unit_score(hit.relevance_score())
 }
 
 fn unit_score(value: f32) -> Option<UnitScore> {
@@ -10683,6 +10687,62 @@ mod tests {
             .into_iter()
             .map(|memory| (memory.id.clone(), memory))
             .collect()
+    }
+
+    #[test]
+    fn hybrid_search_hit_relevance_is_normalized_for_pack_candidates() -> Result<(), String> {
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(939));
+        let memory = tier_memory(memory_id, 0.9, 0.8, 0.7, "rule");
+        let memory_key = memory.id.clone();
+        let memory_batch = super::CandidateMemoryBatch::Owned(tier_memory_map(vec![memory]));
+        let tags_map = BTreeMap::new();
+        let mut freshness_file_cache =
+            crate::core::memory::EvidenceFreshnessFileCache::default();
+        let source = super::PreloadedCandidateSource {
+            memories: &memory_batch,
+            tags_map: &tags_map,
+            workspace_path: Path::new("/tmp/ee-hybrid-pack-relevance-test"),
+            query: "hybrid recall",
+            validity_reference_time: None,
+            include_tombstoned: false,
+            freshness_file_cache: &mut freshness_file_cache,
+        };
+        let hit = SearchHit {
+            doc_id: memory_key.clone(),
+            score: crate::core::search::RRF_HYBRID_TYPICAL_MAX,
+            source: ScoreSource::Hybrid,
+            fast_score: Some(0.91),
+            quality_score: None,
+            lexical_score: Some(0.83),
+            rerank_score: None,
+            metadata: None,
+            explanation: None,
+        };
+        let mut degraded = Vec::new();
+        let mut subspans = super::CandidateResolutionSubspans::default();
+
+        let candidate = super::candidate_from_hit_preloaded(
+            source,
+            &hit,
+            &memory_key,
+            memory_id,
+            None,
+            &mut degraded,
+            &mut subspans,
+        )
+        .ok_or_else(|| "hybrid hit should convert into a pack candidate".to_string())?;
+
+        assert!(
+            (candidate.relevance.into_inner() - 1.0).abs() < 1e-6,
+            "top hybrid RRF hit must be normalized to pack relevance 1.0, got {}",
+            candidate.relevance.into_inner()
+        );
+        assert!(
+            candidate.why.contains("relevance 1.0000"),
+            "why text must report normalized relevance, got: {}",
+            candidate.why
+        );
+        Ok(())
     }
 
     #[test]

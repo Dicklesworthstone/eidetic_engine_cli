@@ -276,7 +276,13 @@ pub enum FlightRecorderError {
     InvalidFlagName {
         flag: String,
     },
+    InvalidOutputFormat {
+        value: String,
+    },
     InvalidMemoryHash {
+        value: String,
+    },
+    InvalidModelFamily {
         value: String,
     },
     InvalidRecordedAt {
@@ -308,8 +314,14 @@ impl std::fmt::Display for FlightRecorderError {
             Self::InvalidFlagName { flag } => {
                 write!(formatter, "invalid flight-recorder flag name: {flag}")
             }
+            Self::InvalidOutputFormat { value } => {
+                write!(formatter, "invalid flight-recorder output format: {value}")
+            }
             Self::InvalidMemoryHash { value } => {
                 write!(formatter, "invalid flight-recorder memory hash: {value}")
+            }
+            Self::InvalidModelFamily { value } => {
+                write!(formatter, "invalid flight-recorder model family: {value}")
             }
             Self::InvalidRecordedAt { value } => {
                 write!(formatter, "invalid flight-recorder timestamp: {value}")
@@ -749,12 +761,26 @@ fn validate_inputs(inputs: &FlightRecorderInputs<'_>) -> Result<(), FlightRecord
             });
         }
     }
+    if let Some(output_format) = inputs.command.output_format
+        && !is_output_format(output_format)
+    {
+        return Err(FlightRecorderError::InvalidOutputFormat {
+            value: output_format.to_string(),
+        });
+    }
     for hash in inputs.memory_hashes {
         if !is_memory_hash(hash) {
             return Err(FlightRecorderError::InvalidMemoryHash {
                 value: (*hash).to_string(),
             });
         }
+    }
+    if let Some(model_family) = inputs.harness_model_family
+        && !is_model_family(model_family)
+    {
+        return Err(FlightRecorderError::InvalidModelFamily {
+            value: model_family.to_string(),
+        });
     }
     if !is_rfc3339_timestamp(inputs.recorded_at_rfc3339) {
         return Err(FlightRecorderError::InvalidRecordedAt {
@@ -787,11 +813,32 @@ fn is_flag_name(value: &str) -> bool {
     is_verb_token(stripped)
 }
 
+fn is_output_format(value: &str) -> bool {
+    matches!(
+        value,
+        "json" | "human" | "markdown" | "toon" | "jsonl" | "compact" | "hook"
+    )
+}
+
 fn is_memory_hash(value: &str) -> bool {
     let Some(hex) = value.strip_prefix("blake3:") else {
         return false;
     };
     (32..=128).contains(&hex.len()) && hex.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn is_model_family(value: &str) -> bool {
+    matches!(
+        value,
+        "claude-opus"
+            | "claude-sonnet"
+            | "claude-haiku"
+            | "gpt-5"
+            | "gpt-4"
+            | "gemini-pro"
+            | "other"
+            | "unknown"
+    )
 }
 
 fn is_degraded_code(value: &str) -> bool {
@@ -1101,11 +1148,33 @@ mod tests {
     }
 
     #[test]
+    fn invalid_output_format_rejected_before_serialization() {
+        let mut inputs = baseline_inputs();
+        inputs.command.output_format = Some("json sk-proj-secret");
+        let err = record_workload(&inputs).expect_err("raw output format rejected");
+        assert!(matches!(
+            err,
+            FlightRecorderError::InvalidOutputFormat { .. }
+        ));
+    }
+
+    #[test]
     fn invalid_memory_hash_rejected() {
         let mut inputs = baseline_inputs();
         inputs.memory_hashes = &["mem_01234567"]; // raw memory id, not a blake3 hash
         let err = record_workload(&inputs).expect_err("raw memory id rejected");
         assert!(matches!(err, FlightRecorderError::InvalidMemoryHash { .. }));
+    }
+
+    #[test]
+    fn invalid_model_family_rejected_before_serialization() {
+        let mut inputs = baseline_inputs();
+        inputs.harness_model_family = Some("gpt-5 sk-proj-secret");
+        let err = record_workload(&inputs).expect_err("raw model family rejected");
+        assert!(matches!(
+            err,
+            FlightRecorderError::InvalidModelFamily { .. }
+        ));
     }
 
     #[test]

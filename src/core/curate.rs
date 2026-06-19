@@ -6194,17 +6194,8 @@ pub fn run_curate_tombstone(
     let next_action = "ee memory list --json".to_owned();
 
     let connection = open_existing_database(&prepared.database_path)?;
-    let memory = connection
-        .get_memory(options.memory_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to fetch memory: {error}"),
-            repair: Some("ee memory list --json".to_owned()),
-        })?
-        .ok_or_else(|| DomainError::NotFound {
-            resource: "memory".to_owned(),
-            id: options.memory_id.to_owned(),
-            repair: Some("ee memory list --json".to_owned()),
-        })?;
+    let memory =
+        get_curate_memory_for_workspace(&connection, &prepared.workspace_id, options.memory_id)?;
 
     if memory.tombstoned_at.is_some() {
         return Err(DomainError::Usage {
@@ -6376,6 +6367,19 @@ pub fn run_curate_untombstone(
 
     let next_action = format!("ee memory show {} --json", options.memory_id);
 
+    let connection = open_existing_database(&prepared.database_path)?;
+    let memory =
+        get_curate_memory_for_workspace(&connection, &prepared.workspace_id, options.memory_id)?;
+
+    let previous_tombstoned_at =
+        memory
+            .tombstoned_at
+            .clone()
+            .ok_or_else(|| DomainError::Usage {
+                message: format!("Memory {} is not tombstoned.", options.memory_id),
+                repair: Some("ee memory list --json".to_owned()),
+            })?;
+
     if options.dry_run {
         return Ok(CurateUntombstoneReport {
             schema: CURATE_UNTOMBSTONE_SCHEMA_V1,
@@ -6386,7 +6390,7 @@ pub fn run_curate_untombstone(
             database_path: prepared.database_path.display().to_string(),
             memory_id: options.memory_id.to_owned(),
             reason,
-            previous_tombstoned_at: None,
+            previous_tombstoned_at: Some(previous_tombstoned_at),
             restored_at,
             restored_by: actor,
             dry_run: true,
@@ -6396,36 +6400,6 @@ pub fn run_curate_untombstone(
             next_action,
         });
     }
-
-    let connection = open_existing_database(&prepared.database_path)?;
-    let memory = connection
-        .get_memory(options.memory_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to fetch memory: {error}"),
-            repair: Some("ee memory list --json".to_owned()),
-        })?
-        .ok_or_else(|| DomainError::NotFound {
-            resource: "memory".to_owned(),
-            id: options.memory_id.to_owned(),
-            repair: Some("ee memory list --json".to_owned()),
-        })?;
-
-    if memory.workspace_id != prepared.workspace_id {
-        return Err(DomainError::NotFound {
-            resource: "memory".to_owned(),
-            id: options.memory_id.to_owned(),
-            repair: Some("ee memory list --json".to_owned()),
-        });
-    }
-
-    let previous_tombstoned_at =
-        memory
-            .tombstoned_at
-            .clone()
-            .ok_or_else(|| DomainError::Usage {
-                message: format!("Memory {} is not tombstoned.", options.memory_id),
-                repair: Some("ee memory list --json".to_owned()),
-            })?;
 
     let details = serde_json::json!({
         "previous_tombstoned_at": previous_tombstoned_at,
@@ -6472,6 +6446,34 @@ pub fn run_curate_untombstone(
         degraded: Vec::new(),
         next_action,
     })
+}
+
+fn get_curate_memory_for_workspace(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+) -> Result<StoredMemory, DomainError> {
+    let memory = connection
+        .get_memory(memory_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to fetch memory: {error}"),
+            repair: Some("ee memory list --json".to_owned()),
+        })?
+        .ok_or_else(|| DomainError::NotFound {
+            resource: "memory".to_owned(),
+            id: memory_id.to_owned(),
+            repair: Some("ee memory list --json".to_owned()),
+        })?;
+
+    if memory.workspace_id != workspace_id {
+        return Err(DomainError::NotFound {
+            resource: "memory".to_owned(),
+            id: memory_id.to_owned(),
+            repair: Some("ee memory list --json".to_owned()),
+        });
+    }
+
+    Ok(memory)
 }
 
 /// Signals that count as "positive access" evidence for threshold promotion.
@@ -7888,7 +7890,6 @@ pub fn ingest_reflection_result(
             repair: Some("ee reflect propose --workspace . --json".to_owned()),
         })?;
     let material = reflection_request_ledger_material_from_stored(&stored);
-    validate_reflection_current_source_hashes(&connection, &prepared.workspace_id, &material)?;
 
     let replay_gate = reflection_result_replay_gate_from_db_status(
         connection
@@ -7903,6 +7904,12 @@ pub fn ingest_reflection_result(
                 repair: Some("ee reflect request-ledger diagnostics --json".to_owned()),
             })?,
     );
+    let source_lock = if matches!(replay_gate, ReflectionResultReplayGate::Pending) {
+        validate_reflection_current_source_hashes(&connection, &prepared.workspace_id, &material)?;
+        "current"
+    } else {
+        "not_checked"
+    };
     let key = if matches!(replay_gate, ReflectionResultReplayGate::Pending) {
         Some(
             options
@@ -7988,7 +7995,7 @@ pub fn ingest_reflection_result(
             } else {
                 "replayed"
             },
-            source_lock: "current",
+            source_lock,
             replay_gate: reflection_replay_gate_label(&replay_gate),
         },
         result,
@@ -15239,12 +15246,19 @@ mod tests {
             ingest.durable_ingest_outcome,
             Some(ReflectionResultDurableIngestOutcome::Inserted { .. })
         ));
+        assert_eq!(ingest.validation.source_lock, "current");
+        assert_eq!(ingest.validation.replay_gate, "pending");
+        assert!(connection
+            .tombstone_memory(&memory_id)
+            .map_err(|error| error.to_string())?);
 
         let replay =
             ingest_reflection_result(&ingest_options).map_err(|error| error.to_string())?;
         assert_eq!(replay.outcome, "idempotent_replay");
         assert!(!replay.durable_mutation);
         assert_eq!(replay.candidate_id, ingest.candidate_id);
+        assert_eq!(replay.validation.source_lock, "not_checked");
+        assert_eq!(replay.validation.replay_gate, "accepted_replay");
         Ok(())
     }
 
@@ -22440,6 +22454,135 @@ mod tests {
                 .as_ref()
                 .is_some_and(|details| details.contains("restore reversible decay tombstone"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn curate_tombstone_dry_runs_validate_targets_before_planning() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(29)).to_string();
+        let candidate_id = curate_id(30);
+        let connection = seed_candidate_database(
+            &database_path,
+            &workspace_id,
+            &memory_id,
+            &candidate_id,
+            "promote",
+            Some("pending"),
+            None,
+        )?;
+
+        let missing_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(31)).to_string();
+        let missing_error =
+            super::run_curate_untombstone(&super::CurateUntombstoneOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                memory_id: &missing_memory_id,
+                actor: Some("MistySalmon"),
+                dry_run: true,
+                reason: Some("missing dry-run must not overstate restore plan"),
+            })
+            .expect_err("untombstone dry-run should reject missing memory");
+        assert_eq!(missing_error.code(), "not_found");
+
+        let active_error = super::run_curate_untombstone(&super::CurateUntombstoneOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            memory_id: &memory_id,
+            actor: Some("MistySalmon"),
+            dry_run: true,
+            reason: Some("active memory dry-run must not overstate restore plan"),
+        })
+        .expect_err("untombstone dry-run should reject active memory");
+        assert_eq!(active_error.code(), "usage");
+        assert!(
+            active_error.message().contains("not tombstoned"),
+            "active untombstone dry-run error should mention tombstone state: {}",
+            active_error.message()
+        );
+
+        let other_workspace_path = tempdir.path().join("other-workspace");
+        std::fs::create_dir_all(&other_workspace_path).map_err(|error| error.to_string())?;
+        let other_workspace_id = test_workspace_id(&other_workspace_path);
+        connection
+            .insert_workspace(
+                &other_workspace_id,
+                &CreateWorkspaceInput {
+                    path: other_workspace_path.display().to_string(),
+                    name: Some("curate-dry-run-other-workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let other_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(32)).to_string();
+        connection
+            .insert_memory(
+                &other_memory_id,
+                &CreateMemoryInput {
+                    workspace_id: other_workspace_id,
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Do not expose cross-workspace tombstone dry-run plans.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.7,
+                    utility: 0.6,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let cross_workspace_error =
+            super::run_curate_tombstone(&super::CurateTombstoneOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                memory_id: &other_memory_id,
+                actor: Some("MistySalmon"),
+                dry_run: true,
+                reason: Some("cross-workspace dry-run must not overstate tombstone plan"),
+                allow_tombstone_load_bearing: true,
+            })
+            .expect_err("tombstone dry-run should reject cross-workspace memory");
+        assert_eq!(cross_workspace_error.code(), "not_found");
+
+        connection
+            .tombstone_memory(&memory_id)
+            .map_err(|error| error.to_string())?;
+        let previous_tombstoned_at = connection
+            .get_memory(&memory_id)
+            .map_err(|error| error.to_string())?
+            .and_then(|memory| memory.tombstoned_at)
+            .ok_or_else(|| "memory should be tombstoned before dry-run restore".to_owned())?;
+
+        let report = super::run_curate_untombstone(&super::CurateUntombstoneOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            memory_id: &memory_id,
+            actor: Some("MistySalmon"),
+            dry_run: true,
+            reason: Some("valid dry-run restore should be validated but not persisted"),
+        })
+        .map_err(|error| error.message())?;
+        assert!(report.dry_run);
+        assert!(!report.persisted);
+        assert!(report.audit_id.is_none());
+        assert_eq!(
+            report.previous_tombstoned_at.as_deref(),
+            Some(previous_tombstoned_at.as_str())
+        );
+        let still_tombstoned = connection
+            .get_memory(&memory_id)
+            .map_err(|error| error.to_string())?
+            .and_then(|memory| memory.tombstoned_at)
+            .ok_or_else(|| "dry-run restore must leave memory tombstoned".to_owned())?;
+        assert_eq!(still_tombstoned, previous_tombstoned_at);
+
         Ok(())
     }
 

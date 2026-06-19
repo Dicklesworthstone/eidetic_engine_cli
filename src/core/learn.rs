@@ -3372,7 +3372,18 @@ impl LearningCluster {
             sample_ids: BTreeSet::new(),
             source_types: BTreeSet::new(),
             content_previews: BTreeSet::new(),
-            last_seen_at: stable_learning_generated_at(),
+            // Empty sentinel, NOT the report-generation time (bd-d67os.20):
+            // `record()` advances `last_seen_at` only when
+            // `event.created_at > self.last_seen_at`. Seeding with the report
+            // time pinned recency to "now" because historical feedback is
+            // always older, so agenda `created_at` / uncertainty
+            // `last_accessed` reported old evidence as if seen now. An empty
+            // string is lexicographically less than any RFC3339 timestamp, so
+            // the first recorded event sets `last_seen_at` and later events
+            // take the maximum — i.e. the latest evidence time. Every cluster
+            // is created via `or_insert_with(new).record(..)`, so a cluster
+            // never escapes with the empty sentinel.
+            last_seen_at: String::new(),
         }
     }
 
@@ -4890,6 +4901,70 @@ mod tests {
         );
         assert!(item.uncertainty >= 0.7);
         Ok(())
+    }
+
+    #[test]
+    fn cluster_recency_uses_latest_event_time_not_report_time() {
+        // Regression for bd-d67os.20: a cluster's recency must reflect the
+        // latest evidence timestamp, never the report-generation time. Before
+        // the fix, `LearningCluster::new` seeded `last_seen_at` with the
+        // report time, and `record()` (which only advances on a strictly
+        // greater `created_at`) left it untouched for historical feedback —
+        // so agenda `created_at` and uncertainty `last_accessed` reported old
+        // evidence as if it had been seen "now".
+        fn feedback_at(id: &str, created_at: &str) -> StoredFeedbackEvent {
+            StoredFeedbackEvent {
+                id: id.to_string(),
+                workspace_id: "ws_recency".to_string(),
+                target_type: "memory".to_string(),
+                target_id: "mem_recency".to_string(),
+                signal: "confirmation".to_string(),
+                weight: 1.0,
+                source_type: "outcome_observed".to_string(),
+                source_id: None,
+                reason: None,
+                evidence_json: None,
+                session_id: None,
+                applied_at: None,
+                created_at: created_at.to_string(),
+            }
+        }
+
+        let old = "2026-01-01T00:00:00Z";
+        let mut cluster = LearningCluster::new("testing".to_string());
+        cluster.record(
+            &feedback_at("fb_old", old),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+        );
+
+        // The single historical event's time is the recency, NOT "now".
+        assert_eq!(cluster.last_seen_at, old);
+        assert_eq!(cluster.agenda_item().created_at, old);
+        assert_eq!(
+            cluster.uncertainty_item().last_accessed.as_deref(),
+            Some(old)
+        );
+
+        // A newer event advances recency to the latest evidence time...
+        let newer = "2026-03-15T12:00:00Z";
+        cluster.record(
+            &feedback_at("fb_newer", newer),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+        );
+        assert_eq!(cluster.agenda_item().created_at, newer);
+
+        // ...while an even-older event does NOT regress it (max is kept).
+        cluster.record(
+            &feedback_at("fb_older", "2025-06-01T00:00:00Z"),
+            BTreeSet::new(),
+            BTreeSet::new(),
+            BTreeSet::new(),
+        );
+        assert_eq!(cluster.agenda_item().created_at, newer);
     }
 
     #[test]

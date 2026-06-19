@@ -1560,6 +1560,13 @@ fn promote_persisted_procedure(
             )),
         });
     }
+    let verification_report =
+        verify_procedure_for_promotion(&options.workspace, procedure_id, &stored.evidence_uris)?;
+    ensure_procedure_promotion_verification_passed(
+        &verification_report,
+        procedure_id,
+        target_maturity,
+    )?;
 
     let generated_at = Utc::now().to_rfc3339();
     let promotion_id = format!("pprom_{}", generate_id());
@@ -1624,14 +1631,18 @@ fn promote_persisted_procedure(
         .map_err(storage_error("failed to audit procedure promotion"))?;
 
     let verification = ProcedurePromotionVerificationSummary {
-        verification_id: event.id.clone(),
-        status: "passed".to_owned(),
-        overall_result: "passed".to_owned(),
-        pass_count: usize_to_u32_saturating(event.evidence_uris.len()),
-        fail_count: 0,
-        skip_count: 0,
-        confidence: stored.confidence.into(),
-        evidence_checked: event.evidence_uris.clone(),
+        verification_id: verification_report.verification_id.clone(),
+        status: verification_report.status.clone(),
+        overall_result: verification_report.overall_result.clone(),
+        pass_count: verification_report.pass_count,
+        fail_count: verification_report.fail_count,
+        skip_count: verification_report.skip_count,
+        confidence: verification_report.confidence,
+        evidence_checked: verification_report
+            .sources_checked
+            .iter()
+            .map(|source| source.source_id.clone())
+            .collect(),
     };
     let curation = ProcedurePromotionCurationPlan {
         schema: PROCEDURE_PROMOTION_CURATION_SCHEMA_V1.to_owned(),
@@ -1708,6 +1719,32 @@ fn promote_persisted_procedure(
         warnings: Vec::new(),
         next_actions: vec![format!("ee procedure show {procedure_id} --json")],
         generated_at,
+    })
+}
+
+fn ensure_procedure_promotion_verification_passed(
+    verification: &ProcedureVerifyReport,
+    procedure_id: &str,
+    target_maturity: ProcedureMaturity,
+) -> Result<(), DomainError> {
+    if verification.fail_count == 0 && verification.overall_result == "passed" {
+        return Ok(());
+    }
+
+    Err(DomainError::PolicyDenied {
+        message: format!(
+            "procedure promotion to {} requires passing verification for all evidence sources; \
+             verification result was {} (passed {}, failed {}, skipped {})",
+            target_maturity.as_str(),
+            verification.overall_result,
+            verification.pass_count,
+            verification.fail_count,
+            verification.skip_count
+        ),
+        repair: Some(format!(
+            "run ee procedure verify {procedure_id} --json and attach executed verification \
+             evidence before promoting"
+        )),
     })
 }
 
@@ -4124,12 +4161,19 @@ mod tests {
     #[test]
     fn persisted_store_promotes_and_retires_with_history() -> TestResult {
         let workspace = procedure_store_workspace()?;
+        let evidence_id = "pack_release_log";
+        let pack_dir = workspace
+            .join(".ee")
+            .join("procedure-verification")
+            .join("repro_pack")
+            .join(evidence_id);
+        write_procedure_repro_pack(&pack_dir)?;
         let proposal = propose_procedure(&ProcedureProposeOptions {
             workspace: workspace.clone(),
             title: "Run release verification".to_owned(),
             summary: Some("1. Check formatting\n2. Run clippy through RCH".to_owned()),
             source_run_ids: vec!["run_release_001".to_owned()],
-            evidence_ids: vec!["ev_release_log".to_owned()],
+            evidence_ids: vec![evidence_id.to_owned()],
             dry_run: false,
         })
         .map_err(|error| error.message())?;
@@ -4190,6 +4234,65 @@ mod tests {
             show.history
                 .iter()
                 .any(|event| event.event_type == "retired")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn learn_promote_blocks_missing_evidence_and_preserves_maturity() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let proposal = propose_procedure(&ProcedureProposeOptions {
+            workspace: workspace.clone(),
+            title: "Run release verification".to_owned(),
+            summary: Some("1. Check formatting\n2. Run clippy through RCH".to_owned()),
+            source_run_ids: vec!["run_release_001".to_owned()],
+            evidence_ids: vec!["ev_missing".to_owned()],
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let Err(error) = promote_procedure(&ProcedurePromoteOptions {
+            workspace: workspace.clone(),
+            procedure_id: proposal.procedure_id.clone(),
+            to_maturity: Some("validated".to_owned()),
+            dry_run: false,
+            actor: Some("BronzeTurtle".to_owned()),
+            reason: Some("evidence count alone should not promote".to_owned()),
+        }) else {
+            return Err("promotion should fail when evidence verification cannot pass".to_owned());
+        };
+
+        assert_eq!(error.code(), "policy_denied");
+        let message = error.message();
+        assert!(
+            message.contains("verification"),
+            "policy denial should explain the verification gate: {message}"
+        );
+
+        let (connection, workspace_id) = procedure_store_connection(&workspace)?;
+        let stored = connection
+            .get_procedure(&workspace_id, &proposal.procedure_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "procedure row missing after failed promotion".to_owned())?;
+        assert_eq!(stored.maturity, ProcedureMaturity::Provisional.as_str());
+        assert!(
+            stored.last_validated_at.is_none(),
+            "failed promotion must not stamp validation time"
+        );
+
+        let show = show_procedure(&ProcedureShowOptions {
+            workspace,
+            procedure_id: proposal.procedure_id,
+            include_steps: false,
+            include_verification: true,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(show.procedure.status, ProcedureMaturity::Provisional.as_str());
+        assert!(
+            show.history
+                .iter()
+                .all(|event| event.event_type != "promoted"),
+            "failed promotion must not record a promoted history event"
         );
         Ok(())
     }

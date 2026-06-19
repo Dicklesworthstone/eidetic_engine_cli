@@ -18,7 +18,10 @@ use std::time::Instant;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::core::feedback::{PreflightFeedbackKind, RecordFeedbackReport, TaskOutcome};
+use crate::core::feedback::{
+    PreflightFeedbackKind, RecordFeedbackReport, RecordOutcomeOptions, TaskOutcome,
+    infer_preflight_feedback_kind, record_preflight_outcome,
+};
 use crate::core::preflight_guard::matches_drop_table_sql;
 use crate::models::DomainError;
 use crate::models::claims::{ClaimEntry, ClaimStatus};
@@ -2203,6 +2206,7 @@ pub fn close_preflight(options: &CloseOptions) -> Result<CloseReport, DomainErro
         .task_outcome
         .map(|outcome| outcome.as_str().to_owned());
     report.dry_run = options.dry_run;
+    report.feedback = preflight_close_feedback(options)?;
 
     if !options.dry_run {
         stored.report.cleared = options.cleared;
@@ -2217,6 +2221,29 @@ pub fn close_preflight(options: &CloseOptions) -> Result<CloseReport, DomainErro
     }
 
     Ok(report)
+}
+
+fn preflight_close_feedback(
+    options: &CloseOptions,
+) -> Result<Option<RecordFeedbackReport>, DomainError> {
+    let Some(task_outcome) = options
+        .task_outcome
+        .or_else(|| options.feedback_kind.map(|_| TaskOutcome::Unknown))
+    else {
+        return Ok(None);
+    };
+    let feedback_kind = options
+        .feedback_kind
+        .unwrap_or_else(|| infer_preflight_feedback_kind(options.cleared, task_outcome));
+    let report = record_preflight_outcome(&RecordOutcomeOptions {
+        workspace: options.workspace.clone(),
+        preflight_run_id: options.run_id.clone(),
+        task_outcome,
+        feedback_kind,
+        notes: options.reason.clone(),
+        dry_run: options.dry_run,
+    })?;
+    Ok(Some(report))
 }
 
 fn validate_preflight_run_id(run_id: &str) -> Result<(), DomainError> {
@@ -3818,10 +3845,44 @@ RULE NUMBER 2: NO WORKTREES. EVER.
             Some("failure".to_owned()),
             "close task outcome",
         )?;
+        let feedback = close
+            .feedback
+            .as_ref()
+            .ok_or_else(|| "close feedback report missing".to_owned())?;
+        ensure(
+            feedback.preflight_run_id.clone(),
+            run.run_id.clone(),
+            "close feedback preflight run id",
+        )?;
+        ensure(
+            feedback.task_outcome.clone(),
+            "failure".to_owned(),
+            "close feedback task outcome",
+        )?;
+        ensure(
+            feedback.feedback_kind.clone(),
+            Some("missed".to_owned()),
+            "close feedback kind",
+        )?;
+        ensure(
+            feedback.signal.clone(),
+            "harmful".to_owned(),
+            "close feedback signal",
+        )?;
+        ensure(
+            feedback.record_status.clone(),
+            "evaluated".to_owned(),
+            "close feedback record status",
+        )?;
+        ensure(
+            feedback.record_id.is_some(),
+            true,
+            "close feedback receives durable record id",
+        )?;
 
         let shown = show_preflight(&ShowOptions {
             workspace: workspace.path().to_path_buf(),
-            run_id: run.run_id,
+            run_id: run.run_id.clone(),
             ..Default::default()
         })
         .map_err(|error| error.message())?;
@@ -3831,6 +3892,34 @@ RULE NUMBER 2: NO WORKTREES. EVER.
             shown.run.block_reason,
             Some("manual review still required".to_owned()),
             "stored close reason",
+        )?;
+
+        let store = read_preflight_run_store(&preflight_run_store_path(workspace.path()))
+            .map_err(|error| error.message())?;
+        let stored_close = store
+            .runs
+            .iter()
+            .find(|stored| stored.report.run_id == run.run_id)
+            .and_then(|stored| stored.close_report.as_ref())
+            .ok_or_else(|| "stored close report missing".to_owned())?;
+        let stored_feedback = stored_close
+            .feedback
+            .as_ref()
+            .ok_or_else(|| "stored close feedback missing".to_owned())?;
+        ensure(
+            stored_feedback.task_outcome.clone(),
+            "failure".to_owned(),
+            "stored close feedback task outcome",
+        )?;
+        ensure(
+            stored_feedback.feedback_kind.clone(),
+            Some("missed".to_owned()),
+            "stored close feedback kind",
+        )?;
+        ensure(
+            stored_feedback.signal.clone(),
+            "harmful".to_owned(),
+            "stored close feedback signal",
         )
     }
 

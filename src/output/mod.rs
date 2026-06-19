@@ -3677,6 +3677,7 @@ where
 #[must_use]
 pub fn render_status_json(report: &StatusReport) -> String {
     let mut b = JsonBuilder::with_capacity(512);
+    let degraded = aggregate_status_degradations("status", &report.degradations);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
@@ -3730,9 +3731,9 @@ pub fn render_status_json(report: &StatusReport) -> String {
             report.tailscale_local.as_ref(),
         );
         render_agent_inventory_json(d, "agentInventory", &report.agent_inventory, false);
-        let degraded = aggregate_status_degradations("status", &report.degradations);
         d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     });
+    b.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     b.finish()
 }
 
@@ -3740,13 +3741,21 @@ pub fn render_status_json(report: &StatusReport) -> String {
 #[must_use]
 pub fn render_status_skyline_json(report: &StatusSkylineReport) -> String {
     let mut b = JsonBuilder::with_capacity(512);
+    let degraded = aggregate_status_degradations("skyline", &report.degraded);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
-    b.field_object("data", |d| render_status_skyline_data_json(d, report));
+    b.field_object("data", |d| {
+        render_status_skyline_data_json(d, report, &degraded);
+    });
+    b.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     b.finish()
 }
 
-fn render_status_skyline_data_json(parent: &mut JsonBuilder, report: &StatusSkylineReport) {
+fn render_status_skyline_data_json(
+    parent: &mut JsonBuilder,
+    report: &StatusSkylineReport,
+    degraded: &[AggregatedDegradation],
+) {
     parent.field_str("command", "status --skyline");
     parent.field_str("schema", report.schema);
     parent.field_raw("snapshotVersion", &report.snapshot_version.to_string());
@@ -3776,8 +3785,7 @@ fn render_status_skyline_data_json(parent: &mut JsonBuilder, report: &StatusSkyl
         obj.field_u32("onionLayer", community.onion_layer);
         obj.field_str("structuralHealth", &community.structural_health);
     });
-    let degraded = aggregate_status_degradations("skyline", &report.degraded);
-    parent.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
+    parent.field_array_of_objects("degraded", degraded, build_aggregated_degradation);
 }
 
 fn render_status_posture_json(
@@ -4756,6 +4764,7 @@ pub fn render_status_json_with_meta(
     timing: Option<&crate::models::DiagnosticTiming>,
 ) -> String {
     let mut b = JsonBuilder::with_capacity(1024);
+    let degraded = aggregate_status_degradations("status", &report.degradations);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_object("data", |d| {
@@ -4800,7 +4809,6 @@ pub fn render_status_json_with_meta(
             report.tailscale_local.as_ref(),
         );
         render_agent_inventory_json(d, "agentInventory", &report.agent_inventory, false);
-        let degraded = aggregate_status_degradations("status", &report.degradations);
         d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     });
     if let Some(t) = timing {
@@ -4816,6 +4824,7 @@ pub fn render_status_json_with_meta(
             });
         });
     }
+    b.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     b.finish()
 }
 
@@ -6018,6 +6027,7 @@ pub fn render_fix_plan_json(plan: &FixPlan) -> String {
         all_suggested.extend(plan.cass_import_guidance.suggested_commands.iter().cloned());
         d.field_array_of_strings("suggestedCommands", &all_suggested);
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -7779,6 +7789,7 @@ pub fn render_memory_show_json(report: &MemoryShowReport) -> String {
             d.field_str("error", err);
         }
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -7931,6 +7942,7 @@ pub fn render_memory_list_json(report: &MemoryListReport) -> String {
             d.field_str("error", err);
         }
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -8162,6 +8174,7 @@ pub fn render_memory_history_json(report: &MemoryHistoryReport) -> String {
             d.field_str("error", err);
         }
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -18022,10 +18035,11 @@ mod tests {
         render_context_response_json, render_context_response_markdown,
         render_context_response_toon, render_dependency_diagnostics_json,
         render_doctor_concise_json, render_doctor_concise_toon, render_doctor_json,
-        render_doctor_json_filtered, render_doctor_toon, render_handoff_create_json,
-        render_handoff_create_toon, render_handoff_inspect_json, render_handoff_inspect_toon,
-        render_handoff_preview_json, render_handoff_preview_toon, render_handoff_resume_json,
-        render_handoff_resume_toon, render_health_json, render_health_toon,
+        render_doctor_json_filtered, render_doctor_toon, render_fix_plan_json,
+        render_handoff_create_json, render_handoff_create_toon, render_handoff_inspect_json,
+        render_handoff_inspect_toon, render_handoff_preview_json, render_handoff_preview_toon,
+        render_handoff_resume_json, render_handoff_resume_toon, render_health_json,
+        render_health_toon,
         render_integrity_diagnostics_json, render_learn_cluster_json,
         render_learn_experiment_proposal_human, render_learn_experiment_proposal_json,
         render_learn_experiment_proposal_toon, render_memory_history_json,
@@ -18039,19 +18053,20 @@ mod tests {
         render_quarantine_json, render_quarantine_json_filtered, render_quarantine_toon,
         render_schema_export_json, render_shadow_run_human, render_shadow_run_json,
         render_shadow_run_toon, render_status_json, render_status_json_filtered,
-        render_status_skyline_json, render_status_skyline_markdown, render_status_skyline_toon,
-        render_status_toon, render_structural_health_json, render_structural_health_markdown,
+        render_status_json_with_meta, render_status_skyline_json,
+        render_status_skyline_markdown, render_status_skyline_toon, render_status_toon,
+        render_structural_health_json, render_structural_health_markdown,
         render_structural_health_toon, render_version_json, render_why_causal_json,
         render_why_causal_markdown, render_why_causal_toon, schema_json, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::degraded_aggregation::AggregatedDegradation;
     use crate::core::doctor::{
-        CheckResult, CheckSeverity, CheckTier, DependencyContractEntry,
-        DependencyDiagnosticsReport, DependencyDiagnosticsSummary, DependencyDriftPolicy,
-        DependencyFeatureProfile, DependencySource, DoctorReport, IntegrityCanaryReport,
-        IntegrityDiagnosticCheck, IntegrityDiagnosticDegradation, IntegrityDiagnosticsReport,
-        IntegrityDiagnosticsStatus, Posture,
+        CassImportGuidance, CassImportGuidanceStatus, CheckResult, CheckSeverity, CheckTier,
+        DependencyContractEntry, DependencyDiagnosticsReport, DependencyDiagnosticsSummary,
+        DependencyDriftPolicy, DependencyFeatureProfile, DependencySource, DoctorReport, FixPlan,
+        IntegrityCanaryReport, IntegrityDiagnosticCheck, IntegrityDiagnosticDegradation,
+        IntegrityDiagnosticsReport, IntegrityDiagnosticsStatus, Posture,
     };
     use crate::core::handoff::{
         CapsuleProfile, CreateReport as HandoffCreateReport, InspectReport as HandoffInspectReport,
@@ -18522,6 +18537,30 @@ mod tests {
         ensure(
             degraded.is_empty(),
             format!("{context}: expected empty degraded array, got {degraded:?}"),
+        )
+    }
+
+    fn parse_rendered_json(json: &str, context: &str) -> Result<serde_json::Value, String> {
+        serde_json::from_str(json)
+            .map_err(|error| format!("{context}: JSON should parse: {error}; {json}"))
+    }
+
+    fn ensure_top_level_degraded_mirrors_data_degraded(
+        value: &serde_json::Value,
+        context: &str,
+    ) -> TestResult {
+        let top_degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("{context}: missing top-level degraded array"))?;
+        let data_degraded = value
+            .pointer("/data/degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("{context}: missing data degraded array"))?;
+        ensure_equal(
+            top_degraded,
+            data_degraded,
+            &format!("{context}: top-level degraded mirrors data degraded"),
         )
     }
 
@@ -19227,6 +19266,83 @@ mod tests {
             "shard fanout schema",
         )?;
         ensure_contains(&json, "\"name\":\"search_index\"", "search index asset")
+    }
+
+    #[test]
+    fn manual_response_v2_json_renderers_emit_top_level_degraded() -> TestResult {
+        let status = StatusReport::gather();
+        for (context, json) in [
+            ("status JSON", render_status_json(&status)),
+            (
+                "status JSON with meta",
+                render_status_json_with_meta(&status, None),
+            ),
+            (
+                "status skyline JSON",
+                render_status_skyline_json(&sample_status_skyline_report()),
+            ),
+        ] {
+            let value = parse_rendered_json(&json, context)?;
+            ensure_top_level_degraded_mirrors_data_degraded(&value, context)?;
+        }
+
+        let memory = output_test_memory(None);
+        let memory_show = MemoryShowReport::found(MemoryDetails {
+            memory: memory.clone(),
+            tags: Vec::new(),
+            typed_fields: None,
+        });
+        let memory_list = MemoryListReport::success(
+            vec![MemorySummary {
+                id: memory.id.clone(),
+                level: memory.level.clone(),
+                kind: memory.kind.clone(),
+                content: memory.content.clone(),
+                content_truncated: false,
+                confidence: memory.confidence,
+                provenance_uri: memory.provenance_uri.clone(),
+                is_tombstoned: memory.tombstoned_at.is_some(),
+                valid_from: memory.valid_from.clone(),
+                valid_to: memory.valid_to.clone(),
+                validity_status: "current".to_owned(),
+                validity_window_kind: "unbounded".to_owned(),
+                created_at: memory.created_at.clone(),
+            }],
+            1,
+            false,
+            MemoryListFilter::default(),
+        );
+        let memory_history =
+            MemoryHistoryReport::found(memory.id.clone(), false, Vec::new(), 0, false);
+        let fix_plan = FixPlan {
+            version: env!("CARGO_PKG_VERSION"),
+            total_issues: 0,
+            fixable_issues: 0,
+            steps: Vec::new(),
+            cass_import_guidance: CassImportGuidance {
+                status: CassImportGuidanceStatus::NotInspected,
+                detected_agent_count: 0,
+                detected_root_count: 0,
+                roots: Vec::new(),
+                suggested_commands: Vec::new(),
+                message: "Agent source roots were not inspected for this fix plan.".to_owned(),
+            },
+        };
+
+        for (context, json) in [
+            ("fix plan JSON", render_fix_plan_json(&fix_plan)),
+            ("memory show JSON", render_memory_show_json(&memory_show)),
+            ("memory list JSON", render_memory_list_json(&memory_list)),
+            (
+                "memory history JSON",
+                render_memory_history_json(&memory_history),
+            ),
+        ] {
+            let value = parse_rendered_json(&json, context)?;
+            ensure_empty_top_level_degraded(&value, context)?;
+        }
+
+        Ok(())
     }
 
     #[test]

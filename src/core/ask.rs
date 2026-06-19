@@ -346,7 +346,7 @@ fn is_abbreviation_end(text: &str, pos: usize) -> bool {
     const ABBREVS: &[&str] = &["e.g", "i.e", "vs", "etc", "Mr", "Mrs", "Dr", "Prof", "St"];
     for abbrev in ABBREVS {
         let alen = abbrev.len();
-        if pos >= alen && &text[pos - alen..pos] == *abbrev {
+        if pos >= alen && text.get(pos - alen..pos) == Some(*abbrev) {
             return true;
         }
     }
@@ -1273,6 +1273,14 @@ mod tests {
         // The fence should not be split across multiple spans
         let fence_spans: Vec<_> = texts.iter().filter(|t| t.contains("echo hello")).collect();
         assert_eq!(fence_spans.len(), 1, "code fence must be exactly one span");
+    }
+
+    #[test]
+    fn segment_non_ascii_before_period_does_not_panic() {
+        let content = "Use café. Next sentence.";
+        let spans = segment_spans(content);
+        let texts: Vec<&str> = spans.iter().map(|(s, e)| &content[*s..*e]).collect();
+        assert_eq!(texts, vec!["Use café.", "Next sentence."]);
     }
 
     #[test]

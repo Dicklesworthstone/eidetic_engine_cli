@@ -101,15 +101,26 @@ impl SandboxOverlay {
         for (id, change) in &self.changes {
             match change {
                 SandboxChange::Upsert { content_hash } => {
-                    canonical.push_str(&format!("\u{0}upsert\u{0}{id}\u{0}{content_hash}"));
+                    canonical.push('\u{0}');
+                    push_canonical_overlay_field(&mut canonical, "upsert");
+                    push_canonical_overlay_field(&mut canonical, id);
+                    push_canonical_overlay_field(&mut canonical, content_hash);
                 }
                 SandboxChange::Remove => {
-                    canonical.push_str(&format!("\u{0}remove\u{0}{id}"));
+                    canonical.push('\u{0}');
+                    push_canonical_overlay_field(&mut canonical, "remove");
+                    push_canonical_overlay_field(&mut canonical, id);
                 }
             }
         }
         format!("blake3:{}", blake3::hash(canonical.as_bytes()).to_hex())
     }
+}
+
+fn push_canonical_overlay_field(canonical: &mut String, value: &str) {
+    canonical.push_str(&value.len().to_string());
+    canonical.push(':');
+    canonical.push_str(value);
 }
 
 /// Baseline-vs-overlay diff report (bd-1n0np.21.1). Deterministic: each id list
@@ -395,6 +406,21 @@ mod tests {
         different.upsert("mem_a", "h_a3");
         different.remove("mem_b");
         assert_ne!(forward.overlay_hash(), different.overlay_hash());
+    }
+
+    #[test]
+    fn overlay_hash_is_not_ambiguous_when_fields_contain_separator_bytes() {
+        let mut separator_in_id = SandboxOverlay::new();
+        separator_in_id.upsert("mem_a\u{0}hash", "tail");
+
+        let mut separator_in_hash = SandboxOverlay::new();
+        separator_in_hash.upsert("mem_a", "hash\u{0}tail");
+
+        assert_ne!(
+            separator_in_id.overlay_hash(),
+            separator_in_hash.overlay_hash(),
+            "length-prefixed fields keep distinct overlays from sharing a hash"
+        );
     }
 
     #[test]

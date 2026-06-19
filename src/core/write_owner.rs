@@ -4333,6 +4333,37 @@ mod tests {
         }
     }
 
+    fn group_commit_test_operation_with_payload(
+        index: usize,
+        payload_bytes: usize,
+    ) -> WriteOperation {
+        WriteOperation::Custom {
+            operation_type: "group_commit_test".to_owned(),
+            payload: serde_json::json!({
+                "index": index,
+                "payload": "x".repeat(payload_bytes),
+            }),
+        }
+    }
+
+    fn group_commit_test_index(operation: &WriteOperation) -> Result<usize, String> {
+        let WriteOperation::Custom { payload, .. } = operation else {
+            return Err(format!("unexpected operation: {operation:?}"));
+        };
+        payload
+            .get("index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| format!("missing numeric index in payload: {payload}"))
+    }
+
+    fn group_commit_test_storage_error(message: impl Into<String>) -> DomainError {
+        DomainError::Storage {
+            message: message.into(),
+            repair: None,
+        }
+    }
+
     fn expect_success_id(
         receiver: &mut oneshot::Receiver<WriteResult>,
     ) -> Result<Option<String>, String> {
@@ -4398,6 +4429,162 @@ mod tests {
     }
 
     #[test]
+    fn write_owner_group_commit_closes_at_max_rows_and_preserves_fifo_across_batches(
+    ) -> Result<(), String> {
+        let (owner, handle) = WriteOwner::new(8);
+        let mut receivers = Vec::new();
+        for index in 0..5 {
+            receivers.push(
+                handle
+                    .try_submit(group_commit_test_operation(index))
+                    .ok_or_else(|| format!("request {index} should enqueue"))?,
+            );
+        }
+        drop(handle);
+
+        let mut observed_batches = Vec::<Vec<usize>>::new();
+        let outcome = crate::core::run_cli_future(async {
+            let cx = Cx::for_testing();
+            owner
+                .run_group_commit(&cx, WriteHotPathConfig::enabled(8, 2, 0, 1), |operations| {
+                    let indices = operations
+                        .iter()
+                        .map(group_commit_test_index)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(group_commit_test_storage_error)?;
+                    observed_batches.push(indices.clone());
+                    Ok(indices
+                        .into_iter()
+                        .map(|index| WriteResult::Success {
+                            entity_id: Some(format!("row-{index}")),
+                        })
+                        .collect())
+                })
+                .await
+        })
+        .map_err(|error| error.to_string())?;
+        let Outcome::Ok(report) = outcome else {
+            return Err(format!("group-commit run should succeed: {outcome:?}"));
+        };
+
+        assert_eq!(observed_batches, vec![vec![0, 1], vec![2, 3], vec![4]]);
+        assert_eq!(report.generation_advances, 3);
+        assert_eq!(report.telemetry.batches, 3);
+        assert_eq!(report.telemetry.writes_coalesced, 4);
+        assert_eq!(report.telemetry.fsync_count, 3);
+        assert_eq!(report.telemetry.fsync_saved, 2);
+        assert_eq!(report.telemetry.fallback_reasons.single_writer, 1);
+        assert_eq!(
+            receivers
+                .iter_mut()
+                .map(expect_success_id)
+                .collect::<Result<Vec<_>, _>>()?,
+            (0..5)
+                .map(|index| Some(format!("row-{index}")))
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn write_owner_group_commit_respects_inflight_bytes_and_recovers_after_oversized()
+    -> Result<(), String> {
+        let small_first = group_commit_test_operation_with_payload(0, 4);
+        let small_second = group_commit_test_operation_with_payload(1, 4);
+        let oversized = group_commit_test_operation_with_payload(2, 256);
+        let trailing = group_commit_test_operation_with_payload(3, 4);
+        let mut config = WriteHotPathConfig::enabled(8, 8, 0, 1);
+        config.max_inflight_bytes = small_first
+            .estimated_payload_bytes()
+            .saturating_add(small_second.estimated_payload_bytes());
+
+        let (owner, handle) = WriteOwner::new(4);
+        let mut receivers = Vec::new();
+        for operation in [small_first, small_second, oversized, trailing] {
+            receivers.push(
+                handle
+                    .try_submit(operation)
+                    .ok_or_else(|| "request should enqueue".to_owned())?,
+            );
+        }
+        drop(handle);
+
+        let mut observed_batches = Vec::<Vec<usize>>::new();
+        let outcome = crate::core::run_cli_future(async {
+            let cx = Cx::for_testing();
+            owner
+                .run_group_commit(&cx, config, |operations| {
+                    let indices = operations
+                        .iter()
+                        .map(group_commit_test_index)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(group_commit_test_storage_error)?;
+                    observed_batches.push(indices.clone());
+                    Ok(indices
+                        .into_iter()
+                        .map(|index| WriteResult::Success {
+                            entity_id: Some(format!("row-{index}")),
+                        })
+                        .collect())
+                })
+                .await
+        })
+        .map_err(|error| error.to_string())?;
+        let Outcome::Ok(report) = outcome else {
+            return Err(format!("group-commit run should succeed: {outcome:?}"));
+        };
+
+        assert_eq!(observed_batches, vec![vec![0, 1], vec![2], vec![3]]);
+        assert_eq!(report.generation_advances, 3);
+        assert_eq!(report.telemetry.batches, 3);
+        assert_eq!(report.telemetry.writes_coalesced, 2);
+        assert_eq!(report.telemetry.fsync_count, 3);
+        assert_eq!(report.telemetry.fsync_saved, 1);
+        assert_eq!(report.telemetry.fallback_reasons.oversized, 1);
+        assert_eq!(report.telemetry.fallback_reasons.single_writer, 1);
+        assert_eq!(
+            receivers
+                .iter_mut()
+                .map(expect_success_id)
+                .collect::<Result<Vec<_>, _>>()?,
+            (0..4)
+                .map(|index| Some(format!("row-{index}")))
+                .collect::<Vec<_>>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn write_owner_group_commit_shutdown_with_empty_queue_reports_zero_work()
+    -> Result<(), String> {
+        let (owner, handle) = WriteOwner::new(2);
+        drop(handle);
+
+        let outcome = crate::core::run_cli_future(async {
+            let cx = Cx::for_testing();
+            owner
+                .run_group_commit(&cx, WriteHotPathConfig::enabled(2, 2, 0, 1), |_| {
+                    Err(group_commit_test_storage_error(
+                        "shutdown path must not invoke the commit callback",
+                    ))
+                })
+                .await
+        })
+        .map_err(|error| error.to_string())?;
+        let Outcome::Ok(report) = outcome else {
+            return Err(format!("shutdown should return a clean report: {outcome:?}"));
+        };
+
+        assert!(report.telemetry.enabled);
+        assert_eq!(report.generation_advances, 0);
+        assert_eq!(report.telemetry.batches, 0);
+        assert_eq!(report.telemetry.fsync_count, 0);
+        assert_eq!(report.telemetry.fsync_saved, 0);
+        assert_eq!(report.telemetry.fallback_count, 0);
+        Ok(())
+    }
+
+    #[test]
     fn write_owner_group_commit_disabled_preserves_per_write_fsyncs() -> Result<(), String> {
         let (owner, handle) = WriteOwner::new(8);
         let mut receivers = Vec::new();
@@ -4436,6 +4623,130 @@ mod tests {
         for receiver in &mut receivers {
             assert_eq!(expect_success_id(receiver)?, Some("rows-1".to_owned()));
         }
+        Ok(())
+    }
+
+    fn assert_run_group_commit_property_case(
+        payload_lengths: &[usize],
+        max_rows: usize,
+        max_inflight_bytes: usize,
+    ) -> Result<(), TestCaseError> {
+        let operations = payload_lengths
+            .iter()
+            .enumerate()
+            .map(|(index, payload_bytes)| {
+                group_commit_test_operation_with_payload(index, *payload_bytes)
+            })
+            .collect::<Vec<_>>();
+        let operation_bytes = operations
+            .iter()
+            .map(WriteOperation::estimated_payload_bytes)
+            .collect::<Vec<_>>();
+        let operation_count = operations.len();
+        let (owner, handle) = WriteOwner::new(operation_count.max(1));
+        let mut receivers = Vec::new();
+        for operation in operations {
+            receivers.push(handle.try_submit(operation).ok_or_else(|| {
+                TestCaseError::fail("generated write should fit the owner channel")
+            })?);
+        }
+        drop(handle);
+
+        let mut observed_batches = Vec::<Vec<usize>>::new();
+        let mut config = WriteHotPathConfig::enabled(operation_count.max(1), max_rows, 0, 1);
+        config.max_inflight_bytes = max_inflight_bytes.max(1);
+        let outcome = crate::core::run_cli_future(async {
+            let cx = Cx::for_testing();
+            owner
+                .run_group_commit(&cx, config, |batch| {
+                    let indices = batch
+                        .iter()
+                        .map(group_commit_test_index)
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(group_commit_test_storage_error)?;
+                    observed_batches.push(indices.clone());
+                    Ok(indices
+                        .into_iter()
+                        .map(|index| WriteResult::Success {
+                            entity_id: Some(format!("entity-{index}")),
+                        })
+                        .collect())
+                })
+                .await
+        })
+        .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        let Outcome::Ok(report) = outcome else {
+            return Err(TestCaseError::fail(format!(
+                "group-commit property run failed: {outcome:?}"
+            )));
+        };
+
+        let expected_ids = (0..payload_lengths.len())
+            .map(|index| Some(format!("entity-{index}")))
+            .collect::<Vec<_>>();
+        let actual_ids = receivers
+            .iter_mut()
+            .map(expect_success_id)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(TestCaseError::fail)?;
+        prop_assert_eq!(actual_ids, expected_ids);
+
+        let flattened = observed_batches
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        prop_assert_eq!(
+            flattened,
+            (0..payload_lengths.len()).collect::<Vec<_>>(),
+            "committed writes must be exactly-once and serial-equivalent"
+        );
+
+        for batch in &observed_batches {
+            prop_assert!(
+                !batch.is_empty(),
+                "commit callback must never receive an empty batch"
+            );
+            prop_assert!(
+                batch.len() <= max_rows.max(1),
+                "batch exceeded max_rows: batch={batch:?} max_rows={max_rows}"
+            );
+            if batch.len() > 1 {
+                let batch_bytes = batch
+                    .iter()
+                    .map(|index| operation_bytes[*index])
+                    .sum::<usize>();
+                prop_assert!(
+                    batch_bytes <= max_inflight_bytes.max(1),
+                    "coalesced batch exceeded max_inflight_bytes: batch={batch:?} bytes={batch_bytes} limit={max_inflight_bytes}"
+                );
+            }
+        }
+
+        let expected_fsync_count = u64::try_from(observed_batches.len()).unwrap_or(u64::MAX);
+        let expected_writes_coalesced = observed_batches
+            .iter()
+            .filter(|batch| batch.len() > 1)
+            .map(|batch| u64::try_from(batch.len()).unwrap_or(u64::MAX))
+            .fold(0_u64, u64::saturating_add);
+        let expected_fsync_saved = observed_batches
+            .iter()
+            .filter(|batch| batch.len() > 1)
+            .map(|batch| u64::try_from(batch.len().saturating_sub(1)).unwrap_or(u64::MAX))
+            .fold(0_u64, u64::saturating_add);
+        let expected_fallback_count = observed_batches
+            .iter()
+            .filter(|batch| batch.len() == 1)
+            .count();
+        prop_assert_eq!(report.generation_advances, expected_fsync_count);
+        prop_assert_eq!(report.telemetry.batches, expected_fsync_count);
+        prop_assert_eq!(report.telemetry.fsync_count, expected_fsync_count);
+        prop_assert_eq!(report.telemetry.writes_coalesced, expected_writes_coalesced);
+        prop_assert_eq!(report.telemetry.fsync_saved, expected_fsync_saved);
+        prop_assert_eq!(
+            report.telemetry.fallback_count,
+            u64::try_from(expected_fallback_count).unwrap_or(u64::MAX)
+        );
         Ok(())
     }
 
@@ -5625,6 +5936,23 @@ mod tests {
             schedule in prop::collection::vec(scheduled_spool_write_strategy(), 0..64),
         ) {
             assert_write_spool_schedule_invariants(&schedule)?;
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn write_owner_run_group_commit_commits_each_generated_write_once(
+            payload_lengths in prop::collection::vec(0_usize..128, 0..32),
+            max_rows in 1_usize..=8,
+            max_inflight_bytes in 1_usize..512,
+        ) {
+            assert_run_group_commit_property_case(
+                &payload_lengths,
+                max_rows,
+                max_inflight_bytes,
+            )?;
         }
     }
 

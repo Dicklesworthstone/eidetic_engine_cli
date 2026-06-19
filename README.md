@@ -1213,6 +1213,7 @@ base retrieval signal dominant.
 | `ee preflight check --cmd "<command>" --json` | Command-facing policy guard for shell hooks; use `--stdin` or `--cmd-base64` when an outer harness may block risky argv text before `ee` can inspect it |
 | `ee tripwire list` / `check` | Inspect and check preflight tripwires |
 | `ee diag plan-cache` | EQL query plan-cache counters and integration posture |
+| `ee diag contention [--use-daemon] [--json]` | Read-only swarm hot-path contention posture: write-lock, read-pool, single-flight (plus group-commit / incremental-index / L2 when present), with a severity-ranked `topContention` list (see [`docs/agent-ux/contention-observability.md`](docs/agent-ux/contention-observability.md)) |
 | `ee diag environment-attestation --workspace . --include-rch --json` / `disk-pressure` / `build-admission` / `artifacts` | Read-only environment source-authority, storage, artifact, and build-admission diagnostics |
 | `ee diag graph` / `graph-snapshot` / `search` | Graph, snapshot, and retrieval diagnostics |
 | `ee diag integrity` / `dependencies` / `streams` | Integrity, dependency, and stdout/stderr stream checks |

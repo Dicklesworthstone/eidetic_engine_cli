@@ -33,8 +33,8 @@ use chrono::{Duration, Utc};
 use serde::Serialize;
 
 use crate::core::bayes::{
-    BetaPosterior, DEFAULT_HARMFUL_WEIGHT, TrustClassTransition, TrustClassTransitionDirection,
-    trust_class_transition,
+    BetaPosterior, DEFAULT_HARMFUL_WEIGHT, FeedbackSignal, TrustClassTransition,
+    TrustClassTransitionDirection, trust_class_transition,
 };
 use crate::core::sprt::{
     SPRT_ALPHA, SPRT_BETA, SprtDecision, SprtEvaluation, SprtObservation, evaluate_sprt,
@@ -1290,16 +1290,15 @@ fn record_outcome_inner(
         if let Some((current_alpha, current_beta)) = stored {
             let prior = BetaPosterior::new(current_alpha, current_beta)
                 .unwrap_or_else(BetaPosterior::jeffreys);
-            let (posterior, applied_weight) = match signal.as_str() {
-                "helpful" => (prior.update_helpful(), 1.0_f64),
-                "harmful" => {
+            let (posterior, applied_weight) = match FeedbackSignal::from_signal_str(&signal) {
+                FeedbackSignal::Helpful => (prior.update_helpful(), 1.0_f64),
+                FeedbackSignal::Harmful => {
                     let w = DEFAULT_HARMFUL_WEIGHT;
                     (prior.update_harmful(w), w)
                 }
-                // Unknown signals (validated to helpful|harmful above
-                // by require_allowed) cannot reach this branch — leave
-                // posterior unchanged as a defensive fallthrough.
-                _ => (prior, 0.0),
+                // Neutral and unknown-safe signals are stored as feedback but
+                // do not represent Bernoulli evidence for this posterior.
+                FeedbackSignal::Neutral => (prior, 0.0),
             };
             confidence_before = Some(prior.mean() as f32);
             confidence_after = Some(posterior.mean() as f32);
@@ -5396,6 +5395,89 @@ mod tests {
             &profile.is_none(),
             &true,
             "audit actor alone must not create an agent profile",
+        )
+    }
+
+    #[test]
+    fn record_outcome_alias_signals_update_bayesian_posterior() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-bayes-aliases")?;
+
+        let confirmation = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "confirmation".to_string(),
+            weight: None,
+            source_type: "human_explicit".to_string(),
+            source_id: Some("bayes-alias-confirmation".to_string()),
+            reason: Some("Confirmation should count as helpful posterior evidence.".to_string()),
+            evidence_json: None,
+            session_id: Some(OUTCOME_TEST_SESSION_ID.to_string()),
+            event_id: Some("fb_31234567890123456789012345".to_string()),
+            actor: Some("test".to_string()),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &confirmation.status,
+            &OutcomeRecordStatus::Recorded,
+            "confirmation alias records",
+        )?;
+
+        let contradiction = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "contradiction".to_string(),
+            weight: None,
+            source_type: "outcome_observed".to_string(),
+            source_id: Some("bayes-alias-contradiction".to_string()),
+            reason: Some("Contradiction should count as harmful posterior evidence.".to_string()),
+            evidence_json: None,
+            session_id: Some(OUTCOME_TEST_SESSION_ID.to_string()),
+            event_id: Some("fb_41234567890123456789012345".to_string()),
+            actor: Some("test".to_string()),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &contradiction.status,
+            &OutcomeRecordStatus::Recorded,
+            "contradiction alias records",
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let posterior = connection
+            .get_memory_bayes_posterior(OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "posterior missing for alias outcome memory".to_string())?;
+        ensure_equal(
+            &posterior,
+            &(1.5, 0.5 + crate::core::bayes::DEFAULT_HARMFUL_WEIGHT),
+            "alias signals update persisted Bayes posterior",
+        )?;
+
+        let audit = connection
+            .list_audit_by_target("memory", OUTCOME_TEST_MEMORY_ID, None)
+            .map_err(|error| error.to_string())?;
+        let bayes_audit = audit
+            .iter()
+            .filter(|row| row.action == crate::db::audit_actions::OUTCOME_BAYES_UPDATE)
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &bayes_audit.len(),
+            &2_usize,
+            "each alias signal writes a Bayes audit row",
         )
     }
 

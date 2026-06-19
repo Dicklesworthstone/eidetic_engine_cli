@@ -378,7 +378,7 @@ pub fn normalize_connector_slug(slug: &str) -> String {
 pub fn remote_mirror_origin_fixtures(fixtures_root: &Path) -> Vec<AgentSourceOriginFixture> {
     vec![AgentSourceOriginFixture {
         origin_id: "fixture-ssh-csd".to_string(),
-        kind: "ssh".to_string(),
+        kind: "remote_mirror".to_string(),
         host: "csd".to_string(),
         remote_root: "/home/agent".to_string(),
         local_root: remote_mirror_home(fixtures_root).display().to_string(),
@@ -632,6 +632,11 @@ mod tests {
             .origin_fixtures
             .first()
             .ok_or_else(|| "expected one origin fixture".to_string())?;
+        ensure_equal(
+            &origin_fixture.kind.as_str(),
+            &"remote_mirror",
+            "origin fixture kind",
+        )?;
         ensure_equal(
             &origin_fixture.connector_slugs,
             &vec!["codex".to_string()],

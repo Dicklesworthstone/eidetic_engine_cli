@@ -1057,6 +1057,7 @@ fn run_system_source_command(request: &SourceRunRequest) -> SourceRunExecution {
                     append_capture_error(
                         &mut stderr,
                         &format!("source command wait failed: {error}"),
+                        tail_bytes_max,
                     );
                     return SourceRunExecution::Completed {
                         exit_code: None,
@@ -1073,8 +1074,8 @@ fn run_system_source_command(request: &SourceRunRequest) -> SourceRunExecution {
             let Some(status) = child_status.take() else {
                 continue;
             };
-            let stdout = join_capture_reader(&mut stdout_thread);
-            let stderr = join_capture_reader(&mut stderr_thread);
+            let stdout = join_capture_reader(&mut stdout_thread, tail_bytes_max);
+            let stderr = join_capture_reader(&mut stderr_thread, tail_bytes_max);
             return SourceRunExecution::Completed {
                 exit_code: status.code(),
                 signal: exit_signal(&status),
@@ -1149,6 +1150,7 @@ fn read_tail_pipe<R: Read>(
 
 fn join_capture_reader(
     handle: &mut Option<thread::JoinHandle<io::Result<SourceRunPipeCapture>>>,
+    tail_bytes_max: usize,
 ) -> SourceRunPipeCapture {
     let Some(handle) = handle.take() else {
         return SourceRunPipeCapture::empty();
@@ -1157,11 +1159,11 @@ fn join_capture_reader(
         Ok(Ok(capture)) => capture,
         Ok(Err(error)) => SourceRunPipeCapture::from_bytes(
             format!("source command pipe read failed: {error}").as_bytes(),
-            DEFAULT_TAIL_BYTES_MAX,
+            tail_bytes_max,
         ),
         Err(_panic) => SourceRunPipeCapture::from_bytes(
             b"source command pipe reader thread panicked",
-            DEFAULT_TAIL_BYTES_MAX,
+            tail_bytes_max,
         ),
     }
 }
@@ -1174,7 +1176,7 @@ fn join_finished_capture_reader(
         return SourceRunPipeCapture::empty();
     };
     if reader.is_finished() {
-        return join_capture_reader(handle);
+        return join_capture_reader(handle, tail_bytes_max);
     }
     SourceRunPipeCapture::from_bytes(
         b"source command pipe drain timed out; output tail unavailable",
@@ -1209,8 +1211,8 @@ fn drain_capture_readers_after_timeout(
     )
 }
 
-fn append_capture_error(capture: &mut SourceRunPipeCapture, message: &str) {
-    let mut rebuilt = TailCapture::new(DEFAULT_TAIL_BYTES_MAX);
+fn append_capture_error(capture: &mut SourceRunPipeCapture, message: &str, tail_bytes_max: usize) {
+    let mut rebuilt = TailCapture::new(tail_bytes_max);
     rebuilt.push(&capture.tail);
     rebuilt.push(message.as_bytes());
     *capture = rebuilt.finish();
@@ -1562,6 +1564,32 @@ mod tests {
         assert_eq!(stdout.total_bytes, unavailable.len());
         assert_eq!(stdout.tail.as_slice(), unavailable);
         assert_eq!(stderr.tail.as_slice(), b"fast stderr");
+    }
+
+    #[test]
+    fn pipe_reader_error_fallback_honors_tail_limit() {
+        let mut reader_thread = Some(thread::spawn(|| {
+            Err(io::Error::other("very long pipe reader failure diagnostic"))
+        }));
+
+        let capture = join_capture_reader(&mut reader_thread, 8);
+
+        assert_eq!(capture.tail.len(), 8);
+        assert_eq!(capture.tail.as_slice(), b"agnostic");
+    }
+
+    #[test]
+    fn appended_wait_error_honors_tail_limit() {
+        let mut capture = SourceRunPipeCapture::from_bytes(b"prior stderr", 8);
+
+        append_capture_error(
+            &mut capture,
+            "source command wait failed: very long wait diagnostic",
+            10,
+        );
+
+        assert_eq!(capture.tail.len(), 10);
+        assert_eq!(capture.tail.as_slice(), b"diagnostic");
     }
 
     #[test]

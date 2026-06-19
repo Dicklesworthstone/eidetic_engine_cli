@@ -15,8 +15,7 @@ use serde::Serialize;
 use toml_edit::{DocumentMut, Item};
 
 use crate::config::{
-    built_in_config, config_from_env, merge_config, ConfigFile, ConfigLayers, ConfigShowEntry,
-    ConfigShowReport, EnvironmentConfigError, PathExpander,
+    ConfigFile, ConfigLayers, ConfigShowEntry, ConfigShowReport, EnvironmentConfigError,
     GRAPH_CAUSAL_MIN_COST_NORMALIZATION_KEY, GRAPH_CURATE_ARTICULATION_PROTECTION_MULTIPLIER_KEY,
     GRAPH_CURATE_ONION_DECAY_MAX_KEY, GRAPH_FEATURE_CAUSAL_EXPLAIN_ENABLED_KEY,
     GRAPH_FEATURE_HITS_PROFILES_ENABLED_KEY, GRAPH_FEATURE_LOAD_BEARING_ENABLED_KEY,
@@ -29,8 +28,9 @@ use crate::config::{
     GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY, GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
     GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
     GRAPH_PPR_ALPHA_KEY, GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY,
-    GRAPH_WITNESSES_RETENTION_DAYS_KEY, SEARCH_GRAPH_WEIGHT_KEY, SEARCH_LEXICAL_WEIGHT_KEY,
-    SEARCH_RERANK_KEY, SEARCH_RERANK_TOP_K_KEY, SEARCH_SEMANTIC_WEIGHT_KEY,
+    GRAPH_WITNESSES_RETENTION_DAYS_KEY, PathExpander, SEARCH_GRAPH_WEIGHT_KEY,
+    SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_RERANK_KEY, SEARCH_RERANK_TOP_K_KEY,
+    SEARCH_SEMANTIC_WEIGHT_KEY, built_in_config, config_from_env, merge_config,
 };
 
 pub const CONFIG_GET_SCHEMA_V1: &str = "ee.config.get.v1";
@@ -710,6 +710,7 @@ enum GraphValueKind {
     NonNegativeFloat,
     UnsignedInteger,
     PositiveInteger,
+    UnsignedIntegerMap,
     RerankMode,
 }
 
@@ -822,6 +823,16 @@ fn graph_key_spec(key: &str) -> Option<GraphKeySpec> {
             key: GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY,
             path: &["graph", "memory", "growth_multiplier_basis_points"],
             kind: GraphValueKind::UnsignedInteger,
+        }),
+        GRAPH_WITNESSES_RETENTION_DAYS_KEY => Some(GraphKeySpec {
+            key: GRAPH_WITNESSES_RETENTION_DAYS_KEY,
+            path: &["graph", "witnesses", "retention_days"],
+            kind: GraphValueKind::UnsignedInteger,
+        }),
+        GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY => Some(GraphKeySpec {
+            key: GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY,
+            path: &["graph", "witnesses", "algorithm_ttl_days"],
+            kind: GraphValueKind::UnsignedIntegerMap,
         }),
         GRAPH_FEATURE_PPR_ENABLED_KEY => Some(GraphKeySpec {
             key: GRAPH_FEATURE_PPR_ENABLED_KEY,
@@ -962,6 +973,11 @@ fn parse_graph_value(spec: GraphKeySpec, raw: &str) -> Result<TomlScalar, Config
                 Err(invalid_value(spec, raw, "a positive integer <= i64::MAX"))
             }
         }
+        GraphValueKind::UnsignedIntegerMap => Err(invalid_value(
+            spec,
+            raw,
+            "a table of per-algorithm non-negative integers in `.ee/config.toml`, such as `[graph.witnesses.algorithm_ttl_days] personalized_pagerank = 90`, or use `ee maintenance graph-witnesses-prune --algorithm-ttl personalized_pagerank=90`",
+        )),
         GraphValueKind::RerankMode => match raw.trim().to_ascii_lowercase().as_str() {
             "auto" => Ok(TomlScalar::String("auto")),
             "off" => Ok(TomlScalar::String("off")),
@@ -1034,8 +1050,8 @@ fn set_toml_value(document: &mut DocumentMut, path: &[&str], value: TomlScalar) 
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_config_write_path_is_regular_or_missing, get_config, graph_config_keys,
-        publish_config_temp_file, set_config, show_config, ConfigSurfaceOptions,
+        ConfigSurfaceOptions, ensure_config_write_path_is_regular_or_missing, get_config,
+        graph_config_keys, publish_config_temp_file, set_config, show_config,
     };
     use std::fs;
 
@@ -1070,6 +1086,17 @@ mod tests {
     }
 
     #[test]
+    fn graph_get_accepts_every_advertised_graph_key() -> TestResult {
+        let temp = workspace()?;
+        for key in graph_config_keys() {
+            get_config(&options(temp.path()), key).map_err(|error| {
+                format!("advertised graph key `{key}` must be gettable: {error}")
+            })?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn graph_get_reads_default_with_source() -> TestResult {
         let temp = workspace()?;
         let report = get_config(&options(temp.path()), "graph.ppr.alpha")
@@ -1079,6 +1106,78 @@ mod tests {
         }
         if report.source != "default" {
             return Err(format!("unexpected source: {}", report.source));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn graph_witness_get_reads_defaults_with_source() -> TestResult {
+        let temp = workspace()?;
+        let retention = get_config(&options(temp.path()), "graph.witnesses.retention_days")
+            .map_err(|error| error.to_string())?;
+        let algorithm_ttls =
+            get_config(&options(temp.path()), "graph.witnesses.algorithm_ttl_days")
+                .map_err(|error| error.to_string())?;
+
+        if retention.value != "30" {
+            return Err(format!(
+                "unexpected graph.witnesses.retention_days: {}",
+                retention.value
+            ));
+        }
+        if retention.source != "default" {
+            return Err(format!("unexpected retention source: {}", retention.source));
+        }
+        if algorithm_ttls.value != "0" {
+            return Err(format!(
+                "unexpected graph.witnesses.algorithm_ttl_days count: {}",
+                algorithm_ttls.value
+            ));
+        }
+        if algorithm_ttls.source != "default" {
+            return Err(format!(
+                "unexpected algorithm TTL source: {}",
+                algorithm_ttls.source
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn graph_witness_get_reads_project_algorithm_ttl_count() -> TestResult {
+        let temp = workspace()?;
+        let config_dir = temp.path().join(".ee");
+        fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        fs::write(
+            config_dir.join("config.toml"),
+            "\
+[graph.witnesses]
+retention_days = 45
+
+[graph.witnesses.algorithm_ttl_days]
+personalized_pagerank = 90
+cache_results = 120
+",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let retention = get_config(&options(temp.path()), "graph.witnesses.retention_days")
+            .map_err(|error| error.to_string())?;
+        let algorithm_ttls =
+            get_config(&options(temp.path()), "graph.witnesses.algorithm_ttl_days")
+                .map_err(|error| error.to_string())?;
+
+        if retention.value != "45" || retention.source != "project" {
+            return Err(format!(
+                "unexpected project retention report: value={} source={}",
+                retention.value, retention.source
+            ));
+        }
+        if algorithm_ttls.value != "2" || algorithm_ttls.source != "project" {
+            return Err(format!(
+                "unexpected project algorithm TTL report: value={} source={}",
+                algorithm_ttls.value, algorithm_ttls.source
+            ));
         }
         Ok(())
     }
@@ -1205,7 +1304,7 @@ mod tests {
             Ok(report) => {
                 return Err(format!(
                     "invalid rerank mode unexpectedly succeeded: {report:?}"
-                ))
+                ));
             }
             Err(error) => error.to_string(),
         };
@@ -1242,6 +1341,11 @@ mod tests {
             ("graph.pack_dna.max_edges", "34"),
             ("graph.gomory_hu.sample_threshold", "600"),
             ("graph.gomory_hu.sample_size", "150"),
+            ("graph.memory.snapshot_cap_mb", "128"),
+            ("graph.memory.per_algorithm_cap_mb", "64"),
+            ("graph.memory.degraded_below_pct", "75"),
+            ("graph.memory.growth_multiplier_basis_points", "12500"),
+            ("graph.witnesses.retention_days", "45"),
             ("graph.feature.ppr.enabled", "true"),
             ("graph.feature.pack_dna.enabled", "true"),
             ("graph.feature.causal_explain.enabled", "false"),
@@ -1271,6 +1375,34 @@ mod tests {
             if observed.source != "project" {
                 return Err(format!("{key}: unexpected source {}", observed.source));
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn graph_set_rejects_algorithm_ttl_table_key_with_specific_hint() -> TestResult {
+        let temp = workspace()?;
+        let error = match set_config(
+            &options(temp.path()),
+            "graph.witnesses.algorithm_ttl_days",
+            "90",
+            false,
+        ) {
+            Ok(report) => {
+                return Err(format!(
+                    "algorithm TTL table set unexpectedly succeeded: {report:?}"
+                ));
+            }
+            Err(error) => error.to_string(),
+        };
+
+        if !error.contains("table of per-algorithm non-negative integers") {
+            return Err(format!("unexpected algorithm TTL table error: {error}"));
+        }
+        if !error.contains("personalized_pagerank = 90") {
+            return Err(format!(
+                "algorithm TTL error must show TOML example: {error}"
+            ));
         }
         Ok(())
     }

@@ -18,7 +18,7 @@
     "originFixtures": [
       {
         "originId": "fixture-ssh-csd",
-        "kind": "ssh",
+        "kind": "remote_mirror",
         "host": "csd",
         "remoteRoot": "/home/agent",
         "localRoot": "__FIXTURE_PATH__/remote_mirror/ssh-csd/home/agent",

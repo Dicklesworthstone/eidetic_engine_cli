@@ -618,6 +618,11 @@ fn checkout_guard_blocks_main_pathspec_and_forced_checkout_forms() {
         "git checkout -b main",
         "git checkout --detach main",
         "git checkout -f main",
+        "git checkout -p",
+        "git checkout -p main",
+        "git checkout -pq main",
+        "git checkout --patch main",
+        "git checkout --patch -- src/lib.rs",
         "git switch --force main",
     ] {
         let report = run_preflight_guard(&registry, &opts(command));

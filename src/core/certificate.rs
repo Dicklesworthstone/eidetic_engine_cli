@@ -2238,6 +2238,7 @@ fn read_key_file_no_symlinks(path: &Path) -> io::Result<Vec<u8>> {
 
 fn read_certificate_key_file(path: &Path) -> io::Result<Vec<u8>> {
     let mut file = open_certificate_key_file_for_read(path)?;
+    ensure_certificate_key_read_permissions(&file, path)?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     Ok(bytes)
@@ -2259,6 +2260,31 @@ fn configure_certificate_key_open_no_follow(options: &mut OpenOptions) {
 
 #[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
 fn configure_certificate_key_open_no_follow(_options: &mut OpenOptions) {}
+
+#[cfg(unix)]
+fn ensure_certificate_key_read_permissions(file: &File, path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = file.metadata()?.permissions().mode() & 0o777;
+    let owner_readable = mode & 0o400 != 0;
+    let private_bits_only = mode & 0o177 == 0;
+    if owner_readable && private_bits_only {
+        return Ok(());
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "certificate key path permissions are {mode:o}, expected owner-readable private mode (600 or 400): {}",
+            path.display()
+        ),
+    ))
+}
+
+#[cfg(not(unix))]
+fn ensure_certificate_key_read_permissions(_file: &File, _path: &Path) -> io::Result<()> {
+    Ok(())
+}
 
 fn write_key_file_no_symlinks(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -2736,6 +2762,18 @@ mod tests {
         }
     }
 
+    fn write_test_key_file(path: &Path, bytes: &[u8]) -> TestResult {
+        fs::write(path, bytes).map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn certificate_list_schema_is_stable() -> TestResult {
         ensure_equal(
@@ -2819,7 +2857,7 @@ mod tests {
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
             .map_err(|error| error.to_string())?;
-        fs::write(&key_path, pkcs8.as_ref()).map_err(|error| error.to_string())?;
+        write_test_key_file(&key_path, pkcs8.as_ref())?;
 
         let payload_hash = blake3::hash(b"signed payload").to_hex().to_string();
         let manifest = serde_json::json!({
@@ -3694,7 +3732,7 @@ mod tests {
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 =
             ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| e.to_string())?;
-        fs::write(&key_path, pkcs8.as_ref()).map_err(|e| e.to_string())?;
+        write_test_key_file(&key_path, pkcs8.as_ref())?;
 
         let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
             .map_err(|e| e.to_string())?;
@@ -3768,6 +3806,84 @@ mod tests {
         ensure(
             report.message.contains("symlink"),
             "sign error should mention symlink",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permissive_key_read_rejects_group_or_world_access() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_path = dir.path().join("workspace.ed25519");
+        fs::write(&key_path, b"not a real key").map_err(|error| error.to_string())?;
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644))
+            .map_err(|error| error.to_string())?;
+
+        let error = read_key_file_no_symlinks(&key_path)
+            .expect_err("group/world-readable key file should be refused");
+
+        ensure_equal(
+            &error.kind(),
+            &io::ErrorKind::PermissionDenied,
+            "error kind",
+        )?;
+        ensure(
+            error.to_string().contains("private mode"),
+            "error should explain private key mode requirement",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permissive_key_sign_certificate_rejects_group_or_world_access() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_path = dir.path().join("workspace.ed25519");
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| e.to_string())?;
+        fs::write(&key_path, pkcs8.as_ref()).map_err(|error| error.to_string())?;
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644))
+            .map_err(|error| error.to_string())?;
+
+        let payload = r#"{"packHash":"signed","selected":["mem_01"]}"#;
+        let payload_hash = blake3::hash(payload.as_bytes()).to_hex().to_string();
+        fs::write(dir.path().join("payload.json"), payload).map_err(|e| e.to_string())?;
+        let manifest = serde_json::json!({
+            "schema": CERTIFICATE_MANIFEST_SCHEMA_V1,
+            "certificates": [
+                {
+                    "id": "cert_permissive_key",
+                    "kind": "pack",
+                    "status": "valid",
+                    "workspaceId": "workspace_main",
+                    "issuedAt": "2026-05-01T00:00:00Z",
+                    "expiresAt": "2999-01-01T00:00:00Z",
+                    "payloadPath": "payload.json",
+                    "payloadHash": payload_hash,
+                    "payloadSchema": CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                    "assumptions": [{"valid": true}]
+                }
+            ]
+        });
+        let manifest_path = dir.path().join("certificates.json");
+        let manifest_json =
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
+        fs::write(&manifest_path, manifest_json).map_err(|e| e.to_string())?;
+
+        let report = sign_certificate(&SignOptions {
+            certificate_id: "cert_permissive_key".to_owned(),
+            manifest_path: Some(manifest_path),
+            key_path: Some(key_path),
+            workspace_path: None,
+        });
+
+        ensure(!report.success, "permissive key must not sign")?;
+        ensure(
+            report.message.contains("private mode"),
+            "sign error should mention private key mode",
         )
     }
 
@@ -4069,7 +4185,7 @@ mod tests {
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 =
             ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| e.to_string())?;
-        fs::write(&key_path, pkcs8.as_ref()).map_err(|e| e.to_string())?;
+        write_test_key_file(&key_path, pkcs8.as_ref())?;
 
         let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
             .map_err(|e| e.to_string())?;
@@ -4099,7 +4215,7 @@ mod tests {
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 =
             ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| e.to_string())?;
-        fs::write(&key_path, pkcs8.as_ref()).map_err(|e| e.to_string())?;
+        write_test_key_file(&key_path, pkcs8.as_ref())?;
 
         let keypair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
             .map_err(|e| e.to_string())?;
@@ -4131,7 +4247,7 @@ mod tests {
         let rng = ring::rand::SystemRandom::new();
         let victim_pkcs8 =
             ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).map_err(|e| e.to_string())?;
-        fs::write(&victim_key_path, victim_pkcs8.as_ref()).map_err(|e| e.to_string())?;
+        write_test_key_file(&victim_key_path, victim_pkcs8.as_ref())?;
 
         let victim_keypair = ring::signature::Ed25519KeyPair::from_pkcs8(victim_pkcs8.as_ref())
             .map_err(|e| e.to_string())?;

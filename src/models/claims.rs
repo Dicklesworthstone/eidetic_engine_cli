@@ -578,7 +578,7 @@ pub fn is_valid_blake3_hex(s: &str) -> bool {
 
 #[must_use]
 pub fn is_valid_artifact_path(path: &str) -> bool {
-    if path.is_empty() || path.trim() != path || path.contains('\\') {
+    if path.is_empty() || path.trim() != path || path.contains('\\') || path.contains(':') {
         return false;
     }
 
@@ -815,6 +815,14 @@ mod tests {
         ensure(
             !is_valid_artifact_path("C:\\temp\\artifact.json"),
             "windows drive path",
+        )?;
+        ensure(
+            !is_valid_artifact_path("C:/temp/artifact.json"),
+            "windows drive path with forward slashes",
+        )?;
+        ensure(
+            !is_valid_artifact_path("dir/name:stream"),
+            "windows alternate data stream syntax",
         )?;
         ensure(
             !is_valid_artifact_path("\\\\server\\share\\artifact.json"),

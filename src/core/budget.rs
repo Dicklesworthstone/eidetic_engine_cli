@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 /// A per-request resource bound enforceable at deterministic checkpoints.
 ///
-/// Each dimension (`wall_clock_deadline`, `tokens`, `memory_bytes`,
+/// Each dimension (`wall_clock`, `tokens`, `memory_bytes`,
 /// `io_bytes`) is independent and optional; `None` means that dimension
 /// is unbounded. The default ([`RequestBudget::unbounded`]) leaves every
 /// dimension `None`.
@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RequestBudget {
     started_at: Instant,
-    wall_clock_deadline: Option<Instant>,
+    wall_clock_limit: Option<Duration>,
     tokens_limit: Option<u64>,
     memory_limit_bytes: Option<u64>,
     io_limit_bytes: Option<u64>,
@@ -62,7 +62,7 @@ impl RequestBudget {
     pub const fn unbounded_at(anchor: Instant) -> Self {
         Self {
             started_at: anchor,
-            wall_clock_deadline: None,
+            wall_clock_limit: None,
             tokens_limit: None,
             memory_limit_bytes: None,
             io_limit_bytes: None,
@@ -80,7 +80,7 @@ impl RequestBudget {
     /// [`RequestBudget::check`].
     #[must_use]
     pub fn with_wall_clock(mut self, budget: Duration) -> Self {
-        self.wall_clock_deadline = self.started_at.checked_add(budget);
+        self.wall_clock_limit = Some(budget);
         self
     }
 
@@ -136,8 +136,8 @@ impl RequestBudget {
     /// Past the deadline reports `Some(Duration::ZERO)`.
     #[must_use]
     pub fn remaining_wall_clock_at(&self, now: Instant) -> Option<Duration> {
-        self.wall_clock_deadline
-            .map(|deadline| deadline.checked_duration_since(now).unwrap_or_default())
+        self.wall_clock_limit
+            .map(|limit| limit.checked_sub(self.elapsed_at(now)).unwrap_or_default())
     }
 
     /// Recorded token count.
@@ -178,11 +178,8 @@ impl RequestBudget {
     #[must_use]
     pub fn snapshot(&self, dimension: BudgetDimension) -> Option<BudgetSnapshot> {
         match dimension {
-            BudgetDimension::WallClock => self.wall_clock_deadline.map(|deadline| {
+            BudgetDimension::WallClock => self.wall_clock_limit.map(|limit| {
                 let elapsed = self.elapsed();
-                let limit = deadline
-                    .checked_duration_since(self.started_at)
-                    .unwrap_or_default();
                 BudgetSnapshot {
                     dimension,
                     limit: duration_to_millis(limit),
@@ -227,11 +224,8 @@ impl RequestBudget {
 
     fn snapshot_at(&self, dimension: BudgetDimension, now: Instant) -> Option<BudgetSnapshot> {
         match dimension {
-            BudgetDimension::WallClock => self.wall_clock_deadline.map(|deadline| {
+            BudgetDimension::WallClock => self.wall_clock_limit.map(|limit| {
                 let elapsed = self.elapsed_at(now);
-                let limit = deadline
-                    .checked_duration_since(self.started_at)
-                    .unwrap_or_default();
                 BudgetSnapshot {
                     dimension,
                     limit: duration_to_millis(limit),
@@ -606,5 +600,20 @@ mod tests {
         assert!(b.check_at(now).is_ok());
         let past = now + Duration::from_millis(1);
         assert!(b.check_at(past).is_err());
+    }
+
+    #[test]
+    fn oversized_wall_clock_budget_remains_bounded() -> std::result::Result<(), &'static str> {
+        let now = anchor();
+        let b = RequestBudget::unbounded_at(now).with_wall_clock(Duration::MAX);
+
+        assert_eq!(b.remaining_wall_clock_at(now), Some(Duration::MAX));
+        let snapshot = require_some(
+            b.snapshot(BudgetDimension::WallClock),
+            "oversized wall-clock budget must remain bounded",
+        )?;
+        assert_eq!(snapshot.limit, Duration::MAX.as_millis());
+        assert!(b.check_at(now).is_ok());
+        Ok(())
     }
 }

@@ -5,7 +5,7 @@
 //! everything needed to reproduce a test result or demonstration.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
@@ -28,6 +28,9 @@ pub const REPLAY_REPORT_SCHEMA_V1: &str = "ee.repro.replay.v1";
 
 /// Schema for minimize report.
 pub const MINIMIZE_REPORT_SCHEMA_V1: &str = "ee.repro.minimize.v1";
+
+const REQUIRED_REPRO_PACK_FILES: &[&str] =
+    &["env.json", "manifest.json", "repro.lock", "provenance.json"];
 
 /// Options for capturing a repro pack.
 #[derive(Clone, Debug)]
@@ -466,9 +469,9 @@ pub fn replay_pack(options: &ReplayOptions) -> Result<ReplayReport, DomainError>
     report.dry_run = options.dry_run;
 
     if options.verify_hashes && !options.dry_run {
-        for required_file in ["env.json", "manifest.json", "repro.lock", "provenance.json"] {
+        for required_file in required_pack_member_paths(&expected_artifacts) {
             let result =
-                verify_required_pack_file(&options.pack_path, required_file, &expected_artifacts);
+                verify_required_pack_file(&options.pack_path, &required_file, &expected_artifacts);
             report.add_verification(result);
         }
     } else if options.dry_run {
@@ -519,9 +522,7 @@ pub fn minimize_pack(options: &MinimizeOptions) -> Result<MinimizeReport, Domain
     let mut report = MinimizeReport::new(options.pack_path.clone(), options.output_dir.clone());
     report.dry_run = options.dry_run;
 
-    let required_files = ["env.json", "manifest.json", "repro.lock", "provenance.json"];
-
-    for file_name in &required_files {
+    for &file_name in REQUIRED_REPRO_PACK_FILES {
         if let Some(metadata) = pack_file_metadata_no_symlinks(&options.pack_path, file_name)? {
             report.add_kept(metadata.len());
         }
@@ -691,6 +692,17 @@ fn manifest_artifact_expectations(
         );
     }
     Ok(expected)
+}
+
+fn required_pack_member_paths(
+    expected_artifacts: &BTreeMap<String, ManifestArtifactExpectation>,
+) -> BTreeSet<String> {
+    let mut paths = REQUIRED_REPRO_PACK_FILES
+        .iter()
+        .map(|path| (*path).to_string())
+        .collect::<BTreeSet<_>>();
+    paths.extend(expected_artifacts.keys().cloned());
+    paths
 }
 
 fn verify_required_pack_file(
@@ -1276,6 +1288,67 @@ mod tests {
 
         assert_eq!(report.artifacts_verified, 1);
         assert_eq!(report.artifacts_failed, 1);
+    }
+
+    #[test]
+    fn replay_pack_verifies_required_manifest_artifacts_beyond_canonical_files() -> TestResult {
+        let workspace = temp_root("ee_repro_replay_extra_required_artifact_")?;
+        let pack = workspace.join("pack");
+        fs::create_dir_all(&pack).map_err(|error| error.to_string())?;
+
+        let env_json = r#"{"schema":"ee.repro_pack.env.v1","os":"linux","arch":"x86_64","captured_at":"2026-05-01T00:00:00Z","env_vars":{},"tool_versions":{"ee":"0.1.0"}}"#;
+        let lock_json = r#"{"schema":"ee.repro_pack.lock.v1","lock_version":1,"locked_at":"2026-05-01T00:00:00Z","dependencies":[]}"#;
+        let provenance_json = r#"{"schema":"ee.repro_pack.provenance.v1","sources":[],"events":[],"verifications":[],"updated_at":"2026-05-01T00:00:00Z"}"#;
+        let expected_stdout = r#"{"ok":true}"#;
+        let artifact_entry = |path: &str, payload: &str| {
+            serde_json::json!({
+                "path": path,
+                "hash": format!("blake3:{}", hash_content(payload.as_bytes())),
+                "size_bytes": len_to_u64(payload.len()),
+                "required": true
+            })
+        };
+        let manifest_json = crate::core::serialize_pretty_or_error(&serde_json::json!({
+            "schema": REPRO_MANIFEST_SCHEMA_V1,
+            "name": "extra_required_artifact",
+            "version": "1.0.0",
+            "artifacts": [
+                artifact_entry("env.json", env_json),
+                artifact_entry("repro.lock", lock_json),
+                artifact_entry("provenance.json", provenance_json),
+                artifact_entry("stdout.json", expected_stdout)
+            ],
+            "created_at": "2026-05-01T00:00:00Z"
+        }));
+
+        fs::write(pack.join("manifest.json"), manifest_json).map_err(|error| error.to_string())?;
+        fs::write(pack.join("env.json"), env_json).map_err(|error| error.to_string())?;
+        fs::write(pack.join("repro.lock"), lock_json).map_err(|error| error.to_string())?;
+        fs::write(pack.join("provenance.json"), provenance_json)
+            .map_err(|error| error.to_string())?;
+        fs::write(pack.join("stdout.json"), r#"{"ok":false}"#)
+            .map_err(|error| error.to_string())?;
+
+        let report = replay_pack(&ReplayOptions {
+            pack_path: pack,
+            verify_hashes: true,
+            check_env: false,
+            dry_run: false,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.status, ReplayStatus::Failed);
+        assert_eq!(report.artifacts_failed, 1);
+        assert!(
+            report.verification_results.iter().any(|result| {
+                result.path == "stdout.json"
+                    && !result.passed
+                    && result.error.as_deref() == Some("hash mismatch")
+            }),
+            "required extra manifest artifact must be verified: {report:?}"
+        );
+        Ok(())
     }
 
     #[test]

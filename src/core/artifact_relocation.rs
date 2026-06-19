@@ -207,11 +207,16 @@ fn plan_or_apply_relocation(
     }
 
     let destination_root = absolutize(destination_root);
+    let entry_status = if options.mode == ArtifactRelocationMode::Apply {
+        "copied"
+    } else {
+        "planned"
+    };
     let entries = collect_entries(
         options.workspace_path,
         &source,
         &destination_root,
-        "planned",
+        entry_status,
     )?;
     let manifest = ArtifactRelocationManifest {
         schema: ARTIFACT_RELOCATION_SCHEMA_V1.to_owned(),
@@ -1310,6 +1315,12 @@ mod tests {
         }
         if report.manifest.entries[0].blake3.is_none() {
             return Err("manifest entry missing blake3".to_owned());
+        }
+        if report.manifest.entries[0].status != "copied" {
+            return Err(format!(
+                "applied relocation entry should be copied, got {}",
+                report.manifest.entries[0].status
+            ));
         }
         Ok(())
     }

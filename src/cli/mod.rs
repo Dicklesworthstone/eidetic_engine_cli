@@ -25384,14 +25384,16 @@ fn flight_recorder_error_to_domain(
     match error {
         crate::obs::flight_recorder::FlightRecorderError::InvalidVerbChain { .. }
         | crate::obs::flight_recorder::FlightRecorderError::InvalidFlagName { .. }
+        | crate::obs::flight_recorder::FlightRecorderError::InvalidOutputFormat { .. }
         | crate::obs::flight_recorder::FlightRecorderError::InvalidMemoryHash { .. }
+        | crate::obs::flight_recorder::FlightRecorderError::InvalidModelFamily { .. }
         | crate::obs::flight_recorder::FlightRecorderError::InvalidRecordedAt { .. }
         | crate::obs::flight_recorder::FlightRecorderError::InvalidDegradedCode { .. }
         | crate::obs::flight_recorder::FlightRecorderError::MalformedTrace { .. } => {
             DomainError::Usage {
                 message: error.to_string(),
                 repair: Some(
-                    "Use shape-only inputs: verbs, flag names, blake3 memory hashes, and degraded codes."
+                    "Use shape-only inputs: verbs, flag names, known output formats, blake3 memory hashes, known model families, and degraded codes."
                         .to_owned(),
                 ),
             }

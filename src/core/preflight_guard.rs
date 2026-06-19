@@ -1594,6 +1594,7 @@ fn git_checkout_segment_is_forbidden(segment: &[String], checkout_index: usize) 
             return segment.get(index + 1).is_some();
         }
         if git_checkout_option_creates_detaches_or_forces(word)
+            || git_checkout_option_overwrites_worktree(word)
             || git_checkout_pathspec_option(word)
         {
             return true;
@@ -1633,6 +1634,14 @@ fn git_checkout_option_creates_detaches_or_forces(word: &str) -> bool {
         || (word.starts_with('-')
             && !word.starts_with("--")
             && word.chars().skip(1).any(|ch| ch == 'f'))
+}
+
+fn git_checkout_option_overwrites_worktree(word: &str) -> bool {
+    matches!(word, "-p" | "--patch")
+        || word.starts_with("--patch=")
+        || (word.starts_with('-')
+            && !word.starts_with("--")
+            && word.chars().skip(1).any(|ch| ch == 'p'))
 }
 
 fn git_checkout_pathspec_option(word: &str) -> bool {
@@ -3963,6 +3972,11 @@ action = "explode"
             "git checkout -b experiment",
             "git checkout --detach main",
             "git checkout -f main",
+            "git checkout -p",
+            "git checkout -p main",
+            "git checkout -pq main",
+            "git checkout --patch main",
+            "git checkout --patch -- src/lib.rs",
             "git checkout --pathspec-from-file=paths.txt",
             "git switch -",
             "git switch feature/other",

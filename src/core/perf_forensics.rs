@@ -1989,7 +1989,7 @@ fn detect_redundant_search_why_context(
     for window in events.windows(3) {
         if window[0].command_family == "search"
             && window[1].command_family == "why"
-            && window[2].command_family == "context"
+            && matches!(window[2].command_family.as_str(), "context" | "pack")
         {
             let avoidable = window[0]
                 .response_bytes
@@ -2151,7 +2151,7 @@ fn prompt_budget_category_rationale(category: &str) -> &'static str {
             "Large JSON responses carried optional diagnostic fields; request compact output or disable heavy explanation fields for steady-state agent loops."
         }
         "redundant_search_why_context_sequence" => {
-            "Search and why were followed by context in the same trace window; context can often provide the pack and explanation in one response."
+            "Search and why were followed by pack/context in the same trace window; pack can often provide the context and explanation in one response."
         }
         "unchanged_pack_resent_full" => {
             "Consecutive pack/context responses had the same memory hash set and size; reuse the prior pack hash or request a delta."
@@ -2167,7 +2167,7 @@ fn prompt_budget_actions() -> Vec<PromptBudgetAction> {
     vec![
         PromptBudgetAction {
             category: "repeated_context_bytes".to_owned(),
-            command: "ee context <task> --max-tokens <n> --json".to_owned(),
+            command: "ee pack <task> --max-tokens <n> --json".to_owned(),
             reason: "Lower max tokens or reuse a prior pack when the trace shows unchanged memory hashes.".to_owned(),
         },
         PromptBudgetAction {
@@ -2177,7 +2177,7 @@ fn prompt_budget_actions() -> Vec<PromptBudgetAction> {
         },
         PromptBudgetAction {
             category: "bulky_optional_json_fields".to_owned(),
-            command: "ee context <task> --format markdown --max-tokens <n>".to_owned(),
+            command: "ee pack <task> --format markdown --max-tokens <n>".to_owned(),
             reason: "Use a diet pack for the prompt path and keep full JSON for audit artifacts.".to_owned(),
         },
         PromptBudgetAction {
@@ -3274,6 +3274,77 @@ mod tests {
         assert!(
             error.to_string().contains("byte cap"),
             "unexpected error: {error}"
+        );
+    }
+
+    fn prompt_budget_test_event(
+        trace_id: &str,
+        command_family: &str,
+        response_bytes: u64,
+        memory_hashes: &[&str],
+    ) -> PromptBudgetTraceEvent {
+        PromptBudgetTraceEvent {
+            trace_id: trace_id.to_owned(),
+            command_key: command_family.to_owned(),
+            command_family: command_family.to_owned(),
+            output_format: Some("json".to_owned()),
+            flag_names: vec!["--json".to_owned()],
+            response_bytes,
+            token_estimate: bytes_to_tokens(response_bytes),
+            memory_hashes: memory_hashes
+                .iter()
+                .map(|hash| (*hash).to_owned())
+                .collect(),
+            degraded_codes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn prompt_budget_detects_redundant_search_why_pack_sequence() {
+        let events = vec![
+            prompt_budget_test_event(
+                "trc_search",
+                "search",
+                1_000,
+                &["blake3:11111111111111111111111111111111"],
+            ),
+            prompt_budget_test_event(
+                "trc_why",
+                "why",
+                900,
+                &["blake3:11111111111111111111111111111111"],
+            ),
+            prompt_budget_test_event(
+                "trc_pack",
+                "pack",
+                20_000,
+                &[
+                    "blake3:11111111111111111111111111111111",
+                    "blake3:22222222222222222222222222222222",
+                ],
+            ),
+        ];
+
+        let report = analyze_prompt_budget_trace("blake3:test".to_owned(), &events, 0);
+        let category = report
+            .top_waste_categories
+            .iter()
+            .find(|category| category.category == "redundant_search_why_context_sequence")
+            .expect("search/why/pack should be reported as redundant");
+
+        assert_eq!(category.avoidable_bytes, 1_900);
+        assert!(report.affected_command_sequences.iter().any(|sequence| {
+            sequence.commands == vec!["search".to_owned(), "why".to_owned(), "pack".to_owned()]
+                && sequence
+                    .waste_categories
+                    .contains(&"redundant_search_why_context_sequence".to_owned())
+        }));
+        assert!(
+            report
+                .suggested_actions
+                .iter()
+                .all(|action| !action.command.starts_with("ee context")),
+            "prompt-budget guidance should use canonical ee pack commands"
         );
     }
 

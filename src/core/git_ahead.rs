@@ -277,7 +277,7 @@ fn parse_git_ahead_log_line(line: &str) -> Option<GitAheadCommit> {
     let hash = fields.next()?.trim();
     let author = fields.next()?.trim();
     let subject = fields.next()?.trim();
-    if hash.is_empty() || subject.is_empty() {
+    if hash.is_empty() || author.is_empty() || subject.is_empty() {
         return None;
     }
     Some(GitAheadCommit {
@@ -554,6 +554,25 @@ mod tests {
             Some("1111111111111111\x1fCodex\x1ffix: parser (bd-2gc7r.1)\n"),
         );
 
+        assert!(snapshot.ambiguous_ahead);
+        assert!(snapshot.peer_owned_ahead_risk);
+        assert!(
+            snapshot
+                .degraded
+                .iter()
+                .any(|entry| entry.code == GIT_AHEAD_LOG_COUNT_MISMATCH_CODE)
+        );
+    }
+
+    #[test]
+    fn empty_author_ahead_log_row_is_not_reported_safe() {
+        let snapshot = summarize_git_ahead(
+            &clean_status(1),
+            Some("1111111111111111\x1f\x1ffix: unknown owner (bd-2gc7r.1)\n"),
+        );
+
+        assert_eq!(snapshot.state, GIT_AHEAD_STATE_AMBIGUOUS);
+        assert!(snapshot.commits.is_empty());
         assert!(snapshot.ambiguous_ahead);
         assert!(snapshot.peer_owned_ahead_risk);
         assert!(
