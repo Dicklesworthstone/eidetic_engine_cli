@@ -38,8 +38,7 @@ pub const ASK_QUALITY_EXPECTATIONS_SCHEMA_V1: &str = "ee.eval.ask_quality_expect
 pub const ASK_REPORT_SCHEMA_V1: &str = "ee.eval.ask_report.v1";
 
 /// Schema version for bundled-embedding semantic recall expectations.
-pub const SEMANTIC_RECALL_EXPECTATIONS_SCHEMA_V1: &str =
-    "ee.eval.semantic_recall_expectations.v1";
+pub const SEMANTIC_RECALL_EXPECTATIONS_SCHEMA_V1: &str = "ee.eval.semantic_recall_expectations.v1";
 
 /// Schema version for bundled-embedding semantic recall reports.
 pub const SEMANTIC_RECALL_REPORT_SCHEMA_V1: &str = "ee.eval.semantic_recall_report.v1";
@@ -2030,12 +2029,19 @@ fn precision_at_k(retrieved: &[String], relevant: &HashSet<String>, k: usize) ->
     if k == 0 {
         return 0.0;
     }
-    let top_k: Vec<_> = retrieved.iter().take(k).collect();
-    if top_k.is_empty() {
+    let mut seen = HashSet::new();
+    let mut considered = 0_usize;
+    let mut hits = 0_usize;
+    for id in retrieved.iter().take(k) {
+        considered += 1;
+        if seen.insert(id) && relevant.contains(id) {
+            hits += 1;
+        }
+    }
+    if considered == 0 {
         return 0.0;
     }
-    let hits = top_k.iter().filter(|id| relevant.contains(**id)).count();
-    hits as f64 / top_k.len() as f64
+    hits as f64 / considered as f64
 }
 
 /// Compute recall at k.
@@ -2054,13 +2060,13 @@ fn ndcg_at_k(retrieved: &[String], relevant: &HashSet<String>, k: usize) -> f64 
         return 0.0;
     }
 
-    let dcg: f64 = retrieved
-        .iter()
-        .take(k)
-        .enumerate()
-        .filter(|(_, id)| relevant.contains(*id))
-        .map(|(i, _)| 1.0 / (i as f64 + 2.0).log2())
-        .sum();
+    let mut seen = HashSet::new();
+    let mut dcg = 0.0;
+    for (i, id) in retrieved.iter().take(k).enumerate() {
+        if seen.insert(id) && relevant.contains(id) {
+            dcg += 1.0 / (i as f64 + 2.0).log2();
+        }
+    }
 
     let ideal_count = relevant.len().min(k);
     let idcg: f64 = (0..ideal_count)
@@ -2187,8 +2193,11 @@ pub fn evaluate_semantic_recall_expectations(
     };
     let hash_baseline_recall_at_k =
         cases.iter().map(|case| case.hash_recall_at_k).sum::<f64>() / divisor;
-    let semantic_recall_at_k =
-        cases.iter().map(|case| case.semantic_recall_at_k).sum::<f64>() / divisor;
+    let semantic_recall_at_k = cases
+        .iter()
+        .map(|case| case.semantic_recall_at_k)
+        .sum::<f64>()
+        / divisor;
     let recall_gain = semantic_recall_at_k - hash_baseline_recall_at_k;
     let thresholds = SemanticRecallThresholds {
         hash_baseline_recall_at_k_max: expectations.hash_baseline_recall_at_k_max,
@@ -2713,10 +2722,7 @@ pub fn evaluate_ask_quality(
     expectations: &AskQualityExpectations,
     actuals: &[AskQualityActual],
 ) -> AskQualityReport {
-    let mut report = AskQualityReport::new(
-        fixture_id.to_string(),
-        expectations.thresholds.clone(),
-    );
+    let mut report = AskQualityReport::new(fixture_id.to_string(), expectations.thresholds.clone());
     let actual_by_case: BTreeMap<&str, &AskQualityActual> = actuals
         .iter()
         .map(|actual| (actual.case_id.as_str(), actual))
@@ -2834,10 +2840,12 @@ fn ask_conflict_recall(case: &AskQualityCase, actual: &AskQualityActual) -> f64 
         .filter(|expected_side| {
             actual.sides.iter().any(|actual_side| {
                 actual_side.label == expected_side.label
-                    && expected_side
-                        .cited_memory_ids
-                        .iter()
-                        .all(|id| actual_side.cited_memory_ids.iter().any(|actual| actual == id))
+                    && expected_side.cited_memory_ids.iter().all(|id| {
+                        actual_side
+                            .cited_memory_ids
+                            .iter()
+                            .any(|actual| actual == id)
+                    })
             })
         })
         .count();
@@ -2930,12 +2938,7 @@ fn apply_ask_quality_thresholds(report: &mut AskQualityReport) {
     };
 }
 
-fn push_threshold_failure(
-    failures: &mut Vec<String>,
-    metric: &str,
-    actual: f64,
-    minimum: f64,
-) {
+fn push_threshold_failure(failures: &mut Vec<String>, metric: &str, actual: f64, minimum: f64) {
     if actual < minimum {
         failures.push(format!("{metric} {actual:.3} below threshold {minimum:.3}"));
     }
@@ -3343,6 +3346,18 @@ mod tests {
     }
 
     #[test]
+    fn precision_at_k_does_not_count_duplicate_relevant_ids() -> TestResult {
+        let retrieved: Vec<String> = vec!["a".into(), "a".into()];
+        let relevant: HashSet<String> = ["a".into()].into_iter().collect();
+        ensure_close(
+            precision_at_k(&retrieved, &relevant, 2),
+            0.5,
+            1e-9,
+            "duplicate relevant id should count once",
+        )
+    }
+
+    #[test]
     fn recall_at_k_all_retrieved() -> TestResult {
         let retrieved: Vec<String> = vec!["a".into(), "b".into()];
         let relevant: HashSet<String> = ["a".into(), "b".into()].into_iter().collect();
@@ -3396,6 +3411,18 @@ mod tests {
             1.0,
             1e-9,
             "perfect ndcg",
+        )
+    }
+
+    #[test]
+    fn ndcg_at_k_duplicate_relevant_ids_stays_bounded() -> TestResult {
+        let retrieved: Vec<String> = vec!["a".into(), "a".into()];
+        let relevant: HashSet<String> = ["a".into()].into_iter().collect();
+        ensure_close(
+            ndcg_at_k(&retrieved, &relevant, 2),
+            1.0,
+            1e-9,
+            "duplicate relevant id should not push nDCG above 1",
         )
     }
 
@@ -3470,10 +3497,8 @@ mod tests {
             }],
         };
 
-        let report = evaluate_semantic_recall_expectations(
-            "fx.bundled_embeddings.v1",
-            &expectations,
-        );
+        let report =
+            evaluate_semantic_recall_expectations("fx.bundled_embeddings.v1", &expectations);
 
         ensure(report.schema, SEMANTIC_RECALL_REPORT_SCHEMA_V1, "schema")?;
         ensure(report.passed, true, "report should pass")?;
@@ -3483,12 +3508,7 @@ mod tests {
             1e-9,
             "hash baseline recall",
         )?;
-        ensure_close(
-            report.semantic_recall_at_k,
-            1.0,
-            1e-9,
-            "semantic recall",
-        )?;
+        ensure_close(report.semantic_recall_at_k, 1.0, 1e-9, "semantic recall")?;
         ensure_close(report.recall_gain, 1.0, 1e-9, "recall gain")?;
         ensure(
             report.cases[0].first_semantic_rank,
@@ -3515,10 +3535,8 @@ mod tests {
             }],
         };
 
-        let report = evaluate_semantic_recall_expectations(
-            "fx.bundled_embeddings.v1",
-            &expectations,
-        );
+        let report =
+            evaluate_semantic_recall_expectations("fx.bundled_embeddings.v1", &expectations);
 
         ensure(report.passed, false, "report should fail without gain")?;
         ensure_close(report.recall_gain, 0.0, 1e-9, "recall gain")

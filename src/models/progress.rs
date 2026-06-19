@@ -235,7 +235,9 @@ impl ProgressEventBuilder {
             total_items: self.total_items,
             processed_items: self.processed_items,
             elapsed_ms: self.elapsed_ms,
-            timestamp: self.timestamp.unwrap_or_default(),
+            timestamp: self
+                .timestamp
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
         }
     }
 }
@@ -398,6 +400,15 @@ mod tests {
         assert_eq!(above.progress, Some(1.0));
         assert_eq!(nan.progress, None);
         assert_eq!(infinite.progress, None);
+    }
+
+    #[test]
+    fn progress_event_builder_defaults_to_rfc3339_timestamp() -> TestResult {
+        let event = ProgressEvent::builder().build();
+
+        chrono::DateTime::parse_from_rfc3339(&event.timestamp)
+            .map_err(|error| format!("default timestamp should parse as RFC 3339: {error}"))?;
+        Ok(())
     }
 
     #[test]

@@ -179,7 +179,9 @@ fn open_audit_append_file(path: &Path) -> io::Result<fs::File> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     configure_audit_append_options(&mut options);
-    options.open(path)
+    let file = options.open(path)?;
+    ensure_audit_append_file_permissions(&file)?;
+    Ok(file)
 }
 
 #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
@@ -187,10 +189,23 @@ fn configure_audit_append_options(options: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
     options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    options.mode(0o600);
 }
 
 #[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
 fn configure_audit_append_options(_options: &mut OpenOptions) {}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn ensure_audit_append_file_permissions(file: &fs::File) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn ensure_audit_append_file_permissions(_file: &fs::File) -> io::Result<()> {
+    Ok(())
+}
 
 fn ensure_append_path_has_no_symlink_components(path: &Path) -> io::Result<()> {
     if let Some(symlink_path) = first_existing_symlink_component(path)? {
@@ -459,6 +474,71 @@ mod tests {
                 .next()
                 .is_none(),
             "non-regular audit target must not be modified"
+        );
+        Ok(())
+    }
+
+    #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+    #[test]
+    fn audit_event_append_creates_owner_only_audit_file() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let audit_path = tempdir.path().join("audit.jsonl");
+        let event = AuditEvent::new(
+            "2026-05-06T00:00:00.123456789Z",
+            "agent:SwiftCat",
+            "remember",
+            "memory:mem_01",
+            AuditOutcome::Success,
+        );
+
+        event
+            .append_to_path(&audit_path)
+            .map_err(|error| error.to_string())?;
+        let mode = std::fs::metadata(&audit_path)
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "new audit files must not grant group/other permissions; mode={mode:o}"
+        );
+        Ok(())
+    }
+
+    #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+    #[test]
+    fn audit_event_append_tightens_existing_audit_file_permissions() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let audit_path = tempdir.path().join("audit.jsonl");
+        std::fs::write(&audit_path, "").map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&audit_path, std::fs::Permissions::from_mode(0o666))
+            .map_err(|error| error.to_string())?;
+        let event = AuditEvent::new(
+            "2026-05-06T00:00:00.123456789Z",
+            "agent:SwiftCat",
+            "remember",
+            "memory:mem_01",
+            AuditOutcome::Success,
+        );
+
+        event
+            .append_to_path(&audit_path)
+            .map_err(|error| error.to_string())?;
+        let mode = std::fs::metadata(&audit_path)
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "existing audit files must be tightened before append; mode={mode:o}"
         );
         Ok(())
     }

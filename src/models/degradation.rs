@@ -380,6 +380,13 @@ pub const SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE: &str = "search_score_calibra
 /// raise the cap intentionally rather than diagnosing a silent absorb.
 /// bd-3qs2i.3.1.
 pub const HARMFUL_BURST_QUARANTINE_CODE: &str = "harmful_burst_quarantine";
+/// Response degraded code for outcome feedback absorbed by the SPRT guard.
+///
+/// The event is preserved in `feedback_quarantine` and does NOT affect
+/// live scoring; unlike `harmful_burst_quarantine`, this means the source's
+/// recent helpful/harmful sequence crossed the sequential probability
+/// quarantine threshold before the simple burst-rate cap fired.
+pub const SPRT_QUARANTINE_CODE: &str = "sprt_quarantine";
 
 // Pack degradations (D400 - D499)
 pub const TOKEN_BUDGET_EXCEEDED: DegradationCode = DegradationCode {

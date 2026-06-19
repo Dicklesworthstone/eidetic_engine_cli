@@ -10832,13 +10832,6 @@ pub const OUTPUT_TRUNCATION_REGISTRY: &[governor::TruncationPoint] = &[
         position_key_field: "id",
     },
     governor::TruncationPoint {
-        schema_id: "ee.audit.timeline.v1",
-        command: "audit timeline",
-        array_path: &["entries"],
-        per_section_items: false,
-        position_key_field: "id",
-    },
-    governor::TruncationPoint {
         schema_id: PACK_SCHEMA_V2,
         command: "pack",
         array_path: &["pack", "skipped"],

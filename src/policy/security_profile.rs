@@ -588,6 +588,12 @@ fn first_existing_symlink_component(
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
             Ok(_) => {}
@@ -756,6 +762,23 @@ mod tests {
 
         assert!(report.passed);
         assert_eq!(report.issue_count, 0);
+    }
+
+    #[test]
+    fn workspace_permission_symlink_scan_accepts_canonical_absolute_roots() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let base =
+            std::fs::canonicalize(tempdir.path()).unwrap_or_else(|_| tempdir.path().to_path_buf());
+        let db_path = base.join(".ee").join("ee.db");
+
+        let symlink = super::first_existing_symlink_component(&db_path)
+            .map_err(|error| format!("{}: {}", error.path.display(), error.source))?;
+
+        ensure(
+            symlink,
+            None,
+            "security profile path scan should skip structural root/prefix anchors",
+        )
     }
 
     #[cfg(unix)]

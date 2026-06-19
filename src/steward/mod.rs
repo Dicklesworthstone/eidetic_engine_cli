@@ -465,29 +465,12 @@ struct SymlinkComponentInspectionError {
 fn first_existing_symlink_component(
     path: &Path,
 ) -> Result<Option<PathBuf>, SymlinkComponentInspectionError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(None);
-            }
-            Err(source) => {
-                return Err(SymlinkComponentInspectionError {
-                    path: current,
-                    source,
-                });
-            }
+    crate::core::path_safety::first_existing_symlink_component(path).map_err(|source| {
+        SymlinkComponentInspectionError {
+            path: path.to_path_buf(),
+            source,
         }
-    }
-    Ok(None)
+    })
 }
 
 // ============================================================================
@@ -8193,6 +8176,23 @@ mod tests {
             Err(error) => error.into_inner().clone(),
         };
         (result, captured)
+    }
+
+    #[test]
+    fn maintenance_job_lock_symlink_scan_accepts_canonical_absolute_roots() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let base =
+            fs::canonicalize(tempdir.path()).unwrap_or_else(|_| tempdir.path().to_path_buf());
+        let lock_path = base.join(".ee").join("maintenance-job.lock");
+
+        let symlink = first_existing_symlink_component(&lock_path)
+            .map_err(|error| format!("{}: {}", error.path.display(), error.source))?;
+
+        ensure(
+            symlink,
+            None,
+            "maintenance lock path scan should skip structural root/prefix anchors",
+        )
     }
 
     #[cfg(unix)]

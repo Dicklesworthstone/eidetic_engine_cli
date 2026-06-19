@@ -460,11 +460,13 @@ pub fn append_workload_trace(
     options: &FlightRecorderStorageOptions,
     trace: &AgentWorkloadTrace,
 ) -> Result<FlightRecorderAppendReport, FlightRecorderError> {
+    let trace_path = options.trace_path();
+    ensure_trace_append_path_safe(&trace_path)?;
     fs::create_dir_all(&options.directory).map_err(|error| FlightRecorderError::Io {
         path: options.directory.clone(),
         message: error.to_string(),
     })?;
-    let trace_path = options.trace_path();
+    ensure_trace_append_path_safe(&trace_path)?;
     let mut line = serde_json::to_string(trace).map_err(|error| FlightRecorderError::Io {
         path: trace_path.clone(),
         message: error.to_string(),
@@ -488,14 +490,7 @@ pub fn append_workload_trace(
             max_bytes: options.max_bytes,
         });
     }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&trace_path)
-        .map_err(|error| FlightRecorderError::Io {
-            path: trace_path.clone(),
-            message: error.to_string(),
-        })?;
+    let mut file = open_flight_recorder_append_file(&trace_path)?;
     file.write_all(line.as_bytes())
         .map_err(|error| FlightRecorderError::Io {
             path: trace_path.clone(),
@@ -512,6 +507,98 @@ pub fn append_workload_trace(
         max_bytes: options.max_bytes,
         redaction_level: trace.redaction_level,
     })
+}
+
+fn open_flight_recorder_append_file(path: &Path) -> Result<fs::File, FlightRecorderError> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    configure_flight_recorder_append_options(&mut options);
+    options.open(path).map_err(|error| FlightRecorderError::Io {
+        path: path.to_path_buf(),
+        message: format!("failed to open flight-recorder trace append file: {error}"),
+    })
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_flight_recorder_append_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+    options.mode(0o600);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_flight_recorder_append_options(_options: &mut OpenOptions) {}
+
+fn ensure_trace_append_path_safe(path: &Path) -> Result<(), FlightRecorderError> {
+    if let Some(symlink_path) = first_existing_symlink_component(path)? {
+        return Err(FlightRecorderError::Io {
+            path: path.to_path_buf(),
+            message: format!(
+                "refusing to append flight-recorder trace to '{}': path traverses symbolic link '{}'",
+                path.display(),
+                symlink_path.display()
+            ),
+        });
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(_) => Err(FlightRecorderError::Io {
+            path: path.to_path_buf(),
+            message: format!(
+                "refusing to append flight-recorder trace to '{}': path is not a regular file",
+                path.display()
+            ),
+        }),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(FlightRecorderError::Io {
+            path: path.to_path_buf(),
+            message: format!(
+                "failed to inspect flight-recorder append path '{}': {error}",
+                path.display()
+            ),
+        }),
+    }
+}
+
+fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, FlightRecorderError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        #[cfg(windows)]
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
+        #[cfg(not(windows))]
+        if matches!(component, std::path::Component::RootDir) {
+            continue;
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => {
+                return Err(FlightRecorderError::Io {
+                    path: current.clone(),
+                    message: format!(
+                        "failed to inspect flight-recorder append path component '{}': {error}",
+                        current.display()
+                    ),
+                });
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub fn replay_workload_trace(
@@ -1097,6 +1184,67 @@ mod tests {
         let err = append_workload_trace(&options, &trace).expect_err("quota exceeded");
         assert!(matches!(err, FlightRecorderError::QuotaExceeded { .. }));
         assert!(!options.trace_path().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_trace_rejects_symlinked_directory_component() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real_dir = temp.path().join("real-recorder");
+        std::fs::create_dir_all(&real_dir).expect("real recorder dir");
+        let linked_dir = temp.path().join("obs");
+        symlink(&real_dir, &linked_dir).expect("symlink recorder parent");
+        let options = FlightRecorderStorageOptions {
+            directory: linked_dir.join("flight_recorder"),
+            retention_days: 7,
+            max_bytes: 64 * 1024,
+        };
+        let trace = record_workload(&baseline_inputs()).expect("trace");
+
+        let err = append_workload_trace(&options, &trace)
+            .expect_err("symlinked recorder parent rejected");
+        assert!(
+            matches!(err, FlightRecorderError::Io { ref message, .. } if message.contains("path traverses symbolic link")),
+            "unexpected error: {err}"
+        );
+        assert!(
+            !real_dir.join("flight_recorder").exists(),
+            "append must not create directories through a symlinked parent"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_trace_rejects_symlinked_trace_file() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let trace_dir = temp.path().join("flight_recorder");
+        std::fs::create_dir_all(&trace_dir).expect("trace dir");
+        let outside_trace = temp.path().join("outside.jsonl");
+        std::fs::write(&outside_trace, "outside\n").expect("outside trace");
+        let linked_trace = trace_dir.join("agent-workload-trace.jsonl");
+        symlink(&outside_trace, &linked_trace).expect("symlink trace file");
+        let options = FlightRecorderStorageOptions {
+            directory: trace_dir,
+            retention_days: 7,
+            max_bytes: 64 * 1024,
+        };
+        let trace = record_workload(&baseline_inputs()).expect("trace");
+
+        let err =
+            append_workload_trace(&options, &trace).expect_err("symlinked trace file rejected");
+        assert!(
+            matches!(err, FlightRecorderError::Io { ref message, .. } if message.contains("path traverses symbolic link")),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside_trace).expect("outside trace content"),
+            "outside\n",
+            "append must not write through a symlinked trace file"
+        );
     }
 
     #[test]
