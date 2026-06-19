@@ -9473,7 +9473,7 @@ ee search 'rotate api key' --workspace . --json
 
 **Severity:** info
 
-**Surfaces:** schema list, search, memory list, insights, curate candidates, audit timeline, pack (skipped[] only), recall, journal list
+**Surfaces:** schema list, search, memory list, insights, curate candidates, pack (skipped[] only), recall, journal list
 
 **Introduced by:** bd-7lvbg.2 (epic GOV)
 
@@ -12761,6 +12761,40 @@ ee symbol snapshot --workspace . --path src/lib.rs --json
 **Repair hint.** Not provided — this code is informational; no operator action is required.
 
 **Fixture.** [`tests/fixtures/failure_modes/source_unparsable.json`](../tests/fixtures/failure_modes/source_unparsable.json)
+
+---
+
+## `sprt_quarantine`
+
+**Severity:** warning
+
+**Surfaces:** outcome
+
+**Introduced by:** bd-3qs2i.3.1 (epic F)
+
+**Trigger.** A harmful outcome event from a source whose recent helpful/harmful sequence crosses the SPRT bad-source threshold is absorbed into feedback quarantine instead of live scoring.
+
+**Setup.**
+
+```bash
+ee init --workspace . --json
+ee remember 'Victim memory' --workspace . --level procedural --kind rule --json
+ee outcome <memory-id> --signal harmful --source-id sprt-source --reason 'warmup 1' --harmful-per-source-per-hour 100 --workspace . --json
+ee outcome <memory-id> --signal harmful --source-id sprt-source --reason 'warmup 2' --harmful-per-source-per-hour 100 --workspace . --json
+ee outcome <memory-id> --signal harmful --source-id sprt-source --reason 'warmup 3' --harmful-per-source-per-hour 100 --workspace . --json
+```
+
+**Invocation.**
+
+```bash
+ee outcome <memory-id> --signal harmful --source-id sprt-source --reason 'cross SPRT quarantine threshold' --harmful-per-source-per-hour 100 --workspace . --json
+```
+
+**Expected emission.** Message contains: `SPRT outcome quarantine threshold exceeded ... event was quarantined ... did NOT update live scoring`
+
+**Repair hint.** Not provided — this code is informational; no operator action is required.
+
+**Fixture.** [`tests/fixtures/failure_modes/sprt_quarantine.json`](../tests/fixtures/failure_modes/sprt_quarantine.json)
 
 ---
 

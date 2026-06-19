@@ -50,7 +50,8 @@ codec instead.
 Each governed schema declares exactly ONE array whose trailing whole
 elements may be dropped. Everything else in the envelope is never
 touched. The registry (`OUTPUT_TRUNCATION_REGISTRY`, mirrored at
-`data.output.governor.truncationPoints` in `ee capabilities --json`):
+`data.output.governor.truncationPoints` in `ee capabilities --json`) covers
+only envelope-governed `ee.response.v2` surfaces:
 
 | Surface | Schema | Truncation point | Position key |
 |---|---|---|---|
@@ -58,11 +59,14 @@ touched. The registry (`OUTPUT_TRUNCATION_REGISTRY`, mirrored at
 | `memory list` | — | `data.memories[]` | `id` |
 | `insights` | `ee.insights.v1` | `data.sections[].items[]` (round-robin) | `id` |
 | `curate candidates` | `ee.curate.candidates.v1` | `data.candidates[]` | `id` |
-| `audit timeline` | `ee.audit.timeline.v1` | `data.entries[]` | `id` |
 | `pack` | `ee.pack.v2` | `data.pack.skipped[]` | `id` |
 | `recall` | `ee.recall.v1` | `data.recall.items[]` | `memoryId` |
 | `journal list` | — | `data.entries[]` | `entryId` |
 | `schema list` | — | `data.schemas[]` | `id` |
+
+`ee audit timeline` is intentionally absent: it emits a top-level
+`ee.audit.timeline.v1` report and uses its own query-level `--cursor` lane on
+the same cursor codec, so `--max-output-tokens` does not truncate it.
 
 Hard rule: **pack `data.pack.items[]` is never a truncation point.**
 Pack content is governed solely by its own `--max-tokens` retrieval

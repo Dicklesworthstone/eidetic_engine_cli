@@ -514,7 +514,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `cursor_stale` | low | bd-7lvbg.2 — ADR 0063 §5: cursor `dbGeneration` < current workspace generation; honest pagination requires partitioning one generation's result set; repair: re-run without `--cursor`. Wired (bd-7lvbg.3) on schema list, search, memory list, insights, curate candidates, pack, and audit timeline; a rejected cursor yields an empty page plus this entry, never a restarted page |
 | `cursor_invalid` | low | bd-7lvbg.2 — ADR 0063 §5: cursor MAC failure, `paramsHash` mismatch, future generation, dishonest `positionKey`/`droppedCount`, or legacy format (including pre-migration bespoke audit-timeline offset cursors); repair: re-run without `--cursor`. Wired (bd-7lvbg.3) on schema list, search, memory list, insights, curate candidates, pack, and audit timeline; a rejected cursor yields an empty page plus this entry, never a restarted page |
 
-#### Feedback (5)
+#### Feedback (6)
 | Code | Severity | Bead |
 |------|----------|------|
 | `anti_pattern_proposed` | info | bd-17c65.14.12 (N12) |
@@ -522,6 +522,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `feedback_protected_rules_unavailable` | medium | bd-17c65.10.6 (J6) |
 | `feedback_quarantine_unavailable` | medium | bd-17c65.10.6 (J6) |
 | `harmful_burst_quarantine` | warning | bd-3qs2i.3.1 (F3) |
+| `sprt_quarantine` | warning | bd-3qs2i.3.1 (F3) |
 
 #### Why / pack inspection and proof verification (6)
 | Code | Severity | Bead |

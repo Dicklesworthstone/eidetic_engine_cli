@@ -5,8 +5,8 @@ This registry is the human-facing companion to
 owned by `bd-1n0np.23.1` and enforced by
 `tests/contracts/dueling_wizards_migration_registry.rs`.
 
-The current compiled migration tail in `src/db/mod.rs` is `V080`. The next
-planned allocation starts at `V081`. Every dueling-wizards schema task must
+The current compiled migration tail in `src/db/mod.rs` is `V083`. The next
+planned allocation starts at `V084`. Every dueling-wizards schema task must
 allocate from the registry before adding a runtime migration, then keep the
 runtime `MIGRATIONS` array contiguous. The registry is a plan artifact, not a
 substitute for the real migration constants.
@@ -14,15 +14,16 @@ substitute for the real migration constants.
 The migration number line is shared with non-initiative workstreams:
 `V073_ERROR_REPAIR_LINKS` (an extension of the `error_fingerprints` allocation
 scope), `V074_JOURNAL_ENTRIES`, `V075_REMEMBER_IDEMPOTENCY_KEYS`,
-`V076_MEMORY_ANCHOR_INDEX`, `V077_PRIMER_CACHE`, `V078_PACK_BASELINES`, and
-`V079_SITUATION_RECORDS` (bd-1tp6p.2.1 persisted situation storage), and
-`V080_WORKSPACE_GENERATION_FLOOR_REBUILD` (forward-only V071 bootstrap repair)
-landed
-between the initiative's implemented allocations and the compiled tail. Implemented
-allocations therefore record historical fact (two allocations may share one
-compiled migration, as the sentinel pair does under `V069_MEMORY_SENTINELS`),
-while planned allocations stay strictly contiguous from
-`nextPlannedMigration`.
+`V076_MEMORY_ANCHOR_INDEX`, `V077_PRIMER_CACHE`, `V078_PACK_BASELINES`,
+`V079_SITUATION_RECORDS` (bd-1tp6p.2.1 persisted situation storage),
+`V080_WORKSPACE_GENERATION_FLOOR_REBUILD` (forward-only V071 bootstrap repair),
+`V081_AUDIT_LOG_WORKSPACE_TIMELINE_INDEX`, `V082_MEMORY_DEBT_SNAPSHOTS`, and
+`V083_ERROR_FINGERPRINT_GENERATION_TRIGGERS` (forward-only V072 generation
+repair) landed between the initiative's implemented allocations and the
+compiled tail. Implemented allocations therefore record historical fact (two
+allocations may share one compiled migration, as the sentinel pair does under
+`V069_MEMORY_SENTINELS`), while planned allocations stay strictly contiguous
+from `nextPlannedMigration`.
 
 ## Policy
 
@@ -32,7 +33,7 @@ rollback must never be required for ordinary repair. A task that adds durable
 or derived storage must also name the backup/export/restore asset class and the
 boundary migration coverage path before source work starts.
 
-Do not reuse migration numbers. If the compiled tail moves past `V080`, update
+Do not reuse migration numbers. If the compiled tail moves past `V083`, update
 this registry in the same change that adds the runtime migration.
 
 ## Allocations
@@ -47,15 +48,15 @@ this registry in the same change that adds the runtime migration.
 | `V070` | `typed_memory_kind_sidecar` | implemented | `bd-1n0np.12.1` | Optional validated per-kind memory JSON sidecar fields (landed as `V070_MEMORY_TYPED_FIELDS` on `memories`). |
 | `V071` | `workspace_generations` | implemented | `bd-1n0np.8.2` | Monotonic workspace and derived-asset generation state. |
 | `V072` | `error_fingerprints` | implemented | `bd-1n0np.4.3` | Error fingerprints plus repair, proof, and outcome links (`error_repair_links` landed separately as `V073_ERROR_REPAIR_LINKS`). |
-| `V081` | `attestation_bundles` | planned | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
-| `V082` | `query_miss_ledger` | planned | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
-| `V083` | `source_write_stats` | planned | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
+| `V084` | `attestation_bundles` | planned | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
+| `V085` | `query_miss_ledger` | planned | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
+| `V086` | `source_write_stats` | planned | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
 
 ## Transition Matrix
 
 The manifest's `transitionMatrix` mirrors the allocation table one-for-one.
 This is the implementation gate: `implemented` rows must name the compiled
-migration constant and stay at or behind the current compiled tail (`V080` at
+migration constant and stay at or behind the current compiled tail (`V083` at
 the time of this registry). `planned` rows must stay ahead of the compiled tail
 and keep `migrationConstant`, `boundaryMigrationEvidence`, and
 `backupCoverageEvidence` set to `required_before_implemented`.
@@ -74,7 +75,7 @@ same change.
 `scripts/e2e_cross_cutting.sh` statically pins the registry's conservative
 posture before runtime proof is available. The shell gate pins the exact
 implemented version layout (`V066` through `V072`, with the sentinel pair
-sharing `V069`) plus the planned reservations (`V081` through `V083`),
+sharing `V069`) plus the planned reservations (`V084` through `V086`),
 transition rows mirror allocation rows by ID, version, and status, implemented
 rows stay at or behind the compiled tail, planned rows stay at or beyond the
 next allocation, and backup assets mirror each allocation's asset kind,
