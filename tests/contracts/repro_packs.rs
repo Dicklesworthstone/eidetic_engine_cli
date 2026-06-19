@@ -175,6 +175,57 @@ fn gate14_capture_pack_rejects_path_traversing_name() -> TestResult {
 }
 
 #[test]
+fn gate14_capture_pack_sets_hash_and_replays() -> TestResult {
+    let workspace = tempfile::Builder::new()
+        .prefix("ee_repro_capture_replay_")
+        .tempdir()
+        .map(tempfile::TempDir::keep)
+        .map_err(|error| error.to_string())?;
+    let source = workspace.join("source");
+    let output_dir = workspace.join("out");
+    fs::create_dir_all(&source).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
+
+    let capture = capture_pack(&CaptureOptions {
+        source,
+        output_dir,
+        name: Some("captured-pack".to_string()),
+        version: "1.0.0".to_string(),
+        dry_run: false,
+        include_env: true,
+        ..Default::default()
+    })
+    .map_err(|error| error.message())?;
+
+    let pack_hash = capture
+        .pack_hash
+        .as_deref()
+        .ok_or_else(|| "capture report should include pack_hash".to_string())?;
+    ensure(
+        pack_hash.starts_with("blake3:"),
+        format!("capture pack_hash should be blake3-prefixed, got {pack_hash}"),
+    )?;
+
+    let replay = replay_pack(&ReplayOptions {
+        pack_path: capture.pack_path.clone(),
+        work_dir: capture.pack_path,
+        verify_hashes: true,
+        check_env: false,
+        dry_run: false,
+    })
+    .map_err(|error| error.message())?;
+
+    ensure(
+        replay.status == ReplayStatus::Verified,
+        "captured pack should replay successfully",
+    )?;
+    ensure(
+        replay.artifacts_failed == 0,
+        "captured pack replay should not report failed artifacts",
+    )
+}
+
+#[test]
 fn gate14_minimize_pack_preserves_required_files_and_marks_optional_removal() -> TestResult {
     let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let pack_dir = temp_dir.path().to_path_buf();

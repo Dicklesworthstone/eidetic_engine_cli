@@ -1417,9 +1417,11 @@ fn ensure_database_parent(path: &Path) -> Result<(), JsonlImportError> {
 
 fn ensure_import_database_path_is_safe_for_write(path: &Path) -> Result<(), JsonlImportError> {
     if let Some(symlink_path) =
-        first_existing_symlink_component(path).map_err(|error| JsonlImportError::Io {
-            path: error.path,
-            message: error.source.to_string(),
+        super::path_safety::first_existing_symlink_component(path).map_err(|error| {
+            JsonlImportError::Io {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            }
         })?
     {
         return Err(JsonlImportError::Io {
@@ -1507,9 +1509,11 @@ fn read_jsonl_source_bounded(source_path: &Path) -> Result<String, JsonlImportEr
 
 fn ensure_import_source_path_is_regular_file(path: &Path) -> Result<(), JsonlImportError> {
     if let Some(symlink_path) =
-        first_existing_symlink_component(path).map_err(|error| JsonlImportError::Io {
-            path: error.path,
-            message: error.source.to_string(),
+        super::path_safety::first_existing_symlink_component(path).map_err(|error| {
+            JsonlImportError::Io {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            }
         })?
     {
         return Err(JsonlImportError::Io {
@@ -1534,40 +1538,6 @@ fn ensure_import_source_path_is_regular_file(path: &Path) -> Result<(), JsonlImp
         });
     }
     Ok(())
-}
-
-#[derive(Debug)]
-struct SymlinkComponentInspectionError {
-    path: PathBuf,
-    source: std::io::Error,
-}
-
-fn first_existing_symlink_component(
-    path: &Path,
-) -> Result<Option<PathBuf>, SymlinkComponentInspectionError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(None);
-            }
-            Err(source) => {
-                return Err(SymlinkComponentInspectionError {
-                    path: current,
-                    source,
-                });
-            }
-        }
-    }
-    Ok(None)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -2379,6 +2349,39 @@ mod tests {
             "unexpected error: {error}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn import_accepts_canonical_absolute_source_path() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source_path = tempdir.path().join("export.jsonl");
+        fs::write(&source_path, sample_jsonl()).map_err(|error| error.to_string())?;
+        let canonical_source = source_path
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+
+        let report = import_jsonl_records(&JsonlImportOptions {
+            workspace_path: tempdir.path().join("workspace"),
+            database_path: None,
+            source_path: canonical_source,
+            dry_run: true,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(report.status.as_str(), "dry_run", "import status")
+    }
+
+    #[test]
+    fn database_path_safety_accepts_canonical_absolute_missing_tail() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let root = tempdir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database_path = root.join("workspace").join(".ee").join("ee.db");
+
+        ensure_import_database_path_is_safe_for_write(&database_path)
+            .map_err(|error| error.to_string())
     }
 
     #[cfg(unix)]

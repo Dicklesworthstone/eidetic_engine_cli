@@ -40,15 +40,32 @@ fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) -> TestResult {
     Ok(())
 }
 
-fn build_time_ee_var_name(line: &str) -> Option<&str> {
+fn compact_code_line(line: &str) -> String {
+    line.split("//")
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+fn line_has_raw_runtime_ee_env_read(line: &str) -> bool {
+    let compact = compact_code_line(line);
+    RAW_RUNTIME_EE_ENV_PATTERNS
+        .iter()
+        .any(|pattern| compact.contains(pattern))
+}
+
+fn build_time_ee_var_name(line: &str) -> Option<String> {
+    let compact = compact_code_line(line);
     for pattern in RAW_BUILD_TIME_EE_ENV_PATTERNS {
-        let Some(pattern_start) = line.find(pattern) else {
+        let Some(pattern_start) = compact.find(pattern) else {
             continue;
         };
         let name_start = pattern_start + pattern.len() - "EE_".len();
-        let rest = &line[name_start..];
+        let rest = &compact[name_start..];
         let name_end = rest.find('"')?;
-        return Some(&rest[..name_end]);
+        return Some(rest[..name_end].to_owned());
     }
     None
 }
@@ -74,14 +91,11 @@ fn production_code_uses_env_registry_for_ee_vars() -> TestResult {
         let content = fs::read_to_string(&file)
             .map_err(|error| format!("read {}: {error}", file.display()))?;
         for (line_index, line) in content.lines().enumerate() {
-            if RAW_RUNTIME_EE_ENV_PATTERNS
-                .iter()
-                .any(|pattern| line.contains(pattern))
-            {
+            if line_has_raw_runtime_ee_env_read(line) {
                 violations.push(format!("{}:{}", relative, line_index + 1));
             }
             if let Some(var_name) = build_time_ee_var_name(line)
-                && !ALLOWED_BUILD_TIME_EE_ENV_VARS.contains(&var_name)
+                && !ALLOWED_BUILD_TIME_EE_ENV_VARS.contains(&var_name.as_str())
             {
                 violations.push(format!(
                     "{}:{} unregistered build-time env {var_name}",
@@ -117,6 +131,35 @@ fn allowed_build_time_ee_vars_are_documented() -> TestResult {
         }
     }
     Ok(())
+}
+
+#[test]
+fn raw_runtime_detector_handles_whitespace_and_ignores_line_comments() {
+    assert!(line_has_raw_runtime_ee_env_read(
+        r#"std::env::var ( "EE_UNREGISTERED" )"#
+    ));
+    assert!(line_has_raw_runtime_ee_env_read(
+        r#"env :: var_os ( "EE_UNREGISTERED" )"#
+    ));
+    assert!(!line_has_raw_runtime_ee_env_read(
+        r#"// std::env::var("EE_DOCUMENTED_ONLY")"#
+    ));
+}
+
+#[test]
+fn build_time_detector_handles_whitespace_and_ignores_line_comments() {
+    assert_eq!(
+        build_time_ee_var_name(r#"option_env ! ( "EE_TRACE_BEAD_ID" )"#).as_deref(),
+        Some("EE_TRACE_BEAD_ID")
+    );
+    assert_eq!(
+        build_time_ee_var_name(r#"env ! ( "EE_NOT_ALLOWED" )"#).as_deref(),
+        Some("EE_NOT_ALLOWED")
+    );
+    assert_eq!(
+        build_time_ee_var_name(r#"// option_env!("EE_COMMENT_ONLY")"#),
+        None
+    );
 }
 
 #[test]
