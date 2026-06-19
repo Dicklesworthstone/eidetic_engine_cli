@@ -192,8 +192,10 @@ emit_event "test_start" \
 run_ee_json "init_workspace" "$ARTIFACT_ROOT/init.json" init --workspace "$WORKSPACE" --json
 
 # Baseline memory count BEFORE the storm — the durability assertion uses the
-# delta so it stays correct even if `init` seeds bootstrap memories.
-run_ee_json "status_baseline" "$ARTIFACT_ROOT/status-baseline.json" status --workspace "$WORKSPACE" --json
+# delta so it stays correct even if `init` seeds bootstrap memories. The durable
+# DB memory count is surfaced by `ee index status` (.data.dbMemoryCount), not the
+# top-level `ee status` envelope.
+run_ee_json "status_baseline" "$ARTIFACT_ROOT/status-baseline.json" index status --workspace "$WORKSPACE" --json
 baseline_count="$(extract_int_field "$ARTIFACT_ROOT/status-baseline.json" db_memory_count)"
 if [[ "$baseline_count" -lt 0 ]]; then
   emit_event "assert_fail" \
@@ -249,7 +251,7 @@ fi
 emit_event "assert_ok" "label" "all_concurrent_writers_succeed" "actual" "0 failures of $WRITERS"
 
 # ---- Durability: every concurrent write landed in the DB exactly once. ----
-run_ee_json "status_after_storm" "$ARTIFACT_ROOT/status.json" status --workspace "$WORKSPACE" --json
+run_ee_json "status_after_storm" "$ARTIFACT_ROOT/status.json" index status --workspace "$WORKSPACE" --json
 db_count="$(extract_int_field "$ARTIFACT_ROOT/status.json" db_memory_count)"
 db_delta=$((db_count - baseline_count))
 emit_event "durability_probe" \
@@ -282,9 +284,45 @@ fi
 emit_event "assert_ok" "label" "all_writes_indexed_under_concurrency" "actual" "hits=$hits"
 
 # ---- Audit integrity: the audit chain survived the concurrent write storm. ----
+# `ee audit verify --json` emits ee.audit.verify.v1 with a top-level
+# integrity_ok bool and a hash-chain break report. Assert BOTH a clean exit and
+# integrity_ok==true so a tampered/broken chain under concurrency fails loudly.
 if "$EE_BINARY" audit verify --workspace "$WORKSPACE" --json \
     >"$ARTIFACT_ROOT/audit-verify.json" 2>"$ARTIFACT_ROOT/audit-verify.json.stderr"; then
-  emit_event "assert_ok" "label" "audit_chain_intact_under_concurrency" "actual" "audit verify exit 0"
+  audit_ok="$(python3 - "$ARTIFACT_ROOT/audit-verify.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+def find_bool(node, field):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key.replace("_", "").lower() == field and isinstance(value, bool):
+                return value
+            nested = find_bool(value, field)
+            if nested is not None:
+                return nested
+    elif isinstance(node, list):
+        for item in node:
+            nested = find_bool(item, field)
+            if nested is not None:
+                return nested
+    return None
+
+print("true" if find_bool(payload, "integrityok") is True else "false")
+PY
+)"
+  if [[ "$audit_ok" == "true" ]]; then
+    emit_event "assert_ok" "label" "audit_chain_intact_under_concurrency" "actual" "integrity_ok=true"
+  else
+    emit_event "assert_fail" \
+      "label" "audit_chain_intact_under_concurrency" \
+      "expected" "integrity_ok == true" \
+      "actual" "integrity_ok=$audit_ok (see audit-verify.json)"
+    exit 1
+  fi
 else
   emit_event "assert_fail" \
     "label" "audit_chain_intact_under_concurrency" \
