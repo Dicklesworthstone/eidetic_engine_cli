@@ -898,19 +898,27 @@ fn start_server_with_dispatch_policy(
                     let Some(cx) = asupersync::Cx::current() else {
                         return;
                     };
-                    // Inc 2: WriteHotPathConfig::default() (disabled) forces a
-                    // one-op-per-batch FIFO; real coalescing arrives in Inc 3.
+                    // Inc 3: enable group-commit so the actor accumulates a
+                    // batch; a homogeneous ee.daemon.journal batch coalesces
+                    // into ONE transaction/fsync (execute_journal_batch), while
+                    // remember ops (which open their own connection) stay per-op.
+                    let write_config = crate::core::write_owner::WriteHotPathConfig {
+                        enabled: true,
+                        group_commit_max_rows: 64,
+                        group_commit_max_us: 1_000,
+                        ..crate::core::write_owner::WriteHotPathConfig::default()
+                    };
                     let _ = owner
-                        .run_group_commit(
-                            &cx,
-                            crate::core::write_owner::WriteHotPathConfig::default(),
-                            |operations| {
+                        .run_group_commit(&cx, write_config, |operations| {
+                            if batch_is_all_journal(operations) {
+                                execute_journal_batch(operations)
+                            } else {
                                 Ok(operations
                                     .iter()
                                     .map(execute_write_operation)
                                     .collect::<Vec<_>>())
-                            },
-                        )
+                            }
+                        })
                         .await;
                 })
                 .map_err(|error| DaemonStartError::Bind {
@@ -2101,6 +2109,130 @@ fn execute_write_operation(
     }
 }
 
+/// Parsed `ee.daemon.journal` op payload (Inc 3, bd-wx6ou.4): the inputs a
+/// journal write needs, carried over the socket. Owns its strings. Defines our
+/// own payload (rather than reusing the direct-path `journal_append` shape) so
+/// the daemon journal path does not depend on `core::journal` internals.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct DaemonJournalParams {
+    workspace_path: PathBuf,
+    workspace_id: String,
+    /// Caller-supplied id for idempotency (Inc 4); generated when absent.
+    entry_id: Option<String>,
+    agent_name: Option<String>,
+    session_key: Option<String>,
+    kind: String,
+    source: String,
+    body: String,
+    structured: Option<String>,
+    redaction_report: String,
+    instruction_risk: String,
+}
+
+impl DaemonJournalParams {
+    /// `operation_type` tag for the `WriteOperation::Custom` carrying a journal
+    /// write through the actor. Distinct from the direct-path `journal_append`.
+    const ACTOR_OPERATION_TYPE: &'static str = "ee.daemon.journal";
+
+    fn from_payload(payload: &serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(payload.clone()).map_err(|error| error.to_string())
+    }
+
+    fn database_path(&self) -> PathBuf {
+        self.workspace_path.join(".ee").join("ee.db")
+    }
+
+    fn into_create_input(self) -> crate::db::CreateJournalEntryInput {
+        crate::db::CreateJournalEntryInput {
+            entry_id: self
+                .entry_id
+                .unwrap_or_else(crate::core::journal::generate_journal_entry_id),
+            workspace_id: self.workspace_id,
+            agent_name: self.agent_name,
+            session_key: self.session_key,
+            kind: self.kind,
+            source: self.source,
+            body: self.body,
+            structured: self.structured,
+            redaction_report: self.redaction_report,
+            instruction_risk: self.instruction_risk,
+        }
+    }
+}
+
+/// True when every op in the batch is an `ee.daemon.journal` Custom op (so the
+/// homogeneous batch can be coalesced into one transaction). bd-wx6ou.4.
+fn batch_is_all_journal(operations: &[crate::core::write_owner::WriteOperation]) -> bool {
+    use crate::core::write_owner::WriteOperation;
+    !operations.is_empty()
+        && operations.iter().all(|operation| {
+            matches!(
+                operation,
+                WriteOperation::Custom { operation_type, .. }
+                    if operation_type == DaemonJournalParams::ACTOR_OPERATION_TYPE
+            )
+        })
+}
+
+/// Execute a homogeneous batch of `ee.daemon.journal` ops in ONE transaction
+/// (Inc 3, bd-wx6ou.4): open the workspace DB connection once, insert all N
+/// journal entries inside a single `with_transaction` so the whole batch shares
+/// ONE commit/fsync — the actual coalescing win. All ops target the daemon's
+/// bound workspace, so one connection serves them. All-or-nothing: a failed
+/// insert rolls back the batch and fails every request in it (the CLI falls
+/// back to the direct path per Inc 4).
+fn execute_journal_batch(
+    operations: &[crate::core::write_owner::WriteOperation],
+) -> Result<Vec<crate::core::write_owner::WriteResult>, crate::models::DomainError> {
+    use crate::core::write_owner::{WriteOperation, WriteResult};
+    let mut params = Vec::with_capacity(operations.len());
+    for operation in operations {
+        let WriteOperation::Custom { payload, .. } = operation else {
+            return Err(crate::models::DomainError::Storage {
+                message: "journal batch received a non-Custom operation".to_string(),
+                repair: Some("only ee.daemon.journal ops are batched here".to_string()),
+            });
+        };
+        params.push(DaemonJournalParams::from_payload(payload).map_err(|message| {
+            crate::models::DomainError::Storage {
+                message: format!("daemon journal payload decode failed: {message}"),
+                repair: Some("retry the write".to_string()),
+            }
+        })?);
+    }
+    let Some(first) = params.first() else {
+        return Ok(Vec::new());
+    };
+    let database_path = first.database_path();
+    let connection =
+        crate::db::DbConnection::open_file(&database_path).map_err(|error| {
+            crate::models::DomainError::Storage {
+                message: format!(
+                    "daemon journal batch could not open {}: {error}",
+                    database_path.display()
+                ),
+                repair: Some("ensure the workspace is initialized".to_string()),
+            }
+        })?;
+    connection
+        .with_transaction(|| {
+            let mut out = Vec::with_capacity(params.len());
+            for entry in params.drain(..) {
+                let input = entry.into_create_input();
+                let entry_id = input.entry_id.clone();
+                connection.insert_journal_entry(&input)?;
+                out.push(WriteResult::Success {
+                    entity_id: Some(entry_id),
+                });
+            }
+            Ok(out)
+        })
+        .map_err(|error| crate::models::DomainError::Storage {
+            message: format!("daemon journal batch transaction failed: {error}"),
+            repair: Some("retry the write".to_string()),
+        })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct DaemonContextParams {
     query: String,
@@ -3250,6 +3382,56 @@ mod tests {
             daemon_method_authority(METHOD_WRITE),
             Some(DaemonAuthority::SameUidWorkspace)
         );
+    }
+
+    #[test]
+    fn write_actor_hosting_round_trips_a_result_without_deadlock() {
+        // Behavioral proof of the Inc 2 runtime hosting (bd-wx6ou.3): build the
+        // same current_thread runtime + WriteOwner actor `start_server` hosts,
+        // submit an op, and block_on the WriteResult from a different thread.
+        // Uses an UNSUPPORTED Custom op so `execute_write_operation` returns
+        // Failed immediately (no `remember_memory`, so no embedding hang in the
+        // worker sandbox) — this still exercises spawn → submit → process_batch
+        // → oneshot send → block_on(recv), which is where a runtime-lifecycle
+        // deadlock would surface.
+        use crate::core::write_owner::{
+            DEFAULT_CHANNEL_CAPACITY, WriteHotPathConfig, WriteOperation, WriteOwner, WriteResult,
+        };
+        let runtime = crate::core::build_cli_runtime().expect("build runtime");
+        let (owner, handle) = WriteOwner::new(DEFAULT_CHANNEL_CAPACITY);
+        let task = runtime
+            .handle()
+            .try_spawn(async move {
+                let Some(cx) = asupersync::Cx::current() else {
+                    return;
+                };
+                let _ = owner
+                    .run_group_commit(&cx, WriteHotPathConfig::default(), |ops| {
+                        Ok(ops.iter().map(execute_write_operation).collect::<Vec<_>>())
+                    })
+                    .await;
+            })
+            .expect("spawn write actor");
+
+        let operation = WriteOperation::Custom {
+            operation_type: "ee.daemon.unsupported".to_string(),
+            payload: serde_json::json!({}),
+        };
+        let mut receiver = handle.try_submit(operation).expect("submit accepted");
+        let result = runtime.block_on(async {
+            let cx = asupersync::Cx::current().expect("block_on installs an ambient Cx");
+            receiver.recv(&cx).await
+        });
+        assert!(
+            matches!(result, Ok(WriteResult::Failed { .. })),
+            "an unsupported op round-trips as a Failed result"
+        );
+
+        // Clean shutdown: dropping the handle closes the mpsc so the actor's
+        // recv returns Disconnected and the task completes; the join must not
+        // hang.
+        drop(handle);
+        let _ = runtime.block_on(task);
     }
 
     #[test]
