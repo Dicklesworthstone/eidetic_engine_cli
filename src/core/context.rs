@@ -2703,20 +2703,6 @@ fn run_context_pack_with_performance_inner(
 
     let coordination = load_coordination_snapshot(options, &mut degraded);
 
-    draft.hash = Some(
-        compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
-            &request,
-            &draft,
-            &degraded,
-            options.output_options,
-            coordination.as_ref(),
-            read_snapshot_generation,
-            options.task_lens.as_ref(),
-        ),
-    );
-    if let Some(profile) = agent_profile.as_mut() {
-        set_agent_profile_base_pack_hash(profile, draft.hash.as_deref());
-    }
     trace.record_elapsed("packAssembly", pack_start);
     control.check()?;
     let slo = if let Some(retry_after_ms) = concurrent_limit_retry_after_ms {
@@ -2754,6 +2740,21 @@ fn run_context_pack_with_performance_inner(
 
     let mut response_degraded = degraded.clone();
     response_degraded.extend(slo.context_degradations());
+    let consensus_conflicts = crate::pack::analyze_pack_consensus_conflicts(&draft);
+    push_consensus_conflict_degradations(
+        &mut response_degraded,
+        &consensus_conflicts,
+        draft.items.len(),
+    );
+    refresh_context_pack_hash(
+        &request,
+        &mut draft,
+        &response_degraded,
+        options.output_options,
+        coordination.as_ref(),
+        read_snapshot_generation,
+        options.task_lens.as_ref(),
+    );
 
     let persist_start = Instant::now();
     control.check()?;
@@ -2771,7 +2772,7 @@ fn run_context_pack_with_performance_inner(
                         &options.workspace_path,
                         &request,
                         &draft,
-                        &degraded,
+                        &response_degraded,
                         options.task_lens.as_ref(),
                         options.baseline_write.as_ref(),
                         &mut pack_persistence,
@@ -2783,7 +2784,7 @@ fn run_context_pack_with_performance_inner(
                             &options.workspace_path,
                             &request,
                             &draft,
-                            &degraded,
+                            &response_degraded,
                             pack_id_seed,
                             options.task_lens.as_ref(),
                             options.baseline_write.as_ref(),
@@ -2807,7 +2808,7 @@ fn run_context_pack_with_performance_inner(
                                 &options.workspace_path,
                                 &request,
                                 &draft,
-                                &degraded,
+                                &response_degraded,
                                 options.task_lens.as_ref(),
                                 options.baseline_write.as_ref(),
                                 &mut pack_persistence,
@@ -2819,7 +2820,7 @@ fn run_context_pack_with_performance_inner(
                                     &options.workspace_path,
                                     &request,
                                     &draft,
-                                    &degraded,
+                                    &response_degraded,
                                     pack_id_seed,
                                     options.task_lens.as_ref(),
                                     options.baseline_write.as_ref(),
@@ -2854,17 +2855,23 @@ fn run_context_pack_with_performance_inner(
             message,
             Some(repair),
         );
+        refresh_context_pack_hash(
+            &request,
+            &mut draft,
+            &response_degraded,
+            options.output_options,
+            coordination.as_ref(),
+            read_snapshot_generation,
+            options.task_lens.as_ref(),
+        );
+    }
+    if let Some(profile) = agent_profile.as_mut() {
+        set_agent_profile_base_pack_hash(profile, draft.hash.as_deref());
     }
     trace.pack_persistence = pack_persistence;
     trace.record_elapsed("packPersistence", persist_start);
     trace.record_read_snapshot(&read_snapshot, read_snapshot_generation);
 
-    let consensus_conflicts = crate::pack::analyze_pack_consensus_conflicts(&draft);
-    push_consensus_conflict_degradations(
-        &mut response_degraded,
-        &consensus_conflicts,
-        draft.items.len(),
-    );
     let mut response = ContextResponse::new(request, draft, response_degraded)
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     response.data.command = command;
@@ -2877,7 +2884,22 @@ fn run_context_pack_with_performance_inner(
     response.data.coordination = coordination;
 
     if let Some(l2_context) = &l2_cache_context {
+        let degraded_count_before_l2_store = response.data.degraded.len();
         context_pack_l2_store(l2_context, options, &search_report, &mut response);
+        if response.data.degraded.len() != degraded_count_before_l2_store {
+            refresh_context_pack_hash(
+                &response.data.request,
+                &mut response.data.pack,
+                &response.data.degraded,
+                options.output_options,
+                response.data.coordination.as_ref(),
+                read_snapshot_generation,
+                options.task_lens.as_ref(),
+            );
+            if let Some(profile) = response.data.agent_profile.as_mut() {
+                set_agent_profile_base_pack_hash(profile, response.data.pack.hash.as_deref());
+            }
+        }
     }
 
     // Bead bd-17c65.7.7 (G8): best-effort audit-log instrumentation for
@@ -5782,6 +5804,27 @@ fn compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
     );
     log_pack_hash_components(&components);
     components.composite_hash
+}
+
+fn refresh_context_pack_hash(
+    request: &ContextRequest,
+    draft: &mut crate::pack::PackDraft,
+    degraded: &[ContextResponseDegradation],
+    output_options: ContextPackOutputOptions,
+    coordination: Option<&PackCoordinationSnapshot>,
+    read_snapshot_generation: Option<u64>,
+    task_lens: Option<&ContextTaskLens>,
+) {
+    let hash = compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
+        request,
+        draft,
+        degraded,
+        output_options,
+        coordination,
+        read_snapshot_generation,
+        task_lens,
+    );
+    draft.hash = Some(hash);
 }
 
 #[derive(Debug)]
@@ -15616,6 +15659,110 @@ pub fn unrelated_context() -> u64 {{
         // Same inputs produce same hash (determinism check).
         let hash_repeat = compute_pack_hash(&request, &base_draft, &base_degraded);
         assert_eq!(hash_base, hash_repeat, "same inputs must produce same hash");
+        Ok(())
+    }
+
+    #[test]
+    fn pack_hash_refresh_includes_late_context_degradation() -> Result<(), String> {
+        use super::{
+            ContextPackOutputOptions, ContextResponseDegradation, ContextResponseSeverity,
+            compute_pack_hash_with_output_options_coordination_snapshot_and_lens,
+            refresh_context_pack_hash,
+        };
+        use crate::models::{ProvenanceUri, TrustClass, UnitScore};
+        use crate::pack::{
+            ContextRequest, ContextResponse, PackCandidate, PackCandidateInput, PackProvenance,
+            PackSection, PackTrustSignal, TokenBudget, assemble_draft,
+        };
+
+        let request = ContextRequest::from_query("late degradation hash")
+            .map_err(|error| error.to_string())?;
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(35));
+        let candidate = PackCandidate::new(PackCandidateInput {
+            memory_id,
+            section: PackSection::ProceduralRules,
+            content: "Late degradation must change the pack hash.".to_string(),
+            estimated_tokens: 9,
+            relevance: UnitScore::parse(0.95).map_err(|error| error.to_string())?,
+            utility: UnitScore::parse(0.75).map_err(|error| error.to_string())?,
+            provenance: vec![
+                PackProvenance::new(ProvenanceUri::EeMemory(memory_id), "hash regression source")
+                    .map_err(|error| error.to_string())?,
+            ],
+            why: "Selected for pack hash regression coverage.".to_string(),
+        })
+        .map_err(|error| error.to_string())?
+        .with_trust_signal(PackTrustSignal::new(TrustClass::AgentValidated, None));
+        let mut draft = assemble_draft(
+            "late degradation hash",
+            TokenBudget::default_context(),
+            [candidate],
+        )
+        .map_err(|error| error.to_string())?;
+        let output_options = ContextPackOutputOptions::default();
+        let read_snapshot_generation = Some(17);
+        let initial_degraded: Vec<ContextResponseDegradation> = Vec::new();
+
+        refresh_context_pack_hash(
+            &request,
+            &mut draft,
+            &initial_degraded,
+            output_options,
+            None,
+            read_snapshot_generation,
+            None,
+        );
+        let stale_hash = draft
+            .hash
+            .clone()
+            .ok_or_else(|| "initial hash should be assigned".to_string())?;
+
+        let late_degraded = vec![ContextResponseDegradation {
+            code: "pack_assembly_slo_breached".to_string(),
+            severity: ContextResponseSeverity::Low,
+            message: "Late SLO degradation changed the rendered context advisory.".to_string(),
+            repair: Some(
+                "Increase the resource profile or retry after the pack slot clears.".to_string(),
+            ),
+        }];
+        refresh_context_pack_hash(
+            &request,
+            &mut draft,
+            &late_degraded,
+            output_options,
+            None,
+            read_snapshot_generation,
+            None,
+        );
+        let refreshed_hash = draft
+            .hash
+            .clone()
+            .ok_or_else(|| "refreshed hash should be assigned".to_string())?;
+        let expected_hash = compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
+            &request,
+            &draft,
+            &late_degraded,
+            output_options,
+            None,
+            read_snapshot_generation,
+            None,
+        );
+
+        assert_ne!(
+            stale_hash, refreshed_hash,
+            "a late response degradation must alter the canonical pack hash"
+        );
+        assert_eq!(
+            refreshed_hash, expected_hash,
+            "refreshed response hash must be computed from the final degradation list"
+        );
+        let response = ContextResponse::new(request, draft, late_degraded)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            response.data.pack.hash.as_deref(),
+            Some(refreshed_hash.as_str()),
+            "final response must carry the hash for the final degraded set"
+        );
         Ok(())
     }
 
