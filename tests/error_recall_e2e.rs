@@ -530,6 +530,36 @@ fn diagnose_error_records_and_recalls_through_the_real_binary() -> TestResult {
         ));
     }
 
+    // RCH diagnostics without an explicit blocker kind are code-less. The CLI
+    // must not invent a catch-all canonical code, or unrelated remote failures
+    // will falsely recall each other.
+    let rch_recorded = diagnose_tool(
+        &workspace,
+        "rch",
+        None,
+        None,
+        "remote hz1 failed to read /tmp/rch-sync/a/projects/frankensearch/Cargo.toml",
+        true,
+    )?;
+    if rch_recorded.get("layer").and_then(Value::as_str) != Some("message_template") {
+        return Err(format!(
+            "code-less RCH diagnostics must use message_template layer: {rch_recorded}"
+        ));
+    }
+    let unrelated_rch = diagnose_tool(
+        &workspace,
+        "rch",
+        None,
+        None,
+        "worker admission failed because no workers passed health",
+        false,
+    )?;
+    if flag(&unrelated_rch, "isKnown")? {
+        return Err(format!(
+            "unrelated code-less RCH failures must not recall via a fabricated code: {unrelated_rch}"
+        ));
+    }
+
     // Redaction-by-default (ADR-0057): the RAW diagnostic text is never
     // persisted. Raw sentinel and secret tokens must be absent from every `.ee/`
     // artifact (DB, WAL/SHM, index) because only fingerprint keys and masked

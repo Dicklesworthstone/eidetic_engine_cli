@@ -499,6 +499,18 @@ fn memory_list_cursor_drain_partitions_exactly() -> TestResult {
 // ============================================================================
 
 #[test]
+fn audit_timeline_is_not_an_envelope_governor_surface() -> TestResult {
+    use ee::output::OUTPUT_TRUNCATION_REGISTRY;
+
+    ensure(
+        !OUTPUT_TRUNCATION_REGISTRY.iter().any(|point| {
+            point.schema_id == "ee.audit.timeline.v1" || point.command == "audit timeline"
+        }),
+        "audit timeline emits a top-level ee.audit.timeline.v1 report and must not be advertised as an ee.response.v2 output-governor truncation point",
+    )
+}
+
+#[test]
 fn audit_timeline_cursor_drain_partitions_exactly() -> TestResult {
     let workspace = isolated_workspace("audit-drain")?;
     seed_memories(&workspace, 6)?;

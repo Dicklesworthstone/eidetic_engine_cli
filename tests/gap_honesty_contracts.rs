@@ -82,6 +82,16 @@ fn cluster_key_collapses_paraphrases_but_separates_topics() {
         query_cluster_key("Restart the FAILED pod"),
         query_cluster_key("failed pod restart the")
     );
+    assert_eq!(
+        query_cluster_key("kubernetes pod eviction policy"),
+        query_cluster_key("pod eviction policy for kubernetes"),
+        "documented filler-word paraphrases must collapse"
+    );
+    assert_eq!(
+        query_cluster_key("cargo-build failure"),
+        query_cluster_key("cargo build failure"),
+        "minor punctuation must not fragment miss demand"
+    );
     assert_ne!(
         query_cluster_key("restart failed pod"),
         query_cluster_key("delete failed pod")

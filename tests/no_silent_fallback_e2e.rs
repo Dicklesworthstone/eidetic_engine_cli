@@ -388,6 +388,11 @@ fn malformed_jsonl_import_reports_rejected_contract_with_issue_codes() -> TestRe
         "jsonl response success flag",
     )?;
     ensure_equal(
+        &result.parsed.pointer("/degraded"),
+        &Some(&json!([])),
+        "jsonl response degraded list",
+    )?;
+    ensure_equal(
         &result.parsed.pointer("/data/schema"),
         &Some(&json!("ee.import.jsonl.v1")),
         "jsonl import schema",

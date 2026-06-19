@@ -3,8 +3,8 @@
 //!
 //! The engine's inline proptest pins only valid-JSON survival on a
 //! uniform corpus. This file pins the contract the wired surfaces
-//! (search, memory list, insights, curate, audit timeline, schema
-//! list) rely on, over random heterogeneous corpora and random
+//! (search, memory list, insights, curate, schema list) rely on, over
+//! random heterogeneous corpora and random
 //! ceilings:
 //!
 //! 1. **Validity + ceiling honesty** — governed output always parses;

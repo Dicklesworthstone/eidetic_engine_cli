@@ -99,6 +99,7 @@ in the same commit, keeping the catalog complete by construction.
 | `feedback_health_unavailable` | status | low | bd-17c65.10.6 (J6) |
 | `feedback_quarantine_unavailable` | status | medium | bd-17c65.10.6 (J6) |
 | `harmful_burst_quarantine` | outcome | warning | bd-3qs2i.3.1 (F3) |
+| `sprt_quarantine` | outcome | warning | bd-3qs2i.3.1 (F3) |
 | `anti_pattern_proposed` | outcome | info | bd-17c65.14.12 (N12) |
 | `feedback_protected_rules_unavailable` | status | medium | bd-17c65.10.6 (J6) |
 | `usage_unknown_field` | global fields | low | bd-17c65.4.5 (D5) |

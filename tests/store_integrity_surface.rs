@@ -115,6 +115,25 @@ fn store_integrity_report_surfaces_read_fence_and_per_source_write_immune() {
 }
 
 #[test]
+fn latest_non_strict_stale_assets_degrade_store_integrity_status() {
+    let report = run_store_integrity_report(StoreIntegrityOptions {
+        read_fence: ReadFence::Latest,
+        db_generation: 12,
+        asset_generations: vec![("search".to_owned(), 12), ("graph".to_owned(), 11)],
+        strict_read_fence: false,
+        write_stream_config: WriteStreamStatsConfig::new(0, 1_000, 0),
+        write_observations: Vec::new(),
+        quarantine_config: quarantine_config(),
+    });
+
+    assert_eq!(report.status, StoreIntegrityStatus::Degraded);
+    assert_eq!(report.read_fence.severity, "high");
+    assert!(!report.read_fence.strict_failed);
+    assert_eq!(report.read_fence.stale_assets.len(), 1);
+    assert_eq!(report.read_fence.stale_assets[0].name, "graph");
+}
+
+#[test]
 fn store_integrity_json_surface_is_enveloped_and_byte_stable() {
     let report = fixture_report();
     let first = render_store_integrity_json(&report);

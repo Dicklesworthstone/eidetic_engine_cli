@@ -103,7 +103,7 @@ const GOVERNOR_EXEMPT_SCHEMAS: &[(&str, &str)] = &[
 /// Registry schema ids whose `docs/schemas/` JSON Schema file does not
 /// exist yet. Pre-existing documentation debt pinned so NEW dangling
 /// ids still fail; shrink this list, never grow it.
-const DOCS_SCHEMA_GAPS: &[&str] = &["ee.audit.timeline.v1"];
+const DOCS_SCHEMA_GAPS: &[&str] = &[];
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
