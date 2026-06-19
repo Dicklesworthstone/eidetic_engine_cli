@@ -19,7 +19,7 @@ pub fn required(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     for (needle, message) in AMBIENT_CALLS {
-        if compact.contains(needle) {
+        if contains_ambient_call(&compact, needle) {
             errors.push(message);
         }
     }
@@ -204,6 +204,65 @@ fn compact_non_literal_tokens(tokens: TokenStream) -> String {
     output
 }
 
+fn contains_ambient_call(compact: &str, needle: &str) -> bool {
+    if let Some(path) = needle.strip_suffix('(') {
+        return contains_path_invocation(compact, path, CallSyntax::Plain);
+    }
+    if let Some(path) = needle.strip_suffix('<') {
+        return contains_path_invocation(compact, path, CallSyntax::Turbofish);
+    }
+
+    compact.contains(needle)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CallSyntax {
+    Plain,
+    Turbofish,
+}
+
+fn contains_path_invocation(compact: &str, path: &str, syntax: CallSyntax) -> bool {
+    let mut search_start = 0;
+    while let Some(relative_index) = compact[search_start..].find(path) {
+        let index = search_start + relative_index;
+        let suffix_start = index + path.len();
+        if path_has_left_boundary(compact, index, path)
+            && match syntax {
+                CallSyntax::Plain => compact[suffix_start..].starts_with('('),
+                CallSyntax::Turbofish => compact[suffix_start..].starts_with("::<"),
+            }
+        {
+            return true;
+        }
+        search_start = suffix_start;
+    }
+
+    false
+}
+
+fn path_has_left_boundary(compact: &str, index: usize, path: &str) -> bool {
+    match compact[..index].chars().next_back() {
+        None => true,
+        Some(ch) if !is_identifier_char(ch) && ch != ':' => true,
+        Some(':') => &compact[..index] == "::" || path_allows_qualified_suffix(path),
+        Some(_) => false,
+    }
+}
+
+fn path_allows_qualified_suffix(path: &str) -> bool {
+    matches!(
+        path,
+        "thread_rng"
+            | "SystemRandom::new"
+            | "Uuid::new_v4"
+            | "Uuid::now_v7"
+            | "Instant::now"
+            | "SystemTime::now"
+            | "Utc::now"
+            | "Local::now"
+    )
+}
+
 fn has_deterministic_seed_parameter(tokens: TokenStream) -> bool {
     let mut saw_function_keyword = false;
 
@@ -294,7 +353,7 @@ fn contains_domain_id_now(compact: &str) -> bool {
         let now_index = search_start + relative_index;
         let prefix = &compact[..now_index];
         let type_name = prefix
-            .rsplit(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+            .rsplit(|ch: char| !is_identifier_char(ch))
             .next()
             .unwrap_or_default();
         if type_name.ends_with("Id") {
@@ -305,6 +364,10 @@ fn contains_domain_id_now(compact: &str) -> bool {
     false
 }
 
+fn is_identifier_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
 fn compile_error(message: &str) -> TokenStream {
     format!("compile_error!({message:?});")
         .parse()
@@ -313,7 +376,7 @@ fn compile_error(message: &str) -> TokenStream {
 
 #[cfg(test)]
 mod tests {
-    use super::{NonLiteralToken, markers_contain_deterministic_seed_type};
+    use super::{NonLiteralToken, contains_ambient_call, markers_contain_deterministic_seed_type};
 
     fn ident(value: &str) -> NonLiteralToken {
         NonLiteralToken::Ident(value.to_owned())
@@ -399,5 +462,99 @@ mod tests {
             ident("Other"),
             punct('>'),
         ]));
+    }
+
+    #[test]
+    fn ambient_random_detection_catches_plain_and_turbofish_calls() {
+        assert!(contains_ambient_call(
+            "fnf(){let_=rand::thread_rng();}",
+            "thread_rng("
+        ));
+        assert!(contains_ambient_call(
+            "fnf(){let_=rand::random();}",
+            "rand::random("
+        ));
+        assert!(contains_ambient_call(
+            "fnf(){let_=rand::random::<u64>();}",
+            "rand::random<"
+        ));
+        assert!(contains_ambient_call("fnf(){let_=random();}", "random("));
+        assert!(contains_ambient_call(
+            "fnf(){let_=random::<u64>();}",
+            "random<"
+        ));
+        assert!(contains_ambient_call(
+            "fnf(){let_=std::time::Instant::now();}",
+            "Instant::now("
+        ));
+        assert!(contains_ambient_call(
+            "fnf(){let_=std::time::SystemTime::now();}",
+            "SystemTime::now("
+        ));
+    }
+
+    #[test]
+    fn ambient_call_detection_ignores_identifier_suffixes() {
+        assert!(!contains_ambient_call(
+            "fnf(){let_=not_random();}",
+            "random("
+        ));
+        assert!(!contains_ambient_call(
+            "fnf(){let_=deterministic_random::<u64>();}",
+            "random<"
+        ));
+        assert!(!contains_ambient_call(
+            "fnf(){let_=deterministic::random();}",
+            "random("
+        ));
+        assert!(!contains_ambient_call(
+            "fnf(){let_=deterministic::random::<u64>();}",
+            "random<"
+        ));
+        assert!(!contains_ambient_call("fnf(){let_=random<x;}", "random<"));
+        assert!(!contains_ambient_call(
+            "fnf(){let_=my_env::var();}",
+            "env::var("
+        ));
+        assert!(!contains_ambient_call(
+            "fnf(){let_=my::env::var();}",
+            "env::var("
+        ));
+        assert!(!contains_ambient_call(
+            "fnf(){let_=my::process::id();}",
+            "process::id("
+        ));
+        assert!(!contains_ambient_call(
+            "fnf(){let_=my::thread::current();}",
+            "thread::current("
+        ));
+        assert!(!contains_ambient_call(
+            "fnf(){let_=my::fs::read_dir();}",
+            "fs::read_dir("
+        ));
+        assert!(!contains_ambient_call(
+            "fnf(){let_=my::getrandom::fill(&mut bytes);}",
+            "getrandom::fill("
+        ));
+    }
+
+    #[test]
+    fn ambient_call_detection_catches_exact_qualified_module_paths() {
+        assert!(contains_ambient_call(
+            "fnf(){let_=std::env::var(\"EE_SEED\");}",
+            "std::env::var("
+        ));
+        assert!(contains_ambient_call(
+            "fnf(){let_=std::process::id();}",
+            "std::process::id("
+        ));
+        assert!(contains_ambient_call(
+            "fnf(){let_=std::thread::current();}",
+            "std::thread::current("
+        ));
+        assert!(contains_ambient_call(
+            "fnf(){let_=std::fs::read_dir(\".\");}",
+            "std::fs::read_dir("
+        ));
     }
 }
