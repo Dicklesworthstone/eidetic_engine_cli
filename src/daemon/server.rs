@@ -112,6 +112,16 @@ pub const METHOD_WRITE: &str = "ee.daemon.write";
 /// remember request shape (missing content, bad workspace path, etc.).
 pub const DAEMON_WRITE_PARAMS_INVALID_CODE: &str = "daemon_write_params_invalid";
 
+/// Method dispatch name for routing a durable journal write through the daemon
+/// (Inc 4, bd-wx6ou.5). Like `ee.daemon.write` but for journal entries: the
+/// long-lived actor coalesces a batch of journal writes into one
+/// transaction/fsync (Inc 3). Workspace-scoped (`SameUidWorkspace`).
+pub const METHOD_WRITE_JOURNAL: &str = "ee.daemon.write_journal";
+
+/// Error code returned when `ee.daemon.write_journal` params cannot be decoded
+/// into a journal write request shape.
+pub const DAEMON_JOURNAL_PARAMS_INVALID_CODE: &str = "daemon_journal_params_invalid";
+
 /// Error code returned when a request's `method` field does not match
 /// any registered handler.
 pub const DAEMON_UNKNOWN_METHOD_CODE: &str = "daemon_unknown_method";
@@ -1789,6 +1799,7 @@ fn dispatch_with_echo_policy_and_workspace(
         METHOD_CONTEXT => dispatch_context(request, shutdown),
         METHOD_TELEMETRY => dispatch_telemetry(request),
         METHOD_WRITE => dispatch_write(request, write_router),
+        METHOD_WRITE_JOURNAL => dispatch_journal(request, write_router),
         _ => unreachable!("registered daemon methods are handled above"),
     }
 }
@@ -2000,11 +2011,23 @@ fn dispatch_write_via_actor(
     params: &DaemonWriteParams,
     router: &DaemonWriteRouter,
 ) -> DaemonResponse {
-    use crate::core::write_owner::{WriteOperation, WriteResult};
-    let operation = WriteOperation::Custom {
+    let operation = crate::core::write_owner::WriteOperation::Custom {
         operation_type: DaemonWriteParams::ACTOR_OPERATION_TYPE.to_string(),
         payload: params.to_payload(),
     };
+    submit_op_via_actor(request, router, operation)
+}
+
+/// Submit a prepared write op to the long-lived actor and block the connection
+/// thread on the (eventually coalesced) `WriteResult`, mapping it to the
+/// `ee.daemon.write.v1` response shape. Shared by the remember (Inc 2) and
+/// journal (Inc 4) daemon write paths. bd-wx6ou.
+fn submit_op_via_actor(
+    request: &DaemonRequest,
+    router: &DaemonWriteRouter,
+    operation: crate::core::write_owner::WriteOperation,
+) -> DaemonResponse {
+    use crate::core::write_owner::WriteResult;
     let Some(mut receiver) = router.handle.try_submit(operation) else {
         return DaemonResponse::err(
             request.request_id.clone(),
@@ -2045,6 +2068,60 @@ fn dispatch_write_via_actor(
                 "code": "write_owner_unavailable",
                 "message": "write-owner actor dropped the request before responding",
             },
+        }),
+    };
+    DaemonResponse::ok(
+        request.request_id.clone(),
+        request.agent_id.clone(),
+        request.workspace_id.clone(),
+        result,
+    )
+}
+
+/// Dispatch `ee.daemon.write_journal`: route a journal write through the actor
+/// (coalesced with sibling journal writes) when the actor is hosted, else
+/// execute it directly as a single-op batch (still durable, no coalescing). The
+/// request params ARE the `DaemonJournalParams` payload, carried verbatim into
+/// the `ee.daemon.journal` op. bd-wx6ou.5 (Inc 4 daemon half).
+fn dispatch_journal(
+    request: &DaemonRequest,
+    write_router: Option<&DaemonWriteRouter>,
+) -> DaemonResponse {
+    use crate::core::write_owner::{WriteOperation, WriteResult};
+    if let Err(message) = DaemonJournalParams::from_payload(&request.params) {
+        return DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_JOURNAL_PARAMS_INVALID_CODE,
+            message,
+        );
+    }
+    let operation = WriteOperation::Custom {
+        operation_type: DaemonJournalParams::ACTOR_OPERATION_TYPE.to_string(),
+        payload: request.params.clone(),
+    };
+    if let Some(router) = write_router {
+        return submit_op_via_actor(request, router, operation);
+    }
+    // No actor (unbound daemon): execute the journal write directly as a
+    // single-op batch — durable, just not coalesced.
+    let result = match execute_journal_batch(std::slice::from_ref(&operation)) {
+        Ok(mut results) => {
+            let entity_id = match results.pop() {
+                Some(WriteResult::Success { entity_id }) => entity_id,
+                _ => None,
+            };
+            serde_json::json!({
+                "schema": "ee.daemon.write.v1",
+                "success": true,
+                "entityId": entity_id,
+            })
+        }
+        Err(error) => serde_json::json!({
+            "schema": "ee.daemon.write.v1",
+            "success": false,
+            "error": { "code": error.code(), "message": error.message() },
         }),
     };
     DaemonResponse::ok(
@@ -2695,7 +2772,9 @@ fn daemon_method_authority(method: &str) -> Option<DaemonAuthority> {
         METHOD_CAPABILITIES | METHOD_ECHO | METHOD_SHUTDOWN | METHOD_TELEMETRY => {
             Some(DaemonAuthority::SameUid)
         }
-        METHOD_CONTEXT | METHOD_WRITE => Some(DaemonAuthority::SameUidWorkspace),
+        METHOD_CONTEXT | METHOD_WRITE | METHOD_WRITE_JOURNAL => {
+            Some(DaemonAuthority::SameUidWorkspace)
+        }
         _ => None,
     }
 }
@@ -2755,7 +2834,8 @@ fn daemon_capabilities_result() -> serde_json::Value {
             METHOD_ECHO,
             METHOD_SHUTDOWN,
             METHOD_TELEMETRY,
-            METHOD_WRITE
+            METHOD_WRITE,
+            METHOD_WRITE_JOURNAL
         ],
         "authorization": {
             "ee.daemon.capabilities": daemon_method_authority(METHOD_CAPABILITIES).expect("registered method").as_wire_label(),
@@ -2763,7 +2843,8 @@ fn daemon_capabilities_result() -> serde_json::Value {
             "ee.daemon.echo": daemon_method_authority(METHOD_ECHO).expect("registered method").as_wire_label(),
             "ee.daemon.shutdown": daemon_method_authority(METHOD_SHUTDOWN).expect("registered method").as_wire_label(),
             "ee.daemon.telemetry": daemon_method_authority(METHOD_TELEMETRY).expect("registered method").as_wire_label(),
-            "ee.daemon.write": daemon_method_authority(METHOD_WRITE).expect("registered method").as_wire_label()
+            "ee.daemon.write": daemon_method_authority(METHOD_WRITE).expect("registered method").as_wire_label(),
+            "ee.daemon.write_journal": daemon_method_authority(METHOD_WRITE_JOURNAL).expect("registered method").as_wire_label()
         },
         "forward_compat": {
             "v1_unknown_fields": "rejected",
@@ -3253,7 +3334,8 @@ mod tests {
                 METHOD_ECHO,
                 METHOD_SHUTDOWN,
                 METHOD_TELEMETRY,
-                METHOD_WRITE
+                METHOD_WRITE,
+                METHOD_WRITE_JOURNAL
             ]))
         );
         assert_eq!(
@@ -3261,6 +3343,12 @@ mod tests {
                 .pointer("/authorization/ee.daemon.telemetry")
                 .and_then(serde_json::Value::as_str),
             Some(DaemonAuthority::SameUid.as_wire_label())
+        );
+        assert_eq!(
+            result
+                .pointer("/authorization/ee.daemon.write_journal")
+                .and_then(serde_json::Value::as_str),
+            Some(DaemonAuthority::SameUidWorkspace.as_wire_label())
         );
         assert_eq!(
             result
@@ -3382,6 +3470,30 @@ mod tests {
             daemon_method_authority(METHOD_WRITE),
             Some(DaemonAuthority::SameUidWorkspace)
         );
+    }
+
+    #[test]
+    fn write_journal_method_is_same_uid_workspace_authorized() {
+        assert_eq!(
+            daemon_method_authority(METHOD_WRITE_JOURNAL),
+            Some(DaemonAuthority::SameUidWorkspace)
+        );
+    }
+
+    #[test]
+    fn dispatch_journal_rejects_invalid_params() {
+        // No router (unbound) + bad params -> params-invalid RPC error, before
+        // any DB work. Exercises the journal dispatch path without a workspace.
+        let mut request = DaemonRequest::new(
+            "req-journal-bad",
+            TEST_AGENT_ID,
+            METHOD_WRITE_JOURNAL,
+            serde_json::json!({ "not": "journal params" }),
+        );
+        request.workspace_id = Some("journal-ws".to_string());
+        let response = dispatch_journal(&request, None);
+        let error = response.error.as_ref().expect("invalid params -> error");
+        assert_eq!(error.code, DAEMON_JOURNAL_PARAMS_INVALID_CODE);
     }
 
     #[test]
