@@ -148,9 +148,18 @@ const DAEMON_SCHEDULER_JOIN_TIMEOUT: Duration = Duration::from_millis(750);
 /// then shared by every accepted connection. Connection-level peer
 /// credentials still gate local UID; this policy gates method-specific
 /// workspace authority inside dispatch. bd-3mbao.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+// Eq/PartialEq were derived but unused; dropped because the optional
+// `write_router` (an asupersync runtime + write handle) is not comparable.
+#[derive(Clone, Debug, Default)]
 pub struct DaemonDispatchPolicy {
     bound_workspace_id: Option<String>,
+    /// Set once at daemon start when the workspace is bound and the long-lived
+    /// write-owner actor is hosted (Inc 2, bd-wx6ou.3). Carries the shared
+    /// runtime + a clone of the actor's submit handle to `dispatch_write`
+    /// without threading a new parameter through the accept/connection path,
+    /// which already carries `Arc<DaemonDispatchPolicy>`. `None` ⇒ the
+    /// in-process direct write path (Inc 1) is used.
+    write_router: Option<DaemonWriteRouter>,
 }
 
 impl DaemonDispatchPolicy {
@@ -159,11 +168,16 @@ impl DaemonDispatchPolicy {
     pub fn for_workspace(workspace_id: impl Into<String>) -> Self {
         Self {
             bound_workspace_id: Some(workspace_id.into()),
+            write_router: None,
         }
     }
 
     fn bound_workspace_id(&self) -> Option<&str> {
         self.bound_workspace_id.as_deref()
+    }
+
+    fn write_router(&self) -> Option<&DaemonWriteRouter> {
+        self.write_router.as_ref()
     }
 }
 
@@ -351,7 +365,6 @@ fn daemon_echo_env_value_truthy(value: &str) -> bool {
 /// and the shutdown signal; dropping it does NOT stop the server
 /// (callers must call [`DaemonServerHandle::shutdown`] explicitly so
 /// the socket file is unlinked deterministically).
-#[derive(Debug)]
 pub struct DaemonServerHandle {
     socket_path: PathBuf,
     shutdown: Arc<AtomicBool>,
@@ -370,6 +383,34 @@ pub struct DaemonServerHandle {
     /// Kept separate from `shutdown_done` so a timed-out explicit
     /// shutdown does not make later calls falsely report success.
     workers_drained: AtomicBool,
+    /// The retained clone of the write-owner actor's submit handle (Inc 2,
+    /// bd-wx6ou.3). Connection threads use clones carried in the dispatch
+    /// policy's `DaemonWriteRouter`; this one is dropped LAST in shutdown so the
+    /// actor's mpsc closes (→ `recv` returns `Disconnected` → the actor loop
+    /// breaks) only after the accept loop and connection workers have drained.
+    /// `None` when the daemon was started without a bound workspace.
+    write_handle: Option<crate::core::write_owner::WriteHandle>,
+    /// Join handle for the long-lived write-owner actor task. Joined during
+    /// shutdown after the write handle drops, so the final batch commits before
+    /// the runtime is torn down.
+    write_owner_task: Option<asupersync::runtime::JoinHandle<()>>,
+    /// The asupersync runtime that drives the actor task and connection-thread
+    /// `block_on` submits. Dropped last (joins its worker threads). Shared as
+    /// `Arc` with the dispatch policy's `DaemonWriteRouter`.
+    write_runtime: Option<Arc<asupersync::runtime::Runtime>>,
+}
+
+impl std::fmt::Debug for DaemonServerHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The write runtime/actor handles have no meaningful Debug; summarize
+        // whether the actor is hosted rather than recursing into them.
+        f.debug_struct("DaemonServerHandle")
+            .field("socket_path", &self.socket_path)
+            .field("accept_thread", &self.accept_thread.is_some())
+            .field("scheduler_thread", &self.scheduler_thread.is_some())
+            .field("write_actor_hosted", &self.write_handle.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl DaemonServerHandle {
@@ -431,6 +472,28 @@ impl DaemonServerHandle {
         if workers_drained {
             self.workers_drained.store(true, Ordering::Release);
         }
+
+        // Tear down the write-owner actor (Inc 2, bd-wx6ou.3) AFTER the accept
+        // loop joined and connection workers drained: by now the dispatch
+        // policy's router (a WriteHandle clone) is dropped, so dropping the
+        // retained handle closes the actor's mpsc, its `recv` returns
+        // Disconnected, and `run_group_commit` returns. Joining the actor task
+        // ensures the final write commits before the runtime is dropped (which
+        // joins its worker threads). The `is_finished` guard plus `catch_unwind`
+        // keep a force-cancelled/panicked actor from hanging or unwinding
+        // shutdown. (TODO Inc 7: bound `block_on` with a timeout so a write
+        // wedged inside `remember_memory` cannot stall shutdown.)
+        self.write_handle.take();
+        if let (Some(runtime), Some(task)) =
+            (self.write_runtime.as_ref(), self.write_owner_task.take())
+            && !task.is_finished()
+        {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = runtime.block_on(task);
+            }));
+        }
+        self.write_runtime.take();
+
         unlink_result?;
         scheduler_result?;
         if !workers_drained {
@@ -798,7 +861,7 @@ pub fn start_server_for_workspace(
 
 fn start_server_with_dispatch_policy(
     socket_path: impl Into<PathBuf>,
-    dispatch_policy: DaemonDispatchPolicy,
+    mut dispatch_policy: DaemonDispatchPolicy,
 ) -> Result<DaemonServerHandle, DaemonStartError> {
     let broker = SocketBroker::new(socket_path);
     let (listener, _publish_lock) = broker.publish_listener()?;
@@ -809,6 +872,60 @@ fn start_server_with_dispatch_policy(
     let listener_path_in_thread = socket_path.clone();
     let pool = InflightPool::new(configured_max_inflight());
     let pool_in_thread = Arc::clone(&pool);
+
+    // Host the long-lived write-owner actor when bound to a workspace (Inc 2,
+    // bd-wx6ou.3): a current_thread asupersync runtime drives the actor task;
+    // a `DaemonWriteRouter` (shared runtime + handle clone) is stashed in the
+    // dispatch policy so `dispatch_write` routes through it. The accept and
+    // connection paths already carry `Arc<DaemonDispatchPolicy>`, so no extra
+    // parameter threading is needed.
+    let (write_runtime, write_handle, write_owner_task) =
+        if dispatch_policy.bound_workspace_id.is_some() {
+            let runtime = Arc::new(crate::core::build_cli_runtime().map_err(|error| {
+                DaemonStartError::Bind {
+                    path: socket_path.clone(),
+                    source: io::Error::other(format!(
+                        "failed to build daemon write runtime: {error}"
+                    )),
+                }
+            })?);
+            let (owner, write_handle) = crate::core::write_owner::WriteOwner::new(
+                crate::core::write_owner::DEFAULT_CHANNEL_CAPACITY,
+            );
+            let owner_task = runtime
+                .handle()
+                .try_spawn(async move {
+                    let Some(cx) = asupersync::Cx::current() else {
+                        return;
+                    };
+                    // Inc 2: WriteHotPathConfig::default() (disabled) forces a
+                    // one-op-per-batch FIFO; real coalescing arrives in Inc 3.
+                    let _ = owner
+                        .run_group_commit(
+                            &cx,
+                            crate::core::write_owner::WriteHotPathConfig::default(),
+                            |operations| {
+                                Ok(operations
+                                    .iter()
+                                    .map(execute_write_operation)
+                                    .collect::<Vec<_>>())
+                            },
+                        )
+                        .await;
+                })
+                .map_err(|error| DaemonStartError::Bind {
+                    path: socket_path.clone(),
+                    source: io::Error::other(format!("failed to spawn daemon write actor: {error}")),
+                })?;
+            dispatch_policy.write_router = Some(DaemonWriteRouter {
+                runtime: Arc::clone(&runtime),
+                handle: write_handle.clone(),
+            });
+            (Some(runtime), Some(write_handle), Some(owner_task))
+        } else {
+            (None, None, None)
+        };
+
     let dispatch_policy = Arc::new(dispatch_policy);
     let dispatch_policy_in_thread = Arc::clone(&dispatch_policy);
     let (accept_ready_tx, accept_ready_rx) = mpsc::channel();
@@ -875,6 +992,9 @@ fn start_server_with_dispatch_policy(
         scheduler_thread,
         shutdown_done: AtomicBool::new(false),
         workers_drained: AtomicBool::new(false),
+        write_handle,
+        write_owner_task,
+        write_runtime,
     })
 }
 
@@ -1574,12 +1694,13 @@ fn dispatch_with_policy_and_shutdown(
         daemon_echo_enabled(),
         policy.bound_workspace_id(),
         shutdown,
+        policy.write_router(),
     )
 }
 
 fn dispatch_with_echo_policy(request: &DaemonRequest, echo_enabled: bool) -> DaemonResponse {
     let shutdown = AtomicBool::new(false);
-    dispatch_with_echo_policy_and_workspace(request, echo_enabled, None, &shutdown)
+    dispatch_with_echo_policy_and_workspace(request, echo_enabled, None, &shutdown, None)
 }
 
 fn dispatch_with_echo_policy_and_workspace(
@@ -1587,6 +1708,7 @@ fn dispatch_with_echo_policy_and_workspace(
     echo_enabled: bool,
     bound_workspace_id: Option<&str>,
     shutdown: &AtomicBool,
+    write_router: Option<&DaemonWriteRouter>,
 ) -> DaemonResponse {
     if request.schema != super::DAEMON_REQUEST_SCHEMA_V1 {
         return DaemonResponse::err(
@@ -1658,7 +1780,7 @@ fn dispatch_with_echo_policy_and_workspace(
         }
         METHOD_CONTEXT => dispatch_context(request, shutdown),
         METHOD_TELEMETRY => dispatch_telemetry(request),
-        METHOD_WRITE => dispatch_write(request),
+        METHOD_WRITE => dispatch_write(request, write_router),
         _ => unreachable!("registered daemon methods are handled above"),
     }
 }
@@ -1699,10 +1821,36 @@ fn dispatch_telemetry(request: &DaemonRequest) -> DaemonResponse {
     }
 }
 
+/// Per-connection carrier for the write-routing path (Inc 2, bd-wx6ou.3): the
+/// daemon's shared asupersync runtime plus a clone of the long-lived
+/// write-owner actor's submit handle. Cloned into each connection worker so
+/// `dispatch_write` can submit a `WriteOperation` and `block_on` the resulting
+/// `WriteResult`. `Runtime` is `Send + Sync` (it wraps `Arc<RuntimeInner>`), so
+/// `Arc<Runtime>` shares safely across the accept/connection threads.
+#[derive(Clone)]
+struct DaemonWriteRouter {
+    runtime: Arc<asupersync::runtime::Runtime>,
+    handle: crate::core::write_owner::WriteHandle,
+}
+
+impl std::fmt::Debug for DaemonWriteRouter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The runtime and write handle have no meaningful Debug; this exists
+        // only so `DaemonDispatchPolicy` can keep deriving Debug.
+        f.debug_struct("DaemonWriteRouter").finish_non_exhaustive()
+    }
+}
+
 /// Parsed `ee.daemon.write` params: the inputs `remember_memory` needs, carried
 /// over the socket so the daemon executes a write byte-identical to
 /// `ee remember`. Owns its strings so `RememberMemoryOptions` can borrow them.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// Serde is derived (snake_case) so these params can ride through the
+/// long-lived write-owner actor as a `WriteOperation::Custom` payload (Inc 2,
+/// bd-wx6ou.3): the low-level `WriteOperation::MemoryCreate` variant lacks the
+/// `confidence`/`workflow_id`/`auto_link`/`propose_candidates` fields a faithful
+/// `ee remember` needs, so we carry the whole owned params object instead.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct DaemonWriteParams {
     workspace_path: PathBuf,
     content: String,
@@ -1764,6 +1912,22 @@ impl DaemonWriteParams {
             propose_candidates: self.propose_candidates,
         }
     }
+
+    /// `operation_type` tag for the `WriteOperation::Custom` that carries these
+    /// params through the write-owner actor (Inc 2).
+    const ACTOR_OPERATION_TYPE: &'static str = "ee.daemon.remember";
+
+    /// Serialize into the `WriteOperation::Custom` payload submitted to the
+    /// actor. Round-trips with [`DaemonWriteParams::from_payload`].
+    fn to_payload(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// Reconstruct from a `WriteOperation::Custom` payload inside the actor's
+    /// `process_batch`. Errors map to a domain write failure for that op.
+    fn from_payload(payload: &serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(payload.clone()).map_err(|error| error.to_string())
+    }
 }
 
 /// Dispatch `ee.daemon.write`: execute a durable memory write. Inc 1 routes it
@@ -1772,7 +1936,10 @@ impl DaemonWriteParams {
 /// a domain-level write failure becomes an `ok` response carrying
 /// `{success:false, error:{code,message}}` so the client can distinguish "the
 /// daemon could not accept this" from "the write itself failed". bd-wx6ou.2.
-fn dispatch_write(request: &DaemonRequest) -> DaemonResponse {
+fn dispatch_write(
+    request: &DaemonRequest,
+    write_router: Option<&DaemonWriteRouter>,
+) -> DaemonResponse {
     let params = match DaemonWriteParams::from_value(&request.params) {
         Ok(params) => params,
         Err(message) => {
@@ -1785,6 +1952,13 @@ fn dispatch_write(request: &DaemonRequest) -> DaemonResponse {
             );
         }
     };
+    // When the long-lived write-owner actor is hosted (bound workspace), route
+    // the write through it so it can coalesce with siblings (Inc 2 wires the
+    // path; real batching is Inc 3). Otherwise fall through to the in-process
+    // direct path (Inc 1), which is the source of truth and is never removed.
+    if let Some(router) = write_router {
+        return dispatch_write_via_actor(request, &params, router);
+    }
     let result = match crate::core::memory::remember_memory(&params.options()) {
         Ok(report) => serde_json::json!({
             "schema": "ee.daemon.write.v1",
@@ -1806,6 +1980,125 @@ fn dispatch_write(request: &DaemonRequest) -> DaemonResponse {
         request.workspace_id.clone(),
         result,
     )
+}
+
+/// Route a parsed write through the long-lived write-owner actor and block the
+/// connection thread until the (eventually coalesced) `WriteResult` returns.
+/// The connection thread is a plain std::thread, so `runtime.block_on` parks it
+/// while the actor task (on the runtime's worker thread) runs `process_batch`
+/// and sends on the oneshot — no deadlock (distinct threads). bd-wx6ou.3.
+fn dispatch_write_via_actor(
+    request: &DaemonRequest,
+    params: &DaemonWriteParams,
+    router: &DaemonWriteRouter,
+) -> DaemonResponse {
+    use crate::core::write_owner::{WriteOperation, WriteResult};
+    let operation = WriteOperation::Custom {
+        operation_type: DaemonWriteParams::ACTOR_OPERATION_TYPE.to_string(),
+        payload: params.to_payload(),
+    };
+    let Some(mut receiver) = router.handle.try_submit(operation) else {
+        return DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            super::DAEMON_OVERLOADED_CODE,
+            "write-owner actor queue is saturated; retry shortly",
+        )
+        .with_degraded(super::DAEMON_OVERLOADED_CODE);
+    };
+    let write_result = router.runtime.block_on(async {
+        let cx = asupersync::Cx::current().expect("Runtime::block_on installs an ambient Cx");
+        receiver.recv(&cx).await
+    });
+    let result = match write_result {
+        Ok(WriteResult::Success { entity_id }) => serde_json::json!({
+            "schema": "ee.daemon.write.v1",
+            "success": true,
+            "entityId": entity_id,
+        }),
+        Ok(WriteResult::Failed { error }) => serde_json::json!({
+            "schema": "ee.daemon.write.v1",
+            "success": false,
+            "error": { "code": error.code(), "message": error.message() },
+        }),
+        Ok(WriteResult::Shutdown) => serde_json::json!({
+            "schema": "ee.daemon.write.v1",
+            "success": false,
+            "error": {
+                "code": super::DAEMON_SHUTTING_DOWN_CODE,
+                "message": "write-owner actor is shutting down",
+            },
+        }),
+        Err(_) => serde_json::json!({
+            "schema": "ee.daemon.write.v1",
+            "success": false,
+            "error": {
+                "code": "write_owner_unavailable",
+                "message": "write-owner actor dropped the request before responding",
+            },
+        }),
+    };
+    DaemonResponse::ok(
+        request.request_id.clone(),
+        request.agent_id.clone(),
+        request.workspace_id.clone(),
+        result,
+    )
+}
+
+/// Execute one `WriteOperation` inside the write-owner actor's `process_batch`
+/// (Inc 2, bd-wx6ou.3). Only the `ee.daemon.remember` Custom op is supported —
+/// the daemon write path carries `DaemonWriteParams` in the payload and runs
+/// the same `remember_memory` the direct path uses, so a daemon-routed write is
+/// byte-identical to `ee remember`. Unsupported ops fail that single request
+/// (the actor maps a per-op error onto its `WriteResult`).
+fn execute_write_operation(
+    operation: &crate::core::write_owner::WriteOperation,
+) -> crate::core::write_owner::WriteResult {
+    use crate::core::write_owner::{WriteOperation, WriteResult};
+    let WriteOperation::Custom {
+        operation_type,
+        payload,
+    } = operation
+    else {
+        return WriteResult::Failed {
+            error: crate::models::DomainError::Storage {
+                message: format!(
+                    "write-owner actor received an unsupported operation: {}",
+                    operation.operation_type()
+                ),
+                repair: Some("only ee.daemon.remember is wired in this build".to_string()),
+            },
+        };
+    };
+    if operation_type != DaemonWriteParams::ACTOR_OPERATION_TYPE {
+        return WriteResult::Failed {
+            error: crate::models::DomainError::Storage {
+                message: format!(
+                    "write-owner actor received an unsupported custom op: {operation_type}"
+                ),
+                repair: Some("only ee.daemon.remember is wired in this build".to_string()),
+            },
+        };
+    }
+    let params = match DaemonWriteParams::from_payload(payload) {
+        Ok(params) => params,
+        Err(message) => {
+            return WriteResult::Failed {
+                error: crate::models::DomainError::Storage {
+                    message: format!("daemon write payload decode failed: {message}"),
+                    repair: Some("retry the write".to_string()),
+                },
+            };
+        }
+    };
+    match crate::core::memory::remember_memory(&params.options()) {
+        Ok(report) => WriteResult::Success {
+            entity_id: Some(report.memory_id.to_string()),
+        },
+        Err(error) => WriteResult::Failed { error },
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2763,6 +3056,7 @@ mod tests {
             false,
             Some(TEST_WORKSPACE_ID),
             &shutdown,
+            None,
         );
         let error = response.error.as_ref().expect("must have error");
         assert_eq!(error.code, DAEMON_METHOD_UNAUTHORIZED_CODE);
@@ -2967,7 +3261,7 @@ mod tests {
             serde_json::json!({}),
         );
         let shutdown = AtomicBool::new(false);
-        let response = dispatch_with_echo_policy_and_workspace(&request, false, None, &shutdown);
+        let response = dispatch_with_echo_policy_and_workspace(&request, false, None, &shutdown, None);
 
         assert!(response.error.is_none());
         assert!(shutdown.load(Ordering::SeqCst));
@@ -3171,6 +3465,9 @@ mod tests {
             scheduler_thread: None,
             shutdown_done: AtomicBool::new(false),
             workers_drained: AtomicBool::new(false),
+            write_handle: None,
+            write_owner_task: None,
+            write_runtime: None,
         };
 
         let error = handle
@@ -3223,6 +3520,9 @@ mod tests {
             scheduler_thread: Some(SchedulerThreadHandle { join, done_rx }),
             shutdown_done: AtomicBool::new(false),
             workers_drained: AtomicBool::new(false),
+            write_handle: None,
+            write_owner_task: None,
+            write_runtime: None,
         };
 
         let started = Instant::now();
