@@ -100,6 +100,18 @@ pub const METHOD_TELEMETRY: &str = "ee.daemon.telemetry";
 /// in-process snapshot path. bd-d67os.12.
 pub const DAEMON_TELEMETRY_ENCODE_FAILED_CODE: &str = "daemon_telemetry_encode_failed";
 
+/// Method dispatch name for routing a durable memory write through the
+/// daemon. Inc 1 (bd-wx6ou.2) executes the write via the existing direct
+/// `remember_memory` path (no actor yet) so daemon-routed writes are
+/// byte-identical to `ee remember`; later increments coalesce them through a
+/// long-lived group-commit actor. Workspace-scoped (`SameUidWorkspace`) like
+/// `ee.daemon.context`, because a write mutates one specific workspace.
+pub const METHOD_WRITE: &str = "ee.daemon.write";
+
+/// Error code returned when `ee.daemon.write` params cannot be mapped to a
+/// remember request shape (missing content, bad workspace path, etc.).
+pub const DAEMON_WRITE_PARAMS_INVALID_CODE: &str = "daemon_write_params_invalid";
+
 /// Error code returned when a request's `method` field does not match
 /// any registered handler.
 pub const DAEMON_UNKNOWN_METHOD_CODE: &str = "daemon_unknown_method";
@@ -1646,6 +1658,7 @@ fn dispatch_with_echo_policy_and_workspace(
         }
         METHOD_CONTEXT => dispatch_context(request, shutdown),
         METHOD_TELEMETRY => dispatch_telemetry(request),
+        METHOD_WRITE => dispatch_write(request),
         _ => unreachable!("registered daemon methods are handled above"),
     }
 }
@@ -1684,6 +1697,115 @@ fn dispatch_telemetry(request: &DaemonRequest) -> DaemonResponse {
             format!("failed to serialize contention telemetry: {error}"),
         ),
     }
+}
+
+/// Parsed `ee.daemon.write` params: the inputs `remember_memory` needs, carried
+/// over the socket so the daemon executes a write byte-identical to
+/// `ee remember`. Owns its strings so `RememberMemoryOptions` can borrow them.
+#[derive(Clone, Debug, PartialEq)]
+struct DaemonWriteParams {
+    workspace_path: PathBuf,
+    content: String,
+    level: String,
+    kind: String,
+    tags: Option<String>,
+    confidence: f32,
+    source: Option<String>,
+    workflow_id: Option<String>,
+    auto_link: bool,
+    propose_candidates: bool,
+}
+
+impl DaemonWriteParams {
+    fn from_value(value: &serde_json::Value) -> Result<Self, String> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "`params` must be a JSON object for ee.daemon.write".to_string())?;
+        #[allow(clippy::cast_possible_truncation)]
+        let confidence = object
+            .get("confidence")
+            .and_then(serde_json::Value::as_f64)
+            .map_or(0.8_f32, |value| value as f32);
+        Ok(Self {
+            workspace_path: required_path_any(
+                object,
+                &["workspacePath", "workspace_path", "workspace"],
+            )?,
+            content: required_string_any(object, &["content"])?,
+            level: optional_string_any(object, &["level"])?
+                .unwrap_or_else(|| "episodic".to_string()),
+            kind: optional_string_any(object, &["kind"])?.unwrap_or_else(|| "fact".to_string()),
+            tags: optional_string_any(object, &["tags"])?,
+            confidence,
+            source: optional_string_any(object, &["source"])?,
+            workflow_id: optional_string_any(object, &["workflow", "workflowId", "workflow_id"])?,
+            auto_link: optional_bool_any(object, &["autoLink", "auto_link"])?.unwrap_or(true),
+            propose_candidates: optional_bool_any(object, &["proposeCandidates", "propose_candidates"])?
+                .unwrap_or(true),
+        })
+    }
+
+    fn options(&self) -> crate::core::memory::RememberMemoryOptions<'_> {
+        crate::core::memory::RememberMemoryOptions {
+            workspace_path: &self.workspace_path,
+            database_path: None,
+            content: &self.content,
+            workflow_id: self.workflow_id.as_deref(),
+            level: &self.level,
+            kind: &self.kind,
+            tags: self.tags.as_deref(),
+            confidence: self.confidence,
+            source: self.source.as_deref(),
+            allow_secret_mention: false,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: self.auto_link,
+            propose_candidates: self.propose_candidates,
+        }
+    }
+}
+
+/// Dispatch `ee.daemon.write`: execute a durable memory write. Inc 1 routes it
+/// straight through `remember_memory` (no actor), so the result is identical to
+/// `ee remember`. RPC-level failures (bad params) become a `DaemonResponse::err`;
+/// a domain-level write failure becomes an `ok` response carrying
+/// `{success:false, error:{code,message}}` so the client can distinguish "the
+/// daemon could not accept this" from "the write itself failed". bd-wx6ou.2.
+fn dispatch_write(request: &DaemonRequest) -> DaemonResponse {
+    let params = match DaemonWriteParams::from_value(&request.params) {
+        Ok(params) => params,
+        Err(message) => {
+            return DaemonResponse::err(
+                request.request_id.clone(),
+                request.agent_id.clone(),
+                request.workspace_id.clone(),
+                DAEMON_WRITE_PARAMS_INVALID_CODE,
+                message,
+            );
+        }
+    };
+    let result = match crate::core::memory::remember_memory(&params.options()) {
+        Ok(report) => serde_json::json!({
+            "schema": "ee.daemon.write.v1",
+            "success": true,
+            "entityId": report.memory_id.to_string(),
+        }),
+        Err(error) => serde_json::json!({
+            "schema": "ee.daemon.write.v1",
+            "success": false,
+            "error": {
+                "code": error.code(),
+                "message": error.message(),
+            },
+        }),
+    };
+    DaemonResponse::ok(
+        request.request_id.clone(),
+        request.agent_id.clone(),
+        request.workspace_id.clone(),
+        result,
+    )
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2148,7 +2270,7 @@ fn daemon_method_authority(method: &str) -> Option<DaemonAuthority> {
         METHOD_CAPABILITIES | METHOD_ECHO | METHOD_SHUTDOWN | METHOD_TELEMETRY => {
             Some(DaemonAuthority::SameUid)
         }
-        METHOD_CONTEXT => Some(DaemonAuthority::SameUidWorkspace),
+        METHOD_CONTEXT | METHOD_WRITE => Some(DaemonAuthority::SameUidWorkspace),
         _ => None,
     }
 }
@@ -2207,14 +2329,16 @@ fn daemon_capabilities_result() -> serde_json::Value {
             METHOD_CONTEXT,
             METHOD_ECHO,
             METHOD_SHUTDOWN,
-            METHOD_TELEMETRY
+            METHOD_TELEMETRY,
+            METHOD_WRITE
         ],
         "authorization": {
             "ee.daemon.capabilities": daemon_method_authority(METHOD_CAPABILITIES).expect("registered method").as_wire_label(),
             "ee.daemon.context": daemon_method_authority(METHOD_CONTEXT).expect("registered method").as_wire_label(),
             "ee.daemon.echo": daemon_method_authority(METHOD_ECHO).expect("registered method").as_wire_label(),
             "ee.daemon.shutdown": daemon_method_authority(METHOD_SHUTDOWN).expect("registered method").as_wire_label(),
-            "ee.daemon.telemetry": daemon_method_authority(METHOD_TELEMETRY).expect("registered method").as_wire_label()
+            "ee.daemon.telemetry": daemon_method_authority(METHOD_TELEMETRY).expect("registered method").as_wire_label(),
+            "ee.daemon.write": daemon_method_authority(METHOD_WRITE).expect("registered method").as_wire_label()
         },
         "forward_compat": {
             "v1_unknown_fields": "rejected",
@@ -2702,7 +2826,8 @@ mod tests {
                 METHOD_CONTEXT,
                 METHOD_ECHO,
                 METHOD_SHUTDOWN,
-                METHOD_TELEMETRY
+                METHOD_TELEMETRY,
+                METHOD_WRITE
             ]))
         );
         assert_eq!(
@@ -2710,6 +2835,12 @@ mod tests {
                 .pointer("/authorization/ee.daemon.telemetry")
                 .and_then(serde_json::Value::as_str),
             Some(DaemonAuthority::SameUid.as_wire_label())
+        );
+        assert_eq!(
+            result
+                .pointer("/authorization/ee.daemon.write")
+                .and_then(serde_json::Value::as_str),
+            Some(DaemonAuthority::SameUidWorkspace.as_wire_label())
         );
         assert_eq!(
             result
@@ -2785,6 +2916,45 @@ mod tests {
         assert_eq!(
             daemon_method_authority(METHOD_TELEMETRY),
             Some(DaemonAuthority::SameUid)
+        );
+    }
+
+    #[test]
+    fn daemon_write_params_from_value_parses_remember_inputs() {
+        let value = serde_json::json!({
+            "workspacePath": "/tmp/ws",
+            "content": "remember this",
+            "tags": "a,b",
+            "confidence": 0.5,
+        });
+        let params = DaemonWriteParams::from_value(&value).expect("valid write params");
+        assert_eq!(params.workspace_path, std::path::PathBuf::from("/tmp/ws"));
+        assert_eq!(params.content, "remember this");
+        assert_eq!(params.level, "episodic", "level defaults to episodic");
+        assert_eq!(params.kind, "fact", "kind defaults to fact");
+        assert_eq!(params.tags.as_deref(), Some("a,b"));
+        assert!((params.confidence - 0.5).abs() < f32::EPSILON);
+        assert!(params.auto_link, "auto_link defaults true for ee-remember parity");
+        assert!(params.propose_candidates, "propose_candidates defaults true");
+        // options() borrows the owned strings without panicking.
+        assert_eq!(params.options().content, "remember this");
+    }
+
+    #[test]
+    fn daemon_write_params_require_content_and_workspace() {
+        let missing_content = serde_json::json!({ "workspacePath": "/tmp/ws" });
+        assert!(DaemonWriteParams::from_value(&missing_content).is_err());
+        let missing_workspace = serde_json::json!({ "content": "x" });
+        assert!(DaemonWriteParams::from_value(&missing_workspace).is_err());
+        let not_object = serde_json::json!("nope");
+        assert!(DaemonWriteParams::from_value(&not_object).is_err());
+    }
+
+    #[test]
+    fn write_method_is_same_uid_workspace_authorized() {
+        assert_eq!(
+            daemon_method_authority(METHOD_WRITE),
+            Some(DaemonAuthority::SameUidWorkspace)
         );
     }
 
