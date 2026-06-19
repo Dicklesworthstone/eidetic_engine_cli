@@ -1168,7 +1168,10 @@ where
         tailnet_display_name: discovery.tailnet_display_name.clone(),
         self_node_key: discovery.self_node_key.clone(),
         discovered_peers: auto_enrollment_candidates_from_discovery(&discovery),
-        tailnet_peers: auto_enrollment_candidates_from_local(local.as_ref()),
+        tailnet_peers: auto_enrollment_candidates_from_local(
+            local.as_ref(),
+            &snapshot.workspace_id,
+        ),
         existing_peers,
         options: AutoEnrollmentOptions {
             dry_run: args.dry_run,
@@ -2545,13 +2548,21 @@ fn auto_enrollment_candidates_from_discovery(
 
 fn auto_enrollment_candidates_from_local(
     local: Option<&TailscaleLocalReport>,
+    workspace_id: &str,
 ) -> Vec<AutoEnrollmentCandidate> {
     local
         .into_iter()
         .flat_map(|report| report.peers.iter())
         .filter_map(|peer| {
             let tailscale_ip = peer.tailscale_ips.first()?.clone();
-            let capability = peer.ee_capability.as_ref();
+            let capability = peer.ee_capability.as_ref().filter(|capability| {
+                capability.respond
+                    && capability.looks_like_ee()
+                    && capability
+                        .workspace_ids
+                        .iter()
+                        .any(|peer_workspace_id| peer_workspace_id == workspace_id)
+            })?;
             Some(AutoEnrollmentCandidate {
                 node_key: peer.node_key.clone(),
                 tailscale_ip,
@@ -2560,9 +2571,7 @@ fn auto_enrollment_candidates_from_local(
                     .hostname
                     .clone()
                     .unwrap_or_else(|| peer.node_key.clone()),
-                ee_protocol_version: capability
-                    .map(|capability| capability.ee_protocol_version.clone())
-                    .unwrap_or_else(|| "1.0".to_owned()),
+                ee_protocol_version: capability.ee_protocol_version.clone(),
                 discovery_policy_decision: "force_include_override".to_owned(),
             })
         })
@@ -2907,15 +2916,27 @@ fn enrolled_peer_record_from_policy_summary(
     {
         return Ok(None);
     }
-    serde_json::from_value::<MeshPeerRecord>(value)
-        .map(Some)
-        .map_err(|error| DomainError::Usage {
+    let peer =
+        serde_json::from_value::<MeshPeerRecord>(value).map_err(|error| DomainError::Usage {
             message: format!("Stored mesh peer {peer_id} record is malformed: {error}"),
             repair: Some(
                 "Re-run `ee mesh peer add ... --yes --json` for this peer or revoke the stale row."
                     .to_owned(),
             ),
-        })
+        })?;
+    if peer.peer_id != peer_id {
+        return Err(DomainError::Usage {
+            message: format!(
+                "Stored mesh peer row {peer_id} contains policy summary for peer {}",
+                peer.peer_id
+            ),
+            repair: Some(
+                "Re-run `ee mesh peer add ... --yes --json` for this peer or revoke the stale row."
+                    .to_owned(),
+            ),
+        });
+    }
+    Ok(Some(peer))
 }
 
 fn unknown_mesh_peer_error(peer_id: &str) -> DomainError {
@@ -3731,6 +3752,9 @@ fn append_degradations(output: &mut String, degraded: &[MeshCliDegradation]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::tailscale_probe::{
+        TailscalePeerEeCapability, TailscalePeerReport, TailscaleProbeMethod,
+    };
 
     #[test]
     fn read_mesh_text_bounded_refuses_oversized_payload() {
@@ -3941,6 +3965,159 @@ mod tests {
         assert_eq!(value["materializedOnNodeKey"], "nodekey:self");
         assert_eq!(value["endpoint"]["tailnetId"], "tailnet-alpha");
         assert_eq!(value["trustEstablishedBy"], "tailscale_auto_enrollment");
+    }
+
+    #[test]
+    fn auto_enrollment_local_include_candidates_require_valid_ee_capability() {
+        let report = TailscaleLocalReport {
+            schema: crate::core::tailscale_probe::TAILSCALE_LOCAL_SCHEMA_V1,
+            installed: true,
+            daemon_reachable: true,
+            authenticated: true,
+            binary_authentic: true,
+            binary_version_raw: None,
+            binary_absolute_path: None,
+            shields_up: Some(false),
+            tailnet_id: Some("tailnet-alpha".to_owned()),
+            tailnet_display_name: Some("alpha.example".to_owned()),
+            self_node_key: Some("nodekey:self".to_owned()),
+            self_tailscale_ip: Some("100.64.0.1".to_owned()),
+            self_magic_dns_name: Some("self.tailnet.test.".to_owned()),
+            self_advertised_tags: Vec::new(),
+            peers: vec![
+                TailscalePeerReport {
+                    node_key: "nodekey:plain".to_owned(),
+                    tailscale_ips: vec!["100.64.0.2".to_owned()],
+                    magic_dns_name: Some("plain.tailnet.test.".to_owned()),
+                    hostname: Some("plain".to_owned()),
+                    advertised_tags: Vec::new(),
+                    online: Some(true),
+                    ee_capability: None,
+                },
+                TailscalePeerReport {
+                    node_key: "nodekey:malformed".to_owned(),
+                    tailscale_ips: vec!["100.64.0.3".to_owned()],
+                    magic_dns_name: Some("malformed.tailnet.test.".to_owned()),
+                    hostname: Some("malformed".to_owned()),
+                    advertised_tags: Vec::new(),
+                    online: Some(true),
+                    ee_capability: Some(TailscalePeerEeCapability {
+                        ee_version: "0.0.0".to_owned(),
+                        ee_protocol_version: "1.0".to_owned(),
+                        workspace_ids: vec!["workspace-alpha".to_owned()],
+                        respond: true,
+                        latency_ms: 1,
+                    }),
+                },
+                TailscalePeerReport {
+                    node_key: "nodekey:ee".to_owned(),
+                    tailscale_ips: vec!["100.64.0.4".to_owned()],
+                    magic_dns_name: Some("ee.tailnet.test.".to_owned()),
+                    hostname: Some("ee".to_owned()),
+                    advertised_tags: Vec::new(),
+                    online: Some(true),
+                    ee_capability: Some(TailscalePeerEeCapability {
+                        ee_version: "0.2.0".to_owned(),
+                        ee_protocol_version: "1.0".to_owned(),
+                        workspace_ids: vec!["workspace-alpha".to_owned()],
+                        respond: true,
+                        latency_ms: 1,
+                    }),
+                },
+                TailscalePeerReport {
+                    node_key: "nodekey:declined".to_owned(),
+                    tailscale_ips: vec!["100.64.0.5".to_owned()],
+                    magic_dns_name: Some("declined.tailnet.test.".to_owned()),
+                    hostname: Some("declined".to_owned()),
+                    advertised_tags: Vec::new(),
+                    online: Some(true),
+                    ee_capability: Some(TailscalePeerEeCapability {
+                        ee_version: "0.2.0".to_owned(),
+                        ee_protocol_version: "1.0".to_owned(),
+                        workspace_ids: vec!["workspace-alpha".to_owned()],
+                        respond: false,
+                        latency_ms: 1,
+                    }),
+                },
+                TailscalePeerReport {
+                    node_key: "nodekey:other-workspace".to_owned(),
+                    tailscale_ips: vec!["100.64.0.6".to_owned()],
+                    magic_dns_name: Some("other-workspace.tailnet.test.".to_owned()),
+                    hostname: Some("other-workspace".to_owned()),
+                    advertised_tags: Vec::new(),
+                    online: Some(true),
+                    ee_capability: Some(TailscalePeerEeCapability {
+                        ee_version: "0.2.0".to_owned(),
+                        ee_protocol_version: "1.0".to_owned(),
+                        workspace_ids: vec!["workspace-beta".to_owned()],
+                        respond: true,
+                        latency_ms: 1,
+                    }),
+                },
+            ],
+            version: Some("1.66.0".to_owned()),
+            probe_method: TailscaleProbeMethod::Cli,
+            probe_elapsed_ms: 10,
+            platform: TailscalePlatform::Linux,
+            degradations: Vec::new(),
+        };
+
+        let candidates = auto_enrollment_candidates_from_local(Some(&report), "workspace-alpha");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].node_key, "nodekey:ee");
+        assert_eq!(candidates[0].ee_protocol_version, "1.0");
+        assert_eq!(
+            candidates[0].discovery_policy_decision,
+            "force_include_override"
+        );
+    }
+
+    #[test]
+    fn enrolled_peer_record_rejects_policy_summary_peer_id_mismatch() {
+        let record = enroll_peer(MeshPeerEnrollInput {
+            workspace_id: "wsp_test_workspace".to_owned(),
+            alias: "alpha".to_owned(),
+            endpoint: MeshPeerEndpoint {
+                tailscale_node_key: "nodekey:alpha".to_owned(),
+                tailnet_id: "tailnet-alpha".to_owned(),
+                tailnet_display_name: Some("alpha.example".to_owned()),
+                endpoint: "100.64.0.2".to_owned(),
+                magic_dns_name: Some("alpha.tailnet.test.".to_owned()),
+            },
+            capability_profile: MeshPeerCapabilityProfile::MetadataOnly,
+            handshake: MeshPeerHandshake::granted(
+                "hello_req_alpha",
+                "1.0",
+                "nodekey:alpha",
+                vec!["mesh:metadata".to_owned()],
+            ),
+            public_key_fingerprint: "blake3:pubkey-alpha".to_owned(),
+            now: "2026-05-20T00:00:00Z".to_owned(),
+            explicit_human_consent: true,
+        })
+        .peer
+        .expect("peer record");
+        let policy_summary_json =
+            serde_json::to_string(&record).expect("peer record should serialize");
+
+        let error = enrolled_peer_record_from_policy_summary(
+            Some(&policy_summary_json),
+            "peer_different_row",
+        )
+        .expect_err("policy summary peer id must match row peer id");
+
+        assert!(
+            error.message().contains("contains policy summary for peer"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            error
+                .repair()
+                .is_some_and(|repair| repair.contains("ee mesh peer add")),
+            "repair should direct operator to refresh or revoke the stale row"
+        );
     }
 
     #[test]

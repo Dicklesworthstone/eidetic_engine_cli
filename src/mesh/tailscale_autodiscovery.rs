@@ -517,7 +517,7 @@ fn push_degradation_once(
 
 impl TailscalePeerEeCapability {
     #[must_use]
-    fn looks_like_ee(&self) -> bool {
+    pub(crate) fn looks_like_ee(&self) -> bool {
         !self.ee_version.trim().is_empty()
             && self.ee_version != "0.0.0"
             && !self.ee_protocol_version.trim().is_empty()

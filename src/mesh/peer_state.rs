@@ -166,15 +166,18 @@ pub fn apply_probe_observation(
     observation: &MeshPeerProbeObservation,
     thresholds: MeshDriftThresholds,
 ) -> MeshPeerStateRow {
-    let mut row = existing.cloned().unwrap_or_else(|| MeshPeerStateRow {
-        schema: MESH_PEER_STATE_SCHEMA_V1.to_owned(),
-        peer_node_key: observation.peer_node_key.clone(),
-        peer_group_id: observation.peer_group_id.clone(),
-        consecutive_missed_probes: 0,
-        last_successful_probe_at_epoch_seconds: None,
-        first_observed_at_epoch_seconds: observation.now_epoch_seconds,
-        state: MeshDriftPeerState::Active,
-    });
+    let mut row = existing
+        .filter(|row| row.peer_node_key == observation.peer_node_key)
+        .cloned()
+        .unwrap_or_else(|| MeshPeerStateRow {
+            schema: MESH_PEER_STATE_SCHEMA_V1.to_owned(),
+            peer_node_key: observation.peer_node_key.clone(),
+            peer_group_id: observation.peer_group_id.clone(),
+            consecutive_missed_probes: 0,
+            last_successful_probe_at_epoch_seconds: None,
+            first_observed_at_epoch_seconds: observation.now_epoch_seconds,
+            state: MeshDriftPeerState::Active,
+        });
     row.peer_group_id = observation.peer_group_id.clone();
 
     match observation.outcome {
@@ -339,6 +342,37 @@ mod tests {
         assert_eq!(recovered.state, MeshDriftPeerState::Active);
         assert_eq!(recovered.consecutive_missed_probes, 0);
         assert_eq!(recovered.last_successful_probe_at_epoch_seconds, Some(402));
+    }
+
+    #[test]
+    fn drift_state_machine_does_not_reuse_history_for_a_different_peer_node_key() {
+        let existing = MeshPeerStateRow {
+            schema: MESH_PEER_STATE_SCHEMA_V1.to_owned(),
+            peer_node_key: "nodekey:old".to_owned(),
+            peer_group_id: "pg_alpha".to_owned(),
+            consecutive_missed_probes: 7,
+            last_successful_probe_at_epoch_seconds: Some(100),
+            first_observed_at_epoch_seconds: 100,
+            state: MeshDriftPeerState::HardStale,
+        };
+
+        let observed = apply_probe_observation(
+            Some(&existing),
+            &MeshPeerProbeObservation::new(
+                "nodekey:new",
+                "pg_alpha",
+                401,
+                MeshPeerProbeOutcome::Success,
+            ),
+            MeshDriftThresholds::default(),
+        );
+
+        assert_eq!(observed.peer_node_key, "nodekey:new");
+        assert_eq!(observed.peer_group_id, "pg_alpha");
+        assert_eq!(observed.consecutive_missed_probes, 0);
+        assert_eq!(observed.last_successful_probe_at_epoch_seconds, Some(401));
+        assert_eq!(observed.first_observed_at_epoch_seconds, 401);
+        assert_eq!(observed.state, MeshDriftPeerState::Active);
     }
 
     #[test]

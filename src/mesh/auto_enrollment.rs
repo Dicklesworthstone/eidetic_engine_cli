@@ -414,6 +414,7 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
     let node_key_changed = matches!(identity_guard, IdentityGuardVerdict::NodeKeyChanged { .. });
     let manual_conflict = existing_enabled.iter().any(|peer| !peer.is_auto_managed());
     let manual_migration = manual_conflict && input.options.replace_manual_with_auto;
+    let missing_fresh_probe = input.fresh_probe_invocations == 0;
 
     let existing_hash = peer_set_hash_from_candidates(
         existing_enabled
@@ -441,6 +442,7 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
         &input,
         tailnet_changed,
         node_key_changed,
+        missing_fresh_probe,
         manual_conflict && !input.options.replace_manual_with_auto,
         selected.is_empty(),
         !peers_to_revoke.is_empty(),
@@ -466,7 +468,7 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
     let peer_group_id = (!selected.is_empty())
         .then(|| peer_group_id(&input.workspace_id, &summary.intended_peer_set_hash));
 
-    if input.fresh_probe_invocations == 0 {
+    if missing_fresh_probe {
         push_degradation_once(
             &mut degraded,
             AutoEnrollmentDegradation::new(
@@ -632,13 +634,14 @@ fn initial_outcome(
     input: &AutoEnrollmentInput,
     tailnet_changed: bool,
     node_key_changed: bool,
+    missing_fresh_probe: bool,
     manual_conflict: bool,
     no_eligible_peers: bool,
     has_revocations: bool,
     existing_hash: Option<&str>,
     selected: &[AutoEnrollmentCandidate],
 ) -> AutoEnrollmentOutcome {
-    if tailnet_changed || node_key_changed || manual_conflict {
+    if tailnet_changed || node_key_changed || missing_fresh_probe || manual_conflict {
         return AutoEnrollmentOutcome::Blocked;
     }
     if no_eligible_peers && !has_revocations {
@@ -950,13 +953,18 @@ mod tests {
         let mut input = input(vec![candidate("nodekey:alpha")]);
         input.fresh_probe_invocations = 0;
         let result = plan_auto_enrollment(input);
+        assert_eq!(result.outcome, "blocked");
         assert!(
             result
                 .degraded
                 .iter()
                 .any(|item| item.code == AUTO_ENROLLMENT_PARTIAL_FAILURE_CODE)
         );
-        assert!(result.materialization.writes_peer_rows);
+        assert!(!result.materialization.writes_peer_rows);
+        assert_eq!(
+            result.materialization.outcome_to_record,
+            MaterializationOutcome::AuditOnly
+        );
     }
 
     #[test]
