@@ -1143,7 +1143,7 @@ mod tests {
         DERIVED_ASSET_MANIFEST_MAX_BYTES, DERIVED_ASSET_REF_SCHEMA_V1,
         DERIVED_ASSET_SCHEMA_MISMATCH_CODE, DerivedAssetDescriptor, DerivedAssetObjectManifest,
         DerivedAssetStore, DerivedAssetStoreError, blake3_body_hash,
-        default_derived_asset_store_root_from_env,
+        default_derived_asset_store_root_from_env, first_existing_symlink_component,
     };
     use serde_json::Value;
     use std::collections::BTreeMap;
