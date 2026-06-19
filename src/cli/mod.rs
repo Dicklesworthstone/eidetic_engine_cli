@@ -6336,16 +6336,16 @@ pub enum AuditCommand {
 /// Arguments for `ee audit timeline`.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 pub struct AuditTimelineArgs {
-    /// Start from this time or operation ID.
-    #[arg(long, value_name = "RFC3339")]
+    /// Start from this RFC3339 time or relative duration such as 7d or 24h.
+    #[arg(long, value_name = "RFC3339|DURATION")]
     pub since: Option<String>,
 
     /// Only include rows for this audit surface.
     #[arg(long, value_name = "NAME")]
     pub surface: Option<String>,
 
-    /// Only include rows whose audit action matches this exact name or namespace glob.
-    #[arg(long, value_name = "ACTION")]
+    /// Only include rows whose audit action/event type matches this exact name or namespace glob.
+    #[arg(long, visible_alias = "event-type", value_name = "ACTION")]
     pub action: Option<String>,
 
     /// Only include rows targeting this exact id (memory, pack, candidate, …) —
@@ -7444,7 +7444,7 @@ pub struct PlanRecipeShowArgs {
 /// Arguments for `ee plan explain`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct PlanExplainArgs {
-    /// Plan ID or recipe ID to explain.
+    /// Recipe ID to explain.
     #[arg(value_name = "ID")]
     pub id: String,
 }
@@ -16551,6 +16551,7 @@ fn task_frame_response_json(report: &TaskFrameReport) -> String {
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report.data_json(),
+        "degraded": [],
     })
     .to_string()
 }
@@ -17871,6 +17872,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": data,
+                "degraded": [],
             });
             write_stdout(stdout, &(response.to_string() + "\n"))
         }
@@ -20219,6 +20221,7 @@ where
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
+                    "degraded": [],
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
@@ -42297,7 +42300,7 @@ where
 {
     use crate::core::ask::{
         ASK_MAX_EVIDENCE_DEFAULT, ASK_MIN_CONFIDENCE_DEFAULT, AskDegradedEntry, AskRequest,
-        ask_data_json, evaluate_ask, render_ask_markdown,
+        ask_data_json, evaluate_ask, record_ask_query_miss_best_effort, render_ask_markdown,
     };
 
     // Resolve question from positional arg or --stdin
@@ -42412,6 +42415,7 @@ where
     };
 
     let report = evaluate_ask(&request, &candidates);
+    record_ask_query_miss_best_effort(&connection, &workspace_id, &report);
 
     // Build degradation entries
     let mut degraded: Vec<serde_json::Value> = Vec::new();
@@ -45007,10 +45011,15 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let redacted_message = crate::policy::redact_secret_like_content(&raw_message).content;
+    let inferred_code = if matches!(args.tool.as_str(), "rustc" | "cargo") {
+        rustc_code_from_message(&raw_message)
+    } else {
+        None
+    };
     let redacted_code = args
         .code
         .clone()
-        .or_else(|| rustc_code_from_message(&raw_message))
+        .or(inferred_code)
         .as_deref()
         .map(|code| crate::policy::redact_secret_like_content(code).content);
     let code = redacted_code.as_deref();
@@ -45019,7 +45028,7 @@ where
         "rustc" => from_rustc(code, message),
         "cargo" => from_cargo(code, message),
         "ee" => from_ee_error(code.unwrap_or_default(), message),
-        "rch" => from_rch_blocker(code.unwrap_or("blocker"), "diagnose", message),
+        "rch" => from_rch_blocker(code.unwrap_or_default(), "", message),
         "shell" => from_shell(args.exit_code.unwrap_or(1), message),
         other => {
             return write_domain_error(
@@ -53866,6 +53875,43 @@ fn daemon_socket_accepts_connection(socket_path: &Path) -> bool {
 }
 
 #[cfg(unix)]
+fn cleanup_failed_daemon_start_socket_file(socket_path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(socket_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    if !metadata.file_type().is_socket() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to remove non-socket daemon path {}",
+                socket_path.display()
+            ),
+        ));
+    }
+    let euid = crate::daemon::current_euid();
+    if metadata.uid() != euid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to remove daemon socket {} owned by uid {}, current uid {euid}",
+                socket_path.display(),
+                metadata.uid()
+            ),
+        ));
+    }
+
+    match fs::remove_file(socket_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
 fn daemon_already_running_error(socket_path: &Path) -> DomainError {
     DomainError::UnsatisfiedDegradedModeCode {
         code: DAEMON_ALREADY_RUNNING_CODE,
@@ -54146,7 +54192,7 @@ where
         }
 
         // Probe deadline elapsed (or child died). Kill any lingering
-        // child, best-effort unlink the orphan socket file, and emit
+        // child, best-effort unlink only an owned socket file, and emit
         // the honest failure envelope.
         if !child_died_early {
             let _ = child.kill();
@@ -54156,9 +54202,7 @@ where
             let domain_error = daemon_already_running_error(&socket_path);
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
-        if socket_path.exists() {
-            let _ = fs::remove_file(&socket_path);
-        }
+        let _ = cleanup_failed_daemon_start_socket_file(&socket_path);
         let elapsed_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
         let why = if child_died_early {
             "Daemon child process exited before its socket became connectable."
@@ -57421,6 +57465,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": data,
+                "degraded": [],
             });
             match serde_json::to_string(&response) {
                 Ok(json) => write_stdout(stdout, &(json + "\n")),
@@ -60146,7 +60191,7 @@ mod tests {
     use clap::{Parser, error::ErrorKind};
 
     use super::{
-        AgentCommand, AnalyzeCommand, ArtifactCommand, AttestCommand, BackupCommand,
+        AgentCommand, AnalyzeCommand, ArtifactCommand, AttestCommand, AuditCommand, BackupCommand,
         BackupRedaction, BootstrapCommand, COORDINATION_FALLBACK_INGEST_SCHEMA_V1,
         COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command, ContextPackProfile, CurateCommand,
         DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand, DiagCommand, DiagQuarantineCommand,
@@ -60161,8 +60206,9 @@ mod tests {
         MaintenanceCommand, MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode,
         MemoryCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
         RedactionLevelSource, ReflectCommand, ReflectRequestLedgerCommand, RegressCommand,
-        RegressExplainArgs, RegressionSurfaceArg, RuleCommand, SessionBudgetCommand,
-        SessionBudgetPlanArgs, ShadowMode, SituationCommand, StatusArgs, SupportCommand,
+        RegressExplainArgs, RegressionSurfaceArg, RuleCommand, SESSION_BUDGET_PLAN_SCHEMA_V1,
+        SessionBudgetCommand, SessionBudgetPlanArgs, ShadowMode, SituationCommand, StatusArgs,
+        SupportCommand,
         SwarmBriefArgs, SwarmCommand, SwarmRepairPlanArgs, SwarmWorkPacketArgs, TaskFrameCommand,
         TaskFrameSubgoalCommand, TrustCommand, VerifyCommand, VerifyRchCommand, WorkflowCommand,
         WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode, db_inspect_redact_source_uri,
@@ -60711,6 +60757,27 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn daemon_start_failed_cleanup_refuses_regular_file_socket_path() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let socket_path = temp_dir.path().join("not-a-socket");
+        fs::write(&socket_path, b"operator data").map_err(|error| error.to_string())?;
+
+        let error = super::cleanup_failed_daemon_start_socket_file(&socket_path)
+            .expect_err("regular file must be refused by failed-start cleanup");
+
+        ensure_equal(
+            &error.kind(),
+            &std::io::ErrorKind::InvalidInput,
+            "daemon start failed cleanup regular-file refusal kind",
+        )?;
+        ensure(
+            socket_path.exists(),
+            "daemon start failed cleanup must not remove regular files passed via --socket",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn daemon_stop_refuses_stale_socket_without_listener() -> TestResult {
         use std::os::unix::net::UnixListener;
 
@@ -60949,6 +61016,33 @@ mod tests {
             &(true, Some(Command::Status(StatusArgs::default()))),
             "--json after status parse",
         )
+    }
+
+    #[test]
+    fn audit_timeline_accepts_event_type_alias_for_action_filter() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "audit",
+            "timeline",
+            "--event-type",
+            "mesh.auto_enrollment_intended",
+            "--json",
+        ])
+        .map_err(|error| {
+            format!(
+                "failed to parse audit timeline --event-type alias: {:?}",
+                error.kind()
+            )
+        })?;
+
+        match parsed.command {
+            Some(Command::Audit(AuditCommand::Timeline(args))) => ensure_equal(
+                &args.action,
+                &Some("mesh.auto_enrollment_intended".to_owned()),
+                "audit timeline --event-type alias maps to action filter",
+            ),
+            _ => Err("expected audit timeline command".to_owned()),
+        }
     }
 
     #[test]
@@ -63852,6 +63946,11 @@ mod tests {
         let create_json: serde_json::Value =
             serde_json::from_str(&create_stdout).map_err(|error| error.to_string())?;
         ensure_equal(
+            &create_json["degraded"],
+            &serde_json::json!([]),
+            "task-frame response degraded list",
+        )?;
+        ensure_equal(
             &create_json["data"]["schema"],
             &serde_json::json!("ee.task_frame.report.v1"),
             "report schema",
@@ -63947,6 +64046,43 @@ mod tests {
             &close_json["data"]["frame"]["closeReason"],
             &serde_json::json!("completed in test"),
             "close reason",
+        )
+    }
+
+    #[test]
+    fn session_budget_plan_json_response_uses_v2_envelope() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "session-budget",
+            "plan",
+            "--workspace-fingerprint",
+            "d37f1e828e51",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "session-budget plan exit")?;
+        ensure(stderr.is_empty(), "session-budget plan JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "response schema",
+        )?;
+        ensure_equal(
+            &value["success"],
+            &serde_json::json!(true),
+            "response success",
+        )?;
+        ensure_equal(
+            &value["degraded"],
+            &serde_json::json!([]),
+            "response degraded list",
+        )?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!(SESSION_BUDGET_PLAN_SCHEMA_V1),
+            "plan schema",
         )
     }
 
