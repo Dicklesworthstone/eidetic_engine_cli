@@ -31,8 +31,9 @@ use crate::core::preflight_guard::classify_repair_command_for_preflight;
 use crate::core::swarm_brief::{
     DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, SwarmBriefBead, SwarmBriefCollectOptions,
     SwarmBriefCommandError, SwarmBriefCommandOutput, SwarmBriefCommandRunner, SwarmBriefCommit,
-    SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefFileSurfaceRisk, SwarmBriefReport,
-    SwarmBriefSourceKind, SwarmBriefSourceStatus, SwarmBriefThreadSummary,
+    SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefFileSurfaceRisk,
+    SwarmBriefHostProfileSummary, SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus,
+    SwarmBriefThreadSummary,
     agent_mail_snapshot_brief_retry_command_template,
     agent_mail_snapshot_producer_command_template, collect_swarm_brief,
 };
@@ -701,6 +702,13 @@ pub struct SwarmWorkPacket {
     claim_gate_actionable_queue: SwarmWorkPacketActionableQueueEvidence,
     #[serde(skip)]
     source_authority_command_timeout_ms: u64,
+    /// Bounded, redaction-safe host-profile evidence (recommended/effective
+    /// operating profile and calibration freshness) derived once from the
+    /// `ee swarm brief` host-profile summary. Carried outside the serialized
+    /// packet body so the claim-gate projection re-derives resource admission
+    /// from the same host evidence instead of pretending workstation/fresh.
+    #[serde(skip)]
+    host_profile_admission: SwarmWorkPacketHostProfileAdmission,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -3053,6 +3061,8 @@ impl SwarmWorkPacket {
         );
         let observed_state_class =
             work_packet_observed_state_class(&coordination, &rch_proof_posture, &degraded);
+        let host_profile_admission =
+            work_packet_host_profile_admission(brief.host_profile.as_ref());
         let resource_admission = work_packet_resource_admission(
             "work_packet",
             "read_only",
@@ -3062,6 +3072,7 @@ impl SwarmWorkPacket {
             &degraded,
             observed_state_class,
             source_provenance.len(),
+            host_profile_admission,
         );
 
         let mut packet = Self {
@@ -3083,6 +3094,7 @@ impl SwarmWorkPacket {
             claim_gate_install_freshness: SwarmWorkPacketClaimGateInstallFreshness::not_evaluated(),
             claim_gate_actionable_queue: SwarmWorkPacketActionableQueueEvidence::not_evaluated(),
             source_authority_command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
+            host_profile_admission,
         };
         packet.packet_id = work_packet_id(&packet);
         packet
@@ -3153,6 +3165,7 @@ impl SwarmWorkPacket {
             &self.degraded,
             self.observed_state_class,
             self.source_provenance.len(),
+            self.host_profile_admission,
         );
         let verdict = work_packet_claim_gate_verdict(
             self,
@@ -4619,6 +4632,7 @@ fn work_packet_resource_admission(
     degraded: &[SwarmWorkPacketDegradation],
     observed_state_class: &'static str,
     source_count: usize,
+    host_profile_admission: SwarmWorkPacketHostProfileAdmission,
 ) -> SwarmWorkPacketResourceAdmission {
     let input = work_packet_resource_admission_input(
         coordination,
@@ -4626,9 +4640,96 @@ fn work_packet_resource_admission(
         rch,
         degraded,
         observed_state_class,
+        host_profile_admission,
     );
     let report = evaluate_resource_profile_budget_admission(input);
     work_packet_resource_admission_from_report(surface, command_class, input, report, source_count)
+}
+
+/// Bounded, redaction-safe projection of the `ee swarm brief` host-profile
+/// summary into the resource-admission profile/calibration dimensions.
+///
+/// Derived once during work-packet construction so the work-packet and
+/// claim-gate admission projections agree on the same host evidence. Absent or
+/// unparseable host evidence is treated conservatively (`Missing`/`Unavailable`
+/// calibration, no requested profile) rather than silently pretending the host
+/// is a fresh workstation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SwarmWorkPacketHostProfileAdmission {
+    requested_profile: Option<ResourceOperatingProfile>,
+    effective_profile: ResourceOperatingProfile,
+    host_calibration: ResourceHostCalibrationPosture,
+}
+
+impl SwarmWorkPacketHostProfileAdmission {
+    /// Conservative posture used when no host-profile evidence is available:
+    /// honest `Missing` calibration (drives an abstain with
+    /// `missing_required_signal`) and a neutral non-swarm effective profile so
+    /// swarm-heavy workloads still earn a split recommendation.
+    const fn missing() -> Self {
+        Self {
+            requested_profile: None,
+            effective_profile: ResourceOperatingProfile::Workstation,
+            host_calibration: ResourceHostCalibrationPosture::Missing,
+        }
+    }
+}
+
+/// Map the brief's recommended-profile string onto a resource operating
+/// profile. Returns `None` for an unknown/unparseable label so the caller can
+/// fall back conservatively instead of guessing a ceiling.
+fn resource_operating_profile_from_brief(value: &str) -> Option<ResourceOperatingProfile> {
+    match value {
+        "constrained" => Some(ResourceOperatingProfile::Constrained),
+        "portable" => Some(ResourceOperatingProfile::Portable),
+        "workstation" => Some(ResourceOperatingProfile::Workstation),
+        "swarm" => Some(ResourceOperatingProfile::Swarm),
+        _ => None,
+    }
+}
+
+/// Map the brief's calibration-freshness string onto the admission host
+/// calibration posture, preserving stale/partial/synthetic/contradictory/
+/// missing/unavailable states. An unknown label is treated as `Unavailable`
+/// (calibration evidence present but unreadable) so admission abstains rather
+/// than pretending the calibration is fresh.
+fn resource_host_calibration_from_brief(value: &str) -> ResourceHostCalibrationPosture {
+    match value {
+        "fresh" => ResourceHostCalibrationPosture::Fresh,
+        "stale" => ResourceHostCalibrationPosture::Stale,
+        "partial" => ResourceHostCalibrationPosture::Partial,
+        "synthetic_only" => ResourceHostCalibrationPosture::SyntheticOnly,
+        "contradictory" => ResourceHostCalibrationPosture::Contradictory,
+        "missing" => ResourceHostCalibrationPosture::Missing,
+        _ => ResourceHostCalibrationPosture::Unavailable,
+    }
+}
+
+/// Derive the bounded host-profile admission posture from the brief's
+/// host-profile summary. The summary itself stays out of the admission input;
+/// only the deterministic profile/calibration mapping is threaded through.
+fn work_packet_host_profile_admission(
+    host_profile: Option<&SwarmBriefHostProfileSummary>,
+) -> SwarmWorkPacketHostProfileAdmission {
+    let Some(profile) = host_profile else {
+        return SwarmWorkPacketHostProfileAdmission::missing();
+    };
+    let host_calibration = resource_host_calibration_from_brief(&profile.calibration_freshness);
+    match resource_operating_profile_from_brief(&profile.recommended_profile) {
+        Some(operating_profile) => SwarmWorkPacketHostProfileAdmission {
+            requested_profile: Some(operating_profile),
+            effective_profile: operating_profile,
+            host_calibration,
+        },
+        // Host profile present but the recommended profile is unparseable:
+        // keep the readable calibration evidence but fall back to a neutral
+        // non-swarm effective profile and request nothing.
+        None => SwarmWorkPacketHostProfileAdmission {
+            requested_profile: None,
+            effective_profile: ResourceOperatingProfile::Workstation,
+            host_calibration,
+        },
+    }
 }
 
 fn work_packet_resource_admission_input(
@@ -4637,12 +4738,13 @@ fn work_packet_resource_admission_input(
     rch: &SwarmWorkPacketRchProofPosture,
     degraded: &[SwarmWorkPacketDegradation],
     observed_state_class: &'static str,
+    host_profile_admission: SwarmWorkPacketHostProfileAdmission,
 ) -> ResourceAdmissionInput {
     ResourceAdmissionInput {
-        requested_profile: Some(ResourceOperatingProfile::Workstation),
-        effective_profile: ResourceOperatingProfile::Workstation,
+        requested_profile: host_profile_admission.requested_profile,
+        effective_profile: host_profile_admission.effective_profile,
         estimated_cost_class: work_packet_resource_cost_class(coordination),
-        host_calibration: ResourceHostCalibrationPosture::Fresh,
+        host_calibration: host_profile_admission.host_calibration,
         resource_budget: work_packet_resource_budget(coordination, degraded),
         rch: work_packet_resource_rch_posture(rch),
         local_cargo: work_packet_resource_local_cargo_posture(rch, degraded),
@@ -10360,7 +10462,7 @@ mod tests {
 
     #[test]
     fn work_packet_is_deterministic_read_only_advice_for_safe_candidate() {
-        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let brief = brief_with_host_profile("workstation", "fresh");
         let snapshot = snapshot_with_candidates(vec![candidate(
             "bd-safe",
             "Implement isolated work packet surface",
@@ -10394,7 +10496,7 @@ mod tests {
 
     #[test]
     fn work_packet_resource_admission_waits_for_rch_when_remote_proof_missing() {
-        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let brief = brief_with_host_profile("workstation", "fresh");
         let mut snapshot = snapshot_with_candidates(vec![candidate(
             "bd-safe",
             "Implement isolated work packet surface",
@@ -10464,7 +10566,7 @@ mod tests {
 
     #[test]
     fn work_packet_resource_admission_degrades_to_lean_without_claim_authority() {
-        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let brief = brief_with_host_profile("workstation", "fresh");
         let mut snapshot = snapshot_with_candidates(vec![candidate(
             "bd-safe",
             "Document isolated resource-admission fixture",
@@ -10492,6 +10594,165 @@ mod tests {
         assert_eq!(gate.resource_admission.decision, "degrade_to_lean");
         assert!(!gate.resource_admission.can_authorize_claim);
         assert!(gate.unsafe_reasons.is_empty());
+    }
+
+    #[test]
+    fn work_packet_resource_admission_threads_swarm_host_profile_evidence() {
+        // A swarm-capable, freshly calibrated host must surface through the
+        // admission projection instead of being flattened to workstation/fresh
+        // by hard-coded defaults (bd-cfi8h.1).
+        let brief = brief_with_host_profile("swarm", "fresh");
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Implement isolated work packet surface",
+            "beads_ready",
+            Some(2),
+        )]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let gate = packet.claim_gate(Some("bd-safe"));
+
+        // effectiveProfile/requestedProfile now reflect the host evidence and
+        // are explicitly NOT pinned to workstation.
+        assert_eq!(
+            packet.resource_admission.effective_profile,
+            ResourceOperatingProfile::Swarm.as_str()
+        );
+        assert_ne!(
+            packet.resource_admission.effective_profile,
+            ResourceOperatingProfile::Workstation.as_str()
+        );
+        assert_eq!(
+            packet.resource_admission.requested_profile,
+            Some(ResourceOperatingProfile::Swarm.as_str())
+        );
+        assert_eq!(
+            packet.resource_admission.source_posture.host_calibration,
+            "fresh"
+        );
+        assert_eq!(packet.resource_admission.decision, "admit");
+        assert!(!packet.resource_admission.can_authorize_claim);
+
+        // The claim-gate projection re-derives admission from the same stored
+        // host evidence, so its profile/calibration agree with the packet.
+        assert_eq!(
+            gate.resource_admission.effective_profile,
+            ResourceOperatingProfile::Swarm.as_str()
+        );
+        assert_eq!(
+            gate.resource_admission.source_posture.host_calibration,
+            "fresh"
+        );
+        assert!(!gate.resource_admission.can_authorize_claim);
+    }
+
+    #[test]
+    fn work_packet_resource_admission_keeps_claim_unsafe_under_swarm_host_profile() {
+        // Even the most permissive host evidence (swarm/fresh) must not flip an
+        // unsafe candidate into a claimable one: admission stays advisory.
+        let brief = brief_with_host_profile("swarm", "fresh");
+        let mut snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Implement isolated work packet surface",
+            "beads_ready",
+            Some(2),
+        )]);
+        snapshot.verification.remote_only_required = true;
+        snapshot.verification.remote_only_safe = None;
+        snapshot.compile_health.safe_to_launch_rch = Some(true);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let gate = packet.claim_gate(None);
+
+        assert!(!gate.safe_to_claim);
+        assert!(!gate.resource_admission.can_authorize_claim);
+        assert_eq!(
+            gate.resource_admission.effective_profile,
+            ResourceOperatingProfile::Swarm.as_str()
+        );
+    }
+
+    #[test]
+    fn work_packet_resource_admission_abstains_when_host_profile_missing() {
+        // No host-profile evidence (e.g. an empty/degraded brief) must abstain
+        // with an explicit missing-signal reason rather than pretending the
+        // host is a fresh workstation.
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Implement isolated work packet surface",
+            "beads_ready",
+            Some(2),
+        )]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let gate = packet.claim_gate(Some("bd-safe"));
+
+        assert_eq!(packet.resource_admission.decision, "abstain");
+        assert_eq!(packet.resource_admission.requested_profile, None);
+        assert_eq!(
+            packet.resource_admission.source_posture.host_calibration,
+            "missing"
+        );
+        assert!(
+            packet
+                .resource_admission
+                .reason_codes
+                .iter()
+                .any(|code| code == "host_calibration_missing"),
+            "missing host profile must surface host_calibration_missing, got {:?}",
+            packet.resource_admission.reason_codes
+        );
+        assert!(
+            packet
+                .resource_admission
+                .abstention_reasons
+                .iter()
+                .any(|reason| reason == "missing_required_signal"),
+            "missing host profile must abstain on a missing required signal, got {:?}",
+            packet.resource_admission.abstention_reasons
+        );
+        assert!(!packet.resource_admission.can_authorize_claim);
+        assert_eq!(gate.resource_admission.decision, "abstain");
+        assert!(!gate.resource_admission.can_authorize_claim);
+    }
+
+    #[test]
+    fn work_packet_resource_admission_abstains_on_stale_host_calibration() {
+        // A readable profile with stale calibration keeps the profile mapping
+        // but abstains on a stale source-authority signal.
+        let brief = brief_with_host_profile("workstation", "stale");
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Implement isolated work packet surface",
+            "beads_ready",
+            Some(2),
+        )]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+
+        assert_eq!(packet.resource_admission.decision, "abstain");
+        assert_eq!(
+            packet.resource_admission.effective_profile,
+            ResourceOperatingProfile::Workstation.as_str()
+        );
+        assert_eq!(
+            packet.resource_admission.requested_profile,
+            Some(ResourceOperatingProfile::Workstation.as_str())
+        );
+        assert_eq!(
+            packet.resource_admission.source_posture.host_calibration,
+            "stale"
+        );
+        assert!(
+            packet
+                .resource_admission
+                .abstention_reasons
+                .iter()
+                .any(|reason| reason == "stale_source_authority"),
+            "stale host calibration must abstain on stale_source_authority, got {:?}",
+            packet.resource_admission.abstention_reasons
+        );
     }
 
     #[test]
@@ -13988,6 +14249,43 @@ mod tests {
             },
             degraded: Vec::new(),
         }
+    }
+
+    /// Build a bounded host-profile summary mirroring what `ee swarm brief`
+    /// collects, so resource-admission tests can exercise real profile and
+    /// calibration evidence instead of the absent-evidence conservative path.
+    fn host_profile_summary(
+        recommended_profile: &str,
+        calibration_freshness: &str,
+    ) -> SwarmBriefHostProfileSummary {
+        SwarmBriefHostProfileSummary {
+            recommended_profile: recommended_profile.to_owned(),
+            confidence: "high".to_owned(),
+            host_class: recommended_profile.to_owned(),
+            calibration_freshness: calibration_freshness.to_owned(),
+            target_dir_posture: "internal".to_owned(),
+            topology_warnings: Vec::new(),
+            repair_action_kinds: Vec::new(),
+            budget_delta_count: 0,
+            logical_cores: Some(32),
+            memory_total_bytes: Some(256 * 1024 * 1024 * 1024),
+            memory_available_bytes: Some(200 * 1024 * 1024 * 1024),
+            rch_hint_configured: true,
+        }
+    }
+
+    /// Empty brief carrying a fresh host-profile summary so the work-packet
+    /// admission projection sees concrete profile/calibration evidence.
+    fn brief_with_host_profile(
+        recommended_profile: &str,
+        calibration_freshness: &str,
+    ) -> SwarmBriefReport {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.host_profile = Some(host_profile_summary(
+            recommended_profile,
+            calibration_freshness,
+        ));
+        brief
     }
 
     struct FailedDoctorJsonRunner {
