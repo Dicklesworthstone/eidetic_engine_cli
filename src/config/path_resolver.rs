@@ -110,8 +110,8 @@ fn non_empty_env_path(env: &BTreeMap<String, OsString>, variable: &str) -> Optio
 #[cfg(test)]
 mod tests {
     use super::{
-        UNIX_XDG_DATA_UNAVAILABLE_CODE, WINDOWS_APPDATA_UNAVAILABLE_CODE, resolve_dir_unix_xdg,
-        resolve_dir_windows_appdata, resolve_dir_windows_localappdata,
+        resolve_dir_unix_xdg, resolve_dir_windows_appdata, resolve_dir_windows_localappdata,
+        UNIX_XDG_DATA_UNAVAILABLE_CODE, WINDOWS_APPDATA_UNAVAILABLE_CODE,
     };
     use std::collections::BTreeMap;
     use std::ffi::OsString;

@@ -2200,7 +2200,10 @@ fn workspace_row_for_path(raw: &str) -> Result<StoredWorkspace, DomainError> {
     if !marker.is_dir() {
         return Err(DomainError::Configuration {
             message: format!("workspace is not initialized: {}", root.display()),
-            repair: Some(format!("ee init --workspace {}", root.display())),
+            repair: Some(format!(
+                "ee init --workspace {}",
+                shell_quote_path_arg(&root)
+            )),
         });
     }
     let canonical = canonical_or_lexical(&root);
@@ -2217,6 +2220,37 @@ fn workspace_row_for_path(raw: &str) -> Result<StoredWorkspace, DomainError> {
         created_at: String::new(),
         updated_at: String::new(),
     })
+}
+
+fn shell_quote_path_arg(path: &Path) -> String {
+    let path_text = path.to_string_lossy();
+    shell_quote_command_arg(path_text.as_ref())
+}
+
+fn shell_quote_command_arg(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    if value.bytes().all(|byte| {
+        matches!(
+            byte,
+            b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'_'
+                | b'-'
+                | b'.'
+                | b'/'
+                | b':'
+                | b'@'
+                | b'+'
+                | b'='
+        )
+    }) {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn workspace_scope_fields(scope: &WorkspaceScope) -> WorkspaceScopeFields {
@@ -2952,6 +2986,25 @@ mod tests {
             stable_workspace_id_seeded(Path::new("/tmp/ee-other-workspace"), &mut other_path)
         );
         assert!(first.starts_with("wsp_"));
+    }
+
+    #[test]
+    fn workspace_row_for_uninitialized_path_quotes_init_repair() -> TestResult {
+        let workspace = unique_dir("ee workspace needs-init's")?;
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+
+        let error = workspace_row_for_path(&workspace.display().to_string())
+            .expect_err("workspace without .ee marker must fail");
+
+        assert_eq!(
+            error.repair().as_deref(),
+            Some(format!(
+                "ee init --workspace '{}'",
+                workspace.display().to_string().replace('\'', "'\\''")
+            ))
+            .as_deref()
+        );
+        Ok(())
     }
 
     #[test]

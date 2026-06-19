@@ -32,7 +32,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use super::env_registry::{EnvVar, read_os as read_env_var_os};
+use super::env_registry::{read_os as read_env_var_os, EnvVar};
 use serde::{Deserialize, Serialize};
 
 use super::PathExpander;
@@ -1343,10 +1343,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        WORKSPACE_ENV_VAR, WORKSPACE_MARKER, WorkspaceError, WorkspaceLocation,
+        detect_git_worktree, discover, discover_from_current_dir, installation_salt_path_from_env,
+        resolve_workspace, workspace_scope_from_repository_root, WorkspaceError, WorkspaceLocation,
         WorkspaceResolutionMode, WorkspaceResolutionRequest, WorkspaceResolutionSource,
-        WorkspaceScopeKind, detect_git_worktree, discover, discover_from_current_dir,
-        installation_salt_path_from_env, resolve_workspace, workspace_scope_from_repository_root,
+        WorkspaceScopeKind, WORKSPACE_ENV_VAR, WORKSPACE_MARKER,
     };
 
     type TestResult = Result<(), String>;
@@ -1887,8 +1887,9 @@ mod tests {
     // --- Canonicalization tests (EE-PRIV-WS-001) ---
 
     use super::{
-        CanonicalizationError, PlatformCaseHandling, SymlinkPolicy, canonicalize_workspace_path,
-        create_installation_salt, rand_salt, read_existing_installation_salt,
+        canonicalize_workspace_path, create_installation_salt, rand_salt,
+        read_existing_installation_salt, CanonicalizationError, PlatformCaseHandling,
+        SymlinkPolicy,
     };
 
     #[test]
