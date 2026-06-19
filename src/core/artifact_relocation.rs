@@ -918,33 +918,22 @@ fn reject_symlink(path: &Path) -> Result<(), DomainError> {
 }
 
 fn reject_existing_symlink_component(path: &Path) -> Result<(), DomainError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(DomainError::PolicyDenied {
-                    message: format!(
-                        "Refusing artifact relocation path with symlink component: {}.",
-                        current.display()
-                    ),
-                    repair: Some(
-                        "Use a path whose existing parent components are regular directories."
-                            .to_owned(),
-                    ),
-                });
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(DomainError::Storage {
-                    message: format!("failed to inspect {}: {error}", current.display()),
-                    repair: Some("Check file permissions.".to_owned()),
-                });
-            }
-        }
+    match super::path_safety::first_existing_symlink_component(path) {
+        Ok(Some(symlink_path)) => Err(DomainError::PolicyDenied {
+            message: format!(
+                "Refusing artifact relocation path with symlink component: {}.",
+                symlink_path.display()
+            ),
+            repair: Some(
+                "Use a path whose existing parent components are regular directories.".to_owned(),
+            ),
+        }),
+        Ok(None) => Ok(()),
+        Err(error) => Err(DomainError::Storage {
+            message: format!("failed to inspect {}: {error}", path.display()),
+            repair: Some("Check file permissions.".to_owned()),
+        }),
     }
-    Ok(())
 }
 
 fn hash_file(path: &Path) -> Result<String, DomainError> {
@@ -1323,6 +1312,39 @@ mod tests {
             return Err("manifest entry missing blake3".to_owned());
         }
         Ok(())
+    }
+
+    #[test]
+    fn relocation_plan_accepts_canonical_absolute_artifact_source() -> TestResult {
+        let workspace = temp_path("canonical-plan-workspace");
+        let source = workspace.join("target/debug/canonical.o");
+        fs::create_dir_all(parent_dir(&source)?).map_err(|error| error.to_string())?;
+        fs::write(&source, "artifact bytes\n").map_err(|error| error.to_string())?;
+        let canonical_workspace =
+            fs::canonicalize(&workspace).map_err(|error| error.to_string())?;
+        let canonical_source = fs::canonicalize(&source).map_err(|error| error.to_string())?;
+        let destination = temp_path("canonical-plan-destination");
+        let manifest = temp_path("canonical-plan-manifest").join("relocation.json");
+
+        let report = relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &canonical_workspace,
+            source_path: Some(&canonical_source),
+            destination_root: Some(&destination),
+            manifest_path: &manifest,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Plan,
+            force_with_explicit_path: false,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            !report.applied,
+            "plan mode should not apply artifact relocation",
+        )?;
+        ensure(
+            report.manifest.entries.len() == 1,
+            "canonical source should produce one relocation entry",
+        )
     }
 
     #[cfg(unix)]

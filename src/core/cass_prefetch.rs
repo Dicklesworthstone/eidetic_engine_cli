@@ -1129,11 +1129,13 @@ impl CassPrefetchMetrics {
     /// the two should check `attempts()` directly).
     #[must_use]
     pub fn hit_rate(&self) -> f64 {
-        let attempts = self.attempts();
-        if attempts == 0 {
+        let hits = self.hits as f64;
+        let misses = self.misses as f64;
+        let attempts = hits + misses;
+        if attempts == 0.0 || !attempts.is_finite() {
             0.0
         } else {
-            (self.hits as f64) / (attempts as f64)
+            (hits / attempts).clamp(0.0, 1.0)
         }
     }
 
@@ -1428,6 +1430,10 @@ mod tests {
         metrics.misses = u64::MAX;
         // attempts() must saturate, not panic.
         assert_eq!(metrics.attempts(), u64::MAX);
+        assert!(
+            (metrics.hit_rate() - 0.5).abs() < 1e-12,
+            "hit_rate should not use the saturated attempts denominator"
+        );
     }
 
     #[test]

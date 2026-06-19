@@ -782,6 +782,7 @@ fn resolve_bridge_file(
 }
 
 fn read_bridge_file(path: &Path, display_path: &str) -> Result<Option<String>, DomainError> {
+    reject_bridge_symlink_component(path, display_path)?;
     if !path.exists() {
         return Ok(None);
     }
@@ -792,12 +793,39 @@ fn read_bridge_file(path: &Path, display_path: &str) -> Result<Option<String>, D
 
 fn write_bridge_file(path: &Path, content: &str, display_path: &str) -> Result<(), DomainError> {
     if let Some(parent) = path.parent() {
+        reject_bridge_symlink_component(parent, display_path)?;
         std::fs::create_dir_all(parent).map_err(|error| {
             storage_error(&format!("Failed to create parent of {display_path}"), error)
         })?;
+        reject_bridge_symlink_component(parent, display_path)?;
     }
+    reject_bridge_symlink_component(path, display_path)?;
     std::fs::write(path, content)
         .map_err(|error| storage_error(&format!("Failed to write {display_path}"), error))
+}
+
+fn reject_bridge_symlink_component(path: &Path, display_path: &str) -> Result<(), DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(invalid_bridge_file_path(
+                    Path::new(display_path),
+                    "path traverses an existing symlinked component",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(storage_error(
+                    &format!("Failed to inspect {display_path} for symlink components"),
+                    error,
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn assemble_bridge_primer(
@@ -2036,6 +2064,54 @@ The deploy job MUST wait for the smoke suite to finish.
                 "{invalid:?} must not resolve as an agentsmd bridge file"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_file_io_rejects_symlinked_components() -> Result<(), String> {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "ee-agentsmd-symlink-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace)
+            .map_err(|error| format!("failed to create workspace: {error}"))?;
+        std::fs::create_dir_all(&outside)
+            .map_err(|error| format!("failed to create outside dir: {error}"))?;
+        let outside_file = outside.join("AGENTS.md");
+        std::fs::write(&outside_file, "outside original")
+            .map_err(|error| format!("failed to seed outside file: {error}"))?;
+        symlink(&outside, workspace.join("linked"))
+            .map_err(|error| format!("failed to create symlink: {error}"))?;
+
+        let bridge_path = workspace.join("linked").join("AGENTS.md");
+        let display_path = "linked/AGENTS.md";
+        let read_error = read_bridge_file(&bridge_path, display_path)
+            .expect_err("read must reject a symlinked bridge path");
+        assert!(
+            read_error.message().contains("symlinked component"),
+            "unexpected read error: {}",
+            read_error.message()
+        );
+
+        let write_error = write_bridge_file(&bridge_path, "rewritten", display_path)
+            .expect_err("write must reject a symlinked bridge path");
+        assert!(
+            write_error.message().contains("symlinked component"),
+            "unexpected write error: {}",
+            write_error.message()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside_file)
+                .map_err(|error| format!("failed to read outside file: {error}"))?,
+            "outside original",
+            "agentsmd bridge IO must not write through symlinked workspace paths"
+        );
+        Ok(())
     }
 
     #[test]

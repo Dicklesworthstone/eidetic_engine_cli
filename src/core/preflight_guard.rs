@@ -1736,10 +1736,52 @@ fn git_clean_segment_is_destructive(segment: &[String]) -> bool {
     {
         return false;
     }
-    segment
-        .iter()
-        .skip(subcommand_index + 1)
-        .any(|word| git_clean_option_has_force(word))
+    git_clean_args_are_destructive(&segment[subcommand_index + 1..])
+}
+
+fn git_clean_args_are_destructive(args: &[String]) -> bool {
+    let mut has_force = false;
+    let mut dry_run = false;
+    let mut index = 0;
+
+    while index < args.len() {
+        let word = args[index].as_str();
+        if word == "--" {
+            break;
+        }
+        if git_clean_option_takes_value(word) {
+            index += 2;
+            continue;
+        }
+        if git_clean_option_is_value_form(word) {
+            index += 1;
+            continue;
+        }
+        if git_clean_option_has_dry_run(word) {
+            dry_run = true;
+        }
+        if git_clean_option_has_force(word) {
+            has_force = true;
+        }
+        index += 1;
+    }
+
+    has_force && !dry_run
+}
+
+fn git_clean_option_takes_value(word: &str) -> bool {
+    matches!(word, "-e" | "--exclude")
+}
+
+fn git_clean_option_is_value_form(word: &str) -> bool {
+    word.starts_with("--exclude=") || (word.starts_with("-e") && word.len() > 2)
+}
+
+fn git_clean_option_has_dry_run(word: &str) -> bool {
+    if word == "--dry-run" || word.starts_with("--dry-run=") {
+        return true;
+    }
+    word.starts_with('-') && !word.starts_with("--") && word.chars().skip(1).any(|ch| ch == 'n')
 }
 
 fn git_clean_option_has_force(word: &str) -> bool {
@@ -3817,6 +3859,7 @@ action = "explode"
             "git clean -fd",
             "git clean -xdf",
             "git clean -f untracked.rs",
+            "git clean --exclude '-n' --force",
             "git worktree add ../parallel main",
             "git -C . worktree add ../parallel main",
             "git stash push -m savepoint",
@@ -3871,7 +3914,14 @@ action = "explode"
     fn builtin_git_clean_allows_dry_run_only() {
         let registry = PreflightGuardRegistry::with_builtins();
 
-        for command in ["git clean -nd", "git clean --dry-run -d"] {
+        for command in [
+            "git clean -nd",
+            "git clean --dry-run -d",
+            "git clean -nfd",
+            "git clean -fdn",
+            "git clean --dry-run --force -d",
+            "git clean --force --dry-run -d",
+        ] {
             let report = run_preflight_guard(&registry, &opts(command));
             assert_eq!(report.exit_code, 0, "command `{command}` should pass");
             assert!(

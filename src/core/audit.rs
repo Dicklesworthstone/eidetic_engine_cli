@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
@@ -266,7 +266,7 @@ impl AuditVerifyReport {
 /// List persisted operations in chronological order.
 pub fn list_timeline(options: &AuditTimelineOptions) -> Result<AuditTimelineReport, DomainError> {
     let entries = load_entries(&options.workspace, options.database_path.as_deref())?;
-    let since = parse_optional_instant(options.since.as_deref(), "since")?;
+    let since = parse_optional_since_bound(options.since.as_deref(), Utc::now())?;
     let filtered = filter_entries(
         entries,
         since,
@@ -300,7 +300,7 @@ pub fn list_timeline(options: &AuditTimelineOptions) -> Result<AuditTimelineRepo
 pub fn list_sharded_timeline(
     options: &ShardedAuditTimelineOptions,
 ) -> Result<AuditTimelineReport, DomainError> {
-    let since = parse_optional_instant(options.since.as_deref(), "since")?;
+    let since = parse_optional_since_bound(options.since.as_deref(), Utc::now())?;
     let mut entries = sharded_entries(options.shards.as_slice());
     sort_sharded_entries_chronological(&mut entries);
     let filtered = filter_sharded_entries(
@@ -1041,6 +1041,38 @@ fn parse_optional_instant(
         .transpose()
 }
 
+fn parse_optional_since_bound(
+    value: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, DomainError> {
+    value.map(|raw| parse_since_bound(raw, now)).transpose()
+}
+
+fn parse_since_bound(value: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, DomainError> {
+    let trimmed = value.trim();
+    match DateTime::parse_from_rfc3339(trimmed) {
+        Ok(timestamp) => Ok(timestamp.with_timezone(&Utc)),
+        Err(timestamp_error) => {
+            let duration = parse_since_duration(trimmed).map_err(|duration_message| {
+                DomainError::Usage {
+                    message: format!(
+                        "since must be an RFC 3339 timestamp or relative duration: {timestamp_error}; {duration_message}"
+                    ),
+                    repair: Some(
+                        "Use timestamps such as 2026-05-01T00:00:00Z or durations such as 7d, 24h, or 7d3h."
+                            .to_owned(),
+                    ),
+                }
+            })?;
+            now.checked_sub_signed(duration)
+                .ok_or_else(|| DomainError::Usage {
+                    message: "since duration is too large".to_owned(),
+                    repair: Some("Use a smaller duration such as 7d or 24h.".to_owned()),
+                })
+        }
+    }
+}
+
 fn parse_required_instant(value: &str, field: &str) -> Result<DateTime<Utc>, DomainError> {
     DateTime::parse_from_rfc3339(value)
         .map(|timestamp| timestamp.with_timezone(&Utc))
@@ -1048,6 +1080,83 @@ fn parse_required_instant(value: &str, field: &str) -> Result<DateTime<Utc>, Dom
             message: format!("{field} must be an RFC 3339 timestamp: {error}"),
             repair: Some("Use timestamps such as 2026-05-01T00:00:00Z.".to_owned()),
         })
+}
+
+fn parse_since_duration(value: &str) -> Result<Duration, &'static str> {
+    let trimmed = value.trim();
+    let trimmed = trimmed.strip_prefix('+').unwrap_or(trimmed);
+    if trimmed.is_empty() {
+        return Err("duration must not be empty");
+    }
+
+    let bytes = trimmed.as_bytes();
+    let mut index = 0_usize;
+    let mut total_seconds = 0_u64;
+    while index < bytes.len() {
+        while byte_at(bytes, index).is_some_and(|byte| byte.is_ascii_whitespace()) {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            break;
+        }
+
+        let number_start = index;
+        while byte_at(bytes, index).is_some_and(|byte| byte.is_ascii_digit()) {
+            index += 1;
+        }
+        if number_start == index {
+            return Err("expected a positive number");
+        }
+        let amount: u64 = trimmed
+            .get(number_start..index)
+            .ok_or("invalid duration number")?
+            .parse()
+            .map_err(|_| "duration number is too large")?;
+
+        while byte_at(bytes, index).is_some_and(|byte| byte.is_ascii_whitespace()) {
+            index += 1;
+        }
+        let unit_start = index;
+        while byte_at(bytes, index).is_some_and(|byte| byte.is_ascii_alphabetic()) {
+            index += 1;
+        }
+        if unit_start == index {
+            return Err("missing duration unit");
+        }
+        let unit = trimmed
+            .get(unit_start..index)
+            .ok_or("invalid duration unit")?
+            .to_ascii_lowercase();
+        let multiplier = since_unit_seconds(&unit).ok_or("unsupported duration unit")?;
+        let seconds = amount
+            .checked_mul(multiplier)
+            .ok_or("duration is too large")?;
+        total_seconds = total_seconds
+            .checked_add(seconds)
+            .ok_or("duration is too large")?;
+    }
+
+    if total_seconds == 0 {
+        return Err("duration must be greater than zero");
+    }
+
+    let total_seconds = i64::try_from(total_seconds).map_err(|_| "duration is too large")?;
+    Duration::try_seconds(total_seconds).ok_or("duration is too large")
+}
+
+fn byte_at(bytes: &[u8], index: usize) -> Option<u8> {
+    bytes.get(index).copied()
+}
+
+fn since_unit_seconds(unit: &str) -> Option<u64> {
+    match unit {
+        "s" | "sec" | "secs" | "second" | "seconds" => Some(1),
+        "m" | "min" | "mins" | "minute" | "minutes" => Some(60),
+        "h" | "hr" | "hrs" | "hour" | "hours" => Some(60 * 60),
+        "d" | "day" | "days" => Some(24 * 60 * 60),
+        "w" | "week" | "weeks" => Some(7 * 24 * 60 * 60),
+        _ => None,
+    }
 }
 
 fn storage_error(context: &str, error: crate::db::DbError) -> DomainError {
@@ -1144,6 +1253,43 @@ mod tests {
             .map(|entry| entry.id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec![lower, higher, later]);
+    }
+
+    #[test]
+    fn audit_since_accepts_rfc3339_or_relative_duration() -> TestResult {
+        let now = DateTime::parse_from_rfc3339("2026-06-19T12:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+
+        let absolute =
+            parse_since_bound("2026-06-18T12:00:00Z", now).map_err(|error| error.message())?;
+        let relative = parse_since_bound("7d3h", now).map_err(|error| error.message())?;
+        let relative_with_plus = parse_since_bound("+24h", now).map_err(|error| error.message())?;
+
+        assert_eq!(absolute.to_rfc3339(), "2026-06-18T12:00:00+00:00");
+        assert_eq!(relative, now - Duration::days(7) - Duration::hours(3));
+        assert_eq!(relative_with_plus, now - Duration::hours(24));
+        Ok(())
+    }
+
+    #[test]
+    fn audit_since_rejects_invalid_relative_duration_with_repair_hint() {
+        let now = DateTime::parse_from_rfc3339("2026-06-19T12:00:00Z")
+            .expect("valid fixture timestamp")
+            .with_timezone(&Utc);
+
+        let error = parse_since_bound("7fortnights", now)
+            .expect_err("unsupported relative duration unit should fail");
+
+        assert!(
+            error.message().contains("relative duration"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            error.repair().is_some_and(|repair| repair.contains("7d3h")),
+            "repair should mention accepted duration examples"
+        );
     }
 
     fn shard_timeline_entry(id: &str, timestamp: &str, workspace_id: &str) -> StoredAuditEntry {

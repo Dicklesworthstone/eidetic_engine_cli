@@ -1634,6 +1634,8 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
         if m.schema != SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1 {
             hash_mismatches.push(MANIFEST_FILE.to_owned());
         }
+        let mut expected_entries = BTreeSet::new();
+        expected_entries.insert(MANIFEST_FILE.to_owned());
         let declared_total_size = m
             .files
             .iter()
@@ -1646,6 +1648,11 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
             hash_mismatches.push(MANIFEST_FILE.to_owned());
         }
         for entry in &m.files {
+            if !expected_entries.insert(entry.path.clone())
+                && !hash_mismatches.contains(&entry.path)
+            {
+                hash_mismatches.push(entry.path.clone());
+            }
             let Ok(file_path) = resolve_bundle_file_no_symlinks(bundle_dir, &entry.path) else {
                 hash_mismatches.push(entry.path.clone());
                 continue;
@@ -1667,6 +1674,20 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
                     hash_mismatches.push(entry.path.clone());
                 }
             }
+        }
+        if let Ok(entries) = fs::read_dir(bundle_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().replace('\\', "/");
+                if !expected_entries.contains(&name) && !hash_mismatches.contains(&name) {
+                    files_found.push(name.clone());
+                    hash_mismatches.push(name);
+                }
+            }
+        } else if !hash_mismatches
+            .iter()
+            .any(|mismatch| mismatch.as_str() == MANIFEST_FILE)
+        {
+            hash_mismatches.push(MANIFEST_FILE.to_owned());
         }
     } else if options.bundle_path.is_dir() {
         if let Ok(entries) = fs::read_dir(bundle_dir) {
@@ -9931,6 +9952,71 @@ mod tests {
                 .iter()
                 .any(|mismatch| mismatch.as_str() == STATUS_FILE),
             "entry size mismatch should be reported as an integrity mismatch"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_bundle_marks_unmanifested_member_invalid() -> TestResult {
+        let root = unique_test_path("inspect-unmanifested-member");
+        let bundle_dir = root.join("bundle");
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+        let payload = "{}";
+        let unexpected_name = "raw-secret.txt";
+        fs::write(bundle_dir.join(STATUS_FILE), payload)
+            .map_err(|error| format!("failed to write manifest member: {error}"))?;
+        fs::write(
+            bundle_dir.join(unexpected_name),
+            "unmanifested support bundle content",
+        )
+        .map_err(|error| format!("failed to write unmanifested member: {error}"))?;
+
+        let manifest = BundleManifest {
+            schema: SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1.to_owned(),
+            bundle_id: "test-bundle".to_owned(),
+            created_at: "2026-05-16T00:00:00Z".to_owned(),
+            workspace_path: "redacted-workspace".to_owned(),
+            ee_version: "test".to_owned(),
+            files: vec![ManifestEntry {
+                path: STATUS_FILE.to_owned(),
+                size_bytes: payload.len() as u64,
+                content_hash: compute_hash(payload),
+                redacted: true,
+            }],
+            total_size_bytes: payload.len() as u64,
+            redaction_applied: true,
+            redaction_reasons: vec![],
+        };
+        fs::write(
+            bundle_dir.join(MANIFEST_FILE),
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("failed to write manifest: {error}"))?;
+
+        let report = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir,
+            verify_hashes: true,
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(
+            !report.valid,
+            "unmanifested bundle members must invalidate support bundle inspection"
+        );
+        assert!(
+            report
+                .hash_mismatches
+                .iter()
+                .any(|mismatch| mismatch == unexpected_name),
+            "unmanifested member should be reported as an integrity mismatch"
+        );
+        assert!(
+            report
+                .files_found
+                .iter()
+                .any(|found| found == unexpected_name),
+            "files_found should surface the unexpected observed member"
         );
         Ok(())
     }

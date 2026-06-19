@@ -156,7 +156,10 @@ pub fn summarize_git_ahead_with_log_state(
         }
     };
 
-    if ahead_count > 0 && commits.len() != ahead_count {
+    let log_count_comparable = ahead_count > 0
+        && branch.upstream_ref.is_some()
+        && matches!(log_state, GitAheadLogState::Available(_));
+    if log_count_comparable && commits.len() != ahead_count {
         degraded.push(degradation(
             GIT_AHEAD_LOG_COUNT_MISMATCH_CODE,
             "Git ahead count did not match the parsed ahead-commit list.",
@@ -482,6 +485,12 @@ mod tests {
                 .iter()
                 .any(|entry| entry.code == GIT_AHEAD_LOG_UNAVAILABLE_CODE)
         );
+        assert!(
+            snapshot
+                .degraded
+                .iter()
+                .all(|entry| entry.code != GIT_AHEAD_LOG_COUNT_MISMATCH_CODE)
+        );
     }
 
     #[test]
@@ -503,6 +512,12 @@ mod tests {
                 .iter()
                 .all(|entry| entry.code != GIT_AHEAD_LOG_FAILED_CODE)
         );
+        assert!(
+            snapshot
+                .degraded
+                .iter()
+                .all(|entry| entry.code != GIT_AHEAD_LOG_COUNT_MISMATCH_CODE)
+        );
     }
 
     #[test]
@@ -523,6 +538,29 @@ mod tests {
                 .degraded
                 .iter()
                 .all(|entry| entry.code != GIT_AHEAD_LOG_TIMEOUT_CODE)
+        );
+        assert!(
+            snapshot
+                .degraded
+                .iter()
+                .all(|entry| entry.code != GIT_AHEAD_LOG_COUNT_MISMATCH_CODE)
+        );
+    }
+
+    #[test]
+    fn available_log_count_mismatch_still_degrades() {
+        let snapshot = summarize_git_ahead(
+            &clean_status(2),
+            Some("1111111111111111\x1fCodex\x1ffix: parser (bd-2gc7r.1)\n"),
+        );
+
+        assert!(snapshot.ambiguous_ahead);
+        assert!(snapshot.peer_owned_ahead_risk);
+        assert!(
+            snapshot
+                .degraded
+                .iter()
+                .any(|entry| entry.code == GIT_AHEAD_LOG_COUNT_MISMATCH_CODE)
         );
     }
 

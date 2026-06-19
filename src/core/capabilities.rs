@@ -380,7 +380,23 @@ impl CapabilitiesReport {
         unimplemented.sort_by(|left, right| left.code.cmp(right.code));
 
         let commands = vec![
+            CommandEntry::new(
+                "agent",
+                true,
+                "Detect and manage coding agent installations",
+            ),
+            CommandEntry::new(
+                "agent-docs",
+                true,
+                "Agent-oriented documentation for commands and contracts",
+            ),
+            CommandEntry::new(
+                "ask",
+                true,
+                "Answer direct questions from stored memories with citations",
+            ),
             CommandEntry::new("attest", true, "Emit local provenance attestation bundles"),
+            CommandEntry::new("backup", true, "Create, verify, and inspect local backups"),
             CommandEntry::new(
                 "bootstrap",
                 true,
@@ -398,15 +414,23 @@ impl CapabilitiesReport {
             ),
             CommandEntry::new("capabilities", true, "Report feature availability"),
             CommandEntry::new("check", true, "Quick posture summary"),
+            CommandEntry::new("context", true, "Context packing"),
+            CommandEntry::new("curate", true, "Rule curation"),
+            CommandEntry::new("db", true, "Inspect database state without mutation"),
             CommandEntry::new("doctor", true, "Health checks"),
             CommandEntry::new("eval", true, "Evaluation scenarios"),
+            CommandEntry::new("export", true, "Export redacted memory records"),
+            CommandEntry::new("health", true, "Run workspace and subsystem health checks"),
             CommandEntry::new("help", true, "Command help"),
+            CommandEntry::new("hook", true, "Generate agent-harness hook helpers"),
             CommandEntry::new(
                 "impact",
                 true,
                 "Find memories attached to a path or typed surface",
             ),
             CommandEntry::new("import", true, "Import from external sources"),
+            CommandEntry::new("init", true, "Workspace initialization"),
+            CommandEntry::new("index", true, "Search index management"),
             CommandEntry::new("lens", true, "Inspect named task lens policy overlays"),
             CommandEntry::new("lens list", true, "List built-in and workspace task lenses"),
             CommandEntry::new(
@@ -414,13 +438,15 @@ impl CapabilitiesReport {
                 true,
                 "Show a task lens effective policy, version, and hash",
             ),
-            CommandEntry::new("remember", true, "Store memories"),
-            CommandEntry::new("rule", true, "Manage procedural rules"),
-            CommandEntry::new("schema", true, "Schema registry"),
-            CommandEntry::new("status", true, "Subsystem readiness"),
-            CommandEntry::new("version", true, "Version info"),
-            CommandEntry::new("context", true, "Context packing"),
+            CommandEntry::new("mcp", true, "Inspect the optional MCP adapter manifest"),
+            CommandEntry::new("memory", true, "Manage stored memories"),
+            CommandEntry::new(
+                "migrate",
+                true,
+                "Inspect or apply workspace schema migrations",
+            ),
             CommandEntry::new("orient", true, "Agent orientation bundle"),
+            CommandEntry::new("outcome", true, "Record feedback about memories and packs"),
             CommandEntry::new(
                 "pack",
                 true,
@@ -431,11 +457,44 @@ impl CapabilitiesReport {
                 true,
                 "Apply a named task lens and persist its lens hash in pack records",
             ),
+            CommandEntry::new("preflight", true, "Run, show, or close risk assessments"),
+            CommandEntry::new(
+                "preflight check",
+                true,
+                "Check shell commands against the policy guard",
+            ),
+            CommandEntry::new("primer", true, "Render the cached workspace charter"),
+            CommandEntry::new(
+                "recall",
+                true,
+                "Fetch memories anchored to paths, symbols, or diffs",
+            ),
+            CommandEntry::new("remember", true, "Store memories"),
+            CommandEntry::new("rule", true, "Manage procedural rules"),
+            CommandEntry::new("schema", true, "Schema registry"),
             CommandEntry::new("search", true, "Memory search"),
+            CommandEntry::new("similar", true, "Find memories similar to a seed memory"),
+            CommandEntry::new("status", true, "Subsystem readiness"),
+            CommandEntry::new("support", true, "Create redacted diagnostic bundles"),
+            CommandEntry::new(
+                "swarm",
+                true,
+                "Inspect crowded-checkout coordination posture",
+            ),
+            CommandEntry::new(
+                "swarm brief",
+                true,
+                "Read-only swarm coordination preflight",
+            ),
+            CommandEntry::new("timeline", true, "Reconstruct topic state at a past time"),
+            CommandEntry::new("version", true, "Version info"),
             CommandEntry::new("why", true, "Explainability"),
-            CommandEntry::new("init", true, "Workspace initialization"),
-            CommandEntry::new("index", true, "Search index management"),
-            CommandEntry::new("curate", true, "Rule curation"),
+            CommandEntry::new(
+                "why-not",
+                true,
+                "Explain why a memory was not selected for a task",
+            ),
+            CommandEntry::new("workspace", true, "Resolve and manage workspace identities"),
             CommandEntry::new(
                 "daemon foreground decay_sweep",
                 true,
@@ -653,6 +712,36 @@ mod tests {
             .find(|c| c.name == "capabilities")
             .unwrap_or_else(|| panic!("capabilities command must exist")); // ubs:ignore
         ensure(cmd.available, true, "capabilities command is available")
+    }
+
+    #[test]
+    fn capabilities_report_includes_documented_agent_loop_commands() -> TestResult {
+        let report = CapabilitiesReport::gather();
+        let names = report
+            .commands
+            .iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "ask",
+            "recall",
+            "preflight check",
+            "swarm brief",
+            "outcome",
+            "why-not",
+        ] {
+            let command = report
+                .commands
+                .iter()
+                .find(|command| command.name == expected)
+                .ok_or_else(|| {
+                    format!("documented agent-loop command {expected} missing from {names:?}")
+                })?;
+            ensure(command.available, true, &format!("{expected} is available"))?;
+        }
+
+        Ok(())
     }
 
     #[test]

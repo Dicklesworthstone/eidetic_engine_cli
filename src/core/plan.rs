@@ -1081,7 +1081,7 @@ pub fn generate_plan(options: &PlanGoalOptions) -> GoalPlan {
 
     let mut next_inspection_commands = vec![
         "ee status --json".to_string(),
-        format!("ee plan explain {} --json", plan_id),
+        plan_next_inspection_command(&recipe_id),
     ];
     if let Some(posture) = &task_frame_posture {
         next_inspection_commands.push(format!("ee task-frame show {} --json", posture.frame_id));
@@ -1116,6 +1116,43 @@ pub fn generate_plan(options: &PlanGoalOptions) -> GoalPlan {
         next_inspection_commands,
         rejected_alternatives,
         task_frame_posture,
+    }
+}
+
+fn plan_next_inspection_command(recipe_id: &str) -> String {
+    if recipe_id == "unknown" {
+        "ee plan recipe list --json".to_owned()
+    } else {
+        format!(
+            "ee plan explain {} --json",
+            shell_quote_command_arg(recipe_id)
+        )
+    }
+}
+
+fn shell_quote_command_arg(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    if value.bytes().all(|byte| {
+        matches!(
+            byte,
+            b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'_'
+                | b'-'
+                | b'.'
+                | b'/'
+                | b':'
+                | b'@'
+                | b'+'
+                | b'='
+        )
+    }) {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
@@ -1593,6 +1630,17 @@ mod tests {
         let plan = generate_plan(&options);
         assert_eq!(plan.recipe_id, "init-workspace");
         assert!(!plan.steps.is_empty());
+        assert!(
+            plan.next_inspection_commands
+                .iter()
+                .any(|command| command == "ee plan explain init-workspace --json")
+        );
+        assert!(
+            plan.next_inspection_commands
+                .iter()
+                .all(|command| !command.contains(&plan.plan_id)),
+            "next inspection commands must reference durable recipe IDs, not ephemeral plan IDs"
+        );
     }
 
     #[test]
@@ -1606,6 +1654,11 @@ mod tests {
         let plan = generate_plan(&options);
         assert_eq!(plan.recipe_id, "unknown");
         assert!(plan.classification.ambiguous);
+        assert!(
+            plan.next_inspection_commands
+                .iter()
+                .any(|command| command == "ee plan recipe list --json")
+        );
     }
 
     #[test]

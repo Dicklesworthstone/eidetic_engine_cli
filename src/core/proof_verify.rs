@@ -4,7 +4,8 @@ use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
 use std::time::Instant;
 
 use serde::Serialize;
@@ -27,6 +28,14 @@ pub const PROOF_VIOLATION_DETECTED_CODE: &str = "proof_violation_detected";
 /// `src/core/handoff.rs` (capsule 16 MiB), `src/core/preflight.rs`
 /// (rules 4 MiB), and `src/core/memory.rs` (`.ee/config.toml` 4 MiB).
 const PROOF_ARTIFACT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Maximum retained stdout or stderr bytes for a single proof-tool invocation.
+///
+/// `Command::output()` captures complete child output into memory. Proof tools
+/// can legitimately print a lot on failure, and a malformed local tool wrapper
+/// can print without bound. Keep the public strings useful while bounding
+/// verifier memory and JSON size.
+const PROOF_COMMAND_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -128,14 +137,13 @@ impl ProofCommandRunner for SystemProofCommandRunner {
         if artifact.kind == ProofArtifactKind::Lean4 {
             process.current_dir(artifact.path.parent().unwrap_or_else(|| Path::new(".")));
         }
-        let output = process.output();
-        match output {
+        match run_command_with_limited_output(process, PROOF_COMMAND_OUTPUT_MAX_BYTES) {
             Ok(output) => ProofCommandOutcome {
                 tool_available: true,
                 duration_ms: duration_millis_saturating(started.elapsed()),
                 exit_code: output.status.code(),
-                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                stdout: output.stdout,
+                stderr: output.stderr,
             },
             Err(error) => ProofCommandOutcome {
                 tool_available: false,
@@ -408,6 +416,98 @@ fn tool_is_available(tool: &str) -> bool {
     std::env::split_paths(&paths).any(|dir| dir.join(tool).is_file())
 }
 
+#[derive(Debug)]
+struct LimitedProofCommandOutput {
+    status: ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug)]
+struct LimitedProofPipeCapture {
+    bytes: Vec<u8>,
+    total_bytes: usize,
+}
+
+impl LimitedProofPipeCapture {
+    #[must_use]
+    fn into_string(self, byte_cap: usize) -> String {
+        let total_bytes = self.total_bytes;
+        let retained_bytes = self.bytes.len();
+        let mut output = String::from_utf8(self.bytes)
+            .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned());
+        if total_bytes > retained_bytes {
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(&format!(
+                "[ee proof output truncated after {byte_cap} bytes; total bytes seen: {total_bytes}]"
+            ));
+        }
+        output
+    }
+}
+
+fn run_command_with_limited_output(
+    mut process: Command,
+    output_limit_bytes: usize,
+) -> io::Result<LimitedProofCommandOutput> {
+    let mut child = process
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("failed to capture proof stdout pipe"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("failed to capture proof stderr pipe"))?;
+    let stdout_thread = thread::spawn(move || read_proof_pipe_limited(stdout, output_limit_bytes));
+    let stderr_thread = thread::spawn(move || read_proof_pipe_limited(stderr, output_limit_bytes));
+
+    let status = child.wait()?;
+    let stdout = join_limited_proof_pipe(stdout_thread, "stdout")?.into_string(output_limit_bytes);
+    let stderr = join_limited_proof_pipe(stderr_thread, "stderr")?.into_string(output_limit_bytes);
+
+    Ok(LimitedProofCommandOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn read_proof_pipe_limited<R: Read>(
+    mut reader: R,
+    byte_cap: usize,
+) -> io::Result<LimitedProofPipeCapture> {
+    let mut bytes = Vec::with_capacity(byte_cap.min(8192));
+    let mut total_bytes = 0usize;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        total_bytes = total_bytes.saturating_add(read);
+        let remaining = byte_cap.saturating_sub(bytes.len());
+        if remaining > 0 {
+            bytes.extend_from_slice(&buffer[..read.min(remaining)]);
+        }
+    }
+    Ok(LimitedProofPipeCapture { bytes, total_bytes })
+}
+
+fn join_limited_proof_pipe(
+    reader: thread::JoinHandle<io::Result<LimitedProofPipeCapture>>,
+    stream_name: &str,
+) -> io::Result<LimitedProofPipeCapture> {
+    reader
+        .join()
+        .map_err(|_| io::Error::other(format!("proof {stream_name} reader thread panicked")))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,6 +737,27 @@ mod tests {
         } else {
             Err(format!("unexpected non-regular artifact error: {error}"))
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proof_tool_stdout_and_stderr_are_bounded() -> TestResult {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf abcdef; printf ghijkl >&2"]);
+
+        let output =
+            run_command_with_limited_output(command, 3).map_err(|error| error.to_string())?;
+
+        assert!(output.status.success());
+        assert_eq!(
+            output.stdout,
+            "abc\n[ee proof output truncated after 3 bytes; total bytes seen: 6]"
+        );
+        assert_eq!(
+            output.stderr,
+            "ghi\n[ee proof output truncated after 3 bytes; total bytes seen: 6]"
+        );
+        Ok(())
     }
 
     #[test]

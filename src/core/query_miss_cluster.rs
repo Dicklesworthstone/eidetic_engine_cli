@@ -40,18 +40,43 @@ pub struct KnowledgeGapCandidate {
     pub member_queries: Vec<String>,
 }
 
-/// Order-independent normalized key for a query: lowercased, whitespace-split,
-/// deduplicated, sorted token set. Paraphrases that differ only by word order or
-/// casing collapse to the same key. Empty for blank/whitespace-only queries.
+/// Order-independent normalized key for a query: lowercased, punctuation-split,
+/// stopword-filtered, deduplicated, sorted token set. Paraphrases that differ
+/// only by word order, casing, minor punctuation, or filler words collapse to
+/// the same key. Empty for blank/whitespace-only queries.
 #[must_use]
 pub fn query_cluster_key(query: &str) -> String {
     let mut tokens: Vec<String> = query
-        .split_whitespace()
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
         .map(str::to_ascii_lowercase)
+        .filter(|token| !is_query_cluster_stopword(token))
         .collect();
     tokens.sort();
     tokens.dedup();
     tokens.join(" ")
+}
+
+fn is_query_cluster_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "a" | "an"
+            | "and"
+            | "are"
+            | "for"
+            | "how"
+            | "i"
+            | "in"
+            | "is"
+            | "of"
+            | "on"
+            | "the"
+            | "to"
+            | "what"
+            | "why"
+            | "with"
+    )
 }
 
 /// Cluster query misses into knowledge-gap candidates (bd-1n0np.6.4).
@@ -194,6 +219,16 @@ mod tests {
         assert_eq!(
             query_cluster_key("Fix flaky Socket timeout"),
             query_cluster_key("socket TIMEOUT flaky fix")
+        );
+        assert_eq!(
+            query_cluster_key("kubernetes pod eviction policy"),
+            query_cluster_key("pod eviction policy for kubernetes"),
+            "filler words should not split equivalent miss demand",
+        );
+        assert_eq!(
+            query_cluster_key("cargo-build failure"),
+            query_cluster_key("cargo build failure"),
+            "minor punctuation should not split equivalent miss demand",
         );
         assert_eq!(query_cluster_key("   "), "");
     }

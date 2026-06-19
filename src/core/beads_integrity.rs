@@ -585,7 +585,7 @@ fn compose_integrity_report_with_metadata(
         inputs.auto_import_enabled,
         inputs.external_changes_pending_import,
         inputs.dirty_issue_count,
-        &merge_artifact_paths,
+        inputs.merge_artifact_paths,
     ));
     let br_reads_authoritative = tracker_authority_state.is_authoritative();
     let safe_repair_candidate = safe_repair_candidate_for_report(
@@ -594,7 +594,7 @@ fn compose_integrity_report_with_metadata(
         inputs.db_record_count,
         db_integrity_ok,
         inputs.dirty_issue_count,
-        &merge_artifact_paths,
+        inputs.merge_artifact_paths,
     );
     let repair_classification = repair_classification_for_report(
         &parse_error,
@@ -603,7 +603,7 @@ fn compose_integrity_report_with_metadata(
         db_integrity_ok,
         inputs.external_changes_pending_import,
         inputs.dirty_issue_count,
-        &merge_artifact_paths,
+        inputs.merge_artifact_paths,
     );
 
     BeadsIntegrityReport {
@@ -1884,6 +1884,35 @@ mod tests {
             &report.merge_artifact_count,
             &(MAX_MERGE_ARTIFACTS as u64 + 4),
             "count reflects the full input, not the truncated list",
+        )
+    }
+
+    #[test]
+    fn merge_artifact_authority_uses_full_untruncated_input() -> TestResult {
+        let mut artifacts = vec!["beads.base.jsonl".to_owned(); MAX_MERGE_ARTIFACTS];
+        artifacts.push(".beads/issues.jsonl.orig".to_owned());
+
+        let report = compose_integrity_report(base_inputs(&artifacts, None));
+
+        ensure_equal(
+            &report.merge_artifact_paths.len(),
+            &MAX_MERGE_ARTIFACTS,
+            "serialized path sample stays bounded",
+        )?;
+        ensure_equal(
+            &report.merge_artifact_count,
+            &(MAX_MERGE_ARTIFACTS as u64 + 1),
+            "count retains the full artifact set",
+        )?;
+        ensure_equal(
+            &report.tracker_authority_state,
+            &BeadsTrackerAuthorityState::MergeArtifacts,
+            "non-benign artifact beyond the retained sample still fails closed",
+        )?;
+        ensure_equal(
+            &report.br_reads_authoritative,
+            &false,
+            "truncated display sample must not make br reads authoritative",
         )
     }
 

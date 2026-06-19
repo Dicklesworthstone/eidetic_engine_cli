@@ -57,6 +57,7 @@ pub struct SingleFlightRun<T> {
     pub value: T,
     pub role: SingleFlightRole,
     pub shared: bool,
+    pub degraded_codes: Vec<&'static str>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -232,7 +233,13 @@ where
         } else {
             self.counters.follower_joins.fetch_add(1, Ordering::SeqCst);
             trace_singleflight_checkpoint(SINGLEFLIGHT_FOLLOWER_JOIN_EVENT, &key_hash, 0, &[]);
-            self.wait_for_leader(&key_hash, &entry, follower_timeout)
+            match self.wait_for_leader(&key_hash, &entry, follower_timeout) {
+                Err(SingleFlightError::FollowerTimeout {
+                    key_hash,
+                    timeout_ms,
+                }) => Self::run_follower_timeout_fallback(&key_hash, timeout_ms, operation),
+                other => other,
+            }
         }
     }
 
@@ -347,6 +354,7 @@ where
                     value,
                     role: SingleFlightRole::Leader,
                     shared: entry.followers.load(Ordering::SeqCst) > 0,
+                    degraded_codes: Vec::new(),
                 })
             }
             Err(message) => {
@@ -454,6 +462,7 @@ where
                         value: value.clone(),
                         role: SingleFlightRole::Follower,
                         shared: true,
+                        degraded_codes: Vec::new(),
                     });
                 }
                 SingleFlightState::Completed(Err(message)) => {
@@ -470,6 +479,29 @@ where
                     });
                 }
             }
+        }
+    }
+
+    fn run_follower_timeout_fallback<F>(
+        key_hash: &str,
+        timeout_ms: u64,
+        operation: F,
+    ) -> Result<SingleFlightRun<T>, SingleFlightError>
+    where
+        F: FnOnce() -> Result<T, String>,
+    {
+        match operation() {
+            Ok(value) => Ok(SingleFlightRun {
+                value,
+                role: SingleFlightRole::Follower,
+                shared: false,
+                degraded_codes: vec![SINGLEFLIGHT_FOLLOWER_TIMEOUT_CODE],
+            }),
+            Err(message) => Err(SingleFlightError::LeaderFailed {
+                key_hash: key_hash.to_owned(),
+                role: SingleFlightRole::Follower,
+                message: format!("follower fallback after {timeout_ms}ms failed: {message}"),
+            }),
         }
     }
 
@@ -793,13 +825,39 @@ where
     key_input.option_pairs = &option_pairs;
     let key = SingleFlightKey::from_input(&key_input);
 
-    input
+    let mut run = input
         .group
-        .run(&key, input.follower_timeout, || Ok(operation()))
+        .run(&key, input.follower_timeout, || Ok(operation()))?;
+    if run
+        .degraded_codes
+        .contains(&SINGLEFLIGHT_FOLLOWER_TIMEOUT_CODE)
+        && !run
+            .value
+            .degraded
+            .iter()
+            .any(|entry| entry.code == SINGLEFLIGHT_FOLLOWER_TIMEOUT_CODE)
+    {
+        run.value
+            .degraded
+            .push(graph_feature_enrichment_timeout_degradation());
+    }
+    Ok(run)
 }
 
 fn stable_f64_option(value: f64) -> String {
     format!("{:016x}", value.to_bits())
+}
+
+fn graph_feature_enrichment_timeout_degradation() -> crate::graph::GraphFeatureEnrichmentDegradation
+{
+    crate::graph::GraphFeatureEnrichmentDegradation {
+        code: SINGLEFLIGHT_FOLLOWER_TIMEOUT_CODE,
+        severity: "medium",
+        message:
+            "Single-flight follower timed out; computed graph feature enrichment independently."
+                .to_owned(),
+        repair: "Retry the read with a longer wait budget.".to_owned(),
+    }
 }
 
 #[derive(Debug)]
@@ -822,14 +880,17 @@ impl BurstOutcome {
         >,
     ) -> Self {
         match outcome {
-            Ok(run) => Self {
-                request_kind,
-                role: Some(run.role),
-                shared: run.shared,
-                result_hash: Some(graph_feature_report_hash(&run.value)),
-                elapsed_ms: duration_ms(elapsed),
-                error_code: None,
-            },
+            Ok(run) => {
+                let error_code = run.degraded_codes.first().copied();
+                Self {
+                    request_kind,
+                    role: Some(run.role),
+                    shared: run.shared,
+                    result_hash: Some(graph_feature_report_hash(&run.value)),
+                    elapsed_ms: duration_ms(elapsed),
+                    error_code,
+                }
+            }
             Err(error) => Self {
                 request_kind,
                 role: None,
@@ -1283,7 +1344,7 @@ mod tests {
     }
 
     #[test]
-    fn follower_timeout_is_structured_and_does_not_cancel_leader() -> TestResult {
+    fn follower_timeout_fails_open_and_does_not_cancel_leader() -> TestResult {
         let group = Arc::new(SingleFlightGroup::new());
         let key = key("slow read");
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1306,14 +1367,19 @@ mod tests {
         leader_started_rx
             .recv_timeout(Duration::from_secs(1))
             .map_err(|error| format!("leader did not start: {error}"))?;
-        let follower_error = match group.run(&key, Duration::from_millis(10), || {
-            Ok("should-not-run".to_owned())
-        }) {
-            Ok(run) => return Err(format!("follower should time out, got {run:?}")),
-            Err(error) => error,
-        };
-        assert_eq!(follower_error.code(), SINGLEFLIGHT_FOLLOWER_TIMEOUT_CODE);
-        assert_eq!(follower_error.severity(), "medium");
+        let follower_run = group
+            .run(&key, Duration::from_millis(10), || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok("follower-fallback".to_owned())
+            })
+            .map_err(|error| format!("follower fallback should succeed: {error:?}"))?;
+        assert_eq!(follower_run.value, "follower-fallback");
+        assert_eq!(follower_run.role, SingleFlightRole::Follower);
+        assert!(!follower_run.shared);
+        assert_eq!(
+            follower_run.degraded_codes,
+            vec![SINGLEFLIGHT_FOLLOWER_TIMEOUT_CODE]
+        );
 
         let leader_run = leader
             .join()
@@ -1321,11 +1387,12 @@ mod tests {
             .map_err(|error| format!("leader failed unexpectedly: {error:?}"))?;
         assert_eq!(leader_run.value, "leader-finished");
         assert_eq!(leader_run.role, SingleFlightRole::Leader);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         let posture = group.posture(SingleFlightSurface::Search, true, Duration::from_millis(10));
         assert_eq!(posture.status, "observed_failures");
         assert_eq!(posture.follower_timeout_count, 1);
         assert_eq!(posture.completed_leader_count, 1);
+        assert_eq!(posture.reused_result_count, 0);
         Ok(())
     }
 
@@ -1560,6 +1627,91 @@ mod tests {
         for report in reports.iter().skip(1) {
             assert_eq!(report, &reports[0]);
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn graph_feature_enrichment_timeout_fallback_returns_degraded_report() -> TestResult {
+        let group = Arc::new(SingleFlightGroup::new());
+        let options = GraphFeatureEnrichmentOptions::default();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let (leader_started_tx, leader_started_rx) = mpsc::channel();
+        let (release_leader_tx, release_leader_rx) = mpsc::channel();
+
+        let leader_group = Arc::clone(&group);
+        let leader_options = options.clone();
+        let leader_executions = Arc::clone(&executions);
+        let leader = thread::spawn(move || {
+            run_graph_feature_enrichment_with_group(
+                GraphFeatureEnrichmentSingleFlightInput {
+                    group: &leader_group,
+                    follower_timeout: Duration::from_secs(2),
+                    workspace_identity: "/workspace/eidetic_engine_cli",
+                    workspace_generation: 12,
+                    graph_generation: Some(7),
+                    source_mode: "graph_snapshot",
+                    options: &leader_options,
+                },
+                || {
+                    leader_executions.fetch_add(1, Ordering::SeqCst);
+                    leader_started_tx.send(()).expect("signal leader start");
+                    release_leader_rx
+                        .recv_timeout(Duration::from_secs(1))
+                        .expect("leader release");
+                    enrich_graph_features(&centrality_report(), &leader_options)
+                },
+            )
+        });
+
+        leader_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|error| format!("leader did not start: {error}"))?;
+        let follower_run = run_graph_feature_enrichment_with_group(
+            GraphFeatureEnrichmentSingleFlightInput {
+                group: &group,
+                follower_timeout: Duration::from_millis(10),
+                workspace_identity: "/workspace/eidetic_engine_cli",
+                workspace_generation: 12,
+                graph_generation: Some(7),
+                source_mode: "graph_snapshot",
+                options: &options,
+            },
+            || {
+                executions.fetch_add(1, Ordering::SeqCst);
+                enrich_graph_features(&centrality_report(), &options)
+            },
+        )
+        .map_err(|error| format!("follower fallback should succeed: {error}"))?;
+
+        assert_eq!(follower_run.role, SingleFlightRole::Follower);
+        assert!(!follower_run.shared);
+        assert_eq!(
+            follower_run.degraded_codes,
+            vec![SINGLEFLIGHT_FOLLOWER_TIMEOUT_CODE]
+        );
+        assert!(
+            follower_run
+                .value
+                .degraded
+                .iter()
+                .any(|entry| entry.code == SINGLEFLIGHT_FOLLOWER_TIMEOUT_CODE),
+            "fallback report should surface the timeout degradation"
+        );
+        assert!(
+            !follower_run.value.features.is_empty(),
+            "fallback report should contain independently computed features"
+        );
+
+        release_leader_tx
+            .send(())
+            .map_err(|error| format!("failed to release leader: {error}"))?;
+        let leader_run = leader
+            .join()
+            .map_err(|_| "leader thread panicked".to_owned())?
+            .map_err(|error| format!("leader failed unexpectedly: {error}"))?;
+        assert_eq!(leader_run.role, SingleFlightRole::Leader);
+        assert_eq!(executions.load(Ordering::SeqCst), 2);
 
         Ok(())
     }

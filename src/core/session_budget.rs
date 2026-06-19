@@ -859,6 +859,7 @@ fn summarize_ledger(path: Option<&Path>) -> BudgetLedgerSummary {
     let mut total_wall_clock_ms: u64 = 0;
     let mut degraded_event_count: u64 = 0;
     let mut most_recent_surface: Option<String> = None;
+    let mut most_recent_recorded_at: Option<DateTime<Utc>> = None;
 
     for row in &rows {
         if let Some(ms) = row
@@ -873,12 +874,24 @@ fn summarize_ledger(path: Option<&Path>) -> BudgetLedgerSummary {
                 degraded_event_count = degraded_event_count.saturating_add(1);
             }
         }
-        if let Some(surface) = row
+        let surface = row
             .get("command")
             .and_then(|c| c.get("surface"))
+            .and_then(Value::as_str);
+        let recorded_at = row
+            .get("recordedAt")
             .and_then(Value::as_str)
-        {
-            most_recent_surface = Some(surface.to_owned());
+            .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+            .map(|timestamp| timestamp.with_timezone(&Utc));
+        if let (Some(surface), Some(recorded_at)) = (surface, recorded_at) {
+            let should_replace = match most_recent_recorded_at {
+                Some(current) => recorded_at >= current,
+                None => true,
+            };
+            if should_replace {
+                most_recent_surface = Some(surface.to_owned());
+                most_recent_recorded_at = Some(recorded_at);
+            }
         }
     }
 
@@ -1273,6 +1286,38 @@ mod tests {
         assert!(
             plan.ledger_summary.total_wall_clock_ms > 0,
             "must sum wall_clock_ms"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_ledger_summary_uses_recorded_at_for_most_recent_surface() -> TestResult {
+        let path = test_ledger_path("plan-ledger-recorded-at");
+        let config = test_config(path.clone(), 10, 30);
+        let base = Utc.with_ymd_and_hms(2026, 6, 14, 12, 0, 0).unwrap();
+
+        let mut newer = observation(2, base + ChronoDuration::seconds(60));
+        newer.command.surface = SessionBudgetCommandSurface::Pack;
+        newer.command.normalized_command = SessionBudgetNormalizedCommand::EePack;
+        let older = observation(1, base);
+
+        let rows = vec![
+            serde_json::to_value(SessionBudgetLedgerRow::from_observation(&config, newer, 0))
+                .map_err(|error| error.to_string())?,
+            serde_json::to_value(SessionBudgetLedgerRow::from_observation(&config, older, 0))
+                .map_err(|error| error.to_string())?,
+        ];
+        write_ledger_rows(&path, &rows).map_err(|error| error.to_string())?;
+
+        let mut input = plan_input_clean();
+        input.ledger_path = Some(path);
+        let plan = plan_cheapest_next_command(&input);
+
+        assert_eq!(plan.ledger_summary.row_count, 2, "must read both rows");
+        assert_eq!(
+            plan.ledger_summary.most_recent_surface.as_deref(),
+            Some("pack"),
+            "mostRecentSurface must use recordedAt, not physical ledger order"
         );
         Ok(())
     }

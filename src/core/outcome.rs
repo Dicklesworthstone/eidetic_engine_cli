@@ -47,7 +47,7 @@ use crate::db::{
     StoredFeedbackEvent, StoredFeedbackQuarantine, UpsertAgentContextProfileInput, audit_actions,
     feedback_scoring, generate_audit_id, generate_audit_id_seeded,
 };
-use crate::models::degradation::HARMFUL_BURST_QUARANTINE_CODE;
+use crate::models::degradation::{HARMFUL_BURST_QUARANTINE_CODE, SPRT_QUARANTINE_CODE};
 use crate::models::{
     AgentContextProfileCounts, DomainError, ProcessExitCode, RecoveryKind, TrustClass,
     VerificationEvidenceRecord,
@@ -664,6 +664,12 @@ impl OutcomeDegradation {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OutcomeQuarantineCause {
+    HarmfulBurst,
+    Sprt,
+}
+
 impl OutcomeRecordReport {
     #[must_use]
     pub fn human_summary(&self) -> String {
@@ -977,15 +983,15 @@ fn record_outcome_inner(
                 options.harmful_burst_window_seconds,
             )
         });
-        let quarantine = burst_quarantine.or(sprt_quarantine);
+        let quarantine = outcome_quarantine_with_cause(burst_quarantine, sprt_quarantine);
         trace_sprt_quarantine("response", 0, &[]);
-        // bd-3qs2i.3.1: dry-run preview also surfaces the harmful_burst_quarantine
-        // degraded entry when the live write WOULD absorb the event, so agents
-        // can branch on the same code in dry-run as in the persisted path.
+        // Dry-run preview surfaces the same degraded code as the persisted
+        // path, but without persisted quarantine candidate IDs.
         let degraded = quarantine
             .as_ref()
-            .map(|q| vec![harmful_burst_quarantine_degradation(q, &[])])
+            .map(|(cause, summary)| vec![outcome_quarantine_degradation(*cause, summary, &[])])
             .unwrap_or_default();
+        let quarantine = quarantine.map(|(_cause, summary)| summary);
         return Ok(OutcomeRecordReport {
             version: env!("CARGO_PKG_VERSION"),
             status: OutcomeRecordStatus::DryRun,
@@ -1074,7 +1080,9 @@ fn record_outcome_inner(
             options.harmful_burst_window_seconds,
         )
     });
-    if let Some(quarantine) = burst_quarantine.or(sprt_quarantine) {
+    if let Some((quarantine_cause, quarantine)) =
+        outcome_quarantine_with_cause(burst_quarantine, sprt_quarantine)
+    {
         let quarantine_id = id_source.next_feedback_quarantine_id();
         let raw_event_hash = raw_feedback_event_hash(&event_id, &feedback_input)?;
         let reason = quarantine.reason.clone();
@@ -1127,11 +1135,6 @@ fn record_outcome_inner(
         }
         let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
         trace_sprt_quarantine("response", 0, &[]);
-        // bd-3qs2i.3.1: surface the harmful_burst_quarantine degraded
-        // entry so agents notice that the event was absorbed by the
-        // burst-rate guard and did NOT update live scoring, without
-        // having to parse `status == Quarantined` and the textual
-        // quarantine reason.
         let final_quarantine = OutcomeQuarantineSummary {
             id: Some(quarantine_id.clone()),
             raw_event_hash: Some(raw_event_hash),
@@ -1143,16 +1146,31 @@ fn record_outcome_inner(
             .as_deref()
             .map(redact_outcome_public_source_ref)
             .unwrap_or_else(|| "unknown".to_owned());
-        tracing::info!(
-            target: "ee::outcome::harmful_burst",
-            source_id = %safe_trace_source_id,
-            observed_rate = final_quarantine.observed_count,
-            configured_cap = final_quarantine.limit,
-            window_seconds = final_quarantine.window_seconds,
-            quarantined_candidate_id = final_quarantine.id.as_deref(),
-            "harmful burst quarantined"
-        );
-        let degraded = vec![harmful_burst_quarantine_degradation(
+        match quarantine_cause {
+            OutcomeQuarantineCause::HarmfulBurst => {
+                tracing::info!(
+                    target: "ee::outcome::harmful_burst",
+                    source_id = %safe_trace_source_id,
+                    observed_rate = final_quarantine.observed_count,
+                    configured_cap = final_quarantine.limit,
+                    window_seconds = final_quarantine.window_seconds,
+                    quarantined_candidate_id = final_quarantine.id.as_deref(),
+                    "harmful burst quarantined"
+                );
+            }
+            OutcomeQuarantineCause::Sprt => {
+                tracing::info!(
+                    target: "ee::outcome::sprt_quarantine",
+                    source_id = %safe_trace_source_id,
+                    classified_event_count = final_quarantine.observed_count,
+                    window_seconds = final_quarantine.window_seconds,
+                    quarantined_candidate_id = final_quarantine.id.as_deref(),
+                    "SPRT outcome quarantined"
+                );
+            }
+        }
+        let degraded = vec![outcome_quarantine_degradation(
+            quarantine_cause,
             &final_quarantine,
             &quarantined_candidate_ids,
         )];
@@ -1401,6 +1419,15 @@ fn record_outcome_inner(
         confidence_before,
         confidence_after,
     })
+}
+
+fn outcome_quarantine_with_cause(
+    burst_quarantine: Option<OutcomeQuarantineSummary>,
+    sprt_quarantine: Option<OutcomeQuarantineSummary>,
+) -> Option<(OutcomeQuarantineCause, OutcomeQuarantineSummary)> {
+    burst_quarantine
+        .map(|summary| (OutcomeQuarantineCause::HarmfulBurst, summary))
+        .or_else(|| sprt_quarantine.map(|summary| (OutcomeQuarantineCause::Sprt, summary)))
 }
 
 fn apply_memory_trust_class_transition(
@@ -1768,6 +1795,44 @@ fn harmful_burst_quarantine_degradation(
     }
 }
 
+fn outcome_quarantine_degradation(
+    cause: OutcomeQuarantineCause,
+    summary: &OutcomeQuarantineSummary,
+    quarantined_candidate_ids: &[String],
+) -> OutcomeDegradation {
+    match cause {
+        OutcomeQuarantineCause::HarmfulBurst => {
+            harmful_burst_quarantine_degradation(summary, quarantined_candidate_ids)
+        }
+        OutcomeQuarantineCause::Sprt => {
+            sprt_quarantine_degradation(summary, quarantined_candidate_ids)
+        }
+    }
+}
+
+fn sprt_quarantine_degradation(
+    summary: &OutcomeQuarantineSummary,
+    quarantined_candidate_ids: &[String],
+) -> OutcomeDegradation {
+    let safe_source_id = redacted_outcome_public_source_id(summary.source_id.as_deref());
+    let classified_event_count = summary.observed_count;
+    let details = serde_json::json!({
+        "sourceId": safe_source_id,
+        "classifiedEventCount": classified_event_count,
+        "quarantinedCandidateIds": quarantined_candidate_ids,
+        "reason": redact_outcome_public_source_ref(&summary.reason),
+        "recovery": sprt_quarantine_recovery_actions(),
+    });
+    OutcomeDegradation {
+        code: SPRT_QUARANTINE_CODE.to_string(),
+        severity: "warning".to_string(),
+        message: format!(
+            "SPRT outcome quarantine threshold exceeded after {classified_event_count} classified outcome events; event was quarantined and did NOT update live scoring."
+        ),
+        details: Some(details),
+    }
+}
+
 fn harmful_burst_quarantine_recovery_actions() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -1789,6 +1854,22 @@ fn harmful_burst_quarantine_recovery_actions() -> Vec<serde_json::Value> {
             "flagName": "--harmful-per-source-per-hour",
             "valueHint": "<N>",
             "rationale": "Per-call override of the cap.",
+        }),
+    ]
+}
+
+fn sprt_quarantine_recovery_actions() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "priority": 1,
+            "kind": RecoveryKind::Command.as_str(),
+            "command": "ee outcome quarantine list --status pending --json",
+            "rationale": "Inspect pending feedback quarantine rows before releasing or rejecting the absorbed event.",
+        }),
+        serde_json::json!({
+            "priority": 2,
+            "kind": RecoveryKind::Narrow.as_str(),
+            "rationale": "Use a more specific source-id if unrelated feedback streams are being grouped together.",
         }),
     ]
 }
@@ -3836,11 +3917,11 @@ mod tests {
         DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR, EXIT_CANCELLED, EXIT_PANICKED,
         HARMFUL_BURST_QUARANTINE_CODE, OUTCOME_QUARANTINE_LIST_SCHEMA_V1, OutcomeFeedbackSummary,
         OutcomeQuarantineListReport, OutcomeQuarantineRecord, OutcomeQuarantineSummary,
-        OutcomeRecordOptions, OutcomeRecordReport, OutcomeRecordStatus, default_feedback_weight,
-        feedback_quarantine_audit_details, feedback_quarantine_review_audit_details,
-        generate_feedback_event_id, harmful_burst_quarantine_degradation, outcome_audit_details,
-        outcome_class, outcome_exit_code, record_outcome, record_outcome_seeded,
-        validate_feedback_event_id,
+        OutcomeRecordOptions, OutcomeRecordReport, OutcomeRecordStatus, SPRT_QUARANTINE_CODE,
+        default_feedback_weight, feedback_quarantine_audit_details,
+        feedback_quarantine_review_audit_details, generate_feedback_event_id,
+        harmful_burst_quarantine_degradation, outcome_audit_details, outcome_class,
+        outcome_exit_code, record_outcome, record_outcome_seeded, validate_feedback_event_id,
     };
     use crate::models::{DomainError, ProcessExitCode};
     use crate::runtime::determinism::Deterministic;
@@ -6095,6 +6176,30 @@ mod tests {
             &summary.observed_count,
             &4_u32,
             "SPRT summary counts classified events",
+        )?;
+        let degraded = quarantined
+            .degraded
+            .first()
+            .ok_or_else(|| "SPRT degradation missing".to_string())?;
+        ensure_equal(
+            &degraded.code,
+            &SPRT_QUARANTINE_CODE.to_string(),
+            "SPRT quarantine uses its own degraded code",
+        )?;
+        ensure(
+            degraded
+                .message
+                .contains("SPRT outcome quarantine threshold exceeded"),
+            "SPRT degradation message identifies the SPRT trigger",
+        )?;
+        let degraded_details = degraded
+            .details
+            .as_ref()
+            .ok_or_else(|| "SPRT degraded details missing".to_string())?;
+        ensure_equal(
+            &degraded_details["classifiedEventCount"],
+            &serde_json::json!(4),
+            "SPRT degraded details count classified events",
         )?;
 
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;

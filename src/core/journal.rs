@@ -1154,15 +1154,46 @@ fn distill_sanitize_command_token(raw: &str) -> Option<String> {
     }
 }
 
+fn distill_token_is_env_assignment(raw: &str) -> bool {
+    let Some((name, _value)) = raw.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+fn distill_token_is_env_wrapper(raw: &str) -> bool {
+    raw.rsplit('/').next().is_some_and(|token| token == "env")
+}
+
 /// Normalized command root (ADR 0062 §6): basename of argv\[0\] plus the
-/// first subcommand token, with paths, hashes, and numbers stripped.
-/// Flags (`-x`, `--release`) and path-shaped tokens never become the
-/// subcommand. Deterministic; falls back to `unknown` for empty input.
+/// first subcommand token, with leading environment assignments, paths,
+/// hashes, and numbers stripped. Flags (`-x`, `--release`) and path-shaped
+/// tokens never become the subcommand. Deterministic; falls back to
+/// `unknown` for empty input.
 #[must_use]
 pub fn normalize_command_root(raw: &str) -> String {
     let mut tokens = raw.split_whitespace();
-    let Some(argv0) = tokens.next() else {
-        return "unknown".to_owned();
+    let mut env_wrapper = false;
+    let argv0 = loop {
+        let Some(token) = tokens.next() else {
+            return "unknown".to_owned();
+        };
+        if distill_token_is_env_wrapper(token) {
+            env_wrapper = true;
+            continue;
+        }
+        if env_wrapper && token.starts_with('-') {
+            continue;
+        }
+        if distill_token_is_env_assignment(token) {
+            continue;
+        }
+        break token;
     };
     let basename = argv0.rsplit('/').next().unwrap_or(argv0);
     let Some(root) = distill_sanitize_command_token(basename) else {
@@ -3090,6 +3121,21 @@ mod tests {
             &normalize_command_root("npm run dev"),
             &"npm run".to_owned(),
             "first plain token becomes the subcommand",
+        )?;
+        ensure_equal(
+            &normalize_command_root("TMPDIR=/tmp RCH_REQUIRE_REMOTE=1 rch exec -- cargo test"),
+            &"rch exec".to_owned(),
+            "leading environment assignments do not become the command root",
+        )?;
+        ensure_equal(
+            &normalize_command_root("env TMPDIR=/tmp cargo test --lib"),
+            &"cargo test".to_owned(),
+            "the env wrapper is skipped before selecting the command root",
+        )?;
+        ensure_equal(
+            &normalize_command_root("/usr/bin/env TMPDIR=/tmp cargo test --lib"),
+            &"cargo test".to_owned(),
+            "path-qualified env wrappers are skipped too",
         )?;
         ensure_equal(
             &normalize_command_root(""),

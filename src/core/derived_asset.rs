@@ -1082,17 +1082,7 @@ fn ensure_no_symlink_components(
 }
 
 fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(None)
+    super::path_safety::first_existing_symlink_component(path)
 }
 
 fn count_ref_files(refs_dir: &Path) -> Result<usize, DerivedAssetStoreError> {
@@ -1498,6 +1488,23 @@ mod tests {
         ensure(
             error.to_string().contains("symbolic link"),
             "symlinked body error cites symlink",
+        )
+    }
+
+    #[test]
+    fn derived_asset_symlink_scan_stops_at_non_directory_tail() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let file_path = root.path().join("not-a-directory");
+        fs::write(&file_path, b"file").map_err(|error| error.to_string())?;
+        let child_path = file_path.join("child").join("asset.bin");
+
+        let symlink = first_existing_symlink_component(&child_path)
+            .map_err(|error| format!("symlink scan should stop at non-directory tail: {error}"))?;
+
+        ensure_equal(
+            &symlink,
+            &None,
+            "non-directory tail reports no symlink before later filesystem operation fails",
         )
     }
 

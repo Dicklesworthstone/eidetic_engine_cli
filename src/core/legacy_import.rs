@@ -481,9 +481,11 @@ pub fn scan_eidetic_legacy_source(
 
 fn canonicalize_existing_source(path: &Path) -> Result<PathBuf, LegacyImportScanError> {
     if let Some(symlink_path) =
-        first_existing_symlink_component(path).map_err(|error| LegacyImportScanError::Io {
-            path: error.path,
-            message: error.source.to_string(),
+        super::path_safety::first_existing_symlink_component(path).map_err(|error| {
+            LegacyImportScanError::Io {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            }
         })?
     {
         return Err(LegacyImportScanError::Io {
@@ -504,40 +506,6 @@ fn canonicalize_existing_source(path: &Path) -> Result<PathBuf, LegacyImportScan
         Err(error) => return Err(io_error(path, error)),
     }
     fs::canonicalize(path).map_err(|error| io_error(path, error))
-}
-
-#[derive(Debug)]
-struct SymlinkComponentInspectionError {
-    path: PathBuf,
-    source: io::Error,
-}
-
-fn first_existing_symlink_component(
-    path: &Path,
-) -> Result<Option<PathBuf>, SymlinkComponentInspectionError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(None);
-            }
-            Err(source) => {
-                return Err(SymlinkComponentInspectionError {
-                    path: current,
-                    source,
-                });
-            }
-        }
-    }
-    Ok(None)
 }
 
 fn collect_files(root: &Path) -> Result<Vec<PathBuf>, LegacyImportScanError> {
@@ -1072,7 +1040,16 @@ impl LegacyMappingReport {
             mappings.push(mapping);
         }
 
-        let type_summaries = generate_type_summaries();
+        let mut type_summaries = generate_type_summaries();
+        for summary in &mut type_summaries {
+            summary.count = u32::try_from(
+                scan.artifacts
+                    .iter()
+                    .filter(|artifact| artifact.artifact_type == summary.source_type)
+                    .count(),
+            )
+            .unwrap_or(u32::MAX);
+        }
 
         Self {
             schema: LEGACY_MAPPING_REPORT_SCHEMA_V1,
@@ -1485,6 +1462,25 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn scanner_accepts_canonical_absolute_source_path() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let canonical_source =
+            fs::canonicalize(tempdir.path()).map_err(|error| error.to_string())?;
+
+        let report = scan_eidetic_legacy_source(&LegacyImportScanOptions {
+            source_path: canonical_source,
+            dry_run: true,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &report.status,
+            &LegacyImportScanStatus::NoArtifacts,
+            "canonical source status",
+        )
+    }
+
     #[cfg(unix)]
     #[test]
     fn hash_preview_rejects_symlinked_artifact_path() -> TestResult {
@@ -1716,6 +1712,55 @@ mod tests {
         let report = LegacyMappingReport::from_scan(&scan);
         ensure_equal(&report.schema, &LEGACY_MAPPING_REPORT_SCHEMA_V1, "schema")?;
         ensure_equal(&report.statistics.total_artifacts, &0, "total")
+    }
+
+    #[test]
+    fn mapping_report_type_summary_counts_match_scan_artifacts() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::write(
+            tempdir.path().join("memories.jsonl"),
+            r#"{"memory":"counted memory"}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            tempdir.path().join("sessions.json"),
+            r#"{"messages":[{"role":"assistant","content":"counted session"}]}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(tempdir.path().join("vectors.db"), b"legacy index")
+            .map_err(|error| error.to_string())?;
+
+        let scan = scan_eidetic_legacy_source(&LegacyImportScanOptions {
+            source_path: tempdir.path().to_path_buf(),
+            dry_run: true,
+        })
+        .map_err(|error| error.to_string())?;
+        let report = LegacyMappingReport::from_scan(&scan);
+
+        let count_for = |artifact_type| {
+            report
+                .type_summaries
+                .iter()
+                .find(|summary| summary.source_type == artifact_type)
+                .map(|summary| summary.count)
+                .unwrap_or_default()
+        };
+
+        ensure_equal(
+            &count_for(LegacyArtifactType::MemoryStore),
+            &1,
+            "memory summary count",
+        )?;
+        ensure_equal(
+            &count_for(LegacyArtifactType::SessionLog),
+            &1,
+            "session summary count",
+        )?;
+        ensure_equal(
+            &count_for(LegacyArtifactType::Index),
+            &1,
+            "index summary count",
+        )
     }
 
     #[test]

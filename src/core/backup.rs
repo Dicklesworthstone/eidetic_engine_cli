@@ -1499,13 +1499,7 @@ pub fn restore_backup_to_side_path(
     let restore_records_path = restore_artifact_dir.join(RECORDS_FILE);
     let restore_manifest_path = restore_artifact_dir.join(MANIFEST_FILE);
     let restored_database_path = side_path.join(WORKSPACE_MARKER).join(DEFAULT_DB_FILE);
-    let mut next_actions = vec![
-        format!("ee backup inspect {} --json", inspect.backup_id),
-        format!(
-            "ee search \"<query>\" --workspace {} --json",
-            side_path.to_string_lossy()
-        ),
-    ];
+    let mut next_actions = restore_base_next_actions(&inspect.backup_id, &side_path);
 
     if options.dry_run {
         return Ok(BackupRestoreReport {
@@ -1553,10 +1547,7 @@ pub fn restore_backup_to_side_path(
         .iter()
         .any(|entry| entry.code == "mesh_restore_requires_repair")
     {
-        next_actions.push(format!(
-            "ee mesh doctor --workspace {} --json",
-            side_path.to_string_lossy()
-        ));
+        next_actions.push(restore_mesh_doctor_next_action(&side_path));
     }
     write_new_file(&restore_manifest_path, &manifest_bytes)?;
 
@@ -1622,6 +1613,57 @@ pub fn restore_backup_to_side_path(
         degraded: restore_degraded,
         next_actions,
     })
+}
+
+fn restore_base_next_actions(backup_id: &str, side_path: &Path) -> Vec<String> {
+    vec![
+        format!(
+            "ee backup inspect {} --json",
+            shell_quote_command_arg(backup_id)
+        ),
+        format!(
+            "ee search \"<query>\" --workspace {} --json",
+            shell_quote_path_arg(side_path)
+        ),
+    ]
+}
+
+fn restore_mesh_doctor_next_action(side_path: &Path) -> String {
+    format!(
+        "ee mesh doctor --workspace {} --json",
+        shell_quote_path_arg(side_path)
+    )
+}
+
+fn shell_quote_path_arg(path: &Path) -> String {
+    let path_text = path.to_string_lossy();
+    shell_quote_command_arg(path_text.as_ref())
+}
+
+fn shell_quote_command_arg(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    if value.bytes().all(|byte| {
+        matches!(
+            byte,
+            b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'_'
+                | b'-'
+                | b'.'
+                | b'/'
+                | b':'
+                | b'@'
+                | b'+'
+                | b'='
+        )
+    }) {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn restore_manifest_degradations(manifest_bytes: &[u8]) -> Vec<BackupDegradation> {
@@ -5358,6 +5400,26 @@ mod tests {
                 .iter()
                 .any(|action| action.contains("ee mesh doctor")),
             "mesh restore next actions include mesh doctor",
+        )
+    }
+
+    #[test]
+    fn restore_next_actions_shell_quote_unsafe_side_path() -> TestResult {
+        let side_path = Path::new("/tmp/restore dir/it' ll");
+        let base_actions = restore_base_next_actions("backup-20260501", side_path);
+
+        ensure_equal(
+            base_actions,
+            vec![
+                "ee backup inspect backup-20260501 --json".to_owned(),
+                "ee search \"<query>\" --workspace '/tmp/restore dir/it'\\'' ll' --json".to_owned(),
+            ],
+            "restore base next actions quote shell-unsafe side paths",
+        )?;
+        ensure_equal(
+            restore_mesh_doctor_next_action(side_path),
+            "ee mesh doctor --workspace '/tmp/restore dir/it'\\'' ll' --json".to_owned(),
+            "restore mesh doctor next action quotes shell-unsafe side path",
         )
     }
 

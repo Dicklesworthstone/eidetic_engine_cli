@@ -5,14 +5,13 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
+use crate::core::bayes::FeedbackSignal;
 use crate::db::{DbConnection, DbError, StoredFeedbackEvent, StoredMemory};
 use crate::models::TRUST_REPORT_SCHEMA_V1;
 
 const DEFAULT_BUCKET_COUNT: usize = 5;
 const DEFAULT_LEADERBOARD_LIMIT: usize = 10;
 const DEFAULT_PACK_ITEM_LIMIT: u32 = 10_000;
-const HELPFUL_SIGNALS: &[&str] = &["positive", "confirmation", "helpful"];
-const HARMFUL_SIGNALS: &[&str] = &["negative", "contradiction", "harmful", "inaccurate"];
 
 /// Options for the read-only trust calibration report.
 #[derive(Clone, Debug)]
@@ -134,8 +133,10 @@ impl TrustReport {
     #[must_use]
     pub fn human_summary(&self) -> String {
         let coverage = stable_ratio(self.memory_with_outcome_count, self.memory_count) * 100.0;
-        let packed_coverage =
-            stable_ratio(self.packed_memory_with_outcome_count, self.packed_memory_count) * 100.0;
+        let packed_coverage = stable_ratio(
+            self.packed_memory_with_outcome_count,
+            self.packed_memory_count,
+        ) * 100.0;
         format!(
             "Trust report: ECE {:.3}; memory outcome coverage {:.1}% ({}/{}); packed-memory outcome coverage {:.1}% ({}/{}); {} recommendation(s).",
             self.expected_calibration_error,
@@ -336,18 +337,22 @@ fn build_trust_report(
             continue;
         }
         let weight = f64::from(event.weight).max(0.0);
-        if HELPFUL_SIGNALS.contains(&event.signal.as_str()) {
-            helpful_event_count += 1;
-            outcome_by_memory
-                .entry(event.target_id)
-                .or_default()
-                .record_helpful(weight);
-        } else if HARMFUL_SIGNALS.contains(&event.signal.as_str()) {
-            harmful_event_count += 1;
-            outcome_by_memory
-                .entry(event.target_id)
-                .or_default()
-                .record_harmful(weight);
+        match FeedbackSignal::from_signal_str(&event.signal) {
+            FeedbackSignal::Helpful => {
+                helpful_event_count += 1;
+                outcome_by_memory
+                    .entry(event.target_id)
+                    .or_default()
+                    .record_helpful(weight);
+            }
+            FeedbackSignal::Harmful => {
+                harmful_event_count += 1;
+                outcome_by_memory
+                    .entry(event.target_id)
+                    .or_default()
+                    .record_harmful(weight);
+            }
+            FeedbackSignal::Neutral => {}
         }
     }
 
@@ -491,7 +496,6 @@ impl OutcomeAggregate {
     fn net_weight(self) -> f64 {
         self.helpful_weight - self.harmful_weight
     }
-
 }
 
 #[derive(Clone, Debug)]
@@ -552,7 +556,9 @@ impl BucketBuilder {
             Some((predicted, observed)) if (predicted - observed).abs() <= 0.05 => {
                 CalibrationPosture::Calibrated
             }
-            Some((predicted, observed)) if predicted > observed => CalibrationPosture::OverConfident,
+            Some((predicted, observed)) if predicted > observed => {
+                CalibrationPosture::OverConfident
+            }
             Some(_) => CalibrationPosture::UnderConfident,
         };
 
@@ -631,12 +637,18 @@ fn recommendations(
             command: Some("ee outcome helpful|harmful <memory-id> --json".to_string()),
         });
     }
-    if packed_memory_count > 0 && stable_ratio(packed_memory_with_outcome_count, packed_memory_count) < 0.5 {
+    if packed_memory_count > 0
+        && stable_ratio(packed_memory_with_outcome_count, packed_memory_count) < 0.5
+    {
         recommendations.push(TrustRecommendation {
             code: "close_packed_memory_feedback_loop",
             severity: "medium",
-            summary: "Packed memories are not receiving enough outcome signal after use.".to_string(),
-            command: Some("ee pack <task> --json && ee outcome helpful|harmful <memory-id> --json".to_string()),
+            summary: "Packed memories are not receiving enough outcome signal after use."
+                .to_string(),
+            command: Some(
+                "ee pack <task> --json && ee outcome helpful|harmful <memory-id> --json"
+                    .to_string(),
+            ),
         });
     }
     if expected_calibration_error > 0.2 {
@@ -774,7 +786,10 @@ mod tests {
         assert_eq!(report.harmful_event_count, 2);
         assert_eq!(report.packed_memory_with_outcome_count, 2);
         assert_eq!(round6(report.expected_calibration_error), 0.233333);
-        assert_eq!(report.buckets[1].posture, CalibrationPosture::UnderConfident);
+        assert_eq!(
+            report.buckets[1].posture,
+            CalibrationPosture::UnderConfident
+        );
         assert_eq!(report.buckets[4].posture, CalibrationPosture::OverConfident);
         assert_eq!(report.most_helpful[0].memory_id, "mem_a");
         assert_eq!(
@@ -786,10 +801,12 @@ mod tests {
             report.most_harmful[0].candidate_action,
             ReliabilityCandidateAction::QuarantineCandidate
         );
-        assert!(report
-            .recommendations
-            .iter()
-            .any(|recommendation| recommendation.code == "review_confidence_calibration"));
+        assert!(
+            report
+                .recommendations
+                .iter()
+                .any(|recommendation| recommendation.code == "review_confidence_calibration")
+        );
     }
 
     #[test]
@@ -815,14 +832,53 @@ mod tests {
 
         assert_eq!(report.memory_with_outcome_count, 1);
         assert_eq!(report.packed_memory_with_outcome_count, 1);
-        assert!(report
-            .recommendations
-            .iter()
-            .any(|recommendation| recommendation.code == "close_packed_memory_feedback_loop"));
-        assert!(!report
-            .recommendations
-            .iter()
-            .any(|recommendation| recommendation.summary.contains("auto")));
+        assert!(
+            report
+                .recommendations
+                .iter()
+                .any(|recommendation| recommendation.code == "close_packed_memory_feedback_loop")
+        );
+        assert!(
+            !report
+                .recommendations
+                .iter()
+                .any(|recommendation| recommendation.summary.contains("auto"))
+        );
+    }
+
+    #[test]
+    fn stale_and_outdated_feedback_count_as_harmful_outcomes() {
+        let report = build_trust_report(
+            "wsp_test".to_string(),
+            vec![
+                memory("mem_outdated", 0.80, 0.40, "outdated convention"),
+                memory("mem_stale", 0.70, 0.30, "stale rule"),
+            ],
+            vec![
+                feedback("mem_stale", "stale", 1.0),
+                feedback("mem_outdated", "outdated", 1.0),
+            ],
+            BTreeSet::from(["mem_stale".to_string()]),
+            5,
+            10,
+        );
+
+        assert_eq!(report.memory_with_outcome_count, 2);
+        assert_eq!(report.outcome_event_count, 2);
+        assert_eq!(report.helpful_event_count, 0);
+        assert_eq!(report.harmful_event_count, 2);
+        assert_eq!(report.packed_memory_with_outcome_count, 1);
+        assert_eq!(report.most_harmful[0].memory_id, "mem_outdated");
+        assert_eq!(
+            report.most_harmful[0].candidate_action,
+            ReliabilityCandidateAction::QuarantineCandidate
+        );
+        assert!(
+            report
+                .recommendations
+                .iter()
+                .any(|recommendation| recommendation.code == "review_harmful_memory_candidates")
+        );
     }
 
     #[test]
@@ -839,9 +895,15 @@ mod tests {
         assert_eq!(report.memory_count, 0);
         assert_eq!(report.memory_with_outcome_count, 0);
         assert_eq!(report.outcome_event_count, 0);
-        assert_eq!(report.bucket_count, 1, "bucket count has a safe lower bound");
+        assert_eq!(
+            report.bucket_count, 1,
+            "bucket count has a safe lower bound"
+        );
         assert_eq!(report.buckets.len(), 1);
-        assert_eq!(report.buckets[0].posture, CalibrationPosture::NoOutcomeSignal);
+        assert_eq!(
+            report.buckets[0].posture,
+            CalibrationPosture::NoOutcomeSignal
+        );
         assert_eq!(report.expected_calibration_error, 0.0);
         assert!(report.most_helpful.is_empty());
         assert!(report.most_harmful.is_empty());

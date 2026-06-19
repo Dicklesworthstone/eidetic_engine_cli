@@ -14,6 +14,7 @@ use crate::core::curate::{
     silhouette_agglomerative_clusters,
 };
 use crate::core::outcome::{OutcomeRecordOptions, OutcomeRecordReport, record_outcome};
+use crate::core::query_miss_cluster::KNOWLEDGE_GAP_MIN_CLUSTER_MISSES;
 use crate::db::{
     CreateCurationCandidateInput, CreateLearningObservationInput, CreateWorkspaceInput,
     DbConnection, StoredAuditEntry, StoredCurationCandidate, StoredFeedbackEvent,
@@ -676,13 +677,17 @@ pub fn show_gaps(options: &LearnGapsOptions) -> Result<LearnGapsReport, DomainEr
             .or_insert_with(|| QueryMissAccumulator::new(&cluster_key, miss));
     }
 
-    let newest_cluster_ts = by_cluster
+    let repeated_clusters = by_cluster
         .values()
+        .filter(|cluster| cluster.miss_count >= KNOWLEDGE_GAP_MIN_CLUSTER_MISSES)
+        .collect::<Vec<_>>();
+    let newest_cluster_ts = repeated_clusters
+        .iter()
         .map(|cluster| cluster.last_seen_at)
         .max()
         .unwrap_or(newest_miss);
-    let mut gaps = by_cluster
-        .values()
+    let mut gaps = repeated_clusters
+        .into_iter()
         .map(|cluster| {
             learn_gap_cluster(
                 cluster,
@@ -4329,6 +4334,57 @@ mod tests {
     }
 
     #[test]
+    fn learn_gaps_does_not_promote_one_off_misses() -> TestResult {
+        let (workspace, database, workspace_id) = seed_learning_workspace("ee-learn-gaps-one-off")?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000001",
+            "hash_one",
+            "no_relevant_results",
+            Some("search"),
+            None,
+        )?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000002",
+            "hash_two",
+            "weak_query_recall",
+            Some("ask"),
+            None,
+        )?;
+
+        let report = show_gaps(&LearnGapsOptions {
+            workspace: workspace.path().to_path_buf(),
+            since: None,
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+
+        if report.scanned_miss_count != 2 {
+            return Err(format!(
+                "expected two scanned misses, got {}",
+                report.scanned_miss_count
+            ));
+        }
+        if report.cluster_count != 0 || !report.gaps.is_empty() {
+            return Err(format!("one-off misses became gaps: {:?}", report.gaps));
+        }
+        if report
+            .degraded
+            .iter()
+            .any(|entry| entry.code == LEARN_GAPS_NO_MISS_DATA)
+        {
+            return Err(format!(
+                "miss rows existed, but no-data degradation was emitted: {:?}",
+                report.degraded
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn learn_gaps_groups_ranks_and_splits_origin_demand() -> TestResult {
         let (workspace, database, workspace_id) = seed_learning_workspace("ee-learn-gaps-ranking")?;
         insert_query_miss_audit(
@@ -4353,6 +4409,15 @@ mod tests {
             &database,
             &workspace_id,
             "audit_00000000000000000000000003",
+            "hash_alpha",
+            "no_relevant_results",
+            Some("search"),
+            None,
+        )?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000004",
             "hash_beta",
             "weak_query_recall",
             None,
@@ -4376,18 +4441,24 @@ mod tests {
             .gaps
             .first()
             .ok_or_else(|| "expected ranked gap".to_string())?;
+        if first.cluster_count != 1 || first.gaps.len() != 1 {
+            return Err(format!(
+                "expected only repeated hash_alpha to become a gap, got {:?}",
+                first.gaps
+            ));
+        }
         if gap.query_hash != "hash_alpha" {
             return Err(format!("expected hash_alpha first, got {}", gap.query_hash));
         }
-        if gap.miss_count != 2 {
-            return Err(format!("expected 2 misses, got {}", gap.miss_count));
+        if gap.miss_count != 3 {
+            return Err(format!("expected 3 misses, got {}", gap.miss_count));
         }
         let origins = gap
             .origins
             .iter()
             .map(|origin| (origin.origin.as_str(), origin.miss_count))
             .collect::<Vec<_>>();
-        if origins != vec![("ask", 1), ("search", 1)] {
+        if origins != vec![("search", 2), ("ask", 1)] {
             return Err(format!("unexpected origins: {origins:?}"));
         }
         if gap.reasons.iter().map(String::as_str).collect::<Vec<_>>()
@@ -4433,6 +4504,15 @@ mod tests {
             Some("search"),
             Some("rotate logs for release"),
         )?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000006",
+            "hash_text_c",
+            "weak_query_recall",
+            Some("ask"),
+            Some("release logs rotate"),
+        )?;
 
         let report = show_gaps(&LearnGapsOptions {
             workspace: workspace.path().to_path_buf(),
@@ -4450,15 +4530,21 @@ mod tests {
             .gaps
             .first()
             .ok_or_else(|| "expected text-clustered gap".to_string())?;
-        if gap.query_hashes != vec!["hash_text_a".to_string(), "hash_text_b".to_string()] {
+        if gap.query_hashes
+            != vec![
+                "hash_text_a".to_string(),
+                "hash_text_b".to_string(),
+                "hash_text_c".to_string(),
+            ]
+        {
             return Err(format!(
                 "unexpected clustered hashes: {:?}",
                 gap.query_hashes
             ));
         }
-        if gap.miss_count != 2 {
+        if gap.miss_count != 3 {
             return Err(format!(
-                "expected two clustered misses, got {}",
+                "expected three clustered misses, got {}",
                 gap.miss_count
             ));
         }
@@ -4488,6 +4574,24 @@ mod tests {
             "hash_template",
             "no_relevant_results",
             Some("ask"),
+            Some("how do I rotate ghp_0123456789abcdef0123456789abcdef01234567"),
+        )?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000005",
+            "hash_template",
+            "no_relevant_results",
+            Some("ask"),
+            Some("how do I rotate ghp_0123456789abcdef0123456789abcdef01234567"),
+        )?;
+        insert_query_miss_audit(
+            &database,
+            &workspace_id,
+            "audit_00000000000000000000000006",
+            "hash_template",
+            "no_relevant_results",
+            Some("search"),
             Some("how do I rotate ghp_0123456789abcdef0123456789abcdef01234567"),
         )?;
 

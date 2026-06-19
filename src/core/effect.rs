@@ -1534,10 +1534,6 @@ impl EffectManifest {
                 "preflight show",
                 "Read a persisted preflight run from the workspace-local store",
             ),
-            CommandEffect::read_only(
-                "preflight guard",
-                "Checks command against preflight guard rules",
-            ),
             CommandEffect::read_only_db(
                 "preflight list-bypass-tokens",
                 "List hashed preflight bypass-token metadata",
@@ -2305,6 +2301,13 @@ impl EffectManifest {
                 "command hash plus matched rule ids plus override token hash",
                 "preflight bypass token audit",
                 "Check a shell command and audit override-token use when present",
+            ),
+            CommandEffect::durable_state_write(
+                "preflight guard",
+                vec!["preflight_bypass_tokens", "audit_log"],
+                "command hash plus matched rule ids plus override token hash",
+                "preflight bypass token audit",
+                "Alias for preflight check; audits override-token use when present",
             ),
             CommandEffect::durable_state_write(
                 "preflight issue-bypass-token",
@@ -3300,6 +3303,28 @@ mod tests {
             outcome.map(|e| e.write_surfaces.db_tables.clone()),
             Some(vec!["feedback_events", "audit_log"]),
             "outcome writes feedback and audit",
+        )?;
+
+        let preflight_check = manifest
+            .get("preflight check")
+            .ok_or_else(|| "preflight check not found".to_owned())?;
+        let preflight_guard = manifest
+            .get("preflight guard")
+            .ok_or_else(|| "preflight guard alias not found".to_owned())?;
+        ensure(
+            preflight_guard.default_effect,
+            preflight_check.default_effect,
+            "preflight guard alias matches preflight check effect",
+        )?;
+        ensure(
+            preflight_guard.mutation_contract.side_effect_class,
+            preflight_check.mutation_contract.side_effect_class,
+            "preflight guard alias matches preflight check mutation class",
+        )?;
+        ensure(
+            preflight_guard.requires_audit,
+            true,
+            "preflight guard alias keeps override-token audit contract",
         )?;
 
         let backup = manifest.get("backup create");

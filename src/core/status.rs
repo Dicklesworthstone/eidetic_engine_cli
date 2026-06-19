@@ -7192,7 +7192,7 @@ mod tests {
         ensure(asset.repair, None, "ready index repair hint")?;
         ensure(
             asset.freshness.verdict.as_str(),
-            "current",
+            "fresh",
             "freshness verdict",
         )
     }

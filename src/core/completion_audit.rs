@@ -943,7 +943,8 @@ fn classify_requirement_support(
     {
         return RequirementSupport::Weak;
     }
-    if missing.is_empty() {
+    let has_required_missing = missing.iter().any(|expectation| expectation.required);
+    if !has_required_missing {
         if records.iter().any(|record| {
             record.status == EvidenceRecordStatus::Pass && record.strength == "direct"
         }) {
@@ -2460,6 +2461,59 @@ mod tests {
 
         assert_eq!(item.support, RequirementSupport::Missing);
         assert!(!item.missing_expectations.is_empty());
+    }
+
+    #[test]
+    fn evidence_adapter_does_not_let_optional_missing_evidence_mask_direct_proof() {
+        let checklist = CompletionChecklist {
+            schema: COMPLETION_AUDIT_CHECKLIST_SCHEMA_V1.to_owned(),
+            source: ChecklistSource {
+                label: "objective".to_owned(),
+                kind: "objective_text".to_owned(),
+            },
+            objective_hash: objective_hash("manual optional evidence check"),
+            objective_text: "manual optional evidence check".to_owned(),
+            requirements: vec![CompletionRequirement {
+                id: "req_001".to_owned(),
+                kind: RequirementKind::Verification,
+                summary: "Verify required proof while optional context is absent".to_owned(),
+                evidence_expectations: vec![evidence("rch", "remote build metadata", "direct")],
+                verification_expectations: vec![verification(
+                    "owner_context",
+                    "nice-to-have operator note",
+                    false,
+                )],
+                source_spans: vec![SourceSpan {
+                    label: "objective".to_owned(),
+                    start: 0,
+                    end: 5,
+                    text: "check".to_owned(),
+                }],
+            }],
+            unknown_clauses: Vec::new(),
+            summary: ChecklistSummary {
+                requirement_count: 1,
+                unknown_count: 0,
+                has_unknowns: false,
+                source_bytes: "manual optional evidence check".len(),
+            },
+        };
+        let bundle = EvidenceBundle {
+            records: vec![record(
+                "rch",
+                "remote build metadata",
+                "rch job 162 on csd",
+                EvidenceRecordStatus::Pass,
+                "direct",
+            )],
+        };
+
+        let evidence = evaluate_completion_evidence(&checklist, &bundle);
+        let item = evidence_for_requirement(&evidence, "req_001");
+
+        assert_eq!(item.support, RequirementSupport::Direct);
+        assert_eq!(item.missing_expectations.len(), 1);
+        assert!(!item.missing_expectations[0].required);
     }
 
     #[test]

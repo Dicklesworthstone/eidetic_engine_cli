@@ -217,7 +217,8 @@ pub fn score_counterfactual(
 /// Maps intervention types to regret categories:
 /// - `AddMemory` → `MissingKnowledge` (adding memory that was missing)
 /// - `RemoveMemory` → `UnderutilizedMemory` (removing noisy/irrelevant memory)
-/// - `ReplaceContent` → `Misinformation` (replacing wrong/outdated content)
+/// - `ReplaceContent` → `StaleInformation` when the replacement identifies stale/outdated content
+/// - `ReplaceContent` → `Misinformation` otherwise (replacing wrong content)
 /// - `Strengthen` → `RetrievalFailure` (boosting under-ranked relevant memory)
 /// - `Weaken` → `UnderutilizedMemory` (reducing over-weighted irrelevant memory)
 /// - `Rerank` → `RetrievalFailure` (fixing retrieval ordering issues)
@@ -229,7 +230,8 @@ fn categorize_interventions(interventions: &[Intervention]) -> RegretCategory {
     // Count intervention types and determine category by severity priority
     let mut add_count = 0u32;
     let mut remove_count = 0u32;
-    let mut replace_count = 0u32;
+    let mut stale_replace_count = 0u32;
+    let mut misinformation_replace_count = 0u32;
     let mut strengthen_count = 0u32;
     let mut weaken_count = 0u32;
     let mut rerank_count = 0u32;
@@ -238,20 +240,29 @@ fn categorize_interventions(interventions: &[Intervention]) -> RegretCategory {
         match intervention.intervention_type {
             InterventionType::AddMemory => add_count += 1,
             InterventionType::RemoveMemory => remove_count += 1,
-            InterventionType::ReplaceContent => replace_count += 1,
+            InterventionType::ReplaceContent => {
+                if replacement_identifies_stale_content(intervention) {
+                    stale_replace_count += 1;
+                } else {
+                    misinformation_replace_count += 1;
+                }
+            }
             InterventionType::Strengthen => strengthen_count += 1,
             InterventionType::Weaken => weaken_count += 1,
             InterventionType::Rerank => rerank_count += 1,
         }
     }
 
-    // Priority order: AddMemory > ReplaceContent > Strengthen/Rerank > Remove/Weaken
-    // This reflects severity: missing knowledge and misinformation are more critical
+    // Priority order: wrong/stale replacement > AddMemory > Strengthen/Rerank > Remove/Weaken.
+    // This keeps existing harmful or stale memories from being hidden by a simultaneous add.
+    if misinformation_replace_count > 0 {
+        return RegretCategory::Misinformation;
+    }
+    if stale_replace_count > 0 {
+        return RegretCategory::StaleInformation;
+    }
     if add_count > 0 {
         return RegretCategory::MissingKnowledge;
-    }
-    if replace_count > 0 {
-        return RegretCategory::Misinformation;
     }
     if strengthen_count > 0 || rerank_count > 0 {
         return RegretCategory::RetrievalFailure;
@@ -261,6 +272,30 @@ fn categorize_interventions(interventions: &[Intervention]) -> RegretCategory {
     }
 
     RegretCategory::Other
+}
+
+fn replacement_identifies_stale_content(intervention: &Intervention) -> bool {
+    let mut haystack = intervention.description.to_ascii_lowercase();
+    if let Some(rationale) = &intervention.rationale {
+        haystack.push('\n');
+        haystack.push_str(&rationale.to_ascii_lowercase());
+    }
+    if let Some(content) = &intervention.hypothetical_content {
+        haystack.push('\n');
+        haystack.push_str(&content.to_ascii_lowercase());
+    }
+
+    [
+        "stale",
+        "outdated",
+        "obsolete",
+        "superseded",
+        "expired",
+        "no longer",
+        "contradicted",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle))
 }
 
 /// Calculate outcome improvement score.
@@ -715,6 +750,16 @@ mod tests {
     }
 
     #[test]
+    fn categorize_stale_replace_content_as_stale_information() {
+        let interventions = vec![
+            sample_intervention(InterventionType::ReplaceContent)
+                .with_rationale("Replace an outdated release rule with the current policy."),
+        ];
+        let category = categorize_interventions(&interventions);
+        assert_eq!(category, RegretCategory::StaleInformation);
+    }
+
+    #[test]
     fn categorize_strengthen_as_retrieval_failure() {
         let interventions = vec![sample_intervention(InterventionType::Strengthen)];
         let category = categorize_interventions(&interventions);
@@ -772,6 +817,38 @@ mod tests {
         assert!(output.entry.is_some());
         assert!((output.raw_score - 1.0).abs() < f64::EPSILON);
         assert!(output.weighted_score > 0.4);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn score_stale_replacement_generates_supersede_candidate() {
+        let config = RegretScoringConfig::default();
+        let cfr = sample_cfr(EpisodeOutcome::Success, 0.9, None);
+        let interventions = vec![
+            sample_intervention(InterventionType::ReplaceContent)
+                .with_rationale("The old memory is stale and should be superseded."),
+        ];
+        let input = sample_input(EpisodeOutcome::Failure, cfr, interventions);
+
+        let output = score_counterfactual(&input, &config);
+
+        assert!(output.is_actionable);
+        assert_eq!(output.category, RegretCategory::StaleInformation);
+        let entry = output
+            .entry
+            .as_ref()
+            .expect("stale replacement should create an actionable regret entry");
+        let candidate =
+            generate_candidate_from_regret(entry, "ws_test", CounterfactualMode::DryRun)
+                .expect("stale regret should generate a curation candidate");
+        assert_eq!(
+            candidate.suggested_action,
+            SuggestedCurationAction::SupersedeMemory
+        );
+        assert_eq!(
+            candidate.candidate_type,
+            super::super::CandidateType::Supersede
+        );
     }
 
     #[test]

@@ -149,7 +149,7 @@ pub fn run_store_integrity_report(options: StoreIntegrityOptions) -> StoreIntegr
     let status = if read_fence.strict_failed {
         StoreIntegrityStatus::Blocked
     } else if quarantined_source_count > 0
-        || matches!(consistency.severity, ConsistencySeverity::Warning)
+        || !matches!(consistency.severity, ConsistencySeverity::Info)
     {
         StoreIntegrityStatus::Degraded
     } else {

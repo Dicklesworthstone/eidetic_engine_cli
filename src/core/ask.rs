@@ -12,6 +12,9 @@
 
 use std::collections::BTreeSet;
 
+use crate::db::{CreateAuditInput, DbConnection, audit_actions, generate_audit_id};
+use crate::obs::audit_events::query_hash as audit_query_hash;
+
 // ─── schema constants ───────────────────────────────────────────────────────
 
 /// Response data schema identifier carried under `ee.response.v2 data.answer`.
@@ -28,6 +31,12 @@ pub const ASK_MAX_EVIDENCE_DEFAULT: usize = 3;
 
 /// Defensive ceiling on memories scanned per invocation.
 pub const ASK_CANDIDATE_SCAN_CAP: usize = 512;
+
+/// Retention horizon for ask miss audit rows, aligned with search miss demand.
+const ASK_QUERY_MISS_AUDIT_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
+
+/// Ask miss audit rows are sparse and demand-driven; record every abstention.
+const ASK_QUERY_MISS_AUDIT_SAMPLE_RATE: f64 = 1.0;
 
 // ─── span scoring weights (ADR §2) ──────────────────────────────────────────
 
@@ -807,6 +816,85 @@ pub fn evaluate_ask(request: &AskRequest, candidates: &[AskCandidate]) -> AskRep
     }
 }
 
+/// Record an ask abstention in the query-miss ledger.
+///
+/// The row deliberately stores only a query hash and redaction posture, never
+/// raw question text or vectors. Callers should treat this as best-effort: ask
+/// answers and abstentions remain useful even when the audit lane is degraded.
+pub fn record_ask_query_miss_best_effort(
+    connection: &DbConnection,
+    workspace_id: &str,
+    report: &AskReport,
+) {
+    if !report.abstained || report.extractiveness_violated {
+        return;
+    }
+    let query_hash = audit_query_hash(&report.question);
+    let audit_id = generate_audit_id();
+    let details = ask_query_miss_audit_details(
+        &query_hash,
+        report,
+        if report
+            .nearest_evidence
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty()
+        {
+            "empty_results"
+        } else {
+            DEGRADED_NO_ANSWER
+        },
+    );
+    let input = CreateAuditInput {
+        workspace_id: Some(workspace_id.to_owned()),
+        actor: None,
+        action: audit_actions::SEARCH_MISS_RECORDED.to_owned(),
+        target_type: Some("query_hash".to_owned()),
+        target_id: Some(query_hash),
+        details: Some(details),
+    };
+    if let Err(error) = connection.insert_audit(&audit_id, &input) {
+        tracing::warn!(
+            target: "ee::core::ask::audit",
+            error = %error,
+            "best-effort ask query-miss audit append failed"
+        );
+    }
+}
+
+fn ask_query_miss_audit_details(query_hash: &str, report: &AskReport, reason: &str) -> String {
+    let nearest_count = report.nearest_evidence.as_ref().map_or(0, Vec::len);
+    serde_json::json!({
+        "schema": "ee.search.query_miss.v1",
+        "origin": ASK_QUERY_MISS_ORIGIN,
+        "queryHash": query_hash,
+        "reason": reason,
+        "status": "abstained",
+        "resultCount": 0,
+        "candidateCount": report.candidates_scanned,
+        "nearestEvidenceCount": nearest_count,
+        "confidence": round_ask_metric(report.confidence),
+        "ttlSeconds": ASK_QUERY_MISS_AUDIT_TTL_SECONDS,
+        "sampling": {
+            "strategy": "all_ask_abstentions_v1",
+            "sampleRate": ASK_QUERY_MISS_AUDIT_SAMPLE_RATE,
+            "sampled": true,
+            "maxRowsPerAsk": 1,
+        },
+        "redaction": {
+            "strategy": "query_hash_only_v1",
+            "rawQueryStored": false,
+            "queryTextStored": false,
+            "queryVectorStored": false,
+        },
+    })
+    .to_string()
+}
+
+fn round_ask_metric(score: f32) -> f32 {
+    (score * 1_000_000.0).round() / 1_000_000.0
+}
+
 // ─── JSON serialization ───────────────────────────────────────────────────────
 
 /// Serialize an `AskReport` into the `ee.ask.v1` data envelope.
@@ -1368,7 +1456,10 @@ mod tests {
             json["queryAssist"]["schema"],
             crate::core::search::QUERY_ASSIST_SCHEMA_V1
         );
-        assert_eq!(json["queryAssist"]["weakResultReason"], "no_confident_answer");
+        assert_eq!(
+            json["queryAssist"]["weakResultReason"],
+            "no_confident_answer"
+        );
         assert_eq!(
             json["queryAssist"]["didYouMean"][0]["memoryId"],
             "mem_installer_smoke"
@@ -1378,6 +1469,53 @@ mod tests {
                 .as_str()
                 .is_some_and(|command| command.contains("ee remember"))
         );
+    }
+
+    #[test]
+    fn ask_query_miss_audit_details_are_hash_only_and_origin_ask() -> Result<(), String> {
+        let report = AskReport {
+            question: "where is installer smoke documented".into(),
+            abstained: true,
+            answer_text: None,
+            confidence: 0.2,
+            confidence_components: AskConfidenceComponents {
+                top_span_score: 0.2,
+                corroboration: 1.0,
+                contradiction_penalty: 0.0,
+            },
+            citations: vec![],
+            sides: None,
+            nearest_evidence: Some(vec![AskNearestEvidence {
+                memory_id: "mem_installer_smoke".into(),
+                byte_start: 4,
+                byte_end: 42,
+                text: "release installers require live smoke validation".into(),
+                score: 0.2,
+            }]),
+            counterfactual_hint: Some("below threshold".into()),
+            semantic_degraded: true,
+            conflict_detected: false,
+            extractiveness_violated: false,
+            candidates_scanned: 7,
+        };
+        let details = ask_query_miss_audit_details("blake3:test", &report, DEGRADED_NO_ANSWER);
+        let value: serde_json::Value =
+            serde_json::from_str(&details).map_err(|error| error.to_string())?;
+
+        assert_eq!(value["schema"], "ee.search.query_miss.v1");
+        assert_eq!(value["origin"], ASK_QUERY_MISS_ORIGIN);
+        assert_eq!(value["queryHash"], "blake3:test");
+        assert_eq!(value["reason"], DEGRADED_NO_ANSWER);
+        assert_eq!(value["candidateCount"], 7);
+        assert_eq!(value["nearestEvidenceCount"], 1);
+        assert_eq!(value["redaction"]["rawQueryStored"], false);
+        assert_eq!(value["redaction"]["queryTextStored"], false);
+        assert_eq!(value["redaction"]["queryVectorStored"], false);
+        assert!(
+            !details.contains("installer smoke"),
+            "ask query-miss audit details must not store raw question text"
+        );
+        Ok(())
     }
 
     #[test]

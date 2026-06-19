@@ -6148,6 +6148,7 @@ impl ReviewQueueState {
 
     #[must_use]
     pub fn next_action(self, candidate_id: &str) -> String {
+        let candidate_id = shell_quote_command_arg(candidate_id);
         match self {
             Self::New | Self::NeedsEvidence | Self::NeedsScope | Self::Duplicate => {
                 format!("ee curate show {candidate_id} --json")
@@ -6209,6 +6210,32 @@ impl ReviewQueueState {
                 false
             }
         }
+    }
+}
+
+fn shell_quote_command_arg(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    if value.bytes().all(|byte| {
+        matches!(
+            byte,
+            b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'_'
+                | b'-'
+                | b'.'
+                | b'/'
+                | b':'
+                | b'@'
+                | b'+'
+                | b'='
+        )
+    }) {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
@@ -9991,6 +10018,23 @@ Then update src/policy/mod.rs on main."
         assert_eq!(
             ReviewQueueState::Rejected.next_action("curate_abc"),
             "no action required"
+        );
+    }
+
+    #[test]
+    fn review_queue_state_next_actions_quote_unsafe_candidate_ids() {
+        let candidate_id = "curate bad'$(id)";
+        assert_eq!(
+            ReviewQueueState::New.next_action(candidate_id),
+            "ee curate show 'curate bad'\\''$(id)' --json"
+        );
+        assert_eq!(
+            ReviewQueueState::Accepted.next_action(candidate_id),
+            "ee curate apply 'curate bad'\\''$(id)' --json"
+        );
+        assert_eq!(
+            ReviewQueueState::Snoozed.next_action(candidate_id),
+            "ee curate snooze 'curate bad'\\''$(id)' --until <DATE> --json"
         );
     }
 

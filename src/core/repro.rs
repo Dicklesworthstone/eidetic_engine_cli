@@ -368,6 +368,7 @@ pub fn capture_pack(options: &CaptureOptions) -> Result<CaptureReport, DomainErr
             options.claim_id.as_deref(),
             options.demo_id.as_deref(),
         );
+        report.pack_hash = Some(format!("blake3:{}", hash_content(manifest_json.as_bytes())));
 
         if let Err(e) = write_pack_file_no_symlinks(&pack_path, "env.json", env_json.as_bytes()) {
             return Err(DomainError::Storage {
