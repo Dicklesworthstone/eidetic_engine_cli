@@ -418,7 +418,7 @@ Current reservations:
 | ------------------- | -------- | ----- |
 | `json`              | reserved | Future "JSON-only minimal output" build profile. No current cfg-gates. |
 | `serve`             | reserved | Future localhost HTTP/SSE adapter (AGENTS.md §Module Layout `src/serve/`). Not implemented in v0.1. |
-| `science-analytics` | reserved | One cfg-gate at `src/science/mod.rs:1999`. The CLI surface `ee analyze science-status` is `CommandEffect::degraded_unavailable` per `src/core/effect.rs`. Reserved for EE-171 analytics subsystem. |
+| `science-analytics` | reserved | Empty reservation for future heavier analytics backends (EE-171). Default builds already include lightweight deterministic science metrics, and `ee analyze science-status` is a read-only status surface. |
 
 `tests/feature_flag_registry_in_sync.rs` enforces 1:1 correspondence
 between `Cargo.toml` and the registry; a flag in either without a

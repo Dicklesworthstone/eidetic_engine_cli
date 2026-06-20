@@ -36,7 +36,7 @@ whether the gate is exercised.
 | `differential-networkx` | active  | `[]`                                     | Test-only gate for the heavyweight Python NetworkX differential suite. It pulls no Rust dependencies and is intended for nightly CI or explicit RCH runs where Python + networkx are installed. | `bd-8jvg.6` (F4.networkx) | 0.1.0 |
 | `mcp`                | active     | `[]`                                     | Gates the optional stdio/server adapter module at `src/lib.rs:24`. The CLI discovery surfaces `ee mcp manifest`, `ee mcp serve-stdio`, and `ee mcp validate` remain available in default builds; manifest and serve-stdio report `mcp_feature_disabled` as a capability gap when the adapter is not compiled. Opt-in via `cargo install eidetic-engine --features mcp` per README §Agent Harness Integration. | `bd-17c65` (MCP adapter) | 0.1.0       |
 | `serve`              | reserved   | `[]`                                     | No cfg-gates in `src/`. Reserved for the future localhost HTTP/SSE adapter described in AGENTS.md §Module Layout (`src/serve/`). Not implemented in v0.1. | `bd-17c65.11.7` (K7) | 0.1.0         |
-| `science-analytics`  | reserved   | `[]`                                     | One cfg-gate at `src/science/mod.rs:1999`. The corresponding CLI surface `ee analyze science-status` is `CommandEffect::degraded_unavailable` per `src/core/effect.rs`. Reserved for the future analytics subsystem (EE-171). | `bd-17c65.11.7` (K7) | 0.1.0         |
+| `science-analytics`  | reserved   | `[]`                                     | Empty reservation for future heavier analytics backends (EE-171). Default builds already include lightweight deterministic science metrics, and `ee analyze science-status` is a read-only status surface. | `bd-17c65.11.7` (K7) | 0.1.0         |
 
 ## Reserved-flag contract
 
@@ -49,8 +49,8 @@ without a tracking bead or a removal plan accrue technical debt.
 ## Cross-references
 
 - `docs/silent-fallback-inventory.md` — the `science-analytics` flag is
-  cross-referenced there because the `ee analyze science-status` CLI
-  surface is currently `CommandEffect::degraded_unavailable`.
+  cross-referenced there because the empty flag remains reserved while
+  lightweight science diagnostics are available in default builds.
 - `bd-17c65.11.7` (K7) — this bead owns the registry. Updates to flag
   status are tracked through it until a successor bead is filed.
 - `Cargo.toml` `[features]` section — the source of truth for flag
