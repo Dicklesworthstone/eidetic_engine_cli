@@ -592,18 +592,42 @@ pub fn compute_plan_tree_hash(key: &PlanCacheKey, plan: &CompiledPlan) -> String
         bound_index,
         join_strategy,
     } = plan;
-    hash_str(&mut hasher, &parsed_query.q);
-    hash_optional_str(&mut hasher, parsed_query.workspace.as_deref());
-    hash_str_list(&mut hasher, &parsed_query.levels);
-    hash_str_list(&mut hasher, &parsed_query.kinds);
-    hash_str_list(&mut hasher, &parsed_query.tags);
-    hasher.update(parsed_query.tags_mode.as_str().as_bytes());
-    hash_str_list(&mut hasher, &parsed_query.scope);
-    hasher.update(&parsed_query.limit.to_le_bytes());
-    hasher.update(parsed_query.speed.as_str().as_bytes());
-    hasher.update(&[u8::from(parsed_query.rerank)]);
-    hasher.update(&[u8::from(parsed_query.return_subgraph)]);
-    hasher.update(&[u8::from(parsed_query.explain)]);
+    // bd-2lzls: destructure EqlQuery exhaustively so any field added later
+    // fails to compile here until it is folded into the plan-tree hash, instead
+    // of being silently dropped (the failure mode that omitted
+    // time/confidence/graph). Hash order is unchanged.
+    let EqlQuery {
+        q,
+        workspace,
+        levels,
+        kinds,
+        tags,
+        tags_mode,
+        scope,
+        time,
+        confidence,
+        graph,
+        limit,
+        speed,
+        rerank,
+        return_subgraph,
+        explain,
+    } = parsed_query;
+    hash_str(&mut hasher, q);
+    hash_optional_str(&mut hasher, workspace.as_deref());
+    hash_str_list(&mut hasher, levels);
+    hash_str_list(&mut hasher, kinds);
+    hash_str_list(&mut hasher, tags);
+    hasher.update(tags_mode.as_str().as_bytes());
+    hash_str_list(&mut hasher, scope);
+    hash_optional_time_filter(&mut hasher, time.as_ref());
+    hash_optional_confidence_filter(&mut hasher, confidence.as_ref());
+    hash_optional_graph_filter(&mut hasher, graph.as_ref());
+    hasher.update(&limit.to_le_bytes());
+    hasher.update(speed.as_str().as_bytes());
+    hasher.update(&[u8::from(*rerank)]);
+    hasher.update(&[u8::from(*return_subgraph)]);
+    hasher.update(&[u8::from(*explain)]);
     hash_optional_str(&mut hasher, bound_index.as_deref());
     hash_optional_str(&mut hasher, join_strategy.as_deref());
     format!("blake3:{}", hasher.finalize().to_hex())
@@ -619,6 +643,75 @@ fn hash_optional_str(hasher: &mut blake3::Hasher, value: Option<&str>) {
         Some(value) => {
             hasher.update(&[1]);
             hash_str(hasher, value);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+fn hash_optional_time_filter(
+    hasher: &mut blake3::Hasher,
+    value: Option<&crate::models::query::EqlTimeFilter>,
+) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hash_optional_str(hasher, value.since.as_deref());
+            hash_optional_str(hasher, value.until.as_deref());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+fn hash_optional_confidence_filter(
+    hasher: &mut blake3::Hasher,
+    value: Option<&crate::models::query::EqlConfidenceFilter>,
+) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hash_optional_f64(hasher, value.min);
+            hash_optional_f64(hasher, value.max);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+fn hash_optional_graph_filter(
+    hasher: &mut blake3::Hasher,
+    value: Option<&crate::models::query::EqlGraphFilter>,
+) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hash_optional_str(hasher, value.center.as_deref());
+            match value.hops {
+                Some(hops) => {
+                    hasher.update(&[1]);
+                    hasher.update(&hops.to_le_bytes());
+                }
+                None => {
+                    hasher.update(&[0]);
+                }
+            }
+            hash_str_list(hasher, &value.relations);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+fn hash_optional_f64(hasher: &mut blake3::Hasher, value: Option<f64>) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(&value.to_bits().to_le_bytes());
         }
         None => {
             hasher.update(&[0]);
@@ -781,6 +874,52 @@ mod tests {
 
     fn key(eql: u64, manifest: u64, cfg: u64) -> PlanCacheKey {
         PlanCacheKey::new(eql, manifest, cfg)
+    }
+
+    #[test]
+    fn time_confidence_graph_changes_plan_tree_hash_bd_2lzls() {
+        use crate::models::query::{EqlConfidenceFilter, EqlGraphFilter, EqlTimeFilter};
+
+        // bd-2lzls: plans that differ only in time/confidence/graph must produce
+        // distinct plan-tree hashes. Before the fix these fields were not hashed,
+        // so distinct plans collided on the hash. Hold the key fixed so the
+        // distinction can only come from the hashed plan fields.
+        let k = key(1, 10, 100);
+        let base_hash = compute_plan_tree_hash(&k, &sample_plan("alpha"));
+
+        let mut time_query = sample_query("alpha");
+        time_query.time = Some(EqlTimeFilter {
+            since: Some("2026-01-01T00:00:00Z".to_string()),
+            until: None,
+        });
+        assert_ne!(
+            base_hash,
+            compute_plan_tree_hash(&k, &CompiledPlan::from_query(time_query)),
+            "time filter must change the plan-tree hash"
+        );
+
+        let mut confidence_query = sample_query("alpha");
+        confidence_query.confidence = Some(EqlConfidenceFilter {
+            min: Some(0.5),
+            max: None,
+        });
+        assert_ne!(
+            base_hash,
+            compute_plan_tree_hash(&k, &CompiledPlan::from_query(confidence_query)),
+            "confidence filter must change the plan-tree hash"
+        );
+
+        let mut graph_query = sample_query("alpha");
+        graph_query.graph = Some(EqlGraphFilter {
+            center: Some("m1".to_string()),
+            hops: Some(2),
+            relations: vec!["rel".to_string()],
+        });
+        assert_ne!(
+            base_hash,
+            compute_plan_tree_hash(&k, &CompiledPlan::from_query(graph_query)),
+            "graph filter must change the plan-tree hash"
+        );
     }
 
     #[test]
