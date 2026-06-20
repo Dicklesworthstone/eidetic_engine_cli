@@ -541,7 +541,7 @@ impl DerivedAssetStore {
             schema: DERIVED_ASSET_STORE_SUMMARY_SCHEMA_V1,
             root: Some(self.root.clone()),
             status: "ok",
-            root_present: self.root.is_dir(),
+            root_present: false,
             object_count: 0,
             reusable_object_count: 0,
             reference_count: 0,
@@ -550,8 +550,43 @@ impl DerivedAssetStore {
             cleanup_candidates: Vec::new(),
             degraded: Vec::new(),
         };
-        if !summary.root_present {
-            return summary;
+        match fs::symlink_metadata(&self.root) {
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                summary.root_present = true;
+            }
+            Ok(metadata) => {
+                summary.status = "degraded";
+                let kind = if metadata.file_type().is_symlink() {
+                    "symbolic link"
+                } else {
+                    "non-directory"
+                };
+                summary.degraded.push(DerivedAssetSummaryDegradation {
+                    code: DERIVED_ASSET_SCHEMA_MISMATCH_CODE,
+                    severity: "high",
+                    message: format!(
+                        "derived asset store root {} is a {kind}, not a directory",
+                        self.root.display()
+                    ),
+                    repair: "move the derived asset store root aside or recreate it as a directory"
+                        .to_owned(),
+                });
+                return summary;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return summary,
+            Err(error) => {
+                summary.status = "degraded";
+                summary.degraded.push(DerivedAssetSummaryDegradation {
+                    code: DERIVED_ASSET_SCHEMA_MISMATCH_CODE,
+                    severity: "medium",
+                    message: format!(
+                        "failed to inspect derived asset store root {}: {error}",
+                        self.root.display()
+                    ),
+                    repair: "inspect the derived asset store root permissions".to_owned(),
+                });
+                return summary;
+            }
         }
         if let Err(error) = ensure_no_symlink_components(&self.root, "inspect_root") {
             summary.status = "degraded";
@@ -1255,6 +1290,61 @@ mod tests {
             &automatic_deletion,
             &Some(&Value::Bool(false)),
             "cleanup is proposal-only",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn summary_reports_non_directory_root_as_degraded() -> TestResult {
+        let root = unique_test_path("regular-file-root");
+        fs::write(&root, b"not-a-directory").map_err(|error| error.to_string())?;
+        let store = DerivedAssetStore::new(root.clone());
+
+        let summary = store.summary();
+
+        ensure_equal(&summary.status, &"degraded", "regular file root status")?;
+        ensure(
+            !summary.root_present,
+            "regular file root is not a usable store directory",
+        )?;
+        ensure_equal(
+            &summary.degraded.len(),
+            &1usize,
+            "regular file root degradation count",
+        )?;
+        ensure(
+            summary.degraded[0].message.contains("not a directory"),
+            "regular file root message explains unusable path",
+        )?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn summary_reports_symlinked_root_as_degraded() -> TestResult {
+        use std::os::unix::fs as unix_fs;
+
+        let root = unique_test_path("symlinked-root");
+        let target = unique_test_path("symlinked-root-target");
+        fs::write(&target, b"not-a-directory").map_err(|error| error.to_string())?;
+        unix_fs::symlink(&target, &root).map_err(|error| error.to_string())?;
+        let store = DerivedAssetStore::new(root);
+
+        let summary = store.summary();
+
+        ensure_equal(&summary.status, &"degraded", "symlink root status")?;
+        ensure(
+            !summary.root_present,
+            "symlink root is not a usable store directory",
+        )?;
+        ensure_equal(
+            &summary.degraded.len(),
+            &1usize,
+            "symlink root degradation count",
+        )?;
+        ensure(
+            summary.degraded[0].message.contains("symbolic link"),
+            "symlink root message explains unsafe path",
         )?;
         Ok(())
     }
