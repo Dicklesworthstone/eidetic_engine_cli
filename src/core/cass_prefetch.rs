@@ -1087,6 +1087,17 @@ pub struct CassPrefetchMetrics {
     /// daemon-wired host is an amplification-probe signal.
     #[serde(default)]
     pub history_oversized: u64,
+    /// Predictions refused because the history's observations carried a
+    /// [`CorpusRevision`] that no longer matched the live lexical corpus
+    /// (bd-1eh60 revision gate). Distinct from `stale_generation_drop`:
+    /// this counts a coherent-generation history whose evidence was
+    /// measured against a since-regenerated segment set, the invalidation
+    /// the daemon-wiring slice (bd-16pwc.4) observes when only the corpus
+    /// revision — not the coarse `(workspace, index)` generation — moved.
+    /// `#[serde(default)]` keeps metrics serialized before this counter
+    /// decodable.
+    #[serde(default)]
+    pub stale_corpus_revision_drop: u64,
 }
 
 impl CassPrefetchMetrics {
@@ -1101,6 +1112,7 @@ impl CassPrefetchMetrics {
             history_too_short: 0,
             stale_generation_drop: 0,
             history_oversized: 0,
+            stale_corpus_revision_drop: 0,
         }
     }
 
@@ -1142,6 +1154,15 @@ impl CassPrefetchMetrics {
     /// [`CASS_PREFETCH_HISTORY_OVERSIZED_CODE`] (bd-1suaa).
     pub fn record_history_oversized(&mut self) {
         self.history_oversized = self.history_oversized.saturating_add(1);
+    }
+
+    /// Record a prediction dropped because the history's corpus revision no
+    /// longer matched the live lexical corpus — the daemon-wiring slice calls
+    /// this whenever [`SpeculativePrefetch::predict_next_n_gated_for_revision`]
+    /// returns [`CASS_PREFETCH_STALE_CORPUS_REVISION_CODE`] (bd-1eh60 /
+    /// bd-16pwc.4).
+    pub fn record_stale_corpus_revision_drop(&mut self) {
+        self.stale_corpus_revision_drop = self.stale_corpus_revision_drop.saturating_add(1);
     }
 
     pub fn set_measured_against_revision(&mut self, revision: CorpusRevision) {
@@ -1440,6 +1461,7 @@ mod tests {
         metrics.record_history_too_short();
         metrics.record_stale_generation_drop();
         metrics.record_history_oversized();
+        metrics.record_stale_corpus_revision_drop();
 
         assert_ne!(metrics, CassPrefetchMetrics::new());
         metrics.reset();
@@ -1781,6 +1803,22 @@ mod tests {
         metrics.stale_generation_drop = u64::MAX;
         metrics.record_stale_generation_drop();
         assert_eq!(metrics.stale_generation_drop, u64::MAX);
+    }
+
+    #[test]
+    fn metrics_record_stale_corpus_revision_drop_bd_16pwc_4() {
+        let mut metrics = CassPrefetchMetrics::new();
+        assert_eq!(metrics.stale_corpus_revision_drop, 0);
+        metrics.record_stale_corpus_revision_drop();
+        metrics.record_stale_corpus_revision_drop();
+        assert_eq!(metrics.stale_corpus_revision_drop, 2);
+        // Distinct counter from the coarse generation gate: a corpus-revision
+        // drop must not bump stale_generation_drop.
+        assert_eq!(metrics.stale_generation_drop, 0);
+        // Saturates rather than panicking.
+        metrics.stale_corpus_revision_drop = u64::MAX;
+        metrics.record_stale_corpus_revision_drop();
+        assert_eq!(metrics.stale_corpus_revision_drop, u64::MAX);
     }
 
     #[test]
