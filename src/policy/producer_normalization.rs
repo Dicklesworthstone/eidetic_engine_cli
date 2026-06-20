@@ -73,8 +73,9 @@ impl fmt::Display for ProducerIdKind {
     }
 }
 
-/// Canonical producer identity used as the attribution key for outcome
-/// feedback. `canonical` is the form persistent stores should index on;
+/// Canonical producer identity used for outcome attribution. `canonical`
+/// is the form persistent stores should index on; `kind` remains
+/// explanatory metadata because producer-kind detection is heuristic.
 /// `original` is preserved verbatim so audit trails remain traceable.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct NormalizedProducerId {
@@ -84,13 +85,16 @@ pub struct NormalizedProducerId {
 }
 
 impl NormalizedProducerId {
-    /// Render an opaque attribution key combining kind and canonical
-    /// form, e.g. `agent_pane:cc_1` or `harness:claude-code`. Use this
-    /// as the index key when two different producer kinds might share a
-    /// canonical fragment.
+    /// Render the stable attribution key for feedback counters and
+    /// quarantine statistics.
+    ///
+    /// This intentionally uses the canonical identity without the
+    /// best-effort kind prefix so casing variants or heuristic kind drift
+    /// (for example `PinkOriole` vs `pinkoriole`) cannot fragment one
+    /// producer into multiple too-small buckets.
     #[must_use]
     pub fn attribution_key(&self) -> String {
-        format!("{}:{}", self.kind.as_str(), self.canonical)
+        self.canonical.clone()
     }
 
     /// True when the input was empty or pure whitespace.
@@ -478,9 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn attribution_key_disambiguates_kinds() {
-        // Two producer strings that canonicalize to the same short
-        // fragment must NOT collide on attribution_key.
+    fn attribution_key_disambiguates_distinct_canonical_fragments() {
         let pane = norm("cc_1");
         let agent = norm("Cc1"); // matches agent-mail PascalCase shape
         assert_ne!(pane.attribution_key(), agent.attribution_key());
@@ -489,7 +491,7 @@ mod tests {
     #[test]
     fn attribution_key_format() {
         let n = norm("PinkOriole");
-        assert_eq!(n.attribution_key(), "agent_name:pinkoriole");
+        assert_eq!(n.attribution_key(), "pinkoriole");
     }
 
     #[test]
@@ -497,10 +499,15 @@ mod tests {
         let a = norm("PinkOriole");
         let b = norm("pinkoriole");
         assert_eq!(a.canonical, b.canonical);
-        // ...but `pinkoriole` (all-lowercase) doesn't match the
-        // agent-mail handle shape so it falls into Human. Document this
-        // explicitly via attribution_key.
-        assert_ne!(a.attribution_key(), b.attribution_key());
+        assert_eq!(a.attribution_key(), b.attribution_key());
+    }
+
+    #[test]
+    fn capitalized_human_handle_shares_lowercase_attribution_bucket() {
+        let capitalized = norm("Jeff");
+        let lowercase = norm("jeff");
+        assert_eq!(capitalized.canonical, lowercase.canonical);
+        assert_eq!(capitalized.attribution_key(), lowercase.attribution_key());
     }
 
     #[test]
