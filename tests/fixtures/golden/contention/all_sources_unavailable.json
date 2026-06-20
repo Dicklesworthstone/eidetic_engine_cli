@@ -1,0 +1,55 @@
+{
+  "schemaTag": "ee.diag.contention.v1",
+  "overallPosture": "ok",
+  "writeLock": {
+    "running": false,
+    "queueDepth": 0,
+    "totalProcessed": 0,
+    "avgWaitMs": 0.0,
+    "maxWaitMs": 0,
+    "posture": "ok"
+  },
+  "readPool": {
+    "maxSize": 0,
+    "active": 0,
+    "idle": 0,
+    "activePins": 0,
+    "expiredPins": 0,
+    "maxSeen": 0,
+    "drops": 0,
+    "releaseFailures": 0,
+    "adHocBypassCount": 0,
+    "acquireWaitSamples": 0,
+    "acquireWaitP50Ns": 0,
+    "acquireWaitP99Ns": 0,
+    "sizeWasZero": false,
+    "underized": false,
+    "posture": "ok"
+  },
+  "singleflight": {
+    "status": "",
+    "configuredSurfaceCount": 0,
+    "activeLeaderCount": 0,
+    "leaderStartCount": 0,
+    "followerWaitCount": 0,
+    "followerTimeoutCount": 0,
+    "leaderFailureCount": 0,
+    "reusedResultCount": 0,
+    "posture": "ok"
+  },
+  "topContention": [],
+  "unavailableSources": [
+    {
+      "source": "read_pool",
+      "code": "read_pool_unavailable"
+    },
+    {
+      "source": "singleflight",
+      "code": "singleflight_unavailable"
+    },
+    {
+      "source": "write_lock",
+      "code": "write_owner_unavailable"
+    }
+  ]
+}

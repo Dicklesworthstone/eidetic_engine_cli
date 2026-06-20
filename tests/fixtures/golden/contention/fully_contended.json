@@ -1,0 +1,119 @@
+{
+  "schemaTag": "ee.diag.contention.v1",
+  "overallPosture": "contended",
+  "writeLock": {
+    "running": true,
+    "queueDepth": 40,
+    "totalProcessed": 1000,
+    "avgWaitMs": 12.0,
+    "maxWaitMs": 5000,
+    "lockWaitMsP50": 50,
+    "lockWaitMsP99": 1500,
+    "posture": "contended"
+  },
+  "readPool": {
+    "maxSize": 8,
+    "active": 8,
+    "idle": 0,
+    "activePins": 2,
+    "expiredPins": 1,
+    "maxSeen": 8,
+    "drops": 3,
+    "releaseFailures": 1,
+    "adHocBypassCount": 5,
+    "acquireWaitSamples": 100,
+    "acquireWaitP50Ns": 2000000,
+    "acquireWaitP99Ns": 1200000000,
+    "sizeWasZero": false,
+    "underized": true,
+    "posture": "contended"
+  },
+  "singleflight": {
+    "status": "observed_failures",
+    "configuredSurfaceCount": 3,
+    "activeLeaderCount": 2,
+    "leaderStartCount": 2,
+    "followerWaitCount": 8,
+    "followerTimeoutCount": 2,
+    "leaderFailureCount": 1,
+    "reusedResultCount": 6,
+    "coalesceEfficiency": 0.75,
+    "posture": "hot"
+  },
+  "groupCommit": {
+    "enabled": true,
+    "batches": 4,
+    "writesCoalesced": 8,
+    "fsyncSaved": 4,
+    "avgBatchSize": 2.0,
+    "posture": "warm"
+  },
+  "indexIntake": {
+    "intakeMode": "full_rebuild",
+    "rebuilds": 5,
+    "swapStalls": 2,
+    "avgSwapMs": 3.5,
+    "posture": "hot"
+  },
+  "l2Cache": {
+    "hits": 6,
+    "misses": 2,
+    "evictions": 4,
+    "hitRate": 0.75,
+    "thrashRatio": 0.5,
+    "posture": "warm"
+  },
+  "topContention": [
+    {
+      "source": "read_pool",
+      "severity": "contended",
+      "reasonCode": "read_pool_ad_hoc_bypass",
+      "detail": "read pool 8/8 active, 5 ad-hoc bypasses, acquire-wait p99 1200000000 ns; readers are waiting or bypassing the pool",
+      "suggestedCommands": [
+        "raise EE_READ_POOL_SIZE for this workload",
+        "investigate long-held snapshot pins (EE_READ_POOL_MAX_PIN_SECONDS)",
+        "see bd-d67os.15 for read-pool FIFO fairness under storm"
+      ]
+    },
+    {
+      "source": "write_lock",
+      "severity": "contended",
+      "reasonCode": "write_lock_queue_backlog",
+      "detail": "write-owner queue depth 40 (max wait 5000 ms); concurrent writers are serializing behind the single write lock",
+      "suggestedCommands": [
+        "enable group-commit write batching (bd-d67os.1)",
+        "route heavy writers through the daemon write owner: ee daemon --foreground",
+        "reduce the number of concurrent durable writers"
+      ]
+    },
+    {
+      "source": "index_intake",
+      "severity": "hot",
+      "reasonCode": "index_swap_stalls",
+      "detail": "index intake mode 'full_rebuild': 5 rebuilds, 2 swap stalls (avg swap 3.5 ms)",
+      "suggestedCommands": [
+        "adopt incremental index intake (bd-d67os.6)"
+      ]
+    },
+    {
+      "source": "singleflight",
+      "severity": "hot",
+      "reasonCode": "singleflight_follower_timeouts",
+      "detail": "single-flight: 2 active leaders, 8 followers waiting, 2 timeouts, 1 leader failures",
+      "suggestedCommands": [
+        "lower duplicate read pressure or raise the follower timeout",
+        "inspect degraded entries before rerunning duplicate work"
+      ]
+    },
+    {
+      "source": "l2_cache",
+      "severity": "warm",
+      "reasonCode": "l2_cache_thrash",
+      "detail": "L2 pack cache: 6 hits / 2 misses, 4 evictions across 8 inserts",
+      "suggestedCommands": [
+        "raise EE_L2_PACK_CACHE_BYTES or narrow the pack workload"
+      ]
+    }
+  ],
+  "unavailableSources": []
+}
