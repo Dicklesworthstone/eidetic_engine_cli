@@ -156,7 +156,15 @@ impl LeakPattern {
         description: &'static str,
         pattern: &str,
     ) -> Option<Self> {
-        regex_lite::Regex::new(pattern).ok().map(|re| Self {
+        // bd-3j60j: the leak detector is a privacy ORACLE (deny-list), so match
+        // case-insensitively — a non-canonical casing of a field/secret marker
+        // (e.g. aws_secret_access_key vs AWS_SECRET_ACCESS_KEY) must not slip past.
+        let pattern = if pattern.starts_with("(?i)") {
+            pattern.to_string()
+        } else {
+            format!("(?i){pattern}")
+        };
+        regex_lite::Regex::new(&pattern).ok().map(|re| Self {
             class,
             name,
             description,
@@ -170,12 +178,18 @@ impl LeakPattern {
 
         match &self.kind {
             PatternKind::Contains(needle) => {
-                for (pos, _) in output.match_indices(needle) {
+                // bd-3j60j: case-insensitive literal match. to_ascii_lowercase
+                // preserves byte length, so positions in the lowered copy align
+                // with the original output; slice the original for the real text.
+                let lowered_output = output.to_ascii_lowercase();
+                let lowered_needle = needle.to_ascii_lowercase();
+                for (pos, _) in lowered_output.match_indices(&lowered_needle) {
+                    let matched = &output[pos..pos + needle.len()];
                     detections.push(LeakDetection {
                         class: self.class,
                         pattern_name: self.name,
-                        matched_text: needle.to_string(),
-                        context: extract_context(output, needle, pos),
+                        matched_text: matched.to_string(),
+                        context: extract_context(output, matched, pos),
                     });
                 }
             }
@@ -197,18 +211,24 @@ impl LeakPattern {
                 }
             }
             PatternKind::Suffix(suffix) => {
+                // bd-3j60j: case-insensitive, and trim surrounding delimiters
+                // (matching the prefix branch) so a quoted/punctuated value such
+                // as "...secret.env" still matches a registered suffix pattern.
+                let lowered_suffix = suffix.to_ascii_lowercase();
                 let mut seen = std::collections::HashSet::new();
                 for word in output.split_whitespace() {
-                    if word.ends_with(suffix) && word.len() > suffix.len() {
-                        if seen.insert(word) {
-                            for (pos, _) in output.match_indices(word) {
-                                detections.push(LeakDetection {
-                                    class: self.class,
-                                    pattern_name: self.name,
-                                    matched_text: word.to_string(),
-                                    context: extract_context(output, word, pos),
-                                });
-                            }
+                    let candidate = trim_token_delimiters(word);
+                    if candidate.len() > suffix.len()
+                        && candidate.to_ascii_lowercase().ends_with(&lowered_suffix)
+                        && seen.insert(candidate)
+                    {
+                        for (pos, _) in output.match_indices(candidate) {
+                            detections.push(LeakDetection {
+                                class: self.class,
+                                pattern_name: self.name,
+                                matched_text: candidate.to_string(),
+                                context: extract_context(output, candidate, pos),
+                            });
                         }
                     }
                 }
@@ -230,15 +250,30 @@ impl LeakPattern {
 }
 
 fn prefixed_token<'a>(word: &'a str, prefix: &str) -> Option<&'a str> {
-    for (index, _) in word.match_indices(prefix) {
-        let (before_prefix, prefixed_fragment) = word.split_at(index);
-        let prefix_is_token_start = before_prefix
-            .chars()
-            .last()
-            .is_none_or(is_prefix_start_delimiter);
+    // bd-3j60j: match the prefix case-insensitively, and register it even when
+    // glued to preceding text in two safe cases: (a) the prefix self-bounds
+    // because it begins with a delimiter (e.g. "/Users/" in "opening/Users/..."),
+    // or (b) the char immediately before it is a start delimiter (now including
+    // '-'/'_', so "bearer-sk-..." registers). A prefix that begins mid-word right
+    // after a plain alphanumeric (e.g. "sk-" inside "task-management") is still
+    // rejected to avoid false positives.
+    let lowered_word = word.to_ascii_lowercase();
+    let lowered_prefix = prefix.to_ascii_lowercase();
+    let prefix_self_bounds = prefix
+        .chars()
+        .next()
+        .is_some_and(is_prefix_start_delimiter);
+    for (index, _) in lowered_word.match_indices(&lowered_prefix) {
+        let prefix_is_token_start = prefix_self_bounds
+            || word[..index]
+                .chars()
+                .last()
+                .is_none_or(is_prefix_start_delimiter);
         if prefix_is_token_start {
-            let candidate = trim_token_delimiters(prefixed_fragment);
-            if candidate.starts_with(prefix) && candidate.len() > prefix.len() {
+            let candidate = trim_token_delimiters(&word[index..]);
+            if candidate.len() > prefix.len()
+                && candidate.to_ascii_lowercase().starts_with(&lowered_prefix)
+            {
                 return Some(candidate);
             }
         }
@@ -258,7 +293,9 @@ fn is_token_delimiter(ch: char) -> bool {
 }
 
 fn is_prefix_start_delimiter(ch: char) -> bool {
-    is_token_delimiter(ch) || matches!(ch, '/' | '\\' | '?' | '&' | '#')
+    // bd-3j60j: '-' and '_' are common secret-glue separators ("bearer-sk-...",
+    // "x_ghp_..."), so treat them as token starts for prefix detection.
+    is_token_delimiter(ch) || matches!(ch, '/' | '\\' | '?' | '&' | '#' | '-' | '_')
 }
 
 /// A detected potential leak.
@@ -568,6 +605,55 @@ mod tests {
             leaks.iter().any(|l| l.class == RedactionClass::Secret),
             true,
             "should be secret class",
+        )
+    }
+
+    #[test]
+    fn detector_catches_case_insensitive_and_glued_prefixes_bd_3j60j() -> TestResult {
+        let detector = RedactionLeakDetector::new();
+
+        // Class 1 (case-insensitive): non-canonical casings of field/secret
+        // markers must still be flagged by the privacy oracle.
+        for (label, output) in [
+            ("PascalCase password field", r#"{"Password": "hunter2"}"#),
+            ("uppercase sk- prefix", "token SK-ABCDEFGHIJ123456"),
+            (
+                "lowercase aws secret key",
+                "aws_secret_access_key=abcdefghij0123456789ABCD",
+            ),
+        ] {
+            ensure(
+                !detector.detect_leaks(output).is_empty(),
+                true,
+                &format!("case-insensitive leak must be detected: {label}"),
+            )?;
+        }
+
+        // Class 2 (glued prefix): a secret/path prefix concatenated to preceding
+        // text must register — both a self-bounding path prefix and a '-'-glued key.
+        ensure(
+            detector
+                .detect_leaks("opening/Users/jeff/.ssh/id_rsa")
+                .iter()
+                .any(|l| l.pattern_name == "users_path"),
+            true,
+            "glued /Users/ path must be detected",
+        )?;
+        ensure(
+            !detector.detect_leaks("bearer-sk-secretvalue123").is_empty(),
+            true,
+            "glued sk- key prefix must be detected",
+        )?;
+
+        // Guard against over-broad matching: a benign hyphenated word that merely
+        // contains a short prefix substring mid-token must NOT be flagged.
+        ensure(
+            detector
+                .detect_leaks("the task-management board")
+                .iter()
+                .all(|l| l.pattern_name != "api_key_prefix"),
+            true,
+            "benign 'task-management' must not be a key leak",
         )
     }
 
