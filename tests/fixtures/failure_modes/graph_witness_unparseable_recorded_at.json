@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_witness_unparseable_recorded_at",
+  "introduced_by": {
+    "bead": "bd-bife.25",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "maintenance graph-witnesses-prune"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Graph witness pruning encounters one or more graph_algorithm_witnesses rows whose recorded_at value is not valid RFC 3339. The command keeps those rows and reports the schema drift instead of silently deleting them.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# seed graph_algorithm_witnesses with an archived-snapshot row whose recorded_at is not RFC 3339"
+    ],
+    "invocation": "ee maintenance graph-witnesses-prune --workspace . --dry-run --json"
+  },
+  "expected_emission": {
+    "code": "graph_witness_unparseable_recorded_at",
+    "severity": "medium",
+    "message_contains": [
+      "unparseable recordedAt timestamps",
+      "kept"
+    ],
+    "repair_contains": "Inspect graph_algorithm_witnesses recorded_at values",
+    "repair_string": "Inspect graph_algorithm_witnesses recorded_at values before pruning."
+  }
+}
