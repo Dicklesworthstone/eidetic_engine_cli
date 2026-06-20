@@ -908,10 +908,10 @@ fn start_server_with_dispatch_policy(
                     let Some(cx) = asupersync::Cx::current() else {
                         return;
                     };
-                    // Inc 3: enable group-commit so the actor accumulates a
-                    // batch; a homogeneous ee.daemon.journal batch coalesces
-                    // into ONE transaction/fsync (execute_journal_batch), while
-                    // remember ops (which open their own connection) stay per-op.
+                    // Inc 3/5: enable group-commit so the actor accumulates a
+                    // batch; transaction-coalescible daemon journal/outcome ops
+                    // share ONE transaction/fsync, while remember ops (which
+                    // open their own connection) stay per-op.
                     let write_config = crate::core::write_owner::WriteHotPathConfig {
                         enabled: true,
                         group_commit_max_rows: 64,
@@ -920,8 +920,8 @@ fn start_server_with_dispatch_policy(
                     };
                     let _ = owner
                         .run_group_commit(&cx, write_config, |operations| {
-                            if batch_is_all_journal(operations) {
-                                execute_journal_batch(operations)
+                            if batch_is_daemon_txn_coalescible(operations) {
+                                execute_daemon_txn_batch(operations)
                             } else {
                                 Ok(operations
                                     .iter()
@@ -2237,9 +2237,89 @@ impl DaemonJournalParams {
     }
 }
 
-/// True when every op in the batch is an `ee.daemon.journal` Custom op (so the
-/// homogeneous batch can be coalesced into one transaction). bd-wx6ou.4.
-fn batch_is_all_journal(operations: &[crate::core::write_owner::WriteOperation]) -> bool {
+/// Parsed prevalidated outcome write payload for the daemon write-owner actor.
+///
+/// This is intentionally narrower than the public `ee outcome` CLI: callers
+/// supply the already-normalized feedback row and audit id, and the actor owns
+/// only the transaction/coalescing boundary. The ordinary CLI path continues to
+/// do validation, quarantine decisions, and derived follow-up updates.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct DaemonOutcomeParams {
+    workspace_path: PathBuf,
+    event_id: String,
+    workspace_id: String,
+    target_type: String,
+    target_id: String,
+    signal: String,
+    weight: f32,
+    source_type: String,
+    source_id: Option<String>,
+    reason: Option<String>,
+    evidence_json: Option<String>,
+    session_id: Option<String>,
+    actor: Option<String>,
+    audit_id: String,
+    details: Option<String>,
+}
+
+impl DaemonOutcomeParams {
+    const ACTOR_OPERATION_TYPE: &'static str = "ee.daemon.outcome";
+
+    fn from_payload(payload: &serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(payload.clone()).map_err(|error| error.to_string())
+    }
+
+    fn database_path(&self) -> PathBuf {
+        self.workspace_path.join(".ee").join("ee.db")
+    }
+
+    fn into_parts(
+        self,
+    ) -> (
+        String,
+        crate::db::AuditedFeedbackEventInput,
+        String,
+    ) {
+        let event_id = self.event_id;
+        let audit_id = self.audit_id;
+        let input = crate::db::AuditedFeedbackEventInput {
+            event: crate::db::CreateFeedbackEventInput {
+                workspace_id: self.workspace_id,
+                target_type: self.target_type,
+                target_id: self.target_id,
+                signal: self.signal,
+                weight: self.weight,
+                source_type: self.source_type,
+                source_id: self.source_id,
+                reason: self.reason,
+                evidence_json: self.evidence_json,
+                session_id: self.session_id,
+            },
+            actor: self.actor,
+            details: self.details,
+        };
+        (event_id, input, audit_id)
+    }
+}
+
+enum DaemonTxnBatchEntry {
+    Journal(DaemonJournalParams),
+    Outcome(DaemonOutcomeParams),
+}
+
+impl DaemonTxnBatchEntry {
+    fn database_path(&self) -> PathBuf {
+        match self {
+            Self::Journal(params) => params.database_path(),
+            Self::Outcome(params) => params.database_path(),
+        }
+    }
+}
+
+/// True when every op in the batch can share one daemon transaction.
+fn batch_is_daemon_txn_coalescible(
+    operations: &[crate::core::write_owner::WriteOperation],
+) -> bool {
     use crate::core::write_owner::WriteOperation;
     !operations.is_empty()
         && operations.iter().all(|operation| {
@@ -2247,8 +2327,47 @@ fn batch_is_all_journal(operations: &[crate::core::write_owner::WriteOperation])
                 operation,
                 WriteOperation::Custom { operation_type, .. }
                     if operation_type == DaemonJournalParams::ACTOR_OPERATION_TYPE
+                        || operation_type == DaemonOutcomeParams::ACTOR_OPERATION_TYPE
             )
         })
+}
+
+fn parse_daemon_txn_batch_entry(
+    operation: &crate::core::write_owner::WriteOperation,
+) -> Result<DaemonTxnBatchEntry, crate::models::DomainError> {
+    use crate::core::write_owner::WriteOperation;
+    let WriteOperation::Custom {
+        operation_type,
+        payload,
+    } = operation
+    else {
+        return Err(crate::models::DomainError::Storage {
+            message: "daemon transaction batch received a non-Custom operation".to_string(),
+            repair: Some("only daemon journal/outcome ops are batched here".to_string()),
+        });
+    };
+    match operation_type.as_str() {
+        DaemonJournalParams::ACTOR_OPERATION_TYPE => {
+            DaemonJournalParams::from_payload(payload)
+                .map(DaemonTxnBatchEntry::Journal)
+                .map_err(|message| crate::models::DomainError::Storage {
+                    message: format!("daemon journal payload decode failed: {message}"),
+                    repair: Some("retry the write".to_string()),
+                })
+        }
+        DaemonOutcomeParams::ACTOR_OPERATION_TYPE => {
+            DaemonOutcomeParams::from_payload(payload)
+                .map(DaemonTxnBatchEntry::Outcome)
+                .map_err(|message| crate::models::DomainError::Storage {
+                    message: format!("daemon outcome payload decode failed: {message}"),
+                    repair: Some("retry the write".to_string()),
+                })
+        }
+        _ => Err(crate::models::DomainError::Storage {
+            message: format!("unsupported daemon transaction op: {operation_type}"),
+            repair: Some("only daemon journal/outcome ops are batched here".to_string()),
+        }),
+    }
 }
 
 /// Execute a homogeneous batch of `ee.daemon.journal` ops in ONE transaction
@@ -2261,56 +2380,79 @@ fn batch_is_all_journal(operations: &[crate::core::write_owner::WriteOperation])
 fn execute_journal_batch(
     operations: &[crate::core::write_owner::WriteOperation],
 ) -> Result<Vec<crate::core::write_owner::WriteResult>, crate::models::DomainError> {
-    use crate::core::write_owner::{WriteOperation, WriteResult};
-    let mut params = Vec::with_capacity(operations.len());
+    execute_daemon_txn_batch(operations)
+}
+
+fn execute_daemon_txn_batch(
+    operations: &[crate::core::write_owner::WriteOperation],
+) -> Result<Vec<crate::core::write_owner::WriteResult>, crate::models::DomainError> {
+    use crate::core::write_owner::WriteResult;
+    let mut entries = Vec::with_capacity(operations.len());
     for operation in operations {
-        let WriteOperation::Custom { payload, .. } = operation else {
-            return Err(crate::models::DomainError::Storage {
-                message: "journal batch received a non-Custom operation".to_string(),
-                repair: Some("only ee.daemon.journal ops are batched here".to_string()),
-            });
-        };
-        params.push(DaemonJournalParams::from_payload(payload).map_err(|message| {
-            crate::models::DomainError::Storage {
-                message: format!("daemon journal payload decode failed: {message}"),
-                repair: Some("retry the write".to_string()),
-            }
-        })?);
+        entries.push(parse_daemon_txn_batch_entry(operation)?);
     }
-    let Some(first) = params.first() else {
+    let Some(first) = entries.first() else {
         return Ok(Vec::new());
     };
     let database_path = first.database_path();
+    for entry in &entries {
+        if entry.database_path() != database_path {
+            return Err(crate::models::DomainError::Storage {
+                message: "daemon transaction batch crossed database paths".to_string(),
+                repair: Some("retry the writes separately".to_string()),
+            });
+        }
+    }
     let connection =
         crate::db::DbConnection::open_file(&database_path).map_err(|error| {
             crate::models::DomainError::Storage {
                 message: format!(
-                    "daemon journal batch could not open {}: {error}",
+                    "daemon transaction batch could not open {}: {error}",
                     database_path.display()
                 ),
                 repair: Some("ensure the workspace is initialized".to_string()),
             }
         })?;
-    crate::core::journal::ensure_workspace(
-        &connection,
-        &first.workspace_id,
-        &first.workspace_path,
-    )?;
     connection
         .with_transaction(|| {
-            let mut out = Vec::with_capacity(params.len());
-            for entry in params.drain(..) {
-                let input = entry.into_create_input();
-                let entry_id = input.entry_id.clone();
-                connection.insert_journal_entry(&input)?;
-                out.push(WriteResult::Success {
-                    entity_id: Some(entry_id),
-                });
+            let mut out = Vec::with_capacity(entries.len());
+            for entry in entries {
+                match entry {
+                    DaemonTxnBatchEntry::Journal(entry) => {
+                        crate::core::journal::ensure_workspace(
+                            &connection,
+                            &entry.workspace_id,
+                            &entry.workspace_path,
+                        )
+                        .map_err(|error| crate::db::DbError::MalformedRow {
+                            operation: crate::db::DbOperation::Execute,
+                            message: error.message().to_string(),
+                        })?;
+                        let input = entry.into_create_input();
+                        let entry_id = input.entry_id.clone();
+                        connection.insert_journal_entry(&input)?;
+                        out.push(WriteResult::Success {
+                            entity_id: Some(entry_id),
+                        });
+                    }
+                    DaemonTxnBatchEntry::Outcome(entry) => {
+                        let (event_id, input, audit_id) = entry.into_parts();
+                        crate::core::outcome::record_outcome_feedback_event_in_txn(
+                            &connection,
+                            &event_id,
+                            &input,
+                            audit_id,
+                        )?;
+                        out.push(WriteResult::Success {
+                            entity_id: Some(event_id),
+                        });
+                    }
+                }
             }
             Ok(out)
         })
         .map_err(|error| crate::models::DomainError::Storage {
-            message: format!("daemon journal batch transaction failed: {error}"),
+            message: format!("daemon transaction batch failed: {error}"),
             repair: Some("retry the write".to_string()),
         })
 }
@@ -3499,6 +3641,107 @@ mod tests {
         let response = dispatch_journal(&request, None);
         let error = response.error.as_ref().expect("invalid params -> error");
         assert_eq!(error.code, DAEMON_JOURNAL_PARAMS_INVALID_CODE);
+    }
+
+    #[test]
+    fn mixed_journal_outcome_batch_rolls_back_as_one_transaction() {
+        let dir = tempfile::Builder::new()
+            .prefix("daemon-mixed-batch")
+            .tempdir_in(std::env::temp_dir())
+            .expect("tempdir");
+        let workspace_path = dir.path().canonicalize().expect("canonical workspace");
+        let database_path = workspace_path.join(".ee").join("ee.db");
+        std::fs::create_dir_all(workspace_path.join(".ee")).expect("create .ee");
+        let workspace_id = "wsp_00000000000000000000009991".to_string();
+        let memory_id = "mem_00000000000000000000009992".to_string();
+        let connection = crate::db::DbConnection::open_file(&database_path).expect("open db");
+        connection.migrate().expect("migrate");
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: Some("daemon mixed batch".to_string()),
+                },
+            )
+            .expect("workspace");
+        connection
+            .insert_memory(
+                &memory_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_string(),
+                    kind: "rule".to_string(),
+                    content: "Use daemon mixed batch transaction tests.".to_string(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.6,
+                    provenance_uri: Some("test://daemon-mixed-batch".to_string()),
+                    trust_class: "human_explicit".to_string(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .expect("memory");
+
+        let journal_id = crate::core::journal::generate_journal_entry_id();
+        let journal = crate::core::write_owner::WriteOperation::Custom {
+            operation_type: DaemonJournalParams::ACTOR_OPERATION_TYPE.to_string(),
+            payload: serde_json::to_value(DaemonJournalParams {
+                workspace_path: workspace_path.clone(),
+                workspace_id: workspace_id.clone(),
+                entry_id: Some(journal_id),
+                agent_name: Some("daemon-test".to_string()),
+                session_key: None,
+                kind: "note".to_string(),
+                source: "manual".to_string(),
+                body: "journal row staged before failing outcome".to_string(),
+                structured: None,
+                redaction_report: "{}".to_string(),
+                instruction_risk: "none".to_string(),
+            })
+            .expect("journal payload"),
+        };
+        let invalid_outcome = crate::core::write_owner::WriteOperation::Custom {
+            operation_type: DaemonOutcomeParams::ACTOR_OPERATION_TYPE.to_string(),
+            payload: serde_json::to_value(DaemonOutcomeParams {
+                workspace_path: workspace_path.clone(),
+                event_id: "bad-feedback-id".to_string(),
+                workspace_id: workspace_id.clone(),
+                target_type: "memory".to_string(),
+                target_id: memory_id,
+                signal: "helpful".to_string(),
+                weight: 1.0,
+                source_type: "outcome_observed".to_string(),
+                source_id: Some("daemon-test".to_string()),
+                reason: Some("force invalid event id rollback".to_string()),
+                evidence_json: None,
+                session_id: None,
+                actor: Some("daemon-test".to_string()),
+                audit_id: crate::db::generate_audit_id(),
+                details: None,
+            })
+            .expect("outcome payload"),
+        };
+
+        let result = execute_daemon_txn_batch(&[journal, invalid_outcome]);
+        assert!(result.is_err(), "invalid outcome id should fail the batch");
+        let entries = connection
+            .list_journal_entries(
+                &workspace_id,
+                &crate::db::JournalEntryListFilter {
+                    limit: 10,
+                    ..crate::db::JournalEntryListFilter::default()
+                },
+            )
+            .expect("list journal entries");
+        assert!(
+            entries.is_empty(),
+            "journal insert must roll back when a later outcome op fails"
+        );
     }
 
     #[test]

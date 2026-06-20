@@ -1109,30 +1109,37 @@ fn record_outcome_inner(
             outcome_type: signal.clone(),
             details: feedback_input.reason.clone(),
         };
+        let sprt_audit = sprt.as_ref().map(|decision| OutcomeSprtAuditInput {
+            workspace_id: &target.workspace_id,
+            actor: options.actor.as_deref(),
+            target_type: "feedback_quarantine",
+            target_id: &quarantine_id,
+            decision,
+            audit_id: id_source.next_audit_id(),
+        });
         let audit_id = crate::core::write_owner::run_one_shot_write_intake(
             outcome_write_intake_workspace_path(options.database_path),
             &write_operation,
             || {
-                insert_feedback_quarantine_audited_with_id(
-                    &connection,
-                    &quarantine_id,
-                    &quarantine_input,
-                    options.actor.as_deref(),
-                    id_source.next_audit_id(),
-                )
+                connection
+                    .with_transaction(|| {
+                        record_outcome_in_txn(
+                            &connection,
+                            OutcomeRecordInTxn::Quarantine {
+                                quarantine_id: &quarantine_id,
+                                input: &quarantine_input,
+                                actor: options.actor.as_deref(),
+                                audit_id: id_source.next_audit_id(),
+                                sprt_audit,
+                            },
+                        )
+                    })
+                    .map_err(|error| DomainError::Storage {
+                        message: format!("Failed to quarantine feedback event: {error}"),
+                        repair: Some("ee doctor".to_owned()),
+                    })
             },
         )?;
-        if let Some(decision) = &sprt {
-            insert_sprt_quarantine_decision_audit(
-                &connection,
-                &target.workspace_id,
-                options.actor.as_deref(),
-                "feedback_quarantine",
-                &quarantine_id,
-                decision,
-                id_source.next_audit_id(),
-            )?;
-        }
         let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
         trace_sprt_quarantine("response", 0, &[]);
         let final_quarantine = OutcomeQuarantineSummary {
@@ -1211,34 +1218,36 @@ fn record_outcome_inner(
         outcome_type: signal.clone(),
         details: feedback_input.reason.clone(),
     };
+    let sprt_audit = sprt.as_ref().map(|decision| OutcomeSprtAuditInput {
+        workspace_id: &target.workspace_id,
+        actor: options.actor.as_deref(),
+        target_type: "feedback_event",
+        target_id: &event_id,
+        decision,
+        audit_id: id_source.next_audit_id(),
+    });
     let audit_id = crate::core::write_owner::run_one_shot_write_intake(
         outcome_write_intake_workspace_path(options.database_path),
         &write_operation,
         || {
-            insert_feedback_event_audited_with_id(
-                &connection,
-                &event_id,
-                &audited_feedback,
-                id_source.next_audit_id(),
-            )
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to record feedback event: {error}"),
-                repair: Some("ee doctor".to_string()),
-            })
+            connection
+                .with_transaction(|| {
+                    record_outcome_in_txn(
+                        &connection,
+                        OutcomeRecordInTxn::Feedback {
+                            event_id: &event_id,
+                            input: &audited_feedback,
+                            audit_id: id_source.next_audit_id(),
+                            sprt_audit,
+                        },
+                    )
+                })
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to record feedback event: {error}"),
+                    repair: Some("ee doctor".to_string()),
+                })
         },
     )?;
-
-    if let Some(decision) = &sprt {
-        insert_sprt_quarantine_decision_audit(
-            &connection,
-            &target.workspace_id,
-            options.actor.as_deref(),
-            "feedback_event",
-            &event_id,
-            decision,
-            id_source.next_audit_id(),
-        )?;
-    }
 
     if target_type == "procedure" {
         connection
@@ -2692,7 +2701,97 @@ fn sprt_observation_for_signal(signal: &str) -> Option<SprtObservation> {
     }
 }
 
-fn insert_feedback_event_audited_with_id(
+#[derive(Clone)]
+struct OutcomeSprtAuditInput<'a> {
+    workspace_id: &'a str,
+    actor: Option<&'a str>,
+    target_type: &'a str,
+    target_id: &'a str,
+    decision: &'a OutcomeSprtDecision,
+    audit_id: String,
+}
+
+enum OutcomeRecordInTxn<'a> {
+    Feedback {
+        event_id: &'a str,
+        input: &'a AuditedFeedbackEventInput,
+        audit_id: String,
+        sprt_audit: Option<OutcomeSprtAuditInput<'a>>,
+    },
+    Quarantine {
+        quarantine_id: &'a str,
+        input: &'a CreateFeedbackQuarantineInput,
+        actor: Option<&'a str>,
+        audit_id: String,
+        sprt_audit: Option<OutcomeSprtAuditInput<'a>>,
+    },
+}
+
+/// Persist the primary outcome record inside an already-open transaction.
+///
+/// The direct CLI path wraps this in `run_one_shot_write_intake` plus
+/// `DbConnection::with_transaction`; the daemon write-owner can call the same
+/// storage primitive while coalescing heterogeneous journal/outcome batches.
+/// Derived follow-up work (posterior/profile/candidate updates) intentionally
+/// stays outside this primitive to preserve the existing response semantics.
+fn record_outcome_in_txn(
+    connection: &DbConnection,
+    write: OutcomeRecordInTxn<'_>,
+) -> crate::db::Result<String> {
+    match write {
+        OutcomeRecordInTxn::Feedback {
+            event_id,
+            input,
+            audit_id,
+            sprt_audit,
+        } => {
+            let audit_id =
+                insert_feedback_event_audited_with_id_in_txn(connection, event_id, input, audit_id)?;
+            if let Some(sprt_audit) = sprt_audit {
+                insert_sprt_quarantine_decision_audit_in_txn(connection, sprt_audit)?;
+            }
+            Ok(audit_id)
+        }
+        OutcomeRecordInTxn::Quarantine {
+            quarantine_id,
+            input,
+            actor,
+            audit_id,
+            sprt_audit,
+        } => {
+            let audit_id = insert_feedback_quarantine_audited_with_id_in_txn(
+                connection,
+                quarantine_id,
+                input,
+                actor,
+                audit_id,
+            )?;
+            if let Some(sprt_audit) = sprt_audit {
+                insert_sprt_quarantine_decision_audit_in_txn(connection, sprt_audit)?;
+            }
+            Ok(audit_id)
+        }
+    }
+}
+
+pub(crate) fn record_outcome_feedback_event_in_txn(
+    connection: &DbConnection,
+    event_id: &str,
+    input: &AuditedFeedbackEventInput,
+    audit_id: String,
+) -> crate::db::Result<String> {
+    record_outcome_in_txn(
+        connection,
+        OutcomeRecordInTxn::Feedback {
+            event_id,
+            input,
+            audit_id,
+            sprt_audit: None,
+        },
+    )
+}
+
+fn insert_feedback_event_audited_with_id_in_txn(
     connection: &DbConnection,
     event_id: &str,
     input: &AuditedFeedbackEventInput,
@@ -2712,71 +2811,57 @@ fn insert_feedback_event_audited_with_id(
         .to_string()
     });
 
-    connection.with_transaction(|| {
-        connection.insert_feedback_event(event_id, &input.event)?;
-        connection.insert_audit(
-            &audit_id,
-            &CreateAuditInput {
-                workspace_id: Some(input.event.workspace_id.clone()),
-                actor: input.actor.clone(),
-                action: audit_actions::FEEDBACK_RECORD.to_string(),
-                target_type: Some(input.event.target_type.clone()),
-                target_id: Some(input.event.target_id.clone()),
-                details: Some(details),
-            },
-        )?;
-        Ok(audit_id)
-    })
+    connection.insert_feedback_event(event_id, &input.event)?;
+    connection.insert_audit(
+        &audit_id,
+        &CreateAuditInput {
+            workspace_id: Some(input.event.workspace_id.clone()),
+            actor: input.actor.clone(),
+            action: audit_actions::FEEDBACK_RECORD.to_string(),
+            target_type: Some(input.event.target_type.clone()),
+            target_id: Some(input.event.target_id.clone()),
+            details: Some(details),
+        },
+    )?;
+    Ok(audit_id)
 }
 
-fn insert_feedback_quarantine_audited_with_id(
+fn insert_feedback_quarantine_audited_with_id_in_txn(
     connection: &DbConnection,
     quarantine_id: &str,
     input: &CreateFeedbackQuarantineInput,
     actor: Option<&str>,
     audit_id: String,
-) -> Result<String, DomainError> {
+) -> crate::db::Result<String> {
     let details = feedback_quarantine_audit_details(quarantine_id, input);
-    connection
-        .with_transaction(|| {
-            connection.insert_feedback_quarantine(quarantine_id, input)?;
-            connection.insert_audit(
-                &audit_id,
-                &CreateAuditInput {
-                    workspace_id: Some(input.workspace_id.clone()),
-                    actor: actor
-                        .map(str::to_owned)
-                        .or_else(|| Some("ee outcome".to_owned())),
-                    action: audit_actions::FEEDBACK_QUARANTINE.to_owned(),
-                    target_type: Some(input.target_type.clone()),
-                    target_id: Some(input.target_id.clone()),
-                    details: Some(details.clone()),
-                },
-            )
-        })
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to quarantine feedback event: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?;
+    connection.insert_feedback_quarantine(quarantine_id, input)?;
+    connection.insert_audit(
+        &audit_id,
+        &CreateAuditInput {
+            workspace_id: Some(input.workspace_id.clone()),
+            actor: actor
+                .map(str::to_owned)
+                .or_else(|| Some("ee outcome".to_owned())),
+            action: audit_actions::FEEDBACK_QUARANTINE.to_owned(),
+            target_type: Some(input.target_type.clone()),
+            target_id: Some(input.target_id.clone()),
+            details: Some(details),
+        },
+    )?;
     Ok(audit_id)
 }
 
-fn insert_sprt_quarantine_decision_audit(
+fn insert_sprt_quarantine_decision_audit_in_txn(
     connection: &DbConnection,
-    workspace_id: &str,
-    actor: Option<&str>,
-    target_type: &str,
-    target_id: &str,
-    decision: &OutcomeSprtDecision,
-    audit_id: String,
-) -> Result<String, DomainError> {
-    let evaluation = decision.evaluation;
+    input: OutcomeSprtAuditInput<'_>,
+) -> crate::db::Result<String> {
+    let evaluation = input.decision.evaluation;
     let threshold_a_or_b = match evaluation.decision {
         SprtDecision::Release => evaluation.lower_bound,
         SprtDecision::Continue | SprtDecision::Quarantine => evaluation.upper_bound,
     };
     let details = serde_json::json!({
-        "source_id": redact_outcome_public_source_ref(&decision.source_id),
+        "source_id": redact_outcome_public_source_ref(&input.decision.source_id),
         "current_stat": rounded_f64_json_value(evaluation.statistic),
         "threshold_A_or_B": rounded_f64_json_value(threshold_a_or_b),
         "upper_bound": rounded_f64_json_value(evaluation.upper_bound),
@@ -2790,25 +2875,21 @@ fn insert_sprt_quarantine_decision_audit(
     })
     .to_string();
 
-    connection
-        .insert_audit(
-            &audit_id,
-            &CreateAuditInput {
-                workspace_id: Some(workspace_id.to_owned()),
-                actor: actor
-                    .map(str::to_owned)
-                    .or_else(|| Some("ee outcome".to_owned())),
-                action: "quarantine.sprt.decision".to_owned(),
-                target_type: Some(target_type.to_owned()),
-                target_id: Some(target_id.to_owned()),
-                details: Some(details),
-            },
-        )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to audit SPRT quarantine decision: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?;
-    Ok(audit_id)
+    connection.insert_audit(
+        &input.audit_id,
+        &CreateAuditInput {
+            workspace_id: Some(input.workspace_id.to_owned()),
+            actor: input
+                .actor
+                .map(str::to_owned)
+                .or_else(|| Some("ee outcome".to_owned())),
+            action: "quarantine.sprt.decision".to_owned(),
+            target_type: Some(input.target_type.to_owned()),
+            target_id: Some(input.target_id.to_owned()),
+            details: Some(details),
+        },
+    )?;
+    Ok(input.audit_id)
 }
 
 fn validate_harmful_feedback_policy(limit: u32, window_seconds: u32) -> Result<(), DomainError> {
