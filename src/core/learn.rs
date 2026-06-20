@@ -315,18 +315,21 @@ impl LearnSummaryReport {
 /// Show learning summary for a period.
 pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport, DomainError> {
     let effective_since = learn_summary_effective_since(options)?;
+    let since = effective_since
+        .as_deref()
+        .map(parse_learn_since)
+        .transpose()?;
     let snapshot = load_learning_snapshot(&options.workspace)?;
-    let since = effective_since.as_deref();
     let events = snapshot
         .feedback_events
         .iter()
-        .filter(|event| since.is_none_or(|since| event.created_at.as_str() >= since))
+        .filter(|event| timestamp_at_or_after(&event.created_at, since.as_ref()))
         .cloned()
         .collect::<Vec<_>>();
     let ledger_observation_count = snapshot
         .learning_observations
         .iter()
-        .filter(|observation| since.is_none_or(|since| observation.observed_at.as_str() >= since))
+        .filter(|observation| timestamp_at_or_after(&observation.observed_at, since.as_ref()))
         .count() as u32;
     let clusters = build_learning_clusters(&snapshot, None, &events);
     let harmful_feedback_count = events
@@ -336,7 +339,7 @@ pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport,
     let decay_audit_entries = snapshot
         .audit_entries
         .iter()
-        .filter(|entry| since.is_none_or(|since| entry.timestamp.as_str() >= since))
+        .filter(|entry| timestamp_at_or_after(&entry.timestamp, since.as_ref()))
         .collect::<Vec<_>>();
     let memories_demoted_via_decay = decay_audit_entries
         .iter()
@@ -349,12 +352,12 @@ pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport,
     let memories_created = snapshot
         .memories
         .values()
-        .filter(|memory| since.is_none_or(|since| memory.created_at.as_str() >= since))
+        .filter(|memory| timestamp_at_or_after(&memory.created_at, since.as_ref()))
         .count() as u32;
     let candidates = snapshot
         .curation_candidates
         .iter()
-        .filter(|candidate| since.is_none_or(|since| candidate.created_at.as_str() >= since))
+        .filter(|candidate| timestamp_at_or_after(&candidate.created_at, since.as_ref()))
         .collect::<Vec<_>>();
     let candidates_proposed = candidates.len() as u32;
     let applied_rules = candidates
@@ -473,6 +476,15 @@ fn learn_summary_period_since(
             ),
         }),
     }
+}
+
+fn timestamp_at_or_after(raw: &str, since: Option<&DateTime<Utc>>) -> bool {
+    let Some(since) = since else {
+        return true;
+    };
+    DateTime::parse_from_rfc3339(raw)
+        .map(|timestamp| timestamp.with_timezone(&Utc) >= *since)
+        .unwrap_or(false)
 }
 
 // ============================================================================
@@ -681,7 +693,7 @@ pub fn show_gaps(options: &LearnGapsOptions) -> Result<LearnGapsReport, DomainEr
     let requested_since = options
         .since
         .as_deref()
-        .map(parse_learn_gaps_since)
+        .map(parse_learn_since)
         .transpose()?;
     let parsed_misses = snapshot
         .audit_entries
@@ -760,7 +772,7 @@ pub fn show_gaps(options: &LearnGapsOptions) -> Result<LearnGapsReport, DomainEr
     })
 }
 
-fn parse_learn_gaps_since(raw: &str) -> Result<DateTime<Utc>, DomainError> {
+fn parse_learn_since(raw: &str) -> Result<DateTime<Utc>, DomainError> {
     DateTime::parse_from_rfc3339(raw)
         .map(|timestamp| timestamp.with_timezone(&Utc))
         .map_err(|error| DomainError::Usage {
@@ -5171,6 +5183,67 @@ mod tests {
             assert_eq!(report.summary.rules_learned, 1);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn summary_rejects_invalid_since_before_storage_lookup() -> TestResult {
+        let error = show_summary(&LearnSummaryOptions {
+            workspace: PathBuf::from("/workspace/does-not-need-to-exist"),
+            period: "all".to_string(),
+            since: Some("not-a-date".to_string()),
+            detailed: false,
+        })
+        .expect_err("invalid explicit since should fail before storage lookup");
+
+        if !matches!(&error, DomainError::Usage { .. }) {
+            return Err(format!("expected usage error, got {error:?}"));
+        }
+        if !error.message().contains("Invalid --since `not-a-date`") {
+            return Err(format!("unexpected error message: {}", error.message()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn summary_since_filters_mixed_rfc3339_forms_chronologically() -> TestResult {
+        let (dir, database, workspace_id) =
+            seed_learning_workspace("ee-learn-summary-since-rfc3339")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let memory_id = "mem_51234567890123456789012345";
+        seed_memory(
+            &connection,
+            &workspace_id,
+            memory_id,
+            "summary-since",
+            "Learning summary since filtering target.",
+        )?;
+        seed_summary_candidate(
+            &connection,
+            &workspace_id,
+            memory_id,
+            "cand_summary_same_second_old",
+            "2026-01-01T00:00:00Z",
+        )?;
+        seed_summary_candidate(
+            &connection,
+            &workspace_id,
+            memory_id,
+            "cand_summary_after_boundary",
+            "2026-01-01T00:00:01+00:00",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = show_summary(&LearnSummaryOptions {
+            workspace: dir.path().to_path_buf(),
+            period: "all".to_string(),
+            since: Some("2026-01-01T00:00:00.500000000+00:00".to_string()),
+            detailed: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.summary.candidates_proposed, 1);
+        assert_eq!(report.summary.rules_learned, 1);
         Ok(())
     }
 
