@@ -171,11 +171,25 @@ proptest-regressions/combinator/
 # stale files on RCH workers (scripts/**/__pycache__/*.pyc from helper scripts,
 # artifacts/** from dependency-audit/atp/ci runs). rsync --delete on them fails
 # `Permission denied (13)` and aborts the whole project sync before Cargo,
-# blocking every /Users-checkout remote verify fleet-wide. Excluding them
-# (dir-recursive + anchored) makes rsync leave the stale remote copies untouched
-# — same shape as the fixtures/proptest protections above.
-__pycache__/
-**/__pycache__/
-**/__pycache__/**
+# blocking every /Users-checkout remote verify fleet-wide. rch only honors
+# rsync --delete protection for LEADING-SLASH-ANCHORED paths (confirmed: the
+# glob/single-component forms `__pycache__/` and `**/__pycache__/` did NOT
+# protect, while `/artifacts/` did), so every __pycache__ dir is listed by its
+# full anchored path. Mirrors the fixtures (01102e54) / proptest protections.
 /artifacts/
 /artifacts/**
+/scripts/__pycache__/
+/scripts/ci/__pycache__/
+/scripts/atp_bench/__pycache__/
+/tests/__pycache__/
+/examples/__pycache__/
+/mcp_agent_mail/__pycache__/
+/skills/active-learning-experiment-planner/scripts/__pycache__/
+/skills/causal-credit-review/scripts/__pycache__/
+/skills/claim-certificate-review/scripts/__pycache__/
+/skills/counterfactual-failure-analysis/scripts/__pycache__/
+/skills/preflight-risk-review/scripts/__pycache__/
+/skills/procedure-distillation/scripts/__pycache__/
+/skills/rehearsal-promotion-review/scripts/__pycache__/
+/skills/session-review-memory-distillation/scripts/__pycache__/
+/skills/situation-framing/scripts/__pycache__/
