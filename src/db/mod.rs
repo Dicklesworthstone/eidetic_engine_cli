@@ -13531,14 +13531,19 @@ impl DbConnection {
     /// Insert one journal entry (bd-1pi9m.2 / V074). The single INSERT is
     /// its own implicit transaction, which is what gives the JSONL batch
     /// surface per-line independent persistence (ADR 0062 §4).
+    ///
+    /// Replays with the same `entry_id` are idempotent for daemon fallback:
+    /// if the first write committed but the client lost the response, a direct
+    /// fallback returns the already-stored row rather than duplicating or
+    /// surfacing a primary-key error.
     pub fn insert_journal_entry(
         &self,
         input: &CreateJournalEntryInput,
     ) -> Result<StoredJournalEntry> {
         let now = Utc::now().to_rfc3339();
-        self.execute_for(
+        let affected = self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO journal_entries (entry_id, workspace_id, agent_name, session_key, kind, source, body, structured, redaction_report, instruction_risk, created_at, distilled_at, tombstoned_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, NULL)",
+            "INSERT OR IGNORE INTO journal_entries (entry_id, workspace_id, agent_name, session_key, kind, source, body, structured, redaction_report, instruction_risk, created_at, distilled_at, tombstoned_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, NULL)",
             &[
                 Value::Text(input.entry_id.clone()),
                 Value::Text(input.workspace_id.clone()),
@@ -13562,6 +13567,17 @@ impl DbConnection {
                 Value::Text(now.clone()),
             ],
         )?;
+        if affected == 0 {
+            return self
+                .get_journal_entry(&input.workspace_id, &input.entry_id)?
+                .ok_or_else(|| DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: format!(
+                        "journal entry id {} already exists outside workspace {}",
+                        input.entry_id, input.workspace_id
+                    ),
+                });
+        }
         Ok(StoredJournalEntry {
             entry_id: input.entry_id.clone(),
             workspace_id: input.workspace_id.clone(),

@@ -2291,6 +2291,11 @@ fn execute_journal_batch(
                 repair: Some("ensure the workspace is initialized".to_string()),
             }
         })?;
+    crate::core::journal::ensure_workspace(
+        &connection,
+        &first.workspace_id,
+        &first.workspace_path,
+    )?;
     connection
         .with_transaction(|| {
             let mut out = Vec::with_capacity(params.len());

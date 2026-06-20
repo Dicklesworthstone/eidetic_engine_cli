@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use serde::Serialize;
 
 use crate::core::curate::{
     ClusterCoherenceInput, silhouette_agglomerative_clusters, stable_workspace_id,
@@ -202,6 +203,37 @@ pub struct JournalEntryDraft {
     pub cwd: Option<String>,
     pub paths: Vec<String>,
     pub stderr_tail: Option<String>,
+}
+
+/// Daemon write-owner payload for one already-screened journal entry.
+///
+/// The CLI prepares this locally so redaction, truncation, kind inference, and
+/// instruction-risk grading stay byte-identical to the direct append path. The
+/// daemon only owns the transaction/coalescing boundary.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct JournalDaemonWritePayload {
+    pub workspace_path: PathBuf,
+    pub workspace_id: String,
+    pub entry_id: String,
+    pub agent_name: Option<String>,
+    pub session_key: Option<String>,
+    pub kind: String,
+    pub source: String,
+    pub body: String,
+    pub structured: Option<String>,
+    pub redaction_report: String,
+    pub instruction_risk: String,
+}
+
+/// Local preparation result for a daemon-routed journal write.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedJournalDaemonWrite {
+    pub payload: JournalDaemonWritePayload,
+    truncated: bool,
+    redaction_applied: bool,
+    redaction_span_count: usize,
+    redaction_classes: Vec<String>,
+    raw_body_bytes: usize,
 }
 
 /// Options shared by the journal append surfaces.
@@ -602,6 +634,19 @@ pub fn append_journal_entry(
     options: &JournalAppendOptions<'_>,
     draft: &JournalEntryDraft,
 ) -> Result<JournalAppendReport, DomainError> {
+    append_journal_entry_with_id(options, draft, generate_journal_entry_id())
+}
+
+/// Append one journal entry with a caller-generated idempotency id.
+///
+/// The daemon-routed path uses this for fallback replay: if the daemon commits
+/// and dies before replying, the direct retry uses the same `entry_id`, and the
+/// DB layer returns the already-stored row instead of duplicating it.
+pub fn append_journal_entry_with_id(
+    options: &JournalAppendOptions<'_>,
+    draft: &JournalEntryDraft,
+    entry_id: String,
+) -> Result<JournalAppendReport, DomainError> {
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
     if !journal_capture_enabled(&workspace_path) {
         return Ok(JournalAppendReport {
@@ -624,8 +669,110 @@ pub fn append_journal_entry(
     let workspace_id = stable_workspace_id(&workspace_path);
     ensure_workspace(&connection, &workspace_id, &workspace_path)?;
 
-    let stored = persist_prepared_entry(&connection, &workspace_path, &workspace_id, options, &prepared)?;
-    let entry = JournalEntryRecord::from_stored(&stored)?;
+    let stored = persist_prepared_entry_with_id(
+        &connection,
+        &workspace_path,
+        &workspace_id,
+        options,
+        &entry_id,
+        &prepared,
+    )?;
+    append_report_from_prepared(&prepared, &stored)
+}
+
+/// Prepare the daemon write-owner payload for one journal append without
+/// mutating storage.
+pub fn prepare_journal_daemon_write(
+    options: &JournalAppendOptions<'_>,
+    draft: &JournalEntryDraft,
+    entry_id: String,
+) -> Result<PreparedJournalDaemonWrite, DomainError> {
+    let workspace_path = resolve_workspace_path(options.workspace_path)?;
+    let prepared = prepare_journal_entry(draft).map_err(|error| DomainError::Usage {
+        message: format!("{} ({})", error.message, error.code),
+        repair: Some("ee journal append --help".to_owned()),
+    })?;
+    let workspace_id = stable_workspace_id(&workspace_path);
+    Ok(PreparedJournalDaemonWrite {
+        payload: JournalDaemonWritePayload {
+            workspace_path,
+            workspace_id,
+            entry_id,
+            agent_name: options.agent_name.clone(),
+            session_key: prepared.session_key.clone(),
+            kind: prepared.kind.as_str().to_owned(),
+            source: options.source.as_str().to_owned(),
+            body: prepared.body.clone(),
+            structured: prepared.structured_json.clone(),
+            redaction_report: prepared.redaction_report_json.clone(),
+            instruction_risk: prepared.instruction_risk.as_str().to_owned(),
+        },
+        truncated: prepared.truncated,
+        redaction_applied: prepared.redaction_applied,
+        redaction_span_count: prepared.redaction_span_count,
+        redaction_classes: prepared.redaction_classes,
+        raw_body_bytes: prepared.raw_body_bytes,
+    })
+}
+
+/// Build the ordinary append report after a daemon-routed write has committed.
+pub fn journal_report_for_daemon_write(
+    options: &JournalAppendOptions<'_>,
+    prepared: &PreparedJournalDaemonWrite,
+) -> Result<JournalAppendReport, DomainError> {
+    let workspace_path = resolve_workspace_path(options.workspace_path)?;
+    let database_path = effective_database_path(&workspace_path, options.database_path);
+    let connection = open_journal_database(&database_path)?;
+    let stored = connection
+        .get_journal_entry(&prepared.payload.workspace_id, &prepared.payload.entry_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to read daemon-routed journal entry: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?
+        .ok_or_else(|| DomainError::Storage {
+            message: format!(
+                "Daemon reported journal entry {} committed, but the row was not found.",
+                prepared.payload.entry_id
+            ),
+            repair: Some("retry `ee journal append` without --daemon-write".to_owned()),
+        })?;
+    append_report_from_daemon_prepared(prepared, &stored)
+}
+
+fn append_report_from_prepared(
+    prepared: &PreparedJournalEntry,
+    stored: &StoredJournalEntry,
+) -> Result<JournalAppendReport, DomainError> {
+    let entry = JournalEntryRecord::from_stored(stored)?;
+    let mut degraded = Vec::new();
+    if prepared.truncated {
+        degraded.push(journal_truncated_degradation(
+            prepared.raw_body_bytes,
+            stored.body.len(),
+        ));
+    }
+    if prepared.redaction_applied {
+        degraded.push(journal_redaction_degradation(
+            prepared.redaction_span_count,
+            &prepared.redaction_classes,
+        ));
+    }
+
+    Ok(JournalAppendReport {
+        version: env!("CARGO_PKG_VERSION"),
+        status: "stored",
+        entry: Some(entry),
+        truncated: prepared.truncated,
+        redaction_applied: prepared.redaction_applied,
+        degraded,
+    })
+}
+
+fn append_report_from_daemon_prepared(
+    prepared: &PreparedJournalDaemonWrite,
+    stored: &StoredJournalEntry,
+) -> Result<JournalAppendReport, DomainError> {
+    let entry = JournalEntryRecord::from_stored(stored)?;
     let mut degraded = Vec::new();
     if prepared.truncated {
         degraded.push(journal_truncated_degradation(
@@ -2364,8 +2511,26 @@ fn persist_prepared_entry(
     options: &JournalAppendOptions<'_>,
     prepared: &PreparedJournalEntry,
 ) -> Result<StoredJournalEntry, DomainError> {
+    persist_prepared_entry_with_id(
+        connection,
+        workspace_path,
+        workspace_id,
+        options,
+        &generate_journal_entry_id(),
+        prepared,
+    )
+}
+
+fn persist_prepared_entry_with_id(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    workspace_id: &str,
+    options: &JournalAppendOptions<'_>,
+    entry_id: &str,
+    prepared: &PreparedJournalEntry,
+) -> Result<StoredJournalEntry, DomainError> {
     let input = CreateJournalEntryInput {
-        entry_id: generate_journal_entry_id(),
+        entry_id: entry_id.to_owned(),
         workspace_id: workspace_id.to_owned(),
         agent_name: options.agent_name.clone(),
         session_key: prepared.session_key.clone(),
@@ -2445,7 +2610,7 @@ fn open_journal_database(database_path: &Path) -> Result<DbConnection, DomainErr
     Ok(connection)
 }
 
-fn ensure_workspace(
+pub(crate) fn ensure_workspace(
     connection: &DbConnection,
     workspace_id: &str,
     workspace_path: &Path,
@@ -2502,9 +2667,9 @@ mod tests {
         JOURNAL_ENTRY_TRUNCATED_CODE, JOURNAL_REDACTION_APPLIED_CODE, JOURNAL_STDIN_MAX_LINES,
         JournalAppendOptions, JournalDistillOptions, JournalEntryDraft, JournalKind,
         JournalListOptions, JournalShowOptions, JournalSource, append_journal_entries_stdin,
-        append_journal_entry, distill_journal_entries, generate_journal_entry_id,
-        journal_retention_days, list_journal_entries, normalize_command_root, show_journal_entry,
-        truncate_at_char_boundary,
+        append_journal_entry, append_journal_entry_with_id, distill_journal_entries,
+        generate_journal_entry_id, journal_retention_days, list_journal_entries,
+        normalize_command_root, show_journal_entry, truncate_at_char_boundary,
     };
     use crate::db::{
         CreateJournalEntryInput, CreateMemoryInput, DbConnection, JournalEntryListFilter,
@@ -2862,6 +3027,49 @@ mod tests {
             "cut lands on a 3-byte char boundary",
         )?;
         ensure(first.truncated, "oversize body reports truncation")
+    }
+
+    #[test]
+    fn caller_entry_id_replay_is_idempotent_for_daemon_fallback() -> TestResult {
+        let (_dir, workspace_path, database_path) = seed_journal_workspace("jrn-idem")?;
+        let options = append_options(&workspace_path, None, JournalSource::Manual);
+        let entry_id = generate_journal_entry_id();
+        let draft = body_draft("daemon write committed before the client observed a response");
+
+        let first = append_journal_entry_with_id(&options, &draft, entry_id.clone())
+            .map_err(|error| error.to_string())?;
+        let replay = append_journal_entry_with_id(&options, &draft, entry_id.clone())
+            .map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &first.entry.as_ref().ok_or("first entry")?.entry_id,
+            &entry_id,
+            "first write uses caller id",
+        )?;
+        ensure_equal(
+            &replay.entry.as_ref().ok_or("replay entry")?.entry_id,
+            &entry_id,
+            "replay returns the same caller id",
+        )?;
+        ensure_equal(
+            &replay.entry.as_ref().ok_or("replay entry")?.created_at,
+            &first.entry.as_ref().ok_or("first entry")?.created_at,
+            "replay returns the original stored row",
+        )?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::curate::stable_workspace_id(&workspace_path);
+        let stored = connection
+            .list_journal_entries(
+                &workspace_id,
+                &JournalEntryListFilter {
+                    limit: 10,
+                    ..JournalEntryListFilter::default()
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&stored.len(), &1, "replay does not duplicate the row")
     }
 
     #[test]

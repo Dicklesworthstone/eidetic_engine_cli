@@ -5914,6 +5914,16 @@ pub struct JournalAppendArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub stdin: bool,
 
+    /// Route a single journal append through the live daemon write-owner when
+    /// its socket is reachable. Falls back to the direct path on daemon errors.
+    #[arg(long = "daemon-write", action = ArgAction::SetTrue, conflicts_with = "stdin")]
+    pub daemon_write: bool,
+
+    /// Explicit daemon socket for --daemon-write. Defaults to the per-UID
+    /// daemon socket path.
+    #[arg(long = "daemon-socket", value_name = "PATH", requires = "daemon_write")]
+    pub daemon_socket: Option<PathBuf>,
+
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
@@ -42773,6 +42783,90 @@ where
     write_stdout(stdout, &(json.to_string() + "\n"))
 }
 
+fn write_journal_append_report<W>(
+    cli: &Cli,
+    report: &crate::core::journal::JournalAppendReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(
+                &serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
+                    "success": true,
+                    "data": report.data_json(),
+                })
+                .to_string(),
+            ) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => write_journal_data_json(stdout, &report.data_json()),
+    }
+}
+
+#[cfg(unix)]
+fn try_append_journal_via_daemon(
+    args: &JournalAppendArgs,
+    options: &crate::core::journal::JournalAppendOptions<'_>,
+    prepared: &crate::core::journal::PreparedJournalDaemonWrite,
+) -> Option<crate::core::journal::JournalAppendReport> {
+    if !args.daemon_write {
+        return None;
+    }
+    let socket_path = args
+        .daemon_socket
+        .clone()
+        .unwrap_or_else(crate::daemon::default_daemon_socket_path);
+    if !daemon_socket_accepts_connection(&socket_path) {
+        return None;
+    }
+    let params = serde_json::to_value(&prepared.payload).ok()?;
+    let request = crate::daemon::protocol::DaemonRequest::new(
+        format!("journal-append-{}", prepared.payload.entry_id),
+        "ee-cli-journal",
+        crate::daemon::server::METHOD_WRITE_JOURNAL,
+        params,
+    );
+    let response = crate::daemon::server::client_round_trip(&socket_path, &request).ok()?;
+    if response.error.is_some() {
+        return None;
+    }
+    let result = response.result?;
+    if result
+        .get("success")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return None;
+    }
+    let entity_matches = result
+        .get("entityId")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|entity_id| entity_id == prepared.payload.entry_id.as_str());
+    if !entity_matches {
+        return None;
+    }
+    crate::core::journal::journal_report_for_daemon_write(options, prepared).ok()
+}
+
+#[cfg(not(unix))]
+fn try_append_journal_via_daemon(
+    _args: &JournalAppendArgs,
+    _options: &crate::core::journal::JournalAppendOptions<'_>,
+    _prepared: &crate::core::journal::PreparedJournalDaemonWrite,
+) -> Option<crate::core::journal::JournalAppendReport> {
+    None
+}
+
 fn handle_journal_append<W, E>(
     cli: &Cli,
     args: &JournalAppendArgs,
@@ -42784,7 +42878,7 @@ where
     E: Write,
 {
     use crate::core::journal::{
-        JournalEntryDraft, JournalSource, append_journal_entries_stdin, append_journal_entry,
+        JournalEntryDraft, JournalSource, append_journal_entries_stdin,
     };
 
     let workspace_path = cli.resolve_workspace();
@@ -42902,27 +42996,24 @@ where
         stderr_tail: args.stderr_tail.clone(),
     };
 
-    match append_journal_entry(&options, &draft) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
+    let entry_id = crate::core::journal::generate_journal_entry_id();
+    if args.daemon_write && crate::core::journal::journal_capture_enabled(&workspace_path) {
+        match crate::core::journal::prepare_journal_daemon_write(
+            &options,
+            &draft,
+            entry_id.clone(),
+        ) {
+            Ok(prepared) => {
+                if let Some(report) = try_append_journal_via_daemon(args, &options, &prepared) {
+                    return write_journal_append_report(cli, &report, stdout);
+                }
             }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &(output::render_toon_from_json(
-                    &serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V2,
-                        "success": true,
-                        "data": report.data_json(),
-                    })
-                    .to_string(),
-                ) + "\n"),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => write_journal_data_json(stdout, &report.data_json()),
-        },
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        }
+    }
+
+    match crate::core::journal::append_journal_entry_with_id(&options, &draft, entry_id) {
+        Ok(report) => write_journal_append_report(cli, &report, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
