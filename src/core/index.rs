@@ -1553,10 +1553,32 @@ fn process_one_index_job(
             .find(|document| document.id == document_id)
             .cloned()
     });
-    let should_try_incremental = matches!(
+    // bd-2qmvp: the single-document incremental path upserts only its own
+    // document yet stamps the current MAX workspace generation (see
+    // `published_generation` below). Under concurrent single-document writes a
+    // sibling memory may already be committed when this job runs — its index
+    // job is enqueued in the SAME transaction as the memory write and the
+    // (audit-derived) generation bump, so a committed sibling is always visible
+    // here as a pending job (race-free detection). An incremental apply would
+    // then publish a current-generation-but-INCOMPLETE index, and a concurrent
+    // `ee search` would read index_gen == db_gen, see `Ready`, and silently
+    // miss the sibling document (the bd-d67os.6 regression). When other index
+    // jobs are still pending for this workspace we rebuild the COMPLETE
+    // indexable set instead, so the published generation truthfully reflects
+    // every committed document. The coalesced batch path already applies all
+    // touched documents together and is unaffected.
+    let sibling_index_jobs_pending = db
+        .list_pending_search_index_jobs(&job.workspace_id, None)?
+        .iter()
+        .any(|pending| pending.id != job.id);
+    let job_is_single_document = matches!(
         job.job_type_enum(),
         Some(SearchIndexJobType::Incremental | SearchIndexJobType::SingleDocument)
     );
+    if job_is_single_document && sibling_index_jobs_pending {
+        processing_mode.push_str("_sibling_pending_full_rebuild");
+    }
+    let should_try_incremental = job_is_single_document && !sibling_index_jobs_pending;
 
     if documents_total == 0 && (!should_try_incremental || incremental_target.is_none()) {
         db.complete_search_index_job(&job.id, 0)?;
@@ -4508,7 +4530,7 @@ pub fn get_index_vacuum_report(
     let before = collect_index_path_stats(&index_dir)?;
     let after = before.clone();
     let candidates = discover_index_vacuum_candidates(&index_dir)?;
-    let lock = inspect_index_vacuum_lock(&database_path)?;
+    let lock = inspect_index_vacuum_lock(&database_path, &options.workspace_path)?;
     let reclaimable_bytes = candidates.iter().fold(0_u64, |total, candidate| {
         total.saturating_add(candidate.stats.size_bytes)
     });
@@ -4682,12 +4704,13 @@ fn index_vacuum_base_name(index_dir: &Path) -> Result<String, std::io::Error> {
 
 fn inspect_index_vacuum_lock(
     database_path: &Path,
+    workspace_path: &Path,
 ) -> Result<IndexVacuumLockReport, IndexStatusError> {
     if !database_path.exists() {
         return Ok(IndexVacuumLockReport::none());
     }
     let db = DbConnection::open_file(database_path)?;
-    let Some(workspace_id) = latest_workspace_id_for_vacuum(&db)? else {
+    let Some(workspace_id) = workspace_id_for_index_vacuum(&db, workspace_path)? else {
         return Ok(IndexVacuumLockReport::none());
     };
     let lock_id = AdvisoryLockId::index(&workspace_id);
@@ -4741,15 +4764,12 @@ fn inspect_index_vacuum_lock(
     Ok(IndexVacuumLockReport::for_lock_id(canonical_lock_id))
 }
 
-fn latest_workspace_id_for_vacuum(db: &DbConnection) -> Result<Option<String>, DbError> {
-    match db.query(
-        "SELECT id FROM workspaces ORDER BY created_at DESC LIMIT 1",
-        &[],
-    ) {
-        Ok(rows) => Ok(rows
-            .first()
-            .and_then(|row| row.get(0).and_then(|value| value.as_str()))
-            .map(str::to_owned)),
+fn workspace_id_for_index_vacuum(
+    db: &DbConnection,
+    workspace_path: &Path,
+) -> Result<Option<String>, DbError> {
+    match workspace_id_for_index_status(db, workspace_path) {
+        Ok(workspace_id) => Ok(workspace_id),
         Err(error) if db_error_mentions_missing_table(&error, "workspaces") => Ok(None),
         Err(error) => Err(error),
     }
@@ -6189,6 +6209,151 @@ mod tests {
             }
             other => panic!("unexpected incremental outcome: {other:?}"),
         }
+    }
+
+    #[test]
+    fn single_document_job_full_rebuilds_when_sibling_jobs_pending() -> TestResult {
+        // bd-2qmvp: a single-document index job that runs while a sibling
+        // memory's index job is still pending must NOT incrementally apply only
+        // its own document and then stamp the current MAX workspace generation
+        // (that publishes a current-but-incomplete index which a concurrent
+        // `ee search` reads as Ready, silently missing the sibling). It must
+        // rebuild the COMPLETE indexable set so the published generation is
+        // honest about every committed document.
+        let root = unique_test_dir("bd2qmvp-sibling-pending");
+        std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        // Canonicalize so the index path carries no symlinked components: when
+        // this test is RCH-verified from the /Users checkout the worker maps the
+        // tree through a symlinked project root, which the index-publish guard
+        // (`ensure_index_path_has_no_symlinks`) correctly refuses. Resolving the
+        // symlinks here keeps the test portable without weakening that guard.
+        let root = std::fs::canonicalize(&root).map_err(|error| error.to_string())?;
+        let index_dir = root.join("index");
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_012345678901234567890123ws";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: root.to_string_lossy().into_owned(),
+                    name: Some("bd-2qmvp sibling pending".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let add_memory_job =
+            |memory_id: &str, job_id: &str, content: &str| -> Result<(), String> {
+                connection
+                    .insert_memory(
+                        memory_id,
+                        &crate::db::CreateMemoryInput {
+                            workspace_id: workspace_id.to_owned(),
+                            level: "procedural".to_owned(),
+                            kind: "rule".to_owned(),
+                            content: content.to_owned(),
+                            workflow_id: None,
+                            confidence: 0.9,
+                            utility: 0.5,
+                            importance: 0.5,
+                            provenance_uri: Some("test://bd-2qmvp".to_owned()),
+                            trust_class: "human_explicit".to_owned(),
+                            trust_subclass: None,
+                            tags: Vec::new(),
+                            valid_from: None,
+                            valid_to: None,
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                connection
+                    .insert_search_index_job(
+                        job_id,
+                        &crate::db::CreateSearchIndexJobInput {
+                            workspace_id: workspace_id.to_owned(),
+                            job_type: crate::db::SearchIndexJobType::SingleDocument,
+                            document_source: Some("memory".to_owned()),
+                            document_id: Some(memory_id.to_owned()),
+                            documents_total: 1,
+                        },
+                    )
+                    .map_err(|error| error.to_string())
+            };
+
+        // Seed an existing index so the single-document incremental path is a
+        // live option; an absent index would fall back to a full rebuild
+        // regardless, masking the gate under test.
+        add_memory_job(
+            "mem_012345678901234567890123ms",
+            "sidx_012345678901234567890123js",
+            "seed alpha document for sibling rebuild test",
+        )?;
+        let seed = process_index_job_for_connection(
+            &connection,
+            "sidx_012345678901234567890123js",
+            &index_dir,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            seed.outcome == "completed",
+            format!("seed index job did not complete: {seed:?}"),
+        )?;
+
+        // Two concurrent writes land (beta, gamma); both their single-document
+        // index jobs are now pending, mirroring the swarm remember pattern.
+        add_memory_job(
+            "mem_012345678901234567890123mb",
+            "sidx_012345678901234567890123jb",
+            "beta sibling document concurrent write",
+        )?;
+        add_memory_job(
+            "mem_012345678901234567890123mg",
+            "sidx_012345678901234567890123jg",
+            "gamma sibling document concurrent write",
+        )?;
+
+        // Process ONLY beta's job while gamma's job is still pending.
+        let beta = process_index_job_for_connection(
+            &connection,
+            "sidx_012345678901234567890123jb",
+            &index_dir,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            beta.outcome == "completed",
+            format!("beta index job did not complete: {beta:?}"),
+        )?;
+        // With the fix the pending gamma job forces a full rebuild of the
+        // complete set (seed + beta + gamma == 3 documents). The legacy bug
+        // would incrementally apply only beta (documents_indexed == 1) and
+        // leave gamma missing under the stamped max generation.
+        ensure(
+            beta.documents_indexed == 3,
+            format!(
+                "expected full rebuild of 3 documents when a sibling job is pending, got documents_indexed={} mode={}",
+                beta.documents_indexed, beta.processing_mode
+            ),
+        )?;
+        ensure(
+            beta.processing_mode.contains("sibling_pending_full_rebuild"),
+            format!(
+                "expected sibling-pending full-rebuild processing mode, got {}",
+                beta.processing_mode
+            ),
+        )?;
+
+        // Draining gamma last (no siblings pending now) completes the queue.
+        let gamma = process_index_job_for_connection(
+            &connection,
+            "sidx_012345678901234567890123jg",
+            &index_dir,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            gamma.outcome == "completed",
+            format!("gamma index job did not complete: {gamma:?}"),
+        )?;
+
+        Ok(())
     }
 
     #[test]
@@ -7799,6 +7964,88 @@ mod tests {
                 .iter()
                 .any(|degraded| degraded.code == "index_locked"),
             "lock degradation should be present",
+        )
+    }
+
+    #[test]
+    fn index_vacuum_lock_resolution_uses_requested_workspace_path() -> TestResult {
+        let root = unique_test_dir("vacuum-lock-target-workspace");
+        let target_workspace = root.join("target");
+        let other_workspace = root.join("other");
+        let database = root.join(".ee").join("ee.db");
+        let index_dir = target_workspace.join(".ee").join("index");
+        let parent = database
+            .parent()
+            .ok_or_else(|| "database path must have parent".to_string())?;
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&other_workspace).map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let target_workspace_id = "wsp_vacuumtarget0000000000000";
+        let other_workspace_id = "wsp_vacuumother00000000000000";
+        connection
+            .insert_workspace(
+                target_workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: default_workspace_root(&target_workspace)
+                        .to_string_lossy()
+                        .into_owned(),
+                    name: Some("vacuum target workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        connection
+            .insert_workspace(
+                other_workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: default_workspace_root(&other_workspace)
+                        .to_string_lossy()
+                        .into_owned(),
+                    name: Some("newer unrelated workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let target_lock_id = AdvisoryLockId::index(target_workspace_id);
+        let lock = connection
+            .acquire_advisory_lock(
+                &target_lock_id,
+                "target_holder",
+                Some(300),
+                Some("target workspace lock"),
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(
+            matches!(
+                lock,
+                AcquireLockResult::Acquired(_) | AcquireLockResult::Expired { .. }
+            ),
+            "target lock should be acquired",
+        )?;
+        write_index_metadata(&index_dir, 0, 0).map_err(|error| error.to_string())?;
+
+        let report = get_index_vacuum_report(&IndexVacuumOptions {
+            workspace_path: target_workspace,
+            database_path: Some(database),
+            index_dir: Some(index_dir),
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            report.status == IndexVacuumStatus::Locked,
+            format!(
+                "target workspace publish lock should report locked status even when another workspace row is newer: {report:?}"
+            ),
+        )?;
+        ensure(
+            report.lock.lock_id.as_deref() == Some(target_lock_id.canonical_key().as_str()),
+            "lock report should use the requested workspace lock id",
+        )?;
+        ensure(
+            report.lock.holder_id.as_deref() == Some("target_holder"),
+            "lock report should identify the target workspace holder",
         )
     }
 }
