@@ -226,15 +226,23 @@ fn agent_scan_only_canonicalizes_codex_aliases() -> TestResult {
     for alias in ["codex", "codex-cli", "CodexCli"] {
         let value = run_agent_scan(&["--only", alias])?;
         ensure(
-            value["schema"].as_str() == Some("ee.agent.scan.v1"),
-            format!("agent scan schema must be ee.agent.scan.v1 for {alias}; got {value}"),
+            value["schema"].as_str() == Some("ee.response.v2"),
+            format!("agent scan top-level schema must be ee.response.v2 for {alias}; got {value}"),
         )?;
         ensure(
             value["success"].as_bool() == Some(true),
             format!("agent scan must succeed for {alias}; got {value}"),
         )?;
+        ensure(
+            value["degraded"].as_array().is_some_and(Vec::is_empty),
+            format!("agent scan response degraded must default empty for {alias}; got {value}"),
+        )?;
 
         let data = &value["data"];
+        ensure(
+            data["schema"].as_str() == Some("ee.agent.scan.v1"),
+            format!("agent scan data schema must be ee.agent.scan.v1 for {alias}; got {data}"),
+        )?;
         ensure(
             data["command"].as_str() == Some("agent scan"),
             format!("data.command must be agent scan for {alias}; got {data}"),

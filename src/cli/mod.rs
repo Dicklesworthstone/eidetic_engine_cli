@@ -50834,17 +50834,15 @@ where
 
         let existing_count = scan_results.iter().filter(|(_, _, _, e)| *e).count();
 
-        serde_json::json!({
+        let raw = serde_json::json!({
             "schema": "ee.agent.scan.v1",
-            "success": true,
-            "data": {
-                "command": "agent scan",
-                "totalPaths": scan_results.len(),
-                "existingPaths": existing_count,
-                "paths": paths,
-            }
+            "command": "agent scan",
+            "totalPaths": scan_results.len(),
+            "existingPaths": existing_count,
+            "paths": paths,
         })
-        .to_string()
+        .to_string();
+        output::ResponseEnvelope::success().data_raw(&raw).finish()
     };
 
     match cli.renderer() {
