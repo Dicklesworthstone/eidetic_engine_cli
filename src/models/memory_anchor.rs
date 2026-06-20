@@ -801,13 +801,18 @@ fn looks_like_schema_id(token: &str) -> bool {
     let Some((prefix, version)) = token.rsplit_once(".v") else {
         return false;
     };
-    prefix.starts_with("ee.")
-        && version.chars().all(|character| character.is_ascii_digit())
-        && prefix.chars().all(|character| {
-            character.is_ascii_lowercase()
-                || character.is_ascii_digit()
-                || matches!(character, '.' | '_')
+    let Some(schema_name) = prefix.strip_prefix("ee.") else {
+        return false;
+    };
+    !schema_name.is_empty()
+        && schema_name.split('.').all(|segment| {
+            !segment.is_empty()
+                && segment.chars().all(|character| {
+                    character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+                })
         })
+        && !version.is_empty()
+        && version.chars().all(|character| character.is_ascii_digit())
 }
 
 fn looks_like_degraded_code(token: &str) -> bool {
@@ -1047,6 +1052,71 @@ mod tests {
         assert_eq!(
             kinds,
             vec![MemoryAnchorKind::Path, MemoryAnchorKind::EnvVar]
+        );
+    }
+
+    #[test]
+    fn schema_anchor_rejects_empty_version_or_name_segments() {
+        assert!(
+            CreateMemoryAnchorInput::from_raw(
+                "mem_01234567890123456789012345",
+                MemoryAnchorKind::Schema,
+                "ee.response.v",
+                0.95,
+                MemoryAnchorSource::Remember,
+                "test://schema",
+                0,
+            )
+            .is_none()
+        );
+        assert!(
+            CreateMemoryAnchorInput::from_raw(
+                "mem_01234567890123456789012345",
+                MemoryAnchorKind::Schema,
+                "ee..v2",
+                0.95,
+                MemoryAnchorSource::Remember,
+                "test://schema",
+                0,
+            )
+            .is_none()
+        );
+        assert!(
+            CreateMemoryAnchorInput::from_raw(
+                "mem_01234567890123456789012345",
+                MemoryAnchorKind::Schema,
+                "ee.response..v2",
+                0.95,
+                MemoryAnchorSource::Remember,
+                "test://schema",
+                0,
+            )
+            .is_none()
+        );
+        assert!(
+            CreateMemoryAnchorInput::from_raw(
+                "mem_01234567890123456789012345",
+                MemoryAnchorKind::Schema,
+                "ee.response.v2",
+                0.95,
+                MemoryAnchorSource::Remember,
+                "test://schema",
+                0,
+            )
+            .is_some()
+        );
+
+        let anchors = extract_precision_memory_anchors(
+            "mem_01234567890123456789012345",
+            "Malformed schema id ee.response.v should stay out of schema anchors.",
+            MemoryAnchorSource::Remember,
+            Some("test://schema"),
+        );
+        assert!(
+            !anchors
+                .iter()
+                .any(|anchor| anchor.anchor_kind == MemoryAnchorKind::Schema),
+            "malformed schema ids must not produce schema anchors"
         );
     }
 

@@ -5,7 +5,7 @@ use std::io::IsTerminal;
 
 use serde::Serialize;
 
-use crate::config::env_registry::{EnvVar, is_set, read};
+use crate::config::env_registry::{EnvVar, is_set, read, read_os};
 use crate::core::agent_detect::{AgentInventoryReport, InstalledAgentDetectionReport};
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
@@ -9099,14 +9099,20 @@ fn source_label(source: crate::cass::DiscoverySource) -> &'static str {
 /// controls, and whether it's currently set.
 fn write_capabilities_env_overrides_block(builder: &mut JsonBuilder) {
     builder.field_array_of_objects("envOverrides", EnvVar::all(), |obj, var| {
-        let value = read(*var);
+        let value = read_os(*var);
+        let is_set = value.is_some();
         let default = var.default_value();
-        let source = if value.is_some() {
+        let source = if is_set {
             "process_env"
         } else if default.is_some() {
             "registry_default"
         } else {
             "unset"
+        };
+        let current_value = if var.exposes_value() {
+            value.and_then(|value| value.into_string().ok())
+        } else {
+            None
         };
         obj.field_str("name", var.name());
         obj.field_str("category", var.category());
@@ -9119,12 +9125,10 @@ fn write_capabilities_env_overrides_block(builder: &mut JsonBuilder) {
                 obj.field_raw("defaultValue", "null");
             }
         }
-        obj.field_bool("isSet", value.is_some());
+        obj.field_bool("isSet", is_set);
         obj.field_str("source", source);
-        if var.exposes_value() {
-            if let Some(ref value) = value {
-                obj.field_str("currentValue", value);
-            }
+        if let Some(value) = current_value.as_deref() {
+            obj.field_str("currentValue", value);
         }
     });
 }

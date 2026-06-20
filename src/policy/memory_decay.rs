@@ -206,10 +206,11 @@ pub fn evaluate_memory_decay_with_settings(
     } else {
         &memory.level
     };
+    let previous_importance = finite_unit(memory.importance);
     let new_importance = if action == MemoryDecayAction::Demote {
-        round_policy_score(f64::from(memory.importance) * 0.5)
+        round_policy_score(f64::from(previous_importance) * 0.5)
     } else {
-        finite_unit(memory.importance)
+        previous_importance
     };
 
     MemoryDecayEvaluation {
@@ -220,7 +221,7 @@ pub fn evaluate_memory_decay_with_settings(
         age_days,
         previous_level: memory.level.clone(),
         new_level: new_level.to_owned(),
-        previous_importance: finite_unit(memory.importance),
+        previous_importance,
         new_importance,
         demote_threshold,
         forget_threshold,
@@ -406,6 +407,41 @@ mod tests {
             episodic.new_level.as_str(),
             "episodic",
             "episodic remains active",
+        )
+    }
+
+    #[test]
+    fn demotion_clamps_importance_before_halving() -> TestResult {
+        let as_of = "2030-01-01T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .map_err(|error| error.to_string())?;
+        let mut memory = memory_fixture("procedural", "rule", 0.4, 0.4);
+        memory.importance = 1.8;
+
+        let evaluation = evaluate_memory_decay(
+            &memory,
+            as_of - Duration::days(800),
+            as_of,
+            MemoryDecayThresholds {
+                demote: 0.05,
+                forget: 0.0,
+            },
+        );
+
+        ensure(
+            evaluation.action,
+            MemoryDecayAction::Demote,
+            "malformed high-importance memory still demotes",
+        )?;
+        ensure(
+            evaluation.previous_importance,
+            1.0,
+            "previous importance is clamped",
+        )?;
+        ensure(
+            evaluation.new_importance,
+            0.5,
+            "new importance halves the clamped value",
         )
     }
 

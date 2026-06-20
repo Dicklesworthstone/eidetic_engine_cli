@@ -162,10 +162,13 @@ impl SourceTrustState {
     /// Negative signal rate (negative / total imports).
     #[must_use]
     pub fn negative_rate(&self) -> f32 {
-        if self.total_imports == 0 {
+        let negative_signals = self.negative_signal_count();
+        if negative_signals == 0 {
             0.0
+        } else if self.total_imports == 0 {
+            1.0
         } else {
-            self.negative_signal_count() as f32 / self.total_imports as f32
+            (negative_signals as f32 / self.total_imports as f32).clamp(0.0, 1.0)
         }
     }
 }
@@ -1014,6 +1017,34 @@ mod tests {
         state.record_contradiction();
 
         ensure_approx(state.negative_rate(), 0.2, 0.001, "negative rate")
+    }
+
+    #[test]
+    fn negative_rate_is_bounded_when_multiple_signals_hit_one_import() -> TestResult {
+        let mut state = SourceTrustState::new("test_source");
+        state.total_imports = 1;
+        state.record_harmful();
+        state.record_quarantine();
+
+        ensure_approx(
+            state.negative_rate(),
+            1.0,
+            0.001,
+            "negative rate is a proportion",
+        )
+    }
+
+    #[test]
+    fn negative_rate_is_conservative_without_import_denominator() -> TestResult {
+        let mut state = SourceTrustState::new("test_source");
+        state.record_harmful();
+
+        ensure_approx(
+            state.negative_rate(),
+            1.0,
+            0.001,
+            "negative signal with missing denominator",
+        )
     }
 
     #[test]
