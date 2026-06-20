@@ -649,3 +649,155 @@ fn schema_constants_pin_the_explain_contract() -> TestResult {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// bd-3k1oe — input-distribution edge coverage. The happy-path tests above all
+// reuse synthetic_task_template_history(); these pin the predictor's behavior on
+// history-length boundaries and pathological inputs (all-same-topic, single
+// element, exactly the window, far over the window, empty topic ids) so a
+// regression can't silently emit an immediate-repeat, leak an empty topic id,
+// or panic / emit non-finite scores on degenerate input.
+// ---------------------------------------------------------------------------
+
+/// Shared invariant check: at most top_k candidates, no empty/duplicate topic
+/// ids, all scores finite in [0, 1], descending score order. Vacuously true for
+/// an empty prediction set.
+fn assert_candidates_well_formed(predictions: &[CassPrefetchCandidate], label: &str) -> TestResult {
+    if predictions.len() > DEFAULT_PREFETCH_TOP_K {
+        return Err(format!(
+            "{label}: more than top_k ({DEFAULT_PREFETCH_TOP_K}) candidates: {}",
+            predictions.len()
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for candidate in predictions {
+        if candidate.topic_id.is_empty() {
+            return Err(format!(
+                "{label}: empty topic_id in output: {predictions:?}"
+            ));
+        }
+        if !seen.insert(candidate.topic_id.clone()) {
+            return Err(format!(
+                "{label}: duplicate topic_id {:?}",
+                candidate.topic_id
+            ));
+        }
+        if !candidate.score.is_finite() || !(0.0..=1.0).contains(&candidate.score) {
+            return Err(format!(
+                "{label}: score {} for {:?} is non-finite or outside [0, 1]",
+                candidate.score, candidate.topic_id
+            ));
+        }
+    }
+    for window in predictions.windows(2) {
+        if window[0].score < window[1].score {
+            return Err(format!(
+                "{label}: not in descending score order: {predictions:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn all_same_topic_history_yields_no_candidates_bd_3k1oe() -> TestResult {
+    let predictor = RecencyWeightedFrequencyPredictor::new();
+    let history =
+        CassPrefetchHistory::from_topics(TEST_AGENT_SCOPE, ["refactor", "refactor", "refactor"]);
+    let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
+    // Most-recent topic and every duplicate of it are excluded; nothing else
+    // remains, so predicting an immediate repeat must never happen.
+    if !predictions.is_empty() {
+        return Err(format!(
+            "all-same-topic history must yield no candidates; got {predictions:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn single_element_history_yields_no_candidates_bd_3k1oe() -> TestResult {
+    let predictor = RecencyWeightedFrequencyPredictor::new();
+    let history = CassPrefetchHistory::from_topics(TEST_AGENT_SCOPE, ["only_topic"]);
+    let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
+    if !predictions.is_empty() {
+        return Err(format!(
+            "single-element history must yield no candidates; got {predictions:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn exact_window_history_is_well_formed_bd_3k1oe() -> TestResult {
+    let predictor = RecencyWeightedFrequencyPredictor::new();
+    // Exactly DEFAULT_PREFETCH_HISTORY_WINDOW elements, most-recent-first.
+    let topics = ["a", "b", "c", "b", "c", "a", "b", "c", "a", "b"];
+    if topics.len() != DEFAULT_PREFETCH_HISTORY_WINDOW {
+        return Err(format!(
+            "fixture must be exactly the window size {DEFAULT_PREFETCH_HISTORY_WINDOW}; got {}",
+            topics.len()
+        ));
+    }
+    let history = CassPrefetchHistory::from_topics(TEST_AGENT_SCOPE, topics);
+    let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
+    assert_candidates_well_formed(&predictions, "exact-window")?;
+    if predictions.is_empty() {
+        return Err("a full-window multi-topic history should emit candidates".to_string());
+    }
+    // Most-recent topic ("a") stays excluded even though older repeats exist.
+    if predictions
+        .iter()
+        .any(|candidate| candidate.topic_id == "a")
+    {
+        return Err(format!(
+            "most-recent topic must stay excluded; got {predictions:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn over_window_history_degrades_gracefully_bd_3k1oe() -> TestResult {
+    let predictor = RecencyWeightedFrequencyPredictor::new();
+    // 100 elements — far over the window. The producer owns trimming; the
+    // predictor must not panic and must never emit non-finite / subnormal-garbage
+    // scores for deep positions (recency weights decay toward zero and are
+    // filtered, not leaked). Admission-bounding to empty is also graceful.
+    let cycle = ["alpha", "bravo", "charlie", "delta"];
+    let topics: Vec<&str> = (0..100).map(|i| cycle[i % cycle.len()]).collect();
+    let history = CassPrefetchHistory::from_topics(TEST_AGENT_SCOPE, topics);
+    let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
+    assert_candidates_well_formed(&predictions, "over-window")?;
+    Ok(())
+}
+
+#[test]
+fn empty_topic_ids_never_appear_in_candidates_bd_3k1oe() -> TestResult {
+    let predictor = RecencyWeightedFrequencyPredictor::new();
+    // Empty topic ids are legal inputs (CassPrefetchObservation::new("")). They
+    // must never surface as candidates — the predictor skips empty topics.
+    let history = CassPrefetchHistory::from_topics(
+        TEST_AGENT_SCOPE,
+        [
+            "current",
+            "",
+            "valid_topic",
+            "",
+            "valid_topic",
+            "another",
+            "",
+        ],
+    );
+    let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
+    assert_candidates_well_formed(&predictions, "empty-topic-input")?;
+    if predictions
+        .iter()
+        .any(|candidate| candidate.topic_id.is_empty())
+    {
+        return Err(format!(
+            "empty topic_id must never leak into candidates; got {predictions:?}"
+        ));
+    }
+    Ok(())
+}
