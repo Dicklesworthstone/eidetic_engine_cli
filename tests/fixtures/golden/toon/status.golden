@@ -267,9 +267,9 @@ data:
     - name: graph_snapshot_artifact
       kind: persisted_snapshot
       status: unavailable
-      sourceHighWatermark: 0
+      sourceHighWatermark: null
       assetHighWatermark: null
-      highWatermarkLag: 0
+      highWatermarkLag: null
       path: .ee/graph
       freshness:
         schema: ee.derived_asset_freshness.v1

@@ -282,7 +282,14 @@ pub fn log_event_to(path: &Path, level: LogLevel, event: &TestEvent) -> bool {
     let Ok(mut file) = open_test_log_for_append(path) else {
         return false;
     };
-    writeln!(file, "{serialized}").is_ok()
+    write_serialized_event_line(&mut file, &serialized).is_ok()
+}
+
+fn write_serialized_event_line<W: Write>(writer: &mut W, serialized: &str) -> io::Result<()> {
+    let mut line = String::with_capacity(serialized.len().saturating_add(1));
+    line.push_str(serialized);
+    line.push('\n');
+    writer.write_all(line.as_bytes())
 }
 
 fn open_test_log_for_append(path: &Path) -> io::Result<fs::File> {
@@ -559,6 +566,23 @@ mod tests {
             .collect()
     }
 
+    struct CountingWriter {
+        write_calls: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for CountingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.write_calls = self.write_calls.saturating_add(1);
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn log_event_to_writes_jsonl() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
@@ -580,6 +604,20 @@ mod tests {
         assert_eq!(lines[0]["kind"], "note");
         assert_eq!(lines[0]["fields"]["message"], "hello");
         assert_eq!(lines[1]["kind"], "assert_ok");
+    }
+
+    #[test]
+    fn serialized_event_line_is_written_as_one_buffer() {
+        let mut writer = CountingWriter {
+            write_calls: 0,
+            bytes: Vec::new(),
+        };
+
+        write_serialized_event_line(&mut writer, r#"{"kind":"note"}"#)
+            .expect("write serialized event line");
+
+        assert_eq!(writer.write_calls, 1);
+        assert_eq!(writer.bytes, b"{\"kind\":\"note\"}\n");
     }
 
     #[test]

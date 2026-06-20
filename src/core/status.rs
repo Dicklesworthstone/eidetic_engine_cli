@@ -605,11 +605,22 @@ impl DerivedAssetReport {
 
     #[must_use]
     pub fn from_graph_snapshot_artifact(report: &GraphSnapshotArtifactReport) -> Self {
+        let source_high_watermark = match report.status {
+            DerivedAssetStatus::NotInspected
+            | DerivedAssetStatus::Unavailable
+            | DerivedAssetStatus::Unimplemented => None,
+            DerivedAssetStatus::Current
+            | DerivedAssetStatus::Stale
+            | DerivedAssetStatus::Empty
+            | DerivedAssetStatus::Missing
+            | DerivedAssetStatus::Corrupt => Some(report.memory_graph.generation),
+        };
+
         Self::from_parts(DerivedAssetReportParts {
             name: GRAPH_SNAPSHOT_ASSET_NAME,
             kind: GRAPH_SNAPSHOT_ASSET_KIND,
             status: report.status,
-            source_high_watermark: Some(report.memory_graph.generation),
+            source_high_watermark,
             asset_high_watermark: report.snapshot_generation,
             path: GRAPH_SNAPSHOT_PATH,
             last_built_at: report.last_built_at.clone(),
@@ -7261,6 +7272,63 @@ mod tests {
             asset.freshness.invalidates,
             vec![GRAPH_SNAPSHOT_ASSET_NAME],
             "graph freshness invalidates",
+        )
+    }
+
+    #[test]
+    fn graph_snapshot_artifact_unavailable_does_not_report_known_source_watermark() -> TestResult {
+        let report = graph_snapshot_artifact_report(
+            DerivedAssetStatus::Unavailable,
+            None,
+            None,
+            None,
+            GraphSnapshotMemoryGraphReport {
+                node_count: 0,
+                edge_count: 0,
+                generation: 0,
+                matches_db_generation: false,
+                availability: GRAPH_LIVE_COMPUTE_AVAILABLE,
+            },
+        );
+
+        let asset = DerivedAssetReport::from_graph_snapshot_artifact(&report);
+
+        ensure(asset.status, DerivedAssetStatus::Unavailable, "status")?;
+        ensure(asset.source_high_watermark, None, "source high watermark")?;
+        ensure(asset.high_watermark_lag, None, "lag")?;
+        ensure(
+            asset.freshness.verdict.as_str(),
+            "unavailable",
+            "freshness verdict",
+        )
+    }
+
+    #[test]
+    fn graph_snapshot_artifact_not_inspected_does_not_report_known_source_watermark() -> TestResult
+    {
+        let report = graph_snapshot_artifact_report(
+            DerivedAssetStatus::NotInspected,
+            None,
+            None,
+            None,
+            GraphSnapshotMemoryGraphReport {
+                node_count: 0,
+                edge_count: 0,
+                generation: 0,
+                matches_db_generation: false,
+                availability: GRAPH_LIVE_COMPUTE_AVAILABLE,
+            },
+        );
+
+        let asset = DerivedAssetReport::from_graph_snapshot_artifact(&report);
+
+        ensure(asset.status, DerivedAssetStatus::NotInspected, "status")?;
+        ensure(asset.source_high_watermark, None, "source high watermark")?;
+        ensure(asset.high_watermark_lag, None, "lag")?;
+        ensure(
+            asset.freshness.verdict.as_str(),
+            "not_inspected",
+            "freshness verdict",
         )
     }
 

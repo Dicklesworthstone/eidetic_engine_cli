@@ -392,10 +392,12 @@ fn build_trust_report(
     let expected_calibration_error = expected_calibration_error(&buckets, outcome_memory_count);
 
     let mut most_helpful = reliability_rows.clone();
+    most_helpful.retain(|leader| leader.net_weight > 0.0);
     most_helpful.sort_by(compare_most_helpful);
     most_helpful.truncate(leaderboard_limit);
 
     let mut most_harmful = reliability_rows;
+    most_harmful.retain(|leader| leader.net_weight < 0.0);
     most_harmful.sort_by(compare_most_harmful);
     most_harmful.truncate(leaderboard_limit);
 
@@ -868,6 +870,10 @@ mod tests {
         assert_eq!(report.helpful_event_count, 0);
         assert_eq!(report.harmful_event_count, 2);
         assert_eq!(report.packed_memory_with_outcome_count, 1);
+        assert!(
+            report.most_helpful.is_empty(),
+            "harmful-only workspaces should not populate mostHelpful"
+        );
         assert_eq!(report.most_harmful[0].memory_id, "mem_outdated");
         assert_eq!(
             report.most_harmful[0].candidate_action,
@@ -878,6 +884,33 @@ mod tests {
                 .recommendations
                 .iter()
                 .any(|recommendation| recommendation.code == "review_harmful_memory_candidates")
+        );
+    }
+
+    #[test]
+    fn helpful_only_feedback_does_not_populate_harmful_leaderboard() {
+        let report = build_trust_report(
+            "wsp_test".to_string(),
+            vec![
+                memory("mem_helpful_a", 0.80, 0.40, "useful convention"),
+                memory("mem_helpful_b", 0.70, 0.30, "another useful rule"),
+            ],
+            vec![
+                feedback("mem_helpful_a", "helpful", 1.0),
+                feedback("mem_helpful_b", "positive", 1.0),
+            ],
+            BTreeSet::new(),
+            5,
+            10,
+        );
+
+        assert_eq!(report.memory_with_outcome_count, 2);
+        assert_eq!(report.helpful_event_count, 2);
+        assert_eq!(report.harmful_event_count, 0);
+        assert_eq!(report.most_helpful.len(), 2);
+        assert!(
+            report.most_harmful.is_empty(),
+            "helpful-only workspaces should not populate mostHarmful"
         );
     }
 

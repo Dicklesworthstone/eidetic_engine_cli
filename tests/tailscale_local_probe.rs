@@ -215,6 +215,67 @@ fn local_probe_returns_authenticated_self_when_status_json_well_formed() -> Test
 }
 
 #[test]
+fn local_probe_parses_current_tailscale_status_shape() -> TestResult {
+    let report = classify_status_payload(TailscaleStatusProbeInput {
+        status_json: br#"{
+          "BackendState": "Running",
+          "CurrentTailnet": {
+            "Name": "team@example.com",
+            "MagicDNSSuffix": "tailabc.ts.net",
+            "MagicDNSEnabled": true
+          },
+          "Self": {
+            "ID": "nSelfNodeId",
+            "PublicKey": "nodekey:selfpublic",
+            "HostName": "fixture-macos",
+            "DNSName": "fixture-macos.tailabc.ts.net.",
+            "OS": "macOS",
+            "TailscaleIPs": ["100.64.0.1"]
+          },
+          "Peer": {
+            "nodekey:peerpublic": {
+              "ID": "nPeerNodeId",
+              "PublicKey": "nodekey:peerpublic",
+              "HostName": "fixture-peer",
+              "DNSName": "fixture-peer.tailabc.ts.net.",
+              "Online": true,
+              "TailscaleIPs": ["100.64.0.2"]
+            },
+            " nodekey:fallbackpeer ": {
+              "ID": "nFallbackPeerNodeId",
+              "HostName": "linux-peer",
+              "DNSName": "linux-peer.tailabc.ts.net.",
+              "Online": true,
+              "TailscaleIPs": ["100.64.0.3"]
+            }
+          }
+        }"#,
+        prefs_json: Some(br#"{"ShieldsUp": false}"#),
+        binary: Some(good_binary()),
+        method: TailscaleProbeMethod::Cli,
+        elapsed_ms: 14,
+        platform_hint: TailscalePlatform::Other,
+    });
+
+    assert!(report.daemon_reachable);
+    assert!(report.authenticated);
+    assert_eq!(report.tailnet_id.as_deref(), Some("tailabc.ts.net"));
+    assert_eq!(
+        report.tailnet_display_name.as_deref(),
+        Some("team@example.com")
+    );
+    assert_eq!(report.self_node_key.as_deref(), Some("nodekey:selfpublic"));
+    assert_eq!(report.platform, TailscalePlatform::MacosOpen);
+    assert_eq!(report.peers.len(), 2);
+    assert_eq!(report.peers[0].node_key, "nodekey:fallbackpeer");
+    assert_eq!(report.peers[0].hostname.as_deref(), Some("linux-peer"));
+    assert_eq!(report.peers[1].node_key, "nodekey:peerpublic");
+    assert_eq!(report.peers[1].hostname.as_deref(), Some("fixture-peer"));
+    assert!(report.degradations.is_empty(), "{:?}", report.degradations);
+    Ok(())
+}
+
+#[test]
 fn local_probe_returns_not_authenticated_when_logged_out() -> TestResult {
     let report = classify_status_payload(TailscaleStatusProbeInput {
         status_json: br#"{

@@ -622,11 +622,14 @@ pub fn classify_status_payload(input: TailscaleStatusProbeInput<'_>) -> Tailscal
         backend_state.as_deref(),
         Some("Running" | "NeedsLogin" | "Starting")
     );
-    let platform = string_value(self_node, "Platform")
+    let platform_value =
+        string_value(self_node, "Platform").or_else(|| string_value(self_node, "OS"));
+    let platform = platform_value
         .as_deref()
         .map(|value| TailscalePlatform::parse(Some(value)))
         .filter(|platform| *platform != TailscalePlatform::Other)
         .unwrap_or(input.platform_hint);
+    let current_tailnet = status.get("CurrentTailnet").unwrap_or(&Value::Null);
     let prefs = input
         .prefs_json
         .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok());
@@ -640,10 +643,13 @@ pub fn classify_status_payload(input: TailscaleStatusProbeInput<'_>) -> Tailscal
     report.daemon_reachable = daemon_reachable;
     report.authenticated = authenticated && daemon_reachable;
     report.shields_up = shields_up;
-    report.tailnet_id = string_value(self_node, "Tailnet");
-    report.tailnet_display_name =
-        string_value(self_node, "TailnetName").or_else(|| report.tailnet_id.clone());
-    report.self_node_key = string_value(self_node, "ID");
+    report.tailnet_id = string_value(self_node, "Tailnet")
+        .or_else(|| string_value(current_tailnet, "MagicDNSSuffix"))
+        .or_else(|| string_value(&status, "MagicDNSSuffix"));
+    report.tailnet_display_name = string_value(self_node, "TailnetName")
+        .or_else(|| string_value(current_tailnet, "Name"))
+        .or_else(|| report.tailnet_id.clone());
+    report.self_node_key = node_key_value(self_node, None);
     report.self_magic_dns_name = string_value(self_node, "DNSName");
     report.self_tailscale_ip = first_string_array_value(self_node, "TailscaleIPs");
     report.self_advertised_tags = string_array_value(self_node, "Tags");
@@ -1084,7 +1090,8 @@ fn peer_reports(status: &Value) -> Vec<TailscalePeerReport> {
             if !peer.is_object() {
                 return None;
             }
-            let node_key = string_value(peer, "ID").unwrap_or_else(|| fallback_node_key.to_owned());
+            let node_key = node_key_value(peer, Some(fallback_node_key))
+                .unwrap_or_else(|| fallback_node_key.to_owned());
             if node_key.trim().is_empty() {
                 return None;
             }
@@ -1122,6 +1129,18 @@ fn peer_ee_capability(peer: &Value) -> Option<TailscalePeerEeCapability> {
             .and_then(Value::as_u64)
             .unwrap_or(0),
     })
+}
+
+fn node_key_value(value: &Value, fallback_node_key: Option<&str>) -> Option<String> {
+    string_value(value, "PublicKey")
+        .and_then(|candidate| normalize_node_key(&candidate))
+        .or_else(|| fallback_node_key.and_then(normalize_node_key))
+        .or_else(|| string_value(value, "ID").and_then(|candidate| normalize_node_key(&candidate)))
+}
+
+fn normalize_node_key(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    trimmed.starts_with("nodekey:").then(|| trimmed.to_owned())
 }
 
 #[cfg(test)]
