@@ -436,6 +436,60 @@ fn install_check_pins_shadowed_stale_path_contract_bd_3utv2_5() -> TestResult {
     ensure_finding_with(&value, "offline_no_manifest", "info", "Pass --manifest")
 }
 
+#[cfg(unix)]
+#[test]
+fn install_freshness_claim_gate_e2e_script_bd_3utv2_7() -> TestResult {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = repo.join("scripts").join("e2e_install_freshness.sh");
+    let artifacts = unique_artifact_dir("install-freshness-e2e")?;
+    fs::create_dir_all(&artifacts).map_err(|error| error.to_string())?;
+    let event_log = artifacts.join("events.jsonl");
+
+    let output = Command::new("bash")
+        .arg(&script)
+        .env("EE_BIN", env!("CARGO_BIN_EXE_ee"))
+        .env("EE_BINARY", env!("CARGO_BIN_EXE_ee"))
+        .env("EE_E2E_TMPDIR", &artifacts)
+        .env("EE_TEST_LOG_PATH", &event_log)
+        .env("LOG_DIR", &artifacts)
+        .env("TMPDIR", &artifacts)
+        .output()
+        .map_err(|error| format!("run {}: {error}", script.display()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure(
+        output.status.success(),
+        &format!(
+            "install freshness e2e script failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status.code(),
+            stdout,
+            stderr
+        ),
+    )?;
+
+    let events = fs::read_to_string(&event_log)
+        .map_err(|error| format!("read {}: {error}", event_log.display()))?;
+    ensure(
+        events.contains("\"schema\":\"ee.test_event.v1\""),
+        "script should emit structured test events",
+    )?;
+    ensure(
+        events.contains("\"label\":\"stale_claim_gate\"")
+            && events.contains("\"freshness_verdict\":\"shadowed_binary\""),
+        "stale claim-gate event should pin the shadowed-binary refusal",
+    )?;
+    ensure(
+        events.contains("\"label\":\"fresh_claim_gate\"")
+            && events.contains("\"freshness_verdict\":\"fresh\""),
+        "fresh claim-gate event should pin the authoritative control path",
+    )?;
+    ensure(
+        events.contains("\"stdout_artifact_path\":\"[REPO]/target/ee-install-artifacts/"),
+        "script should log scrubbed stdout artifact paths",
+    )
+}
+
 #[test]
 fn install_plan_selects_manifest_artifact_and_stays_dry_run() -> TestResult {
     let root = unique_artifact_dir("install-plan")?;
