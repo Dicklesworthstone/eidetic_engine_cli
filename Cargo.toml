@@ -98,7 +98,7 @@ serve = []
 science-analytics = []
 
 [dependencies]
-asupersync = { version = "=0.3.5", default-features = false, features = ["tracing-integration"] }
+asupersync = { version = "=0.3.4", default-features = false, features = ["tracing-integration"] }
 arc-swap = { version = "1.7" }
 base64 = { version = "0.22.1" }
 blake3 = { version = "1.5" }
@@ -322,7 +322,7 @@ name = "witness_retention_e2e"
 path = "tests/contracts/witness_retention_e2e.rs"
 
 [patch.crates-io]
-asupersync = { path = "/dp/asupersync" }
+asupersync = { path = "../asupersync" }
 fsqlite = { path = "../frankensqlite/crates/fsqlite" }
 fsqlite-core = { path = "../frankensqlite/crates/fsqlite-core" }
 fsqlite-error = { path = "../frankensqlite/crates/fsqlite-error" }
