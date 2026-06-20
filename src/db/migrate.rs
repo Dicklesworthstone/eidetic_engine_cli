@@ -486,8 +486,12 @@ fn copy_workspace_to_shard(
     apply_schema_migrations_deterministically(&target)?;
 
     let target_tables = source_user_tables(&target)?;
-    let before_counts =
-        workspace_row_counts(&target, &target_tables, &workspace.workspace_id, None)?;
+    let before_counts = workspace_row_counts_excluding_migration_audit(
+        &target,
+        &target_tables,
+        &workspace.workspace_id,
+        None,
+    )?;
     attach_source_database(&target, &plan.source_database_path)?;
     let copy_result = target.with_transaction(|| {
         for table in ordered_copy_tables(source_tables, &target_tables) {
@@ -516,8 +520,12 @@ fn copy_workspace_to_shard(
         )
     })?;
 
-    let after_counts =
-        workspace_row_counts(&target, &target_tables, &workspace.workspace_id, None)?;
+    let after_counts = workspace_row_counts_excluding_migration_audit(
+        &target,
+        &target_tables,
+        &workspace.workspace_id,
+        None,
+    )?;
     verify_workspace_counts(workspace, &after_counts)?;
     target
         .wal_checkpoint(WalCheckpointMode::Truncate)
@@ -578,6 +586,32 @@ fn workspace_row_counts(
     workspace_id: &str,
     schema: Option<&str>,
 ) -> Result<BTreeMap<String, u64>, DomainError> {
+    workspace_row_counts_with_excluded_audit_id(conn, tables, workspace_id, schema, None)
+}
+
+fn workspace_row_counts_excluding_migration_audit(
+    conn: &DbConnection,
+    tables: &BTreeSet<String>,
+    workspace_id: &str,
+    schema: Option<&str>,
+) -> Result<BTreeMap<String, u64>, DomainError> {
+    let excluded_audit_id = migration_audit_id(workspace_id);
+    workspace_row_counts_with_excluded_audit_id(
+        conn,
+        tables,
+        workspace_id,
+        schema,
+        Some(&excluded_audit_id),
+    )
+}
+
+fn workspace_row_counts_with_excluded_audit_id(
+    conn: &DbConnection,
+    tables: &BTreeSet<String>,
+    workspace_id: &str,
+    schema: Option<&str>,
+    excluded_audit_id: Option<&str>,
+) -> Result<BTreeMap<String, u64>, DomainError> {
     let mut counts = BTreeMap::new();
     for table in ordered_count_tables(tables) {
         let source_columns = table_columns(conn, &table)?;
@@ -587,6 +621,16 @@ fn workspace_row_counts(
         }
         let Some(predicate) = workspace_predicate(scope, workspace_id, schema) else {
             continue;
+        };
+        let predicate = if table == "audit_log" {
+            excluded_audit_id.map_or(predicate.clone(), |audit_id| {
+                format!(
+                    "({predicate}) AND row.\"id\" != {}",
+                    sqlite_string_literal(audit_id)
+                )
+            })
+        } else {
+            predicate
         };
         let sql = format!(
             "SELECT COALESCE(COUNT(*), 0) FROM {} AS row WHERE {}",
@@ -1189,6 +1233,7 @@ mod tests {
     use crate::db::shard::{
         SHARD_FANOUT_CATALOG_SCHEMA_VERSION, SHARD_FANOUT_MIGRATION_AUDIT_SCHEMA_V1,
         SHARD_FANOUT_MIGRATION_PLAN_SCHEMA_V1, ShardFanoutDegradation,
+        ShardFanoutMigrationWorkspacePlan,
     };
 
     type TestResult = Result<(), String>;
@@ -1225,6 +1270,51 @@ mod tests {
         assert!(error.to_string().contains("row-count regression"));
         assert!(error.to_string().contains("memories"));
         Ok(())
+    }
+
+    #[test]
+    fn workspace_counts_exclude_deterministic_migration_audit_row() -> TestResult {
+        let conn = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        conn.execute_raw(
+            "CREATE TABLE audit_log (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL
+            )",
+        )
+        .map_err(|error| error.to_string())?;
+        let migration_audit_id = migration_audit_id(WSP_A);
+        conn.execute_raw(&format!(
+            "INSERT INTO audit_log (id, workspace_id) VALUES \
+             ('audit_source_event_aaaaaaaaaaaa', '{WSP_A}'), \
+             ({}, '{WSP_A}'), \
+             ('audit_other_workspace_bbbbbbbbbb', '{WSP_B}')",
+            sqlite_string_literal(&migration_audit_id)
+        ))
+        .map_err(|error| error.to_string())?;
+        let tables = BTreeSet::from(["audit_log".to_owned()]);
+
+        let raw_counts =
+            workspace_row_counts(&conn, &tables, WSP_A, None).map_err(|error| error.to_string())?;
+        assert_eq!(raw_counts.get("audit_log"), Some(&2));
+
+        let filtered_counts =
+            workspace_row_counts_excluding_migration_audit(&conn, &tables, WSP_A, None)
+                .map_err(|error| error.to_string())?;
+        assert_eq!(filtered_counts.get("audit_log"), Some(&1));
+
+        let workspace = ShardFanoutMigrationWorkspacePlan {
+            workspace_id: WSP_A.to_owned(),
+            workspace_root: PathBuf::from("/tmp/workspace-a"),
+            shard_id: Some("shard_a".to_owned()),
+            shard_path: Some(PathBuf::from("/tmp/shard-a.db")),
+            source_database_path: PathBuf::from("/tmp/source.db"),
+            planned_row_count: Some(1),
+            row_counts_by_table: BTreeMap::from([("audit_log".to_owned(), 1)]),
+            source_hash: None,
+            expected_audit_rows: Vec::new(),
+            blockers: Vec::new(),
+        };
+        verify_workspace_counts(&workspace, &filtered_counts).map_err(|error| error.to_string())
     }
 
     fn blocking_plan() -> ShardFanoutMigrationPlan {
