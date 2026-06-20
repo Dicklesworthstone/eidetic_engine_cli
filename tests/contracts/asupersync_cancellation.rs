@@ -16,7 +16,7 @@ use ee::core::{
 use ee::models::{DomainError, ProcessExitCode};
 use ee::steward::{
     DaemonForegroundOptions, JobPriority, JobType, ManualRunner, RunOutcome, RunnerOptions,
-    run_daemon_foreground_supervised,
+    RunnerReport, run_daemon_foreground_supervised,
 };
 
 type TestResult = Result<(), String>;
@@ -450,6 +450,8 @@ fn daemon_foreground_loop_cancels_between_maintenance_ticks() -> TestResult {
 fn daemon_foreground_runner_honors_cx_cancellation_before_job() -> TestResult {
     let mut lab = LabRuntime::new(LabConfig::new(0xEE_906).max_steps(64));
     let root = lab.state.create_root_region(Budget::INFINITE);
+    let observed_report: Arc<StdMutex<Option<RunnerReport>>> = Arc::new(StdMutex::new(None));
+    let observed_report_for_task = Arc::clone(&observed_report);
 
     let (task_id, mut handle) = lab
         .state
@@ -470,6 +472,14 @@ fn daemon_foreground_runner_honors_cx_cancellation_before_job() -> TestResult {
                 return Outcome::Err(format!(
                     "foreground runner should cancel before maintenance work: {report:?}"
                 ));
+            }
+            {
+                let Ok(mut slot) = observed_report_for_task.lock() else {
+                    return Outcome::Err(
+                        "daemon foreground runner report slot poisoned".to_owned(),
+                    );
+                };
+                *slot = Some(report.clone());
             }
             Outcome::Ok(report)
         })
@@ -496,6 +506,18 @@ fn daemon_foreground_runner_honors_cx_cancellation_before_job() -> TestResult {
             ));
         }
         Ok(None) => return Err("daemon foreground runner task did not finish".to_owned()),
+        Err(JoinError::Cancelled(reason))
+            if reason.message.as_deref() == Some("join channel closed") =>
+        {
+            observed_report
+                .lock()
+                .map_err(|_| "daemon foreground runner report slot poisoned".to_owned())?
+                .clone()
+                .ok_or_else(|| {
+                    "daemon foreground runner cancellation report missing after closed join channel"
+                        .to_owned()
+                })?
+        }
         Err(error) => {
             return Err(format!(
                 "daemon foreground runner cancellation join failed: {error}"
