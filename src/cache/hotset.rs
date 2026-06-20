@@ -1263,34 +1263,32 @@ pub fn cache_prewarm_report_from_manifest_json(
         .and_then(Value::as_str)
         .map(str::to_owned);
 
-    let search_entries = parse_search_entries(manifest.get("searchEntries"))?;
-    let pack_entries = parse_pack_entries(manifest.get("packEntries"))?;
+    let mut search_entries = parse_search_entries(manifest.get("searchEntries"))?;
+    let mut pack_entries = parse_pack_entries(manifest.get("packEntries"))?;
     let requested_search_entries = search_entries.len();
     let requested_pack_entries = pack_entries.len();
     let requested_total = requested_search_entries.saturating_add(requested_pack_entries);
 
     let requested_generation = options.current_generation.unwrap_or(admission_threshold);
-    let search_generation = effective_generation(
-        &search_entries,
-        requested_generation,
-        options.allow_stale_hotset,
-        |entry| entry.generation,
-    );
-    let pack_generation = effective_generation(
-        &pack_entries,
-        requested_generation,
-        options.allow_stale_hotset,
-        |entry| entry.generation,
-    );
+    let stale_hotset_admitted = options.allow_stale_hotset
+        && (entries_have_generation_mismatch(&search_entries, requested_generation, |entry| {
+            entry.generation
+        }) || entries_have_generation_mismatch(&pack_entries, requested_generation, |entry| {
+            entry.generation
+        }));
+    if options.allow_stale_hotset {
+        normalize_search_entry_generations(&mut search_entries, requested_generation);
+        normalize_pack_entry_generations(&mut pack_entries, requested_generation);
+    }
 
     let search_report = prewarm_search_hotset(
         &SearchHotset::new(search_entries),
-        SearchCacheGovernor::new(search_generation, options.budget).with_current_usage(0, 0),
+        SearchCacheGovernor::new(requested_generation, options.budget).with_current_usage(0, 0),
     )
     .data_json();
     let pack_report = prewarm_pack_hotset(
         &PackHotset::new(pack_entries),
-        PackCacheGovernor::new(pack_generation, options.budget).with_current_usage(0, 0),
+        PackCacheGovernor::new(requested_generation, options.budget).with_current_usage(0, 0),
     )
     .data_json();
 
@@ -1305,7 +1303,7 @@ pub fn cache_prewarm_report_from_manifest_json(
         requested_total,
         &search_report,
         &pack_report,
-        options.allow_stale_hotset,
+        stale_hotset_admitted,
         requested_generation,
         admission_threshold,
     );
@@ -1528,16 +1526,25 @@ fn usize_json_field(value: &Value, field: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn effective_generation<T>(
+fn entries_have_generation_mismatch<T>(
     entries: &[T],
     requested_generation: u64,
-    allow_stale_hotset: bool,
     generation: impl Fn(&T) -> u64,
-) -> u64 {
-    if allow_stale_hotset {
-        entries.first().map_or(requested_generation, generation)
-    } else {
-        requested_generation
+) -> bool {
+    entries
+        .iter()
+        .any(|entry| generation(entry) != requested_generation)
+}
+
+fn normalize_search_entry_generations(entries: &mut [SearchHotsetEntry], generation: u64) {
+    for entry in entries {
+        entry.generation = generation;
+    }
+}
+
+fn normalize_pack_entry_generations(entries: &mut [PackHotsetEntry], generation: u64) {
+    for entry in entries {
+        entry.generation = generation;
     }
 }
 
@@ -1545,7 +1552,7 @@ fn cache_prewarm_degraded(
     requested_total: usize,
     search_report: &Value,
     pack_report: &Value,
-    allow_stale_hotset: bool,
+    stale_hotset_admitted: bool,
     requested_generation: u64,
     admission_threshold: u64,
 ) -> Vec<Value> {
@@ -1574,7 +1581,7 @@ fn cache_prewarm_degraded(
                 "admissionThreshold": admission_threshold,
             }
         }));
-    } else if allow_stale_hotset && requested_generation != admission_threshold {
+    } else if stale_hotset_admitted {
         degraded.push(json!({
             "code": STALE_HOTSET_CODE,
             "severity": "medium",
@@ -3007,6 +3014,47 @@ mod tests {
                             == "search_prewarm_reports_admission_stats_not_latency"
                 })),
             "search must be marked unmeasured instead of folded in as zero latency: {latency:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cache_prewarm_allow_stale_admits_mixed_generation_hotset() -> TestResult {
+        let manifest = builder(5)
+            .search_entries([
+                SearchHotsetEntry::memory("mem-search-old", 5, 3),
+                SearchHotsetEntry::memory("mem-search-newer", 6, 2),
+            ])
+            .pack_entries([
+                pack_selection_audit_entry(5, 4),
+                pack_selection_audit_entry(6, 1),
+            ])
+            .build()
+            .to_json();
+
+        let report = cache_prewarm_report_from_manifest_json(
+            &manifest,
+            &CachePrewarmOptions::new("balanced", CacheBudget::new(16, 16 * 1024))
+                .with_current_generation(Some(8))
+                .with_allow_stale_hotset(true),
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(report["allowStaleHotset"], true);
+        assert_eq!(report["admitted"]["searchEntries"], 2);
+        assert_eq!(report["admitted"]["packEntries"], 2);
+        assert_eq!(report["rejected"]["totalEntries"], 0);
+        assert_eq!(report["reports"]["search"]["status"], "warm");
+        assert_eq!(report["reports"]["pack"]["status"], "warm");
+        assert_eq!(report["reports"]["search"]["currentGeneration"], 8);
+        assert_eq!(report["reports"]["pack"]["currentGeneration"], 8);
+        assert!(
+            report["degraded"].as_array().is_some_and(|codes| {
+                codes.iter().any(|code| {
+                    code["code"] == STALE_HOTSET_CODE && code["details"]["allowStaleHotset"] == true
+                })
+            }),
+            "stale admission should remain visible in degraded[]: {report:?}"
         );
         Ok(())
     }
