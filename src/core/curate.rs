@@ -14972,7 +14972,7 @@ mod tests {
 
     #[test]
     fn reflection_core_persists_prepared_request_ledger_once() -> TestResult {
-        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
         let workspace_id = test_workspace_id(workspace_path);
@@ -15067,7 +15067,7 @@ mod tests {
     #[test]
     fn reflection_propose_persists_challenged_request_ledger_without_secret_material() -> TestResult
     {
-        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
         let key_path = workspace_path.join("reflect.key");
