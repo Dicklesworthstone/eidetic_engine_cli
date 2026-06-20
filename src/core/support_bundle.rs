@@ -1619,9 +1619,21 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
         }
     };
 
+    let mut manifest_invalid = false;
     let manifest: Option<BundleManifest> = if manifest_present {
-        let content = read_regular_file_no_symlinks(&manifest_path).ok();
-        content.and_then(|c| serde_json::from_str(&c).ok())
+        match read_regular_file_no_symlinks(&manifest_path) {
+            Ok(content) => match serde_json::from_str(&content) {
+                Ok(manifest) => Some(manifest),
+                Err(_) => {
+                    manifest_invalid = true;
+                    None
+                }
+            },
+            Err(_) => {
+                manifest_invalid = true;
+                None
+            }
+        }
     } else {
         None
     };
@@ -1629,6 +1641,9 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
     let mut files_found = Vec::new();
     let mut total_size = 0u64;
     let mut hash_mismatches = Vec::new();
+    if manifest_invalid {
+        hash_mismatches.push(MANIFEST_FILE.to_owned());
+    }
 
     if let Some(ref m) = manifest {
         if m.schema != SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1 {
@@ -10002,6 +10017,45 @@ mod tests {
         assert!(
             report.manifest.is_none(),
             "test setup must exercise missing manifest handling"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_bundle_marks_malformed_manifest_mismatch() -> TestResult {
+        let root = unique_test_path("inspect-malformed-manifest");
+        let bundle_dir = root.join("bundle");
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+        fs::write(bundle_dir.join(STATUS_FILE), "{}")
+            .map_err(|error| format!("failed to write bundle file: {error}"))?;
+        fs::write(bundle_dir.join(MANIFEST_FILE), "{not-json")
+            .map_err(|error| format!("failed to write malformed manifest: {error}"))?;
+
+        let report = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir,
+            verify_hashes: true,
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(
+            !report.valid,
+            "malformed manifest must invalidate inspection"
+        );
+        assert!(
+            !report.hash_verified,
+            "malformed manifests must not claim hash verification"
+        );
+        assert!(
+            report.manifest.is_none(),
+            "malformed manifest should not deserialize into a manifest report"
+        );
+        assert!(
+            report
+                .hash_mismatches
+                .iter()
+                .any(|mismatch| mismatch.as_str() == MANIFEST_FILE),
+            "malformed manifest should be reported as an integrity mismatch"
         );
         Ok(())
     }
