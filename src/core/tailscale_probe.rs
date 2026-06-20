@@ -495,14 +495,31 @@ pub fn probe_tailscale_socket_with_runner<R: TailscaleSocketProbeRunner>(
         );
     }
 
-    let prefs_output = runner.request(socket_path, "/localapi/v0/prefs", config.timeout_ms);
+    let Some(prefs_timeout_ms) =
+        remaining_probe_timeout_ms(config.timeout_ms, status_output.elapsed_ms)
+    else {
+        let mut report = classify_status_payload(TailscaleStatusProbeInput {
+            status_json: &status_output.stdout,
+            prefs_json: None,
+            binary: None,
+            method: TailscaleProbeMethod::Socket,
+            elapsed_ms: status_output.elapsed_ms,
+            platform_hint: config.platform_hint,
+        });
+        push_probe_timeout_degradation(&mut report, config.timeout_ms);
+        return report;
+    };
+
+    let prefs_output = runner.request(socket_path, "/localapi/v0/prefs", prefs_timeout_ms);
     let prefs_json = successful_localapi_json_payload(&prefs_output);
     let mut report = classify_status_payload(TailscaleStatusProbeInput {
         status_json: &status_output.stdout,
         prefs_json,
         binary: None,
         method: TailscaleProbeMethod::Socket,
-        elapsed_ms: status_output.elapsed_ms + prefs_output.elapsed_ms,
+        elapsed_ms: status_output
+            .elapsed_ms
+            .saturating_add(prefs_output.elapsed_ms),
         platform_hint: config.platform_hint,
     });
     if prefs_output.timed_out {
@@ -555,30 +572,57 @@ pub fn probe_tailscale_cli_with_runner<R: TailscaleCliProbeRunner>(
         );
     }
 
+    let Some(status_timeout_ms) =
+        remaining_probe_timeout_ms(config.timeout_ms, version_output.elapsed_ms)
+    else {
+        return TailscaleLocalReport::timed_out(
+            TailscaleProbeMethod::Cli,
+            version_output.elapsed_ms,
+            config.timeout_ms,
+        );
+    };
+
     let status_output = runner.run(
         &binary_path,
         &["status", "--json", "--self=true", "--peers=true"],
-        config.timeout_ms,
+        status_timeout_ms,
     );
+    let status_elapsed_ms = version_output
+        .elapsed_ms
+        .saturating_add(status_output.elapsed_ms);
     if status_output.timed_out {
         return TailscaleLocalReport::timed_out(
             TailscaleProbeMethod::Cli,
-            status_output.elapsed_ms,
+            status_elapsed_ms,
             config.timeout_ms,
         );
     }
     if !status_output.success {
         return TailscaleLocalReport::daemon_unreachable(
             TailscaleProbeMethod::Cli,
-            status_output.elapsed_ms,
+            status_elapsed_ms,
             command_error_detail(&status_output),
         );
     }
 
+    let Some(prefs_timeout_ms) = remaining_probe_timeout_ms(config.timeout_ms, status_elapsed_ms)
+    else {
+        let mut report = classify_status_payload(TailscaleStatusProbeInput {
+            status_json: &status_output.stdout,
+            prefs_json: None,
+            binary: Some(binary),
+            method: TailscaleProbeMethod::Cli,
+            elapsed_ms: status_elapsed_ms,
+            platform_hint: config.platform_hint,
+        });
+        push_probe_timeout_degradation(&mut report, config.timeout_ms);
+        return report;
+    };
+
     let prefs_output = runner.run(
         &binary_path,
         &["debug", "localapi", "/localapi/v0/prefs"],
-        config.timeout_ms,
+        prefs_timeout_ms,
     );
     let prefs_json = successful_localapi_json_payload(&prefs_output);
     let mut report = classify_status_payload(TailscaleStatusProbeInput {
@@ -586,13 +630,18 @@ pub fn probe_tailscale_cli_with_runner<R: TailscaleCliProbeRunner>(
         prefs_json,
         binary: Some(binary),
         method: TailscaleProbeMethod::Cli,
-        elapsed_ms: version_output.elapsed_ms + status_output.elapsed_ms + prefs_output.elapsed_ms,
+        elapsed_ms: status_elapsed_ms.saturating_add(prefs_output.elapsed_ms),
         platform_hint: config.platform_hint,
     });
     if prefs_output.timed_out {
         push_probe_timeout_degradation(&mut report, config.timeout_ms);
     }
     report
+}
+
+fn remaining_probe_timeout_ms(timeout_budget_ms: u64, elapsed_ms: u64) -> Option<u64> {
+    let remaining = timeout_budget_ms.saturating_sub(elapsed_ms);
+    (remaining > 0).then_some(remaining)
 }
 
 #[must_use]
