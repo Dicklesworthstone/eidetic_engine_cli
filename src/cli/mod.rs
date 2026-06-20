@@ -67,7 +67,7 @@ use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
     ContextPackOutputOptions, ContextPackOutputProfile, ContextTaskLens,
     attach_pack_dna_to_context_response, explain_why_not_default,
-    run_context_pack_with_performance,
+    context_request_from_options, run_context_pack_with_performance,
 };
 use crate::core::context_delta::{
     CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE, CONTEXT_DELTA_NO_BASELINE_CODE,
@@ -321,8 +321,8 @@ use crate::models::{
 };
 use crate::output;
 use crate::pack::{
-    ContextPackProfile, ContextResponse, ContextResponseDegradation, ContextResponseSeverity,
-    PackResourceProfile, PackRevisionMeshMetadata,
+    ContextPackProfile, ContextRequest, ContextResponse, ContextResponseDegradation,
+    ContextResponseSeverity, PackResourceProfile, PackRevisionMeshMetadata,
 };
 use crate::search::plan_cache::{
     DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, process_plan_cache_diag_report,
@@ -34705,29 +34705,17 @@ fn context_json_cache_enabled(cli: &Cli, args: &ContextArgs, deprecated_alias: b
         && !args.read_only
 }
 
-fn write_context_stream_response<W>(
+fn write_context_stream_tail<W>(
     response: &ContextResponse,
-    workspace_path: &Path,
-    stdout: &mut W,
-) -> Result<ProcessExitCode, String>
+    options: output::streaming::ContextStreamFrameOptions,
+    writer: &mut output::streaming::PackStreamWriter<W>,
+) -> Result<(), String>
 where
     W: Write,
 {
-    let started_at = chrono::Utc::now().to_rfc3339();
-    let pack_id = context_stream_pack_id(response);
-    let workspace_id = crate::core::workspace::stable_workspace_id(workspace_path);
-    let request_id = format!("ctx_stream_{pack_id}");
-    let options = output::streaming::ContextStreamFrameOptions::new(
-        pack_id,
-        workspace_id,
-        request_id,
-        started_at,
-        chrono::Utc::now().to_rfc3339(),
-    );
     let frames = output::streaming::context_response_stream_frames(response, options)
         .map_err(|error| error.to_string())?;
-    let mut writer = output::streaming::PackStreamWriter::new(stdout);
-    for frame in &frames {
+    for frame in frames.iter().skip(1) {
         writer
             .write_frame(frame)
             .map_err(|error| error.to_string())?;
@@ -34738,28 +34726,122 @@ where
         frame_count = writer.frames_written(),
         hash = response.data.pack.hash.as_deref().unwrap_or("absent"),
     );
-    Ok(ProcessExitCode::Success)
+    Ok(())
 }
 
-fn context_stream_pack_id(response: &ContextResponse) -> String {
-    let source = response
-        .data
-        .pack
-        .hash
-        .as_deref()
-        .unwrap_or("absent")
-        .strip_prefix("blake3:")
-        .unwrap_or_else(|| response.data.pack.hash.as_deref().unwrap_or("absent"));
-    let suffix: String = source
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .take(26)
-        .collect();
-    if suffix.is_empty() {
-        "pack_stream_absent".to_string()
+fn context_stream_options_for_request(
+    request: &ContextRequest,
+    pack_options: &ContextPackOptions,
+    workspace_path: &Path,
+) -> output::streaming::ContextStreamFrameOptions {
+    let workspace_id = crate::core::workspace::stable_workspace_id(workspace_path);
+    let pack_id = context_stream_pack_id(request, pack_options, &workspace_id);
+    let request_id = format!("ctx_stream_{pack_id}");
+    output::streaming::ContextStreamFrameOptions::new(
+        pack_id,
+        workspace_id,
+        request_id,
+        chrono::Utc::now().to_rfc3339(),
+        chrono::Utc::now().to_rfc3339(),
+    )
+}
+
+fn context_stream_pack_id(
+    request: &ContextRequest,
+    pack_options: &ContextPackOptions,
+    workspace_id: &str,
+) -> String {
+    let source = format!(
+        "ee.pack.stream.v1\0workspace={workspace_id}\0query={}\0profile={}\0max_tokens={}\0candidate_pool={}\0scope={}\0strict={}",
+        request.query,
+        request.profile.as_str(),
+        request.budget.max_tokens(),
+        request.candidate_pool,
+        pack_options.memory_scope.as_str(),
+        pack_options.strict_scope
+    );
+    let digest = blake3::hash(source.as_bytes()).to_hex().to_string();
+    format!("pack_stream_{}", &digest[..26])
+}
+
+fn context_stream_header_frame(
+    request: &ContextRequest,
+    pack_options: &ContextPackOptions,
+    options: &output::streaming::ContextStreamFrameOptions,
+) -> output::streaming::PackStreamFrame {
+    output::streaming::PackStreamFrame::Header(output::streaming::HeaderFrame::new(
+        output::streaming::HeaderFrameInput {
+            pack_id: options.pack_id.clone(),
+            query: request.query.clone(),
+            workspace_id: options.workspace_id.clone(),
+            request_id: options.request_id.clone(),
+            profile: request.profile.as_str().to_string(),
+            max_tokens: request.budget.max_tokens(),
+            candidate_pool: request.candidate_pool,
+            memory_scope: pack_options.memory_scope.as_str().to_string(),
+            strict_scope: pack_options.strict_scope,
+            started_at: options.started_at.clone(),
+        },
+    ))
+}
+
+fn write_context_stream_terminal_error<W>(
+    error: &ContextPackError,
+    options: &output::streaming::ContextStreamFrameOptions,
+    writer: &mut output::streaming::PackStreamWriter<W>,
+) -> Result<ProcessExitCode, String>
+where
+    W: Write,
+{
+    let domain_error = context_error_to_domain(error);
+    let stream_error = context_stream_error_from_context_pack_error(error, &domain_error);
+    let mut terminal = if matches!(error, ContextPackError::Cancelled(_)) {
+        output::streaming::TerminalFrame::cancelled(Some(options.pack_id.clone()), stream_error)
     } else {
-        format!("pack_stream_{suffix}")
-    }
+        output::streaming::TerminalFrame::error(Some(options.pack_id.clone()), stream_error)
+    };
+    terminal.emitted_items = Some(writer.frames_written().saturating_sub(1));
+    terminal.completed_at = Some(chrono::Utc::now().to_rfc3339());
+    writer
+        .write_frame(&output::streaming::PackStreamFrame::Terminal(terminal))
+        .map_err(|write_error| write_error.to_string())?;
+    Ok(domain_error.exit_code())
+}
+
+fn context_stream_error_from_context_pack_error(
+    error: &ContextPackError,
+    domain_error: &DomainError,
+) -> output::streaming::StreamError {
+    let (code, severity) = match error {
+        ContextPackError::Storage(_) => (
+            "context_stream_storage_error",
+            output::streaming::StreamSeverity::High,
+        ),
+        ContextPackError::Search(_) => (
+            "context_stream_search_error",
+            output::streaming::StreamSeverity::High,
+        ),
+        ContextPackError::Pack(_) => (
+            "context_stream_pack_error",
+            output::streaming::StreamSeverity::Medium,
+        ),
+        ContextPackError::PolicyDenied(_) => {
+            ("context_stream_policy_denied", output::streaming::StreamSeverity::High)
+        }
+        ContextPackError::DeadlineExceeded(_) => (
+            "context_stream_deadline_exceeded",
+            output::streaming::StreamSeverity::Medium,
+        ),
+        ContextPackError::Cancelled(_) => {
+            ("context_stream_cancelled", output::streaming::StreamSeverity::Low)
+        }
+    };
+    output::streaming::StreamError::new(
+        code,
+        domain_error.message(),
+        severity,
+        domain_error.repair().map(str::to_string),
+    )
 }
 
 fn context_format_name(renderer: output::Renderer, requested_format: OutputFormat) -> &'static str {
@@ -35665,6 +35747,112 @@ where
         };
     }
 
+    if args.stream && !args.explain_gaps {
+        let request = match context_request_from_options(&options) {
+            Ok(request) => request,
+            Err(error) => {
+                let domain_error = context_error_to_domain(&error);
+                return write_domain_error(&domain_error, true, stdout, stderr);
+            }
+        };
+        let mut frame_options =
+            context_stream_options_for_request(&request, &options, &workspace_path);
+        let header = context_stream_header_frame(&request, &options, &frame_options);
+        let mut writer = output::streaming::PackStreamWriter::new(stdout);
+        if let Err(error) = writer.write_frame(&header) {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to write context stream header: {error}"),
+                repair: Some(
+                    "Retry without --stream to inspect the batch context response.".to_string(),
+                ),
+            };
+            let stdout = writer.into_inner();
+            return write_domain_error(&domain_error, true, stdout, stderr);
+        }
+        let mut response = match run_context_pack_with_performance(&options, command) {
+            Ok(run) => run.response,
+            Err(error) => {
+                return match write_context_stream_terminal_error(
+                    &error,
+                    &frame_options,
+                    &mut writer,
+                ) {
+                    Ok(exit) => exit,
+                    Err(write_error) => {
+                        let domain_error = DomainError::Storage {
+                            message: format!(
+                                "Failed to render context stream error: {write_error}"
+                            ),
+                            repair: Some(
+                                "Retry without --stream to inspect the batch context response."
+                                    .to_string(),
+                            ),
+                        };
+                        let stdout = writer.into_inner();
+                        write_domain_error(&domain_error, true, stdout, stderr)
+                    }
+                };
+            }
+        };
+        if deprecated_alias {
+            let entry = ContextResponseDegradation::new(
+                "deprecated_alias",
+                ContextResponseSeverity::Info,
+                CONTEXT_DEPRECATED_ALIAS_MESSAGE,
+                Some(CONTEXT_DEPRECATED_ALIAS_REPAIR.to_string()),
+            )
+            .unwrap_or(ContextResponseDegradation {
+                code: "deprecated_alias".to_string(),
+                severity: ContextResponseSeverity::Info,
+                message: CONTEXT_DEPRECATED_ALIAS_MESSAGE.to_string(),
+                repair: Some(CONTEXT_DEPRECATED_ALIAS_REPAIR.to_string()),
+            });
+            response.data.degraded.push(entry);
+        }
+        if args.explain && !args.no_pack_dna {
+            attach_pack_dna_to_context_response(&database_path_for_pack_dna, &mut response);
+        }
+        attach_revisable_pack_metadata(&mut response, args.mesh_mode, command);
+        let render_options = output::ContextJsonRenderOptions::from(output_options);
+        let mut delta_sink = io::sink();
+        let _ = maybe_write_context_delta(
+            cli.context_renderer(),
+            cli.format,
+            args,
+            &workspace_path,
+            &mut response,
+            render_options,
+            &mut delta_sink,
+        );
+        frame_options.completed_at = chrono::Utc::now().to_rfc3339();
+        return match write_context_stream_tail(&response, frame_options.clone(), &mut writer) {
+            Ok(()) => ProcessExitCode::Success,
+            Err(error) => {
+                let stream_error = ContextPackError::Pack(format!(
+                    "Failed to render context stream: {error}"
+                ));
+                match write_context_stream_terminal_error(
+                    &stream_error,
+                    &frame_options,
+                    &mut writer,
+                ) {
+                    Ok(exit) => exit,
+                    Err(write_error) => {
+                        let domain_error = DomainError::Storage {
+                            message: format!("Failed to render context stream: {write_error}"),
+                            repair: Some(
+                                "Retry without --stream to inspect the batch context response."
+                                    .to_string(),
+                            ),
+                        };
+                        let stdout = writer.into_inner();
+                        write_domain_error(&domain_error, true, stdout, stderr)
+                    }
+                }
+            }
+        };
+    }
+
     match run_context_pack_with_performance(&options, command).map(|run| run.response) {
         Ok(mut response) => {
             if deprecated_alias {
@@ -35707,21 +35895,6 @@ where
                 stdout,
             ) {
                 return exit;
-            }
-            if args.stream {
-                return match write_context_stream_response(&response, &workspace_path, stdout) {
-                    Ok(exit) => exit,
-                    Err(error) => {
-                        let domain_error = DomainError::Usage {
-                            message: format!("Failed to render context stream: {error}"),
-                            repair: Some(
-                                "Retry without --stream to inspect the batch context response."
-                                    .to_string(),
-                            ),
-                        };
-                        write_domain_error(&domain_error, true, stdout, stderr)
-                    }
-                };
             }
             write_context_response(
                 cli.context_renderer(),
@@ -60375,17 +60548,21 @@ fn render_tripwire_check_human(report: &crate::core::tripwire::CheckReport) -> S
 // CLI tests use expect for fixed parser fixture setup and explicit failure messages.
 #[allow(clippy::expect_used)]
 mod tests {
+    use std::cell::RefCell;
     use std::ffi::OsString;
     use std::fmt::Debug;
     use std::fs;
+    use std::io::{self, Write};
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
 
     use clap::{Parser, error::ErrorKind};
 
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, AttestCommand, AuditCommand, BackupCommand,
         BackupRedaction, BootstrapCommand, COORDINATION_FALLBACK_INGEST_SCHEMA_V1,
-        COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command, ContextPackProfile, CurateCommand,
+        COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command, ContextPackError, ContextPackOptions,
+        ContextPackOutputOptions, ContextPackProfile, CurateCommand,
         DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand, DiagCommand, DiagQuarantineCommand,
         DiagResourceBudgetArg, DiagResourceCommandClassArg, DiagResourceCostClassArg,
         DiagResourceDaemonArg, DiagResourceHostCalibrationArg, DiagResourceLanePressureArg,
@@ -60400,19 +60577,20 @@ mod tests {
         RedactionLevelSource, ReflectCommand, ReflectRequestLedgerCommand, RegressCommand,
         RegressExplainArgs, RegressionSurfaceArg, RuleCommand, SESSION_BUDGET_PLAN_SCHEMA_V1,
         SessionBudgetCommand, SessionBudgetPlanArgs, ShadowMode, SituationCommand, StatusArgs,
-        SupportCommand,
-        SwarmBriefArgs, SwarmCommand, SwarmRepairPlanArgs, SwarmWorkPacketArgs, TaskFrameCommand,
-        TaskFrameSubgoalCommand, TrustCommand, VerifyCommand, VerifyRchCommand, WorkflowCommand,
-        WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode, db_inspect_redact_source_uri,
+        SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmRepairPlanArgs, SwarmWorkPacketArgs,
+        TaskFrameCommand, TaskFrameSubgoalCommand, TrustCommand, VerifyCommand, VerifyRchCommand,
+        WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode,
+        context_request_from_options, context_stream_header_frame,
+        context_stream_options_for_request, db_inspect_redact_source_uri,
         diag_environment_attestation_response_json, environment_attestation_unavailable_sources,
         format_impact_json, format_search_json_with_mesh_and_recalibration,
         hook_git_readiness_response_json, hook_status_response_json, init_report_exit_code,
         json_with_data_result_path, mesh, orient_next_commands,
-        parse_completion_audit_evidence_input, parse_context_profile,
-        parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
-        parse_search_source_mode_arg, parse_verification_evidence_record_input,
-        plan_cache_diag_degraded, plan_cache_diag_response_json,
-        read_environment_attestation_fixture_json, run, write_index_rebuild_error,
+        parse_completion_audit_evidence_input, parse_context_profile, parse_lab_counterfactual_swap,
+        parse_lab_counterfactual_swap_revision, parse_search_source_mode_arg,
+        parse_verification_evidence_record_input, plan_cache_diag_degraded,
+        plan_cache_diag_response_json, read_environment_attestation_fixture_json, run,
+        write_context_stream_terminal_error, write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
     use crate::core::impact::{
@@ -60442,6 +60620,121 @@ mod tests {
     use crate::search::plan_cache::{DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, PlanCache};
 
     type TestResult = Result<(), String>;
+
+    #[derive(Clone, Default)]
+    struct SharedWriteBuffer {
+        bytes: Rc<RefCell<Vec<u8>>>,
+    }
+
+    impl SharedWriteBuffer {
+        fn text(&self) -> String {
+            String::from_utf8(self.bytes.borrow().clone()).expect("test buffer is UTF-8")
+        }
+    }
+
+    impl Write for SharedWriteBuffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn stream_header_test_options(workspace_path: PathBuf) -> ContextPackOptions {
+        ContextPackOptions {
+            workspace_path,
+            database_path: None,
+            index_dir: None,
+            query: "slow pack assembly".to_string(),
+            speed: crate::search::SpeedMode::Default,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(512),
+            candidate_pool: Some(16),
+            max_results: None,
+            include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            redaction_level: RedactionLevel::Minimal,
+            memory_scope: MemoryScope::Workspace,
+            strict_scope: true,
+            ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
+            pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
+            require_fresh_sentinels: false,
+            output_options: ContextPackOutputOptions::default(),
+            persist_pack: false,
+            baseline_write: None,
+            no_lod: false,
+        }
+    }
+
+    #[test]
+    fn pack_stream_header_is_written_before_late_pack_error() -> TestResult {
+        let workspace_path = PathBuf::from("/tmp/ee-pack-stream-header-test");
+        let pack_options = stream_header_test_options(workspace_path.clone());
+        let request = context_request_from_options(&pack_options)
+            .map_err(|error| format!("request normalization failed: {error}"))?;
+        let frame_options =
+            context_stream_options_for_request(&request, &pack_options, &workspace_path);
+        let header = context_stream_header_frame(&request, &pack_options, &frame_options);
+        let probe = SharedWriteBuffer::default();
+        let mut writer = output::streaming::PackStreamWriter::new(probe.clone());
+
+        writer
+            .write_frame(&header)
+            .map_err(|error| format!("header write failed: {error}"))?;
+        let header_text = probe.text();
+        let header_lines: Vec<&str> = header_text.lines().collect();
+        ensure_equal(&header_lines.len(), &1, "header frame is flushed before pack result")?;
+        let header_json: serde_json::Value = serde_json::from_str(header_lines[0])
+            .map_err(|error| format!("header JSON parse failed: {error}"))?;
+        ensure_equal(
+            &header_json["kind"],
+            &serde_json::Value::from("header"),
+            "first stream line is header",
+        )?;
+        ensure(
+            header_json["canonicalKeyHash"].is_null(),
+            "pre-assembly header must not pretend to know the final pack hash",
+        )?;
+
+        let exit = write_context_stream_terminal_error(
+            &ContextPackError::Pack("late synthetic pack failure".to_string()),
+            &frame_options,
+            &mut writer,
+        )
+        .map_err(|error| format!("terminal write failed: {error}"))?;
+        ensure_equal(&exit, &ProcessExitCode::Usage, "late pack error exit code")?;
+
+        let final_text = probe.text();
+        let final_lines: Vec<&str> = final_text.lines().collect();
+        ensure_equal(&final_lines.len(), &2, "stream has header plus terminal error")?;
+        let terminal_json: serde_json::Value = serde_json::from_str(final_lines[1])
+            .map_err(|error| format!("terminal JSON parse failed: {error}"))?;
+        ensure_equal(
+            &terminal_json["kind"],
+            &serde_json::Value::from("error"),
+            "late failure becomes stream error frame",
+        )?;
+        ensure_equal(
+            &terminal_json["packId"],
+            &header_json["packId"],
+            "terminal frame preserves pre-emitted stream pack id",
+        )
+    }
 
     fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
         if condition {
