@@ -213,13 +213,38 @@ impl RequestBudget {
     /// As [`RequestBudget::check`] but against an explicit clock anchor.
     pub fn check_at(&self, now: Instant) -> Result<(), BudgetExceeded> {
         for dimension in DIMENSION_ORDER {
-            if let Some(snapshot) = self.snapshot_at(dimension, now)
-                && snapshot.is_exceeded()
-            {
+            let breach = match dimension {
+                // bd-34599: decide the wall-clock breach on the full `Duration`
+                // so sub-millisecond and zero-budget overruns are not lost to
+                // millisecond truncation; millis are reserved for reporting.
+                BudgetDimension::WallClock => self.wall_clock_breach_at(now),
+                _ => self
+                    .snapshot_at(dimension, now)
+                    .filter(|snapshot| snapshot.is_exceeded()),
+            };
+            if let Some(snapshot) = breach {
                 return Err(BudgetExceeded::from(snapshot));
             }
         }
         Ok(())
+    }
+
+    /// Wall-clock breach decided on the full `Duration` (bd-34599). Returns
+    /// the reporting snapshot (in milliseconds) only when the elapsed time
+    /// strictly exceeds the limit; `used` is nudged above `limit` so a
+    /// sub-millisecond overrun is not displayed as `used == limit`.
+    fn wall_clock_breach_at(&self, now: Instant) -> Option<BudgetSnapshot> {
+        let limit = self.wall_clock_limit?;
+        let elapsed = self.elapsed_at(now);
+        if elapsed <= limit {
+            return None;
+        }
+        let limit_ms = duration_to_millis(limit);
+        Some(BudgetSnapshot {
+            dimension: BudgetDimension::WallClock,
+            limit: limit_ms,
+            used: duration_to_millis(elapsed).max(limit_ms.saturating_add(1)),
+        })
     }
 
     fn snapshot_at(&self, dimension: BudgetDimension, now: Instant) -> Option<BudgetSnapshot> {
@@ -600,6 +625,34 @@ mod tests {
         assert!(b.check_at(now).is_ok());
         let past = now + Duration::from_millis(1);
         assert!(b.check_at(past).is_err());
+    }
+
+    #[test]
+    fn wall_clock_check_detects_sub_ms_overrun_bd_34599() {
+        let now = anchor();
+        // Zero budget must breach on ANY positive elapsed, even 1ns, although
+        // both limit and elapsed truncate to 0ms.
+        let zero = RequestBudget::unbounded_at(now).with_wall_clock(Duration::ZERO);
+        let err = zero
+            .check_at(now + Duration::from_nanos(1))
+            .expect_err("zero wall-clock budget breaches on any positive elapsed");
+        assert_eq!(err.dimension, BudgetDimension::WallClock);
+
+        // Tiny non-zero budget: a 1.5ms limit must breach at 1.9ms elapsed even
+        // though both truncate to 1ms; at/under the limit stays ok.
+        let tiny = RequestBudget::unbounded_at(now).with_wall_clock(Duration::from_micros(1500));
+        assert!(
+            tiny.check_at(now + Duration::from_micros(1900)).is_err(),
+            "sub-millisecond overrun must breach"
+        );
+        assert!(
+            tiny.check_at(now + Duration::from_micros(1500)).is_ok(),
+            "exactly at the limit is not a breach"
+        );
+        assert!(
+            tiny.check_at(now + Duration::from_micros(1400)).is_ok(),
+            "under the limit is not a breach"
+        );
     }
 
     #[test]
