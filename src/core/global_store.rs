@@ -575,11 +575,16 @@ pub fn read_global_store_memories(
     if !paths.database_path.exists() {
         return Ok(Vec::new());
     }
-    let connection = DbConnection::open_file(&paths.database_path)
-        .map_err(|error| format!("failed to open global store database: {error}"))?;
-    connection
-        .migrate()
-        .map_err(|error| format!("failed to migrate global store database: {error}"))?;
+    let connection = DbConnection::open_file_read_only(&paths.database_path)
+        .map_err(|error| format!("failed to open global store database read-only: {error}"))?;
+    let needs_migration = connection
+        .needs_migration()
+        .map_err(|error| format!("failed to inspect global store migration state: {error}"))?;
+    if needs_migration {
+        return Err(
+            "global store database needs migration; skipping read-only global tier".to_owned(),
+        );
+    }
     let workspace_key = global_workspace_key(paths);
     let Some(workspace) = connection
         .get_workspace_by_path(&workspace_key)
@@ -596,11 +601,27 @@ pub fn read_global_store_memories(
 mod tests {
     use super::*;
 
+    fn path_safe_tempdir(prefix: &str) -> Result<tempfile::TempDir, String> {
+        let system_temp = Path::new("/tmp");
+        if system_temp.is_dir() {
+            let root =
+                std::fs::canonicalize(system_temp).unwrap_or_else(|_| system_temp.to_path_buf());
+            return tempfile::Builder::new()
+                .prefix(prefix)
+                .tempdir_in(root)
+                .map_err(|error| error.to_string());
+        }
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .map_err(|error| error.to_string())
+    }
+
     #[test]
     fn global_store_create_is_idempotent_and_persists_memories() -> Result<(), String> {
         use crate::db::CreateMemoryInput;
 
-        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let tempdir = path_safe_tempdir("ee-global-store.")?;
         let paths = GlobalStorePaths::from_root(&tempdir.path().join("global"));
 
         // Reading before any write returns empty — the store does not exist yet,
@@ -637,8 +658,9 @@ mod tests {
         drop(connection);
 
         // Re-opening is idempotent: the workspace id stays stable.
-        let (_again, workspace_id_again) = open_or_create_global_store(&paths)?;
+        let (again, workspace_id_again) = open_or_create_global_store(&paths)?;
         assert_eq!(workspace_id, workspace_id_again);
+        drop(again);
 
         // The write persists and is read back from a fresh connection.
         let memories = read_global_store_memories(&paths, false)?;
@@ -648,6 +670,46 @@ mod tests {
             "always run cargo fmt --check before release"
         );
         assert_eq!(memories[0].workspace_id, workspace_id);
+        Ok(())
+    }
+
+    #[test]
+    fn read_global_store_memories_reports_pending_migration_without_writes() -> Result<(), String> {
+        let tempdir = path_safe_tempdir("ee-global-store-stale.")?;
+        let paths = GlobalStorePaths::from_root(&tempdir.path().join("global"));
+        std::fs::create_dir_all(&paths.root).map_err(|error| error.to_string())?;
+
+        {
+            let connection = DbConnection::open_file(&paths.database_path)
+                .map_err(|error| error.to_string())?;
+            assert!(
+                !connection
+                    .migration_table_exists()
+                    .map_err(|error| error.to_string())?,
+                "fresh database must not start with a migration table"
+            );
+        }
+
+        let Err(error) = read_global_store_memories(&paths, false) else {
+            return Err("stale global store read must report pending migration".to_owned());
+        };
+        assert!(
+            error.contains("needs migration"),
+            "error should identify pending migration, got {error}"
+        );
+
+        let connection = DbConnection::open_file_read_only(&paths.database_path)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            connection.needs_migration().map_err(|error| error.to_string())?,
+            "read-only global store read must leave migration state pending"
+        );
+        assert!(
+            !connection
+                .migration_table_exists()
+                .map_err(|error| error.to_string())?,
+            "read-only global store read must not create migration metadata"
+        );
         Ok(())
     }
 
