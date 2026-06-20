@@ -7,7 +7,7 @@
 
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 
@@ -19,6 +19,7 @@ use crate::models::SESSION_BUDGET_SCHEMA_V1;
 
 pub const SESSION_BUDGET_REDACTION_STATUS: &str = "paths_counts_hashes_no_content";
 pub const SESSION_BUDGET_PATH_POLICY: &str = "workspace_relative_or_hashed";
+const SESSION_BUDGET_LEDGER_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub enum SessionBudgetRecorder {
@@ -456,11 +457,45 @@ fn event_id_for(observation: &SessionBudgetObservation) -> String {
 }
 
 fn load_ledger_rows(path: &Path) -> Result<Vec<Value>, SessionBudgetRecordError> {
-    let content = match fs::read_to_string(path) {
-        Ok(content) => content,
+    load_ledger_rows_with_max_bytes(path, SESSION_BUDGET_LEDGER_MAX_BYTES)
+}
+
+fn load_ledger_rows_with_max_bytes(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Vec<Value>, SessionBudgetRecordError> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(SessionBudgetRecordError::io(path, error)),
     };
+    let metadata = file
+        .metadata()
+        .map_err(|source| SessionBudgetRecordError::io(path, source))?;
+    if !metadata.file_type().is_file() {
+        return Err(SessionBudgetRecordError::invalid_ledger(
+            path,
+            "expected a regular file",
+        ));
+    }
+    if metadata.len() > max_bytes {
+        return Err(SessionBudgetRecordError::ledger_too_large(
+            path,
+            metadata.len(),
+            max_bytes,
+        ));
+    }
+    let mut content = String::new();
+    let mut limited = file.take(max_bytes.saturating_add(1));
+    limited
+        .read_to_string(&mut content)
+        .map_err(|source| SessionBudgetRecordError::io(path, source))?;
+    let bytes_read = u64::try_from(content.len()).unwrap_or(u64::MAX);
+    if bytes_read > max_bytes {
+        return Err(SessionBudgetRecordError::ledger_too_large(
+            path, bytes_read, max_bytes,
+        ));
+    }
     let mut rows = Vec::new();
     for (index, line) in content.lines().enumerate() {
         if line.trim().is_empty() {
@@ -506,10 +541,10 @@ fn write_ledger_rows(path: &Path, rows: &[Value]) -> Result<(), SessionBudgetRec
         fs::create_dir_all(parent)
             .map_err(|source| SessionBudgetRecordError::io(parent, source))?;
     }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
+    let mut options = OpenOptions::new();
+    options.create(true).write(true).truncate(true);
+    configure_session_budget_write_options(&mut options);
+    let mut file = options
         .open(path)
         .map_err(|source| SessionBudgetRecordError::io(path, source))?;
     for row in rows {
@@ -520,6 +555,16 @@ fn write_ledger_rows(path: &Path, rows: &[Value]) -> Result<(), SessionBudgetRec
     file.flush()
         .map_err(|source| SessionBudgetRecordError::io(path, source))
 }
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_session_budget_write_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_session_budget_write_options(_options: &mut OpenOptions) {}
 
 #[derive(Debug)]
 pub struct SessionBudgetRecordError {
@@ -537,6 +582,24 @@ impl SessionBudgetRecordError {
         Self {
             message: format!(
                 "session budget ledger I/O failed at {}: {source}",
+                path.display()
+            ),
+        }
+    }
+
+    fn invalid_ledger(path: &Path, reason: &str) -> Self {
+        Self {
+            message: format!(
+                "session budget ledger is invalid at {}: {reason}",
+                path.display()
+            ),
+        }
+    }
+
+    fn ledger_too_large(path: &Path, projected_bytes: u64, max_bytes: u64) -> Self {
+        Self {
+            message: format!(
+                "session budget ledger at {} is {projected_bytes} bytes, above the {max_bytes}-byte cap",
                 path.display()
             ),
         }
@@ -1088,6 +1151,47 @@ mod tests {
             "cmd_session_budget_0002"
         );
         assert_eq!(rows[0]["retention"]["maxAgeDays"], 1);
+        Ok(())
+    }
+
+    #[test]
+    fn load_ledger_rows_rejects_oversized_file_before_parse() -> TestResult {
+        let path = test_ledger_path("oversized");
+        fs::write(&path, "not-json-and-too-large").map_err(|error| error.to_string())?;
+
+        let error = load_ledger_rows_with_max_bytes(&path, 4)
+            .expect_err("oversized ledger must fail before parsing");
+        assert!(
+            error.to_string().contains("above the 4-byte cap"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_ledger_rows_rejects_symlinked_final_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let target = test_ledger_path("symlink-target");
+        let link = test_ledger_path("symlink-link");
+        fs::write(&target, "outside\n").map_err(|error| error.to_string())?;
+        symlink(&target, &link).map_err(|error| error.to_string())?;
+
+        let rows = [serde_json::json!({ "schema": SESSION_BUDGET_SCHEMA_V1 })];
+        let error =
+            write_ledger_rows(&link, &rows).expect_err("symlinked ledger path must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("session budget ledger I/O failed"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&target).map_err(|error| error.to_string())?,
+            "outside\n",
+            "write must not truncate the symlink target"
+        );
         Ok(())
     }
 

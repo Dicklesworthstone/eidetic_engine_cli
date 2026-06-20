@@ -429,11 +429,31 @@ impl ProcedureListReport {
     }
 }
 
+fn parse_procedure_list_status_filter(
+    raw: Option<&str>,
+) -> Result<Option<ProcedureMaturity>, DomainError> {
+    raw.map(|status| {
+        ProcedureMaturity::from_str(status).map_err(|_| DomainError::Usage {
+            message: format!("invalid procedure status filter {status:?}."),
+            repair: Some(
+                "Use --status candidate/provisional, verified/validated, mature, or retired."
+                    .to_owned(),
+            ),
+        })
+    })
+    .transpose()
+}
+
+fn procedure_status_matches_maturity(status: &str, maturity: ProcedureMaturity) -> bool {
+    ProcedureMaturity::from_str(status).is_ok_and(|candidate| candidate == maturity)
+}
+
 /// List procedures with optional filters.
 pub fn list_procedures(options: &ProcedureListOptions) -> Result<ProcedureListReport, DomainError> {
+    let status_filter = parse_procedure_list_status_filter(options.status_filter.as_deref())?;
     let records = load_procedure_records(
         &options.workspace,
-        options.status_filter.as_deref(),
+        status_filter.map(ProcedureMaturity::as_str),
         list_limit(options.limit),
     )?;
     list_procedures_from_records(options, &records)
@@ -452,10 +472,11 @@ pub fn list_procedures_from_records(
     });
 
     let total_count = usize_to_u32_saturating(all_procedures.len());
-    let mut filtered: Vec<_> = if let Some(ref status_filter) = options.status_filter {
+    let status_filter = parse_procedure_list_status_filter(options.status_filter.as_deref())?;
+    let mut filtered: Vec<_> = if let Some(status_filter) = status_filter {
         all_procedures
             .into_iter()
-            .filter(|procedure| procedure.status == *status_filter)
+            .filter(|procedure| procedure_status_matches_maturity(&procedure.status, status_filter))
             .collect()
     } else {
         all_procedures
@@ -4158,6 +4179,19 @@ mod tests {
         assert_eq!(listed.filtered_count, 1);
         assert_eq!(listed.procedures[0].procedure_id, proposal.procedure_id);
 
+        let listed_by_status_alias = list_procedures(&ProcedureListOptions {
+            workspace: workspace.clone(),
+            status_filter: Some("candidate".to_owned()),
+            limit: 10,
+            include_steps: false,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(listed_by_status_alias.filtered_count, 1);
+        assert_eq!(
+            listed_by_status_alias.procedures[0].procedure_id,
+            proposal.procedure_id
+        );
+
         let promoted = promote_procedure(&ProcedurePromoteOptions {
             workspace: workspace.clone(),
             procedure_id: proposal.procedure_id.clone(),
@@ -4256,7 +4290,10 @@ mod tests {
             include_verification: true,
         })
         .map_err(|error| error.message())?;
-        assert_eq!(show.procedure.status, ProcedureMaturity::Provisional.as_str());
+        assert_eq!(
+            show.procedure.status,
+            ProcedureMaturity::Provisional.as_str()
+        );
         assert!(
             show.history
                 .iter()
@@ -4282,6 +4319,51 @@ mod tests {
         assert_eq!(report.total_count, 2);
         assert_eq!(report.filtered_count, 1);
         assert!(report.procedures.iter().all(|p| p.status == "verified"));
+        Ok(())
+    }
+
+    #[test]
+    fn list_filters_by_persisted_maturity_alias() -> TestResult {
+        let options = ProcedureListOptions {
+            status_filter: Some("validated".to_owned()),
+            limit: 10,
+            ..Default::default()
+        };
+        let records = [
+            procedure_record("provisional"),
+            second_procedure_record("verified"),
+        ];
+
+        let report = list_procedures_from_records(&options, &records).map_err(|e| e.message())?;
+        assert_eq!(report.total_count, 2);
+        assert_eq!(report.filtered_count, 1);
+        assert_eq!(report.procedures[0].procedure_id, "proc_other");
+        assert_eq!(report.procedures[0].status, "verified");
+        Ok(())
+    }
+
+    #[test]
+    fn list_rejects_unknown_status_filter() -> TestResult {
+        let options = ProcedureListOptions {
+            status_filter: Some("approved".to_owned()),
+            limit: 10,
+            ..Default::default()
+        };
+
+        let Err(error) = list_procedures_from_records(&options, &[]) else {
+            return Err("unknown procedure list status should be rejected".to_owned());
+        };
+        match error {
+            DomainError::Usage { message, repair } => {
+                assert!(message.contains("invalid procedure status filter"));
+                assert!(
+                    repair
+                        .as_deref()
+                        .is_some_and(|repair| repair.contains("--status candidate"))
+                );
+            }
+            other => return Err(format!("expected usage error, got {other:?}")),
+        }
         Ok(())
     }
 

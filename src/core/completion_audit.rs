@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -512,7 +512,7 @@ fn local_cargo_process_scan_evidence(process_scan: &Value) -> Vec<EvidenceRecord
                 "local_cargo_policy_state=local_disallowed_attempt; active process scan detected {count} local Cargo/rustc process(es) for this workspace without rch exec"
             ),
         )],
-        "clean" => vec![evidence_record(
+        "clean" | "ok" => vec![evidence_record(
             "local_cargo_tripwire",
             "cargo/build/test command",
             source,
@@ -674,7 +674,7 @@ fn static_workspace_path_file_type_without_symlinks(
     workspace: &Path,
     relative: &Path,
 ) -> Option<std::fs::FileType> {
-    let path = workspace.join(relative);
+    let path = workspace_relative_static_evidence_path(workspace, relative)?;
     if first_existing_static_evidence_symlink_component(&path)
         .ok()
         .flatten()
@@ -685,6 +685,21 @@ fn static_workspace_path_file_type_without_symlinks(
     std::fs::symlink_metadata(path)
         .ok()
         .map(|metadata| metadata.file_type())
+}
+
+fn workspace_relative_static_evidence_path(workspace: &Path, relative: &Path) -> Option<PathBuf> {
+    if relative.as_os_str().is_empty() || relative.is_absolute() {
+        return None;
+    }
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir
+        )
+    }) {
+        return None;
+    }
+    Some(workspace.join(relative))
 }
 
 fn first_existing_static_evidence_symlink_component(
@@ -2302,6 +2317,24 @@ mod tests {
     }
 
     #[test]
+    fn completion_report_treats_ok_process_scan_as_clean_policy_evidence() {
+        let records = local_cargo_process_scan_evidence(&serde_json::json!({
+            "schema": "ee.rch_local_cargo_tripwire.v1",
+            "mode": "probe_processes",
+            "status": "ok",
+            "count": 0,
+            "detectedLocalBuilds": [],
+        }));
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, EvidenceRecordStatus::Pass);
+        assert!(
+            records[0].summary.contains("remote_required_ready"),
+            "clean process-scan evidence must preserve the ready policy state"
+        );
+    }
+
+    #[test]
     fn completion_report_reports_remote_required_blocked_without_local_bypass() {
         let checklist = extract_completion_checklist(
             "objective",
@@ -2922,6 +2955,47 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, "file_read");
         assert_eq!(records[0].status, EvidenceRecordStatus::StaticOnly);
+    }
+
+    #[test]
+    fn static_workspace_evidence_rejects_absolute_path_proxy() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let outside = tempdir.path().join("outside.md");
+        std::fs::write(&outside, "outside").expect("outside");
+
+        let mut records = Vec::new();
+        push_static_workspace_evidence(
+            &mut records,
+            &workspace,
+            &evidence("file_or_path", &outside.display().to_string(), "direct"),
+        );
+
+        assert!(
+            records.is_empty(),
+            "absolute paths outside the workspace must not count as static evidence: {records:?}"
+        );
+    }
+
+    #[test]
+    fn static_workspace_evidence_rejects_parent_traversal_proxy() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::write(tempdir.path().join("outside.md"), "outside").expect("outside");
+
+        let mut records = Vec::new();
+        push_static_workspace_evidence(
+            &mut records,
+            &workspace,
+            &evidence("file_or_path", "../outside.md", "direct"),
+        );
+
+        assert!(
+            records.is_empty(),
+            "parent traversal must not escape workspace static evidence: {records:?}"
+        );
     }
 
     #[test]

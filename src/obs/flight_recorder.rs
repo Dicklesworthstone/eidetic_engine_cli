@@ -697,28 +697,41 @@ fn replay_workload_trace_with_max_bytes(
 }
 
 fn read_trace_body(trace_path: &Path, max_bytes: u64) -> Result<String, FlightRecorderError> {
-    if max_bytes == 0 {
-        return fs::read_to_string(trace_path).map_err(|error| FlightRecorderError::Io {
-            path: trace_path.to_path_buf(),
-            message: error.to_string(),
-        });
-    }
+    ensure_trace_replay_path_safe(trace_path, max_bytes)?;
 
-    let metadata = fs::metadata(trace_path).map_err(|error| FlightRecorderError::Io {
+    let file = open_flight_recorder_read_file(trace_path)?;
+    let opened_metadata = file.metadata().map_err(|error| FlightRecorderError::Io {
         path: trace_path.to_path_buf(),
         message: error.to_string(),
     })?;
-    if metadata.len() > max_bytes {
+    if !opened_metadata.file_type().is_file() {
+        return Err(FlightRecorderError::Io {
+            path: trace_path.to_path_buf(),
+            message: format!(
+                "refusing to replay flight-recorder trace from '{}': path is not a regular file after open",
+                trace_path.display()
+            ),
+        });
+    }
+    if max_bytes > 0 && opened_metadata.len() > max_bytes {
         return Err(FlightRecorderError::QuotaExceeded {
-            projected_bytes: metadata.len(),
+            projected_bytes: opened_metadata.len(),
             max_bytes,
         });
     }
 
-    let file = fs::File::open(trace_path).map_err(|error| FlightRecorderError::Io {
-        path: trace_path.to_path_buf(),
-        message: error.to_string(),
-    })?;
+    if max_bytes == 0 {
+        let mut body = String::new();
+        let mut reader = file;
+        reader
+            .read_to_string(&mut body)
+            .map_err(|error| FlightRecorderError::Io {
+                path: trace_path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+        return Ok(body);
+    }
+
     let mut bytes = Vec::new();
     let mut limited = file.take(max_bytes.saturating_add(1));
     limited
@@ -739,6 +752,64 @@ fn read_trace_body(trace_path: &Path, max_bytes: u64) -> Result<String, FlightRe
         path: trace_path.to_path_buf(),
         message: error.to_string(),
     })
+}
+
+fn open_flight_recorder_read_file(path: &Path) -> Result<fs::File, FlightRecorderError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_flight_recorder_read_options(&mut options);
+    options.open(path).map_err(|error| FlightRecorderError::Io {
+        path: path.to_path_buf(),
+        message: format!("failed to open flight-recorder trace replay file: {error}"),
+    })
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_flight_recorder_read_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_flight_recorder_read_options(_options: &mut OpenOptions) {}
+
+fn ensure_trace_replay_path_safe(path: &Path, max_bytes: u64) -> Result<(), FlightRecorderError> {
+    if let Some(symlink_path) = first_existing_symlink_component(path)? {
+        return Err(FlightRecorderError::Io {
+            path: path.to_path_buf(),
+            message: format!(
+                "refusing to replay flight-recorder trace from '{}': path traverses symbolic link '{}'",
+                path.display(),
+                symlink_path.display()
+            ),
+        });
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            if max_bytes > 0 && metadata.len() > max_bytes {
+                return Err(FlightRecorderError::QuotaExceeded {
+                    projected_bytes: metadata.len(),
+                    max_bytes,
+                });
+            }
+            Ok(())
+        }
+        Ok(_) => Err(FlightRecorderError::Io {
+            path: path.to_path_buf(),
+            message: format!(
+                "refusing to replay flight-recorder trace from '{}': path is not a regular file",
+                path.display()
+            ),
+        }),
+        Err(error) => Err(FlightRecorderError::Io {
+            path: path.to_path_buf(),
+            message: format!(
+                "failed to inspect flight-recorder replay path '{}': {error}",
+                path.display()
+            ),
+        }),
+    }
 }
 
 fn validate_inputs(inputs: &FlightRecorderInputs<'_>) -> Result<(), FlightRecorderError> {
@@ -1330,6 +1401,36 @@ mod tests {
                 max_bytes: 8
             } if projected_bytes > 8
         ));
+    }
+
+    #[test]
+    fn replay_trace_rejects_non_regular_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let trace_path = temp.path().join("agent-workload-trace.jsonl");
+        std::fs::create_dir_all(&trace_path).expect("trace directory");
+        let err = replay_workload_trace(&trace_path).expect_err("directory rejected");
+        assert!(
+            matches!(err, FlightRecorderError::Io { ref message, .. } if message.contains("not a regular file")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replay_trace_rejects_symlinked_trace_file() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside_trace = temp.path().join("outside.jsonl");
+        std::fs::write(&outside_trace, "{\"schema\":\"ignored\"}\n").expect("outside trace");
+        let linked_trace = temp.path().join("agent-workload-trace.jsonl");
+        symlink(&outside_trace, &linked_trace).expect("symlink trace file");
+
+        let err = replay_workload_trace(&linked_trace).expect_err("symlinked replay rejected");
+        assert!(
+            matches!(err, FlightRecorderError::Io { ref message, .. } if message.contains("path traverses symbolic link")),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

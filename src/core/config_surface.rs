@@ -710,6 +710,7 @@ enum GraphValueKind {
     NonNegativeFloat,
     UnsignedInteger,
     PositiveInteger,
+    PercentInteger,
     UnsignedIntegerMap,
     RerankMode,
 }
@@ -807,22 +808,22 @@ fn graph_key_spec(key: &str) -> Option<GraphKeySpec> {
         GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY => Some(GraphKeySpec {
             key: GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY,
             path: &["graph", "memory", "snapshot_cap_mb"],
-            kind: GraphValueKind::UnsignedInteger,
+            kind: GraphValueKind::PositiveInteger,
         }),
         GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY => Some(GraphKeySpec {
             key: GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
             path: &["graph", "memory", "per_algorithm_cap_mb"],
-            kind: GraphValueKind::UnsignedInteger,
+            kind: GraphValueKind::PositiveInteger,
         }),
         GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY => Some(GraphKeySpec {
             key: GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY,
             path: &["graph", "memory", "degraded_below_pct"],
-            kind: GraphValueKind::UnsignedInteger,
+            kind: GraphValueKind::PercentInteger,
         }),
         GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY => Some(GraphKeySpec {
             key: GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY,
             path: &["graph", "memory", "growth_multiplier_basis_points"],
-            kind: GraphValueKind::UnsignedInteger,
+            kind: GraphValueKind::PositiveInteger,
         }),
         GRAPH_WITNESSES_RETENTION_DAYS_KEY => Some(GraphKeySpec {
             key: GRAPH_WITNESSES_RETENTION_DAYS_KEY,
@@ -971,6 +972,16 @@ fn parse_graph_value(spec: GraphKeySpec, raw: &str) -> Result<TomlScalar, Config
                 Ok(TomlScalar::Integer(value as i64))
             } else {
                 Err(invalid_value(spec, raw, "a positive integer <= i64::MAX"))
+            }
+        }
+        GraphValueKind::PercentInteger => {
+            let value = raw
+                .parse::<u64>()
+                .map_err(|_| invalid_value(spec, raw, "an integer in the range 0..=100"))?;
+            if value <= 100 {
+                Ok(TomlScalar::Integer(value as i64))
+            } else {
+                Err(invalid_value(spec, raw, "an integer in the range 0..=100"))
             }
         }
         GraphValueKind::UnsignedIntegerMap => Err(invalid_value(
@@ -1414,11 +1425,34 @@ cache_results = 120
             Ok(report) => return Err(format!("invalid alpha unexpectedly succeeded: {report:?}")),
             Err(error) => error.to_string(),
         };
-        if error.contains("0.0..=1.0") {
-            Ok(())
-        } else {
-            Err(format!("unexpected error: {error}"))
+        if !error.contains("0.0..=1.0") {
+            return Err(format!("unexpected error: {error}"));
         }
+
+        let invalid_memory_values = [
+            ("graph.memory.snapshot_cap_mb", "0", "positive integer"),
+            ("graph.memory.per_algorithm_cap_mb", "0", "positive integer"),
+            ("graph.memory.degraded_below_pct", "101", "0..=100"),
+            (
+                "graph.memory.growth_multiplier_basis_points",
+                "0",
+                "positive integer",
+            ),
+        ];
+        for (key, value, expected) in invalid_memory_values {
+            let error = match set_config(&options(temp.path()), key, value, false) {
+                Ok(report) => {
+                    return Err(format!("{key}={value} unexpectedly succeeded: {report:?}"));
+                }
+                Err(error) => error.to_string(),
+            };
+            if !error.contains(expected) {
+                return Err(format!(
+                    "{key}={value}: expected error containing `{expected}`, got: {error}"
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[test]

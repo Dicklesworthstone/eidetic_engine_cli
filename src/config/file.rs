@@ -965,10 +965,18 @@ impl GraphMemoryConfig {
     fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
         const SECTIONS: &[&str] = &["graph", "memory"];
         Ok(Self {
-            snapshot_cap_mb: optional_u64_path(document, SECTIONS, "snapshot_cap_mb")?,
-            per_algorithm_cap_mb: optional_u64_path(document, SECTIONS, "per_algorithm_cap_mb")?,
-            degraded_below_pct: optional_u64_path(document, SECTIONS, "degraded_below_pct")?,
-            growth_multiplier_basis_points: optional_u64_path(
+            snapshot_cap_mb: optional_positive_u64_path(document, SECTIONS, "snapshot_cap_mb")?,
+            per_algorithm_cap_mb: optional_positive_u64_path(
+                document,
+                SECTIONS,
+                "per_algorithm_cap_mb",
+            )?,
+            degraded_below_pct: optional_percent_u64_path(
+                document,
+                SECTIONS,
+                "degraded_below_pct",
+            )?,
+            growth_multiplier_basis_points: optional_positive_u64_path(
                 document,
                 SECTIONS,
                 "growth_multiplier_basis_points",
@@ -1548,6 +1556,38 @@ fn optional_u64_path(
                 expected: "an integer",
             }),
         },
+        None => Ok(None),
+    }
+}
+
+fn optional_positive_u64_path(
+    document: &DocumentMut,
+    sections: &[&str],
+    key: &str,
+) -> Result<Option<u64>, ConfigParseError> {
+    match optional_u64_path(document, sections, key)? {
+        Some(0) => Err(ConfigParseError::InvalidValue {
+            key: key_path_name(sections, key),
+            value: "0".to_string(),
+            message: "expected a positive integer".to_string(),
+        }),
+        Some(value) => Ok(Some(value)),
+        None => Ok(None),
+    }
+}
+
+fn optional_percent_u64_path(
+    document: &DocumentMut,
+    sections: &[&str],
+    key: &str,
+) -> Result<Option<u64>, ConfigParseError> {
+    match optional_u64_path(document, sections, key)? {
+        Some(value) if value <= 100 => Ok(Some(value)),
+        Some(value) => Err(ConfigParseError::InvalidValue {
+            key: key_path_name(sections, key),
+            value: value.to_string(),
+            message: "expected an integer in the range 0..=100".to_string(),
+        }),
         None => Ok(None),
     }
 }
@@ -3442,6 +3482,38 @@ source_mode = "random"
             ),
             format!("unexpected error: {error:?}"),
         )
+    }
+
+    #[test]
+    fn rejects_out_of_range_graph_memory_limits() -> TestResult {
+        for (input, expected_key) in [
+            (
+                "[graph.memory]\nsnapshot_cap_mb = 0\n",
+                "graph.memory.snapshot_cap_mb",
+            ),
+            (
+                "[graph.memory]\nper_algorithm_cap_mb = 0\n",
+                "graph.memory.per_algorithm_cap_mb",
+            ),
+            (
+                "[graph.memory]\ndegraded_below_pct = 101\n",
+                "graph.memory.degraded_below_pct",
+            ),
+            (
+                "[graph.memory]\ngrowth_multiplier_basis_points = 0\n",
+                "graph.memory.growth_multiplier_basis_points",
+            ),
+        ] {
+            let error = expect_config_error(input)?;
+            ensure(
+                matches!(
+                    error,
+                    ConfigParseError::InvalidValue { ref key, .. } if key == expected_key
+                ),
+                format!("unexpected error for {expected_key}: {error:?}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

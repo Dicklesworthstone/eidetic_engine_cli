@@ -12,6 +12,7 @@ use proc_macro::{Delimiter, Group, TokenStream, TokenTree};
 #[proc_macro_attribute]
 pub fn required(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let compact = compact_non_literal_tokens(item.clone());
+    let markers = non_literal_token_markers(item.clone());
     let mut errors = Vec::new();
 
     if !has_deterministic_seed_parameter(item.clone()) {
@@ -26,6 +27,12 @@ pub fn required(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     if contains_domain_id_now(&compact) {
         errors.push("use seeded ID helpers instead of ambient typed Id::now");
+    }
+    if contains_hash_collection_iteration(&markers, "HashMap") {
+        errors.push("sort HashMap entries before deterministic output");
+    }
+    if contains_hash_collection_iteration(&markers, "HashSet") {
+        errors.push("sort HashSet entries before deterministic output");
     }
 
     if let Some(message) = errors.first() {
@@ -289,10 +296,14 @@ enum NonLiteralToken {
     Punct(char),
 }
 
+fn non_literal_token_markers(tokens: TokenStream) -> Vec<NonLiteralToken> {
+    let mut markers = Vec::new();
+    collect_non_literal_token_markers(tokens, &mut markers);
+    markers
+}
+
 fn contains_deterministic_seed_type(tokens: TokenStream) -> bool {
-    let mut non_literal_tokens = Vec::new();
-    collect_non_literal_token_markers(tokens, &mut non_literal_tokens);
-    markers_contain_deterministic_seed_type(&non_literal_tokens)
+    markers_contain_deterministic_seed_type(&non_literal_token_markers(tokens))
 }
 
 fn collect_non_literal_token_markers(tokens: TokenStream, output: &mut Vec<NonLiteralToken>) {
@@ -364,6 +375,109 @@ fn contains_domain_id_now(compact: &str) -> bool {
     false
 }
 
+fn contains_hash_collection_iteration(markers: &[NonLiteralToken], type_name: &str) -> bool {
+    hash_collection_bindings_from_markers(markers, type_name)
+        .iter()
+        .any(|binding| hash_collection_iteration_call(markers, binding))
+}
+
+fn hash_collection_bindings_from_markers(
+    markers: &[NonLiteralToken],
+    type_name: &str,
+) -> Vec<String> {
+    let mut bindings = Vec::new();
+    for colon_index in markers.iter().enumerate().filter_map(|(index, marker)| {
+        (marker == &NonLiteralToken::Punct(':')
+            && !matches!(
+                markers.get(index.saturating_sub(1)),
+                Some(NonLiteralToken::Punct(':'))
+            )
+            && !matches!(markers.get(index + 1), Some(NonLiteralToken::Punct(':'))))
+        .then_some(index)
+    }) {
+        if !markers_match_hash_collection_type(markers, colon_index + 1, type_name) {
+            continue;
+        }
+        if let Some(binding) = binding_name_before_colon(markers, colon_index) {
+            if !bindings.iter().any(|existing| existing == &binding) {
+                bindings.push(binding);
+            }
+        }
+    }
+    bindings
+}
+
+fn markers_match_hash_collection_type(
+    markers: &[NonLiteralToken],
+    mut start: usize,
+    type_name: &str,
+) -> bool {
+    if double_colon_at(markers, start) {
+        start += 2;
+    }
+    (ident_at(markers, start) == Some(type_name)
+        && matches!(markers.get(start + 1), Some(NonLiteralToken::Punct('<'))))
+        || (ident_at(markers, start) == Some("std")
+            && double_colon_at(markers, start + 1)
+            && ident_at(markers, start + 3) == Some("collections")
+            && double_colon_at(markers, start + 4)
+            && ident_at(markers, start + 6) == Some(type_name)
+            && matches!(markers.get(start + 7), Some(NonLiteralToken::Punct('<'))))
+}
+
+fn binding_name_before_colon(markers: &[NonLiteralToken], colon_index: usize) -> Option<String> {
+    markers[..colon_index].iter().rev().find_map(|marker| {
+        let NonLiteralToken::Ident(name) = marker else {
+            return None;
+        };
+        if matches!(name.as_str(), "let" | "mut" | "ref" | "_") {
+            None
+        } else {
+            Some(name.clone())
+        }
+    })
+}
+
+fn hash_collection_iteration_call(markers: &[NonLiteralToken], binding: &str) -> bool {
+    ["iter", "keys", "values", "into_iter", "drain"]
+        .iter()
+        .any(|method| contains_receiver_method_call(markers, binding, method))
+}
+
+fn contains_receiver_method_call(
+    markers: &[NonLiteralToken],
+    receiver: &str,
+    method: &str,
+) -> bool {
+    markers.windows(3).any(|window| {
+        matches!(
+            window,
+            [
+                NonLiteralToken::Ident(candidate_receiver),
+                NonLiteralToken::Punct('.'),
+                NonLiteralToken::Ident(candidate_method),
+            ] if candidate_receiver == receiver && candidate_method == method
+        )
+    })
+}
+
+fn ident_at(markers: &[NonLiteralToken], index: usize) -> Option<&str> {
+    match markers.get(index) {
+        Some(NonLiteralToken::Ident(value)) => Some(value),
+        _ => None,
+    }
+}
+
+fn double_colon_at(markers: &[NonLiteralToken], index: usize) -> bool {
+    matches!(
+        (markers.get(index), markers.get(index + 1)),
+        (
+            Some(NonLiteralToken::Punct(':')),
+            Some(NonLiteralToken::Punct(':'))
+        )
+    )
+}
+
 fn is_identifier_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
@@ -376,7 +490,10 @@ fn compile_error(message: &str) -> TokenStream {
 
 #[cfg(test)]
 mod tests {
-    use super::{NonLiteralToken, contains_ambient_call, markers_contain_deterministic_seed_type};
+    use super::{
+        NonLiteralToken, contains_ambient_call, contains_hash_collection_iteration,
+        hash_collection_bindings_from_markers, markers_contain_deterministic_seed_type,
+    };
 
     fn ident(value: &str) -> NonLiteralToken {
         NonLiteralToken::Ident(value.to_owned())
@@ -556,5 +673,91 @@ mod tests {
             "fnf(){let_=std::fs::read_dir(\".\");}",
             "std::fs::read_dir("
         ));
+    }
+
+    #[test]
+    fn hash_collection_iteration_detection_catches_typed_bindings() {
+        let markers = [
+            ident("map"),
+            punct(':'),
+            ident("HashMap"),
+            punct('<'),
+            ident("String"),
+            punct('>'),
+            ident("set"),
+            punct(':'),
+            ident("std"),
+            punct(':'),
+            punct(':'),
+            ident("collections"),
+            punct(':'),
+            punct(':'),
+            ident("HashSet"),
+            punct('<'),
+            ident("String"),
+            punct('>'),
+        ];
+
+        assert_eq!(
+            hash_collection_bindings_from_markers(&markers, "HashMap"),
+            vec!["map".to_owned()]
+        );
+        assert_eq!(
+            hash_collection_bindings_from_markers(&markers, "HashSet"),
+            vec!["set".to_owned()]
+        );
+        let mut map_iteration = markers.to_vec();
+        map_iteration.extend([ident("map"), punct('.'), ident("iter")]);
+        let mut set_iteration = markers.to_vec();
+        set_iteration.extend([ident("set"), punct('.'), ident("into_iter")]);
+
+        assert!(contains_hash_collection_iteration(
+            &map_iteration,
+            "HashMap"
+        ));
+        assert!(contains_hash_collection_iteration(
+            &set_iteration,
+            "HashSet"
+        ));
+    }
+
+    #[test]
+    fn hash_collection_iteration_detection_ignores_receiver_suffixes() {
+        let markers = [
+            ident("map"),
+            punct(':'),
+            ident("HashMap"),
+            punct('<'),
+            ident("String"),
+            punct('>'),
+        ];
+
+        let mut suffixed_receiver = markers.to_vec();
+        suffixed_receiver.extend([ident("notmap"), punct('.'), ident("iter")]);
+        let mut non_iteration_method = markers.to_vec();
+        non_iteration_method.extend([ident("map"), punct('.'), ident("len")]);
+
+        assert!(!contains_hash_collection_iteration(
+            &suffixed_receiver,
+            "HashMap"
+        ));
+        assert!(!contains_hash_collection_iteration(
+            &non_iteration_method,
+            "HashMap"
+        ));
+    }
+
+    #[test]
+    fn hash_collection_binding_detection_ignores_value_expressions() {
+        let markers = [
+            ident("field"),
+            punct(':'),
+            ident("HashMap"),
+            punct(':'),
+            punct(':'),
+            ident("new"),
+        ];
+
+        assert!(hash_collection_bindings_from_markers(&markers, "HashMap").is_empty());
     }
 }

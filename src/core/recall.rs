@@ -328,11 +328,35 @@ pub fn normalize_recall_path_selector(selector: &str) -> String {
     selector.strip_prefix("./").unwrap_or(selector).to_owned()
 }
 
+fn diff_name_only_changed_paths(name_only_text: &str) -> Vec<String> {
+    let mut paths = std::collections::BTreeSet::new();
+    for line in name_only_text.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        paths.insert(normalize_recall_path_selector(line));
+    }
+    paths.into_iter().collect()
+}
+
 /// Extract the changed path set from `git diff --name-only` output (one path
 /// per line) or a unified diff (`+++ b/<path>` headers). Paths are
 /// normalized, deduplicated, and sorted; `/dev/null` targets are skipped.
 #[must_use]
 pub fn diff_changed_paths(diff_text: &str) -> Vec<String> {
+    let looks_like_unified_diff = diff_text.lines().any(|line| {
+        let line = line.trim_end();
+        line.starts_with("diff --git a/")
+            || line.starts_with("@@")
+            || line.strip_prefix("+++ ").is_some_and(|target| {
+                target.trim() == "/dev/null" || target.trim().starts_with("b/")
+            })
+    });
+    if !looks_like_unified_diff {
+        return diff_name_only_changed_paths(diff_text);
+    }
+
     let mut paths = std::collections::BTreeSet::new();
     for line in diff_text.lines() {
         let line = line.trim_end();
@@ -622,7 +646,12 @@ pub fn evaluate_recall(
 
     let truncated = dropped_count > 0;
     let continuation_cursor = if truncated {
-        encode_recall_cursor(query, query.offset + items.len(), dropped_count, db_generation)
+        encode_recall_cursor(
+            query,
+            query.offset + items.len(),
+            dropped_count,
+            db_generation,
+        )
     } else {
         None
     };
@@ -884,7 +913,9 @@ pub fn collect_diff_paths_via_git(
             stderr.trim()
         ));
     }
-    Ok(diff_changed_paths(&String::from_utf8_lossy(&output.stdout)))
+    Ok(diff_name_only_changed_paths(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
 }
 
 /// Outcome of resolving an optional `--cursor` flag against the live query
@@ -1487,6 +1518,25 @@ mod tests {
         assert_eq!(
             diff_changed_paths(unified),
             vec!["src/db/mod.rs".to_owned()]
+        );
+    }
+
+    #[test]
+    fn diff_name_only_parsing_keeps_hunk_like_filenames() {
+        let name_only = "+added.rs\n-removed.rs\n leading-space.rs\n\\literal.rs\n";
+
+        assert_eq!(
+            diff_name_only_changed_paths(name_only),
+            vec![
+                " leading-space.rs".to_owned(),
+                "+added.rs".to_owned(),
+                "-removed.rs".to_owned(),
+                "\\literal.rs".to_owned(),
+            ]
+        );
+        assert_eq!(
+            diff_changed_paths(name_only),
+            diff_name_only_changed_paths(name_only)
         );
     }
 

@@ -7841,7 +7841,7 @@ pub struct ProcedureShowArgs {
 /// Arguments for `ee procedure list`.
 #[derive(Clone, Debug, Default, Eq, Parser, PartialEq)]
 pub struct ProcedureListArgs {
-    /// Filter by status: candidate, verified, retired.
+    /// Filter by status/maturity: candidate/provisional, verified/validated, mature, retired.
     #[arg(long, value_name = "STATUS")]
     pub status: Option<String>,
 

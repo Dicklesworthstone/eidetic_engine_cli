@@ -1648,6 +1648,7 @@ fn write_private_secret(path: &Path, secret: &[u8; 32]) -> Result<(), DomainErro
         .create(true)
         .truncate(true)
         .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(path)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to write handoff HMAC key: {error}"),
@@ -6769,6 +6770,30 @@ memories_revised = 3
                 .file_type()
                 .is_dir(),
             "directory key path should remain untouched",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handoff_hmac_key_write_rejects_final_symlink() -> TestResult {
+        let dir = repo_tempdir()?;
+        let key_path = dir.path().join("handoff_hmac_key");
+        let outside_path = dir.path().join("outside_key");
+        fs::write(&outside_path, b"outside sentinel").map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_path, &key_path).map_err(|error| error.to_string())?;
+
+        let error = expect_domain_error(
+            write_private_secret(&key_path, &[7_u8; 32]),
+            "symlinked key path should be rejected before write",
+        )?;
+        ensure(
+            error.message().contains("symlink"),
+            format!("unexpected symlink key error: {}", error.message()),
+        )?;
+        ensure_equal(
+            &fs::read_to_string(&outside_path).map_err(|error| error.to_string())?,
+            &"outside sentinel".to_owned(),
+            "outside key content",
         )
     }
 

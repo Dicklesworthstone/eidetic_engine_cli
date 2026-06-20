@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -497,13 +497,21 @@ fn read_limited_utf8(path: &Path, max_bytes: u64) -> Result<Option<String>, Stri
     if !metadata.is_file() {
         return Err("Provenance source is not a regular file.".to_string());
     }
-    let file = fs::File::open(path)
-        .map_err(|error| format!("Could not read provenance source {}: {error}", path.display()))?;
+    let file = open_provenance_source_no_follow(path)?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| format!("Could not stat opened provenance source: {error}"))?;
+    if !opened_metadata.file_type().is_file() {
+        return Err("Provenance source is not a regular file after open.".to_string());
+    }
     let mut reader = file.take(max_bytes.saturating_add(1));
     let mut bytes = Vec::new();
-    reader
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("Could not read provenance source {}: {error}", path.display()))?;
+    reader.read_to_end(&mut bytes).map_err(|error| {
+        format!(
+            "Could not read provenance source {}: {error}",
+            path.display()
+        )
+    })?;
     if bytes.len() as u64 > max_bytes {
         return Err(format!(
             "Provenance source {} exceeds the {} byte read cap.",
@@ -515,6 +523,28 @@ fn read_limited_utf8(path: &Path, max_bytes: u64) -> Result<Option<String>, Stri
         .map(Some)
         .map_err(|error| format!("Provenance source {} is not UTF-8: {error}", path.display()))
 }
+
+fn open_provenance_source_no_follow(path: &Path) -> Result<fs::File, String> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_provenance_source_open_options(&mut options);
+    options.open(path).map_err(|error| {
+        format!(
+            "Could not read provenance source {}: {error}",
+            path.display()
+        )
+    })
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_provenance_source_open_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_provenance_source_open_options(_options: &mut OpenOptions) {}
 
 fn extract_line_span(contents: &str, span: LineSpan) -> Option<String> {
     let start = usize::try_from(span.start).ok()?.checked_sub(1)?;
@@ -568,16 +598,22 @@ fn find_moved_file(
             if should_skip_scan_entry(&name) {
                 continue;
             }
-            let Ok(metadata) = entry.metadata() else {
+            let Ok(file_type) = entry.file_type() else {
                 continue;
             };
-            if metadata.is_dir() {
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
                 queue.push_back(path);
                 continue;
             }
-            if !metadata.is_file() || path == original_path {
+            if !file_type.is_file() || path == original_path {
                 continue;
             }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
             if metadata.len() > MAX_MOVED_SCAN_BYTES {
                 continue;
             }
@@ -690,7 +726,10 @@ mod tests {
             Some(temp.path()),
         );
         assert_eq!(moved.health, ProvenancePointerStatus::Moved);
-        assert_eq!(moved.pointers[0].reason_code, "missing_source_found_elsewhere");
+        assert_eq!(
+            moved.pointers[0].reason_code,
+            "missing_source_found_elsewhere"
+        );
 
         let missing = assess_memory_provenance_health(
             &memory(
@@ -712,6 +751,36 @@ mod tests {
         );
         assert_eq!(cass.health, ProvenancePointerStatus::Unverifiable);
         assert_eq!(cass.pointers[0].reason_code, "cass_verifier_unavailable");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn moved_scan_does_not_follow_symlinked_workspace_directory() -> Result<(), String> {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+        fs::write(
+            outside.path().join("outside.md"),
+            "symlink-only provenance evidence lives outside workspace\n",
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(outside.path(), workspace.path().join("linked-outside"))
+            .map_err(|error| error.to_string())?;
+
+        let health = assess_memory_provenance_health(
+            &memory(
+                "mem_symlink_escape",
+                "symlink-only provenance evidence lives outside workspace",
+                Some("file://missing.md#L1".to_string()),
+            ),
+            Some(workspace.path()),
+        );
+
+        assert_eq!(health.health, ProvenancePointerStatus::Missing);
+        assert_eq!(health.pointers[0].reason_code, "source_file_missing");
+        assert_eq!(health.pointers[0].moved_to, None);
         Ok(())
     }
 
@@ -739,7 +808,10 @@ mod tests {
         );
         assert_eq!(no_workspace.health, ProvenancePointerStatus::Unverifiable);
         assert_eq!(no_workspace.pointers[0].scheme, "file");
-        assert_eq!(no_workspace.pointers[0].reason_code, "workspace_unavailable");
+        assert_eq!(
+            no_workspace.pointers[0].reason_code,
+            "workspace_unavailable"
+        );
     }
 
     #[test]

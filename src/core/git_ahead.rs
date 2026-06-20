@@ -230,12 +230,26 @@ pub fn parse_git_ahead_log(input: &str) -> Vec<GitAheadCommit> {
 pub fn extract_bead_refs(text: &str) -> Vec<String> {
     let mut refs = BTreeSet::new();
     for (start, _) in text.match_indices("bd-") {
+        let has_left_boundary = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(is_bead_ref_boundary);
+        if !has_left_boundary {
+            continue;
+        }
         let mut candidate = text[start..]
             .chars()
             .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '.')
             .collect::<String>();
         while candidate.ends_with('.') || candidate.ends_with('-') {
             candidate.pop();
+        }
+        let has_right_boundary = text[start + candidate.len()..]
+            .chars()
+            .next()
+            .is_none_or(is_bead_ref_boundary);
+        if !has_right_boundary {
+            continue;
         }
         if candidate.len() > "bd-".len()
             && candidate["bd-".len()..]
@@ -246,6 +260,10 @@ pub fn extract_bead_refs(text: &str) -> Vec<String> {
         }
     }
     refs.into_iter().collect()
+}
+
+fn is_bead_ref_boundary(ch: char) -> bool {
+    !ch.is_ascii_alphanumeric() && ch != '_'
 }
 
 fn parse_git_branch_state(input: &str) -> GitBranchState {
@@ -606,6 +624,16 @@ mod tests {
         assert_eq!(
             extract_bead_refs("commit [br-bd-f6jfs.8], follow-up bd-2gc7r.1."),
             vec!["bd-2gc7r.1", "bd-f6jfs.8"]
+        );
+    }
+
+    #[test]
+    fn bead_ref_extractor_rejects_embedded_word_fragments() {
+        assert_eq!(
+            extract_bead_refs(
+                "notbd-123, abcbd-456, foo_bd-111, and bd-222_suffix are not refs; (bd-789) is"
+            ),
+            vec!["bd-789"]
         );
     }
 
