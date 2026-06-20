@@ -1,0 +1,134 @@
+{
+  "schema": "ee.source_authority.handoff_summary.v1",
+  "summaryId": "sas-summary-support-handoff-0001",
+  "snapshotRef": {
+    "schema": "ee.source_authority.snapshot.v1",
+    "snapshotId": "sas-fixture-candidate-timeout-0001",
+    "provenanceHash": "blake3:9a8b7c6d5e4f30211f0e2d3c4b5a6978"
+  },
+  "redactionStatus": "paths_counts_subjects_only_no_content",
+  "generatedFor": [
+    "support_bundle",
+    "handoff_capsule",
+    "agent_mail"
+  ],
+  "sourceSummaries": [
+    {
+      "sourceKind": "agent_mail",
+      "state": "corrupt_recovery",
+      "authoritative": false,
+      "freshnessState": "fresh",
+      "timeoutClass": "none",
+      "degradedCodes": [
+        "agent_mail_recovery_corrupt"
+      ],
+      "summary": "Agent Mail transport answered, but durability recovery is corrupt; reservation and inbox evidence are diagnostic only."
+    },
+    {
+      "sourceKind": "beads",
+      "state": "stale_fallback",
+      "authoritative": false,
+      "freshnessState": "stale",
+      "timeoutClass": "live_read_timed_out",
+      "degradedCodes": [
+        "source_authority_beads_timed_out"
+      ],
+      "summary": "A stale-safe tracker snapshot exists, but live Beads lookup timed out; candidate absence is not confirmed."
+    },
+    {
+      "sourceKind": "bv",
+      "state": "timed_out",
+      "authoritative": false,
+      "freshnessState": "unknown",
+      "timeoutClass": "robot_next_no_output",
+      "degradedCodes": [
+        "bv_command_timeout",
+        "bv_no_output"
+      ],
+      "summary": "BV graph ranking produced no authoritative recommendation; graph hints remain advisory."
+    },
+    {
+      "sourceKind": "memory_drift",
+      "state": "degraded_read_only",
+      "authoritative": false,
+      "freshnessState": "fresh",
+      "timeoutClass": "lock_contention",
+      "degradedCodes": [
+        "memory_drift_lock_contention"
+      ],
+      "summary": "Memory-drift evidence was partially collected under lock contention and cannot authorize mutation."
+    },
+    {
+      "sourceKind": "rch",
+      "state": "unavailable",
+      "authoritative": false,
+      "freshnessState": "unknown",
+      "timeoutClass": "telemetry_gap",
+      "degradedCodes": [
+        "rch_telemetry_gap"
+      ],
+      "summary": "RCH posture was unavailable for this decision; no remote proof was attached."
+    }
+  ],
+  "candidateEvidence": {
+    "candidateId": "bd-example.1",
+    "lookupOutcome": "candidate_lookup_timed_out",
+    "presentIn": [],
+    "absentFrom": [],
+    "unavailableIn": [
+      "beads",
+      "bv",
+      "rch"
+    ],
+    "explanation": "Live candidate lookup timed out or was unavailable; do not claim or edit until the safe actionable queue and claim gate both answer fresh."
+  },
+  "blockerGroups": [
+    {
+      "code": "claim_gate_degraded_authority",
+      "severity": "warning",
+      "sources": [
+        "agent_mail",
+        "beads",
+        "bv",
+        "memory_drift",
+        "rch"
+      ],
+      "reason": "One or more required claim sources is stale, timed out, corrupt, or unavailable.",
+      "nextNonMutatingCommandIds": [
+        "refresh_actionable_queue",
+        "rerun_claim_gate",
+        "inspect_swarm_brief"
+      ]
+    }
+  ],
+  "nextNonMutatingCommands": [
+    {
+      "commandId": "refresh_actionable_queue",
+      "commandTemplate": "scripts/br_retry.sh actionable --json",
+      "safety": "read_only_probe"
+    },
+    {
+      "commandId": "rerun_claim_gate",
+      "commandTemplate": "ee swarm work-packet --workspace . --include-rch --claim-gate --candidate <candidate-id> --json",
+      "safety": "read_only_probe"
+    },
+    {
+      "commandId": "inspect_swarm_brief",
+      "commandTemplate": "ee swarm brief --workspace . --json",
+      "safety": "read_only_probe"
+    }
+  ],
+  "agentMailTemplate": {
+    "subject": "[source-authority] claim gate failed closed for <candidate-id>",
+    "ackRequired": false,
+    "bodyMarkdown": "Checked source-authority snapshot sas-fixture-candidate-timeout-0001 for <candidate-id>. Authoritative sources were insufficient: Agent Mail corrupt-recovery, Beads live lookup timed out, BV robot-next no-output, memory-drift lock contention, and RCH telemetry gap. No claim or source edit was performed. Safe next steps: refresh actionable queue, rerun claim gate, then coordinate only if the gate emits a fresh runnable action."
+  },
+  "privacy": {
+    "rawMailBodiesIncluded": false,
+    "rawMemoryBodiesIncluded": false,
+    "rawSourceSnippetsIncluded": false,
+    "rawCommandOutputIncluded": false,
+    "secretsIncluded": false,
+    "fullHostPathsIncluded": false
+  }
+}
