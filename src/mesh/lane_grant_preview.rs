@@ -30,6 +30,7 @@
 //! reservations there.
 
 use std::cmp::Reverse;
+#[cfg(test)]
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
@@ -467,11 +468,17 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 }
 
 fn memory_has_sensitive_tag(memory: &MemoryView<'_>) -> bool {
-    let sensitive: BTreeSet<&str> = SENSITIVE_TAGS.iter().copied().collect();
-    memory
-        .tags
-        .iter()
-        .any(|tag| sensitive.contains(tag.as_str()))
+    memory.tags.iter().any(|tag| tag_has_sensitive_token(tag))
+}
+
+fn tag_has_sensitive_token(tag: &str) -> bool {
+    tag.split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            SENSITIVE_TAGS
+                .iter()
+                .any(|sensitive| token.eq_ignore_ascii_case(sensitive))
+        })
 }
 
 fn sort_sample(items: &mut [&MemoryView<'_>], strategy: SampleStrategy, seed: u64) {
@@ -914,6 +921,88 @@ mod tests {
             );
             assert!(preview.preview_sample[0].has_sensitive_tags);
         }
+    }
+
+    #[test]
+    fn sensitive_tag_exposure_caution_fires_for_case_and_scoped_tags() {
+        let variants = [
+            "Secret",
+            "security:secret",
+            "private-data",
+            "personal_data",
+            "INTERNAL",
+        ];
+
+        for variant in variants {
+            let tag_storage = tags(&[variant]);
+            let no_redacted = empty_strings();
+            let memories = [build_memory(
+                "m1",
+                TrustClass::AgentProposed,
+                &tag_storage,
+                1,
+                false,
+                false,
+                &no_redacted,
+            )];
+            let redaction_rules = empty_strings();
+            let preview = compute_lane_grant_preview(&LaneGrantPreviewInput {
+                peer_node_key: "nodekey:test",
+                peer_in_group: true,
+                lane: Lane::Body,
+                workspace_id: "ws-1",
+                current_policy: IntendedLanePolicy::conservative_default(),
+                proposed_policy: body_grant_proposed(),
+                memories: &memories,
+                sample_strategy: SampleStrategy::Random,
+                limit: 25,
+                redaction_rules: &redaction_rules,
+                sample_random_seed: 42,
+            });
+
+            let kinds: BTreeSet<&str> = preview.cautions.iter().map(|c| c.kind.as_str()).collect();
+            assert!(
+                kinds.contains(caution_kinds::SENSITIVE_TAGS_IN_EXPOSURE),
+                "tag {variant} should fire sensitive caution",
+            );
+            assert!(
+                preview.preview_sample[0].has_sensitive_tags,
+                "tag {variant} should mark the preview row sensitive",
+            );
+        }
+    }
+
+    #[test]
+    fn sensitive_tag_exposure_caution_does_not_match_embedded_words() {
+        let tag_storage = tags(&["nonsecret", "privately", "personality", "internalized"]);
+        let no_redacted = empty_strings();
+        let memories = [build_memory(
+            "m1",
+            TrustClass::AgentProposed,
+            &tag_storage,
+            1,
+            false,
+            false,
+            &no_redacted,
+        )];
+        let redaction_rules = empty_strings();
+        let preview = compute_lane_grant_preview(&LaneGrantPreviewInput {
+            peer_node_key: "nodekey:test",
+            peer_in_group: true,
+            lane: Lane::Body,
+            workspace_id: "ws-1",
+            current_policy: IntendedLanePolicy::conservative_default(),
+            proposed_policy: body_grant_proposed(),
+            memories: &memories,
+            sample_strategy: SampleStrategy::Random,
+            limit: 25,
+            redaction_rules: &redaction_rules,
+            sample_random_seed: 42,
+        });
+
+        let kinds: BTreeSet<&str> = preview.cautions.iter().map(|c| c.kind.as_str()).collect();
+        assert!(!kinds.contains(caution_kinds::SENSITIVE_TAGS_IN_EXPOSURE));
+        assert!(!preview.preview_sample[0].has_sensitive_tags);
     }
 
     // ---- Caution: peer not in group, lane already granted ------------------
