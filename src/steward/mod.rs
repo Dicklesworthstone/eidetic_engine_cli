@@ -567,6 +567,7 @@ impl JobType {
             Self::BackupExport,
             Self::GarbageCollection,
             Self::JournalDistill,
+            Self::PrimerRefresh,
             Self::Custom,
         ]
     }
@@ -8600,6 +8601,23 @@ mod tests {
             JobType::GraphSnapshotPrune,
             "camel case job type",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn job_type_all_lists_every_variant() -> TestResult {
+        // Drop-guard (bd-3vtwl): a JobType variant that has an executor but is
+        // missing from `all()` is silently hidden from `ee maintenance status`
+        // and the parse-error "expected one of" list. `PrimerRefresh` was
+        // dropped this way. The length pin forces a future variant addition to
+        // update `all()` rather than silently omit the new job.
+        let all = JobType::all();
+        ensure(
+            all.contains(&JobType::PrimerRefresh),
+            true,
+            "all() includes PrimerRefresh",
+        )?;
+        ensure(all.len(), 19, "all() lists every JobType variant")?;
         Ok(())
     }
 
