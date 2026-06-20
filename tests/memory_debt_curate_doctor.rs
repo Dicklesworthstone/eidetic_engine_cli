@@ -55,13 +55,70 @@ fn insert_memory(
             utility,
             importance: 0.8,
             provenance_uri: Some("test://memory-debt".to_owned()),
-            trust_class: "untrusted".to_owned(),
+            // Valid per the memories.trust_class CHECK constraint
+            // (human_explicit|agent_validated|agent_assertion|cass_evidence|
+            // legacy_import); the prior "untrusted" value was rejected at INSERT,
+            // leaving this whole test file born-red. Orphan-debt detection keys
+            // off link_count, not trust_class, so this does not change classes.
+            trust_class: "agent_assertion".to_owned(),
             trust_subclass: None,
             tags: Vec::new(),
             valid_from: Some("2026-01-01T00:00:00Z".to_owned()),
             valid_to: None,
         },
     )?;
+    Ok(())
+}
+
+#[test]
+fn curate_doctor_total_score_reflects_full_debt_not_truncated_bd_3qagn()
+-> Result<(), Box<dyn Error>> {
+    // bd-3qagn: with --limit truncation, summary.totalScore must reflect the
+    // FULL debt set (consistent with itemCount/classCounts), not just the
+    // returned rows. Seed two orphan-debt memories and request only one.
+    let temp = tempfile::tempdir()?;
+    let db_path = temp.path().join("ee.db");
+    let (connection, workspace_id) = seed_workspace(temp.path(), &db_path)?;
+    insert_memory(
+        &connection,
+        &workspace_id,
+        "mem_00000000000000000000000001",
+        "first orphaned persisted memory for debt doctor",
+        0.2,
+        0.9,
+    )?;
+    insert_memory(
+        &connection,
+        &workspace_id,
+        "mem_00000000000000000000000002",
+        "second orphaned persisted memory for debt doctor",
+        0.4,
+        0.9,
+    )?;
+    connection.close()?;
+
+    let mut options = MemoryDebtDoctorOptions::new(temp.path());
+    options.database_path = Some(&db_path);
+    options.class_filter = Some("orphan");
+    options.limit = 1;
+    options.now_rfc3339 = Some("2026-06-15T00:00:00Z");
+    let report = run_memory_debt_doctor(&options)?;
+    let data = report.data_json();
+
+    assert_eq!(data["summary"]["itemCount"], 2, "itemCount is the full debt set");
+    assert_eq!(data["summary"]["returnedCount"], 1, "returnedCount is truncated");
+    assert_eq!(data["summary"]["truncated"], true);
+
+    let total_score = data["summary"]["totalScore"]
+        .as_f64()
+        .expect("totalScore is a number");
+    let returned_score = data["queue"][0]["score"]
+        .as_f64()
+        .expect("returned queue item has a score");
+    assert!(
+        total_score > returned_score,
+        "totalScore ({total_score}) must include the truncated-away item, not just the returned score ({returned_score})"
+    );
     Ok(())
 }
 
