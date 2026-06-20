@@ -1514,13 +1514,21 @@ pub fn context_request_from_options(
     options: &ContextPackOptions,
 ) -> Result<ContextRequest, ContextPackError> {
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
-    context_request_from_options_with_runtime_profile(options, &runtime_profile)
+    Ok(context_request_from_options_with_runtime_profile(options, &runtime_profile)?.request)
+}
+
+struct RuntimeProfileCappedRequest {
+    request: ContextRequest,
+    effective_max_tokens: u32,
+    tokens_capped: bool,
+    effective_candidate_pool: u32,
+    candidate_pool_capped: bool,
 }
 
 fn context_request_from_options_with_runtime_profile(
     options: &ContextPackOptions,
     runtime_profile: &RuntimeProfileReport,
-) -> Result<ContextRequest, ContextPackError> {
+) -> Result<RuntimeProfileCappedRequest, ContextPackError> {
     let mut request = ContextRequest::new(ContextRequestInput {
         query: options.query.clone(),
         profile: options.profile,
@@ -1545,7 +1553,13 @@ fn context_request_from_options_with_runtime_profile(
         })
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     }
-    Ok(request)
+    Ok(RuntimeProfileCappedRequest {
+        request,
+        effective_max_tokens,
+        tokens_capped,
+        effective_candidate_pool,
+        candidate_pool_capped,
+    })
 }
 
 pub fn run_context_pack_with_performance_controlled(
@@ -1969,7 +1983,13 @@ fn run_context_pack_with_performance_inner(
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
 
     let request_start = Instant::now();
-    let request = context_request_from_options_with_runtime_profile(options, &runtime_profile)?;
+    let RuntimeProfileCappedRequest {
+        mut request,
+        effective_max_tokens,
+        tokens_capped,
+        effective_candidate_pool,
+        candidate_pool_capped,
+    } = context_request_from_options_with_runtime_profile(options, &runtime_profile)?;
     control.check()?;
     trace.record_elapsed("requestValidate", request_start);
 
