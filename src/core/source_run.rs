@@ -28,6 +28,10 @@ pub const SOURCE_RUN_EVIDENCE_SCHEMA_V1: &str = "ee.source_run_evidence.v1";
 const DEFAULT_TAIL_BYTES_MAX: usize = 8192;
 const TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TIMEOUT_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(250);
+/// Smallest source-run timeout. `ee.source_run_evidence.v1` requires
+/// `timing.timeoutMs >= 1` (bd-29xk0), and a zero timeout would also fire
+/// instantly in the poll loop, so requests are floored to 1ms.
+const MIN_SOURCE_RUN_TIMEOUT: Duration = Duration::from_millis(1);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -233,7 +237,9 @@ impl SourceRunRequest {
             source,
             command,
             policy: SourceRunPolicy::best_effort_coordination(),
-            timeout,
+            // Floor the timeout so the v1 evidence schema's `timeoutMs >= 1`
+            // invariant holds and the poll loop never times out instantly.
+            timeout: timeout.max(MIN_SOURCE_RUN_TIMEOUT),
             tail_bytes_max: DEFAULT_TAIL_BYTES_MAX,
             artifacts: Vec::new(),
             producer: ProducerMetadata::unknown_agent(
@@ -646,7 +652,10 @@ fn build_evidence(
     let timing = SourceRunTiming {
         started_at,
         finished_at,
-        timeout_ms: duration_millis(request.timeout),
+        // Defense in depth: `timeout` is a pub field that a caller could mutate
+        // back to zero after construction, so guarantee the v1 schema's
+        // `timeoutMs >= 1` minimum at the serialization boundary too (bd-29xk0).
+        timeout_ms: duration_millis(request.timeout).max(1),
         elapsed_ms,
     };
     let mut evidence = SourceRunEvidence {
@@ -1315,6 +1324,42 @@ mod tests {
         assert!(evidence.output.stdout_hash.is_some());
         assert!(evidence.degraded.is_empty());
         assert!(evidence.recovery.is_empty());
+    }
+
+    #[test]
+    fn zero_timeout_request_floors_to_schema_valid_timeout_ms_bd_29xk0() {
+        // bd-29xk0: a zero/sub-ms timeout must never serialize
+        // `timing.timeoutMs == 0`, which violates ee.source_run_evidence.v1's
+        // `minimum: 1`. Construction floors to 1ms; serialization clamps too.
+        let zero_request = SourceRunRequest::new(
+            SourceRunSource::new(SourceRunKind::Shell, "shell", "zero_timeout"),
+            SourceRunCommand::new("true"),
+            Duration::ZERO,
+        );
+        assert_eq!(
+            zero_request.timeout,
+            Duration::from_millis(1),
+            "construction must floor a zero timeout to 1ms"
+        );
+
+        let evidence = run_source_command_with(
+            &zero_request,
+            &FakeExecutor {
+                execution: SourceRunExecution::Completed {
+                    exit_code: Some(0),
+                    signal: None,
+                    stdout: SourceRunPipeCapture::empty(),
+                    stderr: SourceRunPipeCapture::empty(),
+                    elapsed: Duration::from_millis(1),
+                },
+            },
+            &FixedClock::new("2026-05-24T05:04:00Z"),
+        );
+        assert!(
+            evidence.timing.timeout_ms >= 1,
+            "evidence timeout_ms must satisfy the v1 schema minimum, got {}",
+            evidence.timing.timeout_ms
+        );
     }
 
     #[test]
