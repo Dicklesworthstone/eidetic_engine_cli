@@ -120,7 +120,7 @@ pub fn config_knobs() -> &'static [ConfigKnob] {
             key: SEARCH_DEFAULT_SPEED_KEY,
             category: "search",
             effect: "Default latency/quality tradeoff for search; maps to the frankensearch embedder stack tier.",
-            valid_range: "instant | default | quality",
+            valid_range: "fast | balanced | thorough",
             status: ConfigRuntimeStatus::Active,
             caveat: None,
         },
@@ -458,6 +458,18 @@ mod tests {
         assert!(
             top_k.effect.contains("Candidate pool size"),
             "rerank_top_k must describe the collect-limit effect"
+        );
+    }
+
+    #[test]
+    fn default_speed_knob_matches_parser_tokens() {
+        let speed =
+            knob_for_key(SEARCH_DEFAULT_SPEED_KEY).expect("search.default_speed is covered");
+        assert_eq!(speed.status, ConfigRuntimeStatus::Active);
+        assert_eq!(speed.valid_range, "fast | balanced | thorough");
+        assert!(
+            !speed.valid_range.contains("instant") && !speed.valid_range.contains("quality"),
+            "config explain must not advertise query-schema speed tokens for search.default_speed"
         );
     }
 

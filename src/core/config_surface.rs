@@ -28,8 +28,8 @@ use crate::config::{
     GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY, GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
     GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY, GRAPH_PACK_DNA_MAX_ITEMS_KEY,
     GRAPH_PPR_ALPHA_KEY, GRAPH_WITNESSES_ALGORITHM_TTL_DAYS_KEY,
-    GRAPH_WITNESSES_RETENTION_DAYS_KEY, PathExpander, SEARCH_GRAPH_WEIGHT_KEY,
-    SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_RERANK_KEY, SEARCH_RERANK_TOP_K_KEY,
+    GRAPH_WITNESSES_RETENTION_DAYS_KEY, PathExpander, SEARCH_DEFAULT_SPEED_KEY,
+    SEARCH_GRAPH_WEIGHT_KEY, SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_RERANK_KEY, SEARCH_RERANK_TOP_K_KEY,
     SEARCH_SEMANTIC_WEIGHT_KEY, built_in_config, config_from_env, merge_config,
 };
 
@@ -713,6 +713,7 @@ enum GraphValueKind {
     PercentInteger,
     UnsignedIntegerMap,
     RerankMode,
+    SearchSpeed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -724,6 +725,11 @@ struct GraphKeySpec {
 
 fn config_key_spec(key: &str) -> Option<GraphKeySpec> {
     match key {
+        SEARCH_DEFAULT_SPEED_KEY => Some(GraphKeySpec {
+            key: SEARCH_DEFAULT_SPEED_KEY,
+            path: &["search", "default_speed"],
+            kind: GraphValueKind::SearchSpeed,
+        }),
         SEARCH_LEXICAL_WEIGHT_KEY => Some(GraphKeySpec {
             key: SEARCH_LEXICAL_WEIGHT_KEY,
             path: &["search", "lexical_weight"],
@@ -994,6 +1000,16 @@ fn parse_graph_value(spec: GraphKeySpec, raw: &str) -> Result<TomlScalar, Config
             "off" => Ok(TomlScalar::String("off")),
             _ => Err(invalid_value(spec, raw, "`auto` or `off`")),
         },
+        GraphValueKind::SearchSpeed => match raw.trim().to_ascii_lowercase().as_str() {
+            "fast" => Ok(TomlScalar::String("fast")),
+            "balanced" => Ok(TomlScalar::String("balanced")),
+            "thorough" => Ok(TomlScalar::String("thorough")),
+            _ => Err(invalid_value(
+                spec,
+                raw,
+                "`fast`, `balanced`, or `thorough`",
+            )),
+        },
     }
 }
 
@@ -1067,6 +1083,7 @@ mod tests {
     use crate::config::{
         HANDOFF_STALE_ANY_EXPIRED_IN_PACK_KEY, HANDOFF_STALE_CONTENT_DRIFT_SCORE_KEY,
         HANDOFF_STALE_MEMORIES_ADDED_KEY, HANDOFF_STALE_MEMORIES_REVISED_KEY,
+        SEARCH_DEFAULT_SPEED_KEY,
     };
     use std::fs;
 
@@ -1254,6 +1271,22 @@ cache_results = 120
     }
 
     #[test]
+    fn search_default_speed_get_reads_default_with_source() -> TestResult {
+        let temp = workspace()?;
+        let report =
+            get_config(&options(temp.path()), SEARCH_DEFAULT_SPEED_KEY).map_err(|error| {
+                format!("search.default_speed should be gettable because show reports it: {error}")
+            })?;
+        if report.value != "balanced" {
+            return Err(format!("unexpected search.default_speed: {}", report.value));
+        }
+        if report.source != "default" {
+            return Err(format!("unexpected source: {}", report.source));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn search_weight_get_reads_default_with_source() -> TestResult {
         let temp = workspace()?;
         let report = get_config(&options(temp.path()), "search.semantic_weight")
@@ -1289,6 +1322,40 @@ cache_results = 120
         }
         if top_k.source != "default" {
             return Err(format!("unexpected rerank_top_k source: {}", top_k.source));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn search_default_speed_set_round_trips_supported_values() -> TestResult {
+        let temp = workspace()?;
+        for value in ["fast", "balanced", "thorough"] {
+            let report = set_config(
+                &options(temp.path()),
+                SEARCH_DEFAULT_SPEED_KEY,
+                value,
+                false,
+            )
+            .map_err(|error| format!("set search.default_speed={value}: {error}"))?;
+            if !report.applied && report.before.as_deref() != Some(report.value.as_str()) {
+                return Err(format!(
+                    "search.default_speed={value} did not apply or report idempotence"
+                ));
+            }
+            let observed = get_config(&options(temp.path()), SEARCH_DEFAULT_SPEED_KEY)
+                .map_err(|error| format!("get search.default_speed after {value}: {error}"))?;
+            if observed.value != value {
+                return Err(format!(
+                    "expected search.default_speed {value}, got {}",
+                    observed.value
+                ));
+            }
+            if observed.source != "project" {
+                return Err(format!(
+                    "search.default_speed={value}: unexpected source {}",
+                    observed.source
+                ));
+            }
         }
         Ok(())
     }
@@ -1371,6 +1438,23 @@ cache_results = 120
     #[test]
     fn rerank_set_rejects_invalid_values() -> TestResult {
         let temp = workspace()?;
+        let speed_error = match set_config(
+            &options(temp.path()),
+            SEARCH_DEFAULT_SPEED_KEY,
+            "instant",
+            false,
+        ) {
+            Ok(report) => {
+                return Err(format!(
+                    "invalid search speed unexpectedly succeeded: {report:?}"
+                ));
+            }
+            Err(error) => error.to_string(),
+        };
+        if !speed_error.contains("`fast`, `balanced`, or `thorough`") {
+            return Err(format!("unexpected search speed error: {speed_error}"));
+        }
+
         let mode_error = match set_config(&options(temp.path()), "search.rerank", "always", false) {
             Ok(report) => {
                 return Err(format!(
