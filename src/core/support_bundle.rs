@@ -5748,10 +5748,12 @@ fn redact_path_like_segments(input: &str) -> String {
 fn path_like_prefix_at(input: &str, index: usize) -> bool {
     [
         "/Users/",
+        "/data/",
         "/home/",
         "/private/",
         "/Volumes/",
         "/var/folders/",
+        "/workspace/",
     ]
     .iter()
     .any(|prefix| input[index..].starts_with(prefix))
@@ -8772,6 +8774,39 @@ mod tests {
     }
 
     #[test]
+    fn plan_bundle_redacts_data_workspace_path_under_paranoid() -> TestResult {
+        let options = BundleOptions {
+            workspace: PathBuf::from("/data/projects/eidetic_engine_cli"),
+            output_dir: None,
+            dry_run: true,
+            redacted: true,
+            redaction_level: RedactionLevel::Paranoid,
+            include_raw: false,
+            audit_limit: 100,
+        };
+
+        let report = plan_bundle(&options).map_err(|error| error.message())?;
+
+        ensure(
+            !report
+                .workspace_path
+                .contains("/data/projects/eidetic_engine_cli"),
+            format!(
+                "paranoid support-bundle reports must not expose /data workspace paths: {}",
+                report.workspace_path
+            ),
+        )?;
+        ensure(
+            report
+                .redaction_summary
+                .reasons
+                .iter()
+                .any(|reason| reason == "path_like_segment"),
+            "workspace-path redaction must report path_like_segment",
+        )
+    }
+
+    #[test]
     fn toolchain_provenance_fake_tools_are_deterministic_and_redacted() -> TestResult {
         let workspace = unique_test_path("toolchain-provenance-fake-tools");
         let bin_dir = workspace.join("bin");
@@ -9111,6 +9146,32 @@ mod tests {
                 "{level} support bundle redaction should report path-like redaction"
             );
         }
+    }
+
+    #[test]
+    fn support_bundle_standard_redacts_data_and_workspace_absolute_paths() {
+        let raw = "repo=/data/projects/eidetic_engine_cli scratch=/workspace/agent/output.json";
+
+        let report = redact_support_bundle_content(raw, RedactionLevel::Standard);
+
+        assert!(report.redacted);
+        assert!(
+            !report.content.contains("/data/projects/eidetic_engine_cli"),
+            "standard support bundle redaction should redact /data paths: {}",
+            report.content
+        );
+        assert!(
+            !report.content.contains("/workspace/agent/output.json"),
+            "standard support bundle redaction should redact /workspace paths: {}",
+            report.content
+        );
+        assert!(
+            report
+                .redacted_reasons
+                .iter()
+                .any(|reason| reason == "path_like_segment"),
+            "redacting /data and /workspace paths should report path_like_segment"
+        );
     }
 
     #[test]
