@@ -1168,20 +1168,20 @@ fn read_allowed_source(
         ));
     }
 
-    let byte_count = metadata.len();
-    if byte_count > options.max_source_bytes {
+    let preopen_byte_count = metadata.len();
+    if preopen_byte_count > options.max_source_bytes {
         return SourceReadOutcome::Rejected(degradation(
             "docs_bootstrap_source_oversized",
             "medium",
             format!(
-                "Rejected allowlisted docs source `{}` because it is {byte_count} bytes, above the {} byte per-source limit.",
+                "Rejected allowlisted docs source `{}` because it is {preopen_byte_count} bytes, above the {} byte per-source limit.",
                 allowed.relative_path, options.max_source_bytes
             ),
             "Reduce the file size or raise the docs bootstrap source limit explicitly.",
             Some(&allowed.relative_path),
         ));
     }
-    if current_total_bytes.saturating_add(byte_count) > options.max_total_bytes {
+    if current_total_bytes.saturating_add(preopen_byte_count) > options.max_total_bytes {
         return SourceReadOutcome::TotalLimitReached(degradation(
             "docs_bootstrap_total_limit_reached",
             "medium",
@@ -1194,7 +1194,7 @@ fn read_allowed_source(
         ));
     }
 
-    let mut file = match File::open(&path) {
+    let mut file = match open_bootstrap_source_for_read_no_follow(&path) {
         Ok(file) => file,
         Err(error) => {
             return SourceReadOutcome::Rejected(degradation(
@@ -1209,19 +1209,68 @@ fn read_allowed_source(
             ));
         }
     };
-    let mut content = String::new();
-    if let Err(error) = file.read_to_string(&mut content) {
+    let opened_metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return SourceReadOutcome::Rejected(degradation(
+                "docs_bootstrap_metadata_failed",
+                "low",
+                format!(
+                    "Could not inspect opened allowlisted docs source `{}`: {error}.",
+                    allowed.relative_path
+                ),
+                "Fix file permissions and retry `ee bootstrap docs --dry-run`.",
+                Some(&allowed.relative_path),
+            ));
+        }
+    };
+    if !opened_metadata.file_type().is_file() {
         return SourceReadOutcome::Rejected(degradation(
-            "docs_bootstrap_non_utf8",
-            "medium",
+            "docs_bootstrap_source_not_file",
+            "low",
             format!(
-                "Rejected allowlisted docs source `{}` because it is not readable UTF-8: {error}.",
+                "Allowlisted docs source `{}` is not a regular file after open.",
                 allowed.relative_path
             ),
-            "Convert the docs file to UTF-8 before bootstrapping.",
+            "Use regular files for docs bootstrap inputs.",
             Some(&allowed.relative_path),
         ));
     }
+    let opened_byte_count = opened_metadata.len();
+    if opened_byte_count > options.max_source_bytes {
+        return SourceReadOutcome::Rejected(degradation(
+            "docs_bootstrap_source_oversized",
+            "medium",
+            format!(
+                "Rejected allowlisted docs source `{}` because it grew to {opened_byte_count} bytes after open, above the {} byte per-source limit.",
+                allowed.relative_path, options.max_source_bytes
+            ),
+            "Reduce the file size or raise the docs bootstrap source limit explicitly.",
+            Some(&allowed.relative_path),
+        ));
+    }
+    if current_total_bytes.saturating_add(opened_byte_count) > options.max_total_bytes {
+        return SourceReadOutcome::TotalLimitReached(degradation(
+            "docs_bootstrap_total_limit_reached",
+            "medium",
+            format!(
+                "Stopped docs bootstrap reads before `{}` because the opened source would exceed the {} byte total limit.",
+                allowed.relative_path, options.max_total_bytes
+            ),
+            "Raise the docs bootstrap total limit or reduce allowlisted docs size.",
+            Some(&allowed.relative_path),
+        ));
+    }
+    let remaining_total_bytes = options.max_total_bytes.saturating_sub(current_total_bytes);
+    let (content, byte_count) = match read_bootstrap_source_text_bounded(
+        &mut file,
+        allowed,
+        options.max_source_bytes,
+        remaining_total_bytes,
+    ) {
+        Ok(read) => read,
+        Err(outcome) => return outcome,
+    };
 
     let redaction = crate::policy::redact_secret_like_content(&content);
     let redacted_reasons = redaction
@@ -1240,6 +1289,73 @@ fn read_allowed_source(
         content: redaction.content,
     })
 }
+
+fn read_bootstrap_source_text_bounded(
+    file: &mut File,
+    allowed: &AllowedSource,
+    max_source_bytes: u64,
+    remaining_total_bytes: u64,
+) -> Result<(String, u64), SourceReadOutcome> {
+    let read_limit = max_source_bytes
+        .min(remaining_total_bytes)
+        .saturating_add(1);
+    let mut content = String::new();
+    if let Err(error) = file.take(read_limit).read_to_string(&mut content) {
+        return Err(SourceReadOutcome::Rejected(degradation(
+            "docs_bootstrap_non_utf8",
+            "medium",
+            format!(
+                "Rejected allowlisted docs source `{}` because it is not readable UTF-8: {error}.",
+                allowed.relative_path
+            ),
+            "Convert the docs file to UTF-8 before bootstrapping.",
+            Some(&allowed.relative_path),
+        )));
+    }
+    let byte_count = u64::try_from(content.len()).unwrap_or(u64::MAX);
+    if byte_count > max_source_bytes {
+        return Err(SourceReadOutcome::Rejected(degradation(
+            "docs_bootstrap_source_oversized",
+            "medium",
+            format!(
+                "Rejected allowlisted docs source `{}` because it grew past the {max_source_bytes} byte per-source limit during read.",
+                allowed.relative_path
+            ),
+            "Reduce the file size or raise the docs bootstrap source limit explicitly.",
+            Some(&allowed.relative_path),
+        )));
+    }
+    if byte_count > remaining_total_bytes {
+        return Err(SourceReadOutcome::TotalLimitReached(degradation(
+            "docs_bootstrap_total_limit_reached",
+            "medium",
+            format!(
+                "Stopped docs bootstrap reads before `{}` because the source grew past the {remaining_total_bytes} remaining bytes in the total limit during read.",
+                allowed.relative_path
+            ),
+            "Raise the docs bootstrap total limit or reduce allowlisted docs size.",
+            Some(&allowed.relative_path),
+        )));
+    }
+    Ok((content, byte_count))
+}
+
+fn open_bootstrap_source_for_read_no_follow(path: &Path) -> std::io::Result<File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_bootstrap_source_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_bootstrap_source_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_bootstrap_source_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 #[derive(Clone, Copy)]
 struct SourceLine<'a> {
@@ -2175,6 +2291,45 @@ mod tests {
             degradation.code == "docs_bootstrap_symlink_rejected"
                 && degradation.path.as_deref() == Some("README.md")
         }));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docs_bootstrap_final_open_rejects_symlinked_source() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        write_file(tempdir.path(), "real_readme.md", "# real\n")?;
+        let symlink_path = tempdir.path().join("README.md");
+        std::os::unix::fs::symlink("real_readme.md", &symlink_path)
+            .map_err(|error| error.to_string())?;
+
+        let opened = open_bootstrap_source_for_read_no_follow(&symlink_path);
+
+        assert!(
+            opened.is_err(),
+            "final docs bootstrap open must use O_NOFOLLOW so a post-stat symlink swap is rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn docs_bootstrap_read_cap_rejects_growth_past_source_limit() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        write_file(tempdir.path(), "AGENTS.md", "12345")?;
+        let mut file = File::open(tempdir.path().join("AGENTS.md"))
+            .map_err(|error| format!("open fixture: {error}"))?;
+        let allowed = AllowedSource {
+            relative_path: "AGENTS.md".to_owned(),
+            kind: BootstrapSourceKind::RootPolicy,
+        };
+
+        let outcome = read_bootstrap_source_text_bounded(&mut file, &allowed, 4, 1024);
+
+        let Err(SourceReadOutcome::Rejected(degradation)) = outcome else {
+            return Err("expected read-time oversize rejection".to_owned());
+        };
+        assert_eq!(degradation.code, "docs_bootstrap_source_oversized");
+        assert_eq!(degradation.path.as_deref(), Some("AGENTS.md"));
         Ok(())
     }
 
