@@ -400,6 +400,13 @@ impl MergedConfig {
                 self.source(SEARCH_RERANK_TOP_K_KEY),
             ));
         }
+        if let Some(days) = self.values.search.query_miss_retention_days {
+            entries.push(ConfigShowEntry::new(
+                SEARCH_QUERY_MISS_RETENTION_DAYS_KEY,
+                days.to_string(),
+                self.source(SEARCH_QUERY_MISS_RETENTION_DAYS_KEY),
+            ));
+        }
         if let Some(enabled) = self.values.search.lexical_ram_tier.enabled {
             entries.push(ConfigShowEntry::new(
                 SEARCH_LEXICAL_RAM_TIER_ENABLED_KEY,
