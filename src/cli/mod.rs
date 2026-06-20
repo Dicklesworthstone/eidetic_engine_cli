@@ -59664,9 +59664,21 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
 fn extract_invalid_subcommand(args: &[OsString]) -> Option<(String, Option<String>)> {
     let args_str: Vec<&str> = args.iter().filter_map(|s| s.to_str()).collect();
     let mut parent_path: Option<String> = None;
+    let mut skip_next_format_value = false;
 
     for arg in args_str {
-        if arg == "ee" || arg.starts_with('-') {
+        if skip_next_format_value {
+            skip_next_format_value = false;
+            continue;
+        }
+        if arg == "ee" {
+            continue;
+        }
+        if matches!(arg, "--format" | "-F") {
+            skip_next_format_value = true;
+            continue;
+        }
+        if arg.starts_with("--format=") || arg.starts_with('-') {
             continue;
         }
 
