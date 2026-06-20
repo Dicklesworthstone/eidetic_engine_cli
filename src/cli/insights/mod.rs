@@ -484,22 +484,28 @@ pub fn build_insights_report_with_options(
                 built.degraded_signal.into_iter().collect::<Vec<_>>(),
             )
         } else {
-            (
-                None,
-                registry
-                    .iter()
-                    .map(|(_, display_name, builder)| {
-                        build_registry_section(
-                            display_name,
-                            *builder,
-                            options.workspace,
-                            options.database_path,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, DomainError>>()?,
-                None,
-                Vec::new(),
-            )
+            // Full bundle (bd-2u60p): every section must pass through the same
+            // runtime graph feature gate the selected-section path uses above,
+            // so a disabled rollout flag suppresses the graph-derived section and
+            // emits `graph_feature_disabled` instead of silently computing it.
+            let built = registry
+                .iter()
+                .map(|(_, display_name, builder)| {
+                    build_registry_section_with_runtime_gate(
+                        display_name,
+                        *builder,
+                        options.workspace,
+                        options.database_path,
+                    )
+                })
+                .collect::<Result<Vec<_>, DomainError>>()?;
+            let mut sections = Vec::with_capacity(built.len());
+            let mut gate_degraded = Vec::new();
+            for section in built {
+                sections.push(section.section);
+                gate_degraded.extend(section.degraded_signal);
+            }
+            (None, sections, None, gate_degraded)
         };
 
     let explain_memory_id = args.explain.clone();
@@ -4216,6 +4222,62 @@ mod tests {
             assert_eq!(report.degraded_signals[0].message, message);
             assert_eq!(report.degraded_signals[0].repair.as_deref(), Some(repair));
             assert_eq!(report.degraded_signals[0].sources, vec![section.to_owned()]);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn full_bundle_applies_runtime_graph_feature_gate_bd_2u60p() -> TestResult {
+        // bd-2u60p: the full-bundle path must apply the same runtime graph
+        // feature gate the selected-section path applies. With every graph
+        // rollout flag disabled, the bundle must emit graph_feature_disabled
+        // for each gated section instead of silently computing it (which it
+        // did before the fix, because it used build_registry_section directly).
+        let workspace = unique_insights_workspace("full-bundle-gate")?;
+        write_graph_feature_config(&workspace, false)?;
+
+        let report = build_insights_report_with_options(
+            &InsightsArgs {
+                section: None,
+                explain: None,
+                limit: DEFAULT_SECTION_LIMIT,
+                offset: 0,
+                json_stream: false,
+                cursor: None,
+            },
+            InsightsBuildOptions {
+                workspace: Some(&workspace),
+                ..InsightsBuildOptions::default()
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.mode, InsightsMode::FullBundle);
+
+        let gated_sources: std::collections::BTreeSet<&str> = report
+            .degraded_signals
+            .iter()
+            .filter(|signal| signal.code == "graph_feature_disabled")
+            .flat_map(|signal| signal.sources.iter().map(String::as_str))
+            .collect();
+
+        assert!(
+            !gated_sources.is_empty(),
+            "full bundle must emit graph_feature_disabled when graph flags are off, got {:?}",
+            report.degraded_signals
+        );
+        for section in [
+            "hubs",
+            "authorities",
+            "loadBearingMemories",
+            "knowledgeSkyline",
+            "causalBottlenecks",
+        ] {
+            assert!(
+                gated_sources.contains(section),
+                "full bundle must gate `{section}`, gated sources were {gated_sources:?}"
+            );
         }
 
         Ok(())
