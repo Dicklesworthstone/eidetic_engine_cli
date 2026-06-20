@@ -2545,24 +2545,7 @@ fn non_regular_registry_path_error(path: &Path) -> DomainError {
 }
 
 fn registry_path_has_symlink_component(path: &Path) -> io::Result<bool> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(false);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(false)
+    crate::core::path_safety::path_has_symlink_component(path)
 }
 
 fn alias_usage_error(message: String) -> DomainError {
@@ -3101,6 +3084,24 @@ mod tests {
         assert!(!report.registry_exists);
         assert!(!registry.exists());
         assert!(report.workspaces.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn registry_list_accepts_canonical_absolute_registry_path() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let canonical_parent =
+            fs::canonicalize(temp.path()).unwrap_or_else(|_| temp.path().to_path_buf());
+        let registry = canonical_parent.join("registry.db");
+
+        let report = list_workspace_registry(&WorkspaceListOptions {
+            registry_path: Some(registry.clone()),
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.registry_path, registry.display().to_string());
+        assert!(!report.registry_exists);
+        assert!(!registry.exists());
         Ok(())
     }
 
