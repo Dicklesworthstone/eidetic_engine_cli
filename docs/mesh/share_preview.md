@@ -63,6 +63,9 @@ Before granting body sharing, verify:
 
 - `--include-body` was intentional.
 - `data.preview.examples[]` contain redaction placeholders only.
+- `data.preview.deniedClasses[]` does not include
+  `redaction_class:body_redacted`; if it does, the raw body lane remains
+  denied and only metadata is exportable.
 - `data.previewHash` is captured in the consent audit row.
 
 Embedding sharing is sensitive even without raw bodies. Keep

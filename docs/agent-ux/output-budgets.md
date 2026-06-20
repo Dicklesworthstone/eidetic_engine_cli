@@ -139,7 +139,7 @@ Rules a consumer can rely on:
 |---|---|---|---|
 | `output_truncated_budget` | `info` | Trailing elements dropped to fit the ceiling | Resume with `--cursor`, or raise the ceiling |
 | `output_budget_unsatisfiable` | `medium` | Envelope minimum exceeds the ceiling | Raise the ceiling or narrow `--fields` |
-| `cursor_stale` | `info` | DB generation advanced since the cursor was issued | Re-run without `--cursor` |
+| `cursor_stale` | `low` | DB generation advanced since the cursor was issued | Re-run without `--cursor` |
 | `cursor_invalid` | `low` | MAC/schema/params mismatch or malformed token | Re-run without `--cursor` |
 
 Full taxonomy entries: [`docs/degraded_codes.md`](../degraded_codes.md).

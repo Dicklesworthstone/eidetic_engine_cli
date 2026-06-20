@@ -323,7 +323,6 @@ Additional **MUST-FIX** groups now tracked by follow-up bead:
 | Surface | Classification | Linked bead | Reason |
 |---------|----------------|-------------|--------|
 | `src/cli/mod.rs` machine JSON/envelope serialization | MUST-FIX | `eidetic_engine_cli-sos5.3` | Machine-facing CLI output must not become an empty line on serialization failure. |
-| `src/core/context.rs` coordination hash serialization | MUST-FIX | `eidetic_engine_cli-sos5.3` | Context pack hashes must not silently omit coordination snapshot bytes. |
 | `src/cli/mod.rs` pack diff missing rank defaults | MUST-FIX | `eidetic_engine_cli-sos5.4` | Pack diff should distinguish an absent ledger rank from rank zero. |
 | `src/core/handoff.rs` stale-threshold defaults | MUST-FIX | `eidetic_engine_cli-sos5.4` | Stale handoff reports should distinguish unavailable counters from zero values. |
 | `src/core/handoff.rs` tag lookup defaults | MUST-FIX | `eidetic_engine_cli-sos5.7` | Snapshot hashes should not treat failed tag lookups as untagged memories. |

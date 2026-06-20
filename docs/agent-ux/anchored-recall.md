@@ -31,6 +31,11 @@ match. `--kind`, `--level`, and `--stale` filter the anchored result set before
 ranking. Use `--cursor` only with the continuation cursor returned by a
 budget-truncated response.
 
+`--budget-tokens` must be greater than zero. If a positive budget is still too
+small to fit the next ranked recall item, the response returns an empty page with
+`output_budget_unsatisfiable` and no continuation cursor; raise the budget or
+omit the flag rather than retrying the same cursor sequence.
+
 ## Hook Install
 
 Hook commands default to printing a managed plan. Use `--print` first, then
