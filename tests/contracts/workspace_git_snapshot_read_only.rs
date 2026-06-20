@@ -398,6 +398,31 @@ fn workspace_git_porcelain_v2_parser_preserves_copied_paths() -> TestResult {
 }
 
 #[test]
+fn workspace_git_porcelain_v2_parser_preserves_unquoted_edge_spaces() -> TestResult {
+    let entries = parse_workspace_git_status_porcelain_v2(concat!(
+        "?  leading.txt\n",
+        "? trailing.txt \n",
+        "1 .M N... 100644 100644 100644 abc def  both .txt \n",
+        "2 R. N... 100644 100644 100644 abc def R100  new .txt \t old .txt \n",
+    ));
+
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry.original_path.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            (" both .txt ", None),
+            (" leading.txt", None),
+            (" new .txt ", Some(" old .txt ")),
+            ("trailing.txt ", None),
+        ]
+    );
+
+    Ok(())
+}
+
+#[test]
 fn workspace_git_operation_state_reports_in_progress_markers_without_contents() -> TestResult {
     let temp = tempfile::Builder::new()
         .prefix("ee-workspace-git-operation-state-")
