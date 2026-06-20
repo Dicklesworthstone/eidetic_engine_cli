@@ -1152,12 +1152,14 @@ fn parse_sessions_json(input: &[u8]) -> Result<Vec<CassSessionInfo>, CassImportE
 fn parse_legacy_search_hits_as_sessions(
     hits: &[JsonValue],
 ) -> Result<Vec<CassSessionInfo>, CassImportError> {
-    let mut sessions =
-        std::collections::BTreeMap::<String, (CassSessionInfo, Option<i64>, Option<i64>)>::new();
+    let mut sessions = std::collections::BTreeMap::<
+        String,
+        (CassSessionInfo, Option<String>, Option<String>),
+    >::new();
     for hit in hits {
         let path = required_string(hit, "source_path", "sessions")?;
         validate_reported_session_path(&path)?;
-        let created_at = hit.get("created_at").and_then(JsonValue::as_i64);
+        let created_at = legacy_hit_created_at_rfc3339(hit)?;
         let entry = sessions.entry(path.clone()).or_insert_with(|| {
             let mut session = CassSessionInfo::new(path.clone());
             let content_hash = content_hash_for_session(hit, &path);
@@ -1178,27 +1180,55 @@ fn parse_legacy_search_hits_as_sessions(
                 .map(str::to_string);
         }
         entry.0.message_count = Some(entry.0.message_count.unwrap_or(0).saturating_add(1));
-        if let Some(timestamp) = created_at {
-            entry.1 = Some(
-                entry
-                    .1
-                    .map_or(timestamp, |existing| existing.min(timestamp)),
-            );
-            entry.2 = Some(
-                entry
-                    .2
-                    .map_or(timestamp, |existing| existing.max(timestamp)),
-            );
+        if let Some(timestamp) = created_at.as_deref() {
+            entry.1 = Some(match entry.1.as_deref() {
+                Some(existing) if existing <= timestamp => existing.to_owned(),
+                _ => timestamp.to_owned(),
+            });
+            entry.2 = Some(match entry.2.as_deref() {
+                Some(existing) if existing >= timestamp => existing.to_owned(),
+                _ => timestamp.to_owned(),
+            });
         }
     }
 
     let mut parsed = Vec::with_capacity(sessions.len());
     for (_, (mut session, started_at, ended_at)) in sessions {
-        session.started_at = started_at.and_then(millis_to_rfc3339);
-        session.ended_at = ended_at.and_then(millis_to_rfc3339);
+        session.started_at = started_at;
+        session.ended_at = ended_at;
         parsed.push(session);
     }
     Ok(parsed)
+}
+
+fn legacy_hit_created_at_rfc3339(hit: &JsonValue) -> Result<Option<String>, CassImportError> {
+    let Some(value) = hit.get("created_at") else {
+        return Ok(None);
+    };
+    if let Some(timestamp) = value.as_i64() {
+        return Ok(millis_to_rfc3339(timestamp));
+    }
+    if let Some(timestamp) = value
+        .as_str()
+        .filter(|timestamp| !timestamp.is_empty() && timestamp.trim().len() == timestamp.len())
+    {
+        let parsed = DateTime::parse_from_rfc3339(timestamp).map_err(|error| {
+            CassImportError::InvalidJson {
+                source: "sessions",
+                message: format!("invalid created_at RFC3339 timestamp `{timestamp}`: {error}"),
+            }
+        })?;
+        return Ok(Some(
+            parsed
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(SecondsFormat::Secs, true),
+        ));
+    }
+    Err(CassImportError::InvalidJson {
+        source: "sessions",
+        message: "created_at must be an integer epoch milliseconds or non-empty RFC3339 timestamp"
+            .to_string(),
+    })
 }
 
 fn optional_u32(
@@ -2647,6 +2677,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_legacy_cass_search_hits_with_rfc3339_created_at() -> TestResult {
+        let input = br#"{
+          "count": 2,
+          "hits": [
+            {
+              "source_path": "/tmp/session.jsonl",
+              "workspace": "/tmp/project",
+              "agent": "codex",
+              "created_at": "2026-05-07T06:00:03Z"
+            },
+            {
+              "source_path": "/tmp/session.jsonl",
+              "workspace": "/tmp/project",
+              "agent": "codex",
+              "created_at": "2026-05-07T06:00:01Z"
+            }
+          ]
+        }"#;
+
+        let sessions = parse_sessions_json(input).map_err(|error| error.to_string())?;
+        ensure_equal(&sessions.len(), &1, "session count")?;
+        let first = sessions
+            .first()
+            .ok_or_else(|| "missing parsed session".to_string())?;
+        ensure_equal(&first.message_count, &Some(2), "message_count")?;
+        ensure_equal(
+            &first.started_at.as_deref(),
+            &Some("2026-05-07T06:00:01Z"),
+            "started_at",
+        )?;
+        ensure_equal(
+            &first.ended_at.as_deref(),
+            &Some("2026-05-07T06:00:03Z"),
+            "ended_at",
+        )
+    }
+
+    #[test]
     fn parse_import_since_duration_accepts_compound_windows() -> TestResult {
         let now = DateTime::parse_from_rfc3339("2026-05-05T12:00:00Z")
             .map_err(|error| error.to_string())?
@@ -2713,6 +2781,44 @@ mod tests {
             &paths,
             &vec!["/tmp/recent.jsonl", "/tmp/modified.jsonl"],
             "filtered sessions",
+        )
+    }
+
+    #[test]
+    fn since_filter_keeps_legacy_rfc3339_created_at_sessions() -> TestResult {
+        let input = br#"{
+          "count": 2,
+          "hits": [
+            {
+              "source_path": "/tmp/recent.jsonl",
+              "workspace": "/tmp/project",
+              "agent": "codex",
+              "created_at": "2026-05-07T06:00:01Z"
+            },
+            {
+              "source_path": "/tmp/old.jsonl",
+              "workspace": "/tmp/project",
+              "agent": "codex",
+              "created_at": "2026-03-07T06:00:01Z"
+            }
+          ]
+        }"#;
+        let cutoff = DateTime::parse_from_rfc3339("2026-04-01T00:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+
+        let sessions = parse_sessions_json(input).map_err(|error| error.to_string())?;
+        let filtered =
+            filter_sessions_since(sessions, Some(cutoff)).map_err(|error| error.to_string())?;
+        let paths: Vec<&str> = filtered
+            .iter()
+            .map(|session| session.source_path.as_str())
+            .collect();
+
+        ensure_equal(
+            &paths,
+            &vec!["/tmp/recent.jsonl"],
+            "legacy RFC3339 since filter",
         )
     }
 
