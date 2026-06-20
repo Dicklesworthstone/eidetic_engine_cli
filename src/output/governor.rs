@@ -976,23 +976,16 @@ fn apply_resume_drop(
 /// Whether the cursor's `positionKey` honestly names the recomputed
 /// boundary element.
 ///
-/// Elements that lack the declared key field fall back to their array index
-/// at ISSUE time — and a page-2 cursor is issued in page-local coordinates,
-/// which a later resume (recomputing in full-set coordinates) cannot
-/// reproduce. The cursor is already MAC-protected, params-bound, and
-/// generation-bound, so for fallback-key elements `droppedCount` is the
-/// sole (and sufficient) authority and the positional cross-check is
-/// skipped; elements that carry the declared field must match exactly.
+/// Elements that lack the declared key field fall back to their array index;
+/// the same boundary is recomputed during resume, so fallback keys must match
+/// with the same strictness as explicit keys.
 fn position_key_honest(
     element: &JsonValue,
     point: &TruncationPoint,
     index: usize,
     claimed_key: &str,
 ) -> bool {
-    match element.get(point.position_key_field) {
-        Some(JsonValue::Null) | None => true,
-        _ => element_position_key(element, point, index) == claimed_key,
-    }
+    element_position_key(element, point, index) == claimed_key
 }
 
 /// Empty the declared truncation point for a rejected-cursor page: flat
@@ -1177,8 +1170,38 @@ mod tests {
         .to_string()
     }
 
+    fn list_envelope_without_item_ids(item_count: usize) -> String {
+        let items: Vec<JsonValue> = (0..item_count)
+            .map(|index| {
+                json!({
+                    "content": format!("deterministic keyless body text for element {index:04}; ")
+                        .repeat(4),
+                })
+            })
+            .collect();
+        json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": {
+                "command": "test list",
+                "schema": "ee.test.list.v1",
+                "items": items,
+            },
+            "degraded": [],
+        })
+        .to_string()
+    }
+
     fn parse(json: &str) -> Result<JsonValue, String> {
         serde_json::from_str(json).map_err(|error| format!("parse governed output: {error}"))
+    }
+
+    fn kept_item_count(value: &JsonValue) -> usize {
+        value
+            .pointer("/data/items")
+            .and_then(JsonValue::as_array)
+            .map(Vec::len)
+            .unwrap_or_default()
     }
 
     fn kept_item_ids(value: &JsonValue) -> Vec<String> {
@@ -1965,6 +1988,38 @@ mod tests {
         )?;
         if !kept_item_ids(&second).is_empty() {
             return Err("a dishonest positionKey must yield an empty page".to_string());
+        }
+        degraded_entry_with_code(&second, CURSOR_INVALID_CODE)?;
+        Ok(())
+    }
+
+    #[test]
+    fn dishonest_fallback_position_key_is_rejected_as_invalid() -> TestResult {
+        let json = list_envelope_without_item_ids(40);
+        let generation = || 7u64;
+        let ctx = test_context(600, &generation);
+        let first = parse(
+            &govern_response_json(&json, &ctx, TEST_REGISTRY)
+                .map_err(|error| format!("govern page 1: {error:?}"))?,
+        )?;
+        let cursor = continuation_cursor(&first).ok_or("page 1 must carry a cursor")?;
+        let payload = decode_cursor(&cursor, &ctx.mac_key, &ctx.params_hash, 7)
+            .map_err(|rejection| format!("decode: {rejection:?}"))?;
+        payload.position_key.parse::<usize>().map_err(|error| {
+            format!("keyless page must use fallback index positionKey: {error}")
+        })?;
+        let forged = CursorPayload {
+            position_key: "not-the-boundary-index".to_string(),
+            ..payload
+        };
+        let forged_token =
+            encode_cursor(&forged, &ctx.mac_key).map_err(|error| format!("encode: {error:?}"))?;
+        let second = parse(
+            &govern_response_json_with_resume(&json, &ctx, TEST_REGISTRY, Some(&forged_token))
+                .map_err(|error| format!("govern page 2: {error:?}"))?,
+        )?;
+        if kept_item_count(&second) != 0 {
+            return Err("a dishonest fallback positionKey must yield an empty page".to_string());
         }
         degraded_entry_with_code(&second, CURSOR_INVALID_CODE)?;
         Ok(())
