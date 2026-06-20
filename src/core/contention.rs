@@ -232,9 +232,29 @@ pub fn build_contention_report(inputs: &ContentionInputs) -> ContentionDiagRepor
             source: "write_lock".to_owned(),
             code: "write_owner_unavailable".to_owned(),
         });
+        let status = WriteOwnerStatus::default();
+        let posture = classify_write_lock(&status, inputs.lock_wait_ms_p99);
+        overall = overall.worst(posture);
+        if posture >= ContentionPosture::Warm {
+            findings.push(finding(
+                "write_lock",
+                posture,
+                "write_lock_high_wait",
+                format!(
+                    "write-owner status unavailable, but persisted lock-wait p99 is {} ms; concurrent writers are serializing behind the single write lock",
+                    inputs.lock_wait_ms_p99.unwrap_or_default()
+                ),
+                &[
+                    "enable group-commit write batching (bd-d67os.1)",
+                    "route heavy writers through the daemon write owner: ee daemon --foreground",
+                    "reduce the number of concurrent durable writers",
+                ],
+            ));
+        }
         WriteLockContention {
             lock_wait_ms_p50: inputs.lock_wait_ms_p50,
             lock_wait_ms_p99: inputs.lock_wait_ms_p99,
+            posture,
             ..WriteLockContention::default()
         }
     };
@@ -615,6 +635,42 @@ mod tests {
             .collect();
         // Sorted by source asc.
         assert_eq!(codes, vec!["read_pool", "singleflight", "write_lock"]);
+    }
+
+    #[test]
+    fn persisted_lock_wait_without_write_owner_still_surfaces_contention() {
+        let inputs = ContentionInputs {
+            lock_wait_ms_p50: Some(250),
+            lock_wait_ms_p99: Some(1_500),
+            read_pool: Some(pool_stats(1, 4, 0, 0)),
+            singleflight: Some(quiet_singleflight()),
+            ..ContentionInputs::default()
+        };
+
+        let report = build_contention_report(&inputs);
+
+        assert_eq!(report.write_lock.posture, ContentionPosture::Contended);
+        assert_eq!(report.overall_posture, ContentionPosture::Contended);
+        assert_eq!(report.write_lock.lock_wait_ms_p50, Some(250));
+        assert_eq!(report.write_lock.lock_wait_ms_p99, Some(1_500));
+        assert!(
+            report
+                .unavailable_sources
+                .iter()
+                .any(|gap| gap.source == "write_lock" && gap.code == "write_owner_unavailable")
+        );
+        let finding = report
+            .top_contention
+            .iter()
+            .find(|finding| finding.source == "write_lock")
+            .expect("write_lock finding");
+        assert_eq!(finding.severity, ContentionPosture::Contended);
+        assert_eq!(finding.reason_code, "write_lock_high_wait");
+        assert!(
+            finding
+                .detail
+                .contains("persisted lock-wait p99 is 1500 ms")
+        );
     }
 
     #[test]
