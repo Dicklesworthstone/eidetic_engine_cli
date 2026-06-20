@@ -781,6 +781,35 @@ mod tests {
     }
 
     #[test]
+    fn utility_inverse_interval_matches_persisted_alpha_beta_reconstruction() {
+        for (confidence, total_weight, level) in [(0.3, 2.0, 0.90), (0.8, 2.0, 0.90)] {
+            let posterior = BetaPosterior::from_utility_inverse(confidence, total_weight)
+                .expect("valid utility-inverse posterior");
+            let restored = BetaPosterior::new(posterior.alpha(), posterior.beta())
+                .expect("stored alpha/beta must reconstruct");
+
+            assert!(approx_eq(posterior.mean(), confidence, 1e-12));
+            assert_eq!(posterior, restored);
+
+            let Some((lo, hi)) = posterior.credible_interval(level) else {
+                panic!("utility-inverse credible interval should compute");
+            };
+            let Some((restored_lo, restored_hi)) = restored.credible_interval(level) else {
+                panic!("restored credible interval should compute");
+            };
+
+            assert!(
+                approx_eq(lo, restored_lo, 1e-12),
+                "lo mismatch for confidence={confidence}, total_weight={total_weight}: {lo} != {restored_lo}"
+            );
+            assert!(
+                approx_eq(hi, restored_hi, 1e-12),
+                "hi mismatch for confidence={confidence}, total_weight={total_weight}: {hi} != {restored_hi}"
+            );
+        }
+    }
+
+    #[test]
     fn credible_interval_90_contains_mean() {
         // For a well-evidenced posterior, the 90% CI brackets the mean
         // and has positive width.
