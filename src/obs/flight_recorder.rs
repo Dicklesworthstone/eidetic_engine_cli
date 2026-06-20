@@ -418,11 +418,10 @@ pub fn record_workload(
     inputs: &FlightRecorderInputs<'_>,
 ) -> Result<AgentWorkloadTrace, FlightRecorderError> {
     validate_inputs(inputs)?;
-    let trace_id = derive_trace_id(inputs);
-    let mut deduped_codes: BTreeSet<&str> = BTreeSet::new();
-    for code in inputs.degraded_codes {
-        deduped_codes.insert(*code);
-    }
+    let deduped_flag_names = sorted_unique_strs(inputs.command.flag_names);
+    let deduped_memory_hashes = sorted_unique_strs(inputs.memory_hashes);
+    let deduped_codes = sorted_unique_strs(inputs.degraded_codes);
+    let trace_id = derive_trace_id(inputs, &deduped_flag_names);
     Ok(AgentWorkloadTrace {
         schema: AGENT_WORKLOAD_TRACE_SCHEMA_V1.to_owned(),
         side_effect_free: true,
@@ -437,9 +436,7 @@ pub fn record_workload(
                 .map(|v| (*v).to_string())
                 .collect(),
             positional_arity: inputs.command.positional_arity,
-            flag_names: inputs
-                .command
-                .flag_names
+            flag_names: deduped_flag_names
                 .iter()
                 .map(|f| (*f).to_string())
                 .collect(),
@@ -454,8 +451,7 @@ pub fn record_workload(
             program: inputs.harness_program,
             model_family: inputs.harness_model_family.map(str::to_string),
         },
-        memory_references: inputs
-            .memory_hashes
+        memory_references: deduped_memory_hashes
             .iter()
             .map(|hash| MemoryHashRef {
                 hash: (*hash).to_string(),
@@ -466,6 +462,14 @@ pub fn record_workload(
             .map(|code| (*code).to_string())
             .collect(),
     })
+}
+
+fn sorted_unique_strs<'a>(values: &'a [&'a str]) -> Vec<&'a str> {
+    let mut unique = BTreeSet::new();
+    for value in values {
+        unique.insert(*value);
+    }
+    unique.into_iter().collect()
 }
 
 pub fn append_workload_trace(
@@ -976,7 +980,7 @@ fn usize_to_u64(value: usize) -> u64 {
 /// positional arity, output format, exit code, elapsed ms, response
 /// byte count, harness program, and the recorded-at timestamp. The
 /// result is stable: identical inputs produce identical ids.
-fn derive_trace_id(inputs: &FlightRecorderInputs<'_>) -> String {
+fn derive_trace_id(inputs: &FlightRecorderInputs<'_>, flag_names: &[&str]) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(AGENT_WORKLOAD_TRACE_SCHEMA_V1.as_bytes());
     hasher.update(b"\0");
@@ -987,7 +991,7 @@ fn derive_trace_id(inputs: &FlightRecorderInputs<'_>) -> String {
         hasher.update(b"\0");
     }
     hasher.update(b"|");
-    for flag in inputs.command.flag_names {
+    for flag in flag_names {
         hasher.update(flag.as_bytes());
         hasher.update(b"\0");
     }
@@ -1282,6 +1286,39 @@ mod tests {
                 "context_low_relevance_floor".to_string(),
                 "context_pack_truncated".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn flag_names_and_memory_references_are_deduped_for_schema_unique_items() {
+        let mut inputs = baseline_inputs();
+        inputs.command.flag_names = &["--json", "--explain", "--json"];
+        inputs.memory_hashes = &[
+            "blake3:0123456789abcdef0123456789abcdef",
+            "blake3:fedcba9876543210fedcba9876543210",
+            "blake3:0123456789abcdef0123456789abcdef",
+        ];
+        let trace = record_workload(&inputs).expect("validates");
+        assert_eq!(
+            trace.command.flag_names,
+            vec!["--explain".to_string(), "--json".to_string()]
+        );
+        assert_eq!(
+            trace.memory_references,
+            vec![
+                MemoryHashRef {
+                    hash: "blake3:0123456789abcdef0123456789abcdef".to_string(),
+                },
+                MemoryHashRef {
+                    hash: "blake3:fedcba9876543210fedcba9876543210".to_string(),
+                },
+            ]
+        );
+
+        let baseline = record_workload(&baseline_inputs()).expect("baseline validates");
+        assert_eq!(
+            trace.trace_id, baseline.trace_id,
+            "duplicate-only flags must not perturb the stable trace identity"
         );
     }
 
