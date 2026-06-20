@@ -13,6 +13,7 @@ use crate::mesh::auto_enrollment_safety::{
     AutoEnrollmentSummary, AutoEnrollmentSummaryInput, DiscoveryPolicyDecision, IntendedLanePolicy,
     IntendedPeer, MaterializationOutcome, TriggerReason, compute_summary,
 };
+use crate::mesh::discovery_policy::validate_node_key;
 use crate::mesh::identity_change_guard::{
     AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE, BoundIdentity, CurrentIdentity, IdentityGuardVerdict,
     evaluate_identity_guard,
@@ -341,8 +342,15 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
     let mut explanation = Vec::new();
 
     for node_key in normalize_node_keys(&input.options.include_overrides) {
-        if !looks_like_node_key(&node_key) {
+        if !is_valid_override_node_key(&node_key) {
             push_invalid_override(&mut degraded, &node_key);
+            overrides_applied.push(AutoEnrollmentOverride {
+                node_key,
+                kind: "include",
+                applied: false,
+                reason: "invalid override node key was ignored".to_owned(),
+            });
+            continue;
         }
         if candidates.contains_key(&node_key) {
             overrides_applied.push(AutoEnrollmentOverride {
@@ -376,10 +384,19 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
     }
 
     let exclude_overrides = normalize_node_keys(&input.options.exclude_overrides);
+    let mut valid_exclude_overrides = Vec::new();
     for node_key in &exclude_overrides {
-        if !looks_like_node_key(node_key) {
+        if !is_valid_override_node_key(node_key) {
             push_invalid_override(&mut degraded, node_key);
+            overrides_applied.push(AutoEnrollmentOverride {
+                node_key: node_key.clone(),
+                kind: "exclude",
+                applied: false,
+                reason: "invalid override node key was ignored".to_owned(),
+            });
+            continue;
         }
+        valid_exclude_overrides.push(node_key.clone());
         let removed = candidates.remove(node_key).is_some();
         overrides_applied.push(AutoEnrollmentOverride {
             node_key: node_key.clone(),
@@ -425,7 +442,7 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
     );
 
     let peers_to_revoke = revocation_node_keys(
-        &exclude_overrides,
+        &valid_exclude_overrides,
         &existing_enabled,
         manual_migration,
         !selected.is_empty(),
@@ -560,7 +577,7 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
         outcome_to_record: outcome.materialization_outcome(),
         manual_to_auto_migration_intended: manual_migration,
         peers_to_revoke,
-        append_denylist_node_keys: input.options.exclude_overrides.clone(),
+        append_denylist_node_keys: valid_exclude_overrides,
         ..AutoEnrollmentMaterializationPlan::default()
     };
     if outcome == AutoEnrollmentOutcome::Materialized {
@@ -705,7 +722,7 @@ fn revocation_node_keys(
 ) -> Vec<String> {
     let mut keys: BTreeSet<String> = exclude_overrides
         .iter()
-        .filter(|node_key| looks_like_node_key(node_key))
+        .filter(|node_key| is_valid_override_node_key(node_key))
         .cloned()
         .collect();
     if manual_migration && has_selected_peers {
@@ -836,10 +853,8 @@ fn normalize_node_keys(node_keys: &[String]) -> Vec<String> {
     set.into_iter().collect()
 }
 
-fn looks_like_node_key(node_key: &str) -> bool {
-    node_key
-        .strip_prefix("nodekey:")
-        .is_some_and(|suffix| !suffix.trim().is_empty())
+fn is_valid_override_node_key(node_key: &str) -> bool {
+    validate_node_key(node_key).is_ok()
 }
 
 fn push_invalid_override(degraded: &mut Vec<AutoEnrollmentDegradation>, node_key: &str) {
@@ -848,8 +863,8 @@ fn push_invalid_override(degraded: &mut Vec<AutoEnrollmentDegradation>, node_key
         AutoEnrollmentDegradation::new(
             AUTO_ENROLLMENT_INVALID_OVERRIDE_NODE_KEY_CODE,
             "warning",
-            format!("override node key `{node_key}` does not look like a Tailscale node key"),
-            "Use node keys formatted as `nodekey:<value>`; invalid overrides are ignored when no matching tailnet peer exists.",
+            format!("override node key `{node_key}` is not a valid Tailscale node key"),
+            "Use node keys formatted as `nodekey:` plus 64 lowercase hex characters; invalid overrides are ignored.",
         ),
     );
 }
@@ -876,6 +891,13 @@ fn discovery_policy_decision_from_str(raw: &str) -> DiscoveryPolicyDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const VALID_NODE_KEY_ALPHA: &str =
+        "nodekey:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const VALID_NODE_KEY_BRAVO: &str =
+        "nodekey:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const VALID_NODE_KEY_FORCED: &str =
+        "nodekey:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
 
     fn candidate(node_key: &str) -> AutoEnrollmentCandidate {
         AutoEnrollmentCandidate {
@@ -1156,41 +1178,44 @@ mod tests {
     #[test]
     fn auto_enrollment_include_flag_force_includes_policy_excluded_peer() {
         let mut input = input(Vec::new());
-        input.tailnet_peers = vec![candidate("nodekey:forced")];
-        input.options.include_overrides = vec!["nodekey:forced".to_owned()];
+        input.tailnet_peers = vec![candidate(VALID_NODE_KEY_FORCED)];
+        input.options.include_overrides = vec![VALID_NODE_KEY_FORCED.to_owned()];
         let result = plan_auto_enrollment(input);
         assert_eq!(result.outcome, "materialized");
         assert_eq!(
             result.materialization.peers_to_upsert[0].node_key,
-            "nodekey:forced"
+            VALID_NODE_KEY_FORCED
         );
     }
 
     #[test]
     fn auto_enrollment_exclude_flag_skips_peer_and_appends_to_denylist() {
-        let mut input = input(vec![candidate("nodekey:alpha"), candidate("nodekey:bravo")]);
-        input.options.exclude_overrides = vec!["nodekey:bravo".to_owned()];
+        let mut input = input(vec![
+            candidate(VALID_NODE_KEY_ALPHA),
+            candidate(VALID_NODE_KEY_BRAVO),
+        ]);
+        input.options.exclude_overrides = vec![VALID_NODE_KEY_BRAVO.to_owned()];
         let result = plan_auto_enrollment(input);
         assert_eq!(result.materialization.peers_to_upsert.len(), 1);
         assert_eq!(
             result.materialization.peers_to_revoke,
-            vec!["nodekey:bravo"]
+            vec![VALID_NODE_KEY_BRAVO]
         );
         assert_eq!(
             result.materialization.append_denylist_node_keys,
-            vec!["nodekey:bravo"]
+            vec![VALID_NODE_KEY_BRAVO]
         );
     }
 
     #[test]
     fn auto_enrollment_exclude_existing_peer_materializes_revocation_when_no_candidates_remain() {
-        let mut input = input(vec![candidate("nodekey:alpha")]);
+        let mut input = input(vec![candidate(VALID_NODE_KEY_ALPHA)]);
         input.existing_peers = vec![existing_auto_peer(
-            "nodekey:alpha",
+            VALID_NODE_KEY_ALPHA,
             "tailnet-alpha",
             Some("nodekey:self"),
         )];
-        input.options.exclude_overrides = vec!["nodekey:alpha".to_owned()];
+        input.options.exclude_overrides = vec![VALID_NODE_KEY_ALPHA.to_owned()];
 
         let result = plan_auto_enrollment(input);
 
@@ -1199,7 +1224,7 @@ mod tests {
         assert!(result.materialization.peers_to_upsert.is_empty());
         assert_eq!(
             result.materialization.peers_to_revoke,
-            vec!["nodekey:alpha"]
+            vec![VALID_NODE_KEY_ALPHA]
         );
     }
 
@@ -1241,6 +1266,55 @@ mod tests {
             item.code == AUTO_ENROLLMENT_INVALID_OVERRIDE_NODE_KEY_CODE
                 && item.severity == "warning"
         }));
+    }
+
+    #[test]
+    fn auto_enrollment_malformed_prefixed_include_override_cannot_force_include_peer() {
+        let malformed = "nodekey:not-hex-or-long-enough";
+        let mut input = input(Vec::new());
+        input.tailnet_peers = vec![candidate(malformed)];
+        input.options.include_overrides = vec![malformed.to_owned()];
+
+        let result = plan_auto_enrollment(input);
+
+        assert_eq!(result.outcome, "no_eligible_peers");
+        assert!(result.materialization.peers_to_upsert.is_empty());
+        assert!(
+            result.overrides_applied.iter().any(|item| {
+                item.node_key == malformed && item.kind == "include" && !item.applied
+            })
+        );
+        assert!(
+            result
+                .degraded
+                .iter()
+                .any(|item| item.code == AUTO_ENROLLMENT_INVALID_OVERRIDE_NODE_KEY_CODE)
+        );
+    }
+
+    #[test]
+    fn auto_enrollment_malformed_prefixed_exclude_override_is_not_persisted() {
+        let malformed = "nodekey:not-hex-or-long-enough";
+        let mut input = input(vec![candidate(VALID_NODE_KEY_ALPHA)]);
+        input.options.exclude_overrides = vec![malformed.to_owned()];
+
+        let result = plan_auto_enrollment(input);
+
+        assert_eq!(result.outcome, "materialized");
+        assert_eq!(result.materialization.peers_to_upsert.len(), 1);
+        assert!(result.materialization.peers_to_revoke.is_empty());
+        assert!(result.materialization.append_denylist_node_keys.is_empty());
+        assert!(
+            result.overrides_applied.iter().any(|item| {
+                item.node_key == malformed && item.kind == "exclude" && !item.applied
+            })
+        );
+        assert!(
+            result
+                .degraded
+                .iter()
+                .any(|item| item.code == AUTO_ENROLLMENT_INVALID_OVERRIDE_NODE_KEY_CODE)
+        );
     }
 
     #[test]
