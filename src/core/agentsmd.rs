@@ -741,10 +741,20 @@ fn bridge_file_relative_path(path: &Path) -> Result<PathBuf, DomainError> {
             "absolute paths are not allowed",
         ));
     }
-    if path.to_string_lossy().contains('\\') {
+    let raw_path = path.to_string_lossy();
+    if raw_path.contains('\\') {
         return Err(invalid_bridge_file_path(
             path,
             "backslash paths are not portable",
+        ));
+    }
+    if raw_path
+        .split('/')
+        .any(|segment| matches!(segment, "." | ".."))
+    {
+        return Err(invalid_bridge_file_path(
+            path,
+            "dot path segments are not allowed",
         ));
     }
 
