@@ -304,11 +304,8 @@ fn classify_attribution_bucket(
     // disappears. Without this, the test at
     // `unsafe_source_and_stage_labels_are_sanitized` (source `context/search`)
     // would classify as Rch instead of Search.
-    let tokens: Vec<&str> = haystack
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .collect();
-    let has = |needle: &str| tokens.iter().any(|t| *t == needle);
+    let tokens = attribution_tokens(&haystack);
+    let has = |needle: &str| has_token(&tokens, needle);
     // Source-specific Rch / Tracker buckets MUST outrank the generic
     // "coordination" stage that `adapt_swarm_slo_coordination_event`
     // injects unconditionally — otherwise every coordination event
@@ -366,6 +363,17 @@ fn attribution_haystack(
     parts.join(" ")
 }
 
+fn attribution_tokens(haystack: &str) -> Vec<&str> {
+    haystack
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn has_token(tokens: &[&str], needle: &str) -> bool {
+    tokens.iter().any(|token| *token == needle)
+}
+
 fn repair_command_for(
     source_kind: &str,
     posture: SwarmSloPosture,
@@ -379,15 +387,20 @@ fn repair_command_for(
     // `["agent","mail"]`, `bv_timeout_no_output` →
     // `["bv","timeout","no","output"]`, etc., and only the intended
     // tokens trigger their repair commands.
-    let tokens: Vec<&str> = haystack
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .collect();
-    let has = |needle: &str| tokens.iter().any(|t| *t == needle);
+    let tokens = attribution_tokens(&haystack);
+    let source_tokens = attribution_tokens(source_kind);
+    let has = |needle: &str| has_token(&tokens, needle);
+    let source_has = |needle: &str| has_token(&source_tokens, needle);
     if has("rch") || has("e327") {
         return Some(r#"rch diagnose --dry-run "cargo test --workspace""#.to_owned());
     }
-    if has("mail") || has("sqlite") {
+    if source_has("bv") {
+        return Some("bv --robot-triage".to_owned());
+    }
+    if source_has("beads") || source_has("br") || source_has("tracker") {
+        return Some("br doctor --json".to_owned());
+    }
+    if source_has("mail") || source_has("reservation") {
         return Some("am doctor check --verbose".to_owned());
     }
     if has("bv") {
@@ -395,6 +408,9 @@ fn repair_command_for(
     }
     if has("beads") || has("br") || has("tracker") {
         return Some("br doctor --json".to_owned());
+    }
+    if has("mail") || has("reservation") {
+        return Some("am doctor check --verbose".to_owned());
     }
     if posture.is_unavailable_or_blocked() {
         return Some("ee status --json".to_owned());
@@ -545,6 +561,35 @@ mod tests {
             rch.repair_command.as_deref(),
             Some(r#"rch diagnose --dry-run "cargo test --workspace""#)
         );
+    }
+
+    #[test]
+    fn coordination_repair_command_prioritizes_source_before_sqlite_evidence() {
+        let beads = adapt_swarm_slo_coordination_event(&SwarmSloCoordinationInput {
+            producer_id: "cod_1",
+            source_kind: "beads",
+            posture: SwarmSloPosture::Unavailable,
+            elapsed_ms: 150,
+            event_count: 1,
+            error_count: 1,
+            degraded_count: 1,
+            evidence: &[("code", "sqlite_malformed")],
+        });
+        let bv = adapt_swarm_slo_coordination_event(&SwarmSloCoordinationInput {
+            producer_id: "cod_2",
+            source_kind: "bv",
+            posture: SwarmSloPosture::Unavailable,
+            elapsed_ms: 150,
+            event_count: 1,
+            error_count: 1,
+            degraded_count: 1,
+            evidence: &[("code", "sqlite_malformed")],
+        });
+
+        assert_eq!(beads.bucket, SwarmSloAttributionBucket::Tracker);
+        assert_eq!(beads.repair_command.as_deref(), Some("br doctor --json"));
+        assert_eq!(bv.bucket, SwarmSloAttributionBucket::Tracker);
+        assert_eq!(bv.repair_command.as_deref(), Some("bv --robot-triage"));
     }
 
     #[test]

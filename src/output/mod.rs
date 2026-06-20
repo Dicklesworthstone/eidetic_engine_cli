@@ -56,10 +56,10 @@ use crate::models::{
 };
 use crate::pack::{
     ConflictEntry, ConsensusEntry, ConsensusProducer, ContextResponse, ContextResponseDegradation,
-    ContextResponseSeverity, PACK_BUDGET_TOO_SMALL_CODE, PACK_CONCURRENT_LIMIT_REACHED_CODE,
-    PackAdmissionPosture, PackAdvisoryBanner, PackAdvisoryNote, PackAssemblySlo,
-    PackFreshnessAnchorFacet, PackFreshnessFacet, PackItemProvenance, PackOmission,
-    PackOmissionMetrics, PackQualityMetrics, PackSectionMetric, PackSelectedItem,
+    ContextResponsePagination, ContextResponseSeverity, PACK_BUDGET_TOO_SMALL_CODE,
+    PACK_CONCURRENT_LIMIT_REACHED_CODE, PackAdmissionPosture, PackAdvisoryBanner, PackAdvisoryNote,
+    PackAssemblySlo, PackFreshnessAnchorFacet, PackFreshnessFacet, PackItemProvenance,
+    PackOmission, PackOmissionMetrics, PackQualityMetrics, PackSectionMetric, PackSelectedItem,
     PackSelectionAudit, PackSelectionStep, RenderedPackProvenance,
 };
 use crate::steward::{
@@ -1593,9 +1593,22 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
         "context" | "pack" => match preset {
             FieldProfile::Minimal => &["command", "query", "hash"],
             FieldProfile::Summary => &[
-                "command", "request", "pack", "budget", "quality", "degraded",
+                "command",
+                "request",
+                "pack",
+                "budget",
+                "quality",
+                "pagination",
+                "degraded",
             ],
-            FieldProfile::Standard => &["command", "request", "pack", "items", "degraded"],
+            FieldProfile::Standard => &[
+                "command",
+                "request",
+                "pack",
+                "items",
+                "pagination",
+                "degraded",
+            ],
             FieldProfile::Full => &["*"],
         },
         "orient" => match preset {
@@ -2645,6 +2658,11 @@ pub fn render_context_response_json_with_options(
                 );
             });
         });
+        if let Some(pagination) = &response.data.pagination {
+            d.field_object("pagination", |pagination_obj| {
+                build_context_response_pagination(pagination_obj, pagination);
+            });
+        }
         // Bead bd-17c65.5.2 (E2): filter the per-response degraded[]
         // array by category. The DegradedCategory::AffectsThisResponse
         // signals always emit; build-time feature gaps and
@@ -2663,6 +2681,17 @@ pub fn render_context_response_json_with_options(
         d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     });
     b.finish()
+}
+
+fn build_context_response_pagination(
+    obj: &mut JsonBuilder,
+    pagination: &ContextResponsePagination,
+) {
+    obj.field_u32("offset", pagination.offset);
+    obj.field_u32("limit", pagination.limit);
+    obj.field_u32("total", pagination.total);
+    obj.field_bool("hasMore", pagination.has_more);
+    field_optional_str(obj, "nextCursor", pagination.next_cursor.as_deref());
 }
 
 #[must_use]
@@ -18043,8 +18072,7 @@ mod tests {
         render_handoff_create_json, render_handoff_create_toon, render_handoff_inspect_json,
         render_handoff_inspect_toon, render_handoff_preview_json, render_handoff_preview_toon,
         render_handoff_resume_json, render_handoff_resume_toon, render_health_json,
-        render_health_toon,
-        render_integrity_diagnostics_json, render_learn_cluster_json,
+        render_health_toon, render_integrity_diagnostics_json, render_learn_cluster_json,
         render_learn_experiment_proposal_human, render_learn_experiment_proposal_json,
         render_learn_experiment_proposal_toon, render_memory_history_json,
         render_memory_history_toon, render_memory_impact_analysis_json,
@@ -18057,11 +18085,11 @@ mod tests {
         render_quarantine_json, render_quarantine_json_filtered, render_quarantine_toon,
         render_schema_export_json, render_shadow_run_human, render_shadow_run_json,
         render_shadow_run_toon, render_status_json, render_status_json_filtered,
-        render_status_json_with_meta, render_status_skyline_json,
-        render_status_skyline_markdown, render_status_skyline_toon, render_status_toon,
-        render_structural_health_json, render_structural_health_markdown,
-        render_structural_health_toon, render_version_json, render_why_causal_json,
-        render_why_causal_markdown, render_why_causal_toon, schema_json, status_response_json,
+        render_status_json_with_meta, render_status_skyline_json, render_status_skyline_markdown,
+        render_status_skyline_toon, render_status_toon, render_structural_health_json,
+        render_structural_health_markdown, render_structural_health_toon, render_version_json,
+        render_why_causal_json, render_why_causal_markdown, render_why_causal_toon, schema_json,
+        status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::degraded_aggregation::AggregatedDegradation;
@@ -18121,10 +18149,10 @@ mod tests {
         UnitScore,
     };
     use crate::pack::{
-        ContextRequest, ContextResponse, PACK_BUDGET_TOO_SMALL_CODE, PackAssemblySlo,
-        PackAssemblySloActuals, PackCandidate, PackCandidateInput, PackFreshnessAnchorFacet,
-        PackFreshnessFacet, PackProvenance, PackResourceProfile, PackScoreBreakdown, PackSection,
-        PackTrustSignal, TokenBudget, assemble_draft,
+        ContextRequest, ContextResponse, ContextResponsePagination, PACK_BUDGET_TOO_SMALL_CODE,
+        PackAssemblySlo, PackAssemblySloActuals, PackCandidate, PackCandidateInput,
+        PackFreshnessAnchorFacet, PackFreshnessFacet, PackProvenance, PackResourceProfile,
+        PackScoreBreakdown, PackSection, PackTrustSignal, TokenBudget, assemble_draft,
         budget_classifier::{AdaptiveBudgetInput, classify_adaptive_budget},
     };
 
@@ -20365,6 +20393,27 @@ mod tests {
             "item trust posture",
         )?;
         ensure_contains(&json, "\"relevance\":0.800000", "stable relevance")
+    }
+
+    #[test]
+    fn context_response_json_renders_query_file_pagination_metadata() -> TestResult {
+        let mut response = context_response_fixture()?;
+        response.data.pagination = Some(ContextResponsePagination {
+            offset: 2,
+            limit: 2,
+            total: 5,
+            page_size: 2,
+            has_more: true,
+            next_cursor: Some("cursor_next_page".to_owned()),
+        });
+
+        let json = render_context_response_json(&response);
+
+        ensure_contains(
+            &json,
+            "\"pagination\":{\"offset\":2,\"limit\":2,\"total\":5,\"hasMore\":true,\"nextCursor\":\"cursor_next_page\"}",
+            "query-file pagination metadata",
+        )
     }
 
     #[test]

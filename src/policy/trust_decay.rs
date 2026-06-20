@@ -709,7 +709,7 @@ fn plan_peer_outcome_feedback(
     }
 
     let max_peer_weight = finite_clamped(policy.max_peer_weight, 0.0, 1.0, 1.0);
-    let peer_weight = finite_clamped(event.peer_weight, 0.0, max_peer_weight, 1.0);
+    let peer_weight = finite_clamped(event.peer_weight, 0.0, max_peer_weight, 0.0);
     let effective_weight = effective_peer_feedback_weight(event, state, policy, peer_trust);
     let trust_delta = round_peer_feedback_metric(event.kind.trust_delta() * effective_weight);
     let quality_delta = round_peer_feedback_metric(event.kind.quality_delta() * effective_weight);
@@ -759,7 +759,7 @@ fn effective_peer_feedback_weight(
     peer_trust: f32,
 ) -> f32 {
     let max_peer_weight = finite_clamped(policy.max_peer_weight, 0.0, 1.0, 1.0);
-    let peer_weight = finite_clamped(event.peer_weight, 0.0, max_peer_weight, 1.0);
+    let peer_weight = finite_clamped(event.peer_weight, 0.0, max_peer_weight, 0.0);
     let history_decay = state.map_or(1.0, |state| 1.0 - state.negative_rate());
     let base_weight = peer_weight * peer_trust * history_decay.clamp(0.0, 1.0);
     let capped_weight = if state.is_some_and(is_bad_peer_feedback_source) {
@@ -1287,6 +1287,44 @@ mod tests {
             -0.030,
             0.001,
             "single peer ranking cap",
+        )
+    }
+
+    #[test]
+    fn peer_outcome_feedback_non_finite_weight_is_neutralized() -> TestResult {
+        let events = vec![PeerOutcomeFeedbackEvent {
+            peer_id: "peer_alpha",
+            memory_id: "mem_shared",
+            kind: PeerOutcomeFeedbackKind::Helped,
+            peer_weight: f32::NAN,
+            evidence_ref: Some("evidence://alpha_run_001"),
+        }];
+        let states = vec![PeerOutcomePeerState::new("peer_alpha", 1.0)];
+
+        let summary = summarize_peer_outcome_feedback(
+            "mem_shared",
+            &events,
+            &states,
+            PeerOutcomeFeedbackPolicy::default(),
+        );
+
+        ensure_approx(
+            summary.signals[0].peer_weight,
+            0.0,
+            0.001,
+            "non-finite peer weight is neutralized",
+        )?;
+        ensure_approx(
+            summary.signals[0].effective_weight,
+            0.0,
+            0.001,
+            "non-finite peer weight has no effective influence",
+        )?;
+        ensure_approx(
+            summary.ranking_adjustment,
+            0.0,
+            0.001,
+            "non-finite peer weight has no ranking influence",
         )
     }
 

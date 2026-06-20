@@ -1170,13 +1170,42 @@ fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> 
     crate::core::path_safety::first_existing_symlink_component(path)
 }
 
+struct TempPackL2FileGuard<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl<'a> TempPackL2FileGuard<'a> {
+    fn disarmed(path: &'a Path) -> Self {
+        Self { path, armed: false }
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempPackL2FileGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(self.path);
+        }
+    }
+}
+
 fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), PackL2CacheError> {
+    let mut cleanup_guard = TempPackL2FileGuard::disarmed(path);
     let mut file =
         open_cache_temp_file_for_create(path).map_err(|source| PackL2CacheError::Io {
             path: path.to_path_buf(),
             operation: "open_temp",
             source,
         })?;
+    cleanup_guard.arm();
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
         .map_err(|source| PackL2CacheError::Io {
@@ -1205,6 +1234,7 @@ fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), PackL2CacheError> 
             operation: "set_file_permissions",
             source,
         })?;
+    cleanup_guard.disarm();
     Ok(())
 }
 
@@ -1389,6 +1419,61 @@ mod tests {
             .modified()
             .map_err(|error| error.to_string())?;
         system_time_seconds(modified).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn temp_pack_l2_file_guard_removes_armed_orphan() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = temp.path().join("entry.tmp");
+        fs::write(&path, b"orphan").map_err(|error| error.to_string())?;
+        {
+            let mut guard = TempPackL2FileGuard::disarmed(&path);
+            guard.arm();
+        }
+
+        assert!(
+            !path.exists(),
+            "armed pack L2 temp guard should remove an owned orphan"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn temp_pack_l2_file_guard_disarm_preserves_success_temp() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = temp.path().join("entry.tmp");
+        fs::write(&path, b"ready-to-publish").map_err(|error| error.to_string())?;
+        {
+            let mut guard = TempPackL2FileGuard::disarmed(&path);
+            guard.arm();
+            guard.disarm();
+        }
+
+        assert!(
+            path.exists(),
+            "disarmed pack L2 temp guard must preserve the successful temp file"
+        );
+        assert_eq!(
+            fs::read(&path).map_err(|error| error.to_string())?,
+            b"ready-to-publish",
+            "disarmed guard must not change temp file contents"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn temp_pack_l2_file_guard_unarmed_ignores_missing_path() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = temp.path().join("never-created.tmp");
+        {
+            let _guard = TempPackL2FileGuard::disarmed(&path);
+        }
+
+        assert!(
+            !path.exists(),
+            "unarmed pack L2 temp guard must not create or remove a missing path"
+        );
+        Ok(())
     }
 
     #[test]
