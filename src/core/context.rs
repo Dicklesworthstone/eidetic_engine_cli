@@ -90,8 +90,8 @@ use crate::models::{
 use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
     ContextRequest, ContextRequestInput, ContextResponse, ContextResponseDegradation,
-    ContextResponseSeverity, PackAdmissionPosture, PackAssemblySlo, PackAssemblySloActuals,
-    PackCandidate, PackCandidateInput, PackCoordinationSnapshot, PackDraft,
+    ContextResponsePagination, ContextResponseSeverity, PackAdmissionPosture, PackAssemblySlo,
+    PackAssemblySloActuals, PackCandidate, PackCandidateInput, PackCoordinationSnapshot, PackDraft,
     PackFreshnessAnchorFacet, PackFreshnessFacet, PackItemLifecycle, PackOmission,
     PackOmissionReason, PackProvenance, PackRejectionStage, PackResourceProfile,
     PackScoreBreakdown, PackSection, PackTrustSignal, TokenBudget, WhyNotSelectedInput,
@@ -2522,7 +2522,7 @@ fn run_context_pack_with_performance_inner(
         }
     }
 
-    let _pagination_info = apply_pagination(&mut candidates, &options.pagination, &mut degraded);
+    let pagination_info = apply_pagination(&mut candidates, &options.pagination, &mut degraded);
     candidate_metrics.subspans.scoring_ordering = scoring_ordering_start.elapsed();
     trace.record_candidate_resolution_subspans(&candidate_metrics.subspans);
     trace.candidate_resolution = candidate_metrics;
@@ -2882,6 +2882,9 @@ fn run_context_pack_with_performance_inner(
     response.data.consensus = consensus_conflicts.consensus;
     response.data.conflicts = consensus_conflicts.conflicts;
     response.data.coordination = coordination;
+    if pagination_info.applied {
+        response.data.pagination = Some(pagination_info.into_response());
+    }
 
     if let Some(l2_context) = &l2_cache_context {
         let degraded_count_before_l2_store = response.data.degraded.len();
@@ -4016,10 +4019,25 @@ pub struct PaginationInfo {
     pub limit: u32,
     /// Number of items in this page.
     pub page_size: u32,
+    /// Total candidates before pagination was applied.
+    pub total: u32,
     /// Whether there are more results after this page.
     pub has_more: bool,
     /// Next cursor token (if has_more is true).
     pub next_cursor: Option<String>,
+}
+
+impl PaginationInfo {
+    fn into_response(self) -> ContextResponsePagination {
+        ContextResponsePagination {
+            offset: self.offset,
+            limit: self.limit,
+            total: self.total,
+            page_size: self.page_size,
+            has_more: self.has_more,
+            next_cursor: self.next_cursor,
+        }
+    }
 }
 
 fn apply_pagination(
@@ -4042,6 +4060,7 @@ fn apply_pagination(
             offset: pagination.offset,
             limit: pagination.limit,
             page_size: 0,
+            total: u32::try_from(total).unwrap_or(u32::MAX),
             has_more: false,
             next_cursor: None,
         };
@@ -4087,6 +4106,7 @@ fn apply_pagination(
         offset: pagination.offset,
         limit: pagination.limit,
         page_size: u32::try_from(page_size).unwrap_or(u32::MAX),
+        total: u32::try_from(total).unwrap_or(u32::MAX),
         has_more,
         next_cursor,
     }
@@ -9810,6 +9830,7 @@ mod tests {
 
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
+    use std::str::FromStr;
     use std::time::Duration;
 
     use proptest::prelude::*;
@@ -9819,9 +9840,10 @@ mod tests {
 
     use super::{
         AccessLevel, CandidateResolutionMetrics, CapabilitySet, CommandContext,
+        ContextPagination,
         ContextPerformanceTrace, PackPersistenceSubspans, PackSlotAcquisition, PerformanceTiming,
-        ReadSnapshotTrace, candidate_selection_why, context_performance_json, focus_candidate_why,
-        focus_relevance, open_pack_slot_lock_file, pack_assembly_slo_for_run,
+        ReadSnapshotTrace, apply_pagination, candidate_selection_why, context_performance_json,
+        focus_candidate_why, focus_relevance, open_pack_slot_lock_file, pack_assembly_slo_for_run,
         push_evidence_freshness_degradation, push_pack_budget_too_small_degradation,
         push_search_degradations, try_acquire_pack_slot, unit_score,
     };
@@ -9887,6 +9909,71 @@ mod tests {
 
     fn test_runtime_profile() -> RuntimeProfileReport {
         RuntimeProfileReport::for_profile(OperatingProfile::Workstation, "test_fixture")
+    }
+
+    fn pagination_candidate(seed: u128) -> Result<PackCandidate, String> {
+        let provenance = PackProvenance::new(
+            ProvenanceUri::from_str("manual://pagination")
+                .map_err(|error| format!("provenance uri: {error:?}"))?,
+            "pagination fixture",
+        )
+        .map_err(|error| format!("provenance: {error:?}"))?;
+        PackCandidate::new(PackCandidateInput {
+            memory_id: MemoryId::from_uuid(uuid::Uuid::from_u128(seed)),
+            section: PackSection::ProceduralRules,
+            content: format!("Pagination candidate {seed}."),
+            estimated_tokens: 4,
+            relevance: UnitScore::parse(0.8).map_err(|error| format!("relevance: {error:?}"))?,
+            utility: UnitScore::parse(0.7).map_err(|error| format!("utility: {error:?}"))?,
+            provenance: vec![provenance],
+            why: "pagination helper fixture".to_owned(),
+        })
+        .map_err(|error| format!("candidate: {error:?}"))
+    }
+
+    #[test]
+    fn apply_pagination_preserves_next_cursor_metadata_for_response() -> Result<(), String> {
+        let mut candidates = vec![
+            pagination_candidate(1)?,
+            pagination_candidate(2)?,
+            pagination_candidate(3)?,
+        ];
+        let mut degraded = Vec::new();
+        let info = apply_pagination(
+            &mut candidates,
+            &Some(ContextPagination {
+                limit: 1,
+                offset: 1,
+                query_hash: "query-shape".to_owned(),
+            }),
+            &mut degraded,
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(info.offset, 1);
+        assert_eq!(info.limit, 1);
+        assert_eq!(info.page_size, 1);
+        assert_eq!(info.total, 3);
+        assert!(info.has_more);
+        let cursor = info
+            .next_cursor
+            .clone()
+            .ok_or_else(|| "expected next cursor".to_owned())?;
+        let decoded =
+            crate::models::PaginationCursor::decode(&cursor).map_err(|error| error.to_string())?;
+        assert_eq!(decoded.offset, 2);
+        assert_eq!(decoded.query_hash, "query-shape");
+        let response = info.into_response();
+        assert_eq!(response.next_cursor.as_deref(), Some(cursor.as_str()));
+        assert_eq!(response.total, 3);
+        assert_eq!(response.page_size, 1);
+        assert!(
+            degraded
+                .iter()
+                .any(|entry| entry.code == "context_pagination_applied"),
+            "pagination should remain visible as a degradation"
+        );
+        Ok(())
     }
 
     #[test]
