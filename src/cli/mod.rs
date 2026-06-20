@@ -50738,7 +50738,7 @@ where
     W: Write,
     E: Write,
 {
-    use franken_agent_detection::default_probe_paths_tilde;
+    use crate::core::agent_detect::{default_probe_paths_tilde, normalize_connector_slug};
 
     let all_sources = default_probe_paths_tilde();
     let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
@@ -50748,14 +50748,14 @@ where
         s.split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(|s| s.to_lowercase())
+            .map(normalize_connector_slug)
             .collect()
     });
 
     let filtered: Vec<_> = if let Some(ref slugs) = only_slugs {
         all_sources
             .into_iter()
-            .filter(|(slug, _)| slugs.contains(&slug.to_string()))
+            .filter(|(slug, _)| slugs.contains(&normalize_connector_slug(slug)))
             .collect()
     } else {
         all_sources

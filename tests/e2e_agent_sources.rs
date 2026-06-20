@@ -50,6 +50,28 @@ fn run_agent_sources(extra: &[&str]) -> Result<Value, String> {
         .map_err(|error| format!("ee agent sources stdout must be JSON: {error}"))
 }
 
+fn run_agent_scan(extra: &[&str]) -> Result<Value, String> {
+    let mut args = vec!["--json", "agent", "scan"];
+    args.extend_from_slice(extra);
+    let output = run_ee(&args)?;
+    ensure(
+        output.status.success(),
+        format!(
+            "ee agent scan {extra:?} must succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    ensure(
+        output.stderr.is_empty(),
+        format!(
+            "ee agent scan {extra:?} must keep stderr empty; got {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("ee agent scan stdout must be JSON: {error}"))
+}
+
 #[test]
 fn agent_sources_default_json_is_response_envelope_without_probe_paths() -> TestResult {
     let value = run_agent_sources(&[])?;
@@ -197,4 +219,44 @@ fn agent_sources_origin_fixture_filter_canonicalizes_codex_alias() -> TestResult
             .is_some_and(|path| path.contains("tests/fixtures/agent_detect/remote_mirror")),
         format!("rewrite.to must target the deterministic fixture mirror; got {rewrite}"),
     )
+}
+
+#[test]
+fn agent_scan_only_canonicalizes_codex_aliases() -> TestResult {
+    for alias in ["codex", "codex-cli", "CodexCli"] {
+        let value = run_agent_scan(&["--only", alias])?;
+        ensure(
+            value["schema"].as_str() == Some("ee.agent.scan.v1"),
+            format!("agent scan schema must be ee.agent.scan.v1 for {alias}; got {value}"),
+        )?;
+        ensure(
+            value["success"].as_bool() == Some(true),
+            format!("agent scan must succeed for {alias}; got {value}"),
+        )?;
+
+        let data = &value["data"];
+        ensure(
+            data["command"].as_str() == Some("agent scan"),
+            format!("data.command must be agent scan for {alias}; got {data}"),
+        )?;
+        let paths = data["paths"]
+            .as_array()
+            .ok_or_else(|| format!("data.paths must be an array for {alias}; got {data}"))?;
+        ensure(
+            !paths.is_empty(),
+            format!("agent scan --only {alias} must scan codex paths; got {data}"),
+        )?;
+        ensure(
+            data["totalPaths"].as_u64() == Some(paths.len() as u64),
+            format!("totalPaths must match paths length for {alias}; got {data}"),
+        )?;
+        for (index, path) in paths.iter().enumerate() {
+            ensure(
+                path["slug"].as_str() == Some("codex"),
+                format!("paths[{index}] must be canonical codex for {alias}; got {path}"),
+            )?;
+        }
+    }
+
+    Ok(())
 }
