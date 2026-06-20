@@ -469,6 +469,82 @@ pub const CONCRETE_EVIDENCE_SOURCE_MARKERS: &[&str] = &[
     r#""procedureids":["#,
 ];
 
+const PERSISTED_RECORD_EVIDENCE_MARKERS: &[&str] = &[
+    r#""auditid":""#,
+    r#""databasepath":""#,
+    r#""recorderrunids":["#,
+    r#""evidenceids":["#,
+];
+
+const PACK_SELECTION_EVIDENCE_MARKERS: &[&str] = &[
+    r#""evidenceids":["#,
+    r#""sourceids":["#,
+    r#""provenance":["#,
+    r#""scorecomponents":{"#,
+    r#""scorebreakdown":{"#,
+    r#""packhash":""#,
+    r#""contextpackids":["#,
+];
+
+const RISK_EVIDENCE_MARKERS: &[&str] = &[
+    r#""sourceschecked":[{"#,
+    r#""preflightids":["#,
+    r#""tripwireids":["#,
+    r#""evidenceids":["#,
+    r#""sourceids":["#,
+];
+
+const CURATION_EVIDENCE_MARKERS: &[&str] = &[
+    r#""evidenceids":["#,
+    r#""sourceids":["#,
+    r#""procedureids":["#,
+    r#""provenance":["#,
+];
+
+const GRAPH_EVIDENCE_MARKERS: &[&str] = &[
+    r#""graphsnapshotid":""#,
+    r#""sourceids":["#,
+    r#""evidenceids":["#,
+    r#""provenance":["#,
+];
+
+const CERTIFICATE_EVIDENCE_MARKERS: &[&str] = &[
+    r#""manifestpath":""#,
+    r#""manifesthash":""#,
+    r#""artifacthash":""#,
+    r#""payloadhash":""#,
+    r#""sourceids":["#,
+];
+
+const REPLAY_EVIDENCE_MARKERS: &[&str] = &[
+    r#""manifestpath":""#,
+    r#""manifesthash":""#,
+    r#""artifacthash":""#,
+    r#""payloadhash":""#,
+    r#""recorderrunids":["#,
+    r#""contextpackids":["#,
+    r#""evidenceids":["#,
+];
+
+const PROCEDURE_EVIDENCE_MARKERS: &[&str] = &[
+    r#""sourceschecked":[{"#,
+    r#""procedureids":["#,
+    r#""preflightids":["#,
+    r#""evidenceids":["#,
+    r#""sourceids":["#,
+];
+
+const CAUSAL_EVIDENCE_MARKERS: &[&str] = &[
+    r#""manifestpath":""#,
+    r#""manifesthash":""#,
+    r#""artifacthash":""#,
+    r#""payloadhash":""#,
+    r#""recorderrunids":["#,
+    r#""contextpackids":["#,
+    r#""evidenceids":["#,
+    r#""sourceids":["#,
+];
+
 fn compact_ascii_lowercase(input: &str) -> String {
     input
         .chars()
@@ -479,6 +555,29 @@ fn compact_ascii_lowercase(input: &str) -> String {
 
 fn has_concrete_evidence_source(compact_output: &str) -> bool {
     CONCRETE_EVIDENCE_SOURCE_MARKERS
+        .iter()
+        .any(|marker| compact_output.contains(marker))
+}
+
+fn evidence_markers_for_claim(claim: &str) -> &'static [&'static str] {
+    match claim {
+        "persisted records" => PERSISTED_RECORD_EVIDENCE_MARKERS,
+        "pack selection" | "pack selection reason" => PACK_SELECTION_EVIDENCE_MARKERS,
+        "risk assessment" | "risk score" => RISK_EVIDENCE_MARKERS,
+        "curation maturity" => CURATION_EVIDENCE_MARKERS,
+        "graph PageRank" | "graph betweenness" | "graph explanation" => GRAPH_EVIDENCE_MARKERS,
+        "certificate validity"
+        | "certificate hash verification"
+        | "certificate verification message" => CERTIFICATE_EVIDENCE_MARKERS,
+        "replay success" | "verified replay hash" => REPLAY_EVIDENCE_MARKERS,
+        "procedure validation" | "procedure verified status" => PROCEDURE_EVIDENCE_MARKERS,
+        "causal uplift" | "causal confidence" => CAUSAL_EVIDENCE_MARKERS,
+        _ => CONCRETE_EVIDENCE_SOURCE_MARKERS,
+    }
+}
+
+fn claim_has_relevant_evidence_source(claim: &str, compact_output: &str) -> bool {
+    evidence_markers_for_claim(claim)
         .iter()
         .any(|marker| compact_output.contains(marker))
 }
@@ -589,13 +688,6 @@ fn local_unsupported_evidence_claims(
     claims
 }
 
-fn value_has_concrete_evidence_source(value: &serde_json::Value) -> bool {
-    let Ok(json) = serde_json::to_string(value) else {
-        return false;
-    };
-    has_concrete_evidence_source(&compact_ascii_lowercase(&json))
-}
-
 fn collect_json_evidence_claim_checks(
     command_path: &str,
     path: &str,
@@ -606,8 +698,13 @@ fn collect_json_evidence_claim_checks(
         serde_json::Value::Object(object) => {
             let claims = local_unsupported_evidence_claims(object);
             if !claims.is_empty() {
-                let has_evidence = value_has_concrete_evidence_source(value);
+                let compact_value = serde_json::to_string(value)
+                    .ok()
+                    .map(|json| compact_ascii_lowercase(&json));
                 for claim in claims {
+                    let has_evidence = compact_value
+                        .as_deref()
+                        .is_some_and(|compact| claim_has_relevant_evidence_source(claim, compact));
                     if has_evidence {
                         checks.push(HonestyCheckResult::pass_for(
                             "no_unsupported_evidence_claim",
@@ -1086,6 +1183,39 @@ mod tests {
             true,
             false,
             r#"{"schema":"ee.certificate.verify.v1","success":true,"data":{"result":"valid","hashVerified":true,"manifestHash":"blake3:abc123","payloadHash":"blake3:def456"}}"#,
+        );
+
+        assert!(report.passed);
+    }
+
+    #[test]
+    fn unsupported_evidence_claim_rejects_certificate_with_unrelated_audit_id() {
+        let report = validate_no_unsupported_evidence_claims(
+            "certificate verify",
+            true,
+            false,
+            r#"{"schema":"ee.response.v2","success":true,"data":{"result":"valid","hashVerified":true,"auditId":"audit_unrelated"}}"#,
+        );
+
+        assert!(!report.passed);
+        assert_eq!(report.issue_count, 2);
+        assert!(
+            report
+                .checks
+                .iter()
+                .filter_map(|check| check.issue.as_deref())
+                .all(|issue| issue.contains("/data")),
+            "unsupported certificate claims should stay attributed to the claim-bearing object: {report:?}"
+        );
+    }
+
+    #[test]
+    fn unsupported_evidence_claim_accepts_persisted_record_with_audit_id() {
+        let report = validate_no_unsupported_evidence_claims(
+            "remember",
+            true,
+            false,
+            r#"{"schema":"ee.response.v2","success":true,"data":{"persisted":true,"auditId":"audit_memory_write"}}"#,
         );
 
         assert!(report.passed);
