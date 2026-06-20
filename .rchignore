@@ -139,3 +139,10 @@ tests/audit_artifacts/latest_*.json
 **/._*
 .DS_Store
 **/.DS_Store
+
+# Proptest's default failure persistence can create per-module seed files under
+# the repo-root proptest-regressions/ directory. This project intentionally
+# tracks a few stable seeds there, but connection.txt is a generated local seed
+# on some workers. Protect the stale remote file from rsync --delete without
+# hiding the tracked regression seeds above.
+/proptest-regressions/connection.txt
