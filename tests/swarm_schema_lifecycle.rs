@@ -1129,6 +1129,118 @@ fn source_authority_fixtures_cover_taxonomy_and_redaction() -> TestResult {
 }
 
 #[test]
+fn source_authority_bv_robot_next_no_output_fixture_is_bounded() -> TestResult {
+    let fixture = read_json(
+        &repo_root()
+            .join("tests")
+            .join("fixtures")
+            .join("source_authority")
+            .join("bv_robot_next_no_output_large_tracker.json"),
+    )?;
+    if string_field(&fixture, "/schema", "bv robot-next no-output fixture")?
+        != "ee.source_authority.snapshot.v1"
+    {
+        return Err("bv robot-next no-output fixture schema drifted".into());
+    }
+    if string_field(
+        &fixture,
+        "/overall/verdict",
+        "bv robot-next no-output fixture",
+    )? != "fail_closed_timeout"
+        || !bool_field(
+            &fixture,
+            "/overall/failClosed",
+            "bv robot-next no-output fixture",
+        )?
+    {
+        return Err("bv robot-next no-output fixture must fail closed on timeout".into());
+    }
+
+    let sources = fixture
+        .pointer("/sources")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "bv robot-next no-output fixture missing sources".to_owned())?;
+    let bv_source = sources
+        .iter()
+        .find(|source| source.pointer("/sourceKind").and_then(Value::as_str) == Some("bv"))
+        .ok_or_else(|| "bv robot-next no-output fixture missing BV source".to_owned())?;
+    if string_field(bv_source, "/state", "bv source")? != "timed_out" {
+        return Err("bv source must preserve timed_out instead of candidate absence".into());
+    }
+    if string_field(bv_source, "/exit/exitClass", "bv source")? != "timeout"
+        || bv_source.pointer("/exit/exitCode").and_then(Value::as_i64) != Some(124)
+        || !bool_field(bv_source, "/budget/timedOut", "bv source")?
+    {
+        return Err("bv source must pin timeout exit and budget posture".into());
+    }
+    if !bool_field(bv_source, "/partialData/available", "bv source")? {
+        return Err("bv source must retain bounded partial graph metadata".into());
+    }
+
+    let dropped = string_array_at(bv_source, "/partialData/droppedSections", "bv source")?;
+    for phase in ["cycles", "robot_next", "claim_command"] {
+        if !dropped.iter().any(|item| item == phase) {
+            return Err(format!("bv source droppedSections missing {phase}"));
+        }
+    }
+    let skipped = string_array_at(bv_source, "/bvRobotNext/skippedPhases", "bv source")?;
+    for phase in ["cycles", "robot_next", "claim_command"] {
+        if !skipped.iter().any(|item| item == phase) {
+            return Err(format!("bvRobotNext skippedPhases missing {phase}"));
+        }
+    }
+    if bv_source
+        .pointer("/bvRobotNext/graphNodeCount")
+        .and_then(Value::as_i64)
+        .is_none_or(|count| count < 4000)
+        || bv_source
+            .pointer("/bvRobotNext/graphEdgeCount")
+            .and_then(Value::as_i64)
+            .is_none_or(|count| count < 6000)
+    {
+        return Err("bvRobotNext must pin sanitized large-graph shape".into());
+    }
+    if string_field(bv_source, "/bvRobotNext/recommendationState", "bv source")? != "no_output"
+    {
+        return Err("bvRobotNext must distinguish no_output from empty_queue".into());
+    }
+    if !bool_field(
+        bv_source,
+        "/bvRobotNext/claimCommandSuppressed",
+        "bv source",
+    )? {
+        return Err("degraded BV posture must suppress claim commands".into());
+    }
+    if string_field(bv_source, "/bvRobotNext/fallbackCommand", "bv source")?
+        != "bv --robot-insights --format json"
+    {
+        return Err("bvRobotNext fallback command drifted".into());
+    }
+
+    let serialized = fixture.to_string();
+    let lowered = serialized.to_ascii_lowercase();
+    for forbidden in [
+        "/private/",
+        "/users/",
+        "/home/",
+        "raw stdout",
+        "raw stderr",
+        "safe_to_claim",
+        "\"safetoclaim\"",
+        "\"claimcommandaction\"",
+        "claimable",
+    ] {
+        if lowered.contains(forbidden) {
+            return Err(format!(
+                "bv robot-next no-output fixture leaked forbidden detail {forbidden}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn source_authority_replay_fixtures_pin_claim_gate_projections() -> TestResult {
     let fixture_path = repo_root()
         .join("tests")

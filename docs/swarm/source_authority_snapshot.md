@@ -75,6 +75,13 @@ templates, graph sizes are counts only, skipped phases are enum-like names, and
 no raw tracker rows, raw BV stdout, private paths, or environment dumps are
 included.
 
+Regression fixture
+`tests/fixtures/source_authority/bv_robot_next_no_output_large_tracker.json`
+pins the large-tracker no-output case: `bv --robot-next --format json` exhausts
+its budget with empty stdout, partial graph-size metadata remains available,
+and `claimCommandSuppressed=true` prevents the degraded BV recommendation from
+becoming a claim action.
+
 ## Collector projection
 
 The shipped collector is the work-packet projection in

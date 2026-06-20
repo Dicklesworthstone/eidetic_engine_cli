@@ -1,0 +1,101 @@
+{
+  "schema": "ee.source_authority.snapshot.v1",
+  "snapshotId": "sas-fixture-bv-no-output-large-tracker-0001",
+  "generatedAt": "2026-06-20T16:30:00Z",
+  "workspace": {
+    "workspaceLabel": "eidetic_engine_cli",
+    "workspaceIdHash": "blake3:a7f2c19e6b3d48aa"
+  },
+  "redactionStatus": "paths_counts_subjects_only_no_content",
+  "ordering": {
+    "sources": "sourceKind ascending byte order",
+    "evidence": "evidenceId ascending byte order",
+    "contradictions": "contradictionId ascending byte order"
+  },
+  "sources": [
+    {
+      "sourceKind": "bv",
+      "state": "timed_out",
+      "authoritative": false,
+      "freshness": {
+        "capturedAt": null,
+        "ageMs": null,
+        "staleAfterMs": 300000,
+        "freshnessState": "unknown"
+      },
+      "budget": {
+        "commandBudgetMs": 30000,
+        "elapsedMs": 30000,
+        "timedOut": true,
+        "retriesUsed": 0,
+        "retryBudget": 0
+      },
+      "exit": {
+        "exitClass": "timeout",
+        "exitCode": 124
+      },
+      "partialData": {
+        "available": true,
+        "droppedSections": [
+          "cycles",
+          "robot_next",
+          "claim_command"
+        ],
+        "reason": "bv robot-next exhausted its bounded budget with no stdout; bounded robot-insights metadata still reported graph scale"
+      },
+      "fallback": {
+        "active": false,
+        "fallbackKind": null,
+        "fallbackAgeMs": null
+      },
+      "repair": {
+        "guidance": "Retry BV with a bounded robot-insights probe or fall back to the safe Beads actionable queue.",
+        "command": "bv --robot-insights --format json",
+        "safety": "read_only_probe"
+      },
+      "evidenceId": "sre-bv-large-tracker-no-output-0001",
+      "statusDetail": "bv robot-next timed out with empty stdout; partial graph counts came from bounded robot-insights fallback",
+      "bvRobotNext": {
+        "commandId": "bv_robot_next",
+        "commandName": "bv --robot-next",
+        "commandTemplate": "bv --robot-next --format json",
+        "graphNodeCount": 4079,
+        "graphEdgeCount": 6120,
+        "skippedPhases": [
+          "cycles",
+          "robot_next",
+          "claim_command"
+        ],
+        "recommendationState": "no_output",
+        "claimCommandSuppressed": true,
+        "fallbackCommand": "bv --robot-insights --format json"
+      }
+    }
+  ],
+  "candidateEvidence": null,
+  "contradictions": [],
+  "overall": {
+    "verdict": "fail_closed_timeout",
+    "failClosed": true,
+    "authoritativeSourceCount": 0,
+    "degradedSourceCount": 1,
+    "unavailableSourceCount": 0
+  },
+  "degraded": [
+    {
+      "code": "bv_command_timeout",
+      "severity": "warning",
+      "message": "BV robot-next exhausted its bounded budget before returning a recommendation.",
+      "repair": "bv --robot-insights --format json",
+      "sourceKind": "bv"
+    },
+    {
+      "code": "bv_no_output",
+      "severity": "warning",
+      "message": "BV robot-next returned no stdout; graph-aware ranking is advisory only.",
+      "repair": "scripts/br_retry.sh actionable --json",
+      "sourceKind": "bv"
+    }
+  ],
+  "provenanceHash": "blake3:6f8c2a1d9e0b4c3f8172635445362718"
+}
