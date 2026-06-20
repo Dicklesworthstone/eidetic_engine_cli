@@ -381,6 +381,20 @@ pub fn build_contention_report(inputs: &ContentionInputs) -> ContentionDiagRepor
             ContentionPosture::Ok
         };
         overall = overall.worst(posture);
+        if posture >= ContentionPosture::Warm {
+            findings.push(finding(
+                "group_commit",
+                posture,
+                "group_commit_active_coalescing",
+                format!(
+                    "group-commit: {} batches, {} coalesced writes, {} fsyncs saved (avg batch {:.2}); batching is absorbing durable-write pressure",
+                    gc.batches, gc.writes_coalesced, gc.fsync_saved, avg_batch_size
+                ),
+                &[
+                    "informational: group-commit batching is reducing write fsync pressure",
+                ],
+            ));
+        }
         GroupCommitContention {
             enabled: gc.enabled,
             batches: gc.batches,
@@ -621,6 +635,36 @@ mod tests {
             .map(|f| f.source.as_str())
             .collect();
         assert_eq!(sources, vec!["read_pool", "write_lock"]);
+    }
+
+    #[test]
+    fn group_commit_warm_emits_informational_finding() {
+        let inputs = ContentionInputs {
+            write_owner: Some(quiet_write_owner()),
+            read_pool: Some(pool_stats(1, 4, 0, 0)),
+            singleflight: Some(quiet_singleflight()),
+            group_commit: Some(GroupCommitInput {
+                enabled: true,
+                batches: 2,
+                writes_coalesced: 5,
+                fsync_saved: 3,
+            }),
+            ..ContentionInputs::default()
+        };
+        let report = build_contention_report(&inputs);
+        let group_commit = report.group_commit.as_ref().expect("group_commit report");
+        assert_eq!(group_commit.posture, ContentionPosture::Warm);
+        assert_eq!(group_commit.avg_batch_size, 2.5);
+        assert_eq!(report.overall_posture, ContentionPosture::Warm);
+        let finding = report
+            .top_contention
+            .iter()
+            .find(|finding| finding.source == "group_commit")
+            .expect("group_commit finding");
+        assert_eq!(finding.severity, ContentionPosture::Warm);
+        assert_eq!(finding.reason_code, "group_commit_active_coalescing");
+        assert!(finding.detail.contains("3 fsyncs saved"));
+        assert!(!finding.suggested_commands.is_empty());
     }
 
     #[test]
