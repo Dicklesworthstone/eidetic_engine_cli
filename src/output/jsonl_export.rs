@@ -93,6 +93,24 @@ pub fn contains_secret_pattern(content: &str) -> bool {
             .any(|key| contains_secret_key_with_value(&lower, key))
 }
 
+fn contains_export_secret_pattern(content: &str) -> bool {
+    if contains_secret_pattern(content) {
+        return true;
+    }
+
+    crate::policy::redact_secret_like_content(content)
+        .redacted_reasons
+        .iter()
+        .any(|reason| export_redaction_reason_is_secret(reason))
+}
+
+fn export_redaction_reason_is_secret(reason: &str) -> bool {
+    !matches!(
+        reason,
+        "email_address" | "ssn" | "phone_number" | "high_entropy_secret"
+    )
+}
+
 fn contains_secret_key_with_value(content: &str, key: &str) -> bool {
     content
         .match_indices(key)
@@ -203,14 +221,14 @@ pub fn redact_content(content: &str, level: RedactionLevel) -> String {
     match level {
         RedactionLevel::None => content.to_owned(),
         RedactionLevel::Minimal => {
-            if contains_secret_pattern(content) {
+            if contains_export_secret_pattern(content) {
                 REDACTED_PLACEHOLDER.to_owned()
             } else {
                 content.to_owned()
             }
         }
         RedactionLevel::Standard => {
-            if contains_secret_pattern(content) {
+            if contains_export_secret_pattern(content) {
                 REDACTED_PLACEHOLDER.to_owned()
             } else {
                 redact_high_entropy_tokens(
@@ -220,7 +238,7 @@ pub fn redact_content(content: &str, level: RedactionLevel) -> String {
             }
         }
         RedactionLevel::Strict => {
-            if contains_secret_pattern(content) {
+            if contains_export_secret_pattern(content) {
                 REDACTED_PLACEHOLDER.to_owned()
             } else {
                 redact_high_entropy_tokens(
@@ -1245,6 +1263,33 @@ mod tests {
             redact_content(normal, RedactionLevel::Minimal),
             normal.to_owned(),
             "minimal preserves normal",
+        )
+    }
+
+    #[test]
+    fn redact_content_minimal_uses_policy_secret_shapes_without_pii_or_entropy_drift() -> TestResult
+    {
+        let openai_key = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ==.c2lnbmF0dXJl";
+        let email = "contact redaction-fixture@example.test for context";
+        let long_entropy = "abcdEFGH1234abcdEFGH1234abcdEFGH1234abcdEFGH1234abcdEFGH1234";
+
+        for secret in [openai_key, jwt] {
+            ensure(
+                redact_content(secret, RedactionLevel::Minimal),
+                REDACTED_PLACEHOLDER.to_owned(),
+                &format!("minimal redacts policy-recognized credential shape {secret}"),
+            )?;
+        }
+        ensure(
+            redact_content(email, RedactionLevel::Minimal),
+            email.to_owned(),
+            "minimal does not promote policy PII findings into JSONL export content redaction",
+        )?;
+        ensure(
+            redact_content(long_entropy, RedactionLevel::Minimal),
+            long_entropy.to_owned(),
+            "minimal preserves high-entropy-only values per redaction-level matrix",
         )
     }
 
