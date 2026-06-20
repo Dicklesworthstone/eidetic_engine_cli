@@ -142,10 +142,11 @@ tests/audit_artifacts/latest_*.json
 
 # Proptest's default failure persistence can create per-module seed files under
 # the repo-root proptest-regressions/ directory. This project intentionally
-# tracks a few stable seeds there, but connection.txt is a generated local seed
-# on some workers. Protect the stale remote file from rsync --delete without
-# hiding the tracked regression seeds above.
+# tracks a few stable seeds there, but connection.txt and codegen.txt are
+# generated local seeds on some workers. Protect the stale remote files from
+# rsync --delete without hiding the tracked regression seeds above.
 /proptest-regressions/connection.txt
+/proptest-regressions/codegen.txt
 
 # Foreign stale worker artifacts (bd-isqmd class). fixtures/openhands/ and
 # fixtures/antigravity/ are NOT ee source — they are not tracked, not in this
