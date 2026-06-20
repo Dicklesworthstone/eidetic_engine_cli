@@ -147,6 +147,13 @@ tests/audit_artifacts/latest_*.json
 # rsync --delete without hiding the tracked regression seeds above.
 /proptest-regressions/connection.txt
 /proptest-regressions/codegen.txt
+proptest-regressions/connection.txt
+proptest-regressions/codegen.txt
+proptest-regressions/sync/
+proptest-regressions/runtime/
+proptest-regressions/net/
+proptest-regressions/cx/
+proptest-regressions/combinator/
 
 # Foreign stale worker artifacts (bd-isqmd class). fixtures/openhands/ and
 # fixtures/antigravity/ are NOT ee source — they are not tracked, not in this
