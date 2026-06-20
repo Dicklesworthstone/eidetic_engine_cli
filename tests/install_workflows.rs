@@ -121,10 +121,15 @@ fn ensure_finding_with(
 fn normalize_dynamic_value(value: &mut serde_json::Value, install_root: Option<&Path>) {
     match value {
         serde_json::Value::String(text) => {
+            let mut normalized = std::mem::take(text);
             if let Some(root) = install_root {
                 let root = root.to_string_lossy().replace('\\', "/");
-                *text = text.replace(&root, "<INSTALL_ROOT>");
+                normalized = normalized.replace(&root, "<INSTALL_ROOT>");
             }
+            let manifest_dir = env!("CARGO_MANIFEST_DIR").replace('\\', "/");
+            normalized = normalized.replace(&manifest_dir, "<WORKSPACE>");
+            normalized = normalized.replace(env!("CARGO_PKG_VERSION"), "<EE_VERSION>");
+            *text = normalized;
         }
         serde_json::Value::Array(items) => {
             for item in items {
