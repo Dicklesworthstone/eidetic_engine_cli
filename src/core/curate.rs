@@ -6206,28 +6206,6 @@ pub fn run_curate_retire(
 
     let next_action = "ee curate candidates --status=retired --json".to_owned();
 
-    if options.dry_run {
-        return Ok(CurateRetireReport {
-            schema: CURATE_RETIRE_SCHEMA_V1,
-            command: "curate retire",
-            version: env!("CARGO_PKG_VERSION"),
-            workspace_id: prepared.workspace_id,
-            workspace_path: prepared.workspace_path.display().to_string(),
-            database_path: prepared.database_path.display().to_string(),
-            candidate_id: options.candidate_id.to_owned(),
-            from_status: "pending".to_owned(),
-            to_status: "retired".to_owned(),
-            reason,
-            retired_at,
-            retired_by: actor,
-            dry_run: true,
-            persisted: false,
-            audit_id: None,
-            degraded: Vec::new(),
-            next_action,
-        });
-    }
-
     let connection = open_existing_database(&prepared.database_path)?;
     let candidate = connection
         .get_curation_candidate(&prepared.workspace_id, options.candidate_id)
@@ -6243,6 +6221,28 @@ pub fn run_curate_retire(
 
     let from_status = candidate.status.clone();
     let to_status = CandidateStatus::Rejected.as_str();
+
+    if options.dry_run {
+        return Ok(CurateRetireReport {
+            schema: CURATE_RETIRE_SCHEMA_V1,
+            command: "curate retire",
+            version: env!("CARGO_PKG_VERSION"),
+            workspace_id: prepared.workspace_id.clone(),
+            workspace_path: prepared.workspace_path.display().to_string(),
+            database_path: prepared.database_path.display().to_string(),
+            candidate_id: options.candidate_id.to_owned(),
+            from_status: from_status.clone(),
+            to_status: to_status.to_owned(),
+            reason,
+            retired_at,
+            retired_by: actor,
+            dry_run: true,
+            persisted: false,
+            audit_id: None,
+            degraded: Vec::new(),
+            next_action,
+        });
+    }
 
     let audit_id = generate_audit_id();
     let details = serde_json::json!({

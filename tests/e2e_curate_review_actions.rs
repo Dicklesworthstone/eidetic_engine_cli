@@ -23,6 +23,9 @@
 //! * NotFound on a valid-format but missing candidate via reject.
 //!   Pinned shape: `reject <valid-format-but-missing>` -> NotFound
 //!   `"curation candidate"` + `"ee curate candidates --json"`
+//! * NotFound on a valid-format but missing candidate via retire
+//!   dry-run. Pinned shape: `retire <valid-format-but-missing>
+//!   --dry-run` -> NotFound before any retirement plan is reported.
 
 #![cfg(unix)]
 
@@ -219,6 +222,50 @@ fn curate_reject_returns_not_found_for_valid_format_but_missing_candidate() -> T
     ensure(
         error.is_object(),
         format!("response must include an error object; got {parsed}"),
+    )?;
+    let message = error["message"].as_str().unwrap_or_default();
+    let error_id = error["id"].as_str().unwrap_or_default();
+    ensure(
+        message.contains("curation candidate") || error_id == valid_id,
+        format!(
+            "not-found error must reference curation candidate; got message={message}, id={error_id}"
+        ),
+    )?;
+    let repair = error["repair"].as_str().unwrap_or_default();
+    ensure(
+        repair.contains("ee curate candidates --json"),
+        format!("not-found repair must point at `ee curate candidates --json`; got {repair}"),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn curate_retire_dry_run_returns_not_found_for_valid_format_but_missing_candidate() -> TestResult {
+    let workspace = unique_workspace("retire-dry-run-not-found")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    init_workspace(&workspace_arg)?;
+
+    let valid_id = "curate_00000000000000000000000999";
+    let (output, parsed) = run_curate(&workspace_arg, &["retire", valid_id, "--dry-run"])?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "ee curate retire --dry-run on unknown candidate must fail; stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        ),
+    )?;
+    let error = &parsed["error"];
+    ensure(
+        error.is_object(),
+        format!("response must include an error object; got {parsed}"),
+    )?;
+    let code = error["code"].as_str().unwrap_or_default();
+    ensure(
+        code == "not_found",
+        format!("retire dry-run must return not_found for missing candidate; got {code}"),
     )?;
     let message = error["message"].as_str().unwrap_or_default();
     let error_id = error["id"].as_str().unwrap_or_default();
