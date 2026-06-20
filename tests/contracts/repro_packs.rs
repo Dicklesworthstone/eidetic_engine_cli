@@ -228,7 +228,7 @@ fn gate14_capture_pack_sets_hash_and_replays() -> TestResult {
 #[test]
 fn gate14_minimize_pack_preserves_required_files_and_marks_optional_removal() -> TestResult {
     let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
-    let pack_dir = temp_dir.path().to_path_buf();
+    let pack_dir = fs::canonicalize(temp_dir.path()).map_err(|error| error.to_string())?;
     write_repro_pack(&pack_dir)?;
 
     let report = minimize_pack(&MinimizeOptions {
@@ -252,6 +252,60 @@ fn gate14_minimize_pack_preserves_required_files_and_marks_optional_removal() ->
             .iter()
             .any(|file| file.path == "LEGAL.md"),
         "optional file removal is explicit",
+    )
+}
+
+#[test]
+fn gate14_minimize_pack_materializes_replayable_output() -> TestResult {
+    let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = fs::canonicalize(temp_dir.path()).map_err(|error| error.to_string())?;
+    let pack_dir = workspace.join("source-pack");
+    let output_dir = workspace.join("minimized-pack");
+    write_repro_pack(&pack_dir)?;
+
+    let report = minimize_pack(&MinimizeOptions {
+        pack_path: pack_dir,
+        output_dir: output_dir.clone(),
+        remove_optional: true,
+        remove_binaries: true,
+        max_file_size: Some(4096),
+        dry_run: false,
+    })
+    .map_err(|error| error.message())?;
+
+    ensure(!report.dry_run, "non-dry-run report is not dry-run")?;
+    ensure(report.artifacts_kept == 4, "required files are kept")?;
+    ensure(
+        report.artifacts_removed == 1,
+        "optional legal file is removed from minimized output",
+    )?;
+    for required_file in ["env.json", "manifest.json", "repro.lock", "provenance.json"] {
+        ensure(
+            output_dir.join(required_file).is_file(),
+            format!("minimized output should contain {required_file}"),
+        )?;
+    }
+    ensure(
+        !output_dir.join("LEGAL.md").exists(),
+        "optional legal file should not be copied",
+    )?;
+
+    let replay = replay_pack(&ReplayOptions {
+        pack_path: output_dir.clone(),
+        work_dir: output_dir,
+        verify_hashes: true,
+        check_env: false,
+        dry_run: false,
+    })
+    .map_err(|error| error.message())?;
+
+    ensure(
+        replay.status == ReplayStatus::Verified,
+        "minimized pack should replay successfully",
+    )?;
+    ensure(
+        replay.artifacts_failed == 0,
+        "minimized pack replay should not report failed artifacts",
     )
 }
 

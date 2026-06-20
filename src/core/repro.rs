@@ -519,28 +519,380 @@ pub fn replay_pack(options: &ReplayOptions) -> Result<ReplayReport, DomainError>
 pub fn minimize_pack(options: &MinimizeOptions) -> Result<MinimizeReport, DomainError> {
     validate_pack_root(&options.pack_path)?;
 
+    let manifest_bytes =
+        read_pack_file_no_symlinks(&options.pack_path, "manifest.json").map_err(|e| {
+            DomainError::Storage {
+                message: format!("Failed to read manifest.json: {e}"),
+                repair: Some("Ensure the pack contains a valid manifest.json".to_string()),
+            }
+        })?;
+    let manifest_json = String::from_utf8(manifest_bytes).map_err(|e| DomainError::Import {
+        message: format!("manifest.json is not valid UTF-8: {e}"),
+        repair: None,
+    })?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest_json).map_err(|e| DomainError::Import {
+            message: format!("Invalid manifest.json: {e}"),
+            repair: None,
+        })?;
+    let expected_artifacts = manifest_artifact_expectations(&manifest)?;
+    let required_members = required_pack_member_paths(&expected_artifacts);
+    let pack_members = collect_pack_member_files(&options.pack_path)?;
+
     let mut report = MinimizeReport::new(options.pack_path.clone(), options.output_dir.clone());
     report.dry_run = options.dry_run;
 
-    for &file_name in REQUIRED_REPRO_PACK_FILES {
-        if let Some(metadata) = pack_file_metadata_no_symlinks(&options.pack_path, file_name)? {
-            report.add_kept(metadata.len());
-        }
+    if !options.dry_run {
+        prepare_minimized_output_dir(&options.pack_path, &options.output_dir)?;
     }
 
-    if let Some(metadata) = pack_file_metadata_no_symlinks(&options.pack_path, "LEGAL.md")? {
-        if options.remove_optional {
+    for (member_path, metadata) in pack_members {
+        if required_members.contains(&member_path) {
+            report.add_kept(metadata.len());
+            if !options.dry_run {
+                copy_pack_member_no_symlinks(
+                    &options.pack_path,
+                    &options.output_dir,
+                    &member_path,
+                )?;
+            }
+            continue;
+        }
+
+        if let Some(reason) = optional_pack_member_removal_reason(
+            options,
+            &options.pack_path,
+            &member_path,
+            &metadata,
+        )? {
             report.add_removed(RemovedFile {
-                path: "LEGAL.md".to_string(),
+                path: member_path,
                 size_bytes: metadata.len(),
-                reason: "optional artifact".to_string(),
+                reason,
             });
         } else {
             report.add_kept(metadata.len());
+            if !options.dry_run {
+                copy_pack_member_no_symlinks(
+                    &options.pack_path,
+                    &options.output_dir,
+                    &member_path,
+                )?;
+            }
         }
     }
 
     Ok(report)
+}
+
+fn collect_pack_member_files(
+    pack_path: &Path,
+) -> Result<BTreeMap<String, fs::Metadata>, DomainError> {
+    let mut files = BTreeMap::new();
+    collect_pack_member_files_inner(pack_path, Path::new(""), &mut files)?;
+    Ok(files)
+}
+
+fn collect_pack_member_files_inner(
+    pack_path: &Path,
+    relative_dir: &Path,
+    files: &mut BTreeMap<String, fs::Metadata>,
+) -> Result<(), DomainError> {
+    let dir_path = if relative_dir.as_os_str().is_empty() {
+        pack_path.to_path_buf()
+    } else {
+        let relative_dir = pack_member_path_to_string(relative_dir)?;
+        resolve_pack_file_path_no_symlinks(pack_path, &relative_dir).map_err(|error| {
+            DomainError::Storage {
+                message: error,
+                repair: Some("Use real repro pack member paths without symbolic links".to_string()),
+            }
+        })?
+    };
+
+    let entries = fs::read_dir(&dir_path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "pack_artifact_metadata_unavailable: {}: {}",
+            dir_path.display(),
+            error
+        ),
+        repair: None,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| DomainError::Storage {
+            message: format!(
+                "pack_artifact_metadata_unavailable: {}: {}",
+                dir_path.display(),
+                error
+            ),
+            repair: None,
+        })?;
+        let child_relative = if relative_dir.as_os_str().is_empty() {
+            PathBuf::from(entry.file_name())
+        } else {
+            relative_dir.join(entry.file_name())
+        };
+        let child_relative_path = pack_member_path_to_string(&child_relative)?;
+        let child_path = entry.path();
+        let metadata = fs::symlink_metadata(&child_path).map_err(|error| DomainError::Storage {
+            message: format!(
+                "pack_artifact_metadata_unavailable: {}: {}",
+                child_path.display(),
+                error
+            ),
+            repair: None,
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(DomainError::Storage {
+                message: format!("pack_symlink_refused: {}", child_path.display()),
+                repair: Some(
+                    "Use regular repro pack member files without symbolic links".to_string(),
+                ),
+            });
+        }
+        if metadata.file_type().is_file() {
+            files.insert(child_relative_path, metadata);
+        } else if metadata.file_type().is_dir() {
+            collect_pack_member_files_inner(pack_path, &child_relative, files)?;
+        } else {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "pack_artifact_metadata_unavailable: {}: not a regular file",
+                    child_path.display()
+                ),
+                repair: Some("Use regular repro pack member files".to_string()),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn pack_member_path_to_string(path: &Path) -> Result<String, DomainError> {
+    let mut segments = Vec::new();
+    for component in path.components() {
+        let Component::Normal(segment) = component else {
+            return Err(DomainError::Storage {
+                message: format!("invalid pack member path: {}", path.display()),
+                repair: Some("Use relative repro pack member paths".to_string()),
+            });
+        };
+        let Some(segment) = segment.to_str() else {
+            return Err(DomainError::Storage {
+                message: format!("invalid non-UTF-8 pack member path: {}", path.display()),
+                repair: Some("Use UTF-8 repro pack member paths".to_string()),
+            });
+        };
+        segments.push(segment.to_string());
+    }
+    if segments.is_empty() {
+        return Err(DomainError::Storage {
+            message: "invalid empty pack member path".to_string(),
+            repair: Some("Use relative repro pack member paths".to_string()),
+        });
+    }
+    let member_path = segments.join("/");
+    if !is_safe_pack_member_path(&member_path) {
+        return Err(DomainError::Storage {
+            message: format!("invalid pack member path: {member_path}"),
+            repair: Some("Use relative repro pack member paths".to_string()),
+        });
+    }
+    Ok(member_path)
+}
+
+fn prepare_minimized_output_dir(pack_path: &Path, output_dir: &Path) -> Result<(), DomainError> {
+    if output_dir == pack_path || output_dir.starts_with(pack_path) {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Minimized pack output directory must be outside the source pack: {}",
+                output_dir.display()
+            ),
+            repair: Some(
+                "Choose an empty output directory outside the source repro pack".to_string(),
+            ),
+        });
+    }
+    reject_existing_symlink_components(output_dir).map_err(repro_symlink_refused_storage_error)?;
+    match fs::symlink_metadata(output_dir) {
+        Ok(metadata) if !metadata.file_type().is_dir() => Err(DomainError::Storage {
+            message: format!(
+                "Minimized pack output path is not a directory: {}",
+                output_dir.display()
+            ),
+            repair: Some("Choose an empty output directory".to_string()),
+        }),
+        Ok(_) => {
+            let mut entries = fs::read_dir(output_dir).map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to inspect minimized pack output directory: {}: {}",
+                    output_dir.display(),
+                    error
+                ),
+                repair: Some("Choose an empty output directory".to_string()),
+            })?;
+            if entries
+                .next()
+                .transpose()
+                .map_err(|error| DomainError::Storage {
+                    message: format!(
+                        "Failed to inspect minimized pack output directory: {}: {}",
+                        output_dir.display(),
+                        error
+                    ),
+                    repair: Some("Choose an empty output directory".to_string()),
+                })?
+                .is_some()
+            {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Minimized pack output directory is not empty: {}",
+                        output_dir.display()
+                    ),
+                    repair: Some("Choose an empty output directory".to_string()),
+                });
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(output_dir).map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to create minimized pack output directory: {}: {}",
+                    output_dir.display(),
+                    error
+                ),
+                repair: Some("Check directory permissions".to_string()),
+            })?;
+            validate_pack_root(output_dir)
+        }
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect minimized pack output directory: {}: {}",
+                output_dir.display(),
+                error
+            ),
+            repair: Some("Choose an empty output directory".to_string()),
+        }),
+    }
+}
+
+fn optional_pack_member_removal_reason(
+    options: &MinimizeOptions,
+    pack_path: &Path,
+    member_path: &str,
+    metadata: &fs::Metadata,
+) -> Result<Option<String>, DomainError> {
+    if options.remove_optional {
+        return Ok(Some("optional artifact".to_string()));
+    }
+    if let Some(max_file_size) = options.max_file_size {
+        if metadata.len() > max_file_size {
+            return Ok(Some(format!("exceeds max_file_size {max_file_size} bytes")));
+        }
+    }
+    if options.remove_binaries && pack_file_looks_binary(pack_path, member_path)? {
+        return Ok(Some("binary artifact".to_string()));
+    }
+    Ok(None)
+}
+
+fn pack_file_looks_binary(pack_path: &Path, relative_path: &str) -> Result<bool, DomainError> {
+    let target_path =
+        resolve_pack_file_path_no_symlinks(pack_path, relative_path).map_err(|error| {
+            DomainError::Storage {
+                message: error,
+                repair: Some("Use real repro pack member paths without symbolic links".to_string()),
+            }
+        })?;
+    let mut file = open_pack_file_for_read_no_symlinks(&target_path).map_err(|error| {
+        DomainError::Storage {
+            message: error,
+            repair: Some("Use regular repro pack member files without symbolic links".to_string()),
+        }
+    })?;
+    let mut sample = [0_u8; 8192];
+    let bytes_read = file
+        .read(&mut sample)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "pack_artifact_unavailable: {}: {}",
+                target_path.display(),
+                error
+            ),
+            repair: None,
+        })?;
+    Ok(sample[..bytes_read].contains(&0))
+}
+
+fn copy_pack_member_no_symlinks(
+    source_pack_path: &Path,
+    output_pack_path: &Path,
+    relative_path: &str,
+) -> Result<(), DomainError> {
+    let content = read_pack_file_no_symlinks(source_pack_path, relative_path).map_err(|error| {
+        DomainError::Storage {
+            message: error,
+            repair: Some("Use regular repro pack member files without symbolic links".to_string()),
+        }
+    })?;
+    create_pack_member_parent_dirs_no_symlinks(output_pack_path, relative_path).map_err(
+        |error| DomainError::Storage {
+            message: error,
+            repair: Some("Use an empty real output directory for the minimized pack".to_string()),
+        },
+    )?;
+    write_pack_file_no_symlinks(output_pack_path, relative_path, &content).map_err(|error| {
+        DomainError::Storage {
+            message: error,
+            repair: Some("Use an empty real output directory for the minimized pack".to_string()),
+        }
+    })
+}
+
+fn create_pack_member_parent_dirs_no_symlinks(
+    pack_path: &Path,
+    relative_path: &str,
+) -> Result<(), String> {
+    reject_pack_symlink_component(pack_path)?;
+    let mut parent_path = pack_path.to_path_buf();
+    let mut components = Path::new(relative_path).components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(segment) = component else {
+            return Err(format!("invalid pack member path: {relative_path}"));
+        };
+        if components.peek().is_none() {
+            break;
+        }
+        parent_path.push(segment);
+        match fs::symlink_metadata(&parent_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("pack_symlink_refused: {}", parent_path.display()));
+            }
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "pack_artifact_write_failed: {}: not a directory",
+                    parent_path.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&parent_path).map_err(|error| {
+                    format!(
+                        "pack_artifact_write_failed: {}: {}",
+                        parent_path.display(),
+                        error
+                    )
+                })?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "pack_artifact_write_failed: {}: {}",
+                    parent_path.display(),
+                    error
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn resolve_pack_output_path(output_dir: &Path, pack_name: &str) -> Result<PathBuf, DomainError> {
@@ -894,38 +1246,6 @@ fn ensure_pack_write_target_is_regular_or_missing(target_path: &Path) -> Result<
     }
 }
 
-fn pack_file_metadata_no_symlinks(
-    pack_path: &Path,
-    relative_path: &str,
-) -> Result<Option<fs::Metadata>, DomainError> {
-    let Some(target_path) = resolve_optional_pack_file_path_no_symlinks(pack_path, relative_path)
-        .map_err(|error| DomainError::Storage {
-        message: error,
-        repair: Some("Use real repro pack member paths without symbolic links".to_string()),
-    })?
-    else {
-        return Ok(None);
-    };
-    let metadata = fs::symlink_metadata(&target_path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "pack_artifact_metadata_unavailable: {}: {}",
-            target_path.display(),
-            error
-        ),
-        repair: None,
-    })?;
-    if !metadata.file_type().is_file() {
-        return Err(DomainError::Storage {
-            message: format!(
-                "pack_artifact_metadata_unavailable: {}: not a regular file",
-                target_path.display()
-            ),
-            repair: Some("Use regular repro pack member files without symbolic links".to_string()),
-        });
-    }
-    Ok(Some(metadata))
-}
-
 fn resolve_pack_file_path_no_symlinks(
     pack_path: &Path,
     relative_path: &str,
@@ -971,40 +1291,6 @@ fn resolve_pack_file_path_for_write_no_symlinks(
         }
     }
     Ok(target_path)
-}
-
-fn resolve_optional_pack_file_path_no_symlinks(
-    pack_path: &Path,
-    relative_path: &str,
-) -> Result<Option<PathBuf>, String> {
-    reject_pack_symlink_component(pack_path)?;
-    let mut target_path = pack_path.to_path_buf();
-    let mut components = Path::new(relative_path).components().peekable();
-    while let Some(component) = components.next() {
-        let Component::Normal(segment) = component else {
-            return Err(format!("invalid pack member path: {relative_path}"));
-        };
-        target_path.push(segment);
-        match fs::symlink_metadata(&target_path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(format!("pack_symlink_refused: {}", target_path.display()));
-            }
-            Ok(_) => {}
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound && components.peek().is_none() =>
-            {
-                return Ok(None);
-            }
-            Err(error) => {
-                return Err(format!(
-                    "pack_artifact_not_found: {}: {}",
-                    target_path.display(),
-                    error
-                ));
-            }
-        }
-    }
-    Ok(Some(target_path))
 }
 
 fn reject_pack_symlink_component(path: &Path) -> Result<(), String> {
