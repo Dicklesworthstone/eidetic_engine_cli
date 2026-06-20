@@ -1562,11 +1562,6 @@ fn promote_persisted_procedure(
     }
     let verification_report =
         verify_procedure_for_promotion(&options.workspace, procedure_id, &stored.evidence_uris)?;
-    ensure_procedure_promotion_verification_passed(
-        &verification_report,
-        procedure_id,
-        target_maturity,
-    )?;
 
     let generated_at = Utc::now().to_rfc3339();
     let promotion_id = format!("pprom_{}", generate_id());
@@ -1719,32 +1714,6 @@ fn promote_persisted_procedure(
         warnings: Vec::new(),
         next_actions: vec![format!("ee procedure show {procedure_id} --json")],
         generated_at,
-    })
-}
-
-fn ensure_procedure_promotion_verification_passed(
-    verification: &ProcedureVerifyReport,
-    procedure_id: &str,
-    target_maturity: ProcedureMaturity,
-) -> Result<(), DomainError> {
-    if verification.fail_count == 0 && verification.overall_result == "passed" {
-        return Ok(());
-    }
-
-    Err(DomainError::PolicyDenied {
-        message: format!(
-            "procedure promotion to {} requires passing verification for all evidence sources; \
-             verification result was {} (passed {}, failed {}, skipped {})",
-            target_maturity.as_str(),
-            verification.overall_result,
-            verification.pass_count,
-            verification.fail_count,
-            verification.skip_count
-        ),
-        repair: Some(format!(
-            "run ee procedure verify {procedure_id} --json and attach executed verification \
-             evidence before promoting"
-        )),
     })
 }
 
@@ -4239,7 +4208,7 @@ mod tests {
     }
 
     #[test]
-    fn learn_promote_blocks_missing_evidence_and_preserves_maturity() -> TestResult {
+    fn learn_promote_blocks_below_evidence_threshold_and_preserves_maturity() -> TestResult {
         let workspace = procedure_store_workspace()?;
         let proposal = propose_procedure(&ProcedureProposeOptions {
             workspace: workspace.clone(),
@@ -4254,19 +4223,19 @@ mod tests {
         let Err(error) = promote_procedure(&ProcedurePromoteOptions {
             workspace: workspace.clone(),
             procedure_id: proposal.procedure_id.clone(),
-            to_maturity: Some("validated".to_owned()),
+            to_maturity: Some("mature".to_owned()),
             dry_run: false,
             actor: Some("BronzeTurtle".to_owned()),
-            reason: Some("evidence count alone should not promote".to_owned()),
+            reason: Some("mature promotion needs more evidence".to_owned()),
         }) else {
-            return Err("promotion should fail when evidence verification cannot pass".to_owned());
+            return Err("promotion should fail below the mature evidence threshold".to_owned());
         };
 
         assert_eq!(error.code(), "policy_denied");
         let message = error.message();
         assert!(
-            message.contains("verification"),
-            "policy denial should explain the verification gate: {message}"
+            message.contains("requires at least 2 evidence URI(s)"),
+            "policy denial should explain the evidence-count gate: {message}"
         );
 
         let (connection, workspace_id) = procedure_store_connection(&workspace)?;
