@@ -58182,7 +58182,7 @@ fn swarm_brief_summary_json(report: &SwarmBriefReport) -> Result<serde_json::Val
         "schema": report.schema,
         "workspace": &report.workspace,
         "redactionStatus": report.redaction_status,
-        "sources": swarm_brief_summary_array(&report.sources, 8, "sources")?,
+        "sources": swarm_brief_summary_array(&report.sources, report.sources.len(), "sources")?,
         "dirtyFiles": swarm_brief_summary_array(&report.dirty_files, 12, "dirtyFiles")?,
         "recentCommits": swarm_brief_summary_array(&report.recent_commits, 5, "recentCommits")?,
         "beads": {
@@ -67155,6 +67155,32 @@ mod tests {
                 .unwrap_or_default(),
             &9,
             "swarm brief source count",
+        )?;
+        let sources = value["data"]["sources"]
+            .as_array()
+            .ok_or_else(|| "swarm brief sources must be an array".to_string())?
+            .iter()
+            .map(|source| {
+                source["source"]
+                    .as_str()
+                    .ok_or_else(|| format!("swarm brief source label missing: {source}"))
+                    .map(str::to_string)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        ensure_equal(
+            &sources,
+            &vec![
+                "agent_inventory".to_string(),
+                "agent_mail".to_string(),
+                "beads".to_string(),
+                "bv".to_string(),
+                "git".to_string(),
+                "host_profile".to_string(),
+                "memory_drift".to_string(),
+                "rch".to_string(),
+                "toolchain".to_string(),
+            ],
+            "swarm brief source labels",
         )
     }
 
