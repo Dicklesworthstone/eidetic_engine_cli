@@ -21,7 +21,7 @@ Every audit-lane telemetry event has:
 | `auditSeq` | Per-workspace sequence assigned before enqueue. `0` means no event was accepted. |
 | `batchSize` | Number of events drained or committed for batch phases. |
 | `elapsedMs` | Wall-clock duration for the phase. |
-| `degradedCodes` | `audit_backpressure` and/or `audit_lane_shutdown_drain_timeout`. |
+| `degradedCodes` | `audit_backpressure`, `audit_lane_batch_commit_failed`, and/or `audit_lane_shutdown_drain_timeout`. |
 
 ## Ordering
 
@@ -72,6 +72,11 @@ Shutdown drains the queue and performs a final batch commit. If the drain budget
 expires, the lane emits `audit_lane_shutdown_drain_timeout` with the number of
 events not yet committed. Tests and e2e artifacts must retain enough evidence
 for `ee audit verify --json` to prove whether the durable chain is complete.
+
+If a batch sink returns an error, the fallible drain path returns that source
+error with `audit_lane_batch_commit_failed`, `failedEvents`, and
+`failedBatches` in the report. Callers must not count that batch as drained or
+claim audit durability for the affected mutations.
 
 ## Crash Safety
 

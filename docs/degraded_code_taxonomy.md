@@ -597,11 +597,12 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `serialization_failed` | medium | bd-17c65.10.6 (J6) |
 | `trust_promotion_evidence_rejected` | medium | bd-17c65.7.4 (G4) |
 
-#### Concurrency + write owner (10)
+#### Concurrency + write owner (11)
 | Code | Severity | Bead |
 |------|----------|------|
 | `advisory_lock_timeout` | medium | bd-3usjw.57 |
 | `audit_backpressure` | warning | bd-wp5ac.1 |
+| `audit_lane_batch_commit_failed` | high | bd-2kzk9 |
 | `audit_lane_shutdown_drain_timeout` | medium | bd-wp5ac.1 |
 | `daemon_overloaded` | warning | bd-jnyui — bounded `ee daemon` accept loop refuses excess connections to bound peak RSS amplification |
 | `index_publish_lock_contention` | warning | bd-17c65.12.2 (L1) |

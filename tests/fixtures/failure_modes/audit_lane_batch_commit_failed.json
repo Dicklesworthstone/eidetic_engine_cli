@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "audit_lane_batch_commit_failed",
+  "introduced_by": {
+    "bead": "bd-2kzk9",
+    "epic_letter": "review"
+  },
+  "surfaces": [
+    "audit lane"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Audit-lane drain accepted a batch from the in-memory queue, but the durable batch sink returned an error before committing the audit rows.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee daemon --foreground --once --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "audit_lane_batch_commit_failed",
+    "severity": "high",
+    "message_contains": [
+      "audit",
+      "batch",
+      "commit"
+    ],
+    "repair_contains": "ee audit verify --workspace . --json"
+  }
+}

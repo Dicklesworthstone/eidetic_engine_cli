@@ -4,6 +4,7 @@
 //! `bd-wp5ac` slices. This module owns the bounded producer lane and drain
 //! semantics that those call sites will use.
 
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -15,6 +16,7 @@ pub const AUDIT_LANE_SCHEMA_V1: &str = "ee.audit_lane.v1";
 pub const AUDIT_LANE_SOURCE_LABEL: &str = "audit_lane";
 
 pub const AUDIT_BACKPRESSURE_CODE: &str = "audit_backpressure";
+pub const AUDIT_LANE_BATCH_COMMIT_FAILED_CODE: &str = "audit_lane_batch_commit_failed";
 pub const AUDIT_LANE_SHUTDOWN_DRAIN_TIMEOUT_CODE: &str = "audit_lane_shutdown_drain_timeout";
 
 const DEFAULT_AUDIT_LANE_CAPACITY: usize = 1024;
@@ -165,8 +167,16 @@ pub struct AuditLaneDrainReport {
     pub phase: AuditLanePhase,
     pub drained_events: u64,
     pub batches: u64,
+    pub failed_events: u64,
+    pub failed_batches: u64,
     pub pending_events: u64,
     pub degraded_codes: Vec<&'static str>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct AuditLaneDrainError<E> {
+    pub report: AuditLaneDrainReport,
+    pub source: E,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -342,16 +352,48 @@ impl AuditLane {
         (handle, lane)
     }
 
-    pub fn drain_available<F>(&mut self, sink: F) -> AuditLaneDrainReport
+    pub fn drain_available<F>(&mut self, mut sink: F) -> AuditLaneDrainReport
     where
         F: FnMut(&[AuditEvent]),
+    {
+        match self.try_drain_available(|batch| {
+            sink(batch);
+            Ok::<(), Infallible>(())
+        }) {
+            Ok(report) => report,
+            Err(error) => match error.source {},
+        }
+    }
+
+    pub fn shutdown_drain<F>(&mut self, mut sink: F) -> AuditLaneDrainReport
+    where
+        F: FnMut(&[AuditEvent]),
+    {
+        match self.try_shutdown_drain(|batch| {
+            sink(batch);
+            Ok::<(), Infallible>(())
+        }) {
+            Ok(report) => report,
+            Err(error) => match error.source {},
+        }
+    }
+
+    pub fn try_drain_available<E, F>(
+        &mut self,
+        sink: F,
+    ) -> Result<AuditLaneDrainReport, AuditLaneDrainError<E>>
+    where
+        F: FnMut(&[AuditEvent]) -> Result<(), E>,
     {
         self.drain_with_limit(AuditLanePhase::Drain, None, sink)
     }
 
-    pub fn shutdown_drain<F>(&mut self, sink: F) -> AuditLaneDrainReport
+    pub fn try_shutdown_drain<E, F>(
+        &mut self,
+        sink: F,
+    ) -> Result<AuditLaneDrainReport, AuditLaneDrainError<E>>
     where
-        F: FnMut(&[AuditEvent]),
+        F: FnMut(&[AuditEvent]) -> Result<(), E>,
     {
         self.receiver.close();
         self.drain_with_limit(
@@ -361,27 +403,41 @@ impl AuditLane {
         )
     }
 
-    fn drain_with_limit<F>(
+    fn drain_with_limit<E, F>(
         &mut self,
         phase: AuditLanePhase,
         max_events: Option<u64>,
         mut sink: F,
-    ) -> AuditLaneDrainReport
+    ) -> Result<AuditLaneDrainReport, AuditLaneDrainError<E>>
     where
-        F: FnMut(&[AuditEvent]),
+        F: FnMut(&[AuditEvent]) -> Result<(), E>,
     {
         let mut batch = Vec::with_capacity(self.config.batch_size);
+        let mut received_events = 0_u64;
         let mut drained_events = 0_u64;
         let mut batches = 0_u64;
 
-        while max_events.is_none_or(|limit| drained_events < limit) {
+        while max_events.is_none_or(|limit| received_events < limit) {
             match self.receiver.try_recv() {
                 Ok(event) => {
-                    drained_events = drained_events.saturating_add(1);
+                    received_events = received_events.saturating_add(1);
                     batch.push(event);
                     if batch.len() == self.config.batch_size {
-                        sink(&batch);
+                        let batch_len = batch.len() as u64;
+                        if let Err(source) = sink(&batch) {
+                            return Err(AuditLaneDrainError {
+                                report: self.finish_drain_report(
+                                    phase,
+                                    drained_events,
+                                    batches,
+                                    batch_len,
+                                    1,
+                                ),
+                                source,
+                            });
+                        }
                         batch.clear();
+                        drained_events = drained_events.saturating_add(batch_len);
                         batches = batches.saturating_add(1);
                     }
                 }
@@ -390,24 +446,54 @@ impl AuditLane {
         }
 
         if !batch.is_empty() {
-            sink(&batch);
+            let batch_len = batch.len() as u64;
+            if let Err(source) = sink(&batch) {
+                return Err(AuditLaneDrainError {
+                    report: self.finish_drain_report(
+                        phase,
+                        drained_events,
+                        batches,
+                        batch_len,
+                        1,
+                    ),
+                    source,
+                });
+            }
             batches = batches.saturating_add(1);
+            drained_events = drained_events.saturating_add(batch_len);
         }
 
-        self.counters
-            .drained
-            .fetch_add(drained_events, Ordering::AcqRel);
+        Ok(self.finish_drain_report(phase, drained_events, batches, 0, 0))
+    }
+
+    fn finish_drain_report(
+        &self,
+        phase: AuditLanePhase,
+        drained_events: u64,
+        batches: u64,
+        failed_events: u64,
+        failed_batches: u64,
+    ) -> AuditLaneDrainReport {
+        if drained_events > 0 {
+            self.counters
+                .drained
+                .fetch_add(drained_events, Ordering::AcqRel);
+        }
         let pending_events = self.counters.pending();
-        let degraded_codes = if phase == AuditLanePhase::Shutdown && pending_events > 0 {
-            vec![AUDIT_LANE_SHUTDOWN_DRAIN_TIMEOUT_CODE]
-        } else {
-            Vec::new()
-        };
+        let mut degraded_codes = Vec::new();
+        if failed_batches > 0 {
+            degraded_codes.push(AUDIT_LANE_BATCH_COMMIT_FAILED_CODE);
+        }
+        if phase == AuditLanePhase::Shutdown && pending_events > 0 {
+            degraded_codes.push(AUDIT_LANE_SHUTDOWN_DRAIN_TIMEOUT_CODE);
+        }
 
         AuditLaneDrainReport {
             phase,
             drained_events,
             batches,
+            failed_events,
+            failed_batches,
             pending_events,
             degraded_codes,
         }
@@ -419,6 +505,7 @@ mod tests {
     use super::*;
     use crate::core::audit::{AuditVerifyOptions, verify_audit};
     use proptest::prelude::*;
+    use std::convert::Infallible;
     use std::sync::{Arc, Barrier};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -445,6 +532,7 @@ mod tests {
     fn audit_lane_degraded_codes_are_snake_case() {
         for code in [
             AUDIT_BACKPRESSURE_CODE,
+            AUDIT_LANE_BATCH_COMMIT_FAILED_CODE,
             AUDIT_LANE_SHUTDOWN_DRAIN_TIMEOUT_CODE,
         ] {
             assert!(
@@ -489,7 +577,12 @@ mod tests {
         ));
 
         let mut drained = Vec::new();
-        let report = lane.drain_available(|batch| drained.extend_from_slice(batch));
+        let report = lane
+            .try_drain_available(|batch| {
+                drained.extend_from_slice(batch);
+                Ok::<(), Infallible>(())
+            })
+            .expect("drain should succeed");
 
         assert_eq!(report.drained_events, 3);
         assert_eq!(report.batches, 1);
@@ -592,7 +685,11 @@ mod tests {
         assert_eq!(direct_insert_count, 0);
 
         let mut drained = Vec::new();
-        lane.drain_available(|batch| drained.extend_from_slice(batch));
+        lane.try_drain_available(|batch| {
+            drained.extend_from_slice(batch);
+            Ok::<(), Infallible>(())
+        })
+        .expect("drain should succeed");
         assert_eq!(drained[0].audit_seq, 8);
         Ok(())
     }
@@ -787,7 +884,12 @@ mod tests {
         );
 
         let mut drained = Vec::with_capacity(EVENT_COUNT);
-        let report = lane.drain_available(|batch| drained.extend_from_slice(batch));
+        let report = lane
+            .try_drain_available(|batch| {
+                drained.extend_from_slice(batch);
+                Ok::<(), Infallible>(())
+            })
+            .expect("drain should succeed");
 
         assert_eq!(report.drained_events, EVENT_COUNT as u64);
         assert_eq!(report.batches, 2);
@@ -867,7 +969,12 @@ mod tests {
         }
 
         let mut drained = Vec::with_capacity(EVENT_COUNT);
-        let drain_report = lane.shutdown_drain(|batch| drained.extend_from_slice(batch));
+        let drain_report = lane
+            .try_shutdown_drain(|batch| {
+                drained.extend_from_slice(batch);
+                Ok::<(), Infallible>(())
+            })
+            .expect("shutdown drain should succeed");
         assert_eq!(drain_report.drained_events, EVENT_COUNT as u64);
         assert_eq!(drain_report.batches, 2);
         assert_eq!(drain_report.pending_events, 0);
@@ -988,7 +1095,12 @@ mod tests {
         }
 
         let mut drained = Vec::with_capacity(event_count);
-        let report = lane.shutdown_drain(|batch| drained.extend_from_slice(batch));
+        let report = lane
+            .try_shutdown_drain(|batch| {
+                drained.extend_from_slice(batch);
+                Ok::<(), Infallible>(())
+            })
+            .map_err(|error| format!("drain failed unexpectedly: {:?}", error.source))?;
         if report.drained_events != event_count as u64 {
             return Err(format!(
                 "drained {} events, expected {event_count}",
@@ -1061,7 +1173,12 @@ mod tests {
         }
 
         let mut batch_sizes = Vec::new();
-        let report = lane.drain_available(|batch| batch_sizes.push(batch.len()));
+        let report = lane
+            .try_drain_available(|batch| {
+                batch_sizes.push(batch.len());
+                Ok::<(), Infallible>(())
+            })
+            .expect("drain should succeed");
 
         assert_eq!(report.drained_events, 5);
         assert_eq!(report.batches, 3);
@@ -1085,7 +1202,12 @@ mod tests {
         }
 
         let mut drained = Vec::new();
-        let report = lane.shutdown_drain(|batch| drained.extend_from_slice(batch));
+        let report = lane
+            .try_shutdown_drain(|batch| {
+                drained.extend_from_slice(batch);
+                Ok::<(), Infallible>(())
+            })
+            .expect("shutdown drain should succeed");
 
         assert!(handle.is_closed());
         assert_eq!(report.phase, AuditLanePhase::Shutdown);
@@ -1100,5 +1222,56 @@ mod tests {
             handle.enqueue(AuditEvent::new("workspace-a", 4, "memory.create")),
             AuditEnqueueResult::Closed { .. }
         ));
+    }
+
+    #[test]
+    fn drain_reports_sink_failure_without_marking_batch_drained() {
+        let config = AuditLaneConfig {
+            capacity: 4,
+            batch_size: 2,
+            shutdown_event_limit: 4,
+        };
+        let (handle, mut lane) = AuditLane::new(config);
+        for seq in 1..=3 {
+            assert!(matches!(
+                handle.enqueue(AuditEvent::new("workspace-a", seq, "memory.create")),
+                AuditEnqueueResult::Enqueued { .. }
+            ));
+        }
+
+        let mut attempted = Vec::new();
+        let error = lane
+            .try_drain_available(|batch| {
+                attempted.extend(batch.iter().map(|event| event.audit_seq));
+                Err::<(), &'static str>("db unavailable")
+            })
+            .expect_err("sink failure must be reported");
+
+        assert_eq!(error.source, "db unavailable");
+        assert_eq!(attempted, vec![1, 2]);
+        assert_eq!(
+            error.report,
+            AuditLaneDrainReport {
+                phase: AuditLanePhase::Drain,
+                drained_events: 0,
+                batches: 0,
+                failed_events: 2,
+                failed_batches: 1,
+                pending_events: 3,
+                degraded_codes: vec![AUDIT_LANE_BATCH_COMMIT_FAILED_CODE],
+            }
+        );
+        assert_eq!(handle.pending_events(), 3);
+
+        let mut recovered = Vec::new();
+        let report = lane
+            .try_drain_available(|batch| {
+                recovered.extend(batch.iter().map(|event| event.audit_seq));
+                Ok::<(), Infallible>(())
+            })
+            .expect("remaining queued events should drain");
+        assert_eq!(recovered, vec![3]);
+        assert_eq!(report.drained_events, 1);
+        assert_eq!(report.pending_events, 2);
     }
 }

@@ -740,6 +740,36 @@ ee remember 'audit lane pressure fixture' --workspace . --json
 
 ---
 
+## `audit_lane_batch_commit_failed`
+
+**Severity:** high
+
+**Surfaces:** audit lane
+
+**Introduced by:** bd-2kzk9 (epic review)
+
+**Trigger.** Audit-lane drain accepted a batch from the in-memory queue, but the durable batch sink returned an error before committing the audit rows.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+```
+
+**Invocation.**
+
+```bash
+ee daemon --foreground --once --workspace . --json
+```
+
+**Expected emission.** Message contains: `audit ... batch ... commit`
+
+**Repair hint.** `ee audit verify --workspace . --json`
+
+**Fixture.** [`tests/fixtures/failure_modes/audit_lane_batch_commit_failed.json`](../tests/fixtures/failure_modes/audit_lane_batch_commit_failed.json)
+
+---
+
 ## `audit_lane_shutdown_drain_timeout`
 
 **Severity:** medium

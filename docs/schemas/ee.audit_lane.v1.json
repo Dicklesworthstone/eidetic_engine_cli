@@ -61,6 +61,7 @@
         "type": "string",
         "enum": [
           "audit_backpressure",
+          "audit_lane_batch_commit_failed",
           "audit_lane_shutdown_drain_timeout"
         ]
       }

@@ -167,6 +167,7 @@ in the same commit, keeping the catalog complete by construction.
 | `l2_pack_cache_unavailable` | context | low | bd-ndzfg.4 (L) |
 | `l2_pack_cache_corruption` | context | low | bd-ndzfg.4 (L) |
 | `audit_backpressure` | audit lane | warning | bd-wp5ac.1 |
+| `audit_lane_batch_commit_failed` | audit lane | high | bd-2kzk9 |
 | `audit_lane_shutdown_drain_timeout` | audit lane | medium | bd-wp5ac.1 |
 | `why_pack_selection_unavailable` | why | low | bd-17c65.10.6 (J6) |
 | `why_result_target_unsupported_source` | why | medium | bd-17c65.10.6 (J6) |
