@@ -116,6 +116,14 @@ fn ambient_process_and_thread(_: &ee::runtime::determinism::Deterministic<Seed>)
     let _ = thread::current();
 }
 
+#[determinism::required]
+fn inferred_hash_collection_iteration(_: &ee::runtime::determinism::Deterministic<Seed>) {
+    let mut inferred_map = HashMap::new();
+    for _ in inferred_map.iter() {}
+    let mut inferred_set = std::collections::HashSet::with_capacity(4);
+    for _ in inferred_set.drain() {}
+}
+
 fn benign_documentation_mentions() {
     let _ = "rand::random::<u64>() random::<u64>() getrandom::fill(&mut bytes) SystemRandom::new() Instant::now() SystemTime::now() chrono::Utc::now() MemoryId::now() std::env::current_dir() env::current_dir() std::env::temp_dir() env::temp_dir() std::fs::read_dir(.) HashSet";
     // rand::thread_rng();

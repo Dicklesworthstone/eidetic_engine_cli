@@ -288,6 +288,43 @@ fn expiry_revocation_and_rate_limit_are_enforced() {
 }
 
 #[test]
+fn final_consume_update_rejects_revoked_and_expired_rows() {
+    let connection = test_connection();
+    let now = Utc::now();
+
+    let revoked = issue_bypass_token(&connection, &issue_options("revoke before consume", 1))
+        .expect("revoked fixture token issues");
+    let revoked_hash = token_hash(&revoked.token);
+    connection
+        .revoke_preflight_bypass_token(&revoked_hash, &now.to_rfc3339())
+        .expect("fixture token revokes");
+    let consumed_revoked = connection
+        .increment_preflight_bypass_token_use(&revoked_hash, &now.to_rfc3339())
+        .expect("revoked consume check executes");
+    assert!(
+        !consumed_revoked,
+        "revoked bypass tokens must not be consumed by the final update"
+    );
+
+    let expired = issue_bypass_token(
+        &connection,
+        &IssueBypassTokenOptions {
+            now: Some(now - Duration::minutes(DEFAULT_TTL_MINUTES + 1)),
+            ..issue_options("expire before consume", 1)
+        },
+    )
+    .expect("expired fixture token issues");
+    let expired_hash = token_hash(&expired.token);
+    let consumed_expired = connection
+        .increment_preflight_bypass_token_use(&expired_hash, &now.to_rfc3339())
+        .expect("expired consume check executes");
+    assert!(
+        !consumed_expired,
+        "expired bypass tokens must not be consumed by the final update"
+    );
+}
+
+#[test]
 fn bypass_audit_records_token_hash_matches_and_blocking_memories() {
     let connection = test_connection();
     let issued =

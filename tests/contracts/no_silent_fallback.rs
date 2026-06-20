@@ -401,13 +401,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "tags_map.get",
         "A memory with no tag rows has an explicit empty tag set.",
     ),
-    must_fix(
-        "NSF-CORE-CONTEXT-COORDINATION-HASH",
-        "src/core/context.rs",
-        "serde_json::to_string(coordination).unwrap_or_default()",
-        "eidetic_engine_cli-sos5.3",
-        "Context pack hashes should not silently drop coordination snapshot bytes when serialization fails.",
-    ),
     allowed(
         "NSF-CORE-CURATE-PROPOSED-CONTENT-TAGS",
         "src/core/curate.rs",
@@ -1135,12 +1128,6 @@ const INVENTORY_RULES: &[InventoryRule] = &[
         "src/cli/mod.rs",
         "data[\"repair\"].as_str().unwrap_or_default()",
         "Maintenance degraded-table repair text is optional human-facing detail; severity and message fall back to explicit defaults alongside.",
-    ),
-    allowed(
-        "NSF-SWARM-BRIEF-DRAIN-JOIN",
-        "src/core/swarm_brief.rs",
-        "stdout_thread.join().unwrap_or_default()",
-        "A panicked source drain thread surfaces as a failed or degraded source parse with explicit per-source status; it can never fabricate source content.",
     ),
     allowed(
         "NSF-SWARM-BRIEF-OUTPUT-TAILS",

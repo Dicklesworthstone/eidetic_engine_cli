@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use ee::core::read_fence::ReadFence;
+use ee::core::read_fence::{READ_FENCE_GRAPH_REPAIR, ReadFence};
 use ee::core::store_integrity::{
     StoreIntegrityOptions, StoreIntegrityReport, StoreIntegrityStatus,
     StoreIntegrityWriteObservationInput, run_store_integrity_report,
@@ -80,6 +80,10 @@ fn store_integrity_report_surfaces_read_fence_and_per_source_write_immune() {
     assert_eq!(report.read_fence.stale_assets[0].name, "graph");
     assert_eq!(report.read_fence.stale_assets[0].generation, 11);
     assert_eq!(report.read_fence.stale_assets[0].lag, 1);
+    assert_eq!(
+        report.read_fence.repair.as_deref(),
+        Some(READ_FENCE_GRAPH_REPAIR)
+    );
 
     assert!(report.write_immune.advisory_only);
     assert!(!report.write_immune.global_write_stall);
@@ -131,6 +135,10 @@ fn latest_non_strict_stale_assets_degrade_store_integrity_status() {
     assert!(!report.read_fence.strict_failed);
     assert_eq!(report.read_fence.stale_assets.len(), 1);
     assert_eq!(report.read_fence.stale_assets[0].name, "graph");
+    assert_eq!(
+        report.read_fence.repair.as_deref(),
+        Some(READ_FENCE_GRAPH_REPAIR)
+    );
 }
 
 #[test]

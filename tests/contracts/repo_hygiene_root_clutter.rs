@@ -29,6 +29,7 @@ const REQUIRED_PATTERNS: &[&str] = &[
     "/pass*.jsonl",
     "/fix_*.sh",
     "/find_*.sh",
+    "/*-upgrade-progress.json",
 ];
 
 fn repo_root() -> PathBuf {
@@ -83,6 +84,7 @@ fn matches_root_scratchpad(path: &str) -> bool {
         || (path.starts_with("pass") && path.ends_with(".jsonl"))
         || (path.starts_with("fix_") && path.ends_with(".sh"))
         || (path.starts_with("find_") && path.ends_with(".sh"))
+        || path.ends_with("-upgrade-progress.json")
 }
 
 fn parse_status_path(line: &str) -> Option<(&str, &str)> {

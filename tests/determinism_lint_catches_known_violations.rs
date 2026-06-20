@@ -568,30 +568,220 @@ fn compact_source_line(line: &str) -> String {
 }
 
 fn hash_collection_bindings(line: &str, type_name: &str) -> Vec<String> {
+    let markers = source_markers(line);
     let mut names = Vec::new();
-    let short = format!(": {type_name}");
-    let qualified = format!(": std::collections::{type_name}");
-    collect_hash_collection_bindings(line, &short, &mut names);
-    collect_hash_collection_bindings(line, &qualified, &mut names);
+    for colon_index in markers.iter().enumerate().filter_map(|(index, marker)| {
+        (marker == &SourceMarker::Punct(':')
+            && !matches!(
+                markers.get(index.saturating_sub(1)),
+                Some(SourceMarker::Punct(':'))
+            )
+            && !matches!(markers.get(index + 1), Some(SourceMarker::Punct(':'))))
+        .then_some(index)
+    }) {
+        if !markers_match_hash_collection_type(&markers, colon_index + 1, type_name) {
+            continue;
+        }
+        if let Some(name) = binding_name_before_colon(&markers, colon_index) {
+            push_unique_binding(&mut names, name);
+        }
+    }
+    for equals_index in markers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, marker)| (marker == &SourceMarker::Punct('=')).then_some(index))
+    {
+        if !markers_match_hash_collection_constructor(&markers, equals_index + 1, type_name) {
+            continue;
+        }
+        if let Some(name) = binding_name_before_equals(&markers, equals_index) {
+            push_unique_binding(&mut names, name);
+        }
+    }
     names
 }
 
-fn collect_hash_collection_bindings(line: &str, needle: &str, names: &mut Vec<String>) {
-    let mut search_start = 0;
-    while let Some(relative_index) = line[search_start..].find(needle) {
-        let index = search_start + relative_index;
-        let prefix = &line[..index];
-        if let Some(name) = prefix
-            .rsplit(|ch: char| !is_identifier_char(ch))
-            .next()
-            .filter(|name| !name.is_empty())
-        {
-            if !names.iter().any(|existing| existing == name) {
-                names.push(name.to_owned());
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SourceMarker {
+    Ident(String),
+    Punct(char),
+}
+
+fn source_markers(line: &str) -> Vec<SourceMarker> {
+    let mut markers = Vec::new();
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if is_identifier_char(ch) {
+            let mut ident = String::from(ch);
+            while let Some(next) = chars.peek().copied() {
+                if is_identifier_char(next) {
+                    ident.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
             }
+            markers.push(SourceMarker::Ident(ident));
+        } else if matches!(ch, ':' | '<' | '>' | '=') {
+            markers.push(SourceMarker::Punct(ch));
         }
-        search_start = index + needle.len();
     }
+    markers
+}
+
+fn push_unique_binding(names: &mut Vec<String>, name: String) {
+    if !names.iter().any(|existing| existing == &name) {
+        names.push(name);
+    }
+}
+
+fn markers_match_hash_collection_type(
+    markers: &[SourceMarker],
+    start: usize,
+    type_name: &str,
+) -> bool {
+    let Some(path_end) = hash_collection_type_path_end(markers, start, type_name) else {
+        return false;
+    };
+    matches!(markers.get(path_end), Some(SourceMarker::Punct('<')))
+}
+
+fn markers_match_hash_collection_constructor(
+    markers: &[SourceMarker],
+    start: usize,
+    type_name: &str,
+) -> bool {
+    let Some(path_end) = hash_collection_type_path_end(markers, start, type_name) else {
+        return false;
+    };
+    let Some(method_path_start) = hash_collection_constructor_method_start(markers, path_end)
+    else {
+        return false;
+    };
+    matches!(
+        ident_at(markers, method_path_start),
+        Some("new" | "with_capacity" | "from" | "default")
+    )
+}
+
+fn hash_collection_constructor_method_start(
+    markers: &[SourceMarker],
+    path_end: usize,
+) -> Option<usize> {
+    let mut double_colon_index = path_end;
+    if double_colon_at(markers, double_colon_index)
+        && matches!(
+            markers.get(double_colon_index + 2),
+            Some(SourceMarker::Punct('<'))
+        )
+    {
+        double_colon_index = skip_angle_group(markers, double_colon_index + 2)?;
+    } else if matches!(
+        markers.get(double_colon_index),
+        Some(SourceMarker::Punct('<'))
+    ) {
+        double_colon_index = skip_angle_group(markers, double_colon_index)?;
+    }
+    double_colon_at(markers, double_colon_index).then_some(double_colon_index + 2)
+}
+
+fn skip_angle_group(markers: &[SourceMarker], start: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    for (index, marker) in markers.iter().enumerate().skip(start) {
+        match marker {
+            SourceMarker::Punct('<') => depth += 1,
+            SourceMarker::Punct('>') => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn hash_collection_type_path_end(
+    markers: &[SourceMarker],
+    mut start: usize,
+    type_name: &str,
+) -> Option<usize> {
+    if double_colon_at(markers, start) {
+        start += 2;
+    }
+    if ident_at(markers, start) == Some(type_name) {
+        return Some(start + 1);
+    }
+    if ident_at(markers, start) == Some("std")
+        && double_colon_at(markers, start + 1)
+        && ident_at(markers, start + 3) == Some("collections")
+        && double_colon_at(markers, start + 4)
+        && ident_at(markers, start + 6) == Some(type_name)
+    {
+        return Some(start + 7);
+    }
+    None
+}
+
+fn binding_name_before_colon(markers: &[SourceMarker], colon_index: usize) -> Option<String> {
+    markers[..colon_index].iter().rev().find_map(|marker| {
+        let SourceMarker::Ident(name) = marker else {
+            return None;
+        };
+        if matches!(name.as_str(), "let" | "mut" | "ref" | "_") {
+            None
+        } else {
+            Some(name.clone())
+        }
+    })
+}
+
+fn binding_name_before_equals(markers: &[SourceMarker], equals_index: usize) -> Option<String> {
+    let binding_index = equals_index.checked_sub(1)?;
+    let binding = ident_at(markers, binding_index)?;
+    if binding == "_" {
+        return None;
+    }
+
+    if binding_index
+        .checked_sub(1)
+        .and_then(|index| ident_at(markers, index))
+        == Some("let")
+    {
+        return Some(binding.to_owned());
+    }
+
+    if binding_index
+        .checked_sub(1)
+        .and_then(|index| ident_at(markers, index))
+        == Some("mut")
+        && binding_index
+            .checked_sub(2)
+            .and_then(|index| ident_at(markers, index))
+            == Some("let")
+    {
+        return Some(binding.to_owned());
+    }
+
+    None
+}
+
+fn ident_at(markers: &[SourceMarker], index: usize) -> Option<&str> {
+    match markers.get(index) {
+        Some(SourceMarker::Ident(value)) => Some(value),
+        _ => None,
+    }
+}
+
+fn double_colon_at(markers: &[SourceMarker], index: usize) -> bool {
+    matches!(
+        (markers.get(index), markers.get(index + 1)),
+        (
+            Some(SourceMarker::Punct(':')),
+            Some(SourceMarker::Punct(':'))
+        )
+    )
 }
 
 fn hash_collection_iteration_call(line: &str, bindings: &[String]) -> bool {
@@ -945,6 +1135,46 @@ mod self_tests {
         let report = render_report(&scan_fixture(fixture));
         assert_eq!(report.matches("hashmap_iteration").count(), 4);
         assert_eq!(report.matches("hashset_iteration").count(), 3);
+    }
+
+    #[test]
+    fn inferred_hash_collection_constructor_bindings_emit_known_violations() {
+        let fixture = r#"
+            use std::collections::HashMap;
+
+            #[determinism::required]
+            fn ambient(_: &ee::runtime::determinism::Deterministic<Seed>) {
+                let mut map = HashMap::new();
+                for _ in map.iter() {}
+                let mut set = std::collections::HashSet::with_capacity(4);
+                for _ in set.drain() {}
+                let typed_map = HashMap::<String, String>::default();
+                for _ in typed_map.values() {}
+            }
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert_eq!(report.matches("hashmap_iteration").count(), 2);
+        assert_eq!(report.matches("hashset_iteration").count(), 1);
+    }
+
+    #[test]
+    fn hash_collection_constructor_assignments_without_let_do_not_bind() {
+        let fixture = r#"
+            use std::collections::HashMap;
+
+            #[determinism::required]
+            fn ambient(_: &ee::runtime::determinism::Deterministic<Seed>) {
+                field = HashMap::new();
+                for _ in field.iter() {}
+                let _ = HashMap::new();
+                for _ in placeholder.iter() {}
+            }
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert!(
+            !report.contains("hashmap_iteration"),
+            "constructor expressions outside let bindings must not create tracked bindings: {report}"
+        );
     }
 
     #[test]

@@ -807,6 +807,31 @@ fn cli_probe_classifies_healthy_status_and_prefs_payloads() -> TestResult {
 }
 
 #[test]
+fn cli_probe_parses_debug_localapi_prefs_with_prelude_line() -> TestResult {
+    let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+    runner.version = Some(TailscaleCliCommandOutput::success(good_version_output(), 3));
+    runner.status = Some(TailscaleCliCommandOutput::success(healthy_status(), 4));
+    runner.prefs = Some(TailscaleCliCommandOutput::success(
+        b"# doing request GET /localapi/v0/prefs\n{\"ShieldsUp\": true}",
+        5,
+    ));
+
+    let report = probe_tailscale_cli_with_runner(
+        &cli_probe_config("/opt/homebrew/bin/tailscale"),
+        &mut runner,
+    );
+
+    assert_eq!(report.shields_up, Some(true));
+    assert!(
+        report
+            .degradations
+            .iter()
+            .any(|entry| entry.code == "tailscale_shields_up")
+    );
+    Ok(())
+}
+
+#[test]
 fn cli_probe_continues_after_current_long_version_output() -> TestResult {
     let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
     runner.version = Some(TailscaleCliCommandOutput::success(

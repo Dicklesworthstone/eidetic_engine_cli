@@ -44,3 +44,5 @@ line 113: ambient_process_id: inject the host PID at the boundary instead of cal
 line 114: ambient_process_id: inject the host PID at the boundary instead of calling std::process::id
 line 115: ambient_thread_current: inject the thread identifier at the boundary instead of std::thread::current
 line 116: ambient_thread_current: inject the thread identifier at the boundary instead of std::thread::current
+line 122: hashmap_iteration: sort HashMap entries before deterministic output
+line 124: hashset_iteration: sort HashSet entries before deterministic output

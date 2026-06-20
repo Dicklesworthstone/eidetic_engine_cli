@@ -366,3 +366,31 @@ fn full_undo_idempotence_two_replays_safe() {
     // File still byte-identical to the original.
     assert_eq!(fs::read(&target).unwrap(), b"a");
 }
+
+#[test]
+fn undo_create_dir_all_reports_partial_when_created_dir_gains_content() {
+    let ws = fresh_workspace();
+    let target = ws.path().join("doctor-created-dir");
+
+    let run_dir;
+    {
+        let mut ctx = start_test_run(ws.path());
+        run_dir = ctx.run_dir().to_path_buf();
+        mutate(&mut ctx, &target, Op::CreateDirAll { mode: 0o755 }).unwrap();
+        ctx.finish(RunStatus::CompletedOk).unwrap();
+    }
+
+    fs::write(target.join("peer-owned.txt"), b"do not hide this").unwrap();
+
+    let summary = replay_undo(&run_dir).expect("undo should report partial instead of erroring");
+
+    assert!(matches!(summary.status, RunStatus::UndonePartial));
+    assert_eq!(summary.actions_undone, 0);
+    assert!(summary.first_error.as_deref().is_some_and(|error| {
+        error.contains("drifted") && error.contains("<non-empty directory>")
+    }));
+    assert!(
+        target.join("peer-owned.txt").exists(),
+        "undo must leave peer-created directory contents in place"
+    );
+}

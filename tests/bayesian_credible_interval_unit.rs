@@ -121,15 +121,21 @@ fn lcg_unit(state: u64) -> f64 {
     (state >> 11) as f64 * 2.0_f64.powi(-53)
 }
 
+fn raw_success_probability_for_weighted_rate(weighted_rate: f64) -> f64 {
+    let harmful_weight = DEFAULT_HARMFUL_WEIGHT;
+    (weighted_rate * harmful_weight) / (1.0 - weighted_rate + weighted_rate * harmful_weight)
+}
+
 fn coverage_for(p_true: f64, n_per_trial: usize, trials: usize, seed: u64) -> f64 {
     let mut state = seed;
     let mut covered = 0_usize;
+    let raw_success_probability = raw_success_probability_for_weighted_rate(p_true);
     for _ in 0..trials {
         let mut p = BetaPosterior::jeffreys();
         for _ in 0..n_per_trial {
             state = lcg_next(state);
             let u = lcg_unit(state);
-            if u < p_true {
+            if u < raw_success_probability {
                 p = p.update_helpful();
             } else {
                 p = p.update_harmful(DEFAULT_HARMFUL_WEIGHT);
@@ -191,6 +197,15 @@ fn ci_is_symmetric_around_half_when_alpha_equals_beta() {
         "symmetric posterior must yield symmetric CI: lo={lo}, hi={hi}, sum={}",
         lo + hi
     );
+}
+
+#[test]
+fn ci_for_uniform_beta_uses_stored_alpha_beta_directly() {
+    let p = BetaPosterior::new(1.0, 1.0).expect("uniform beta posterior is valid");
+    let (lo, hi) = p.credible_interval(0.90).expect("uniform beta CI");
+
+    assert!(approx_eq(lo, 0.05, 1e-10), "uniform beta lo was {lo}");
+    assert!(approx_eq(hi, 0.95, 1e-10), "uniform beta hi was {hi}");
 }
 
 // ---------------------------------------------------------------------------

@@ -257,7 +257,63 @@ fn capabilities_json_contract_reports_inventory_counts_and_registry() -> TestRes
     )
 }
 
+#[cfg(unix)]
+#[test]
+fn capabilities_json_reports_non_utf8_secret_env_as_set_without_value() -> TestResult {
+    use std::os::unix::ffi::OsStringExt;
+
+    let workspace = E2eWorkspace::create("capabilities-non-utf8-secret-env")?;
+    let secret = std::ffi::OsString::from_vec(vec![b'a', 0x80, b'b']);
+    let output = run_ee_with_extra_env(
+        &workspace,
+        "act_capabilities_non_utf8_secret_env",
+        &["capabilities", "--json"],
+        &[("EE_SERVE_TOKEN", secret.as_os_str())],
+    )?;
+    ensure_success(
+        &output,
+        "ee capabilities --json with non-UTF8 EE_SERVE_TOKEN",
+    )?;
+    ensure_empty_stderr(
+        &output,
+        "ee capabilities --json with non-UTF8 EE_SERVE_TOKEN",
+    )?;
+
+    let json = stdout_json(
+        &output,
+        "ee capabilities --json with non-UTF8 EE_SERVE_TOKEN",
+    )?;
+    let data = object_value(&json, "data")?;
+    let env_overrides = array_member(data, "envOverrides")?;
+    let serve_token =
+        find_object_by_string(env_overrides, "envOverrides", "name", "EE_SERVE_TOKEN")?;
+    ensure_eq_bool(
+        bool_member(serve_token, "isSet")?,
+        true,
+        "envOverrides[EE_SERVE_TOKEN].isSet",
+    )?;
+    ensure_eq_str(
+        string_member(serve_token, "source")?,
+        "process_env",
+        "envOverrides[EE_SERVE_TOKEN].source",
+    )?;
+    if serve_token.contains_key("currentValue") {
+        return Err("envOverrides[EE_SERVE_TOKEN] must not expose currentValue".to_owned());
+    }
+
+    Ok(())
+}
+
 fn run_ee(workspace: &E2eWorkspace, phase: &str, args: &[&str]) -> TestResult<Output> {
+    run_ee_with_extra_env(workspace, phase, args, &[])
+}
+
+fn run_ee_with_extra_env(
+    workspace: &E2eWorkspace,
+    phase: &str,
+    args: &[&str],
+    extra_env: &[(&str, &std::ffi::OsStr)],
+) -> TestResult<Output> {
     workspace.log(
         phase,
         json!({
@@ -266,11 +322,16 @@ fn run_ee(workspace: &E2eWorkspace, phase: &str, args: &[&str]) -> TestResult<Ou
         }),
     )?;
     let started = Instant::now();
-    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command
         .args(args)
         .env("HOME", &workspace.home)
         .env("XDG_DATA_HOME", &workspace.xdg_data)
-        .env("EE_NO_COLOR", "1")
+        .env("EE_NO_COLOR", "1");
+    for &(name, value) in extra_env {
+        command.env(name, value);
+    }
+    let output = command
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))?;
     workspace.log(

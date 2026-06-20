@@ -96,28 +96,8 @@ const ALLOWLIST: &[(&str, u32, &str)] = &[
         "PENDING-FIX: CLI JSON response serialization tracked by no-silent-fallback inventory",
     ),
     (
-        "src/core/context.rs",
-        4336,
-        "PENDING-FIX: Coordination fallback serialization tracked by no-silent-fallback inventory",
-    ),
-    (
-        "src/core/context.rs",
-        4351,
-        "PENDING-FIX: Coordination fallback serialization tracked by no-silent-fallback inventory",
-    ),
-    (
         "src/core/rehearse.rs",
         1404,
-        "PENDING-FIX: Captured stderr thread join tracked by no-silent-fallback inventory",
-    ),
-    (
-        "src/core/swarm_brief.rs",
-        1013,
-        "PENDING-FIX: Captured stdout thread join tracked by no-silent-fallback inventory",
-    ),
-    (
-        "src/core/swarm_brief.rs",
-        1014,
         "PENDING-FIX: Captured stderr thread join tracked by no-silent-fallback inventory",
     ),
     (

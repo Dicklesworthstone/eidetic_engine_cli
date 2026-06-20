@@ -565,6 +565,87 @@ fn effect_manifest_includes_config_write_commands() -> TestResult {
             &format!("{command} requires audit"),
         )?;
     }
+
+    for command in ["config set", "profile config apply"] {
+        let effect = manifest
+            .get(command)
+            .ok_or_else(|| format!("{command} not in manifest"))?;
+        let contract = &effect.mutation_contract;
+        ensure(
+            effect.default_effect,
+            EffectClass::ConfigWrite,
+            &format!("{command} writes configuration"),
+        )?;
+        ensure(
+            contract.side_effect_class,
+            SideEffectClass::SidePathArtifact,
+            &format!("{command} writes a config side-path file"),
+        )?;
+        ensure(
+            effect.requires_audit,
+            false,
+            &format!("{command} does not write audit rows"),
+        )?;
+        ensure(
+            effect.write_surfaces.db_tables.is_empty(),
+            true,
+            &format!("{command} does not write DB tables"),
+        )?;
+        ensure(
+            effect
+                .write_surfaces
+                .workspace_files
+                .contains(&".ee/config.toml"),
+            true,
+            &format!("{command} declares config file surface"),
+        )?;
+        let dry_run_behavior = contract
+            .dry_run_behavior
+            .ok_or_else(|| format!("{command} missing dry-run behavior"))?;
+        ensure(
+            dry_run_behavior.contains("--dry-run"),
+            true,
+            &format!("{command} dry-run contract names the config preview flag"),
+        )?;
+        ensure(
+            dry_run_behavior.contains("key material"),
+            false,
+            &format!("{command} dry-run contract is not certificate-specific"),
+        )?;
+        ensure(
+            dry_run_behavior.contains("--show"),
+            false,
+            &format!("{command} dry-run contract is not certificate keygen --show"),
+        )?;
+        ensure(
+            contract.recovery_behavior.contains("config-file"),
+            true,
+            &format!("{command} recovery contract names config files"),
+        )?;
+        ensure(
+            contract.recovery_behavior.contains("key material"),
+            false,
+            &format!("{command} recovery contract is not certificate-specific"),
+        )?;
+    }
+
+    let keygen = manifest
+        .get("certificate keygen")
+        .ok_or_else(|| "certificate keygen not in manifest".to_string())?;
+    let keygen_dry_run = keygen
+        .mutation_contract
+        .dry_run_behavior
+        .ok_or_else(|| "certificate keygen missing dry-run behavior".to_string())?;
+    ensure(
+        keygen_dry_run.contains("--show"),
+        true,
+        "certificate keygen names its read-only --show mode",
+    )?;
+    ensure(
+        keygen_dry_run.contains("key material"),
+        true,
+        "certificate keygen keeps key-material contract wording",
+    )?;
     Ok(())
 }
 

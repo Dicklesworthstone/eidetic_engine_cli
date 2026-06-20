@@ -6,7 +6,9 @@
 //! `run_search_inner` integration will rely on) and bumps coverage on the
 //! determinism contract that bead `bd-2mey5` requires.
 
-use ee::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
+use ee::models::query::{
+    EqlConfidenceFilter, EqlGraphFilter, EqlQuery, EqlSpeedMode, EqlTagsMode, EqlTimeFilter,
+};
 use ee::search::plan_cache::{
     CompiledPlan, DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, MAX_PLAN_CACHE_ENTRIES,
     PLAN_CACHE_DIAG_SCHEMA_V1, PLAN_CACHE_ENV_VAR_NAME, PlanCache, PlanCacheDecision,
@@ -79,6 +81,37 @@ fn limit_or_query_change_changes_plan_tree_hash() {
     let different_limit = compute_plan_tree_hash(&key, &sample_plan("alpha", 20));
     assert_ne!(base, different_query);
     assert_ne!(base, different_limit);
+}
+
+#[test]
+fn time_confidence_or_graph_change_changes_plan_tree_hash() {
+    let key = PlanCacheKey::new(1, 1, 1);
+    let base = compute_plan_tree_hash(&key, &sample_plan("alpha", 10));
+
+    let mut with_time = sample_query("alpha", 10);
+    with_time.time = Some(EqlTimeFilter {
+        since: Some("2026-01-01T00:00:00Z".to_owned()),
+        until: None,
+    });
+    let mut with_confidence = sample_query("alpha", 10);
+    with_confidence.confidence = Some(EqlConfidenceFilter {
+        min: Some(0.7),
+        max: None,
+    });
+    let mut with_graph = sample_query("alpha", 10);
+    with_graph.graph = Some(EqlGraphFilter {
+        center: Some("mem_01".to_owned()),
+        hops: Some(2),
+        relations: vec!["supports".to_owned()],
+    });
+
+    for plan in [
+        CompiledPlan::from_query(with_time),
+        CompiledPlan::from_query(with_confidence),
+        CompiledPlan::from_query(with_graph),
+    ] {
+        assert_ne!(base, compute_plan_tree_hash(&key, &plan));
+    }
 }
 
 #[test]

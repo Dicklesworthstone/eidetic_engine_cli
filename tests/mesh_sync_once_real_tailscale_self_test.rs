@@ -145,7 +145,7 @@ fn write_fake_ee(bin_dir: &Path) -> TestResult {
         &bin_dir.join("ee"),
         r#"#!/usr/bin/env bash
 set -euo pipefail
-printf '{"schema":"ee.response.v2","success":true,"data":{"contactedPeers":1},"degraded":[]}\n'
+printf '{"schema":"ee.response.v2","success":true,"data":{"contactedPeers":true},"degraded":[]}\n'
 "#,
     )
 }
@@ -230,6 +230,35 @@ fn assert_redacted_tailnet_artifacts(artifact_dir: &Path) -> TestResult {
         ));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn assert_sync_once_event_reports_contacted_peer(event_dir: &Path) -> TestResult {
+    let event_file = event_dir.join("events.jsonl");
+    let contents = fs::read_to_string(&event_file)
+        .map_err(|error| format!("read {}: {error}", event_file.display()))?;
+
+    for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+        let value: serde_json::Value = serde_json::from_str(line)
+            .map_err(|error| format!("parse event JSON: {error}; line={line}"))?;
+        if value.get("phase").and_then(serde_json::Value::as_str) != Some("assert") {
+            continue;
+        }
+        let contacted_peers = value
+            .pointer("/fields/contactedPeers")
+            .and_then(serde_json::Value::as_i64);
+        if contacted_peers != Some(1) {
+            return Err(format!(
+                "assert event must normalize boolean contactedPeers to numeric 1; got {value}"
+            ));
+        }
+        return Ok(());
+    }
+
+    Err(format!(
+        "expected an assert event in {}; contents={contents:?}",
+        event_file.display()
+    ))
 }
 
 #[cfg(unix)]
@@ -337,7 +366,8 @@ fn mesh_sync_once_real_tailscale_fake_run_retains_redacted_tailnet_artifacts() -
         ));
     }
 
-    assert_redacted_tailnet_artifacts(&artifact_dir)
+    assert_redacted_tailnet_artifacts(&artifact_dir)?;
+    assert_sync_once_event_reports_contacted_peer(&event_dir)
 }
 
 #[cfg(unix)]

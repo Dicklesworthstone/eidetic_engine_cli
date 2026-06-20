@@ -321,6 +321,77 @@ fn recall_requires_at_least_one_selector() -> TestResult {
 }
 
 #[test]
+fn recall_rejects_zero_budget_tokens() -> TestResult {
+    let workspace = seed_recall_workspace()?;
+    let output = run_ee(&[
+        "recall",
+        "--path",
+        "src/db/*.rs",
+        "--budget-tokens",
+        "0",
+        "--workspace",
+        workspace.path().to_str().unwrap(),
+        "--json",
+    ])?;
+    if output.status.success() {
+        return Err("ee recall --budget-tokens 0 must fail with a usage error".to_owned());
+    }
+    if output.status.code() != Some(1) {
+        return Err(format!(
+            "expected usage exit code 1, got {:?}",
+            output.status.code()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stdout.contains("--budget-tokens must be greater than zero") {
+        return Err(format!(
+            "usage error must name the zero-budget problem; got: {stdout}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn recall_too_small_positive_budget_reports_unsatisfiable() -> TestResult {
+    let workspace = seed_recall_workspace()?;
+    let response = parse_response(
+        &run_ee(&[
+            "recall",
+            "--path",
+            "src/db/*.rs",
+            "--budget-tokens",
+            "1",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--json",
+        ])?,
+        "recall --budget-tokens 1",
+    )?;
+    if !item_memory_ids(&response).is_empty() {
+        return Err("too-small positive budget must emit an empty item page".to_owned());
+    }
+    if response.pointer("/data/recall/truncated") != Some(&Value::Bool(true)) {
+        return Err("too-small positive budget must report truncated=true".to_owned());
+    }
+    if response
+        .pointer("/data/recall/continuationCursor")
+        .is_some_and(|cursor| !cursor.is_null())
+    {
+        return Err("too-small positive budget must not mint a non-progress cursor".to_owned());
+    }
+    let codes = degraded_codes(&response);
+    if !codes
+        .iter()
+        .any(|code| code == "output_budget_unsatisfiable")
+    {
+        return Err(format!(
+            "expected output_budget_unsatisfiable, got {codes:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn recall_markdown_output_matches_golden() -> TestResult {
     let workspace = seed_recall_workspace()?;
     let output = run_ee(&[

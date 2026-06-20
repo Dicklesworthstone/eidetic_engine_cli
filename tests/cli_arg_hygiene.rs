@@ -25,7 +25,7 @@
 //! exact crash, and a recursive sweep that forces every subcommand to build.
 
 use clap::{CommandFactory, Parser};
-use ee::cli::Cli;
+use ee::cli::{Cli, Command, PlanCommand};
 
 /// Structural catch-all: validates the ENTIRE command tree (every subcommand,
 /// every global after propagation) for duplicate argument ids, conflicting
@@ -150,5 +150,39 @@ fn ee_primer_parses_and_accesses_without_panicking() {
             argv.join(" "),
             parsed.err()
         );
+    }
+}
+
+/// `ee plan goal --workspace <path>` has a local workspace-path flag whose
+/// public spelling intentionally matches the root global `--workspace`.
+/// Keep the Rust field id distinct from the global id so clap never registers
+/// the root `PathBuf` value and local subcommand value under the same id.
+#[test]
+fn ee_plan_goal_workspace_flag_stays_on_local_path_arg() {
+    let parsed = Cli::try_parse_from([
+        "ee",
+        "plan",
+        "goal",
+        "--goal",
+        "prepare release",
+        "--workspace",
+        ".",
+        "--json",
+    ])
+    .expect("plan goal local --workspace parses");
+
+    assert!(
+        parsed.workspace.is_none(),
+        "post-subcommand --workspace must not be consumed by the root global workspace arg"
+    );
+    match parsed.command {
+        Some(Command::Plan(PlanCommand::Goal(args))) => {
+            assert_eq!(
+                args.workspace_path.as_deref(),
+                Some(std::path::Path::new(".")),
+                "plan goal local --workspace should populate workspace_path"
+            );
+        }
+        other => panic!("expected plan goal command, got {other:?}"),
     }
 }
