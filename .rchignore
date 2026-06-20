@@ -82,6 +82,7 @@ recent_commits.txt
 /pass*.jsonl
 /fix_*.sh
 /find_*.sh
+/*-upgrade-progress.json
 
 # Volatile Beads SQLite sidecars and temp files. Keep .beads/issues.jsonl
 # visible for tests and coordination, but do not let transient DB files make

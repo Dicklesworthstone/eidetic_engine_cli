@@ -187,6 +187,7 @@ tests/logs/
 /pass*.jsonl
 /fix_*.sh
 /find_*.sh
+/*-upgrade-progress.json
 
 # scripts/audit_install_pipeline.sh writes a timestamped JSON snapshot per
 # run into tests/audit_artifacts/. The "latest_install_pipeline.json" symlink
