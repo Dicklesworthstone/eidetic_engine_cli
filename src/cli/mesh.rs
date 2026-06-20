@@ -2536,14 +2536,47 @@ fn auto_enrollment_candidates_from_discovery(
             node_key: peer.node_key.clone(),
             tailscale_ip: peer.tailscale_ip.clone(),
             magic_dns_name: peer.magic_dns_name.clone(),
-            hostname: peer
-                .hostname
-                .clone()
-                .unwrap_or_else(|| peer.node_key.clone()),
+            hostname: auto_enrollment_candidate_hostname(
+                peer.hostname.as_deref(),
+                peer.magic_dns_name.as_deref(),
+                &peer.tailscale_ip,
+                &peer.node_key,
+            ),
             ee_protocol_version: peer.ee_protocol_version.clone(),
             discovery_policy_decision: peer.discovery_policy_decision.clone(),
         })
         .collect()
+}
+
+fn auto_enrollment_candidate_hostname(
+    hostname: Option<&str>,
+    magic_dns_name: Option<&str>,
+    tailscale_ip: &str,
+    node_key: &str,
+) -> String {
+    hostname
+        .and_then(trimmed_non_empty)
+        .or_else(|| magic_dns_name.and_then(trimmed_magic_dns_name))
+        .or_else(|| trimmed_non_empty(tailscale_ip))
+        .unwrap_or_else(|| node_key.to_owned())
+}
+
+fn trimmed_non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+fn trimmed_magic_dns_name(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
 }
 
 fn auto_enrollment_candidates_from_local(
@@ -2566,14 +2599,17 @@ fn auto_enrollment_candidates_from_local(
                         .iter()
                         .any(|peer_workspace_id| peer_workspace_id == workspace_id)
             })?;
+            let hostname = auto_enrollment_candidate_hostname(
+                peer.hostname.as_deref(),
+                peer.magic_dns_name.as_deref(),
+                &tailscale_ip,
+                &peer.node_key,
+            );
             Some(AutoEnrollmentCandidate {
                 node_key: peer.node_key.clone(),
                 tailscale_ip,
                 magic_dns_name: peer.magic_dns_name.clone(),
-                hostname: peer
-                    .hostname
-                    .clone()
-                    .unwrap_or_else(|| peer.node_key.clone()),
+                hostname,
                 ee_protocol_version: capability.ee_protocol_version.clone(),
                 discovery_policy_decision: "force_include_override".to_owned(),
             })
@@ -3758,6 +3794,7 @@ mod tests {
     use crate::core::tailscale_probe::{
         TailscalePeerEeCapability, TailscalePeerReport, TailscaleProbeMethod,
     };
+    use crate::mesh::tailscale_autodiscovery::TailscaleAutodiscoveryPeer;
 
     #[test]
     fn read_mesh_text_bounded_refuses_oversized_payload() {
@@ -3968,6 +4005,81 @@ mod tests {
         assert_eq!(value["materializedOnNodeKey"], "nodekey:self");
         assert_eq!(value["endpoint"]["tailnetId"], "tailnet-alpha");
         assert_eq!(value["trustEstablishedBy"], "tailscale_auto_enrollment");
+    }
+
+    #[test]
+    fn auto_enrollment_discovery_candidate_hostname_uses_magic_dns_before_node_key() {
+        let report = TailscaleAutodiscoveryReport {
+            schema: crate::mesh::tailscale_autodiscovery::TAILSCALE_AUTODISCOVERY_SCHEMA_V1,
+            tailnet_id: Some("tailnet-alpha".to_owned()),
+            tailnet_display_name: Some("alpha.example".to_owned()),
+            self_node_key: Some("nodekey:self".to_owned()),
+            probed_peer_count: 1,
+            eligible_peer_count: 1,
+            ee_capable_peers: vec![TailscaleAutodiscoveryPeer {
+                node_key: "nodekey:alpha".to_owned(),
+                tailscale_ip: "100.64.0.2".to_owned(),
+                magic_dns_name: Some("alpha.tailnet.test.".to_owned()),
+                hostname: None,
+                ee_protocol_version: "1.0".to_owned(),
+                workspace_match_set: vec!["workspace-alpha".to_owned()],
+                last_probed_at: "2026-05-20T00:00:00Z".to_owned(),
+                latency_ms: 5,
+                discovery_policy_decision: "service_tag_match".to_owned(),
+            }],
+            skipped_peers: Vec::new(),
+            degraded: Vec::new(),
+        };
+
+        let candidates = auto_enrollment_candidates_from_discovery(&report);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].hostname, "alpha.tailnet.test");
+    }
+
+    #[test]
+    fn auto_enrollment_local_candidate_hostname_uses_tailscale_ip_before_node_key() {
+        let report = TailscaleLocalReport {
+            schema: crate::core::tailscale_probe::TAILSCALE_LOCAL_SCHEMA_V1,
+            installed: true,
+            daemon_reachable: true,
+            authenticated: true,
+            binary_authentic: true,
+            binary_version_raw: None,
+            binary_absolute_path: None,
+            shields_up: Some(false),
+            tailnet_id: Some("tailnet-alpha".to_owned()),
+            tailnet_display_name: Some("alpha.example".to_owned()),
+            self_node_key: Some("nodekey:self".to_owned()),
+            self_tailscale_ip: Some("100.64.0.1".to_owned()),
+            self_magic_dns_name: Some("self.tailnet.test.".to_owned()),
+            self_advertised_tags: Vec::new(),
+            peers: vec![TailscalePeerReport {
+                node_key: "nodekey:ee".to_owned(),
+                tailscale_ips: vec!["100.64.0.4".to_owned()],
+                magic_dns_name: None,
+                hostname: Some("   ".to_owned()),
+                advertised_tags: Vec::new(),
+                online: Some(true),
+                ee_capability: Some(TailscalePeerEeCapability {
+                    ee_version: "0.2.0".to_owned(),
+                    ee_protocol_version: "1.0".to_owned(),
+                    workspace_ids: vec!["workspace-alpha".to_owned()],
+                    respond: true,
+                    latency_ms: 1,
+                }),
+            }],
+            version: Some("1.66.0".to_owned()),
+            probe_method: TailscaleProbeMethod::Cli,
+            probe_elapsed_ms: 10,
+            platform: TailscalePlatform::Linux,
+            degradations: Vec::new(),
+        };
+
+        let candidates = auto_enrollment_candidates_from_local(Some(&report), "workspace-alpha");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].hostname, "100.64.0.4");
     }
 
     #[test]

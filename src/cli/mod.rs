@@ -19125,28 +19125,33 @@ where
     I: IntoIterator,
     I::Item: AsRef<std::ffi::OsStr>,
 {
-    let mut prev_was_format = false;
-    for arg in args {
+    let mut args = args.into_iter().peekable();
+    while let Some(arg) = args.next() {
         let s = arg.as_ref().to_string_lossy();
-        if prev_was_format {
-            if format_value_requests_json_error(&s) {
-                return true;
-            }
-            prev_was_format = false;
-            continue;
-        }
         if s == "--" {
             return false;
         }
         if s == "--json" || s == "-j" || s == "--robot" {
             return true;
         }
-        if s == "--format" {
-            prev_was_format = true;
-        } else if let Some(format) = s.strip_prefix("--format=") {
+        if let Some(format) = s.strip_prefix("--format=") {
             if format_value_requests_json_error(format) {
                 return true;
             }
+        } else if s == "--format"
+            && let Some(next) = args.peek()
+        {
+            if next.as_ref() == std::ffi::OsStr::new("--") {
+                continue;
+            }
+            let format = next.as_ref().to_string_lossy();
+            if format.starts_with('-') {
+                continue;
+            }
+            if format_value_requests_json_error(&format) {
+                return true;
+            }
+            let _ = args.next();
         }
     }
     false
@@ -42500,8 +42505,9 @@ where
 {
     use crate::core::recall::{
         RecallCursorResolution, RecallDegradedEntry, RecallQuery, RecallQueryEcho,
-        collect_diff_paths_via_git, empty_recall_report_for_rejected_cursor, recall_data_json,
-        render_recall_markdown, resolve_recall_cursor, run_recall,
+        collect_diff_paths_via_git, empty_recall_report_for_rejected_cursor,
+        recall_cursor_page_is_honest, recall_data_json, render_recall_markdown,
+        resolve_recall_cursor, run_recall,
     };
 
     // At least one selector is required (ADR 0064 §2): with no selectors the
@@ -42622,10 +42628,15 @@ where
             return write_domain_error(&error, cli.wants_json(), stdout, stderr);
         }
     };
+    let mut resume_cursor: Option<(usize, usize)> = None;
     let rejected_page = match resolve_recall_cursor(args.cursor.as_deref(), &query, db_generation) {
         RecallCursorResolution::Fresh => None,
-        RecallCursorResolution::Resume(offset) => {
+        RecallCursorResolution::Resume {
+            offset,
+            dropped_count,
+        } => {
             query.offset = offset;
+            resume_cursor = Some((offset, dropped_count));
             None
         }
         RecallCursorResolution::RejectedInvalid => {
@@ -42643,7 +42654,7 @@ where
             Some(())
         }
     };
-    let report = if rejected_page.is_some() {
+    let mut report = if rejected_page.is_some() {
         // A rejected cursor yields an empty page (never a restarted one), so
         // a page sequence can never duplicate or skip items across writes.
         let index_generation = match connection.memory_anchor_index_generation(&workspace_id) {
@@ -42669,6 +42680,13 @@ where
             }
         }
     };
+    if let Some((offset, dropped_count)) = resume_cursor
+        && !recall_cursor_page_is_honest(offset, dropped_count, report.total_matched)
+    {
+        extra_degraded.push(RecallDegradedEntry::cursor_invalid());
+        report =
+            empty_recall_report_for_rejected_cursor(report.index_generation, report.db_generation);
+    }
 
     // Engine degradations first, then CLI-level entries, then the budget
     // truncation entry — one truncation vocabulary (ADR 0064 §5).
@@ -56685,6 +56703,7 @@ where
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
+        "degraded": [],
     });
     write_stdout(stdout, &(response.to_string() + "\n"))
 }
@@ -57145,7 +57164,8 @@ where
                 let response = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
-                    "data": data
+                    "data": data,
+                    "degraded": [],
                 });
                 write_stdout(stdout, &(response.to_string() + "\n"))
             }
@@ -57206,7 +57226,8 @@ where
                 let response = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
-                    "data": report.data_json()
+                    "data": report.data_json(),
+                    "degraded": [],
                 });
                 write_stdout(stdout, &(response.to_string() + "\n"))
             }
@@ -58815,7 +58836,7 @@ const COMMAND_NAMES: &[&str] = &[
 
 /// Subcommand names for nested commands.
 const AGENT_SUBCOMMANDS: &[&str] = &["detect", "status", "sources", "scan"];
-const ANALYZE_SUBCOMMANDS: &[&str] = &["science-status"];
+const ANALYZE_SUBCOMMANDS: &[&str] = &["science-status", "drift", "clustering"];
 const ARTIFACT_SUBCOMMANDS: &[&str] = &["register", "inspect", "list"];
 const AUDIT_SUBCOMMANDS: &[&str] = &["timeline", "show", "diff", "verify"];
 const BACKUP_SUBCOMMANDS: &[&str] = &["create", "list", "inspect", "restore", "verify"];
@@ -59341,7 +59362,17 @@ impl NormalizedInvocation {
                     McpCommand::Validate(_) => "mcp validate".to_string(),
                 },
                 Command::Hook(hook) => match hook {
+                    // Harness hook install/undo modes write settings files and
+                    // backups; print/default modes only render the plan.
+                    HookCommand::ClaudeCode(args) if args.install => {
+                        "hook claude-code --install".to_string()
+                    }
+                    HookCommand::ClaudeCode(args) if args.undo => {
+                        "hook claude-code --undo".to_string()
+                    }
                     HookCommand::ClaudeCode(_) => "hook claude-code".to_string(),
+                    HookCommand::Codex(args) if args.install => "hook codex --install".to_string(),
+                    HookCommand::Codex(args) if args.undo => "hook codex --undo".to_string(),
                     HookCommand::Codex(_) => "hook codex".to_string(),
                     HookCommand::Gemini(_) => "hook gemini".to_string(),
                     HookCommand::PreflightShell(_) => "hook preflight-shell".to_string(),
@@ -64386,6 +64417,38 @@ mod tests {
     }
 
     #[test]
+    fn support_bundle_json_envelope_includes_required_top_level_degraded() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "support", "bundle", "--dry-run"]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "support bundle dry-run exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "support bundle dry-run JSON stderr clean",
+        )?;
+        let report: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &report["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "support bundle response schema",
+        )?;
+        ensure_equal(
+            &report["success"],
+            &serde_json::json!(true),
+            "support bundle success",
+        )?;
+        ensure_equal(
+            &report["degraded"],
+            &serde_json::json!([]),
+            "support bundle top-level degraded",
+        )
+    }
+
+    #[test]
     fn support_inspect_verify_hashes_flag_controls_hash_verification() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let bundle_dir = tempdir.path().join("bundle");
@@ -64446,6 +64509,11 @@ mod tests {
             "structure-only inspection must not claim hash verification",
         )?;
         ensure_equal(
+            &report["degraded"],
+            &serde_json::json!([]),
+            "structure-only inspection top-level degraded",
+        )?;
+        ensure_equal(
             &report["data"]["valid"],
             &serde_json::json!(true),
             "structure-only inspection should accept size-consistent bundles",
@@ -64468,6 +64536,11 @@ mod tests {
             &report["data"]["hashVerified"],
             &serde_json::json!(true),
             "default inspection must verify hashes",
+        )?;
+        ensure_equal(
+            &report["degraded"],
+            &serde_json::json!([]),
+            "default inspection top-level degraded",
         )?;
         ensure_equal(
             &report["data"]["valid"],
@@ -64757,6 +64830,38 @@ mod tests {
             }
             other => Err(format!("expected artifact register command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn artifact_success_envelope_includes_required_top_level_degraded() -> TestResult {
+        let mut stdout = Vec::new();
+        let exit = super::write_artifact_success(
+            &mut stdout,
+            serde_json::json!({
+                "schema": "ee.artifact.registry.v1",
+                "command": "artifact list",
+            }),
+        );
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "exit code")?;
+        let value = serde_json::from_slice::<serde_json::Value>(&stdout)
+            .map_err(|error| format!("artifact success envelope should parse: {error}"))?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "response schema",
+        )?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "success")?;
+        ensure_equal(
+            &value["degraded"],
+            &serde_json::json!([]),
+            "top-level degraded",
+        )?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!("artifact list"),
+            "data command",
+        )
     }
 
     #[test]
@@ -69011,6 +69116,38 @@ mod tests {
     }
 
     #[test]
+    fn parse_error_json_detection_does_not_consume_flags_after_malformed_format() -> TestResult {
+        let requests_json = |argv: &[&str]| {
+            super::args_request_json(argv.iter().copied().map(std::ffi::OsString::from))
+        };
+
+        ensure(
+            requests_json(&["ee", "--format", "--json", "status"]),
+            "a malformed split --format must not hide a following --json flag",
+        )?;
+        ensure(
+            requests_json(&["ee", "status", "--format", "-j"]),
+            "a malformed split --format must not hide a following -j flag",
+        )?;
+        ensure(
+            requests_json(&["ee", "status", "--format", "--robot"]),
+            "a malformed split --format must not hide a following --robot flag",
+        )?;
+        ensure(
+            requests_json(&["ee", "--format", "hook", "status"]),
+            "hook renderer requests machine-readable parse errors",
+        )?;
+        ensure(
+            !requests_json(&["ee", "--format", "markdown", "status"]),
+            "markdown renderer does not request JSON parse errors",
+        )?;
+        ensure(
+            !requests_json(&["ee", "status", "--format", "--", "--json"]),
+            "separator stops option scanning before positional --json text",
+        )
+    }
+
+    #[test]
     fn format_is_machine_readable_classification() -> TestResult {
         ensure(
             !OutputFormat::Human.is_machine_readable(),
@@ -69676,6 +69813,83 @@ mod tests {
             }
             _ => Err("expected HookCommand::Codex".to_string()),
         }
+    }
+
+    #[test]
+    fn hook_harness_install_and_undo_resolve_to_write_effects() -> TestResult {
+        let manifest = crate::core::effect::EffectManifest::build();
+
+        let effect_for = |argv: &[&str]| -> Result<(String, bool), String> {
+            let cli = Cli::try_parse_from(argv.iter().copied())
+                .map_err(|error| format!("parse {argv:?}: {error}"))?;
+            let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
+            let path = super::NormalizedInvocation::from_cli(&cli, &args).command_path;
+            let effect = manifest
+                .get(&path)
+                .ok_or_else(|| format!("no effect manifest entry for {path:?}"))?;
+            Ok((path, effect.default_effect.is_mutating()))
+        };
+
+        for (argv, expected_path, expected_mutating) in [
+            (
+                &["ee", "hook", "claude-code"][..],
+                "hook claude-code",
+                false,
+            ),
+            (
+                &["ee", "hook", "claude-code", "--print"][..],
+                "hook claude-code",
+                false,
+            ),
+            (
+                &["ee", "hook", "claude-code", "--install"][..],
+                "hook claude-code --install",
+                true,
+            ),
+            (
+                &["ee", "hook", "claude-code", "--undo"][..],
+                "hook claude-code --undo",
+                true,
+            ),
+            (&["ee", "hook", "codex"][..], "hook codex", false),
+            (&["ee", "hook", "codex", "--print"][..], "hook codex", false),
+            (
+                &["ee", "hook", "codex", "--install"][..],
+                "hook codex --install",
+                true,
+            ),
+            (
+                &["ee", "hook", "codex", "--undo"][..],
+                "hook codex --undo",
+                true,
+            ),
+            (&["ee", "hook", "gemini"][..], "hook gemini", false),
+            (
+                &["ee", "hook", "gemini", "--print"][..],
+                "hook gemini",
+                false,
+            ),
+            (
+                &["ee", "hook", "gemini", "--install"][..],
+                "hook gemini",
+                false,
+            ),
+            (
+                &["ee", "hook", "gemini", "--undo"][..],
+                "hook gemini",
+                false,
+            ),
+        ] {
+            let (path, mutating) = effect_for(argv)?;
+            ensure_equal(&path, &expected_path.to_string(), "hook command_path")?;
+            ensure_equal(
+                &mutating,
+                &expected_mutating,
+                "hook mutating classification",
+            )?;
+        }
+
+        Ok(())
     }
 
     #[test]
@@ -76217,6 +76431,20 @@ mod tests {
             &suggestion,
             &Some("science-status".to_string()),
             "science-stats -> science-status",
+        )
+    }
+
+    #[test]
+    fn did_you_mean_subcommand_analyze_covers_all_public_subcommands() -> TestResult {
+        ensure_equal(
+            &super::did_you_mean("drfit", Some("analyze")),
+            &Some("drift".to_string()),
+            "analyze drfit -> drift",
+        )?;
+        ensure_equal(
+            &super::did_you_mean("clustring", Some("analyze")),
+            &Some("clustering".to_string()),
+            "analyze clustring -> clustering",
         )
     }
 
