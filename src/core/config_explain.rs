@@ -24,7 +24,7 @@
 //! config to these cores in the follow-on leaves.
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::config::merge::{
     ConfigValueSource, MESH_ENABLED_KEY, PACK_DEFAULT_MAX_TOKENS_KEY, PACK_MMR_LAMBDA_KEY,
@@ -345,7 +345,7 @@ pub fn lint_unknown_env_var(var_name: &str, recognized: bool) -> Option<ConfigLi
             LINT_UNKNOWN_ENV_VAR,
             var_name,
             format!(
-                "environment variable `{var_name}` is set but `ee` does not consume it; it has no effect. See `ee config env` for the variables ee honors."
+                "environment variable `{var_name}` is set but `ee` does not consume it; it has no effect. See `ee capabilities --json` data.envOverrides[] for the variables ee honors."
             ),
         ))
     }
@@ -672,6 +672,15 @@ mod tests {
     fn lint_flags_unknown_env_var() {
         let finding = lint_unknown_env_var("EMBEDDING_MODEL", false).expect("unknown var flagged");
         assert_eq!(finding.code, LINT_UNKNOWN_ENV_VAR);
+        assert!(
+            finding.message.contains("ee capabilities --json")
+                && finding.message.contains("data.envOverrides[]"),
+            "unknown-env lint must point at the shipped env-var discovery surface"
+        );
+        assert!(
+            !finding.message.contains("ee config env"),
+            "unknown-env lint must not point at the nonexistent `ee config env` command"
+        );
         assert!(lint_unknown_env_var("EE_DB", true).is_none());
     }
 

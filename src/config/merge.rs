@@ -20,12 +20,12 @@ use super::file::{
     CacheConfig, CassConfig, ConfigFile, CurationConfig, DecideConfig, FeedbackConfig,
     GraphCausalConfig, GraphConfig, GraphCurateConfig, GraphFeatureFlagsConfig,
     GraphGomoryHuConfig, GraphHealthConfig, GraphHitsConfig, GraphMemoryConfig, GraphPackDnaConfig,
-    GraphPprConfig, GraphWitnessesConfig, HandoffConfig, JournalConfig, LearnConfig,
-    LearnDecayConfig, MeshCommandMode, MeshConfig, OutputRedactionConfig, PackConfig,
-    PackL2CacheConfig, PolicyConfig, PrimerConfig, PrivacyConfig, ReadPoolConfig, RedactionConfig,
-    RedactionDefaultsConfig, RuntimeConfig, SearchConfig, SearchLexicalRamTierConfig,
-    SearchRerankMode, SearchSpeed, SecretDetectorConfig, StorageConfig, SwarmAdaptiveConfig,
-    SwarmConfig, TaskLensConfig, TrustConfig, WriteConfig,
+    GraphPprConfig, GraphWitnessesConfig, HandoffConfig, HandoffStaleThresholdConfig,
+    JournalConfig, LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig,
+    OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig, PrimerConfig,
+    PrivacyConfig, ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig, RuntimeConfig,
+    SearchConfig, SearchLexicalRamTierConfig, SearchRerankMode, SearchSpeed, SecretDetectorConfig,
+    StorageConfig, SwarmAdaptiveConfig, SwarmConfig, TaskLensConfig, TrustConfig, WriteConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -127,6 +127,12 @@ pub const JOURNAL_ENABLED_KEY: &str = "journal.enabled";
 pub const JOURNAL_RETENTION_DAYS_KEY: &str = "journal.retention_days";
 pub const PRIMER_DEFAULT_TOKENS_KEY: &str = "primer.default_tokens";
 pub const DECIDE_REVISIT_WARNING_DAYS_KEY: &str = "decide.revisit_warning_days";
+pub const HANDOFF_STALE_MEMORIES_ADDED_KEY: &str = "handoff.stale_threshold.memories_added";
+pub const HANDOFF_STALE_ANY_EXPIRED_IN_PACK_KEY: &str =
+    "handoff.stale_threshold.any_expired_in_pack";
+pub const HANDOFF_STALE_CONTENT_DRIFT_SCORE_KEY: &str =
+    "handoff.stale_threshold.content_drift_score";
+pub const HANDOFF_STALE_MEMORIES_REVISED_KEY: &str = "handoff.stale_threshold.memories_revised";
 pub const LEARN_DECAY_DEMOTE_THRESHOLD_KEY: &str = "learn.decay.demote_threshold";
 pub const LEARN_DECAY_FORGET_THRESHOLD_KEY: &str = "learn.decay.forget_threshold";
 pub const LEARN_DECAY_WORKING_HALF_LIFE_DAYS_KEY: &str = "learn.decay.working_half_life_days";
@@ -832,6 +838,36 @@ impl MergedConfig {
             ));
         }
 
+        // Handoff section
+        if let Some(threshold) = self.values.handoff.stale_threshold.memories_added {
+            entries.push(ConfigShowEntry::new(
+                HANDOFF_STALE_MEMORIES_ADDED_KEY,
+                threshold.to_string(),
+                self.source(HANDOFF_STALE_MEMORIES_ADDED_KEY),
+            ));
+        }
+        if let Some(threshold) = self.values.handoff.stale_threshold.any_expired_in_pack {
+            entries.push(ConfigShowEntry::new(
+                HANDOFF_STALE_ANY_EXPIRED_IN_PACK_KEY,
+                threshold.to_string(),
+                self.source(HANDOFF_STALE_ANY_EXPIRED_IN_PACK_KEY),
+            ));
+        }
+        if let Some(threshold) = self.values.handoff.stale_threshold.content_drift_score {
+            entries.push(ConfigShowEntry::new(
+                HANDOFF_STALE_CONTENT_DRIFT_SCORE_KEY,
+                threshold.to_string(),
+                self.source(HANDOFF_STALE_CONTENT_DRIFT_SCORE_KEY),
+            ));
+        }
+        if let Some(threshold) = self.values.handoff.stale_threshold.memories_revised {
+            entries.push(ConfigShowEntry::new(
+                HANDOFF_STALE_MEMORIES_REVISED_KEY,
+                threshold.to_string(),
+                self.source(HANDOFF_STALE_MEMORIES_REVISED_KEY),
+            ));
+        }
+
         // Learn section
         if let Some(threshold) = self.values.learn.cluster_coherence_threshold {
             entries.push(ConfigShowEntry::new(
@@ -1116,7 +1152,14 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             baseline_ledger_max_rows: None,
         },
         task_lens: TaskLensConfig::default(),
-        handoff: HandoffConfig::default(),
+        handoff: HandoffConfig {
+            stale_threshold: HandoffStaleThresholdConfig {
+                memories_added: Some(20),
+                any_expired_in_pack: Some(true),
+                content_drift_score: Some(0.15),
+                memories_revised: Some(0),
+            },
+        },
         cache: CacheConfig {
             pack_l2: PackL2CacheConfig {
                 enabled: Some(true),
@@ -1852,7 +1895,54 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
             ),
         },
         task_lens: merge_task_lens_config(layers),
-        handoff: HandoffConfig::default(),
+        handoff: HandoffConfig {
+            stale_threshold: HandoffStaleThresholdConfig {
+                memories_added: pick_field(
+                    &mut sources,
+                    HANDOFF_STALE_MEMORIES_ADDED_KEY,
+                    &layers.cli.handoff.stale_threshold.memories_added,
+                    &layers.environment.handoff.stale_threshold.memories_added,
+                    &layers.project.handoff.stale_threshold.memories_added,
+                    &layers.user.handoff.stale_threshold.memories_added,
+                    &layers.defaults.handoff.stale_threshold.memories_added,
+                ),
+                any_expired_in_pack: pick_field(
+                    &mut sources,
+                    HANDOFF_STALE_ANY_EXPIRED_IN_PACK_KEY,
+                    &layers.cli.handoff.stale_threshold.any_expired_in_pack,
+                    &layers
+                        .environment
+                        .handoff
+                        .stale_threshold
+                        .any_expired_in_pack,
+                    &layers.project.handoff.stale_threshold.any_expired_in_pack,
+                    &layers.user.handoff.stale_threshold.any_expired_in_pack,
+                    &layers.defaults.handoff.stale_threshold.any_expired_in_pack,
+                ),
+                content_drift_score: pick_field(
+                    &mut sources,
+                    HANDOFF_STALE_CONTENT_DRIFT_SCORE_KEY,
+                    &layers.cli.handoff.stale_threshold.content_drift_score,
+                    &layers
+                        .environment
+                        .handoff
+                        .stale_threshold
+                        .content_drift_score,
+                    &layers.project.handoff.stale_threshold.content_drift_score,
+                    &layers.user.handoff.stale_threshold.content_drift_score,
+                    &layers.defaults.handoff.stale_threshold.content_drift_score,
+                ),
+                memories_revised: pick_field(
+                    &mut sources,
+                    HANDOFF_STALE_MEMORIES_REVISED_KEY,
+                    &layers.cli.handoff.stale_threshold.memories_revised,
+                    &layers.environment.handoff.stale_threshold.memories_revised,
+                    &layers.project.handoff.stale_threshold.memories_revised,
+                    &layers.user.handoff.stale_threshold.memories_revised,
+                    &layers.defaults.handoff.stale_threshold.memories_revised,
+                ),
+            },
+        },
         cache: CacheConfig {
             pack_l2: PackL2CacheConfig {
                 enabled: pick_field(
@@ -2723,7 +2813,9 @@ mod tests {
         GRAPH_HITS_PROFILE_BOOST_KEY, GRAPH_MEMORY_DEGRADED_BELOW_PCT_KEY,
         GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS_KEY, GRAPH_MEMORY_PER_ALGORITHM_CAP_MB_KEY,
         GRAPH_MEMORY_SNAPSHOT_CAP_MB_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY,
-        GRAPH_PACK_DNA_MAX_ITEMS_KEY, GRAPH_PPR_ALPHA_KEY, LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY,
+        GRAPH_PACK_DNA_MAX_ITEMS_KEY, GRAPH_PPR_ALPHA_KEY, HANDOFF_STALE_ANY_EXPIRED_IN_PACK_KEY,
+        HANDOFF_STALE_CONTENT_DRIFT_SCORE_KEY, HANDOFF_STALE_MEMORIES_ADDED_KEY,
+        HANDOFF_STALE_MEMORIES_REVISED_KEY, LEARN_CLUSTER_COHERENCE_THRESHOLD_KEY,
         LEARN_DECAY_DEMOTE_THRESHOLD_KEY, LEARN_DECAY_PROCEDURAL_RULE_HALF_LIFE_DAYS_KEY,
         MESH_COMMAND_MODE_KEY, MESH_ENABLED_KEY, MESH_PEER_GROUP_BINDINGS_KEY,
         MESH_PEER_POLICIES_KEY, PACK_ADAPTIVE_BUDGET_KEY, PACK_DEFAULT_MAX_TOKENS_KEY,
@@ -2745,10 +2837,10 @@ mod tests {
     use crate::config::{
         CacheConfig, ConfigFile, CurationConfig, GraphConfig, GraphCurateConfig,
         GraphFeatureFlagsConfig, GraphGomoryHuConfig, GraphHealthConfig, GraphMemoryConfig,
-        GraphPprConfig, LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig, PackConfig,
-        PackL2CacheConfig, PathExpander, PolicyConfig, ReadPoolConfig, SearchConfig,
-        SearchLexicalRamTierConfig, SearchRerankMode, SearchSpeed, SecretDetectorConfig,
-        StorageConfig, SwarmAdaptiveConfig, SwarmConfig, WriteConfig,
+        GraphPprConfig, HandoffConfig, HandoffStaleThresholdConfig, LearnConfig, LearnDecayConfig,
+        MeshCommandMode, MeshConfig, PackConfig, PackL2CacheConfig, PathExpander, PolicyConfig,
+        ReadPoolConfig, SearchConfig, SearchLexicalRamTierConfig, SearchRerankMode, SearchSpeed,
+        SecretDetectorConfig, StorageConfig, SwarmAdaptiveConfig, SwarmConfig, WriteConfig,
     };
     use crate::models::{TaskLens, TaskLensInput, TaskLensOverlay};
 
@@ -3405,6 +3497,14 @@ mod tests {
                 memory_tier_admission: Some(true),
                 ..PackConfig::default()
             },
+            handoff: HandoffConfig {
+                stale_threshold: HandoffStaleThresholdConfig {
+                    memories_added: Some(9),
+                    any_expired_in_pack: Some(false),
+                    content_drift_score: Some(0.30),
+                    memories_revised: Some(4),
+                },
+            },
             swarm: SwarmConfig {
                 adaptive: SwarmAdaptiveConfig {
                     enabled: Some(true),
@@ -3758,6 +3858,46 @@ mod tests {
             &Some(ConfigValueSource::Project),
             "memory tier admission source",
         )?;
+        ensure_equal(
+            &merged.values.handoff.stale_threshold.memories_added,
+            &Some(9),
+            "project handoff stale memories added",
+        )?;
+        ensure_equal(
+            &merged.source(HANDOFF_STALE_MEMORIES_ADDED_KEY),
+            &Some(ConfigValueSource::Project),
+            "handoff stale memories added source",
+        )?;
+        ensure_equal(
+            &merged.values.handoff.stale_threshold.any_expired_in_pack,
+            &Some(false),
+            "project handoff stale expired threshold",
+        )?;
+        ensure_equal(
+            &merged.source(HANDOFF_STALE_ANY_EXPIRED_IN_PACK_KEY),
+            &Some(ConfigValueSource::Project),
+            "handoff stale expired source",
+        )?;
+        ensure_equal(
+            &merged.values.handoff.stale_threshold.content_drift_score,
+            &Some(0.30),
+            "project handoff stale content drift",
+        )?;
+        ensure_equal(
+            &merged.source(HANDOFF_STALE_CONTENT_DRIFT_SCORE_KEY),
+            &Some(ConfigValueSource::Project),
+            "handoff stale content drift source",
+        )?;
+        ensure_equal(
+            &merged.values.handoff.stale_threshold.memories_revised,
+            &Some(4),
+            "project handoff stale memories revised",
+        )?;
+        ensure_equal(
+            &merged.source(HANDOFF_STALE_MEMORIES_REVISED_KEY),
+            &Some(ConfigValueSource::Project),
+            "handoff stale memories revised source",
+        )?;
         let task_lens_ids: Vec<&str> = merged
             .values
             .task_lens
@@ -4036,7 +4176,7 @@ mod tests {
     }
 
     #[test]
-    fn show_report_includes_graph_threshold_keys() -> TestResult {
+    fn show_report_includes_recent_surface_keys() -> TestResult {
         let defaults =
             built_in_config(&expander()).map_err(|error| format!("defaults failed: {error}"))?;
         let report = merge_config(&ConfigLayers::with_defaults(defaults)).to_show_report();
@@ -4081,6 +4221,10 @@ mod tests {
             SEARCH_LEXICAL_RAM_TIER_POPULATE_ON_OPEN_KEY,
             SEARCH_RERANK_KEY,
             SEARCH_RERANK_TOP_K_KEY,
+            HANDOFF_STALE_MEMORIES_ADDED_KEY,
+            HANDOFF_STALE_ANY_EXPIRED_IN_PACK_KEY,
+            HANDOFF_STALE_CONTENT_DRIFT_SCORE_KEY,
+            HANDOFF_STALE_MEMORIES_REVISED_KEY,
             WRITE_GROUP_COMMIT_ENABLED_KEY,
             WRITE_BATCH_WINDOW_MS_KEY,
             WRITE_MAX_BATCH_SIZE_KEY,

@@ -1064,6 +1064,10 @@ mod tests {
         ConfigSurfaceOptions, ensure_config_write_path_is_regular_or_missing, get_config,
         graph_config_keys, publish_config_temp_file, set_config, show_config,
     };
+    use crate::config::{
+        HANDOFF_STALE_ANY_EXPIRED_IN_PACK_KEY, HANDOFF_STALE_CONTENT_DRIFT_SCORE_KEY,
+        HANDOFF_STALE_MEMORIES_ADDED_KEY, HANDOFF_STALE_MEMORIES_REVISED_KEY,
+    };
     use std::fs;
 
     type TestResult = Result<(), String>;
@@ -1094,6 +1098,62 @@ mod tests {
         } else {
             Err(format!("unexpected graph keys: {keys:?}"))
         }
+    }
+
+    #[test]
+    fn handoff_show_filters_to_handoff_namespace_with_sources() -> TestResult {
+        let temp = workspace()?;
+        let config_dir = temp.path().join(".ee");
+        fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        fs::write(
+            config_dir.join("config.toml"),
+            "\
+[handoff.stale_threshold]
+memories_added = 7
+content_drift_score = 0.25
+",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = show_config(&options(temp.path()), Some("handoff.*"))
+            .map_err(|error| error.to_string())?;
+        if report.entry_count != 4 {
+            return Err(format!("unexpected handoff entry count: {report:?}"));
+        }
+
+        let entry = |key| {
+            report
+                .entries
+                .iter()
+                .find(|entry| entry.key == key)
+                .ok_or_else(|| format!("missing handoff config key {key}"))
+        };
+
+        let memories_added = entry(HANDOFF_STALE_MEMORIES_ADDED_KEY)?;
+        if memories_added.value != "7" || memories_added.source != "project" {
+            return Err(format!(
+                "unexpected memories_added entry: {memories_added:?}"
+            ));
+        }
+
+        let content_drift = entry(HANDOFF_STALE_CONTENT_DRIFT_SCORE_KEY)?;
+        if content_drift.value != "0.25" || content_drift.source != "project" {
+            return Err(format!("unexpected content_drift entry: {content_drift:?}"));
+        }
+
+        let any_expired = entry(HANDOFF_STALE_ANY_EXPIRED_IN_PACK_KEY)?;
+        if any_expired.value != "true" || any_expired.source != "default" {
+            return Err(format!("unexpected any_expired entry: {any_expired:?}"));
+        }
+
+        let memories_revised = entry(HANDOFF_STALE_MEMORIES_REVISED_KEY)?;
+        if memories_revised.value != "0" || memories_revised.source != "default" {
+            return Err(format!(
+                "unexpected memories_revised entry: {memories_revised:?}"
+            ));
+        }
+
+        Ok(())
     }
 
     #[test]
