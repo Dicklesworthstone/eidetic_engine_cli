@@ -91,8 +91,14 @@ ee search "<specific question>" --workspace . --limit 20 --explain --json
 ee ask "<direct question>" --workspace . --json
 ee why <memory-id> --workspace . --json
 ee preflight check --cmd "<risky shell command>" --workspace . --json
+ee journal append "<observation>" --workspace . --source manual --json
+ee journal distill --workspace . --dry-run --json
 ee remember "<durable lesson>" --workspace . --level procedural --kind rule --json
+ee remember --batch --stdin --workspace . --json
+ee remember "<existing lesson>" --workspace . --reinforce --json
 ee outcome <memory-id> --workspace . --signal helpful --reason "<what it changed>"
+ee outcome --pack <pack-id> --item <n> --workspace . --signal helpful --reason "<why>"
+ee outcome trace <memory-id> --workspace . --json
 ```
 
 | Situation | First `ee` command |
@@ -103,8 +109,14 @@ ee outcome <memory-id> --workspace . --signal helpful --reason "<what it changed
 | Starting substantive work | `ee pack "<task>" --workspace . --read-only --max-tokens 4000 --format markdown` |
 | About to edit known files or a diff | `ee recall --path <path> --workspace . --budget-tokens 400 --format markdown` |
 | Joining a crowded checkout | `ee swarm brief --workspace . --json` |
+| Capturing raw session observations | `ee journal append "<text>" --workspace . --source manual --json` |
+| Ending a session with reviewable candidates | `ee journal distill --workspace . --dry-run --json` |
 | Learning a durable rule | `ee remember "<text>" --workspace . --level procedural --kind rule --json` |
+| Importing several curated facts | `ee remember --batch --stdin --workspace . --json` |
+| Corroborating an existing lesson | `ee remember "<text>" --workspace . --reinforce --json` |
 | A memory helped or misled you | `ee outcome <id> --signal helpful\|harmful --reason "<one sentence>"` |
+| A specific pack item helped | `ee outcome --pack <pack-id> --item <n> --signal helpful --reason "<one sentence>"` |
+| You need feedback provenance | `ee outcome trace <memory-id> --workspace . --json` |
 | Need a direct cited answer | `ee ask "<question>" --workspace . --json` |
 | A high-ranked memory looks suspicious | `ee why <id> --workspace . --json` |
 | A context pack looks odd | `ee pack "<task>" --workspace . --explain --json` |
@@ -435,7 +447,7 @@ Current top-level groups:
 | Group | Commands |
 |---|---|
 | Core memory loop | `init`, `remember`, `decide`, `search`, `ask`, `pack`, `why`, `status`, `doctor`, `capabilities`, `check`, `health` |
-| Memory lifecycle | `memory`, `rule`, `curate`, `review`, `playbook`, `procedure`, `workflow`, `outcome`, `outcome-quarantine` |
+| Memory lifecycle | `memory`, `rule`, `journal`, `curate`, `review`, `playbook`, `procedure`, `workflow`, `outcome`, `outcome-quarantine` |
 | Packing and retrieval | `recall`, `timeline`, `similar`, `lens`, `context-show`, `show`, `link`, `tag`, `history`, `proximity`, `insights`, `subscribe` |
 | Graph and structure | `graph`, `causal`, `economy`, `focus`, `learn`, `lab`, `rehearse`, `rationale`, `situation`, `task-frame` |
 | Storage and derived assets | `db`, `migrate`, `index`, `model`, `schema`, `backup`, `export`, `artifact`, `config`, `workspace` |
@@ -465,10 +477,19 @@ Current top-level groups:
 | `ee recall --path <glob>` / `--symbol <name>` / `--diff <ref>` | Fetch memories anchored to a code surface before editing; returns `ee.recall.v1` under the standard response envelope |
 | `ee timeline "<topic>" --as-of <RFC3339> --json` | Reconstruct read-only memory state for a topic at a historical timestamp; returns `ee.timeline.v1` under the standard response envelope |
 | `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b]` | Capture a durable memory |
+| `ee journal append "<text>" [--source hook\|manual] --json` | Append a working-tier observation that can later be distilled; JSONL batches use `ee journal append --stdin --json` |
+| `ee journal distill [--dry-run\|--apply] --json` | Turn repeated or surprising journal entries into reviewable curation candidates; dry-run is the safe default |
+| `ee journal list` / `ee journal show <entry-id>` | Inspect append-only journal entries, truncation/redaction state, and distillation bookkeeping |
+| `ee remember --batch --stdin --json` | Record a JSONL batch of curated memories with independent per-line results and quarantine reporting |
+| `ee remember "<text>" --reinforce --json` | Corroborate an existing near-duplicate memory through bounded reinforcement instead of creating a redundant row |
 | `ee decide record "<topic>" --chosen <x> --alternative <y> --rationale "<why>" [--revisit-by <RFC3339\|+ND>]` | Record a decision-kind memory with typed fields and fork protection |
 | `ee decide list [--about <text>] [--include-superseded] --json` | Review current decision heads or full supersede history before proposing architecture changes |
 | `ee decide revisit [--warning-days N] --json` | Find decisions whose revisit horizon is due or near due |
 | `ee outcome <id> --signal helpful\|harmful [--reason "<reason>"]` | Record feedback, updating utility/confidence |
+| `ee outcome --batch --stdin --json` | Record a JSONL batch of outcome events with independent quarantine and rate-limit handling per line |
+| `ee outcome --pack <pack-id> --item <n> --signal helpful\|harmful --json` | Grade a specific persisted pack item without manually copying its memory id |
+| `ee outcome trace <memory-id> --json` | Read the feedback events, posterior updates, and trust transitions that affected a memory |
+| `ee audit timeline --target <id> --json` | Inspect the audit rows for a memory, pack, candidate, or other target id in one bounded call |
 | `ee why <memory-id> [--json]` | Explain why a memory was selected, scored, or curated the way it was |
 | `ee why-not <memory-id> --task "<task>" [--json]` | Counterfactual reverse of `ee why`: explain why a memory was not selected for a task's context pack, with the minimal change that would include it (read-only) |
 | `ee pack build --query-file task.eeq.json --max-tokens N --format toon` | Build a pack from an explicit EQL query document |
@@ -1083,6 +1104,9 @@ Related docs:
 
 | Command | Purpose |
 |---|---|
+| `ee journal append "<text>" [--source hook\|manual] [--json]` | Append one working-tier observation for later review; `--stdin` accepts JSONL batches |
+| `ee journal distill [--dry-run\|--apply] [--json]` | Distill journal observations into pending curation candidates without applying them as memories |
+| `ee journal list` / `show <entry-id>` | Inspect journal entries, redaction/truncation state, and whether an entry has been distilled |
 | `ee review session <id> --propose [--dry-run]` | Distill imported CASS session evidence into proposed memories/rules |
 | `ee curate candidates [--workspace .]` | List pending curation candidates |
 | `ee curate doctor [--limit N] [--trend] [--json]` | Read-only memory-debt report with ranked suggested repairs for stale anchors, unresolved contradictions, never-retrieved or orphan memories, low-trust high-rank items, and decay-imminent high-utility rows |
@@ -1115,6 +1139,7 @@ Targets can be memories, packs, or curation candidates:
 ```bash
 ee outcome <memory-id> --signal helpful --reason "Caught a release gate omission" --workspace .
 ee outcome <pack-id> --target-type pack --signal helpful --reason "Included the missing RCH rule" --workspace .
+ee outcome --pack <pack-id> --item 2 --signal harmful --reason "Selected stale advice" --workspace .
 ee outcome <candidate-id> --target-type candidate --signal negative --reason "Too vague after review" --workspace .
 ```
 
@@ -1303,6 +1328,10 @@ duplicate_similarity = 0.92
 harmful_weight       = 2.5            # harmful feedback hits harder than helpful
 decay_half_life_days = 60
 
+[journal]
+enabled = true
+retention_days = 14                   # applied only by the explicit journal-retention steward job
+
 [learn]
 cluster_coherence_threshold = 0.55     # average-linkage merge floor for `ee learn cluster`
 
@@ -1358,6 +1387,8 @@ Environment variable overrides:
 | `EE_MAX_TOKENS`    | `[pack].default_max_tokens` |
 | `EE_AGENT_NAME` | agent identity for outcome attribution and per-agent bias |
 | `EE_SECURITY_PROFILE` | preflight policy posture |
+| `EE_JOURNAL_ENABLED` | `[journal].enabled` capture gate; false makes journal surfaces report `journal_disabled` |
+| `EE_JOURNAL_RETENTION_DAYS` | `[journal].retention_days` for the explicit journal-retention steward job |
 | `EE_HARMFUL_PER_SOURCE_PER_HOUR` | `[feedback].harmful_per_source_per_hour` |
 | `EE_HARMFUL_BURST_WINDOW_SECONDS` | `[feedback].harmful_burst_window_seconds` |
 | `EE_QUERY_PLAN_CACHE_ENTRIES` | query-plan cache size |
@@ -2189,6 +2220,7 @@ replacements, and tombstones each produce recorded entries visible via
 | [`docs/agent-ux/auto_enrollment_onboarding.md`](docs/agent-ux/auto_enrollment_onboarding.md) | Agent workflow and use/no-use checklist for optional Tailscale mesh, auto-enrollment, drift handling, and safety previews |
 | [`docs/agent-ux/ee-doctor-first-aid-precedence.md`](docs/agent-ux/ee-doctor-first-aid-precedence.md) | Doctor-first repair workflow for agents |
 | [`docs/agent-ux/memory-hygiene.md`](docs/agent-ux/memory-hygiene.md) | Weekly content-health workflow for curate doctor, learn gaps, and debt trends |
+| [`docs/agent-ux/journal-capture.md`](docs/agent-ux/journal-capture.md) | Append-only journal capture, end-of-session distillation, reinforcement, and pack-item grading workflow |
 | [`docs/agent-ux/flight-recorder.md`](docs/agent-ux/flight-recorder.md) | Redacted workload flight-recorder operator and agent reference |
 | [`docs/agent-ux/workspace-hygiene.md`](docs/agent-ux/workspace-hygiene.md) | Dirty-checkout and commit-readiness workflow |
 | [`docs/mesh/operator_onboarding.md`](docs/mesh/operator_onboarding.md) | Operator guide for optional mesh usage, trust/redaction posture, revision tokens, and troubleshooting |

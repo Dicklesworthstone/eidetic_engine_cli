@@ -1634,6 +1634,24 @@ pub const MEMORY_HYGIENE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     },
 ];
 
+pub const JOURNAL_CAPTURE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
+    FailureBranchEntry {
+        condition: "journal capture is disabled by config",
+        jq: r#".degraded[]? | select(.code == "journal_disabled")"#,
+        next_action: "Respect `[journal].enabled = false`; use explicit `ee remember` only when the operator asks for durable memory.",
+    },
+    FailureBranchEntry {
+        condition: "distillation found entries but no proposals",
+        jq: r#".degraded[]? | select(.code == "distill_no_candidates")"#,
+        next_action: "Treat this as an honest empty review, then keep journaling until repeated or surprising evidence exists.",
+    },
+    FailureBranchEntry {
+        condition: "database migration is required before journal review",
+        jq: r#".error | select(.code == "migration_required") | {message, repair}"#,
+        next_action: "Run the reported migration repair before retrying journal append, list, show, or distill.",
+    },
+];
+
 pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
     AgentDocsRecipeEntry {
         id: "local-attestation",
@@ -1744,6 +1762,26 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         jq: r#".data | {summary, queue: [.queue[]? | {memoryId, class, severity, command: .suggestedAction.value}], trend}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.curate.doctor.v1""#,
         failure_branches: MEMORY_HYGIENE_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "end-of-session-journal-flush",
+        title: "End-of-session journal flush",
+        description: "Review append-only journal observations at session end and draft evidence-backed curation candidates without mutating memory by default.",
+        category: "curation",
+        command: "ee journal distill --workspace . --dry-run --json",
+        jq: r#"{schema: .data.schema, dryRun: .data.dryRun, proposals: [.data.proposals[]? | {proposalId, action, kind, level, clusterSize}], degraded: (.data.degraded // .degraded // [])}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and .data.schema == "ee.journal.distill.v1" and .data.dryRun == true"#,
+        failure_branches: JOURNAL_CAPTURE_RECIPE_FAILURES,
+    },
+    AgentDocsRecipeEntry {
+        id: "grade-pack-item",
+        title: "Grade the pack item you just used",
+        description: "Attach helpful or harmful outcome feedback to a specific persisted pack item so future ranking learns from real usage.",
+        category: "feedback",
+        command: "ee outcome --pack <pack-id> --item <n> --signal helpful --reason \"<why>\" --workspace . --json",
+        jq: r#"{status: .data.status, targetId: .data.targetId, targetType: .data.targetType, feedback: .data.feedback, degraded: (.data.degraded // .degraded // [])}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true"#,
+        failure_branches: JOURNAL_CAPTURE_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
         id: "goal-to-recipe",
@@ -2277,6 +2315,40 @@ mod tests {
         ensure(
             recipe.success_check.contains("durableMutation == false"),
             "docs bootstrap recipe documents candidates-not-memories guarantee",
+        )
+    }
+
+    #[test]
+    fn journal_capture_recipes_are_registered_for_agents() -> TestResult {
+        let flush_recipe = AGENT_DOC_RECIPES
+            .iter()
+            .find(|recipe| recipe.id == "end-of-session-journal-flush")
+            .ok_or_else(|| "journal distill recipe is documented".to_string())?;
+        ensure(
+            flush_recipe.command.contains("ee journal distill")
+                && flush_recipe.command.contains("--dry-run")
+                && flush_recipe
+                    .success_check
+                    .contains(crate::core::journal::JOURNAL_DISTILL_SCHEMA_V1),
+            "journal flush recipe is dry-run and schema-pinned",
+        )?;
+
+        let grade_recipe = AGENT_DOC_RECIPES
+            .iter()
+            .find(|recipe| recipe.id == "grade-pack-item")
+            .ok_or_else(|| "pack-item outcome recipe is documented".to_string())?;
+        ensure(
+            grade_recipe.command.contains("ee outcome --pack")
+                && grade_recipe.command.contains("--item")
+                && grade_recipe.command.contains("--signal helpful"),
+            "pack-item grade recipe targets a persisted pack item",
+        )?;
+        ensure(
+            flush_recipe
+                .failure_branches
+                .iter()
+                .any(|branch| branch.jq.contains("journal_disabled")),
+            "journal recipes document disabled-capture handling",
         )
     }
 

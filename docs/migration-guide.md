@@ -86,6 +86,36 @@ Do not repair it with manual SQL. Re-run migrations for schema drift and
 `ee index rebuild` for stale or missing derived rows so generation accounting
 and recall degraded codes stay honest.
 
+## Agent Journal Capture
+
+Migration V078 adds `journal_entries`, the append-only working-tier capture
+table used by `ee journal append`, `list`, `show`, and `distill`. Journal rows
+store redacted observation text, structured sidecar metadata, source/session
+fields, `distilled_at` bookkeeping, and tombstone markers. Indexes on session,
+agent, source, and distilled state keep end-of-session review deterministic.
+
+The journal is durable storage, but it is intentionally not a search-indexed
+memory tier. It is a staging ledger for observations that may become curated
+memories later through `ee journal distill --dry-run`, `ee journal distill
+--apply`, or the normal `ee remember` and `ee curate` paths. A missing search
+hit for a raw journal entry is therefore expected; index rebuilds must not
+materialize journal rows as ordinary searchable memories.
+
+The runtime gate is:
+
+```toml
+[journal]
+enabled = true
+retention_days = 14
+```
+
+`EE_JOURNAL_ENABLED` and `EE_JOURNAL_RETENTION_DAYS` override those keys.
+Disabling capture makes journal surfaces report `journal_disabled` rather than
+silently writing. Retention is enforced only by the explicit
+`journal-retention` steward job. That job tombstones or prunes according to the
+configured window with audit rows; routine command execution never deletes
+journal evidence in the background.
+
 ## Core Documents
 
 - [Mechanical Boundary Command Inventory](./mechanical-boundary-command-inventory.md) — full command matrix

@@ -1510,6 +1510,44 @@ pub fn run_context_pack_with_performance(
     )
 }
 
+pub fn context_request_from_options(
+    options: &ContextPackOptions,
+) -> Result<ContextRequest, ContextPackError> {
+    let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
+    context_request_from_options_with_runtime_profile(options, &runtime_profile)
+}
+
+fn context_request_from_options_with_runtime_profile(
+    options: &ContextPackOptions,
+    runtime_profile: &RuntimeProfileReport,
+) -> Result<ContextRequest, ContextPackError> {
+    let mut request = ContextRequest::new(ContextRequestInput {
+        query: options.query.clone(),
+        profile: options.profile,
+        max_tokens: options.max_tokens,
+        candidate_pool: options.candidate_pool,
+        max_results: options.max_results,
+        sections: Vec::new(),
+    })
+    .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    let (effective_max_tokens, tokens_capped) =
+        runtime_profile.cap_pack_max_tokens(request.budget.max_tokens());
+    let (effective_candidate_pool, candidate_pool_capped) =
+        runtime_profile.cap_pack_candidate_pool(request.candidate_pool);
+    if tokens_capped || candidate_pool_capped {
+        request = ContextRequest::new(ContextRequestInput {
+            query: request.query.clone(),
+            profile: Some(request.profile),
+            max_tokens: Some(effective_max_tokens),
+            candidate_pool: Some(effective_candidate_pool),
+            max_results: request.max_results,
+            sections: Vec::new(),
+        })
+        .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    }
+    Ok(request)
+}
+
 pub fn run_context_pack_with_performance_controlled(
     options: &ContextPackOptions,
     command: &'static str,
@@ -1931,30 +1969,7 @@ fn run_context_pack_with_performance_inner(
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
 
     let request_start = Instant::now();
-    let mut request = ContextRequest::new(ContextRequestInput {
-        query: options.query.clone(),
-        profile: options.profile,
-        max_tokens: options.max_tokens,
-        candidate_pool: options.candidate_pool,
-        max_results: options.max_results,
-        sections: Vec::new(),
-    })
-    .map_err(|error| ContextPackError::Pack(error.to_string()))?;
-    let (effective_max_tokens, tokens_capped) =
-        runtime_profile.cap_pack_max_tokens(request.budget.max_tokens());
-    let (effective_candidate_pool, candidate_pool_capped) =
-        runtime_profile.cap_pack_candidate_pool(request.candidate_pool);
-    if tokens_capped || candidate_pool_capped {
-        request = ContextRequest::new(ContextRequestInput {
-            query: request.query.clone(),
-            profile: Some(request.profile),
-            max_tokens: Some(effective_max_tokens),
-            candidate_pool: Some(effective_candidate_pool),
-            max_results: request.max_results,
-            sections: Vec::new(),
-        })
-        .map_err(|error| ContextPackError::Pack(error.to_string()))?;
-    }
+    let request = context_request_from_options_with_runtime_profile(options, &runtime_profile)?;
     control.check()?;
     trace.record_elapsed("requestValidate", request_start);
 

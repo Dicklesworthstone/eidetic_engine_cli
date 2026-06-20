@@ -161,6 +161,10 @@ pub enum EnvVar {
     IndexPublishLockRetryAttempts,
     /// `EE_JSON`
     Json,
+    /// `EE_JOURNAL_ENABLED`
+    JournalEnabled,
+    /// `EE_JOURNAL_RETENTION_DAYS`
+    JournalRetentionDays,
     /// `EE_L2_PACK_CACHE_BYTES`
     L2PackCacheBytes,
     /// `EE_L2_PACK_CACHE_DIR`
@@ -354,6 +358,8 @@ impl EnvVar {
             Self::IndexDir,
             Self::IndexPublishLockRetryAttempts,
             Self::Json,
+            Self::JournalEnabled,
+            Self::JournalRetentionDays,
             Self::L2PackCacheBytes,
             Self::L2PackCacheDir,
             Self::L2PackCacheDisable,
@@ -480,6 +486,8 @@ impl EnvVar {
             Self::IndexDir => "EE_INDEX_DIR",
             Self::IndexPublishLockRetryAttempts => "EE_INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS",
             Self::Json => "EE_JSON",
+            Self::JournalEnabled => "EE_JOURNAL_ENABLED",
+            Self::JournalRetentionDays => "EE_JOURNAL_RETENTION_DAYS",
             Self::L2PackCacheBytes => "EE_L2_PACK_CACHE_BYTES",
             Self::L2PackCacheDir => "EE_L2_PACK_CACHE_DIR",
             Self::L2PackCacheDisable => "EE_L2_PACK_CACHE_DISABLE",
@@ -687,6 +695,10 @@ impl EnvVar {
                 "Override index publish advisory-lock retry attempts."
             }
             Self::Json => "Request JSON output from renderer auto-detection.",
+            Self::JournalEnabled => "Enable or disable append-only agent journal capture.",
+            Self::JournalRetentionDays => {
+                "Override the append-only journal retention window in days."
+            }
             Self::L2PackCacheBytes => "Override the L2 pack cache byte cap per workspace.",
             Self::L2PackCacheDir => "Override the L2 pack cache root directory.",
             Self::L2PackCacheDisable => "Disable L2 pack cache lookup and writes.",
@@ -888,6 +900,8 @@ impl EnvVar {
             Self::WriteGroupCommitMaxInflightBytes => Some("4194304"),
             Self::WorkspaceCloseDrainTimeoutSeconds => Some("5"),
             Self::IndexPublishLockRetryAttempts => Some("200"),
+            Self::JournalEnabled => Some("true"),
+            Self::JournalRetentionDays => Some("14"),
             Self::CurationAutoPromoteConfidenceFloor => Some("0.80"),
             Self::CurationAutoPromoteMaxPerRun => Some("10"),
             Self::CurationDerivedPreviewLimit => Some("20"),
@@ -963,6 +977,7 @@ impl EnvVar {
             | Self::EmbedDownload
             | Self::EmbedModelDir
             | Self::EmbedModelPath => "embeddings",
+            Self::JournalEnabled => "memory",
             Self::MeshEnabled
             | Self::MeshMode
             | Self::MeshDiscoveryCacheTtlSeconds
@@ -1027,6 +1042,7 @@ impl EnvVar {
             | Self::DisableAdaptive
             | Self::DisableRememberSearchNeighbors
             | Self::IndexPublishLockRetryAttempts => "tuning",
+            Self::JournalRetentionDays => "tuning",
             Self::ScienceBackendPath => "integration",
             Self::ShardFanoutEnabled => "storage",
             Self::PreflightBypassSecret
@@ -1260,6 +1276,38 @@ mod tests {
             }
             if var.category() != "curation" {
                 return Err(format!("{name} must be categorized as curation"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn journal_env_vars_are_registered_with_defaults() -> TestResult {
+        let expected = [
+            (EnvVar::JournalEnabled, "EE_JOURNAL_ENABLED", "true", "memory"),
+            (
+                EnvVar::JournalRetentionDays,
+                "EE_JOURNAL_RETENTION_DAYS",
+                "14",
+                "tuning",
+            ),
+        ];
+
+        for (var, name, default, category) in expected {
+            if !EnvVar::all().contains(&var) {
+                return Err(format!("{name} missing from registry order"));
+            }
+            if var.name() != name {
+                return Err(format!("unexpected env name for {var:?}: {}", var.name()));
+            }
+            if var.default_value() != Some(default) {
+                return Err(format!("{name} default drifted"));
+            }
+            if var.category() != category {
+                return Err(format!("{name} must be categorized as {category}"));
+            }
+            if !var.exposes_value() {
+                return Err(format!("{name} should expose non-secret effective values"));
             }
         }
         Ok(())

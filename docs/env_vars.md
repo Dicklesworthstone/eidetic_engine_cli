@@ -73,6 +73,8 @@ retrieval.
 | `EE_INDEX_DIR` | paths | path | none | Override the configured search index directory. | Equivalent to overriding the storage index directory in config. |
 | `EE_INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS` | tuning | integer count | `200` | Override index publish advisory-lock retry attempts. | Used by Frankensearch writers. |
 | `EE_JSON` | output | boolean flag | none | Request JSON output from renderer auto-detection. | Prefer explicit `--json` for scripts when possible. |
+| `EE_JOURNAL_ENABLED` | memory | boolean flag | `true` | Enable or disable append-only agent journal capture. | Mirrors `[journal].enabled`; false makes journal append, list, show, and distill report `journal_disabled` instead of mutating capture state. |
+| `EE_JOURNAL_RETENTION_DAYS` | tuning | integer days | `14` | Override the append-only journal retention window in days. | Mirrors `[journal].retention_days`; pruning is performed only by the explicit `journal-retention` steward job and is audited. |
 | `EE_L2_PACK_CACHE_BYTES` | tuning | integer bytes | none | Override the L2 pack cache byte cap per workspace. | Maps to `[cache.pack_l2].max_bytes`; default is 1 GiB. |
 | `EE_L2_PACK_CACHE_DIR` | paths | path | none | Override the L2 pack cache root directory. | Maps to `[cache.pack_l2].directory`; entries are stored below a workspace-specific subdirectory. |
 | `EE_L2_PACK_CACHE_DISABLE` | tuning | boolean flag | none | Disable L2 pack cache lookup and writes. | Inverts `[cache.pack_l2].enabled` for `ee pack` and the `ee context` alias once L2 runtime wiring lands. |

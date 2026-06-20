@@ -27,6 +27,7 @@ use super::file::{
     SearchConfig, SearchLexicalRamTierConfig, SearchRerankMode, SearchSpeed, SecretDetectorConfig,
     StorageConfig, SwarmAdaptiveConfig, SwarmConfig, TaskLensConfig, TrustConfig, WriteConfig,
 };
+use super::parse_env_bool_flag;
 use super::path::{PathExpander, PathExpansionError};
 
 pub const STORAGE_DATABASE_PATH_KEY: &str = "storage.database_path";
@@ -1435,7 +1436,10 @@ pub fn config_from_env(
         },
         task_lens: TaskLensConfig::default(),
         curation: CurationConfig::default(),
-        journal: JournalConfig::default(),
+        journal: JournalConfig {
+            enabled: optional_env_bool_flag(env, EnvVar::JournalEnabled.name())?,
+            retention_days: optional_env_u64(env, EnvVar::JournalRetentionDays.name())?,
+        },
         primer: PrimerConfig::default(),
         decide: DecideConfig::default(),
         learn: LearnConfig::default(),
@@ -1494,7 +1498,7 @@ impl fmt::Display for EnvironmentConfigError {
             ),
             Self::InvalidBoolean { variable, value } => write!(
                 formatter,
-                "environment variable `{variable}` must be `true` or `false`, got `{value}`"
+                "environment variable `{variable}` must be `true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off`, got `{value}`"
             ),
             Self::InvalidMeshCommandMode { variable, value } => write!(
                 formatter,
@@ -2756,11 +2760,9 @@ fn optional_env_bool_flag(
     let Some(value) = optional_env_string(env, variable)? else {
         return Ok(None);
     };
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => Ok(Some(true)),
-        "false" | "0" | "no" | "off" => Ok(Some(false)),
-        _ => Err(EnvironmentConfigError::InvalidBoolean { variable, value }),
-    }
+    parse_env_bool_flag(&value)
+        .map(Some)
+        .ok_or(EnvironmentConfigError::InvalidBoolean { variable, value })
 }
 
 fn optional_env_mesh_command_mode(
@@ -3180,6 +3182,11 @@ mod tests {
         );
         env.insert("EE_PROFILE".to_string(), OsString::from("thorough"));
         env.insert("EE_MAX_TOKENS".to_string(), OsString::from("8192"));
+        env.insert("EE_JOURNAL_ENABLED".to_string(), OsString::from("false"));
+        env.insert(
+            "EE_JOURNAL_RETENTION_DAYS".to_string(),
+            OsString::from("21"),
+        );
         env.insert(
             "EE_WRITE_GROUP_COMMIT_ENABLED".to_string(),
             OsString::from("true"),
@@ -3219,6 +3226,16 @@ mod tests {
             &parsed.pack.default_max_tokens,
             &Some(8192),
             "env max tokens",
+        )?;
+        ensure_equal(
+            &parsed.journal.enabled,
+            &Some(false),
+            "env journal enabled",
+        )?;
+        ensure_equal(
+            &parsed.journal.retention_days,
+            &Some(21),
+            "env journal retention days",
         )?;
         ensure_equal(
             &parsed.write.group_commit_enabled,
