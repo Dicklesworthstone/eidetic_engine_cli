@@ -24,8 +24,9 @@ Retries only transient Beads JSONL partial-write parse signatures:
   - invalid type: ..., expected struct Issue
 
 All stdout from the successful br invocation is passed through unchanged.
-The synthetic `actionable --json` mode runs `br ready --json` through the same
-retry guard, then emits only open, unassigned, non-epic rows as a JSON array.
+The synthetic `actionable --json` mode runs `br ready --limit 0 --json` through
+the same retry guard, then emits only open, unassigned, non-epic rows as a JSON
+array.
 Diagnostics are emitted to stderr as ee.beads_retry.v1 JSON lines.
 EOF
 }
@@ -225,7 +226,7 @@ if [ "$subcommand" = "actionable" ]; then
         usage >&2
         exit 2
     fi
-    set -- ready --json
+    set -- ready --limit 0 --json
 fi
 
 backoffs_ms=(0 50 200 500)

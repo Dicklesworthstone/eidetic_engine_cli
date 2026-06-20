@@ -83,6 +83,17 @@ case "$mode" in
         fi
         printf '{"schema":"br.ready.v1","workspace_id":"%s","request_id":"%s","issues":[],"attempt":%s}\n' "${EE_FAKE_BR_WORKSPACE_ID:-br-jsonl-race-fixture}" "${EE_FAKE_BR_REQUEST_ID:-bd-3usjw.73-contract}" "$count"
         ;;
+    actionable)
+        if [ "$#" -ne 4 ] || [ "$1" != "ready" ] || [ "$2" != "--limit" ] || [ "$3" != "0" ] || [ "$4" != "--json" ]; then
+            printf 'expected br ready --limit 0 --json, got:' >&2
+            printf ' [%s]' "$@" >&2
+            printf '\n' >&2
+            exit 66
+        fi
+        cat <<'JSON'
+{"schema":"br.ready.v1","issues":[{"id":"bd-actionable","status":"open","assignee":null,"issue_type":"bug"},{"id":"bd-assigned","status":"open","assignee":"AmberSparrow","issue_type":"bug"},{"id":"bd-in-progress","status":"in_progress","assignee":null,"issue_type":"bug"},{"id":"bd-epic","status":"open","assignee":null,"issue_type":"epic"}]}
+JSON
+        ;;
     permanent)
         printf 'Usage error: unknown br subcommand\n' >&2
         exit 64
@@ -111,12 +122,12 @@ fn prepend_path(bin_dir: &Path) -> OsString {
     path
 }
 
-fn run_wrapper(root: &Path, mode: &str) -> Result<(Output, u128), String> {
+fn run_wrapper_with_args(root: &Path, mode: &str, args: &[&str]) -> Result<(Output, u128), String> {
     let bin_dir = install_fake_br(root)?;
     let state_file = root.join(format!("fake-br-state-{mode}"));
     let start = Instant::now();
     let output = Command::new(repo_root().join("scripts").join("br_retry.sh"))
-        .args(["ready", "--json"])
+        .args(args)
         .current_dir(repo_root())
         .env("PATH", prepend_path(&bin_dir))
         .env("EE_FAKE_BR_MODE", mode)
@@ -126,6 +137,10 @@ fn run_wrapper(root: &Path, mode: &str) -> Result<(Output, u128), String> {
         .output()
         .map_err(|error| format!("spawn scripts/br_retry.sh: {error}"))?;
     Ok((output, start.elapsed().as_millis()))
+}
+
+fn run_wrapper(root: &Path, mode: &str) -> Result<(Output, u128), String> {
+    run_wrapper_with_args(root, mode, &["ready", "--json"])
 }
 
 fn parse_json_lines(stderr: &str) -> Result<Vec<Value>, String> {
@@ -259,5 +274,32 @@ fn br_retry_does_not_retry_permanent_br_errors() -> TestResult {
         !stderr.contains("ee.beads_retry.v1"),
         format!("permanent errors must not emit retry diagnostics: {stderr:?}"),
     )?;
+    Ok(())
+}
+
+#[test]
+fn br_retry_actionable_scans_full_ready_queue_before_filtering() -> TestResult {
+    let root = retained_artifact_root("actionable-full-scan")?;
+    let (output, _) = run_wrapper_with_args(&root, "actionable", &["actionable", "--json"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    ensure(
+        output.status.success(),
+        format!(
+            "br_retry actionable should scan full ready queue\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ),
+    )?;
+    ensure(stderr.is_empty(), format!("unexpected stderr: {stderr}"))?;
+    let body: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse stdout JSON: {error}"))?;
+    let rows = body
+        .as_array()
+        .ok_or_else(|| format!("actionable output must be a JSON array: {body:#}"))?;
+    ensure(
+        rows.len() == 1,
+        format!("expected exactly one actionable row, got {rows:#?}"),
+    )?;
+    ensure_json_eq(&body, "/0/id", &json!("bd-actionable"))?;
+    ensure_json_eq(&body, "/0/status", &json!("open"))?;
     Ok(())
 }
