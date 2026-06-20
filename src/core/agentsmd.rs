@@ -22,6 +22,10 @@
 //! Dry-run reports carry no wall-clock timestamps, no absolute paths, and
 //! no binary version, so golden tests stay byte-identical across machines.
 
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+use std::ffi::OsString;
+use std::fs::File;
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
@@ -793,12 +797,141 @@ fn resolve_bridge_file(
 
 fn read_bridge_file(path: &Path, display_path: &str) -> Result<Option<String>, DomainError> {
     reject_bridge_symlink_component(path, display_path)?;
-    if !path.exists() {
-        return Ok(None);
+    let mut file = match open_bridge_file_for_read(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(storage_error(
+                &format!("Failed to read {display_path}"),
+                error,
+            ));
+        }
+    };
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|error| storage_error(&format!("Failed to read {display_path}"), error))?;
+    Ok(Some(content))
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn open_bridge_file_for_read(path: &Path) -> io::Result<File> {
+    open_bridge_leaf_no_follow(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::from_raw_mode(0),
+    )
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn open_bridge_file_for_read(path: &Path) -> io::Result<File> {
+    std::fs::OpenOptions::new().read(true).open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn open_bridge_file_for_write(path: &Path) -> io::Result<File> {
+    open_bridge_leaf_no_follow(
+        path,
+        rustix::fs::OFlags::WRONLY
+            | rustix::fs::OFlags::CREATE
+            | rustix::fs::OFlags::TRUNC
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::from_raw_mode(0o666),
+    )
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn open_bridge_file_for_write(path: &Path) -> io::Result<File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn open_bridge_leaf_no_follow(
+    path: &Path,
+    flags: rustix::fs::OFlags,
+    create_mode: rustix::fs::Mode,
+) -> io::Result<File> {
+    let (parent, leaf) = open_bridge_parent_directory_no_follow(path)?;
+    let fd = rustix::fs::openat(
+        &parent,
+        leaf.as_os_str(),
+        flags | rustix::fs::OFlags::NOFOLLOW,
+        create_mode,
+    )
+    .map_err(io::Error::from)?;
+    Ok(File::from(fd))
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn open_bridge_parent_directory_no_follow(path: &Path) -> io::Result<(File, OsString)> {
+    let leaf = path.file_name().map(OsString::from).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "agentsmd bridge path {} has no final component",
+                path.display()
+            ),
+        )
+    })?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    Ok((open_bridge_directory_chain_no_follow(parent)?, leaf))
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn open_bridge_directory_chain_no_follow(path: &Path) -> io::Result<File> {
+    let directory_flags =
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW;
+    let mut directory = if path.is_absolute() {
+        let fd = rustix::fs::openat(
+            rustix::fs::CWD,
+            Path::new("/"),
+            directory_flags,
+            rustix::fs::Mode::from_raw_mode(0),
+        )
+        .map_err(io::Error::from)?;
+        File::from(fd)
+    } else {
+        let fd = rustix::fs::openat(
+            rustix::fs::CWD,
+            Path::new("."),
+            directory_flags,
+            rustix::fs::Mode::from_raw_mode(0),
+        )
+        .map_err(io::Error::from)?;
+        File::from(fd)
+    };
+
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(part) => {
+                let fd = rustix::fs::openat(
+                    &directory,
+                    part,
+                    directory_flags,
+                    rustix::fs::Mode::from_raw_mode(0),
+                )
+                .map_err(io::Error::from)?;
+                directory = File::from(fd);
+            }
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "unsupported agentsmd bridge directory component in {}",
+                        path.display()
+                    ),
+                ));
+            }
+        }
     }
-    std::fs::read_to_string(path)
-        .map(Some)
-        .map_err(|error| storage_error(&format!("Failed to read {display_path}"), error))
+    Ok(directory)
 }
 
 fn write_bridge_file(path: &Path, content: &str, display_path: &str) -> Result<(), DomainError> {
@@ -810,7 +943,9 @@ fn write_bridge_file(path: &Path, content: &str, display_path: &str) -> Result<(
         reject_bridge_symlink_component(parent, display_path)?;
     }
     reject_bridge_symlink_component(path, display_path)?;
-    std::fs::write(path, content)
+    let mut file = open_bridge_file_for_write(path)
+        .map_err(|error| storage_error(&format!("Failed to write {display_path}"), error))?;
+    file.write_all(content.as_bytes())
         .map_err(|error| storage_error(&format!("Failed to write {display_path}"), error))
 }
 
@@ -2120,6 +2255,50 @@ The deploy job MUST wait for the smoke suite to finish.
                 .map_err(|error| format!("failed to read outside file: {error}"))?,
             "outside original",
             "agentsmd bridge IO must not write through symlinked workspace paths"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_file_final_open_rejects_symlinked_leaf() -> Result<(), String> {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "ee-agentsmd-leaf-symlink-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&workspace)
+            .map_err(|error| format!("failed to create workspace: {error}"))?;
+        std::fs::create_dir_all(&outside)
+            .map_err(|error| format!("failed to create outside dir: {error}"))?;
+        let outside_file = outside.join("AGENTS.md");
+        std::fs::write(&outside_file, "outside original")
+            .map_err(|error| format!("failed to seed outside file: {error}"))?;
+        let bridge_path = workspace.join("AGENTS.md");
+        symlink(&outside_file, &bridge_path)
+            .map_err(|error| format!("failed to create leaf symlink: {error}"))?;
+
+        open_bridge_file_for_read(&bridge_path)
+            .expect_err("final bridge read open must reject a symlinked leaf");
+        open_bridge_file_for_write(&bridge_path)
+            .expect_err("final bridge write open must reject a symlinked leaf");
+
+        assert!(
+            std::fs::symlink_metadata(&bridge_path)
+                .map_err(|error| format!("failed to inspect bridge symlink: {error}"))?
+                .file_type()
+                .is_symlink(),
+            "final open rejection must leave the symlink in place"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside_file)
+                .map_err(|error| format!("failed to read outside file: {error}"))?,
+            "outside original",
+            "final bridge write open must not truncate or rewrite the symlink target"
         );
         Ok(())
     }
