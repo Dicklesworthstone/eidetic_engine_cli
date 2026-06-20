@@ -251,9 +251,21 @@ fn path_has_left_boundary(compact: &str, index: usize, path: &str) -> bool {
     match compact[..index].chars().next_back() {
         None => true,
         Some(ch) if !is_identifier_char(ch) && ch != ':' => true,
-        Some(':') => &compact[..index] == "::" || path_allows_qualified_suffix(path),
+        Some(':') => {
+            path_starts_after_absolute_prefix(compact, index) || path_allows_qualified_suffix(path)
+        }
         Some(_) => false,
     }
+}
+
+fn path_starts_after_absolute_prefix(compact: &str, index: usize) -> bool {
+    if index < 2 || !compact[..index].ends_with("::") {
+        return false;
+    }
+    compact[..index - 2]
+        .chars()
+        .next_back()
+        .is_none_or(|ch| !is_identifier_char(ch) && ch != ':')
 }
 
 fn path_allows_qualified_suffix(path: &str) -> bool {
@@ -790,6 +802,30 @@ mod tests {
         assert!(contains_ambient_call(
             "fnf(){let_=std::fs::read_dir(\".\");}",
             "std::fs::read_dir("
+        ));
+    }
+
+    #[test]
+    fn ambient_call_detection_catches_absolute_module_paths() {
+        assert!(contains_ambient_call(
+            "fnf(){let_=::std::env::var(\"EE_SEED\");}",
+            "std::env::var("
+        ));
+        assert!(contains_ambient_call(
+            "fnf(){let_=::rand::random::<u64>();}",
+            "rand::random<"
+        ));
+    }
+
+    #[test]
+    fn ambient_call_detection_ignores_prefixed_exact_module_paths() {
+        assert!(!contains_ambient_call(
+            "fnf(){let_=my::std::env::var(\"EE_SEED\");}",
+            "std::env::var("
+        ));
+        assert!(!contains_ambient_call(
+            "fnf(){let_=my::rand::random::<u64>();}",
+            "rand::random<"
         ));
     }
 
