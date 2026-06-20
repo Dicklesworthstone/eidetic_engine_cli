@@ -600,6 +600,11 @@ fn build_memory_debt_report(
     for class in MemoryDebtClass::all() {
         class_counts.entry(class.as_str().to_owned()).or_insert(0);
     }
+    // bd-3qagn: total_score must reflect the FULL debt set so it stays
+    // consistent with item_count/class_counts (both full-queue) and so a trend
+    // snapshot's totalScore shifts only when corpus debt changes, not when the
+    // --limit changes. Compute it BEFORE truncating the queue.
+    let total_score = round_score(queue.iter().map(|item| f64::from(item.score)).sum());
     let returned_count = total_count.min(limit as usize);
     let truncated = total_count > returned_count;
     queue.truncate(returned_count);
@@ -621,7 +626,6 @@ fn build_memory_debt_report(
     } else {
         None
     };
-    let total_score = round_score(queue.iter().map(|item| f64::from(item.score)).sum());
     Ok(MemoryDebtReport {
         schema: MEMORY_DEBT_DOCTOR_SCHEMA_V1,
         command: "curate doctor",
