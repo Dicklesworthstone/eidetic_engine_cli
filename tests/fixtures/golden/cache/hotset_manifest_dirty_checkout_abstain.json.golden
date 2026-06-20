@@ -1,0 +1,119 @@
+{
+  "schema": "ee.hotset_manifest.v1",
+  "manifestId": "hotset-fixture-dirty-checkout-abstain",
+  "generatedAt": "2026-06-20T09:15:00Z",
+  "workspace": {
+    "workspaceLabel": ".",
+    "workspaceIdHash": "blake3:06060606060606060606060606060606"
+  },
+  "redactionStatus": "hashes_counts_bounded_labels_no_content",
+  "readOnly": true,
+  "sideEffectFree": true,
+  "mutationPolicy": "never_mutates_or_prewarms",
+  "resourceProfile": {
+    "requested": "standard",
+    "effective": "standard",
+    "supported": true,
+    "unsupportedReason": null
+  },
+  "sourceSnapshots": [
+    {
+      "source": "workspace_hygiene",
+      "status": "contradicted",
+      "authoritative": false,
+      "schemaId": "ee.workspace_hygiene.v1",
+      "snapshotHash": "blake3:07070707070707070707070707070707",
+      "capturedAt": "2026-06-20T09:14:58Z",
+      "freshness": {
+        "state": "fresh",
+        "capturedAt": "2026-06-20T09:14:58Z",
+        "ageMs": 2000,
+        "staleAfterMs": 60000,
+        "generation": 43
+      },
+      "degraded": [
+        {
+          "code": "dirty_checkout_overlap",
+          "severity": "medium",
+          "message": "Hotset path overlaps active dirty checkout changes.",
+          "repair": "Reserve files and recapture the manifest after the overlap is resolved."
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "itemCount": 1,
+    "admittedCount": 0,
+    "advisoryCount": 0,
+    "failClosedCount": 1,
+    "classCounts": {
+      "path": 1,
+      "memory": 0,
+      "searchIndexShard": 0,
+      "graphNeighborhood": 0,
+      "readPoolTarget": 0,
+      "packL2Candidate": 0,
+      "lexicalRamTierCandidate": 0
+    }
+  },
+  "items": [
+    {
+      "itemId": "item-path-dirty-context",
+      "itemClass": "path",
+      "keyHash": "blake3:08080808080808080808080808080808",
+      "label": "src/core/context.rs",
+      "freshness": {
+        "state": "fresh",
+        "capturedAt": "2026-06-20T09:14:58Z",
+        "ageMs": 2000,
+        "staleAfterMs": 60000,
+        "generation": 43
+      },
+      "confidence": {
+        "score": 0.52,
+        "basis": "observed_frequency",
+        "reasonCodes": ["recent_pack_hits", "dirty_overlap"]
+      },
+      "resourceClass": "standard",
+      "invalidationReason": "dirty_checkout_overlap",
+      "admission": {
+        "decision": "fail_closed",
+        "reasonCodes": ["dirty_checkout_overlap"]
+      },
+      "estimatedCost": {
+        "bytes": 12288,
+        "readPoolSlots": 0,
+        "expectedMs": 4
+      },
+      "evidence": [
+        {
+          "evidenceId": "ev-dirty-workspace-hygiene",
+          "source": "workspace_hygiene",
+          "schemaId": "ee.workspace_hygiene.v1",
+          "refHash": "blake3:09090909090909090909090909090909",
+          "subjectPreview": "dirty path overlap count",
+          "redactionStatus": "bounded_preview_no_content"
+        }
+      ]
+    }
+  ],
+  "failClosed": {
+    "status": "fail_closed",
+    "blockedExecution": true,
+    "reasons": ["dirty_checkout_overlap"]
+  },
+  "ordering": {
+    "sourceSnapshots": "source ascending, schemaId ascending, snapshotHash ascending",
+    "items": "itemClass ascending, itemId ascending",
+    "evidence": "evidenceId ascending"
+  },
+  "provenanceHash": "blake3:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+  "degraded": [
+    {
+      "code": "dirty_checkout_overlap",
+      "severity": "medium",
+      "message": "Manifest abstained because a candidate overlaps dirty checkout state.",
+      "repair": "Resolve or coordinate the dirty path before prewarm apply."
+    }
+  ]
+}

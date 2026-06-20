@@ -1,0 +1,271 @@
+{
+  "schema": "ee.hotset_manifest.v1",
+  "manifestId": "hotset-fixture-warm-workspace",
+  "generatedAt": "2026-06-20T09:05:00Z",
+  "workspace": {
+    "workspaceLabel": ".",
+    "workspaceIdHash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "sourceRootHash": "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "redactionStatus": "hashes_counts_bounded_labels_no_content",
+  "readOnly": true,
+  "sideEffectFree": true,
+  "mutationPolicy": "never_mutates_or_prewarms",
+  "resourceProfile": {
+    "requested": "swarm_heavy",
+    "effective": "standard",
+    "supported": true,
+    "unsupportedReason": null
+  },
+  "sourceSnapshots": [
+    {
+      "source": "cache_hotset",
+      "status": "ready",
+      "authoritative": true,
+      "schemaId": "ee.cache.hotset.v1",
+      "snapshotHash": "blake3:cccccccccccccccccccccccccccccccc",
+      "capturedAt": "2026-06-20T09:04:55Z",
+      "freshness": {
+        "state": "fresh",
+        "capturedAt": "2026-06-20T09:04:55Z",
+        "ageMs": 5000,
+        "staleAfterMs": 120000,
+        "generation": 42
+      },
+      "degraded": []
+    },
+    {
+      "source": "pack_l2",
+      "status": "ready",
+      "authoritative": true,
+      "schemaId": "ee.pack.v2",
+      "snapshotHash": "blake3:dddddddddddddddddddddddddddddddd",
+      "capturedAt": "2026-06-20T09:04:56Z",
+      "freshness": {
+        "state": "fresh",
+        "capturedAt": "2026-06-20T09:04:56Z",
+        "ageMs": 4000,
+        "staleAfterMs": 120000,
+        "generation": 42
+      },
+      "degraded": []
+    },
+    {
+      "source": "read_pool",
+      "status": "ready",
+      "authoritative": true,
+      "schemaId": "ee.singleflight.posture.v1",
+      "snapshotHash": "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "capturedAt": "2026-06-20T09:04:57Z",
+      "freshness": {
+        "state": "fresh",
+        "capturedAt": "2026-06-20T09:04:57Z",
+        "ageMs": 3000,
+        "staleAfterMs": 120000,
+        "generation": 42
+      },
+      "degraded": []
+    },
+    {
+      "source": "search_index",
+      "status": "ready",
+      "authoritative": true,
+      "schemaId": "ee.search.document.v1",
+      "snapshotHash": "blake3:ffffffffffffffffffffffffffffffff",
+      "capturedAt": "2026-06-20T09:04:58Z",
+      "freshness": {
+        "state": "fresh",
+        "capturedAt": "2026-06-20T09:04:58Z",
+        "ageMs": 2000,
+        "staleAfterMs": 120000,
+        "generation": 42
+      },
+      "degraded": []
+    }
+  ],
+  "summary": {
+    "itemCount": 4,
+    "admittedCount": 4,
+    "advisoryCount": 0,
+    "failClosedCount": 0,
+    "classCounts": {
+      "path": 0,
+      "memory": 1,
+      "searchIndexShard": 1,
+      "graphNeighborhood": 0,
+      "readPoolTarget": 1,
+      "packL2Candidate": 1,
+      "lexicalRamTierCandidate": 0
+    }
+  },
+  "items": [
+    {
+      "itemId": "item-memory-hotset-release-rule",
+      "itemClass": "memory",
+      "keyHash": "blake3:12121212121212121212121212121212",
+      "label": "mem:release-rule",
+      "freshness": {
+        "state": "fresh",
+        "capturedAt": "2026-06-20T09:04:50Z",
+        "ageMs": 10000,
+        "staleAfterMs": 300000,
+        "generation": 42
+      },
+      "confidence": {
+        "score": 0.91,
+        "basis": "source_authority",
+        "reasonCodes": ["pack_hits:8", "why_hits:3"]
+      },
+      "resourceClass": "small",
+      "invalidationReason": "none",
+      "admission": {
+        "decision": "admit",
+        "reasonCodes": ["fresh_authority", "within_budget"]
+      },
+      "estimatedCost": {
+        "bytes": 8192,
+        "readPoolSlots": 0,
+        "expectedMs": 3
+      },
+      "evidence": [
+        {
+          "evidenceId": "ev-pack-l2-memory-release-rule",
+          "source": "pack_l2",
+          "schemaId": "ee.cache.hotset.v1",
+          "refHash": "blake3:34343434343434343434343434343434",
+          "subjectPreview": "pack and why hit counts",
+          "redactionStatus": "bounded_preview_no_content"
+        }
+      ]
+    },
+    {
+      "itemId": "item-pack-l2-release-section",
+      "itemClass": "pack_l2_candidate",
+      "keyHash": "blake3:56565656565656565656565656565656",
+      "label": "pack-l2:release-section",
+      "freshness": {
+        "state": "fresh",
+        "capturedAt": "2026-06-20T09:04:56Z",
+        "ageMs": 4000,
+        "staleAfterMs": 120000,
+        "generation": 42
+      },
+      "confidence": {
+        "score": 0.86,
+        "basis": "observed_frequency",
+        "reasonCodes": ["pack_reused:5"]
+      },
+      "resourceClass": "standard",
+      "invalidationReason": "none",
+      "admission": {
+        "decision": "admit",
+        "reasonCodes": ["cache_key_redacted", "within_budget"]
+      },
+      "estimatedCost": {
+        "bytes": 32768,
+        "readPoolSlots": 0,
+        "expectedMs": 8
+      },
+      "evidence": [
+        {
+          "evidenceId": "ev-pack-l2-release-section",
+          "source": "pack_l2",
+          "schemaId": "ee.pack.v2",
+          "refHash": "blake3:78787878787878787878787878787878",
+          "subjectPreview": "pack L2 cache admission",
+          "redactionStatus": "bounded_preview_no_content"
+        }
+      ]
+    },
+    {
+      "itemId": "item-read-pool-pack-why",
+      "itemClass": "read_pool_target",
+      "keyHash": "blake3:90909090909090909090909090909090",
+      "label": "read-pool:pack-why",
+      "freshness": {
+        "state": "fresh",
+        "capturedAt": "2026-06-20T09:04:57Z",
+        "ageMs": 3000,
+        "staleAfterMs": 120000,
+        "generation": 42
+      },
+      "confidence": {
+        "score": 0.78,
+        "basis": "replay_slo",
+        "reasonCodes": ["read_pool_wait_high"]
+      },
+      "resourceClass": "standard",
+      "invalidationReason": "none",
+      "admission": {
+        "decision": "admit",
+        "reasonCodes": ["pool_capacity_available"]
+      },
+      "estimatedCost": {
+        "bytes": 0,
+        "readPoolSlots": 1,
+        "expectedMs": 6
+      },
+      "evidence": [
+        {
+          "evidenceId": "ev-read-pool-pack-why",
+          "source": "read_pool",
+          "schemaId": "ee.singleflight.posture.v1",
+          "refHash": "blake3:abababababababababababababababab",
+          "subjectPreview": "bounded read-pool wait counters",
+          "redactionStatus": "bounded_preview_no_content"
+        }
+      ]
+    },
+    {
+      "itemId": "item-search-index-release-shard",
+      "itemClass": "search_index_shard",
+      "keyHash": "blake3:bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc",
+      "label": "search-shard:release",
+      "freshness": {
+        "state": "fresh",
+        "capturedAt": "2026-06-20T09:04:58Z",
+        "ageMs": 2000,
+        "staleAfterMs": 120000,
+        "generation": 42
+      },
+      "confidence": {
+        "score": 0.81,
+        "basis": "observed_frequency",
+        "reasonCodes": ["search_hits:12"]
+      },
+      "resourceClass": "standard",
+      "invalidationReason": "none",
+      "admission": {
+        "decision": "admit",
+        "reasonCodes": ["fresh_index", "within_budget"]
+      },
+      "estimatedCost": {
+        "bytes": 65536,
+        "readPoolSlots": 1,
+        "expectedMs": 10
+      },
+      "evidence": [
+        {
+          "evidenceId": "ev-search-release-shard",
+          "source": "search_index",
+          "schemaId": "ee.search.document.v1",
+          "refHash": "blake3:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+          "subjectPreview": "search shard hit counts",
+          "redactionStatus": "bounded_preview_no_content"
+        }
+      ]
+    }
+  ],
+  "failClosed": {
+    "status": "clear",
+    "blockedExecution": false,
+    "reasons": []
+  },
+  "ordering": {
+    "sourceSnapshots": "source ascending, schemaId ascending, snapshotHash ascending",
+    "items": "itemClass ascending, itemId ascending",
+    "evidence": "evidenceId ascending"
+  },
+  "provenanceHash": "blake3:dededededededededededededededede",
+  "degraded": []
+}

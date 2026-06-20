@@ -1,0 +1,65 @@
+{
+  "schema": "ee.hotset_manifest.v1",
+  "manifestId": "hotset-fixture-cold-workspace",
+  "generatedAt": "2026-06-20T09:00:00Z",
+  "workspace": {
+    "workspaceLabel": ".",
+    "workspaceIdHash": "blake3:11111111111111111111111111111111"
+  },
+  "redactionStatus": "hashes_counts_bounded_labels_no_content",
+  "readOnly": true,
+  "sideEffectFree": true,
+  "mutationPolicy": "never_mutates_or_prewarms",
+  "resourceProfile": {
+    "requested": "small",
+    "effective": "small",
+    "supported": true,
+    "unsupportedReason": null
+  },
+  "sourceSnapshots": [
+    {
+      "source": "source_authority",
+      "status": "ready",
+      "authoritative": true,
+      "schemaId": "ee.source_authority.snapshot.v1",
+      "snapshotHash": "blake3:22222222222222222222222222222222",
+      "capturedAt": "2026-06-20T08:59:59Z",
+      "freshness": {
+        "state": "fresh",
+        "capturedAt": "2026-06-20T08:59:59Z",
+        "ageMs": 1000,
+        "staleAfterMs": 60000,
+        "generation": 1
+      },
+      "degraded": []
+    }
+  ],
+  "summary": {
+    "itemCount": 0,
+    "admittedCount": 0,
+    "advisoryCount": 0,
+    "failClosedCount": 0,
+    "classCounts": {
+      "path": 0,
+      "memory": 0,
+      "searchIndexShard": 0,
+      "graphNeighborhood": 0,
+      "readPoolTarget": 0,
+      "packL2Candidate": 0,
+      "lexicalRamTierCandidate": 0
+    }
+  },
+  "items": [],
+  "failClosed": {
+    "status": "clear",
+    "blockedExecution": false,
+    "reasons": []
+  },
+  "ordering": {
+    "sourceSnapshots": "source ascending, schemaId ascending, snapshotHash ascending",
+    "items": "itemClass ascending, itemId ascending",
+    "evidence": "evidenceId ascending"
+  },
+  "provenanceHash": "blake3:33333333333333333333333333333333",
+  "degraded": []
+}

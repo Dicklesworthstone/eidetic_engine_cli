@@ -1,0 +1,119 @@
+{
+  "schema": "ee.hotset_manifest.v1",
+  "manifestId": "hotset-fixture-resource-pressure-abstain",
+  "generatedAt": "2026-06-20T09:20:00Z",
+  "workspace": {
+    "workspaceLabel": ".",
+    "workspaceIdHash": "blake3:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+  },
+  "redactionStatus": "hashes_counts_bounded_labels_no_content",
+  "readOnly": true,
+  "sideEffectFree": true,
+  "mutationPolicy": "never_mutates_or_prewarms",
+  "resourceProfile": {
+    "requested": "swarm_heavy",
+    "effective": "unsupported",
+    "supported": false,
+    "unsupportedReason": "resource_budget_exceeded"
+  },
+  "sourceSnapshots": [
+    {
+      "source": "resource_admission",
+      "status": "degraded_read_only",
+      "authoritative": false,
+      "schemaId": "ee.resource_admission.v1",
+      "snapshotHash": "blake3:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+      "capturedAt": "2026-06-20T09:19:59Z",
+      "freshness": {
+        "state": "fresh",
+        "capturedAt": "2026-06-20T09:19:59Z",
+        "ageMs": 1000,
+        "staleAfterMs": 60000,
+        "generation": 44
+      },
+      "degraded": [
+        {
+          "code": "resource_budget_exceeded",
+          "severity": "warning",
+          "message": "Host resource admission rejected the requested prewarm profile.",
+          "repair": "Retry with a smaller resource profile or wait for pressure to clear."
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "itemCount": 1,
+    "admittedCount": 0,
+    "advisoryCount": 0,
+    "failClosedCount": 1,
+    "classCounts": {
+      "path": 0,
+      "memory": 0,
+      "searchIndexShard": 0,
+      "graphNeighborhood": 0,
+      "readPoolTarget": 1,
+      "packL2Candidate": 0,
+      "lexicalRamTierCandidate": 0
+    }
+  },
+  "items": [
+    {
+      "itemId": "item-read-pool-heavy-pack",
+      "itemClass": "read_pool_target",
+      "keyHash": "blake3:0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+      "label": "read-pool:heavy-pack",
+      "freshness": {
+        "state": "fresh",
+        "capturedAt": "2026-06-20T09:19:59Z",
+        "ageMs": 1000,
+        "staleAfterMs": 60000,
+        "generation": 44
+      },
+      "confidence": {
+        "score": 0.73,
+        "basis": "replay_slo",
+        "reasonCodes": ["would_reduce_pack_latency", "resource_pressure"]
+      },
+      "resourceClass": "swarm_heavy",
+      "invalidationReason": "resource_budget_exceeded",
+      "admission": {
+        "decision": "fail_closed",
+        "reasonCodes": ["resource_budget_exceeded"]
+      },
+      "estimatedCost": {
+        "bytes": 268435456,
+        "readPoolSlots": 8,
+        "expectedMs": 80
+      },
+      "evidence": [
+        {
+          "evidenceId": "ev-resource-admission",
+          "source": "resource_admission",
+          "schemaId": "ee.resource_admission.v1",
+          "refHash": "blake3:0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+          "subjectPreview": "resource admission pressure counters",
+          "redactionStatus": "bounded_preview_no_content"
+        }
+      ]
+    }
+  ],
+  "failClosed": {
+    "status": "fail_closed",
+    "blockedExecution": true,
+    "reasons": ["resource_budget_exceeded"]
+  },
+  "ordering": {
+    "sourceSnapshots": "source ascending, schemaId ascending, snapshotHash ascending",
+    "items": "itemClass ascending, itemId ascending",
+    "evidence": "evidenceId ascending"
+  },
+  "provenanceHash": "blake3:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+  "degraded": [
+    {
+      "code": "resource_budget_exceeded",
+      "severity": "warning",
+      "message": "Manifest abstained because resource pressure exceeded the requested profile.",
+      "repair": "Use a smaller profile or retry when resource pressure clears."
+    }
+  ]
+}

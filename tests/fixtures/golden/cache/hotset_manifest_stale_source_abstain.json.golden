@@ -1,0 +1,119 @@
+{
+  "schema": "ee.hotset_manifest.v1",
+  "manifestId": "hotset-fixture-stale-source-abstain",
+  "generatedAt": "2026-06-20T09:10:00Z",
+  "workspace": {
+    "workspaceLabel": ".",
+    "workspaceIdHash": "blake3:01010101010101010101010101010101"
+  },
+  "redactionStatus": "hashes_counts_bounded_labels_no_content",
+  "readOnly": true,
+  "sideEffectFree": true,
+  "mutationPolicy": "never_mutates_or_prewarms",
+  "resourceProfile": {
+    "requested": "standard",
+    "effective": "standard",
+    "supported": true,
+    "unsupportedReason": null
+  },
+  "sourceSnapshots": [
+    {
+      "source": "beads",
+      "status": "stale_fallback",
+      "authoritative": false,
+      "schemaId": "br.ready.v1",
+      "snapshotHash": "blake3:02020202020202020202020202020202",
+      "capturedAt": "2026-06-20T08:30:00Z",
+      "freshness": {
+        "state": "stale",
+        "capturedAt": "2026-06-20T08:30:00Z",
+        "ageMs": 2400000,
+        "staleAfterMs": 60000,
+        "generation": 40
+      },
+      "degraded": [
+        {
+          "code": "source_snapshot_stale",
+          "severity": "low",
+          "message": "Beads hotset evidence is stale.",
+          "repair": "Refresh Beads and rerun the hotset manifest collector."
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "itemCount": 1,
+    "admittedCount": 0,
+    "advisoryCount": 0,
+    "failClosedCount": 1,
+    "classCounts": {
+      "path": 0,
+      "memory": 1,
+      "searchIndexShard": 0,
+      "graphNeighborhood": 0,
+      "readPoolTarget": 0,
+      "packL2Candidate": 0,
+      "lexicalRamTierCandidate": 0
+    }
+  },
+  "items": [
+    {
+      "itemId": "item-memory-stale-source",
+      "itemClass": "memory",
+      "keyHash": "blake3:03030303030303030303030303030303",
+      "label": "mem:stale-source",
+      "freshness": {
+        "state": "stale",
+        "capturedAt": "2026-06-20T08:30:00Z",
+        "ageMs": 2400000,
+        "staleAfterMs": 60000,
+        "generation": 40
+      },
+      "confidence": {
+        "score": 0.24,
+        "basis": "conservative_default",
+        "reasonCodes": ["beads_stale"]
+      },
+      "resourceClass": "small",
+      "invalidationReason": "source_snapshot_stale",
+      "admission": {
+        "decision": "fail_closed",
+        "reasonCodes": ["source_snapshot_stale"]
+      },
+      "estimatedCost": {
+        "bytes": 4096,
+        "readPoolSlots": 0,
+        "expectedMs": 2
+      },
+      "evidence": [
+        {
+          "evidenceId": "ev-stale-beads",
+          "source": "beads",
+          "schemaId": "br.ready.v1",
+          "refHash": "blake3:04040404040404040404040404040404",
+          "subjectPreview": "stale bead hotset count",
+          "redactionStatus": "bounded_preview_no_content"
+        }
+      ]
+    }
+  ],
+  "failClosed": {
+    "status": "fail_closed",
+    "blockedExecution": true,
+    "reasons": ["source_snapshot_stale"]
+  },
+  "ordering": {
+    "sourceSnapshots": "source ascending, schemaId ascending, snapshotHash ascending",
+    "items": "itemClass ascending, itemId ascending",
+    "evidence": "evidenceId ascending"
+  },
+  "provenanceHash": "blake3:05050505050505050505050505050505",
+  "degraded": [
+    {
+      "code": "source_snapshot_stale",
+      "severity": "low",
+      "message": "One or more required hotset sources are stale.",
+      "repair": "Refresh stale sources before applying prewarm."
+    }
+  ]
+}
