@@ -1129,6 +1129,188 @@ fn source_authority_fixtures_cover_taxonomy_and_redaction() -> TestResult {
 }
 
 #[test]
+fn source_authority_support_bundle_handoff_summary_is_redacted() -> TestResult {
+    let fixture = read_json(
+        &repo_root()
+            .join("tests")
+            .join("fixtures")
+            .join("source_authority")
+            .join("support_bundle_handoff_summary.json"),
+    )?;
+    if string_field(&fixture, "/schema", "source-authority handoff summary")?
+        != "ee.source_authority.handoff_summary.v1"
+    {
+        return Err("source-authority handoff summary schema drifted".into());
+    }
+    if string_field(&fixture, "/snapshotRef/schema", "source-authority handoff summary")?
+        != "ee.source_authority.snapshot.v1"
+    {
+        return Err("source-authority handoff summary must reference snapshot schema".into());
+    }
+    if string_field(&fixture, "/redactionStatus", "source-authority handoff summary")?
+        != "paths_counts_subjects_only_no_content"
+    {
+        return Err("source-authority handoff summary redactionStatus drifted".into());
+    }
+
+    let generated_for =
+        string_array_at(&fixture, "/generatedFor", "source-authority handoff summary")?;
+    for expected in ["support_bundle", "handoff_capsule", "agent_mail"] {
+        if !generated_for.iter().any(|item| item == expected) {
+            return Err(format!(
+                "source-authority handoff summary missing generatedFor={expected}"
+            ));
+        }
+    }
+
+    let source_summaries = fixture
+        .pointer("/sourceSummaries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "source-authority handoff summary missing sourceSummaries".to_owned())?;
+    let source_kinds = source_summaries
+        .iter()
+        .filter_map(|source| source.pointer("/sourceKind").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    for expected in ["agent_mail", "beads", "bv", "memory_drift", "rch"] {
+        if !source_kinds.contains(expected) {
+            return Err(format!(
+                "source-authority handoff summary missing sourceKind {expected}"
+            ));
+        }
+    }
+    if !source_summaries.iter().any(|source| {
+        source.pointer("/sourceKind").and_then(Value::as_str) == Some("agent_mail")
+            && source.pointer("/state").and_then(Value::as_str) == Some("corrupt_recovery")
+    }) {
+        return Err("summary must preserve Agent Mail corrupt-recovery posture".into());
+    }
+    if !source_summaries.iter().any(|source| {
+        source.pointer("/sourceKind").and_then(Value::as_str) == Some("bv")
+            && source.pointer("/timeoutClass").and_then(Value::as_str)
+                == Some("robot_next_no_output")
+    }) {
+        return Err("summary must preserve BV timeout/no-output posture".into());
+    }
+
+    if string_field(
+        &fixture,
+        "/candidateEvidence/lookupOutcome",
+        "source-authority handoff summary",
+    )? != "candidate_lookup_timed_out"
+    {
+        return Err("summary must not collapse timed-out lookup into absence".into());
+    }
+    let blocker_codes = fixture
+        .pointer("/blockerGroups")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "summary missing blockerGroups".to_owned())?
+        .iter()
+        .filter_map(|blocker| blocker.pointer("/code").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    if !blocker_codes.contains("claim_gate_degraded_authority") {
+        return Err("summary missing claim_gate_degraded_authority blocker".into());
+    }
+
+    let commands = fixture
+        .pointer("/nextNonMutatingCommands")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "summary missing nextNonMutatingCommands".to_owned())?;
+    let command_ids = commands
+        .iter()
+        .filter_map(|command| command.pointer("/commandId").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    for expected in [
+        "refresh_actionable_queue",
+        "rerun_claim_gate",
+        "inspect_swarm_brief",
+    ] {
+        if !command_ids.contains(expected) {
+            return Err(format!("summary missing command {expected}"));
+        }
+    }
+    for command in commands {
+        if string_field(command, "/safety", "source-authority handoff command")?
+            != "read_only_probe"
+        {
+            return Err("summary follow-up commands must be read-only probes".into());
+        }
+        let template = string_field(
+            command,
+            "/commandTemplate",
+            "source-authority handoff command",
+        )?;
+        for forbidden in ["br update", "br close", "git commit", "send_message"] {
+            if template.contains(forbidden) {
+                return Err(format!(
+                    "summary follow-up command must not mutate state: {forbidden}"
+                ));
+            }
+        }
+    }
+
+    if fixture
+        .pointer("/agentMailTemplate/ackRequired")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        return Err("Agent Mail handoff template should be FYI by default".into());
+    }
+    let body = string_field(
+        &fixture,
+        "/agentMailTemplate/bodyMarkdown",
+        "source-authority handoff summary",
+    )?;
+    for expected in [
+        "Agent Mail corrupt-recovery",
+        "Beads live lookup timed out",
+        "BV robot-next no-output",
+        "RCH telemetry gap",
+        "No claim or source edit was performed",
+    ] {
+        if !body.contains(expected) {
+            return Err(format!("Agent Mail template missing phrase {expected}"));
+        }
+    }
+
+    for field in [
+        "/privacy/rawMailBodiesIncluded",
+        "/privacy/rawMemoryBodiesIncluded",
+        "/privacy/rawSourceSnippetsIncluded",
+        "/privacy/rawCommandOutputIncluded",
+        "/privacy/secretsIncluded",
+        "/privacy/fullHostPathsIncluded",
+    ] {
+        if fixture.pointer(field).and_then(Value::as_bool) != Some(false) {
+            return Err(format!("summary privacy field {field} must be false"));
+        }
+    }
+
+    let serialized =
+        serde_json::to_string(&fixture).map_err(|error| format!("serialize fixture: {error}"))?;
+    for forbidden in [
+        "/Users/",
+        "/home/",
+        "/private/",
+        "body_md",
+        "rawBody",
+        "From:",
+        "Subject:",
+        "Message-ID:",
+        "sk-ant-",
+        "AKIA",
+        "-----BEGIN",
+    ] {
+        if serialized.contains(forbidden) {
+            return Err(format!(
+                "source-authority handoff summary leaked forbidden content {forbidden}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn source_authority_bv_robot_next_no_output_fixture_is_bounded() -> TestResult {
     let fixture = read_json(
         &repo_root()

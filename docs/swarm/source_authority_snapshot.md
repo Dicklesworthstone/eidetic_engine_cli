@@ -101,6 +101,30 @@ is represented as unavailable when not supplied. Per-source command budget,
 timeout, fallback, and repair fields are data in the snapshot, not reasons to
 drop the source record.
 
+## Support-Bundle And Agent Mail Summaries
+
+Tracking bead: `bd-3w4pv.5`. Support bundles, handoff capsules, and Agent
+Mail coordination notes should carry a compact source-authority summary rather
+than raw source payloads. The summary is a projection of an
+`ee.source_authority.snapshot.v1` record with:
+
+- source statuses, freshness states, timeout classes, and degraded codes;
+- candidate lookup posture (`candidate_lookup_timed_out`,
+  `candidate_lookup_unavailable`, stale fallback, contradiction, or confirmed
+  presence/absence);
+- blocker groups that explain why no claim or source edit happened;
+- read-only follow-up command templates, such as
+  `scripts/br_retry.sh actionable --json`, `ee swarm brief --workspace . --json`,
+  and a fresh claim-gate rerun;
+- an Agent Mail-safe subject/body template suitable for pasting into a thread.
+
+The projection is support-bundle safe: it contains no raw mail bodies, memory
+bodies, source snippets, command stdout/stderr, secrets, or full host paths.
+Fixture
+`tests/fixtures/source_authority/support_bundle_handoff_summary.json` pins the
+shape and redaction posture for support-bundle, handoff-capsule, and Agent Mail
+consumers.
+
 ## Actionable queue (`scripts/br_retry.sh actionable --json`)
 
 Tracking bead: `bd-3w4pv.7`. AGENTS.md/README establish
@@ -233,6 +257,7 @@ exactly that case.
 | `tests/fixtures/source_authority/all_source_states.json` | Every `state` value across the sources |
 | `tests/fixtures/source_authority/candidate_beads_timeout.json` | Candidate in stale-safe Beads, live lookup timed out, gate fails closed |
 | `tests/fixtures/source_authority/redaction_proof.json` | Redaction posture: forbidden content classes absent |
+| `tests/fixtures/source_authority/support_bundle_handoff_summary.json` | Redacted support-bundle, handoff-capsule, and Agent Mail summary projection |
 | `tests/fixtures/swarm_work_packet/actionable_queue/present_but_gate_refuses.json` | Queue presence necessary but not sufficient; claim stays null |
 | `tests/fixtures/swarm_work_packet/actionable_queue/bv_advisory_contradiction.json` | BV recommends a blocked id absent from the queue |
 | `tests/fixtures/swarm_work_packet/actionable_queue/ready_epic_exclusion.json` | Exclusion accounting + filter contract golden |
