@@ -146,3 +146,14 @@ tests/audit_artifacts/latest_*.json
 # on some workers. Protect the stale remote file from rsync --delete without
 # hiding the tracked regression seeds above.
 /proptest-regressions/connection.txt
+
+# Foreign stale worker artifacts (bd-isqmd class). fixtures/openhands/ and
+# fixtures/antigravity/ are NOT ee source — they are not tracked, not in this
+# checkout, and were left on some RCH workers by a prior tool's runs, owned by an
+# orphaned uid (the Mac-side 501) that the workers' ubuntu rsync cannot remove.
+# rsync --delete on them fails `Permission denied (13)` and aborts the whole sync
+# before Cargo starts, blocking every remote verify. Excluding the dirs makes
+# rsync leave them untouched (it never had them in source anyway). Same shape as
+# the proptest seed protection above.
+/fixtures/openhands/
+/fixtures/antigravity/
