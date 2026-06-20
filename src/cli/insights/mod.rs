@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use clap::Args;
 use fnx_algorithms::{
@@ -34,6 +36,7 @@ use crate::graph::skyline::{
     compute_knowledge_skyline,
 };
 use crate::models::{DomainError, RESPONSE_SCHEMA_V2};
+use crate::output::governor::{CURSOR_SCHEMA_V1, CursorPayload, cursor_invalid_degraded_entry};
 use crate::output::render_toon_from_json;
 
 pub const INSIGHTS_SCHEMA_V1: &str = "ee.insights.v1";
@@ -455,6 +458,14 @@ pub fn build_insights_report_with_options(
         InsightsMode::FullBundle
     };
 
+    if args
+        .cursor
+        .as_deref()
+        .is_some_and(insights_cursor_is_malformed)
+    {
+        return build_malformed_cursor_report(args, &registry, available_sections, mode);
+    }
+
     let (selected_section, sections, pagination, gated_degraded_signals) =
         if let Some(section) = args.section.as_deref() {
             let normalized = normalize_section_name(section);
@@ -540,6 +551,108 @@ pub fn build_insights_report_with_options(
         sections,
         degraded_signals,
     })
+}
+
+fn build_malformed_cursor_report(
+    args: &InsightsArgs,
+    registry: &[SectionRegistryEntry],
+    available_sections: Vec<&'static str>,
+    mode: InsightsMode,
+) -> Result<InsightsReport, DomainError> {
+    let (selected_section, sections, pagination) = if let Some(section) = args.section.as_deref() {
+        let normalized = normalize_section_name(section);
+        let Some((_, display_name, builder)) = registry
+            .iter()
+            .find(|(lookup_name, _, _)| *lookup_name == normalized)
+        else {
+            let available = available_sections.join(", ");
+            return Err(DomainError::Usage {
+                message: format!(
+                    "Unknown insights section `{section}`. Available sections: {available}."
+                ),
+                repair: Some("ee insights --help".to_owned()),
+            });
+        };
+        let section = paginate_section(builder(), args.offset, args.limit);
+        (
+            Some((*display_name).to_owned()),
+            vec![section.section],
+            Some(section.pagination),
+        )
+    } else {
+        (
+            None,
+            registry
+                .iter()
+                .map(|(_, _, builder)| builder())
+                .collect::<Vec<_>>(),
+            None,
+        )
+    };
+
+    Ok(InsightsReport {
+        schema: INSIGHTS_SCHEMA_V1,
+        command: "insights",
+        mode,
+        snapshot_version: 0,
+        generated_at: EMPTY_WORKSPACE_GENERATED_AT,
+        run_duration_ms: 0,
+        selected_section,
+        explain_memory_id: args.explain.clone(),
+        explain_command: args
+            .explain
+            .as_ref()
+            .map(|memory_id| format!("ee why {memory_id} --json")),
+        pagination,
+        available_sections,
+        sections,
+        degraded_signals: vec![cursor_invalid_insights_signal()],
+    })
+}
+
+fn insights_cursor_is_malformed(token: &str) -> bool {
+    let Some((payload_part, mac_part)) = token.split_once('.') else {
+        return true;
+    };
+    if payload_part.is_empty() || mac_part.is_empty() {
+        return true;
+    }
+    let Ok(payload_bytes) = URL_SAFE_NO_PAD.decode(payload_part) else {
+        return true;
+    };
+    if URL_SAFE_NO_PAD.decode(mac_part).is_err() {
+        return true;
+    }
+    let Ok(payload) = serde_json::from_slice::<CursorPayload>(&payload_bytes) else {
+        return true;
+    };
+    payload.schema != CURSOR_SCHEMA_V1 || payload.target_schema != INSIGHTS_SCHEMA_V1
+}
+
+fn cursor_invalid_insights_signal() -> InsightsDegradedSignal {
+    let entry = cursor_invalid_degraded_entry();
+    InsightsDegradedSignal {
+        code: entry
+            .get("code")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("cursor_invalid")
+            .to_owned(),
+        severity: entry
+            .get("severity")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("low")
+            .to_owned(),
+        message: entry
+            .get("message")
+            .and_then(JsonValue::as_str)
+            .unwrap_or("Continuation cursor failed validation.")
+            .to_owned(),
+        repair: entry
+            .get("repair")
+            .and_then(JsonValue::as_str)
+            .map(str::to_owned),
+        sources: vec!["insights".to_owned()],
+    }
 }
 
 fn build_registry_section_with_runtime_gate(
@@ -5757,6 +5870,71 @@ mod tests {
         assert_eq!(pagination.returned, 0);
         assert_eq!(pagination.total, 0);
         assert!(report.sections[0].items.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_cursor_returns_empty_invalid_page_bd_51i3f() -> TestResult {
+        let workspace = unique_insights_workspace("cursor-invalid")?;
+        let _ = seed_load_bearing_workspace(&workspace)?;
+
+        let normal = build_insights_report_with_options(
+            &InsightsArgs {
+                section: Some("comprehensiveRules".to_owned()),
+                explain: None,
+                limit: DEFAULT_SECTION_LIMIT,
+                offset: 0,
+                json_stream: false,
+                cursor: None,
+            },
+            InsightsBuildOptions {
+                workspace: Some(&workspace),
+                ..InsightsBuildOptions::default()
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(
+            !normal.sections[0].items.is_empty(),
+            "fixture must prove the malformed cursor is not returning the normal page"
+        );
+
+        let rejected = build_insights_report_with_options(
+            &InsightsArgs {
+                section: Some("comprehensiveRules".to_owned()),
+                explain: None,
+                limit: DEFAULT_SECTION_LIMIT,
+                offset: 0,
+                json_stream: false,
+                cursor: Some("not-a-valid-cursor".to_owned()),
+            },
+            InsightsBuildOptions {
+                workspace: Some(&workspace),
+                ..InsightsBuildOptions::default()
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(rejected.mode, InsightsMode::Section);
+        assert_eq!(
+            rejected.selected_section.as_deref(),
+            Some("comprehensiveRules")
+        );
+        assert!(rejected.sections[0].items.is_empty());
+        let pagination = rejected
+            .pagination
+            .ok_or_else(|| "cursor rejection should preserve section pagination".to_owned())?;
+        assert_eq!(pagination.limit, DEFAULT_SECTION_LIMIT);
+        assert_eq!(pagination.offset, 0);
+        assert_eq!(pagination.returned, 0);
+        assert_eq!(pagination.total, 0);
+        assert_eq!(rejected.degraded_signals.len(), 1);
+        assert_eq!(rejected.degraded_signals[0].code, "cursor_invalid");
+        assert_eq!(rejected.degraded_signals[0].severity, "low");
+        assert_eq!(
+            rejected.degraded_signals[0].sources,
+            vec!["insights".to_owned()]
+        );
 
         Ok(())
     }

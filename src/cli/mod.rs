@@ -7416,9 +7416,9 @@ pub struct PlanGoalArgs {
     #[arg(long, value_name = "TEXT")]
     pub goal: String,
 
-    /// Workspace ID to plan for.
-    #[arg(long, value_name = "ID")]
-    pub workspace: Option<String>,
+    /// Workspace path to plan for.
+    #[arg(long = "workspace", value_name = "PATH")]
+    pub workspace_path: Option<PathBuf>,
 
     /// Output profile (compact, full, safe).
     #[arg(long, value_name = "PROFILE", default_value = "full")]
@@ -11971,13 +11971,13 @@ pub struct SupportInspectArgs {
     #[arg(value_name = "PATH")]
     pub bundle_path: PathBuf,
 
-    /// Verify content hashes against manifest.
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub verify_hashes: bool,
+    /// Verify content hashes against manifest; enabled by default. Use --verify-hashes=false for structure-only inspection.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub verify_hashes: Option<bool>,
 
-    /// Check for stale or unsupported schema versions.
-    #[arg(long, action = ArgAction::SetTrue)]
-    pub check_versions: bool,
+    /// Check for stale or unsupported schema versions; enabled by default and cannot be disabled.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
+    pub check_versions: Option<bool>,
 }
 
 /// Subcommands for `ee session-budget`.
@@ -22488,9 +22488,8 @@ where
     use crate::core::plan::{PlanRecommendOptions, recommend_recipes};
 
     let workspace_path = args
-        .workspace
+        .workspace_path
         .clone()
-        .map(PathBuf::from)
         .or_else(|| cli.workspace.clone())
         .unwrap_or_else(|| PathBuf::from("."));
     let options = PlanRecommendOptions {
@@ -42508,6 +42507,13 @@ where
         };
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
+    if args.budget_tokens == Some(0) {
+        let error = DomainError::Usage {
+            message: "ee recall --budget-tokens must be greater than zero".to_owned(),
+            repair: Some("Re-run with --budget-tokens 400 or omit the flag.".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
 
     let workspace_path = cli.resolve_workspace();
     let database_path = args
@@ -42669,6 +42675,13 @@ where
         degraded.push(RecallDegradedEntry::budget_truncated(
             report.dropped_count,
             cursor,
+            budget,
+        ));
+    } else if report.truncated
+        && let Some(budget) = args.budget_tokens
+    {
+        degraded.push(RecallDegradedEntry::budget_unsatisfiable(
+            report.dropped_count,
             budget,
         ));
     }
@@ -57062,9 +57075,20 @@ where
 {
     use crate::core::support_bundle::{InspectOptions, inspect_bundle};
 
+    if args.check_versions == Some(false) {
+        let error = DomainError::Usage {
+            message: "ee support inspect always checks support bundle schema versions".to_owned(),
+            repair: Some(
+                "Omit --check-versions=false; unsupported bundle schemas must stay invalid."
+                    .to_owned(),
+            ),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
     let options = InspectOptions {
         bundle_path: args.bundle_path.clone(),
-        verify_hashes: true,
+        verify_hashes: args.verify_hashes.unwrap_or(true),
     };
 
     match inspect_bundle(&options) {
@@ -64268,6 +64292,97 @@ mod tests {
             ),
             other => Err(format!("expected support bundle command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn support_inspect_verify_hashes_flag_controls_hash_verification() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let bundle_dir = tempdir.path().join("bundle");
+        fs::create_dir_all(&bundle_dir).map_err(|error| {
+            format!(
+                "failed to create support bundle dir {}: {error}",
+                bundle_dir.display()
+            )
+        })?;
+        let payload = "{}";
+        fs::write(bundle_dir.join("status.json"), payload)
+            .map_err(|error| format!("failed to write status fixture: {error}"))?;
+        let manifest = serde_json::json!({
+            "schema": crate::core::support_bundle::SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1,
+            "bundle_id": "cli-verify-hashes-flag",
+            "created_at": "2026-06-20T00:00:00Z",
+            "workspace_path": "redacted-workspace",
+            "ee_version": env!("CARGO_PKG_VERSION"),
+            "files": [{
+                "path": "status.json",
+                "size_bytes": payload.len(),
+                "content_hash": blake3::hash(b"different content").to_hex().to_string(),
+                "redacted": true
+            }],
+            "total_size_bytes": payload.len(),
+            "redaction_applied": true,
+            "redaction_reasons": ["fixture"]
+        });
+        fs::write(
+            bundle_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("failed to write manifest fixture: {error}"))?;
+        let bundle_arg = bundle_dir.to_string_lossy().to_string();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "support",
+            "inspect",
+            bundle_arg.as_str(),
+            "--verify-hashes=false",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "support inspect structure-only exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "support inspect structure-only JSON stderr clean",
+        )?;
+        let report: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &report["data"]["hashVerified"],
+            &serde_json::json!(false),
+            "structure-only inspection must not claim hash verification",
+        )?;
+        ensure_equal(
+            &report["data"]["valid"],
+            &serde_json::json!(true),
+            "structure-only inspection should accept size-consistent bundles",
+        )?;
+
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--json", "support", "inspect", bundle_arg.as_str()]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "support inspect default exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "support inspect default JSON stderr clean",
+        )?;
+        let report: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &report["data"]["hashVerified"],
+            &serde_json::json!(true),
+            "default inspection must verify hashes",
+        )?;
+        ensure_equal(
+            &report["data"]["valid"],
+            &serde_json::json!(false),
+            "default inspection must reject hash-tampered bundles",
+        )
     }
 
     #[test]
