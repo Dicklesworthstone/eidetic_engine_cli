@@ -165,3 +165,17 @@ proptest-regressions/combinator/
 # the proptest seed protection above.
 /fixtures/openhands/
 /fixtures/antigravity/
+
+# Generated Python bytecode and CI/audit output (bd-isqmd class): these are NOT
+# Rust verification inputs, are untracked in git, and accrue as wrong-owner
+# stale files on RCH workers (scripts/**/__pycache__/*.pyc from helper scripts,
+# artifacts/** from dependency-audit/atp/ci runs). rsync --delete on them fails
+# `Permission denied (13)` and aborts the whole project sync before Cargo,
+# blocking every /Users-checkout remote verify fleet-wide. Excluding them
+# (dir-recursive + anchored) makes rsync leave the stale remote copies untouched
+# — same shape as the fixtures/proptest protections above.
+__pycache__/
+**/__pycache__/
+**/__pycache__/**
+/artifacts/
+/artifacts/**
