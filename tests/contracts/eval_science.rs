@@ -3,6 +3,7 @@
 //! Eval now has fixture discovery and execution wired. These tests keep the
 //! public CLI contract honest without requiring science analytics fields.
 
+use ee::models::ProcessExitCode;
 use serde_json::{Value as JsonValue, json};
 use std::process::{Command, Output};
 
@@ -46,9 +47,9 @@ fn eval_run_science_json_reports_fixture_without_science_metrics() -> TestResult
         .map_err(|error| format!("eval run --science stderr was not UTF-8: {error}"))?;
 
     ensure(
-        output.status.success(),
+        output.status.code() == Some(ProcessExitCode::EvalFailure as i32),
         format!(
-            "eval run --science must succeed for a fixture; got {:?}; stderr: {stderr}",
+            "eval run --science must fail the process for a failed fixture; got {:?}; stderr: {stderr}",
             output.status.code()
         ),
     )?;
@@ -69,8 +70,13 @@ fn eval_run_science_json_reports_fixture_without_science_metrics() -> TestResult
         json!("ee.response.v2"),
         "response schema",
     )?;
-    ensure_json_equal(value.get("success"), JsonValue::Bool(true), "success")?;
+    ensure_json_equal(value.get("success"), JsonValue::Bool(false), "success")?;
     ensure_json_equal(value.pointer("/data/command"), json!("eval run"), "command")?;
+    ensure_json_equal(
+        value.pointer("/data/report/status"),
+        json!("failed"),
+        "report status",
+    )?;
     ensure_json_equal(
         value.pointer("/data/report/schema"),
         json!("ee.eval.report.v1"),
@@ -95,9 +101,9 @@ fn eval_run_without_science_reports_fixture_metrics_contract() -> TestResult {
     let stderr = String::from_utf8(output.stderr)
         .map_err(|error| format!("eval run stderr was not UTF-8: {error}"))?;
     ensure(
-        output.status.success(),
+        output.status.code() == Some(ProcessExitCode::EvalFailure as i32),
         format!(
-            "eval run must succeed for a fixture; got {:?}; stderr: {stderr}",
+            "eval run must fail the process for a failed fixture; got {:?}; stderr: {stderr}",
             output.status.code()
         ),
     )?;
@@ -112,6 +118,12 @@ fn eval_run_without_science_reports_fixture_metrics_contract() -> TestResult {
         value.pointer("/data/report/schema"),
         json!("ee.eval.report.v1"),
         "report schema",
+    )?;
+    ensure_json_equal(value.get("success"), JsonValue::Bool(false), "success")?;
+    ensure_json_equal(
+        value.pointer("/data/report/status"),
+        json!("failed"),
+        "report status",
     )?;
     ensure_json_equal(
         value.pointer("/data/report/metrics/queries_evaluated"),

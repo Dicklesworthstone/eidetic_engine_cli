@@ -694,12 +694,13 @@ emit_event "rerank_precision_gain_measured" "$(jq -cn \
     '{bead_id:$bead,surface:$surface,query:$query,rerank_mode:$mode,target_memory_id:$target,lexical_top_memory_id:$lexicalTop,hybrid_top_memory_id:$hybridTop,lexical_precision_at_1:$lexicalPrecision,hybrid_precision_at_1:$hybridPrecision,precision_gain_at_1:$precisionGain,redaction_status:"local_workspace_artifacts_retained"}')"
 record_pass "rerank precision gain metric emitted"
 
-run_ee_json_env "eval_release_failure_metrics" "${HASH_ENV[@]}" -- \
-    eval run release_failure --json
+run_ee_json_env "eval_dangerous_cleanup_metrics" "${HASH_ENV[@]}" -- \
+    eval run fx.dangerous_cleanup.v1 --json
 eval_file="${LAST_STDOUT_FILE}"
 assert_jq_file "${eval_file}" '.schema == "ee.response.v2"' "eval response schema"
 assert_jq_file "${eval_file}" '.success == true' "eval run succeeds"
 assert_jq_file "${eval_file}" '.data.command == "eval run"' "eval command field"
+assert_jq_file "${eval_file}" '.data.report.status == "passed"' "eval report passed"
 assert_jq_file "${eval_file}" '(.data.report.metrics.queries_evaluated // 0) > 0' "eval metrics query count"
 assert_jq_file "${eval_file}" '.data.report.metrics.mean_precision_at_1 | type == "number"' "eval mean precision at 1 measured"
 assert_jq_file "${eval_file}" '.data.report.metrics.mean_precision_at_5 | type == "number"' "eval mean precision at 5 measured"

@@ -1,5 +1,6 @@
 use std::process::{Command, Output};
 
+use ee::models::ProcessExitCode;
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -16,17 +17,20 @@ const EXPECTED_FIXTURE_IDS: &[&str] = &[
     "fx.semantic_model_admissibility.v1",
 ];
 
-const GOLDEN_REPORTS: &[(&str, &str)] = &[
+const GOLDEN_REPORTS: &[(&str, ProcessExitCode, &str)] = &[
     (
         "fx.async_migration.v1",
+        ProcessExitCode::Success,
         include_str!("fixtures/golden/eval/fx.async_migration.v1/report.json.golden"),
     ),
     (
         "fx.dangerous_cleanup.v1",
+        ProcessExitCode::Success,
         include_str!("fixtures/golden/eval/fx.dangerous_cleanup.v1/report.json.golden"),
     ),
     (
         "fx.release_failure.v1",
+        ProcessExitCode::EvalFailure,
         include_str!("fixtures/golden/eval/fx.release_failure.v1/report.json.golden"),
     ),
 ];
@@ -40,15 +44,20 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
 }
 
 fn command_json(args: &[&str]) -> Result<Value, String> {
+    command_json_with_exit(args, ProcessExitCode::Success)
+}
+
+fn command_json_with_exit(args: &[&str], expected_exit: ProcessExitCode) -> Result<Value, String> {
     let output = run_ee(args)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    if !output.status.success() {
+    if output.status.code() != Some(expected_exit as i32) {
         return Err(format!(
-            "ee {} failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+            "ee {} exited with status {:?}, expected {:?}\nstdout:\n{}\nstderr:\n{}",
             args.join(" "),
             output.status.code(),
+            expected_exit,
             stdout,
             stderr
         ));
@@ -194,9 +203,9 @@ fn eval_list_json_enumerates_all_fixture_directories() -> TestResult {
 
 #[test]
 fn eval_run_reports_are_stable_and_match_golden_snapshots() -> TestResult {
-    for &(fixture_id, golden) in GOLDEN_REPORTS {
-        let first = command_json(&["--json", "eval", "run", fixture_id])?;
-        let second = command_json(&["--json", "eval", "run", fixture_id])?;
+    for &(fixture_id, expected_exit, golden) in GOLDEN_REPORTS {
+        let first = command_json_with_exit(&["--json", "eval", "run", fixture_id], expected_exit)?;
+        let second = command_json_with_exit(&["--json", "eval", "run", fixture_id], expected_exit)?;
 
         ensure_equal(
             &stable_data_hash(&first)?,

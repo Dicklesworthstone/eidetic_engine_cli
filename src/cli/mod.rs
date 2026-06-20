@@ -15187,12 +15187,15 @@ where
         Ok(reports) => reports,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
+    let passed = reports
+        .iter()
+        .all(|report| report.status == crate::eval::EvalRunStatus::Passed);
 
     if cli.wants_json() {
         let json = if reports.len() == 1 {
             serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
-                "success": true,
+                "success": passed,
                 "data": {
                     "command": "eval run",
                     "report": reports.first()
@@ -15201,7 +15204,7 @@ where
         } else {
             serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
-                "success": true,
+                "success": passed,
                 "data": {
                     "command": "eval run",
                     "reports": reports,
@@ -15246,7 +15249,11 @@ where
         }
     }
 
-    ProcessExitCode::Success
+    if passed {
+        ProcessExitCode::Success
+    } else {
+        ProcessExitCode::EvalFailure
+    }
 }
 
 fn handle_eval_report<W, E>(
