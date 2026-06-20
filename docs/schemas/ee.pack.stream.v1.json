@@ -147,6 +147,11 @@
         },
         "message": {"type": "string"},
         "repair": {"type": ["string", "null"]},
+        "sources": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Aggregated degradation source labels emitted when duplicate degraded entries are merged."
+        },
         "details": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
       }
     },

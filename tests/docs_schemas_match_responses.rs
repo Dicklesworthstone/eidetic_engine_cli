@@ -2379,7 +2379,15 @@ fn pack_stream_header_conformance_sample() -> Value {
         "startedAt": "2026-05-22T00:00:00Z",
         "featureFlagsHash": null,
         "canonicalKeyHash": null,
-        "degraded": []
+        "degraded": [
+            {
+                "code": "search_weak_recall",
+                "severity": "high",
+                "message": "Weak recall remained after fallback expansion.",
+                "repair": "run ee search --explain",
+                "sources": ["search"]
+            }
+        ]
     })
 }
 
