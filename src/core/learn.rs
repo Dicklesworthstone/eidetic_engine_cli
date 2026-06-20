@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::core::curate::{
@@ -314,8 +314,9 @@ impl LearnSummaryReport {
 
 /// Show learning summary for a period.
 pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport, DomainError> {
+    let effective_since = learn_summary_effective_since(options)?;
     let snapshot = load_learning_snapshot(&options.workspace)?;
-    let since = options.since.as_deref();
+    let since = effective_since.as_deref();
     let events = snapshot
         .feedback_events
         .iter()
@@ -437,6 +438,41 @@ pub fn show_summary(options: &LearnSummaryOptions) -> Result<LearnSummaryReport,
         events: learning_events,
         generated_at: stable_learning_generated_at(),
     })
+}
+
+fn learn_summary_effective_since(
+    options: &LearnSummaryOptions,
+) -> Result<Option<String>, DomainError> {
+    if let Some(since) = options.since.as_ref() {
+        return Ok(Some(since.clone()));
+    }
+
+    learn_summary_period_since(&options.period, Utc::now())
+}
+
+fn learn_summary_period_since(
+    period: &str,
+    now: DateTime<Utc>,
+) -> Result<Option<String>, DomainError> {
+    match period.trim() {
+        "all" => Ok(None),
+        "today" => Ok(Some(
+            now.date_naive()
+                .and_time(NaiveTime::MIN)
+                .and_utc()
+                .to_rfc3339(),
+        )),
+        "week" => Ok(Some((now - chrono::Duration::days(7)).to_rfc3339())),
+        "month" => Ok(Some((now - chrono::Duration::days(30)).to_rfc3339())),
+        other => Err(DomainError::Usage {
+            message: format!(
+                "unsupported learn summary period `{other}`; expected today, week, month, or all"
+            ),
+            repair: Some(
+                "Use --period today, --period week, --period month, or --period all.".to_string(),
+            ),
+        }),
+    }
 }
 
 // ============================================================================
@@ -4843,6 +4879,37 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
+    fn seed_summary_candidate(
+        connection: &DbConnection,
+        workspace_id: &str,
+        memory_id: &str,
+        id: &str,
+        created_at: &str,
+    ) -> TestResult {
+        connection
+            .insert_curation_candidate(
+                id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.to_string(),
+                    candidate_type: "rule".to_string(),
+                    target_memory_id: Some(memory_id.to_string()),
+                    proposed_content: Some(format!("Learned summary candidate {id}.")),
+                    proposed_confidence: Some(0.7),
+                    proposed_trust_class: Some("derived".to_string()),
+                    source_type: "learn_summary_test".to_string(),
+                    source_id: Some(id.to_string()),
+                    reason: format!("Summary period regression candidate {id}."),
+                    confidence: 0.7,
+                    status: Some("pending".to_string()),
+                    created_at: Some(created_at.to_string()),
+                    ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
     #[test]
     fn agenda_empty_ledger_returns_empty_report() -> TestResult {
         let (dir, _database, _workspace_id) = seed_learning_workspace("ee-learn-empty")?;
@@ -5048,6 +5115,84 @@ mod tests {
         assert_eq!(report.summary.harmful_feedback_count, 1);
         assert_eq!(report.summary.gaps_identified, 1);
         assert_eq!(report.events.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn summary_period_filters_candidate_history_without_explicit_since() -> TestResult {
+        let (dir, database, workspace_id) = seed_learning_workspace("ee-learn-summary-period")?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let memory_id = "mem_41234567890123456789012345";
+        seed_memory(
+            &connection,
+            &workspace_id,
+            memory_id,
+            "summary-period",
+            "Learning summary period target.",
+        )?;
+        seed_summary_candidate(
+            &connection,
+            &workspace_id,
+            memory_id,
+            "cand_summary_old_000000000000001",
+            "2000-01-01T00:00:00Z",
+        )?;
+        seed_summary_candidate(
+            &connection,
+            &workspace_id,
+            memory_id,
+            "cand_summary_current_0000000001",
+            "9999-01-01T00:00:00Z",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let all = show_summary(&LearnSummaryOptions {
+            workspace: dir.path().to_path_buf(),
+            period: "all".to_string(),
+            since: None,
+            detailed: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(all.summary.candidates_proposed, 2);
+        assert_eq!(all.summary.rules_learned, 2);
+
+        for period in ["today", "week", "month"] {
+            let report = show_summary(&LearnSummaryOptions {
+                workspace: dir.path().to_path_buf(),
+                period: period.to_string(),
+                since: None,
+                detailed: false,
+            })
+            .map_err(|error| error.message())?;
+
+            assert_eq!(report.summary.period, period);
+            assert_eq!(report.summary.candidates_proposed, 1);
+            assert_eq!(report.summary.rules_learned, 1);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn summary_rejects_unknown_period() -> TestResult {
+        let error = show_summary(&LearnSummaryOptions {
+            workspace: PathBuf::from("/workspace/does-not-need-to-exist"),
+            period: "forever".to_string(),
+            since: None,
+            detailed: false,
+        })
+        .expect_err("unknown summary period should fail before storage lookup");
+
+        if !matches!(&error, DomainError::Usage { .. }) {
+            return Err(format!("expected usage error, got {error:?}"));
+        }
+        if !error
+            .message()
+            .contains("expected today, week, month, or all")
+        {
+            return Err(format!("unexpected error message: {}", error.message()));
+        }
         Ok(())
     }
 
