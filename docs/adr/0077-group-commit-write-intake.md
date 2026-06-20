@@ -44,8 +44,12 @@ group-commit ships disabled (`group_commit_enabled = false`) until the
 
 **Group-commit write intake** coalesces concurrent in-flight durable write
 requests that arrive within a bounded batch window into **one transaction and
-one `fsync`**, while preserving every write's own audit row, idempotency
-semantics, and per-write result.
+one commit boundary**, while preserving every write's own audit row, idempotency
+semantics, and per-write result. (Under the configured WAL `synchronous=NORMAL`
+— see Context — COMMIT issues no per-commit fsync, so the win is the shared
+commit boundary, write-lock acquisition, and WAL/round-trip overhead, not a
+saved per-commit fsync. The single-fsync-per-batch framing holds only under
+`synchronous=FULL`; the ACK contract is documented below.)
 
 The intake sits inside the existing write-owner critical section. It does not
 introduce a second writer, a background runtime, or a new command. It is an
@@ -57,7 +61,7 @@ effect classification.
 | Property | Contract |
 | --- | --- |
 | Batch trigger | A batch closes when the first of `batch_window_ms` elapses, `max_batch_size` requests accumulate, or `max_inflight_bytes` of pending payload is reached — whichever comes first. |
-| Atomicity | All writes in a closed batch commit in ONE transaction with ONE `fsync`. A batch either commits whole or rolls back whole; partial visibility is never observable. |
+| Atomicity | All writes in a closed batch commit in ONE transaction (ONE commit boundary; under the configured `synchronous=NORMAL` that boundary issues no fsync — see Context). A batch either commits whole or rolls back whole; partial visibility is never observable. |
 | Audit preservation | Each coalesced write still emits its own audit row(s) with its own content hash chain. Coalescing changes the commit boundary, never the audit cardinality. |
 | Idempotency | Per-write idempotency keys are evaluated independently inside the batch; a duplicate within a batch resolves to the same no-op it would have under per-write commit. |
 | Ordering | Writes commit in arrival order within the batch; cross-batch ordering is the arrival order of batch closure. Determinism for a given input sequence is preserved. |
@@ -107,6 +111,15 @@ latencies only, never write payloads) is the normative telemetry contract:
 | `fallback_count` | Writes that took the per-write fallback path. |
 | `fallback_reason` | Closed-set reason for fallback (`disabled`, `degraded`, `oversized`, `single_writer`). |
 
+Under the configured WAL `synchronous=NORMAL`, `fsync_count` reflects syncs at
+WAL checkpoint, not one-per-COMMIT, so `fsync_count`/`fsync_saved` quantify
+commit-boundary coalescing rather than literal saved per-commit fsyncs; the
+saving becomes literal per-commit fsyncs only under `synchronous=FULL`. The `v1`
+field names are retained here unchanged; a future `v2` of this schema may rename
+them to `commit_count`/`commits_coalesced` to remove the ambiguity (tracked in
+bd-d67os.16, deferred because renaming the serialized `v1` fields is a
+contract-breaking change requiring a coordinated schema/golden bump).
+
 The schema registers in `public_schemas()` (`src/output/mod.rs`), the
 `schema_list` golden (`tests/fixtures/golden/schema/schema_list_json.golden`),
 and the `docs/schemas/ee.write_group_commit.v1.json` document. Both the
@@ -149,7 +162,9 @@ left half-updated.
 ## Rejected Alternatives
 
 - **Per-write as-is:** rejected because it is precisely the single-writer WAL
-  wall this epic exists to remove; N concurrent writers pay N `fsync`s.
+  wall this epic exists to remove; N concurrent writers pay N separate commit
+  boundaries — N write-lock acquisitions and N WAL commit round-trips (and, under
+  `synchronous=FULL`, N fsyncs).
 - **Multi-writer database:** rejected — forbidden by the single-process MVCC
   constraint. Concurrent OS-level writers to one FrankenSQLite file are not a
   correctness model `ee` relies on.

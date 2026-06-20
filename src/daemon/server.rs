@@ -2389,10 +2389,15 @@ fn parse_daemon_txn_batch_entry(
 /// Execute a homogeneous batch of `ee.daemon.journal` ops in ONE transaction
 /// (Inc 3, bd-wx6ou.4): open the workspace DB connection once, insert all N
 /// journal entries inside a single `with_transaction` so the whole batch shares
-/// ONE commit/fsync — the actual coalescing win. All ops target the daemon's
-/// bound workspace, so one connection serves them. All-or-nothing: a failed
-/// insert rolls back the batch and fails every request in it (the CLI falls
-/// back to the direct path per Inc 4).
+/// ONE commit boundary — one `FileWriteOwnerGuard` acquisition, one WAL commit
+/// frame, one COMMIT round-trip — which is the coalescing win. (Under WAL
+/// `synchronous=NORMAL` (`src/db/mod.rs:1709`), COMMIT does not fsync; the WAL
+/// is synced only at checkpoint, so the saving is commit-boundary overhead, not
+/// per-commit fsyncs. The daemon ACK is therefore app/process-crash-durable, not
+/// power-loss-durable — see ADR 0077 and bd-d67os.16.) All ops target the
+/// daemon's bound workspace, so one connection serves them. All-or-nothing: a
+/// failed insert rolls back the batch and fails every request in it (the CLI
+/// falls back to the direct path per Inc 4).
 fn execute_journal_batch(
     operations: &[crate::core::write_owner::WriteOperation],
 ) -> Result<Vec<crate::core::write_owner::WriteResult>, crate::models::DomainError> {
