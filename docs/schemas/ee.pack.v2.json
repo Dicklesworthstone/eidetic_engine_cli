@@ -41,6 +41,18 @@
         "scopeStats": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "consensus": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
         "conflicts": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        "pagination": {
+          "type": "object",
+          "required": ["offset", "limit", "total", "hasMore", "nextCursor"],
+          "additionalProperties": false,
+          "properties": {
+            "offset": {"type": "integer", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 0},
+            "total": {"type": "integer", "minimum": 0},
+            "hasMore": {"type": "boolean"},
+            "nextCursor": {"type": ["string", "null"]}
+          }
+        },
         "pack": {
           "type": "object",
           "required": [
@@ -122,8 +134,8 @@
   },
   "field_presets": {
     "minimal": ["command", "query", "hash"],
-    "summary": ["command", "request", "pack", "budget", "quality", "degraded"],
-    "standard": ["command", "request", "pack", "items", "degraded"],
+    "summary": ["command", "request", "pack", "budget", "quality", "pagination", "degraded"],
+    "standard": ["command", "request", "pack", "items", "pagination", "degraded"],
     "full": ["*"]
   },
   "$defs": {

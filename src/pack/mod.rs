@@ -4092,6 +4092,7 @@ impl ContextResponse {
                 mesh: None,
                 pack_dna: None,
                 adaptive_budget: None,
+                pagination: None,
                 degraded,
             },
         })
@@ -4148,6 +4149,7 @@ impl ContextResponse {
                 mesh: None,
                 pack_dna: None,
                 adaptive_budget: None,
+                pagination: None,
                 degraded: Vec::new(),
             },
         }
@@ -4168,7 +4170,18 @@ pub struct ContextResponseData {
     pub mesh: Option<PackRevisionMeshMetadata>,
     pub pack_dna: Option<serde_json::Value>,
     pub adaptive_budget: Option<budget_classifier::AdaptiveBudgetDecision>,
+    pub pagination: Option<ContextResponsePagination>,
     pub degraded: Vec<ContextResponseDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextResponsePagination {
+    pub offset: u32,
+    pub limit: u32,
+    pub total: u32,
+    pub page_size: u32,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
 }
 
 impl ContextResponseData {
