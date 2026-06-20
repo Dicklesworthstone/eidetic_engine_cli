@@ -2333,9 +2333,12 @@ pub fn render_context_response_json_with_options(
         return cached_json.clone();
     }
 
-    let rendered_text = options
-        .include_rendered_text
-        .then(|| render_context_response_markdown(response));
+    let rendered_text = options.include_rendered_text.then(|| {
+        render_context_response_markdown_with_options(
+            response,
+            options.include_non_affecting_degradations,
+        )
+    });
     let mut b = JsonBuilder::with_capacity(2048 + rendered_text.as_ref().map_or(0, String::len));
     b.field_str("schema", response.schema);
     b.field_bool("success", response.success);
@@ -2957,7 +2960,31 @@ pub fn render_context_response_mermaid(response: &ContextResponse) -> String {
 /// pack section, with provenance and why explanations preserved.
 #[must_use]
 pub fn render_context_response_markdown(response: &ContextResponse) -> String {
-    let degraded = aggregate_context_degraded_as_response(response.data.degraded.iter());
+    // Standalone callers keep the full degradation set (include_non_affecting =
+    // true) so existing markdown surfaces and the dual-render parity contract
+    // stay byte-identical. The JSON data.pack.text path (bd-2v6r0) instead
+    // threads the caller's include_non_affecting_degradations flag so the
+    // rendered text honors the same default-emission filter as data.degraded[].
+    render_context_response_markdown_with_options(response, true)
+}
+
+/// Render the context response markdown, optionally dropping non-affecting
+/// degradation signals (workspace-state and build-time-gap categories) from the
+/// `## Degradations` section. When `include_non_affecting` is false the rendered
+/// text honors the same default-emission contract as the per-response
+/// `degraded[]` array (bd-2v6r0 / bd-17c65.5.2): an agent reading the pack text
+/// sees only the signals that actually affected this response.
+#[must_use]
+pub fn render_context_response_markdown_with_options(
+    response: &ContextResponse,
+    include_non_affecting: bool,
+) -> String {
+    let filtered = response
+        .data
+        .degraded
+        .iter()
+        .filter(|entry| include_non_affecting || entry.category().included_by_default());
+    let degraded = aggregate_context_degraded_as_response(filtered);
     let mut markdown =
         crate::pack::render_context_response_markdown_with_degraded(response, &degraded);
     if let Some(pack_dna) = &response.data.pack_dna {
@@ -20797,6 +20824,78 @@ mod tests {
             &severity,
             &Some(crate::pack::ContextResponseSeverity::Critical),
             "aggregated critical context degradation severity",
+        )
+    }
+
+    #[test]
+    fn pack_text_drops_non_affecting_degradation_by_default_bd_2v6r0() -> TestResult {
+        // search_index_stale is WorkspaceStateNotPerResponse (non-affecting): it
+        // is dropped from data.degraded[] by default, so the rendered pack text
+        // must not advertise it either. Verbose mode surfaces both. The markdown
+        // ## Degradations section renders the message (not the raw code), so the
+        // pack.text assertions key on the message and the section header.
+        let mut response = context_response_fixture()?;
+        response.data.degraded.clear();
+        response.data.degraded.push(
+            crate::pack::ContextResponseDegradation::new(
+                "search_index_stale",
+                crate::pack::ContextResponseSeverity::Medium,
+                "Search index is behind the database generation.",
+                Some("ee index rebuild --workspace .".to_string()),
+            )
+            .map_err(|error| format!("degradation rejected: {error:?}"))?,
+        );
+
+        // Default render: the non-affecting signal is filtered from BOTH
+        // data.degraded[] and the rendered pack text.
+        let json = render_context_response_json(&response);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        let degraded = parsed["data"]["degraded"]
+            .as_array()
+            .ok_or_else(|| "degraded must be an array".to_string())?;
+        if degraded
+            .iter()
+            .any(|entry| entry["code"] == "search_index_stale")
+        {
+            return Err(
+                "default degraded[] must drop the non-affecting search_index_stale".to_string(),
+            );
+        }
+        let pack_text = parsed["data"]["pack"]["text"]
+            .as_str()
+            .ok_or_else(|| "data.pack.text must be a string".to_string())?;
+        if pack_text.contains("## Degradations") {
+            return Err(
+                "default pack.text must not render a Degradations section for a non-affecting signal"
+                    .to_string(),
+            );
+        }
+        if pack_text.contains("behind the database generation") {
+            return Err("default pack.text must not mention the dropped degradation".to_string());
+        }
+
+        // Verbose render (--include-non-affecting-degradations): both surfaces
+        // include the signal again.
+        let verbose = render_context_response_json_with_options(
+            &response,
+            ContextJsonRenderOptions {
+                include_non_affecting_degradations: true,
+                ..ContextJsonRenderOptions::default()
+            },
+        );
+        let verbose_parsed: serde_json::Value =
+            serde_json::from_str(&verbose).map_err(|error| error.to_string())?;
+        let verbose_text = verbose_parsed["data"]["pack"]["text"]
+            .as_str()
+            .ok_or_else(|| "verbose data.pack.text must be a string".to_string())?;
+        if !verbose_text.contains("## Degradations") {
+            return Err("verbose pack.text must render the Degradations section".to_string());
+        }
+        ensure_contains(
+            verbose_text,
+            "behind the database generation",
+            "verbose pack.text surfaces the non-affecting degradation",
         )
     }
 
