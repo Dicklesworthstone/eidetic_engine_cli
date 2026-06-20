@@ -144,7 +144,8 @@ fn mask_token(raw: &str) -> String {
     if raw.contains('/') || raw.contains('\\') {
         return "<path>".to_string();
     }
-    if let Some(rest) = raw.strip_prefix("0x")
+    let lowercase = raw.to_ascii_lowercase();
+    if let Some(rest) = lowercase.strip_prefix("0x")
         && !rest.is_empty()
         && rest.chars().all(|ch| ch.is_ascii_hexdigit())
     {
@@ -153,7 +154,7 @@ fn mask_token(raw: &str) -> String {
     if is_numeric_token(raw) {
         return "<num>".to_string();
     }
-    raw.to_ascii_lowercase()
+    lowercase
 }
 
 /// Normalize a diagnostic message into a stable, variable-masked template so
@@ -223,13 +224,16 @@ pub fn from_rch_blocker(kind: &str, stage: &str, message: &str) -> CanonicalDiag
 /// message template and the layered key falls to the template layer.
 #[must_use]
 pub fn from_shell(exit_code: i32, first_line: &str) -> CanonicalDiagnostic {
+    let first_line = canonical_message_template(first_line);
+    let message_template = if first_line.is_empty() {
+        format!("exit_{exit_code}")
+    } else {
+        format!("exit_{exit_code} {first_line}")
+    };
     CanonicalDiagnostic {
         tool: DiagnosticTool::Shell,
         canonical_code: None,
-        message_template: format!(
-            "exit_{exit_code} {}",
-            canonical_message_template(first_line)
-        ),
+        message_template,
     }
 }
 
@@ -567,6 +571,9 @@ mod tests {
         assert!(t.contains("<hex>"));
         assert!(t.contains("<num>"));
         assert!(!t.contains("4096"));
+
+        let upper_prefix = canonical_message_template("trap at 0XFEEDFACE");
+        assert_eq!(upper_prefix, "trap at <hex>");
     }
 
     #[test]
@@ -584,6 +591,19 @@ mod tests {
         let key = diag.layered_key();
         assert_eq!(key.layer, FingerprintLayer::MessageTemplate);
         assert!(key.key.starts_with("shell:tmpl:blake3:"));
+    }
+
+    #[test]
+    fn shell_empty_message_template_is_canonical() {
+        for raw in ["", "   \t\n  "] {
+            let diag = from_shell(17, raw);
+            assert_eq!(diag.message_template, "exit_17");
+            assert_eq!(
+                diag.message_template,
+                canonical_message_template(&diag.message_template),
+                "shell fallback template must not carry trailing whitespace",
+            );
+        }
     }
 
     #[test]

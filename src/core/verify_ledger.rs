@@ -1389,9 +1389,9 @@ fn active_rch_verify_blockers_after_success_supersession(
     runs: &[StoredRchVerifyRun],
     now_rfc3339: &str,
 ) -> Vec<StoredRchVerifyRun> {
-    let passed_exact_keys = runs
+    let source_outcome_exact_keys = runs
         .iter()
-        .filter(|run| run.status == "passed")
+        .filter(|run| matches!(run.status.as_str(), "passed" | "failed"))
         .map(|run| {
             (
                 run.command_hash.as_str(),
@@ -1403,18 +1403,19 @@ fn active_rch_verify_blockers_after_success_supersession(
 
     runs.iter()
         .filter(|run| {
-            run.blocker_fingerprint.is_some()
+            run.status == "blocked"
+                && run.blocker_fingerprint.is_some()
                 && run
                     .retry_after
                     .as_deref()
                     .is_none_or(|retry_after| retry_after > now_rfc3339)
-                && !passed_exact_keys
-                    .iter()
-                    .any(|(command_hash, source_state_hash, created_at)| {
+                && !source_outcome_exact_keys.iter().any(
+                    |(command_hash, source_state_hash, created_at)| {
                         *command_hash == run.command_hash.as_str()
                             && *source_state_hash == run.source_state_hash.as_str()
                             && *created_at >= run.created_at.as_str()
-                    })
+                    },
+                )
         })
         .cloned()
         .collect()
@@ -2194,6 +2195,62 @@ determinism = { version = "0.1.0", path = "crates/determinism" }
             "2026-05-23T05:20:00Z",
         )
         .expect("ingest success");
+
+        let blockers = list_rch_verify_blockers(
+            &connection,
+            TEST_WORKSPACE_ID,
+            Some("bd-17awb"),
+            "2026-05-23T05:30:00Z",
+        )
+        .expect("query blockers");
+        assert_eq!(blockers.blocker_count, 0);
+
+        let status = summarize_rch_verify_ledger_status(
+            &connection,
+            TEST_WORKSPACE_ID,
+            "2026-05-23T05:30:00Z",
+        )
+        .expect("status");
+        assert_eq!(status.status, "clear");
+        assert_eq!(status.active_blocker_count, 0);
+    }
+
+    #[test]
+    fn failed_source_outcome_supersedes_active_environment_blocker() {
+        let connection = connection_with_workspace();
+        let mut blocked = baseline_success();
+        blocked["success"] = json!(false);
+        blocked["exit_code"] = json!(1);
+        blocked["degraded_codes"] = json!([
+            "rch_verify_topology_blocked",
+            "rch_verify_local_fallback_refused"
+        ]);
+        blocked["known_blocker"] = json!({
+            "blocker_fingerprint": "sha256:f7bc698cf3da7706581ae21077954d26b5201f52729e22f71b5df65613b7283f",
+            "remediation_bead": "bd-17c65.10.17.1.2",
+            "retry_after": "2026-05-23T06:00:00Z"
+        });
+        ingest_rch_verify_v1(
+            &connection,
+            TEST_WORKSPACE_ID,
+            &blocked,
+            "2026-05-23T05:10:00Z",
+        )
+        .expect("ingest blocker");
+
+        let mut failed_source = baseline_success();
+        failed_source["success"] = json!(false);
+        failed_source["exit_code"] = json!(101);
+        failed_source["stderr_tail"] =
+            json!("error[E0425]: cannot find value `missing` in this scope");
+        failed_source["degraded_codes"] = json!(["rch_verify_remote_command_failed"]);
+        ingest_rch_verify_v1(
+            &connection,
+            TEST_WORKSPACE_ID,
+            &failed_source,
+            "2026-05-23T05:20:00Z",
+        )
+        .expect("ingest failed source outcome");
 
         let blockers = list_rch_verify_blockers(
             &connection,

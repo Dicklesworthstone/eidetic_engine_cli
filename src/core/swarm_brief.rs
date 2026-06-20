@@ -1228,8 +1228,8 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
             }
         };
 
-        let stdout_bytes = stdout_thread.join().unwrap_or_default();
-        let stderr_bytes = stderr_thread.join().unwrap_or_default();
+        let stdout_bytes = join_swarm_brief_pipe_reader(stdout_thread, "stdout")?;
+        let stderr_bytes = join_swarm_brief_pipe_reader(stderr_thread, "stderr")?;
 
         let stdout = String::from_utf8(stdout_bytes)
             .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
@@ -1354,21 +1354,37 @@ impl SwarmBriefCommandRunner for SourceRunSwarmBriefRunner {
     }
 }
 
-fn read_swarm_brief_pipe_limited<R: io::Read>(reader: &mut R, limit: usize) -> Vec<u8> {
+fn join_swarm_brief_pipe_reader(
+    handle: thread::JoinHandle<io::Result<Vec<u8>>>,
+    stream_name: &str,
+) -> Result<Vec<u8>, SwarmBriefCommandError> {
+    match handle.join() {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Err(SwarmBriefCommandError::Unavailable(format!(
+            "source command {stream_name} pipe read failed: {error}"
+        ))),
+        Err(_panic) => Err(SwarmBriefCommandError::Unavailable(format!(
+            "source command {stream_name} reader thread panicked"
+        ))),
+    }
+}
+
+fn read_swarm_brief_pipe_limited<R: io::Read>(reader: &mut R, limit: usize) -> io::Result<Vec<u8>> {
     let mut output = Vec::new();
     let mut buffer = [0_u8; SWARM_BRIEF_COMMAND_PIPE_BUFFER_BYTES];
     loop {
         let read = match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(read) => read,
-            Err(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
         };
         let remaining = limit.saturating_sub(output.len());
         if remaining > 0 {
             output.extend_from_slice(&buffer[..read.min(remaining)]);
         }
     }
-    output
+    Ok(output)
 }
 
 /// Output from one source adapter.
@@ -9578,6 +9594,14 @@ mod tests {
         }
     }
 
+    struct FailingReader;
+
+    impl io::Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("synthetic pipe failure"))
+        }
+    }
+
     #[test]
     fn swarm_brief_pipe_limit_drains_after_retained_cap() {
         let consumed = Rc::new(Cell::new(0));
@@ -9587,10 +9611,38 @@ mod tests {
             consumed: Rc::clone(&consumed),
         };
 
-        let output = read_swarm_brief_pipe_limited(&mut reader, 7);
+        let output = read_swarm_brief_pipe_limited(&mut reader, 7).expect("pipe drains");
 
         assert_eq!(output, b"xxxxxxx");
         assert_eq!(consumed.get(), 32);
+    }
+
+    #[test]
+    fn swarm_brief_pipe_reader_reports_read_errors() {
+        let mut reader = FailingReader;
+
+        let error = read_swarm_brief_pipe_limited(&mut reader, 7)
+            .expect_err("pipe read failures must not become empty output");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(error.to_string().contains("synthetic pipe failure"));
+    }
+
+    #[test]
+    fn swarm_brief_pipe_reader_thread_panic_is_unavailable() {
+        let handle = thread::spawn(|| -> io::Result<Vec<u8>> {
+            panic!("synthetic pipe reader panic");
+        });
+
+        let error = join_swarm_brief_pipe_reader(handle, "stdout")
+            .expect_err("reader thread panics must not become empty output");
+
+        match error {
+            SwarmBriefCommandError::Unavailable(message) => {
+                assert!(message.contains("stdout reader thread panicked"));
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
     }
 
     fn bead(id: &str, title: &str, source_bucket: &str) -> SwarmBriefBead {

@@ -17,8 +17,17 @@
 /// Stable schema id for the consistency block emitted onto responses.
 pub const READ_FENCE_CONSISTENCY_SCHEMA_V1: &str = "ee.read_fence.consistency.v1";
 
-/// Default repair when a derived asset trails the DB generation.
-pub const READ_FENCE_REPAIR: &str = "ee index rebuild --workspace .";
+/// Default repair when a search/index asset trails the DB generation.
+pub const READ_FENCE_INDEX_REPAIR: &str = "ee index rebuild --workspace .";
+/// Repair when a graph snapshot trails the DB generation.
+pub const READ_FENCE_GRAPH_REPAIR: &str = "ee graph centrality-refresh --workspace .";
+/// Repair when the pack cache trails the DB generation.
+pub const READ_FENCE_CACHE_REPAIR: &str = "ee pack --workspace . --json";
+/// Fallback repair when the stale asset name is not recognized by this model.
+pub const READ_FENCE_GENERIC_REPAIR: &str =
+    "Inspect stale derived asset generations before retrying.";
+/// Backwards-compatible alias for the historical search-index repair.
+pub const READ_FENCE_REPAIR: &str = READ_FENCE_INDEX_REPAIR;
 
 /// Requested read coherence for a context-producing command.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -163,6 +172,8 @@ pub fn evaluate_consistency(
         .unwrap_or(0);
     let latest = matches!(fence, ReadFence::Latest);
 
+    let repair = repair_for_behind_assets(&behind_assets);
+
     ConsistencyBlock {
         schema: READ_FENCE_CONSISTENCY_SCHEMA_V1,
         mode: fence.mode_str(),
@@ -177,16 +188,55 @@ pub fn evaluate_consistency(
         } else {
             ConsistencySeverity::Warning
         },
-        repair: Some(READ_FENCE_REPAIR.to_string()),
+        repair: Some(repair),
         strict_failed: latest && strict,
+    }
+}
+
+fn repair_for_behind_assets(behind_assets: &[String]) -> String {
+    let mut repairs = Vec::new();
+    let mut saw_unknown = false;
+
+    for asset in behind_assets {
+        if let Some(repair) = repair_for_asset(asset) {
+            push_unique_repair(&mut repairs, repair);
+        } else {
+            saw_unknown = true;
+        }
+    }
+
+    if saw_unknown {
+        push_unique_repair(&mut repairs, READ_FENCE_GENERIC_REPAIR);
+    }
+
+    if repairs.is_empty() {
+        READ_FENCE_GENERIC_REPAIR.to_owned()
+    } else {
+        repairs.join(" && ")
+    }
+}
+
+fn repair_for_asset(asset: &str) -> Option<&'static str> {
+    let normalized = asset.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "search" | "search_index" | "index" => Some(READ_FENCE_INDEX_REPAIR),
+        "graph" | "graph_snapshot" | "graph_snapshot_artifact" => Some(READ_FENCE_GRAPH_REPAIR),
+        "cache" | "pack_cache" | "pack_l2_cache" => Some(READ_FENCE_CACHE_REPAIR),
+        _ => None,
+    }
+}
+
+fn push_unique_repair(repairs: &mut Vec<&'static str>, repair: &'static str) {
+    if !repairs.contains(&repair) {
+        repairs.push(repair);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ConsistencySeverity, ConsistencyVerdict, READ_FENCE_CONSISTENCY_SCHEMA_V1, ReadFence,
-        evaluate_consistency,
+        ConsistencySeverity, ConsistencyVerdict, READ_FENCE_CONSISTENCY_SCHEMA_V1,
+        READ_FENCE_GRAPH_REPAIR, READ_FENCE_INDEX_REPAIR, ReadFence, evaluate_consistency,
     };
 
     fn assets() -> Vec<(String, u64)> {
@@ -268,5 +318,33 @@ mod tests {
             .map(|(name, _)| name.as_str())
             .collect();
         assert_eq!(names, vec!["a_asset", "m_asset", "z_asset"]);
+    }
+
+    #[test]
+    fn graph_only_lag_uses_graph_refresh_repair() {
+        let block = evaluate_consistency(
+            ReadFence::Latest,
+            12,
+            vec![("search".to_string(), 12), ("graph".to_string(), 11)],
+            false,
+        );
+
+        assert_eq!(block.repair.as_deref(), Some(READ_FENCE_GRAPH_REPAIR));
+    }
+
+    #[test]
+    fn mixed_lag_reports_all_required_repairs_in_stable_order() {
+        let block = evaluate_consistency(
+            ReadFence::Latest,
+            12,
+            vec![
+                ("search_index".to_string(), 10),
+                ("graph_snapshot".to_string(), 11),
+            ],
+            false,
+        );
+
+        let expected = format!("{READ_FENCE_GRAPH_REPAIR} && {READ_FENCE_INDEX_REPAIR}");
+        assert_eq!(block.repair.as_deref(), Some(expected.as_str()));
     }
 }

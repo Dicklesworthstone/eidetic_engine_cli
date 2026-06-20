@@ -267,7 +267,7 @@ impl QuarantineReport {
             }),
         }
 
-        match connection.list_trust_quarantine(&workspace_id, false) {
+        match connection.list_trust_quarantine(&workspace_id, true) {
             Ok(rows) => {
                 for row in &rows {
                     apply_trust_quarantine_row(&mut states, row);
@@ -835,6 +835,49 @@ mod tests {
             "cass://bad-source",
             "blocked source id",
         )
+    }
+
+    #[test]
+    fn gather_for_workspace_ignores_released_trust_quarantine() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().join("workspace");
+        fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let workspace_path = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database_path = workspace_path.join(".ee").join("ee.db");
+        let workspace_id = crate::core::curate::stable_workspace_id(&workspace_path);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("released quarantine test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .upsert_trust_quarantine(&UpsertTrustQuarantineInput {
+                workspace_id,
+                source_uri: "cass://released-source".to_owned(),
+                first_event_at: "2026-05-06T00:00:00Z".to_owned(),
+                last_event_at: "2026-05-06T01:00:00Z".to_owned(),
+                harmful_event_count: 10,
+                quarantined_until: Some("2026-05-07T00:00:00Z".to_owned()),
+                reason: "reviewed and released".to_owned(),
+                status: "released".to_owned(),
+            })
+            .map_err(|error| error.to_string())?;
+
+        let report = QuarantineReport::gather_for_workspace(&workspace);
+
+        ensure(report.storage_status.as_str(), "ready", "storage status")?;
+        ensure(report.summary.total_sources, 0, "released source omitted")?;
+        ensure(report.summary.blocked_count, 0, "no stale block")?;
+        ensure(report.has_issues(), false, "released row is not live issue")
     }
 
     #[test]

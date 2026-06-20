@@ -5901,8 +5901,7 @@ fn compute_pack_hash_components(
         composite_hasher.update(rendered_text.as_bytes());
     }
     if let Some(coordination) = coordination {
-        let coordination_json = serde_json::to_string(coordination).unwrap_or_default();
-        composite_hasher.update(coordination_json.as_bytes());
+        composite_hasher.update(coordination_snapshot_hash_input(coordination).as_bytes());
     }
 
     for item in &draft.items {
@@ -6065,6 +6064,11 @@ fn hash_context_task_lens(hasher: &mut blake3::Hasher, task_lens: Option<&Contex
             task_lens.lens_hash.as_bytes(),
         );
     }
+}
+
+fn coordination_snapshot_hash_input(coordination: &PackCoordinationSnapshot) -> String {
+    serde_json::to_string(coordination)
+        .unwrap_or_else(|error| format!("ee_coordination_snapshot_serialization_error:{error}"))
 }
 
 fn finalize_blake3(hasher: blake3::Hasher) -> String {
@@ -10696,8 +10700,7 @@ mod tests {
         let memory_key = memory.id.clone();
         let memory_batch = super::CandidateMemoryBatch::Owned(tier_memory_map(vec![memory]));
         let tags_map = BTreeMap::new();
-        let mut freshness_file_cache =
-            crate::core::memory::EvidenceFreshnessFileCache::default();
+        let mut freshness_file_cache = crate::core::memory::EvidenceFreshnessFileCache::default();
         let source = super::PreloadedCandidateSource {
             memories: &memory_batch,
             tags_map: &tags_map,
@@ -15448,9 +15451,10 @@ pub fn unrelated_context() -> u64 {{
         };
         use crate::models::{ProvenanceUri, TrustClass, UnitScore};
         use crate::pack::{
-            ContextRequest, PackDraft, PackDraftItem, PackOmission, PackOmissionReason,
-            PackProvenance, PackRejectionStage, PackSection, PackSelectionAudit,
-            PackSelectionObjective, PackSelectionPhase, PackTrustSignal, TokenBudget,
+            ContextRequest, DEFAULT_COORDINATION_STALE_AFTER_MS, PackCoordinationSnapshot,
+            PackDraft, PackDraftItem, PackOmission, PackOmissionReason, PackProvenance,
+            PackRejectionStage, PackSection, PackSelectionAudit, PackSelectionObjective,
+            PackSelectionPhase, PackTrustSignal, TokenBudget,
         };
 
         let request =
@@ -15551,6 +15555,50 @@ pub fn unrelated_context() -> u64 {{
                 Some(1),
             ),
             "fixed read snapshot generation must reproduce"
+        );
+        let coordination_a = PackCoordinationSnapshot::from_json_str(
+            r#"{"schema":"ee.coordination_snapshot.v1","capturedAt":"2026-06-01T00:00:00Z","scope":"workspace","sources":[]}"#,
+            DEFAULT_COORDINATION_STALE_AFTER_MS,
+        )?;
+        let coordination_b = PackCoordinationSnapshot::from_json_str(
+            r#"{"schema":"ee.coordination_snapshot.v1","capturedAt":"2026-06-02T00:00:00Z","scope":"workspace","sources":[]}"#,
+            DEFAULT_COORDINATION_STALE_AFTER_MS,
+        )?;
+        let hash_coordination_a = compute_pack_hash_with_output_options_coordination_and_snapshot(
+            &request,
+            &base_draft,
+            &base_degraded,
+            ContextPackOutputOptions::default(),
+            Some(&coordination_a),
+            None,
+        );
+        let hash_coordination_b = compute_pack_hash_with_output_options_coordination_and_snapshot(
+            &request,
+            &base_draft,
+            &base_degraded,
+            ContextPackOutputOptions::default(),
+            Some(&coordination_b),
+            None,
+        );
+        assert_ne!(
+            hash_base, hash_coordination_a,
+            "pack hash must include coordination snapshot bytes"
+        );
+        assert_ne!(
+            hash_coordination_a, hash_coordination_b,
+            "different coordination snapshots must produce different pack hashes"
+        );
+        assert_eq!(
+            hash_coordination_a,
+            compute_pack_hash_with_output_options_coordination_and_snapshot(
+                &request,
+                &base_draft,
+                &base_degraded,
+                ContextPackOutputOptions::default(),
+                Some(&coordination_a),
+                None,
+            ),
+            "fixed coordination snapshot must reproduce"
         );
         let hash_task_lens_a = compute_pack_hash_with_output_options_coordination_snapshot_and_lens(
             &request,

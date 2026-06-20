@@ -483,6 +483,167 @@ fn has_concrete_evidence_source(compact_output: &str) -> bool {
         .any(|marker| compact_output.contains(marker))
 }
 
+fn object_field_case_insensitive<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    object
+        .iter()
+        .find_map(|(field, value)| field.eq_ignore_ascii_case(key).then_some(value))
+}
+
+fn object_has_field_case_insensitive(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> bool {
+    object_field_case_insensitive(object, key).is_some()
+}
+
+fn object_bool_field_is(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    expected: bool,
+) -> bool {
+    object_field_case_insensitive(object, key).and_then(serde_json::Value::as_bool)
+        == Some(expected)
+}
+
+fn object_string_field_eq_ignore_ascii_case(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    expected: &str,
+) -> bool {
+    object_field_case_insensitive(object, key)
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+}
+
+fn object_string_field_compacts_to(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    expected: &str,
+) -> bool {
+    object_field_case_insensitive(object, key)
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| compact_ascii_lowercase(value).contains(expected))
+}
+
+fn local_unsupported_evidence_claims(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<&'static str> {
+    let mut claims = Vec::new();
+    if object_bool_field_is(object, "persisted", true) {
+        claims.push("persisted records");
+    }
+    if object_bool_field_is(object, "selected", true) {
+        claims.push("pack selection");
+    }
+    if object_has_field_case_insensitive(object, "selectionReason") {
+        claims.push("pack selection reason");
+    }
+    if object_has_field_case_insensitive(object, "riskLevel") {
+        claims.push("risk assessment");
+    }
+    if object_has_field_case_insensitive(object, "riskScore") {
+        claims.push("risk score");
+    }
+    if object_has_field_case_insensitive(object, "maturity") {
+        claims.push("curation maturity");
+    }
+    if object_has_field_case_insensitive(object, "pageRank") {
+        claims.push("graph PageRank");
+    }
+    if object_has_field_case_insensitive(object, "betweenness") {
+        claims.push("graph betweenness");
+    }
+    if object_has_field_case_insensitive(object, "graphExplanation") {
+        claims.push("graph explanation");
+    }
+    if object_string_field_eq_ignore_ascii_case(object, "result", "valid") {
+        claims.push("certificate validity");
+    }
+    if object_bool_field_is(object, "hashVerified", true) {
+        claims.push("certificate hash verification");
+    }
+    if object_string_field_compacts_to(object, "message", "certificateverificationpassed") {
+        claims.push("certificate verification message");
+    }
+    if object_string_field_eq_ignore_ascii_case(object, "replayOutcome", "success") {
+        claims.push("replay success");
+    }
+    if object_bool_field_is(object, "episodeHashVerified", true) {
+        claims.push("verified replay hash");
+    }
+    if object_string_field_eq_ignore_ascii_case(object, "overallResult", "passed") {
+        claims.push("procedure validation");
+    }
+    if object_string_field_eq_ignore_ascii_case(object, "status", "verified") {
+        claims.push("procedure verified status");
+    }
+    if object_has_field_case_insensitive(object, "uplift") {
+        claims.push("causal uplift");
+    }
+    if object_has_field_case_insensitive(object, "confidenceState") {
+        claims.push("causal confidence");
+    }
+    claims
+}
+
+fn value_has_concrete_evidence_source(value: &serde_json::Value) -> bool {
+    let Ok(json) = serde_json::to_string(value) else {
+        return false;
+    };
+    has_concrete_evidence_source(&compact_ascii_lowercase(&json))
+}
+
+fn collect_json_evidence_claim_checks(
+    command_path: &str,
+    path: &str,
+    value: &serde_json::Value,
+    checks: &mut Vec<HonestyCheckResult>,
+) {
+    match value {
+        serde_json::Value::Object(object) => {
+            let claims = local_unsupported_evidence_claims(object);
+            if !claims.is_empty() {
+                let has_evidence = value_has_concrete_evidence_source(value);
+                for claim in claims {
+                    if has_evidence {
+                        checks.push(HonestyCheckResult::pass_for(
+                            "no_unsupported_evidence_claim",
+                            command_path,
+                        ));
+                    } else {
+                        checks.push(HonestyCheckResult::fail_for(
+                            "no_unsupported_evidence_claim",
+                            command_path,
+                            format!(
+                                "Successful production output claims {claim} at {path} without concrete evidence source"
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            for (key, child) in object {
+                let child_path = if path.is_empty() {
+                    format!("/{key}")
+                } else {
+                    format!("{path}/{key}")
+                };
+                collect_json_evidence_claim_checks(command_path, &child_path, child, checks);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                let child_path = format!("{path}/{index}");
+                collect_json_evidence_claim_checks(command_path, &child_path, child, checks);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Validate that a successful production command did not return fake data.
 ///
 /// Failed/degraded commands are allowed to explain that behavior is unavailable.
@@ -552,6 +713,18 @@ pub fn validate_no_unsupported_evidence_claims(
             "evidence_claim_allowed_in_fixture_mode",
             command_path,
         )]);
+    }
+
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(output) {
+        let mut checks = Vec::new();
+        collect_json_evidence_claim_checks(command_path, "", &value, &mut checks);
+        if checks.is_empty() {
+            checks.push(HonestyCheckResult::pass_for(
+                "no_unsupported_evidence_claim",
+                command_path,
+            ));
+        }
+        return HonestyReport::from_checks(checks);
     }
 
     let compact_output = compact_ascii_lowercase(output);
@@ -916,6 +1089,27 @@ mod tests {
         );
 
         assert!(report.passed);
+    }
+
+    #[test]
+    fn unsupported_evidence_claim_rejects_claim_with_unrelated_sibling_sources() {
+        let report = validate_no_unsupported_evidence_claims(
+            "certificate verify",
+            true,
+            false,
+            r#"{"schema":"ee.response.v2","success":true,"data":{"certificate":{"result":"valid","hashVerified":true},"unrelatedPack":{"provenance":["mem://abc"],"scoreComponents":{"lexical":0.4}}}}"#,
+        );
+
+        assert!(!report.passed);
+        assert_eq!(report.issue_count, 2);
+        assert!(
+            report
+                .checks
+                .iter()
+                .filter_map(|check| check.issue.as_deref())
+                .all(|issue| issue.contains("/data/certificate")),
+            "unsupported claim should be attributed to the claim-bearing object: {report:?}"
+        );
     }
 
     #[test]

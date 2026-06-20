@@ -389,13 +389,7 @@ pub fn verify_bypass_token(
             BYPASS_TOKEN_REVOKED,
             "token revoked",
         );
-        return Err(PreflightBypassTokenError::new(
-            BYPASS_TOKEN_REVOKED,
-            "high",
-            "preflight bypass token has been revoked",
-            "Issue a fresh bypass token after renewed human confirmation.",
-            Some(prefix),
-        ));
+        return Err(revoked_token_error(prefix));
     }
 
     if parse_rfc3339_utc(&token.expires_at)? <= now {
@@ -406,13 +400,7 @@ pub fn verify_bypass_token(
             BYPASS_TOKEN_EXPIRED,
             "token expired",
         );
-        return Err(PreflightBypassTokenError::new(
-            BYPASS_TOKEN_EXPIRED,
-            "medium",
-            "preflight bypass token has expired",
-            "Issue a fresh bypass token with an explicit reason.",
-            Some(prefix),
-        ));
+        return Err(expired_token_error(prefix));
     }
 
     if token.used_count >= token.max_uses {
@@ -423,13 +411,7 @@ pub fn verify_bypass_token(
             BYPASS_TOKEN_EXHAUSTED,
             "token exhausted",
         );
-        return Err(PreflightBypassTokenError::new(
-            BYPASS_TOKEN_EXHAUSTED,
-            "high",
-            "preflight bypass token has no remaining uses",
-            "Issue a fresh one-shot bypass token if the command is still approved.",
-            Some(prefix),
-        ));
+        return Err(exhausted_token_error(prefix));
     }
 
     let since = now - Duration::hours(1);
@@ -454,9 +436,15 @@ pub fn verify_bypass_token(
     }
 
     let used_count = token.used_count.saturating_add(1);
-    connection
-        .increment_preflight_bypass_token_use(&hash, &now.to_rfc3339())
+    let used_at = now.to_rfc3339();
+    let consumed = connection
+        .increment_preflight_bypass_token_use(&hash, &used_at)
         .map_err(storage_error)?;
+    if !consumed {
+        return Err(classify_failed_token_consume(
+            connection, options, &hash, &prefix, now,
+        )?);
+    }
 
     let audit_id = insert_token_audit(
         connection,
@@ -748,6 +736,114 @@ fn scope_mismatch_error(prefix: String) -> PreflightBypassTokenError {
         "Issue a fresh bypass token for this exact command after human confirmation.",
         Some(prefix),
     )
+}
+
+fn revoked_token_error(prefix: String) -> PreflightBypassTokenError {
+    PreflightBypassTokenError::new(
+        BYPASS_TOKEN_REVOKED,
+        "high",
+        "preflight bypass token has been revoked",
+        "Issue a fresh bypass token after renewed human confirmation.",
+        Some(prefix),
+    )
+}
+
+fn expired_token_error(prefix: String) -> PreflightBypassTokenError {
+    PreflightBypassTokenError::new(
+        BYPASS_TOKEN_EXPIRED,
+        "medium",
+        "preflight bypass token has expired",
+        "Issue a fresh bypass token with an explicit reason.",
+        Some(prefix),
+    )
+}
+
+fn exhausted_token_error(prefix: String) -> PreflightBypassTokenError {
+    PreflightBypassTokenError::new(
+        BYPASS_TOKEN_EXHAUSTED,
+        "high",
+        "preflight bypass token has no remaining uses",
+        "Issue a fresh one-shot bypass token if the command is still approved.",
+        Some(prefix),
+    )
+}
+
+fn failed_consume_storage_error(prefix: String) -> PreflightBypassTokenError {
+    PreflightBypassTokenError::new(
+        BYPASS_TOKEN_STORAGE_ERROR,
+        "critical",
+        "preflight bypass token use update affected no rows while the token still appeared usable",
+        "Run `ee doctor --json` and inspect preflight_bypass_tokens rows for inconsistent state.",
+        Some(prefix),
+    )
+}
+
+fn classify_failed_token_consume(
+    connection: &DbConnection,
+    options: &VerifyBypassTokenOptions,
+    hash: &str,
+    prefix: &str,
+    now: DateTime<Utc>,
+) -> Result<PreflightBypassTokenError> {
+    let token = connection
+        .get_preflight_bypass_token(hash)
+        .map_err(storage_error)?
+        .ok_or_else(|| {
+            audit_reject(
+                connection,
+                options,
+                prefix,
+                BYPASS_TOKEN_INVALID,
+                "token disappeared before use update",
+            );
+            invalid_token_error(prefix.to_owned())
+        })?;
+
+    if token.workspace_id != options.workspace_id {
+        audit_reject(
+            connection,
+            options,
+            prefix,
+            BYPASS_TOKEN_INVALID,
+            "workspace mismatch before use update",
+        );
+        return Ok(invalid_token_error(prefix.to_owned()));
+    }
+
+    if token.revoked_at.is_some() {
+        audit_reject(
+            connection,
+            options,
+            prefix,
+            BYPASS_TOKEN_REVOKED,
+            "token revoked before use update",
+        );
+        return Ok(revoked_token_error(prefix.to_owned()));
+    }
+
+    if parse_rfc3339_utc(&token.expires_at)? <= now {
+        audit_reject(
+            connection,
+            options,
+            prefix,
+            BYPASS_TOKEN_EXPIRED,
+            "token expired before use update",
+        );
+        return Ok(expired_token_error(prefix.to_owned()));
+    }
+
+    if token.used_count >= token.max_uses {
+        audit_reject(
+            connection,
+            options,
+            prefix,
+            BYPASS_TOKEN_EXHAUSTED,
+            "token exhausted before use update",
+        );
+        return Ok(exhausted_token_error(prefix.to_owned()));
+    }
+
+    Ok(failed_consume_storage_error(prefix.to_owned()))
 }
 
 fn stored_token_rule_ids(token: &StoredPreflightBypassToken) -> Result<Vec<String>> {

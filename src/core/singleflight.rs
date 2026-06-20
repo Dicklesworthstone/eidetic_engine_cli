@@ -41,6 +41,9 @@ const SINGLEFLIGHT_REQUIRED_TELEMETRY_PHASES: [&str; 5] = [
 const GRAPH_FEATURE_ENRICHMENT_FOLLOWER_TIMEOUT: Duration = Duration::from_secs(30);
 const GRAPH_FEATURE_ENRICHMENT_BURST_SCHEMA_V1: &str =
     "ee.graph.feature_enrichment.singleflight_burst.v1";
+const GRAPH_FEATURE_ENRICHMENT_BURST_MAX_IDENTICAL_REQUESTS: usize = 32;
+const GRAPH_FEATURE_ENRICHMENT_BURST_MAX_DISTINCT_REQUESTS: usize = 8;
+const GRAPH_FEATURE_ENRICHMENT_BURST_MAX_NODE_COUNT: usize = 256;
 
 static GRAPH_FEATURE_ENRICHMENT_GROUP: OnceLock<
     SingleFlightGroup<crate::graph::GraphFeatureEnrichmentReport>,
@@ -624,7 +627,10 @@ pub struct GraphFeatureEnrichmentBurstReport {
     pub workspace_identity_hash: String,
     pub requested_identical: usize,
     pub requested_distinct: usize,
-    pub node_count: usize,
+    pub requested_node_count: usize,
+    pub effective_identical: usize,
+    pub effective_distinct: usize,
+    pub effective_node_count: usize,
     pub execution_count: usize,
     pub identical_leader_count: usize,
     pub identical_follower_count: usize,
@@ -650,7 +656,17 @@ impl GraphFeatureEnrichmentBurstReport {
             "requested": {
                 "identical": self.requested_identical,
                 "distinct": self.requested_distinct,
-                "nodeCount": self.node_count,
+                "nodeCount": self.requested_node_count,
+            },
+            "effective": {
+                "identical": self.effective_identical,
+                "distinct": self.effective_distinct,
+                "nodeCount": self.effective_node_count,
+            },
+            "limits": {
+                "maxIdentical": GRAPH_FEATURE_ENRICHMENT_BURST_MAX_IDENTICAL_REQUESTS,
+                "maxDistinct": GRAPH_FEATURE_ENRICHMENT_BURST_MAX_DISTINCT_REQUESTS,
+                "maxNodeCount": GRAPH_FEATURE_ENRICHMENT_BURST_MAX_NODE_COUNT,
             },
             "summary": {
                 "passed": self.passed,
@@ -694,9 +710,25 @@ pub fn run_graph_feature_enrichment_burst_smoke(
     enrichment_options: &crate::graph::GraphFeatureEnrichmentOptions,
     burst_options: &GraphFeatureEnrichmentBurstOptions,
 ) -> GraphFeatureEnrichmentBurstReport {
-    let identical_count = burst_options.identical_requests.max(2);
-    let distinct_count = burst_options.distinct_requests;
-    let node_count = burst_options.node_count.max(1);
+    let requested_identical = burst_options.identical_requests;
+    let requested_distinct = burst_options.distinct_requests;
+    let requested_node_count = burst_options.node_count;
+    let identical_count = requested_identical
+        .max(2)
+        .min(GRAPH_FEATURE_ENRICHMENT_BURST_MAX_IDENTICAL_REQUESTS);
+    let distinct_count =
+        requested_distinct.min(GRAPH_FEATURE_ENRICHMENT_BURST_MAX_DISTINCT_REQUESTS);
+    let node_count = requested_node_count
+        .max(1)
+        .min(GRAPH_FEATURE_ENRICHMENT_BURST_MAX_NODE_COUNT);
+    let mut input_diagnoses = burst_input_diagnoses(
+        requested_identical,
+        requested_distinct,
+        requested_node_count,
+        identical_count,
+        distinct_count,
+        node_count,
+    );
     let group = Arc::new(SingleFlightGroup::new());
     let executions = Arc::new(AtomicUsize::new(0));
     let identical_barrier = Arc::new(Barrier::new(identical_count));
@@ -781,12 +813,43 @@ pub fn run_graph_feature_enrichment_burst_smoke(
 
     summarize_burst(
         workspace_identity,
+        requested_identical,
+        requested_distinct,
+        requested_node_count,
         identical_count,
         distinct_count,
         node_count,
         executions.load(Ordering::SeqCst),
         &outcomes,
+        &mut input_diagnoses,
     )
+}
+
+fn burst_input_diagnoses(
+    requested_identical: usize,
+    requested_distinct: usize,
+    requested_node_count: usize,
+    effective_identical: usize,
+    effective_distinct: usize,
+    effective_node_count: usize,
+) -> Vec<String> {
+    let mut diagnoses = Vec::new();
+    if requested_identical > effective_identical {
+        diagnoses.push(format!(
+            "capped identical requests from {requested_identical} to {effective_identical}"
+        ));
+    }
+    if requested_distinct > effective_distinct {
+        diagnoses.push(format!(
+            "capped distinct requests from {requested_distinct} to {effective_distinct}"
+        ));
+    }
+    if requested_node_count > effective_node_count {
+        diagnoses.push(format!(
+            "capped node count from {requested_node_count} to {effective_node_count}"
+        ));
+    }
+    diagnoses
 }
 
 struct GraphFeatureEnrichmentSingleFlightInput<'a> {
@@ -916,11 +979,15 @@ impl BurstOutcome {
 
 fn summarize_burst(
     workspace_identity: &str,
+    requested_identical: usize,
+    requested_distinct: usize,
+    requested_node_count: usize,
     identical_count: usize,
     distinct_count: usize,
     node_count: usize,
     execution_count: usize,
     outcomes: &[BurstOutcome],
+    input_diagnoses: &mut Vec<String>,
 ) -> GraphFeatureEnrichmentBurstReport {
     let mut identical_leader_count = 0;
     let mut identical_follower_count = 0;
@@ -965,7 +1032,7 @@ fn summarize_burst(
         .iter()
         .filter(|outcome| outcome.request_kind == "identical" && outcome.shared)
         .count();
-    let mut diagnoses = Vec::new();
+    let mut diagnoses = std::mem::take(input_diagnoses);
     if identical_leader_count != 1 {
         diagnoses.push(format!(
             "expected one identical leader, got {identical_leader_count}"
@@ -1022,9 +1089,12 @@ fn summarize_burst(
             "blake3:{}",
             blake3::hash(workspace_identity.as_bytes()).to_hex()
         ),
-        requested_identical: identical_count,
-        requested_distinct: distinct_count,
-        node_count,
+        requested_identical,
+        requested_distinct,
+        requested_node_count,
+        effective_identical: identical_count,
+        effective_distinct: distinct_count,
+        effective_node_count: node_count,
         execution_count,
         identical_leader_count,
         identical_follower_count,
@@ -1712,6 +1782,97 @@ mod tests {
             .map_err(|error| format!("leader failed unexpectedly: {error}"))?;
         assert_eq!(leader_run.role, SingleFlightRole::Leader);
         assert_eq!(executions.load(Ordering::SeqCst), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn graph_feature_enrichment_burst_caps_oversized_inputs() -> TestResult {
+        let report = run_graph_feature_enrichment_burst_smoke(
+            "/workspace/eidetic_engine_cli",
+            &GraphFeatureEnrichmentOptions::default(),
+            &GraphFeatureEnrichmentBurstOptions {
+                identical_requests: GRAPH_FEATURE_ENRICHMENT_BURST_MAX_IDENTICAL_REQUESTS
+                    .saturating_add(1),
+                distinct_requests: GRAPH_FEATURE_ENRICHMENT_BURST_MAX_DISTINCT_REQUESTS
+                    .saturating_add(1),
+                node_count: GRAPH_FEATURE_ENRICHMENT_BURST_MAX_NODE_COUNT.saturating_add(1),
+            },
+        );
+
+        assert_eq!(
+            report.requested_identical,
+            GRAPH_FEATURE_ENRICHMENT_BURST_MAX_IDENTICAL_REQUESTS.saturating_add(1)
+        );
+        assert_eq!(
+            report.requested_distinct,
+            GRAPH_FEATURE_ENRICHMENT_BURST_MAX_DISTINCT_REQUESTS.saturating_add(1)
+        );
+        assert_eq!(
+            report.requested_node_count,
+            GRAPH_FEATURE_ENRICHMENT_BURST_MAX_NODE_COUNT.saturating_add(1)
+        );
+        assert_eq!(
+            report.effective_identical,
+            GRAPH_FEATURE_ENRICHMENT_BURST_MAX_IDENTICAL_REQUESTS
+        );
+        assert_eq!(
+            report.effective_distinct,
+            GRAPH_FEATURE_ENRICHMENT_BURST_MAX_DISTINCT_REQUESTS
+        );
+        assert_eq!(
+            report.effective_node_count,
+            GRAPH_FEATURE_ENRICHMENT_BURST_MAX_NODE_COUNT
+        );
+        assert!(
+            !report.passed,
+            "capped hidden harness inputs must not report a clean pass"
+        );
+        assert!(
+            report
+                .diagnoses
+                .iter()
+                .any(|diagnosis| diagnosis.starts_with("capped identical requests")),
+            "diagnoses should mention capped identical requests: {:?}",
+            report.diagnoses
+        );
+        assert!(
+            report
+                .diagnoses
+                .iter()
+                .any(|diagnosis| diagnosis.starts_with("capped distinct requests")),
+            "diagnoses should mention capped distinct requests: {:?}",
+            report.diagnoses
+        );
+        assert!(
+            report
+                .diagnoses
+                .iter()
+                .any(|diagnosis| diagnosis.starts_with("capped node count")),
+            "diagnoses should mention capped node count: {:?}",
+            report.diagnoses
+        );
+        assert!(
+            report.execution_count
+                <= GRAPH_FEATURE_ENRICHMENT_BURST_MAX_DISTINCT_REQUESTS.saturating_add(1),
+            "execution count should stay bounded by one identical leader plus capped distinct leaders"
+        );
+
+        let json = report.data_json();
+        assert_eq!(
+            json["requested"]["identical"],
+            serde_json::json!(
+                GRAPH_FEATURE_ENRICHMENT_BURST_MAX_IDENTICAL_REQUESTS.saturating_add(1)
+            )
+        );
+        assert_eq!(
+            json["effective"]["identical"],
+            serde_json::json!(GRAPH_FEATURE_ENRICHMENT_BURST_MAX_IDENTICAL_REQUESTS)
+        );
+        assert_eq!(
+            json["limits"]["maxNodeCount"],
+            serde_json::json!(GRAPH_FEATURE_ENRICHMENT_BURST_MAX_NODE_COUNT)
+        );
 
         Ok(())
     }

@@ -201,6 +201,7 @@ struct LexicalRamTierSearchConfigFingerprint {
     exists: bool,
     len: u64,
     modified: Option<SystemTime>,
+    content_hash: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -7390,16 +7391,20 @@ fn lexical_ram_tier_search_config_fingerprint(
     workspace_path: &Path,
 ) -> LexicalRamTierSearchConfigFingerprint {
     let config_path = workspace_path.join(".ee").join("config.toml");
-    match std::fs::symlink_metadata(config_path) {
+    match std::fs::symlink_metadata(&config_path) {
         Ok(metadata) => LexicalRamTierSearchConfigFingerprint {
             exists: true,
             len: metadata.len(),
             modified: metadata.modified().ok(),
+            content_hash: std::fs::read(&config_path)
+                .ok()
+                .map(|bytes| *blake3::hash(&bytes).as_bytes()),
         },
         Err(_) => LexicalRamTierSearchConfigFingerprint {
             exists: false,
             len: 0,
             modified: None,
+            content_hash: None,
         },
     }
 }
@@ -16349,6 +16354,61 @@ mod tests {
         if second.request_hugepages {
             return Err(format!(
                 "disabled RAM tier must normalize hugepages off after cache refresh; got {:?}",
+                second
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lexical_ram_tier_search_config_cache_refreshes_same_length_preserved_mtime() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_dir = temp.path().join(".ee");
+        std::fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        let config_path = config_dir.join("config.toml");
+        let first_body = "[search.lexical_ram_tier]\nenabled = true\npopulate_on_open = false\n";
+        let second_body = "[search.lexical_ram_tier]\nenabled = false\npopulate_on_open = true\n";
+        if first_body.len() != second_body.len() {
+            return Err(format!(
+                "test fixtures must stay the same length: {} != {}",
+                first_body.len(),
+                second_body.len()
+            ));
+        }
+        let fixed_mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+
+        std::fs::write(&config_path, first_body).map_err(|error| error.to_string())?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .open(&config_path)
+            .map_err(|error| error.to_string())?
+            .set_times(std::fs::FileTimes::new().set_modified(fixed_mtime))
+            .map_err(|error| error.to_string())?;
+        let first = lexical_ram_tier_config_for_search(temp.path());
+        if !first.enabled || first.populate_on_open {
+            return Err(format!(
+                "initial workspace config must drive enabled=true/populate=false; got {:?}",
+                first
+            ));
+        }
+
+        std::fs::write(&config_path, second_body).map_err(|error| error.to_string())?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .open(&config_path)
+            .map_err(|error| error.to_string())?
+            .set_times(std::fs::FileTimes::new().set_modified(fixed_mtime))
+            .map_err(|error| error.to_string())?;
+        let second = lexical_ram_tier_config_for_search(temp.path());
+        if second.enabled {
+            return Err(format!(
+                "same-length config rewrite with preserved mtime must refresh enabled=false; got {:?}",
+                second
+            ));
+        }
+        if !second.populate_on_open {
+            return Err(format!(
+                "same-length config rewrite with preserved mtime must refresh populate_on_open=true; got {:?}",
                 second
             ));
         }

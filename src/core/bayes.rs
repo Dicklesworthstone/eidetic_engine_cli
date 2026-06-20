@@ -84,7 +84,6 @@ impl FeedbackSignal {
 pub struct BetaPosterior {
     alpha: f64,
     beta: f64,
-    interval_harmful_weight: f64,
 }
 
 impl BetaPosterior {
@@ -93,11 +92,7 @@ impl BetaPosterior {
     #[must_use]
     pub fn new(alpha: f64, beta: f64) -> Option<Self> {
         if alpha.is_finite() && beta.is_finite() && alpha > 0.0 && beta > 0.0 {
-            Some(Self {
-                alpha,
-                beta,
-                interval_harmful_weight: DEFAULT_HARMFUL_WEIGHT,
-            })
+            Some(Self { alpha, beta })
         } else {
             None
         }
@@ -109,7 +104,6 @@ impl BetaPosterior {
         Self {
             alpha: DEFAULT_PRIOR_ALPHA,
             beta: DEFAULT_PRIOR_BETA,
-            interval_harmful_weight: DEFAULT_HARMFUL_WEIGHT,
         }
     }
 
@@ -212,7 +206,6 @@ impl BetaPosterior {
         Self {
             alpha: self.alpha + w,
             beta: self.beta,
-            interval_harmful_weight: self.interval_harmful_weight,
         }
     }
 
@@ -234,7 +227,6 @@ impl BetaPosterior {
         Self {
             alpha: self.alpha,
             beta: self.beta + w,
-            interval_harmful_weight: w,
         }
     }
 
@@ -251,23 +243,10 @@ impl BetaPosterior {
         if !(level > 0.0 && level < 1.0) {
             return None;
         }
-        let (interval_alpha, interval_beta) = self.interval_parameters();
         let tail = (1.0 - level) / 2.0;
-        let lo = beta_inv_cdf(tail, interval_alpha, interval_beta)?;
-        let hi = beta_inv_cdf(1.0 - tail, interval_alpha, interval_beta)?;
+        let lo = beta_inv_cdf(tail, self.alpha, self.beta)?;
+        let hi = beta_inv_cdf(1.0 - tail, self.alpha, self.beta)?;
         Some((lo, hi))
-    }
-
-    fn interval_parameters(&self) -> (f64, f64) {
-        let weight = self.interval_harmful_weight;
-        if weight.is_finite() && weight > 1.0 && self.beta >= DEFAULT_PRIOR_BETA {
-            (
-                self.alpha,
-                DEFAULT_PRIOR_BETA + (self.beta - DEFAULT_PRIOR_BETA) / weight,
-            )
-        } else {
-            (self.alpha, self.beta)
-        }
     }
 }
 

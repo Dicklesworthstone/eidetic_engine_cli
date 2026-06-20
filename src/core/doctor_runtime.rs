@@ -1244,9 +1244,28 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
             // quarantine destination by action.sequence + sanitized full
             // path to prevent collisions; propagate read_dir errors instead
             // of silently treating them as "non-empty".
+            if action.path.exists() && !action.path.is_dir() {
+                return Err(DoctorRuntimeError::UndoStateDrifted {
+                    path: action.path.clone(),
+                    expected_hash: "<empty directory created by doctor>".to_owned(),
+                    observed_hash: "<non-directory occupant>".to_owned(),
+                });
+            }
             if action.path.is_dir() {
                 let is_empty = match fs::read_dir(&action.path) {
-                    Ok(mut it) => it.next().is_none(),
+                    Ok(mut it) => match it.next() {
+                        Some(Ok(_)) => false,
+                        Some(Err(source)) => {
+                            return Err(DoctorRuntimeError::Io {
+                                context: format!(
+                                    "read_dir entry for undo of create_dir_all({})",
+                                    action.path.display()
+                                ),
+                                source,
+                            });
+                        }
+                        None => true,
+                    },
                     Err(source) => {
                         return Err(DoctorRuntimeError::Io {
                             context: format!(
@@ -1257,20 +1276,35 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
                         });
                     }
                 };
-                if is_empty {
-                    let path_rel = sanitize_path_for_run_dir(&action.path);
-                    let quarantine_dest = run_dir
-                        .join("quarantine")
-                        .join("undo_created_dirs")
-                        .join(format!("{:06}", action.sequence))
-                        .join(&path_rel);
-                    if let Some(parent) = quarantine_dest.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-                    fs::rename(&action.path, &quarantine_dest)?;
+                if !is_empty {
+                    return Err(DoctorRuntimeError::UndoStateDrifted {
+                        path: action.path.clone(),
+                        expected_hash: "<empty directory created by doctor>".to_owned(),
+                        observed_hash: "<non-empty directory>".to_owned(),
+                    });
                 }
-                // else: dir has content from other code; refuse to remove.
-                // Surface as Skipped via the undo_log entry caller writes.
+                let path_rel = sanitize_path_for_run_dir(&action.path);
+                let quarantine_dest = run_dir
+                    .join("quarantine")
+                    .join("undo_created_dirs")
+                    .join(format!("{:06}", action.sequence))
+                    .join(&path_rel);
+                if let Some(parent) = quarantine_dest.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                if quarantine_dest.exists() {
+                    return Err(DoctorRuntimeError::Io {
+                        context: format!(
+                            "undo quarantine collision at {}",
+                            quarantine_dest.display()
+                        ),
+                        source: io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            "undo quarantine collision",
+                        ),
+                    });
+                }
+                fs::rename(&action.path, &quarantine_dest)?;
             }
         }
         "quarantine_by_rename" => {

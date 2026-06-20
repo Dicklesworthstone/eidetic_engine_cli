@@ -379,17 +379,38 @@ impl CassPrefetchObservation {
 pub struct AgentScope(String);
 
 impl AgentScope {
+    /// Sentinel used when a caller supplies an empty or whitespace-only owner.
+    pub const UNKNOWN: &'static str = "agent:unknown";
+
     /// Construct an agent scope from the stable agent identity used by the
     /// caller. The value is not interpreted by the predictor; it exists to keep
-    /// the per-agent ownership boundary attached to the history.
+    /// the per-agent ownership boundary attached to the history. Blank values
+    /// canonicalize to [`Self::UNKNOWN`] so a malformed caller cannot create an
+    /// empty owner that collapses the isolation boundary invisibly.
     #[must_use]
     pub fn new(raw: impl Into<String>) -> Self {
-        Self(raw.into())
+        let raw = raw.into();
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            Self::unknown()
+        } else {
+            Self(trimmed.to_owned())
+        }
     }
 
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self(Self::UNKNOWN.to_owned())
+    }
+
+    #[must_use]
+    pub fn is_unknown(&self) -> bool {
+        self.0 == Self::UNKNOWN
     }
 }
 
@@ -1529,6 +1550,27 @@ mod tests {
             agent_a, agent_b,
             "identical topic windows from different agents must stay distinct"
         );
+    }
+
+    #[test]
+    fn blank_agent_scope_canonicalizes_to_unknown_owner_bd_298n0() {
+        assert_eq!(AgentScope::new("").as_str(), AgentScope::UNKNOWN);
+        assert_eq!(AgentScope::new(" \n\t ").as_str(), AgentScope::UNKNOWN);
+        assert!(AgentScope::new("").is_unknown());
+        assert_eq!(AgentScope::new(" agent:a ").as_str(), "agent:a");
+
+        let unnamed = CassPrefetchHistory::from_topics(" ", ["current", "alpha"]);
+        let named = CassPrefetchHistory::from_topics("agent:a", ["current", "alpha"]);
+        assert!(unnamed.agent_scope.is_unknown());
+        assert_ne!(
+            unnamed, named,
+            "blank scopes must not serialize as an empty owner indistinguishable from a real scope"
+        );
+
+        let decoded: CassPrefetchHistory =
+            serde_json::from_str(r#"{"agentScope":"   ","recentFirst":[{"topicId":"current"}]}"#)
+                .expect("deserialize blank scoped history");
+        assert!(decoded.agent_scope.is_unknown());
     }
 
     #[test]

@@ -771,7 +771,48 @@ impl CommandEffect {
             },
             mutation_contract: CommandMutationContract {
                 side_effect_class: SideEffectClass::SidePathArtifact,
-                transaction_scope: Some("config/key file create-or-explicit-force overwrite"),
+                transaction_scope: Some("workspace config file update"),
+                idempotency_key: Some(idempotency_key),
+                audit_surface: None,
+                db_generation_effect: "source DB generation unchanged",
+                index_generation_effect: "none",
+                dry_run_behavior: Some(
+                    "--dry-run validates and previews config changes; no files are written",
+                ),
+                recovery_behavior: "partial config-file output is reported as failed, never deleted by ee, and not treated as committed configuration",
+                no_overwrite_behavior: Some(
+                    "preserves unrelated config keys where possible; no-delete: ee never deletes the config file",
+                ),
+                degraded_code: None,
+            },
+            runtime_contract: CommandRuntimeContract::side_path_artifact(),
+            requires_read_snapshot: false,
+            requires_audit: false,
+            description,
+        }
+    }
+
+    /// Create a certificate key-file write entry that does not touch the ee database.
+    #[must_use]
+    pub fn certificate_key_file_write(
+        command_path: &'static str,
+        workspace_files: Vec<&'static str>,
+        idempotency_key: &'static str,
+        description: &'static str,
+    ) -> Self {
+        Self {
+            command_path,
+            default_effect: EffectClass::ConfigWrite,
+            dry_run_effect: Some(EffectClass::ReadOnly),
+            idempotency: IdempotencyClass::DryRunAvailable,
+            write_surfaces: WriteSurfaces {
+                db_tables: Vec::new(),
+                derived_paths: Vec::new(),
+                workspace_files,
+            },
+            mutation_contract: CommandMutationContract {
+                side_effect_class: SideEffectClass::SidePathArtifact,
+                transaction_scope: Some("key file create-or-explicit-force overwrite"),
                 idempotency_key: Some(idempotency_key),
                 audit_surface: None,
                 db_generation_effect: "source DB generation unchanged",
@@ -2482,7 +2523,7 @@ impl EffectManifest {
                 "workspace config path plus exact config key and scalar value",
                 "Set a supported workspace configuration key",
             ),
-            CommandEffect::config_file_write(
+            CommandEffect::certificate_key_file_write(
                 "certificate keygen",
                 vec!["~/.config/ee/keys/<workspace>.ed25519"],
                 "workspace key path plus --show/--force mode",

@@ -2681,34 +2681,17 @@ fn configure_playbook_source_read_options(options: &mut OpenOptions) {
 fn configure_playbook_source_read_options(_options: &mut OpenOptions) {}
 
 fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(None);
-            }
-            Err(error) => {
-                return Err(DomainError::Storage {
-                    message: format!(
-                        "failed to inspect playbook path component '{}': {error}",
-                        current.display()
-                    ),
-                    repair: Some(
-                        "inspect filesystem permissions or choose another playbook path".to_owned(),
-                    ),
-                });
-            }
+    super::path_safety::first_existing_symlink_component(path).map_err(|error| {
+        DomainError::Storage {
+            message: format!(
+                "failed to inspect playbook path '{}' for symlink safety: {error}",
+                path.display()
+            ),
+            repair: Some(
+                "inspect filesystem permissions or choose another playbook path".to_owned(),
+            ),
         }
-    }
-    Ok(None)
+    })
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {

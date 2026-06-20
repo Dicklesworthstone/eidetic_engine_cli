@@ -35,10 +35,10 @@
 //!   collector can suggest `br sync`; metadata-only drift with equal
 //!   counts and zero dirty issues is warning evidence, not a hard claim
 //!   blocker.
-//! - [`BeadsIntegrityHealth::MergeArtifactsWarn`] — merge conflict
-//!   artifacts (`.orig`, `.rej`, `.merge_artifact*`) are sitting next
-//!   to `issues.jsonl`. JSONL may parse, but a recent merge may not
-//!   have settled, so tracker reads are advisory only.
+//! - [`BeadsIntegrityHealth::MergeArtifactsWarn`] — non-benign merge
+//!   conflict artifacts (`.orig`, `.rej`, `.merge_artifact*`) are
+//!   sitting next to `issues.jsonl`. JSONL may parse, but a recent
+//!   merge may not have settled, so tracker reads are advisory only.
 //!
 //! When more than one condition is true at once the *most severe* one
 //! is reported (parse error > count mismatch > merge warn). Pending
@@ -292,8 +292,8 @@ impl BeadsIntegrityHealth {
     const fn severity_rank(self) -> u8 {
         match self {
             Self::Ok => 0,
-            Self::MergeArtifactsWarn => 1,
-            Self::ExternalChangesPendingImport => 2,
+            Self::ExternalChangesPendingImport => 1,
+            Self::MergeArtifactsWarn => 2,
             Self::DbJsonlCountMismatch => 3,
             Self::JsonlParseError => 4,
         }
@@ -536,7 +536,7 @@ impl std::error::Error for BeadsDoctorJsonError {}
 ///    disabled → [`BeadsIntegrityHealth::DbJsonlCountMismatch`].
 /// 3. Otherwise, if JSONL has more rows than the DB →
 ///    [`BeadsIntegrityHealth::ExternalChangesPendingImport`].
-/// 4. Otherwise, if any merge artifacts are present →
+/// 4. Otherwise, if any non-benign merge artifacts are present →
 ///    [`BeadsIntegrityHealth::MergeArtifactsWarn`].
 /// 5. Otherwise → [`BeadsIntegrityHealth::Ok`].
 #[must_use]
@@ -560,6 +560,10 @@ fn compose_integrity_report_with_metadata(
         .jsonl_record_count
         .saturating_sub(inputs.db_record_count);
     let merge_artifact_count = u64::try_from(inputs.merge_artifact_paths.len()).unwrap_or(u64::MAX);
+    let has_non_benign_merge_artifacts = inputs
+        .merge_artifact_paths
+        .iter()
+        .any(|path| !is_benign_beads_merge_base_artifact(path));
 
     let health = classify_health(
         parse_error.is_some(),
@@ -567,7 +571,7 @@ fn compose_integrity_report_with_metadata(
         inputs.db_record_count,
         inputs.auto_import_enabled,
         inputs.external_changes_pending_import,
-        merge_artifact_count > 0,
+        has_non_benign_merge_artifacts,
     );
 
     let mut merge_artifact_paths: Vec<String> = inputs
@@ -784,7 +788,7 @@ pub fn classify_health(
     db_count: u64,
     auto_import_enabled: bool,
     external_changes_pending_import: bool,
-    has_merge_artifacts: bool,
+    has_non_benign_merge_artifacts: bool,
 ) -> BeadsIntegrityHealth {
     let mut candidate = BeadsIntegrityHealth::Ok;
     let mut promote = |state: BeadsIntegrityHealth| {
@@ -793,7 +797,7 @@ pub fn classify_health(
         }
     };
 
-    if has_merge_artifacts {
+    if has_non_benign_merge_artifacts {
         promote(BeadsIntegrityHealth::MergeArtifactsWarn);
     }
     if jsonl_count != db_count {
@@ -2200,6 +2204,11 @@ mod tests {
         let benign = vec!["beads.base.jsonl".to_owned()];
         let benign_report = compose_integrity_report(base_inputs(&benign, None));
         ensure_equal(
+            &benign_report.health,
+            &BeadsIntegrityHealth::Ok,
+            "benign merge anchor is not a merge warning",
+        )?;
+        ensure_equal(
             &benign_report.tracker_authority_state,
             &BeadsTrackerAuthorityState::Clean,
             "benign merge anchor is not a merge_artifacts signal",
@@ -2221,6 +2230,43 @@ mod tests {
             &report.br_reads_authoritative,
             &false,
             "merge_artifacts fails closed",
+        )
+    }
+
+    #[test]
+    fn non_benign_merge_artifacts_dominate_metadata_only_pending_import() -> TestResult {
+        let artifacts = vec![".beads/issues.jsonl.orig".to_owned()];
+        let report = compose_integrity_report(BeadsIntegrityInputs {
+            external_changes_pending_import: true,
+            dirty_issue_count: 0,
+            ..base_inputs(&artifacts, None)
+        });
+
+        ensure_equal(
+            &report.health,
+            &BeadsIntegrityHealth::MergeArtifactsWarn,
+            "non-benign merge artifacts must be the coarse health signal",
+        )?;
+        ensure_equal(
+            &report.tracker_authority_state,
+            &BeadsTrackerAuthorityState::MergeArtifacts,
+            "non-benign merge artifacts dominate metadata-only drift",
+        )?;
+        ensure_equal(
+            &report.pending_import_count,
+            &0,
+            "metadata-only drift has no pending rows",
+        )?;
+        ensure_equal(
+            &report.br_reads_authoritative,
+            &false,
+            "non-benign merge artifacts fail closed",
+        )?;
+        ensure(
+            report
+                .recovery_hint
+                .is_some_and(|hint| hint.contains("merge artifacts")),
+            "recovery hint must point at merge artifacts",
         )
     }
 
@@ -2281,8 +2327,8 @@ mod tests {
         };
         let ranks = [
             HealthOk.severity_rank(),
-            MergeArtifactsWarn.severity_rank(),
             ExternalChangesPendingImport.severity_rank(),
+            MergeArtifactsWarn.severity_rank(),
             DbJsonlCountMismatch.severity_rank(),
             JsonlParseError.severity_rank(),
         ];

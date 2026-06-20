@@ -395,7 +395,13 @@ fn record_enabled(
 ) -> Result<SessionBudgetRecordOutcome, SessionBudgetRecordError> {
     let mut rows = load_ledger_rows(&config.ledger_path)?;
     let rows_before = rows.len();
-    let evicted_rows = apply_retention(&mut rows, observation.recorded_at, config);
+    let workspace_fingerprint = observation.workspace_fingerprint.clone();
+    let evicted_rows = apply_retention(
+        &mut rows,
+        observation.recorded_at,
+        &workspace_fingerprint,
+        config,
+    );
     let row = SessionBudgetLedgerRow::from_observation(config, observation, evicted_rows);
     let event_id = row.event_id.clone();
     rows.push(serde_json::to_value(row).map_err(SessionBudgetRecordError::json_value)?);
@@ -512,6 +518,7 @@ fn load_ledger_rows_with_max_bytes(
 fn apply_retention(
     rows: &mut Vec<Value>,
     recorded_at: DateTime<Utc>,
+    workspace_fingerprint: &str,
     config: &SessionBudgetRecorderConfig,
 ) -> u64 {
     let cutoff = recorded_at - ChronoDuration::days(i64::from(config.max_age_days.get()));
@@ -526,12 +533,28 @@ fn apply_retention(
 
     let max_existing = config.max_rows_per_workspace.get().saturating_sub(1);
     let mut evicted = before_age.saturating_sub(rows.len());
-    if rows.len() > max_existing {
-        let overflow = rows.len().saturating_sub(max_existing);
-        rows.drain(0..overflow);
+    let current_workspace_rows = rows
+        .iter()
+        .filter(|row| row_workspace_fingerprint(row) == Some(workspace_fingerprint))
+        .count();
+    if current_workspace_rows > max_existing {
+        let overflow = current_workspace_rows.saturating_sub(max_existing);
+        let mut remaining = overflow;
+        rows.retain(|row| {
+            if remaining > 0 && row_workspace_fingerprint(row) == Some(workspace_fingerprint) {
+                remaining = remaining.saturating_sub(1);
+                false
+            } else {
+                true
+            }
+        });
         evicted = evicted.saturating_add(overflow);
     }
     u64::try_from(evicted).unwrap_or(u64::MAX)
+}
+
+fn row_workspace_fingerprint(row: &Value) -> Option<&str> {
+    row.get("workspaceFingerprint").and_then(Value::as_str)
 }
 
 fn write_ledger_rows(path: &Path, rows: &[Value]) -> Result<(), SessionBudgetRecordError> {
@@ -1050,6 +1073,16 @@ mod tests {
         }
     }
 
+    fn observation_for_workspace(
+        sequence: u32,
+        recorded_at: DateTime<Utc>,
+        workspace_fingerprint: &str,
+    ) -> SessionBudgetObservation {
+        let mut observation = observation(sequence, recorded_at);
+        observation.workspace_fingerprint = workspace_fingerprint.to_owned();
+        observation
+    }
+
     fn read_rows(path: &Path) -> Result<Vec<Value>, String> {
         let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
         content
@@ -1125,6 +1158,66 @@ mod tests {
         assert_eq!(rows[1]["privacy"]["contentStored"], false);
         assert_eq!(rows[1]["retention"]["maxRowsPerWorkspace"], 2);
         assert_eq!(rows[1]["retention"]["evictedRows"], 1);
+        Ok(())
+    }
+
+    #[test]
+    fn retention_caps_rows_per_workspace_without_evicting_other_workspaces() -> TestResult {
+        let path = test_ledger_path("per-workspace");
+        let config = test_config(path.clone(), 2, 30);
+        let recorder = SessionBudgetRecorder::enabled(config);
+        let base = Utc.with_ymd_and_hms(2026, 6, 14, 12, 0, 0).unwrap();
+
+        recorder
+            .record_with(|| Ok(observation_for_workspace(1, base, "workspace_alpha")))
+            .map_err(|error| error.to_string())?;
+        recorder
+            .record_with(|| {
+                Ok(observation_for_workspace(
+                    2,
+                    base + ChronoDuration::seconds(1),
+                    "workspace_alpha",
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        recorder
+            .record_with(|| {
+                Ok(observation_for_workspace(
+                    3,
+                    base + ChronoDuration::seconds(2),
+                    "workspace_beta",
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        let outcome = recorder
+            .record_with(|| {
+                Ok(observation_for_workspace(
+                    4,
+                    base + ChronoDuration::seconds(3),
+                    "workspace_alpha",
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(outcome.rows_after, 3);
+        assert_eq!(outcome.evicted_rows, 1);
+        let rows = read_rows(&path)?;
+        assert_eq!(rows.len(), 3, "other workspace rows must remain");
+        assert_eq!(
+            rows[0]["correlation"]["commandId"],
+            "cmd_session_budget_0002"
+        );
+        assert_eq!(rows[0]["workspaceFingerprint"], "workspace_alpha");
+        assert_eq!(
+            rows[1]["correlation"]["commandId"],
+            "cmd_session_budget_0003"
+        );
+        assert_eq!(rows[1]["workspaceFingerprint"], "workspace_beta");
+        assert_eq!(
+            rows[2]["correlation"]["commandId"],
+            "cmd_session_budget_0004"
+        );
+        assert_eq!(rows[2]["workspaceFingerprint"], "workspace_alpha");
         Ok(())
     }
 

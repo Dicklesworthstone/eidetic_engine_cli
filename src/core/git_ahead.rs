@@ -178,8 +178,10 @@ pub fn summarize_git_ahead_with_log_state(
     let mixed_bead_ahead = bead_refs.len() > 1
         || (ahead_count > 1 && !bead_refs.is_empty() && has_commit_without_bead);
     let ambiguous_bead_attribution = ahead_count > 1 && has_commit_without_bead;
+    let diverged_from_upstream = behind_count > 0;
     let ambiguous_ahead = ahead_count > 0
         && (ambiguous_bead_attribution
+            || diverged_from_upstream
             || commits.len() != ahead_count
             || branch.upstream_ref.is_none()
             || branch.detached);
@@ -436,6 +438,28 @@ mod tests {
         assert!(!snapshot.mixed_bead_ahead);
         assert!(!snapshot.ambiguous_ahead);
         assert!(!snapshot.peer_owned_ahead_risk);
+    }
+
+    #[test]
+    fn diverged_ahead_and_behind_snapshot_is_risky() {
+        let snapshot = summarize_git_ahead(
+            concat!(
+                "# branch.oid abcdef\n",
+                "# branch.head main\n",
+                "# branch.upstream origin/main\n",
+                "# branch.ab +1 -1\n",
+            ),
+            Some("730f16a6abcdef\x1fCodex\x1ffix: compact metadata (bd-2gc7r.1)\n"),
+        );
+
+        assert_eq!(snapshot.state, GIT_AHEAD_STATE_AMBIGUOUS);
+        assert_eq!(snapshot.ahead_count, 1);
+        assert_eq!(snapshot.behind_count, 1);
+        assert!(!snapshot.mixed_author_ahead);
+        assert!(!snapshot.mixed_bead_ahead);
+        assert!(snapshot.ambiguous_ahead);
+        assert!(snapshot.peer_owned_ahead_risk);
+        assert!(snapshot.degraded.is_empty());
     }
 
     #[test]

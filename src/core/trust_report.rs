@@ -336,7 +336,9 @@ fn build_trust_report(
         if event.target_type != "memory" || !memory_ids.contains(&event.target_id) {
             continue;
         }
-        let weight = f64::from(event.weight).max(0.0);
+        let Some(weight) = positive_feedback_weight(event.weight) else {
+            continue;
+        };
         match FeedbackSignal::from_signal_str(&event.signal) {
             FeedbackSignal::Helpful => {
                 helpful_event_count += 1;
@@ -612,6 +614,11 @@ fn compare_f64_desc(left: f64, right: f64) -> Ordering {
 
 fn compare_f64_asc(left: f64, right: f64) -> Ordering {
     left.partial_cmp(&right).unwrap_or(Ordering::Equal)
+}
+
+fn positive_feedback_weight(weight: f32) -> Option<f64> {
+    let weight = f64::from(weight);
+    (weight.is_finite() && weight > 0.0).then_some(weight)
 }
 
 fn candidate_action(outcome: &OutcomeAggregate) -> ReliabilityCandidateAction {
@@ -912,6 +919,45 @@ mod tests {
             report.most_harmful.is_empty(),
             "helpful-only workspaces should not populate mostHarmful"
         );
+    }
+
+    #[test]
+    fn zero_and_non_finite_feedback_weights_do_not_create_outcome_signal() {
+        let report = build_trust_report(
+            "wsp_test".to_string(),
+            vec![
+                memory("mem_zero", 0.80, 0.40, "zero weight"),
+                memory("mem_negative", 0.70, 0.30, "negative weight"),
+                memory("mem_nan", 0.60, 0.20, "nan weight"),
+                memory("mem_infinite", 0.50, 0.10, "infinite weight"),
+                memory("mem_real", 0.40, 0.30, "real outcome"),
+            ],
+            vec![
+                feedback("mem_zero", "helpful", 0.0),
+                feedback("mem_negative", "harmful", -1.0),
+                feedback("mem_nan", "helpful", f32::NAN),
+                feedback("mem_infinite", "harmful", f32::INFINITY),
+                feedback("mem_real", "helpful", 1.0),
+            ],
+            BTreeSet::from([
+                "mem_zero".to_string(),
+                "mem_negative".to_string(),
+                "mem_nan".to_string(),
+                "mem_infinite".to_string(),
+                "mem_real".to_string(),
+            ]),
+            5,
+            10,
+        );
+
+        assert_eq!(report.memory_with_outcome_count, 1);
+        assert_eq!(report.outcome_event_count, 1);
+        assert_eq!(report.helpful_event_count, 1);
+        assert_eq!(report.harmful_event_count, 0);
+        assert_eq!(report.packed_memory_with_outcome_count, 1);
+        assert_eq!(report.most_helpful.len(), 1);
+        assert_eq!(report.most_helpful[0].memory_id, "mem_real");
+        assert!(report.most_harmful.is_empty());
     }
 
     #[test]

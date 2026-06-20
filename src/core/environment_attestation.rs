@@ -1243,7 +1243,7 @@ fn snapshot_authority(
     degraded_codes: &[EnvironmentAttestationDegradedCode],
 ) -> EnvironmentAttestationAuthority {
     if degraded_codes.contains(&EnvironmentAttestationDegradedCode::BeadsMetadataOnlyStale) {
-        return EnvironmentAttestationAuthority::Stale;
+        return EnvironmentAttestationAuthority::Authoritative;
     }
     if degraded_codes.contains(&EnvironmentAttestationDegradedCode::BeadsTrackerStale) {
         return EnvironmentAttestationAuthority::Stale;
@@ -1277,9 +1277,10 @@ fn snapshot_status(
     snapshot: &SwarmBriefSourceSnapshot,
     degraded_codes: &[EnvironmentAttestationDegradedCode],
 ) -> EnvironmentAttestationSourceStatus {
-    if degraded_codes.contains(&EnvironmentAttestationDegradedCode::BeadsMetadataOnlyStale)
-        || degraded_codes.contains(&EnvironmentAttestationDegradedCode::BeadsTrackerStale)
-    {
+    if degraded_codes.contains(&EnvironmentAttestationDegradedCode::BeadsMetadataOnlyStale) {
+        return EnvironmentAttestationSourceStatus::Degraded;
+    }
+    if degraded_codes.contains(&EnvironmentAttestationDegradedCode::BeadsTrackerStale) {
         return EnvironmentAttestationSourceStatus::Stale;
     }
     if degraded_codes.contains(&EnvironmentAttestationDegradedCode::RchWorkerTopologyBlocked)
@@ -1446,7 +1447,6 @@ fn attestation_summary(
             .contains(&EnvironmentAttestationDegradedCode::StaleBinarySuspected),
         coordination_blocked: codes
             .contains(&EnvironmentAttestationDegradedCode::DirtyCheckoutObserved)
-            || codes.contains(&EnvironmentAttestationDegradedCode::BeadsMetadataOnlyStale)
             || codes.contains(&EnvironmentAttestationDegradedCode::BvRecommendationStale)
             || codes.contains(&EnvironmentAttestationDegradedCode::AgentMailUnavailable)
             || codes.contains(&EnvironmentAttestationDegradedCode::AgentMailProbeMismatch),
@@ -1927,7 +1927,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_only_beads_drift_is_stale_with_precise_repair() {
+    fn metadata_only_beads_drift_remains_authoritative_with_precise_repair() {
         let brief = report_with_sources(vec![SwarmBriefSourceSnapshot {
             source: SwarmBriefSourceKind::Beads,
             status: SwarmBriefSourceStatus::Ready,
@@ -1944,11 +1944,19 @@ mod tests {
         let attestation = environment_attestation_from_swarm_brief(&brief, fixed_time());
         let beads = entry(&attestation, EnvironmentAttestationSourceKind::BeadsTracker);
 
-        assert_eq!(beads.authority, EnvironmentAttestationAuthority::Stale);
-        assert_eq!(beads.status, EnvironmentAttestationSourceStatus::Stale);
+        assert_eq!(
+            beads.authority,
+            EnvironmentAttestationAuthority::Authoritative
+        );
+        assert_eq!(beads.status, EnvironmentAttestationSourceStatus::Degraded);
         assert_eq!(
             beads.degraded_codes,
             vec![EnvironmentAttestationDegradedCode::BeadsMetadataOnlyStale]
+        );
+        assert!(attestation.summary.safe_to_claim);
+        assert_eq!(
+            attestation.verdict,
+            EnvironmentAttestationVerdict::SafeToClaim
         );
         assert!(beads.recovery_actions.iter().any(|action| {
             action

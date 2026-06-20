@@ -645,7 +645,7 @@ pub fn evaluate_recall(
     };
 
     let truncated = dropped_count > 0;
-    let continuation_cursor = if truncated {
+    let continuation_cursor = if truncated && !items.is_empty() {
         encode_recall_cursor(
             query,
             query.offset + items.len(),
@@ -1087,6 +1087,28 @@ impl RecallDegradedEntry {
         }
     }
 
+    /// `output_budget_unsatisfiable` (medium): the recall item floor exceeds
+    /// `--budget-tokens`, so no honest continuation cursor can reproduce the
+    /// ranked set under the requested budget.
+    #[must_use]
+    pub fn budget_unsatisfiable(dropped_count: usize, budget_tokens: u32) -> Self {
+        Self {
+            code: crate::output::governor::OUTPUT_BUDGET_UNSATISFIABLE_CODE.to_owned(),
+            severity: "medium".to_owned(),
+            message: format!(
+                "Recall budget unsatisfiable: dropped {dropped_count} item(s) because the next \
+                 ranked item exceeds the recall budget of {budget_tokens} tokens."
+            ),
+            repair: Some(
+                "Re-run with a larger --budget-tokens value, or omit the flag.".to_owned(),
+            ),
+            details: Some(serde_json::json!({
+                "droppedCount": dropped_count,
+                "budgetTokens": budget_tokens,
+            })),
+        }
+    }
+
     /// Envelope-shaped JSON (`code`, `severity`, `message`, `repair`,
     /// optional `details`).
     #[must_use]
@@ -1414,6 +1436,19 @@ mod cli_surface_tests {
         let json = entry.to_json();
         assert_eq!(json["details"]["droppedCount"], 4);
         assert_eq!(json["details"]["continuationCursor"], "cursor-string");
+    }
+
+    #[test]
+    fn budget_unsatisfiable_entry_carries_repair_details() {
+        let entry = RecallDegradedEntry::budget_unsatisfiable(4, 1);
+        assert_eq!(
+            entry.code,
+            crate::output::governor::OUTPUT_BUDGET_UNSATISFIABLE_CODE
+        );
+        assert_eq!(entry.severity, "medium");
+        let json = entry.to_json();
+        assert_eq!(json["details"]["droppedCount"], 4);
+        assert_eq!(json["details"]["budgetTokens"], 1);
     }
 
     #[test]
@@ -1795,14 +1830,17 @@ mod tests {
         let per_item = recall_item_token_estimate(&unbounded.items[0]);
         assert!(per_item > 0);
 
-        // Zero budget: nothing fits, everything dropped.
+        // Zero budget: nothing fits, everything dropped. The public CLI
+        // rejects this upfront, but the pure core still must not mint a
+        // same-offset cursor that would loop forever if a caller bypassed the
+        // CLI guard.
         let mut query = path_query(&["src/*.rs"]);
         query.max_tokens = Some(0);
         let zero = evaluate_recall(&query, &rows, Some(7), 7);
         assert!(zero.items.is_empty());
         assert_eq!(zero.dropped_count, 4);
         assert!(zero.truncated);
-        assert!(zero.continuation_cursor.is_some());
+        assert!(zero.continuation_cursor.is_none());
 
         // Exactly-fits: all four kept, no cursor.
         let exact_budget = u32::try_from(per_item * 4).expect("budget fits in u32");
