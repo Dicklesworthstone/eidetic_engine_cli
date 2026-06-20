@@ -47300,6 +47300,7 @@ impl MemoryReviseReport {
         let json = serde_json::json!({
             "schema": "ee.response.v2",
             "success": self.success,
+            "degraded": Vec::<&str>::new(),
             "data": {
                 "command": "memory revise",
                 "version": self.version,
@@ -47406,6 +47407,7 @@ impl MemoryExpireReport {
         serde_json::json!({
             "schema": "ee.response.v2",
             "success": true,
+            "degraded": Vec::<&str>::new(),
             "data": {
                 "command": "memory expire",
                 "schema": self.schema,
@@ -47465,6 +47467,7 @@ impl MemoryLevelReport {
         serde_json::json!({
             "schema": "ee.response.v2",
             "success": true,
+            "degraded": Vec::<&str>::new(),
             "data": {
                 "command": "memory level",
                 "schema": self.schema,
@@ -47531,6 +47534,7 @@ impl MemoryLinkReport {
         serde_json::json!({
             "schema": "ee.response.v2",
             "success": true,
+            "degraded": Vec::<&str>::new(),
             "data": {
                 "command": "memory link",
                 "schema": self.schema,
@@ -47598,6 +47602,7 @@ impl MemoryTagsReport {
         serde_json::json!({
             "schema": "ee.response.v2",
             "success": true,
+            "degraded": Vec::<&str>::new(),
             "data": {
                 "command": "memory tags",
                 "schema": self.schema,
@@ -48067,7 +48072,7 @@ impl WorkflowCloseReport {
             .join(",");
 
         format!(
-            r#"{{"schema":"ee.response.v2","success":true,"data":{{"command":"workflow close","version":"{}","workspace_id":"{}","workflow_id":"{}","promoted_count":{},"expired_count":{},"promoted_memory_ids":[{}],"audit_ids":[{}]}}}}"#,
+            r#"{{"schema":"ee.response.v2","success":true,"degraded":[],"data":{{"command":"workflow close","version":"{}","workspace_id":"{}","workflow_id":"{}","promoted_count":{},"expired_count":{},"promoted_memory_ids":[{}],"audit_ids":[{}]}}}}"#,
             self.version,
             escape_json_string(&self.workspace_id),
             escape_json_string(&self.workflow_id),
@@ -74169,6 +74174,143 @@ mod tests {
             }
             _ => Err("expected Memory Level command".to_string()),
         }
+    }
+
+    #[test]
+    fn memory_lifecycle_json_outputs_include_top_level_degraded() -> TestResult {
+        let rendered_reports = vec![
+            (
+                "memory revise",
+                crate::core::memory::MemoryReviseReport::dry_run_preview(
+                    "mem_release_policy".to_owned(),
+                    crate::core::memory::ReviseReason::Correction,
+                    vec!["content".to_owned()],
+                )
+                .json_output(),
+                "memory revise",
+            ),
+            (
+                "memory expire",
+                crate::core::memory::MemoryExpireReport {
+                    schema: "ee.memory.expire.v1",
+                    version: "test",
+                    memory_id: "mem_release_policy".to_owned(),
+                    workspace_id: "ws_release".to_owned(),
+                    status: "expired".to_owned(),
+                    dry_run: false,
+                    persisted: true,
+                    changed: true,
+                    previous_valid_to: None,
+                    valid_to: Some("2026-06-20T00:00:00Z".to_owned()),
+                    previous_tombstoned_at: None,
+                    tombstoned_at: Some("2026-06-20T00:00:00Z".to_owned()),
+                    audit_id: Some("audit_release_policy".to_owned()),
+                    index_job_id: Some("idx_release_policy".to_owned()),
+                    index_status: "queued".to_owned(),
+                    idempotency: "applied".to_owned(),
+                }
+                .json_output(),
+                "memory expire",
+            ),
+            (
+                "memory level",
+                crate::core::memory::MemoryLevelReport {
+                    schema: "ee.memory.level.v1",
+                    version: "test",
+                    memory_id: "mem_release_policy".to_owned(),
+                    workspace_id: "ws_release".to_owned(),
+                    status: "transitioned".to_owned(),
+                    dry_run: false,
+                    persisted: true,
+                    changed: true,
+                    previous_level: "working".to_owned(),
+                    level: "procedural".to_owned(),
+                    event: Some("manual_transition".to_owned()),
+                    reason: Some("stable release rule".to_owned()),
+                    automatic: false,
+                    evidence_refs: vec!["session:release".to_owned()],
+                    audit_id: Some("audit_memory_level".to_owned()),
+                    index_job_id: Some("idx_memory_level".to_owned()),
+                    index_status: "queued".to_owned(),
+                    idempotency: "applied".to_owned(),
+                }
+                .json_output(),
+                "memory level",
+            ),
+            (
+                "memory link",
+                crate::core::memory::MemoryLinkReport {
+                    schema: "ee.memory.link.v1",
+                    version: "test",
+                    memory_id: "mem_release_policy".to_owned(),
+                    workspace_id: "ws_release".to_owned(),
+                    status: "linked".to_owned(),
+                    dry_run: false,
+                    persisted: true,
+                    changed: true,
+                    links: Vec::new(),
+                    link: None,
+                    audit_id: Some("audit_memory_link".to_owned()),
+                    idempotency: "applied".to_owned(),
+                }
+                .json_output(),
+                "memory link",
+            ),
+            (
+                "memory tags",
+                crate::core::memory::MemoryTagsReport {
+                    schema: "ee.memory.tags.v1",
+                    version: "test",
+                    memory_id: "mem_release_policy".to_owned(),
+                    workspace_id: "ws_release".to_owned(),
+                    status: "tagged".to_owned(),
+                    dry_run: false,
+                    persisted: true,
+                    changed: true,
+                    previous_tags: vec!["release".to_owned()],
+                    tags: vec!["release".to_owned(), "policy".to_owned()],
+                    added_tags: vec!["policy".to_owned()],
+                    removed_tags: Vec::new(),
+                    audit_ids: vec!["audit_memory_tags".to_owned()],
+                    index_job_id: Some("idx_memory_tags".to_owned()),
+                    index_status: "queued".to_owned(),
+                    idempotency: "applied".to_owned(),
+                }
+                .json_output(),
+                "memory tags",
+            ),
+            (
+                "workflow close",
+                crate::core::memory::WorkflowCloseReport {
+                    version: "test",
+                    workspace_id: "ws_release".to_owned(),
+                    workflow_id: "wf_release".to_owned(),
+                    promoted_count: 1,
+                    expired_count: 0,
+                    promoted_memory_ids: vec!["mem_release_policy".to_owned()],
+                    audit_ids: vec!["audit_workflow_close".to_owned()],
+                }
+                .json_output(),
+                "workflow close",
+            ),
+        ];
+
+        for (context, rendered, command) in rendered_reports {
+            let value: serde_json::Value = serde_json::from_str(&rendered)
+                .map_err(|error| format!("{context} json should parse: {error}"))?;
+            ensure_equal(
+                &value["degraded"],
+                &serde_json::json!([]),
+                &format!("{context} top-level degraded"),
+            )?;
+            ensure_equal(
+                &value["data"]["command"],
+                &serde_json::json!(command),
+                &format!("{context} command"),
+            )?;
+        }
+
+        Ok(())
     }
 
     #[test]
