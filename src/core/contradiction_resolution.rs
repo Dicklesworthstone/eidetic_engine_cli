@@ -51,10 +51,16 @@ impl ContradictionResolutionKind {
     /// mutation.
     #[must_use]
     pub const fn candidate_type(self) -> CandidateType {
+        // bd-jkgta: a confirmed contradiction resolution always applies the same
+        // content-free mutation — "keep the winner, tombstone-with-pointer the
+        // loser" (the documented principle above). It must NOT map to
+        // Supersede/Split/Merge: those set CandidateType::requires_content() and
+        // the curate accept/apply path rejects them as `content_required_for_type`
+        // because the pure proposal carries no proposed_content. Tombstone is the
+        // content-free type matching that principle; the winner is recorded as the
+        // candidate `source_id`. The analytical kind is preserved in the rationale.
         match self {
-            Self::Supersede => CandidateType::Supersede,
-            Self::ScopeSplit => CandidateType::Split,
-            Self::Merge => CandidateType::Merge,
+            Self::Supersede | Self::ScopeSplit | Self::Merge => CandidateType::Tombstone,
         }
     }
 
@@ -268,11 +274,40 @@ mod tests {
             ExplicitConflictSignal::DuplicateDivergent,
         );
         let input = to_curation_candidate_input(&proposal, "wsp_test");
-        assert_eq!(input.candidate_type, "merge");
+        // bd-jkgta: applies through a content-free tombstone-with-pointer, not
+        // a content-requiring merge/split/supersede.
+        assert_eq!(input.candidate_type, "tombstone");
         assert_eq!(input.target_memory_id.as_deref(), Some("mem_loser"));
         assert_eq!(input.source_id.as_deref(), Some("mem_winner"));
         assert_eq!(input.source_type, CONTRADICTION_RESOLUTION_SOURCE_TYPE);
         // Never auto-applied: it is a pending candidate awaiting curate accept.
         assert_eq!(input.status.as_deref(), Some("pending"));
+    }
+
+    #[test]
+    fn curate_candidate_uses_content_free_type_so_accept_can_apply_bd_jkgta() {
+        // bd-jkgta: every signal/kind must map to a CandidateType whose
+        // requires_content() is false, so the pending candidate (proposed_content
+        // None) does not hit the curate `content_required_for_type` branch and can
+        // actually be confirmed by `ee curate accept`.
+        for signal in [
+            ExplicitConflictSignal::ContradictionLink,
+            ExplicitConflictSignal::Supersession,
+            ExplicitConflictSignal::TrustOutcomeSplit,
+            ExplicitConflictSignal::RepeatedCoSelection,
+            ExplicitConflictSignal::DuplicateDivergent,
+            ExplicitConflictSignal::ValidityWindowOverlap,
+        ] {
+            let proposal = propose_contradiction_resolution("mem_winner", "mem_loser", signal);
+            let candidate_type = proposal.kind.candidate_type();
+            assert!(
+                !candidate_type.requires_content(),
+                "candidate_type {candidate_type:?} for signal {signal:?} must be content-free"
+            );
+            let input = to_curation_candidate_input(&proposal, "wsp_test");
+            assert_eq!(input.proposed_content, None);
+            assert_eq!(input.target_memory_id.as_deref(), Some("mem_loser"));
+            assert_eq!(input.source_id.as_deref(), Some("mem_winner"));
+        }
     }
 }
