@@ -279,7 +279,12 @@ pub fn build_agent_sources_report(options: &AgentSourcesOptions) -> AgentSources
     let only = options.only.as_deref().map(normalize_connector_slug);
     let sources = default_probe_paths_tilde()
         .into_iter()
-        .filter(|(slug, _)| only.as_deref().is_none_or(|wanted| *slug == wanted))
+        // bd-8kcov: normalize the catalog slug before comparing, matching the
+        // `wanted` value (already normalized at line above) and the
+        // path-rewrites filter below. Without this, a hyphenated canonical slug
+        // like `github-copilot` never equals the underscore-folded `wanted`,
+        // so `--only github-copilot` returned zero sources.
+        .filter(|(slug, _)| only.as_deref().is_none_or(|wanted| normalize_connector_slug(slug) == wanted))
         .map(|(slug, paths)| AgentSourceCatalogEntry {
             slug: slug.to_string(),
             probe_paths: if options.include_paths {
@@ -652,6 +657,30 @@ mod tests {
             &"/home/agent/.codex/sessions",
             "rewrite source",
         )
+    }
+
+    #[test]
+    fn source_report_only_matches_hyphenated_catalog_slug_bd_8kcov() -> TestResult {
+        // bd-8kcov: `--only github-copilot` must match the hyphenated canonical
+        // catalog slug. normalize_connector_slug folds the operator value to
+        // `github_copilot`, but `github-copilot` is not in the alias table
+        // (unlike codex_cli -> codex), so before the fix the filter compared the
+        // underscore `wanted` against the raw hyphenated catalog slug and
+        // dropped the source (total 0). The filter now normalizes the catalog
+        // slug too, mirroring the path-rewrites filter.
+        let report = build_agent_sources_report(&AgentSourcesOptions {
+            only: Some("github-copilot".to_string()),
+            include_paths: false,
+            include_origin_fixtures: false,
+            fixtures_root: None,
+        });
+
+        ensure_equal(&report.total_count, &1, "github-copilot source count")?;
+        let source = report
+            .sources
+            .first()
+            .ok_or_else(|| "expected one github-copilot source".to_string())?;
+        ensure_equal(&source.slug.as_str(), &"github-copilot", "source slug")
     }
 
     #[test]
