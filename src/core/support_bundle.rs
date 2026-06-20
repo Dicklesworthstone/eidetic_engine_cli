@@ -5307,6 +5307,15 @@ fn blake3_text_hash(value: &str) -> String {
     format!("blake3:{}", compute_hash(value))
 }
 
+fn normalize_blake3_text_hash(value: &str) -> Option<String> {
+    let hex = value.strip_prefix("blake3:")?;
+    if hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Some(format!("blake3:{}", hex.to_ascii_lowercase()))
+    } else {
+        None
+    }
+}
+
 struct SupportDiagnosticRedaction {
     content: String,
     redacted: bool,
@@ -5411,7 +5420,7 @@ fn summarize_performance_explain_sample(workspace: &Path, path: &Path) -> Option
         "contentHash": compute_hash(&redaction.content),
         "schema": parsed.get("schema").map(redact_json_value).unwrap_or(Value::Null),
         "command": data.get("command").map(redact_json_value).unwrap_or(Value::Null),
-        "query": data.get("query").map(redact_json_value).unwrap_or(Value::Null),
+        "query": summarize_performance_query_observation(data.get("query")),
         "queryPlan": data.get("queryPlan").map(redact_json_value).unwrap_or_else(|| json!({})),
         "measurements": {
             "dbReads": data.get("dbReads").map(redact_json_value).unwrap_or(Value::Null),
@@ -5425,6 +5434,94 @@ fn summarize_performance_explain_sample(workspace: &Path, path: &Path) -> Option
         "redacted": redaction.redacted,
         "redactionReasons": redaction_reasons,
     }))
+}
+
+fn summarize_performance_query_observation(query: Option<&Value>) -> Value {
+    let Some(query) = query else {
+        return Value::Null;
+    };
+
+    match query {
+        Value::Object(map) => {
+            let mut summary = serde_json::Map::new();
+            summary.insert("textIncluded".to_owned(), json!(false));
+            summary.insert("rawQueryTextIncluded".to_owned(), json!(false));
+            if let Some(length) = map.get("lengthBytes").and_then(Value::as_u64) {
+                summary.insert("lengthBytes".to_owned(), json!(length));
+            }
+            summary.insert(
+                "fingerprint".to_owned(),
+                json!(
+                    map.get("fingerprint")
+                        .and_then(Value::as_str)
+                        .and_then(normalize_blake3_text_hash)
+                        .unwrap_or_else(|| blake3_text_hash(&stable_json(query)))
+                ),
+            );
+            if let Some(mesh_provenance) = map.get("meshProvenance") {
+                summary.insert(
+                    "meshProvenance".to_owned(),
+                    summarize_performance_mesh_provenance(mesh_provenance),
+                );
+            }
+
+            let kept_fields = [
+                "textIncluded",
+                "lengthBytes",
+                "fingerprint",
+                "meshProvenance",
+            ];
+            let dropped_field_count = map
+                .keys()
+                .filter(|field| !kept_fields.contains(&field.as_str()))
+                .count();
+            if dropped_field_count > 0 {
+                summary.insert("droppedFieldCount".to_owned(), json!(dropped_field_count));
+            }
+
+            Value::Object(summary)
+        }
+        Value::String(text) => json!({
+            "textIncluded": false,
+            "rawQueryTextIncluded": false,
+            "lengthBytes": text.len(),
+            "fingerprint": blake3_text_hash(text),
+            "droppedFieldCount": 1,
+        }),
+        _ => json!({
+            "textIncluded": false,
+            "rawQueryTextIncluded": false,
+            "fingerprint": blake3_text_hash(&stable_json(query)),
+            "droppedFieldCount": 1,
+        }),
+    }
+}
+
+fn summarize_performance_mesh_provenance(mesh_provenance: &Value) -> Value {
+    let Some(map) = mesh_provenance.as_object() else {
+        return json!({
+            "shapeHash": blake3_text_hash(&stable_json(mesh_provenance)),
+            "droppedFieldCount": 1,
+        });
+    };
+
+    let mut summary = serde_json::Map::new();
+    let kept_fields = ["originWorkspaceLabel", "producerPeerLabel"];
+    for field in kept_fields {
+        if let Some(value) = map.get(field) {
+            summary.insert(field.to_owned(), redact_json_value(value));
+        }
+    }
+
+    let dropped_field_count = map
+        .keys()
+        .filter(|field| !kept_fields.contains(&field.as_str()))
+        .count();
+    if dropped_field_count > 0 {
+        summary.insert("droppedFieldCount".to_owned(), json!(dropped_field_count));
+    }
+
+    Value::Object(summary)
 }
 
 fn triage_summary_json(status: &StatusReport, swarm_reports: &[Value]) -> String {
@@ -12488,6 +12585,8 @@ mod tests {
         let performance_dir = workspace.join(".ee").join(PERFORMANCE_EXPLAIN_SAMPLE_DIR);
         fs::create_dir_all(&performance_dir)
             .map_err(|error| format!("failed to create performance sample dir: {error}"))?;
+        let untrusted_fingerprint =
+            "blake3:ordinary release checklist query terms should not leak as a fingerprint";
 
         let persisted_sample = json!({
             "schema": crate::core::search::PERFORMANCE_EXPLAIN_SCHEMA_V1,
@@ -12496,11 +12595,14 @@ mod tests {
                 "command": "search",
                 "query": {
                     "textIncluded": false,
+                    "text": "ordinary release checklist query terms",
+                    "debugQuery": "literal non-secret search text",
                     "lengthBytes": 31,
-                    "fingerprint": "blake3:samplequeryhash",
+                    "fingerprint": untrusted_fingerprint,
                     "meshProvenance": {
                         "originWorkspaceLabel": "/Users/alice/private/repo",
-                        "producerPeerLabel": "/Users/alice/private/peer-agent"
+                        "producerPeerLabel": "/Users/alice/private/peer-agent",
+                        "queryText": "mesh provenance raw query terms"
                     }
                 },
                 "queryPlan": {
@@ -12581,6 +12683,13 @@ mod tests {
                 && !samples_json.contains("/Users/alice/private/peer-agent"),
             "performance samples must not leak raw mesh workspace or producer peer paths"
         );
+        assert!(
+            !samples_json.contains("ordinary release checklist query terms")
+                && !samples_json.contains("literal non-secret search text")
+                && !samples_json.contains("mesh provenance raw query terms")
+                && !samples_json.contains(untrusted_fingerprint),
+            "performance samples must not leak raw query text"
+        );
         let samples: Value = serde_json::from_str(&samples_json)
             .map_err(|error| format!("performance samples must parse: {error}"))?;
 
@@ -12592,6 +12701,30 @@ mod tests {
         assert_eq!(
             samples.pointer("/samples/0/command"),
             Some(&json!("search"))
+        );
+        assert_eq!(
+            samples.pointer("/samples/0/query/textIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            samples.pointer("/samples/0/query/rawQueryTextIncluded"),
+            Some(&json!(false))
+        );
+        let emitted_fingerprint = samples
+            .pointer("/samples/0/query/fingerprint")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "performance sample query fingerprint missing".to_owned())?;
+        assert_ne!(
+            emitted_fingerprint, untrusted_fingerprint,
+            "non-canonical fingerprints must be replaced instead of echoed"
+        );
+        assert!(
+            normalize_blake3_text_hash(emitted_fingerprint).is_some(),
+            "emitted fingerprint must be a canonical blake3 digest: {emitted_fingerprint}"
+        );
+        assert_eq!(
+            samples.pointer("/samples/0/query/droppedFieldCount"),
+            Some(&json!(2))
         );
         assert_eq!(
             samples.pointer("/samples/0/queryPlan/requestedLimit"),
@@ -12608,6 +12741,10 @@ mod tests {
         assert_eq!(
             samples.pointer("/samples/0/query/meshProvenance/producerPeerLabel"),
             Some(&json!("[REDACTED:path]"))
+        );
+        assert_eq!(
+            samples.pointer("/samples/0/query/meshProvenance/droppedFieldCount"),
+            Some(&json!(1))
         );
         assert_eq!(samples.pointer("/samples/0/redacted"), Some(&json!(true)));
         assert!(
@@ -12641,6 +12778,25 @@ mod tests {
             samples.pointer("/samples/0/path"),
             Some(&json!(".ee/performance-explain/search-release.json"))
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn support_bundle_query_fingerprint_requires_canonical_blake3_digest() -> TestResult {
+        let uppercase = format!("blake3:{}", "A".repeat(64));
+        let lowercase = format!("blake3:{}", "a".repeat(64));
+
+        assert_eq!(normalize_blake3_text_hash(&uppercase), Some(lowercase));
+        assert!(normalize_blake3_text_hash("blake3:samplequeryhash").is_none());
+        assert!(
+            normalize_blake3_text_hash(
+                "blake3:ordinary release checklist query terms should not leak"
+            )
+            .is_none()
+        );
+        assert!(normalize_blake3_text_hash(&format!("blake3:{}", "g".repeat(64))).is_none());
+        assert!(normalize_blake3_text_hash(&format!("sha256:{}", "a".repeat(64))).is_none());
 
         Ok(())
     }

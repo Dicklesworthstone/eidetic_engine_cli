@@ -781,7 +781,48 @@ impl CommandEffect {
                 ),
                 recovery_behavior: "partial config-file output is reported as failed, never deleted by ee, and not treated as committed configuration",
                 no_overwrite_behavior: Some(
-                    "preserves unrelated config keys where possible; no-delete: ee never deletes the config file",
+                    "no-overwrite contract preserves unrelated config keys where possible; no-delete: ee never deletes the config file",
+                ),
+                degraded_code: None,
+            },
+            runtime_contract: CommandRuntimeContract::side_path_artifact(),
+            requires_read_snapshot: false,
+            requires_audit: false,
+            description,
+        }
+    }
+
+    /// Create a harness settings-file write entry that does not touch the ee database.
+    #[must_use]
+    pub fn harness_hook_settings_write(
+        command_path: &'static str,
+        workspace_files: Vec<&'static str>,
+        idempotency_key: &'static str,
+        description: &'static str,
+    ) -> Self {
+        Self {
+            command_path,
+            default_effect: EffectClass::ConfigWrite,
+            dry_run_effect: Some(EffectClass::ReadOnly),
+            idempotency: IdempotencyClass::DryRunAvailable,
+            write_surfaces: WriteSurfaces {
+                db_tables: Vec::new(),
+                derived_paths: Vec::new(),
+                workspace_files,
+            },
+            mutation_contract: CommandMutationContract {
+                side_effect_class: SideEffectClass::SidePathArtifact,
+                transaction_scope: Some("agent harness settings file update"),
+                idempotency_key: Some(idempotency_key),
+                audit_surface: None,
+                db_generation_effect: "source DB generation unchanged",
+                index_generation_effect: "none",
+                dry_run_behavior: Some(
+                    "--print previews generated harness hooks without writing settings files",
+                ),
+                recovery_behavior: "failed harness settings writes return storage_error, partial output is never deleted by ee, and backups are left in place for manual restore and --undo",
+                no_overwrite_behavior: Some(
+                    "no-overwrite/no-delete: preserves unmanaged settings entries; install writes a deterministic backup before changing managed hook entries; ee never deletes harness settings files",
                 ),
                 degraded_code: None,
             },
@@ -2522,6 +2563,36 @@ impl EffectManifest {
                 vec![".ee/config.toml"],
                 "workspace config path plus exact config key and scalar value",
                 "Set a supported workspace configuration key",
+            ),
+            CommandEffect::harness_hook_settings_write(
+                "hook claude-code --install",
+                vec![
+                    "~/.claude/settings.json",
+                    "~/.claude/settings.json.ee-backup",
+                ],
+                "Claude Code settings path plus generated managed hook snippets",
+                "Install ee-managed Claude Code recall and journal hooks into harness settings",
+            ),
+            CommandEffect::harness_hook_settings_write(
+                "hook claude-code --undo",
+                vec![
+                    "~/.claude/settings.json",
+                    "~/.claude/settings.json.ee-backup",
+                ],
+                "Claude Code settings backup path",
+                "Restore Claude Code harness settings from the deterministic ee backup",
+            ),
+            CommandEffect::harness_hook_settings_write(
+                "hook codex --install",
+                vec![".codex/hooks.json", ".codex/hooks.json.ee-backup"],
+                "Codex hooks path plus generated managed hook snippets",
+                "Install ee-managed Codex recall and journal hooks into harness settings",
+            ),
+            CommandEffect::harness_hook_settings_write(
+                "hook codex --undo",
+                vec![".codex/hooks.json", ".codex/hooks.json.ee-backup"],
+                "Codex hooks backup path",
+                "Restore Codex harness settings from the deterministic ee backup",
             ),
             CommandEffect::certificate_key_file_write(
                 "certificate keygen",

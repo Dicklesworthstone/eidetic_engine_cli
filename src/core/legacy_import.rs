@@ -572,7 +572,8 @@ fn is_candidate_path(path: &Path, scan_root: &Path) -> bool {
 fn scan_artifact(path: &Path, scan_root: &Path) -> Result<LegacyArtifact, LegacyImportScanError> {
     let format = format_from_path(path);
     let (size_bytes, content_hash, preview) = hash_and_preview(path)?;
-    let lower_path = path_to_wire_string(path).to_ascii_lowercase();
+    let artifact_path = relative_path(path, scan_root);
+    let lower_path = artifact_path.to_ascii_lowercase();
     let lower_preview = preview.to_ascii_lowercase();
     let artifact_type = classify_artifact(&lower_path, &lower_preview, format);
     let instruction_report = detect_instruction_like_content(&preview);
@@ -599,7 +600,7 @@ fn scan_artifact(path: &Path, scan_root: &Path) -> Result<LegacyArtifact, Legacy
     risk_flags.dedup();
 
     Ok(LegacyArtifact {
-        path: relative_path(path, scan_root),
+        path: artifact_path,
         artifact_type,
         format,
         size_bytes,
@@ -1414,6 +1415,39 @@ mod tests {
                 .risk_flags
                 .contains(&LegacyRiskFlag::SensitiveContent),
             "sensitive flag present",
+        )
+    }
+
+    #[test]
+    fn scanner_classifies_artifacts_from_reported_relative_path() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source = tempdir.path().join("db_named_source_root");
+        fs::create_dir(&source).map_err(|error| error.to_string())?;
+        fs::write(
+            source.join("config.toml"),
+            "[storage]\ndatabase_path = \"legacy.db\"\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = scan_eidetic_legacy_source(&LegacyImportScanOptions {
+            source_path: source,
+            dry_run: true,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(&report.artifacts.len(), &1, "artifact count")?;
+        let artifact = &report.artifacts[0];
+        ensure_equal(&artifact.path, &"config.toml".to_string(), "artifact path")?;
+        ensure_equal(
+            &artifact.artifact_type,
+            &LegacyArtifactType::Config,
+            "source root keywords must not override relative artifact classification",
+        )?;
+        ensure(
+            !artifact
+                .risk_flags
+                .contains(&LegacyRiskFlag::DatabaseOrIndexAsset),
+            "source root keywords must not add index risk",
         )
     }
 

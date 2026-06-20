@@ -230,9 +230,11 @@ where
             };
 
             let result = operation();
-            guard.completed = true;
-
-            self.complete_leader(&key_hash, &entry, leader_started, result)
+            let completion = self.complete_leader(&key_hash, &entry, leader_started, result);
+            if !matches!(&completion, Err(SingleFlightError::StatePoisoned { .. })) {
+                guard.completed = true;
+            }
+            completion
         } else {
             self.counters.follower_joins.fetch_add(1, Ordering::SeqCst);
             trace_singleflight_checkpoint(SINGLEFLIGHT_FOLLOWER_JOIN_EVENT, &key_hash, 0, &[]);
@@ -838,6 +840,10 @@ fn burst_input_diagnoses(
         diagnoses.push(format!(
             "capped identical requests from {requested_identical} to {effective_identical}"
         ));
+    } else if requested_identical < effective_identical {
+        diagnoses.push(format!(
+            "raised identical requests from {requested_identical} to {effective_identical}"
+        ));
     }
     if requested_distinct > effective_distinct {
         diagnoses.push(format!(
@@ -847,6 +853,10 @@ fn burst_input_diagnoses(
     if requested_node_count > effective_node_count {
         diagnoses.push(format!(
             "capped node count from {requested_node_count} to {effective_node_count}"
+        ));
+    } else if requested_node_count < effective_node_count {
+        diagnoses.push(format!(
+            "raised node count from {requested_node_count} to {effective_node_count}"
         ));
     }
     diagnoses
@@ -1613,6 +1623,40 @@ mod tests {
         Ok(())
     }
 
+    #[derive(Debug)]
+    struct PanicOnClone;
+
+    impl Clone for PanicOnClone {
+        fn clone(&self) -> Self {
+            panic!("synthetic clone panic")
+        }
+    }
+
+    #[test]
+    fn leader_cleanup_runs_when_result_clone_panics_during_completion() -> TestResult {
+        let group = SingleFlightGroup::<PanicOnClone>::new();
+        let key = key("clone panics during completion");
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = group.run(&key, Duration::from_secs(1), || Ok(PanicOnClone));
+        }));
+        assert!(
+            panic.is_err(),
+            "test fixture should panic while cloning the leader result"
+        );
+
+        assert_eq!(
+            group.active_len().map_err(|error| format!("{error:?}"))?,
+            0,
+            "leader guard must remove the active entry when completion panics after the operation returns"
+        );
+        let posture = group.posture(SingleFlightSurface::Context, true, Duration::from_secs(1));
+        assert_eq!(posture.active_leader_count, 0);
+        assert_eq!(posture.leader_failure_count, 1);
+        assert_eq!(posture.state_poisoned_count, 1);
+        Ok(())
+    }
+
     fn wait_for_registered_follower(
         group: &SingleFlightGroup<String>,
         key_hash: &str,
@@ -1872,6 +1916,46 @@ mod tests {
         assert_eq!(
             json["limits"]["maxNodeCount"],
             serde_json::json!(GRAPH_FEATURE_ENRICHMENT_BURST_MAX_NODE_COUNT)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn graph_feature_enrichment_burst_reports_floor_adjusted_inputs() -> TestResult {
+        let report = run_graph_feature_enrichment_burst_smoke(
+            "/workspace/eidetic_engine_cli",
+            &GraphFeatureEnrichmentOptions::default(),
+            &GraphFeatureEnrichmentBurstOptions {
+                identical_requests: 0,
+                distinct_requests: 0,
+                node_count: 0,
+            },
+        );
+
+        assert_eq!(report.requested_identical, 0);
+        assert_eq!(report.effective_identical, 2);
+        assert_eq!(report.requested_node_count, 0);
+        assert_eq!(report.effective_node_count, 1);
+        assert!(
+            !report.passed,
+            "floor-adjusted hidden harness inputs must not report a clean pass"
+        );
+        assert!(
+            report
+                .diagnoses
+                .iter()
+                .any(|diagnosis| diagnosis == "raised identical requests from 0 to 2"),
+            "diagnoses should mention raised identical requests: {:?}",
+            report.diagnoses
+        );
+        assert!(
+            report
+                .diagnoses
+                .iter()
+                .any(|diagnosis| diagnosis == "raised node count from 0 to 1"),
+            "diagnoses should mention raised node count: {:?}",
+            report.diagnoses
         );
 
         Ok(())

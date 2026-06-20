@@ -34,6 +34,7 @@ use crate::graph::health::{
     ContradictionCluster, ContradictionClusterPolicy, ContradictionSeverity,
     detect_contradiction_clusters_with_policy,
 };
+use crate::models::TrustClass;
 
 /// An explicit, DB-recorded conflict signal between two memories. Each variant is
 /// evidence the store already holds — never an inferred/fuzzy guess.
@@ -394,18 +395,18 @@ pub const CONFLICT_SURFACE_SCHEMA_V1: &str = "ee.conflict.v1";
 
 /// Trust ranking for a memory's `trust_class` (higher = more trusted). Used only
 /// to pick the "higher-trust side" of a conflicting pair. Ranks the canonical
-/// memory trust-class vocabulary (the `memories.trust_class` CHECK set); unknown
-/// classes rank low-but-nonzero so they never silently outrank a known class.
+/// memory trust-class vocabulary (the `memories.trust_class` CHECK set). Unknown
+/// or corrupt classes rank below every known class so they never silently outrank
+/// valid store data.
 #[must_use]
 pub fn trust_class_rank(trust_class: &str) -> u8 {
-    match trust_class {
-        "human_explicit" => 5,
-        "agent_validated" => 4,
-        "cass_evidence" => 3,
-        "agent_assertion" => 2,
-        "legacy_import" => 1,
-        "external" => 0,
-        _ => 1,
+    match trust_class.parse::<TrustClass>() {
+        Ok(TrustClass::HumanExplicit) => 5,
+        Ok(TrustClass::AgentValidated) => 4,
+        Ok(TrustClass::AgentAssertion) => 3,
+        Ok(TrustClass::CassEvidence) => 2,
+        Ok(TrustClass::LegacyImport) => 1,
+        Err(_) => 0,
     }
 }
 
@@ -1006,12 +1007,14 @@ mod tests {
     }
 
     #[test]
-    fn trust_class_rank_orders_human_above_agent_above_external() {
+    fn trust_class_rank_follows_the_canonical_store_taxonomy() {
         assert!(trust_class_rank("human_explicit") > trust_class_rank("agent_validated"));
-        assert!(trust_class_rank("agent_validated") > trust_class_rank("external"));
-        // An unknown class ranks low-but-nonzero so it never outranks a known one.
-        assert!(trust_class_rank("totally_unknown") < trust_class_rank("human_explicit"));
-        assert!(trust_class_rank("totally_unknown") >= trust_class_rank("external"));
+        assert!(trust_class_rank("agent_validated") > trust_class_rank("agent_assertion"));
+        assert!(trust_class_rank("agent_assertion") > trust_class_rank("cass_evidence"));
+        assert!(trust_class_rank("cass_evidence") > trust_class_rank("legacy_import"));
+        // Unknown/corrupt classes rank below every valid DB trust class.
+        assert!(trust_class_rank("legacy_import") > trust_class_rank("totally_unknown"));
+        assert_eq!(trust_class_rank("external"), 0);
     }
 
     #[test]

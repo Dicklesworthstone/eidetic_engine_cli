@@ -24,8 +24,7 @@ use crate::models::model_registry::{ModelPurpose, ModelRegistryStatus};
 use crate::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use crate::models::{
     GLOBAL_MEMORY_SCOPE_TAG, MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri, TrustClass,
-    UnitScore,
-    degraded_recovery_actions,
+    UnitScore, degraded_recovery_actions,
 };
 use crate::obs::audit_events::query_hash as audit_query_hash;
 use crate::pack::{
@@ -5923,11 +5922,12 @@ fn resolve_similar_seed_memory(
     workspace_id: &str,
     scope_context: &MemoryScopeContext,
 ) -> Result<StoredMemory, SimilarError> {
-    let memory = connection
-        .get_memory(&options.memory_id)?
-        .ok_or_else(|| SimilarError::MemoryNotFound {
-            memory_id: options.memory_id.clone(),
-        })?;
+    let memory =
+        connection
+            .get_memory(&options.memory_id)?
+            .ok_or_else(|| SimilarError::MemoryNotFound {
+                memory_id: options.memory_id.clone(),
+            })?;
     let tags = connection.get_memory_tags(&options.memory_id)?;
 
     // Workspace + scope trust lane: the seed must belong to the requested
@@ -8086,6 +8086,39 @@ fn weighted_component_mix(
         + (weights.graph * graph_component)
 }
 
+fn weighted_available_component_mix(
+    weights: SearchFusionWeights,
+    lexical_component: f32,
+    semantic_component: f32,
+    graph_component: f32,
+) -> f32 {
+    if graph_component > 0.0 {
+        return weighted_component_mix(
+            weights,
+            lexical_component,
+            semantic_component,
+            graph_component,
+        );
+    }
+
+    let wired_weight_sum = weights.lexical + weights.semantic;
+    if !wired_weight_sum.is_finite() || wired_weight_sum <= f32::EPSILON {
+        return weighted_available_component_mix(
+            SearchFusionWeights::default(),
+            lexical_component,
+            semantic_component,
+            graph_component,
+        );
+    }
+    let total_weight = weights.lexical + weights.semantic + weights.graph;
+    let scale = if total_weight.is_finite() && total_weight > wired_weight_sum {
+        total_weight / wired_weight_sum
+    } else {
+        1.0
+    };
+    (weights.lexical * scale * lexical_component) + (weights.semantic * scale * semantic_component)
+}
+
 fn configured_fusion_adjustment(
     hit: &SearchHit,
     source_mode: SearchSourceMode,
@@ -8103,7 +8136,7 @@ fn configured_fusion_adjustment(
     }
 
     let default_weights = SearchFusionWeights::default();
-    let default_mix = weighted_component_mix(
+    let default_mix = weighted_available_component_mix(
         default_weights,
         lexical_component,
         semantic_component,
@@ -8113,7 +8146,7 @@ fn configured_fusion_adjustment(
         return None;
     }
 
-    let configured_mix = weighted_component_mix(
+    let configured_mix = weighted_available_component_mix(
         weights,
         lexical_component,
         semantic_component,
@@ -8150,7 +8183,7 @@ fn append_configured_fusion_weight_factor(
         adjustment.multiplier,
         "workspace search.lexical_weight/search.semantic_weight/search.graph_weight multiplier",
         "search.lexical_weight/search.semantic_weight/search.graph_weight",
-        "adjusted_score = raw_fusion_score * (configured_component_mix / default_component_mix)",
+        "adjusted_score = raw_fusion_score * (configured_available_component_mix / default_available_component_mix)",
     ));
 }
 
@@ -9511,11 +9544,10 @@ fn apply_memory_scope_visibility_with_connection(
     let (mut scope_memories, read_error): (
         BTreeMap<String, crate::db::StoredMemory>,
         Option<String>,
-    ) =
-        match connection.get_memories_batch(&hit_doc_refs) {
-            Ok(memories) => (memories, None),
-            Err(error) => (BTreeMap::new(), Some(error.to_string())),
-        };
+    ) = match connection.get_memories_batch(&hit_doc_refs) {
+        Ok(memories) => (memories, None),
+        Err(error) => (BTreeMap::new(), Some(error.to_string())),
+    };
     if let Some(preloaded) = preloaded_memories.as_deref() {
         for memory_id in &hit_doc_ids {
             if let Some(memory) = preloaded.get(memory_id) {
@@ -15188,6 +15220,48 @@ mod tests {
         assert!(rrf_deep_rank < DEFAULT_RELEVANCE_FLOOR_HYBRID);
     }
 
+    #[test]
+    fn graph_only_config_does_not_zero_hybrid_recall_bd_d67os_19() {
+        let hit = search_hit_from_scored_result(
+            crate::search::ScoredResult {
+                doc_id: "mem_graph_weight_recall".to_owned(),
+                score: 0.02,
+                source: crate::search::ScoreSource::Hybrid,
+                index: None,
+                fast_score: Some(0.70),
+                quality_score: None,
+                lexical_score: Some(0.40),
+                rerank_score: None,
+                explanation: None,
+                metadata: None,
+            },
+            true,
+            SearchSourceMode::Hybrid,
+            SearchFusionWeights {
+                lexical: 0.0,
+                semantic: 0.0,
+                graph: 1.0,
+            },
+        );
+
+        assert!(
+            hit.score >= DEFAULT_RELEVANCE_FLOOR_HYBRID,
+            "graph-only config must not erase an otherwise relevant hybrid hit"
+        );
+        assert!((hit.score - 0.02).abs() < 1e-6);
+        let explanation = hit
+            .explanation
+            .as_ref()
+            .expect("explain=true should preserve configured-weight explanation");
+        assert!(
+            explanation
+                .factors
+                .iter()
+                .any(|factor| factor.name == "configured_fusion_weight"
+                    && (factor.value - 1.0).abs() < 1e-6)
+        );
+    }
+
     /// Helper: synthesize a hybrid `SearchHit` for adaptive-floor tests.
     fn synthetic_hybrid_hit(doc_id: &str, score: f32) -> SearchHit {
         let mut hit = synthetic_hit(doc_id, score);
@@ -15327,12 +15401,8 @@ mod tests {
 
     #[test]
     fn rerank_posture_reports_empty_fusion_only_without_degradation() {
-        let posture = search_rerank_posture_json(
-            &[],
-            &[],
-            crate::config::SearchRerankMode::Off,
-            12,
-        );
+        let posture =
+            search_rerank_posture_json(&[], &[], crate::config::SearchRerankMode::Off, 12);
 
         assert_eq!(posture["schema"], "ee.rerank_posture.v1");
         assert_eq!(posture["mode"], "fusion_only");

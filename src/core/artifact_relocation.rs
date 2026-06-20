@@ -237,6 +237,7 @@ fn plan_or_apply_relocation(
     if options.mode == ArtifactRelocationMode::Apply {
         reject_existing_symlink_component(&destination_root)?;
         reject_existing_symlink_component(options.manifest_path)?;
+        prepare_manifest_output_path(options.manifest_path)?;
         apply_manifest_copy(&manifest)?;
         write_manifest_no_overwrite(options.manifest_path, &manifest)?;
     }
@@ -277,6 +278,7 @@ fn restore_relocation(
     for entry in &manifest.entries {
         let original = manifest_entry_path(entry, "originalPath", &entry.original_path)?;
         let destination = manifest_entry_path(entry, "destinationPath", &entry.destination_path)?;
+        let expected_hash = required_manifest_entry_hash(entry)?;
         reject_existing_symlink_component(&original)?;
         reject_existing_symlink_component(&destination)?;
         let original_allowed = source_allowed(options.workspace_path, &original);
@@ -294,24 +296,20 @@ fn restore_relocation(
         }
         restore_source_allowed &= original_allowed;
         if original.exists() {
-            if let Some(expected) = entry.blake3.as_deref() {
-                verify_relocation_file_hash(
-                    &original,
-                    expected,
-                    "existing original artifact",
-                    "Move the conflicting file aside manually before restore.",
-                )?;
-            }
+            verify_relocation_file_hash(
+                &original,
+                expected_hash,
+                "existing original artifact",
+                "Move the conflicting file aside manually before restore.",
+            )?;
             continue;
         }
-        if let Some(expected) = entry.blake3.as_deref() {
-            verify_relocation_file_hash(
-                &destination,
-                expected,
-                "relocated artifact",
-                "Verify the relocation manifest and preserved artifact before restore.",
-            )?;
-        }
+        verify_relocation_file_hash(
+            &destination,
+            expected_hash,
+            "relocated artifact",
+            "Verify the relocation manifest and preserved artifact before restore.",
+        )?;
         if let Some(parent) = original.parent() {
             reject_existing_symlink_component(parent)?;
             fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
@@ -326,14 +324,12 @@ fn restore_relocation(
         reject_existing_symlink_component(&destination)?;
         reject_existing_symlink_component(&original)?;
         copy_relocation_file_no_overwrite(&destination, &original, "restore relocated artifact")?;
-        if let Some(expected) = entry.blake3.as_deref() {
-            verify_relocation_file_hash(
-                &original,
-                expected,
-                "restored original artifact",
-                "Remove the partial restored file manually after reviewing it, then retry.",
-            )?;
-        }
+        verify_relocation_file_hash(
+            &original,
+            expected_hash,
+            "restored original artifact",
+            "Remove the partial restored file manually after reviewing it, then retry.",
+        )?;
         restored = true;
     }
 
@@ -349,6 +345,18 @@ fn restore_relocation(
         preservation_policy: "copy_preserve_no_delete_no_overwrite",
         recovery_actions: Vec::new(),
         manifest,
+    })
+}
+
+fn required_manifest_entry_hash(entry: &ArtifactRelocationEntry) -> Result<&str, DomainError> {
+    entry.blake3.as_deref().ok_or_else(|| DomainError::Usage {
+        message: format!(
+            "relocation manifest entry for {} is missing required blake3 hash.",
+            entry.destination_path
+        ),
+        repair: Some(
+            "Use a relocation manifest created by `ee artifact relocate --apply`.".to_owned(),
+        ),
     })
 }
 
@@ -594,33 +602,13 @@ fn write_manifest_no_overwrite(
     manifest_path: &Path,
     manifest: &ArtifactRelocationManifest,
 ) -> Result<(), DomainError> {
-    reject_existing_symlink_component(manifest_path)?;
-    if manifest_path.exists() {
-        return Err(DomainError::Storage {
-            message: format!("manifest already exists: {}", manifest_path.display()),
-            repair: Some("Choose a new manifest path; this command will not overwrite.".to_owned()),
-        });
-    }
-    if let Some(parent) = manifest_path.parent() {
-        reject_existing_symlink_component(parent)?;
-        fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
-            message: format!(
-                "failed to create manifest parent {}: {error}",
-                parent.display()
-            ),
-            repair: Some("Check manifest directory permissions.".to_owned()),
-        })?;
-        reject_existing_symlink_component(parent)?;
-    }
+    prepare_manifest_output_path(manifest_path)?;
     let json = serde_json::to_string_pretty(manifest).map_err(|error| DomainError::Storage {
         message: format!("failed to serialize relocation manifest: {error}"),
         repair: Some("Report the serialization failure.".to_owned()),
     })?;
 
-    let mut temp_path = manifest_path.to_owned();
-    temp_path.set_extension("tmp");
-    reject_existing_symlink_component(&temp_path)?;
-    ensure_relocation_manifest_temp_path_regular_or_missing(&temp_path)?;
+    let temp_path = relocation_manifest_temp_path(manifest_path);
 
     {
         use std::io::Write;
@@ -661,6 +649,37 @@ fn write_manifest_no_overwrite(
     }
 
     Ok(())
+}
+
+fn prepare_manifest_output_path(manifest_path: &Path) -> Result<(), DomainError> {
+    reject_existing_symlink_component(manifest_path)?;
+    ensure_relocation_manifest_final_path_missing(manifest_path)?;
+    if let Some(parent) = non_empty_parent(manifest_path) {
+        reject_existing_symlink_component(parent)?;
+        fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+            message: format!(
+                "failed to create manifest parent {}: {error}",
+                parent.display()
+            ),
+            repair: Some("Check manifest directory permissions.".to_owned()),
+        })?;
+        reject_existing_symlink_component(parent)?;
+    }
+
+    let temp_path = relocation_manifest_temp_path(manifest_path);
+    reject_existing_symlink_component(&temp_path)?;
+    ensure_relocation_manifest_temp_path_regular_or_missing(&temp_path)
+}
+
+fn relocation_manifest_temp_path(manifest_path: &Path) -> PathBuf {
+    let mut temp_path = manifest_path.to_owned();
+    temp_path.set_extension("tmp");
+    temp_path
+}
+
+fn non_empty_parent(path: &Path) -> Option<&Path> {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
 }
 
 fn publish_relocation_manifest_temp_file(
@@ -1527,11 +1546,13 @@ mod tests {
         fs::create_dir_all(parent_dir(&source)?).map_err(|error| error.to_string())?;
         fs::write(&source, "artifact bytes\n").map_err(|error| error.to_string())?;
         let destination = temp_path("existing-temp-manifest-destination");
+        let expected_copy = destination
+            .join(RELOCATION_DIR)
+            .join("target/debug/sample.o");
         let manifest = temp_path("existing-temp-manifest").join("relocation.json");
         let parent = parent_dir(&manifest)?;
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        let mut temp_manifest = manifest.clone();
-        temp_manifest.set_extension("tmp");
+        let temp_manifest = relocation_manifest_temp_path(&manifest);
         fs::write(&temp_manifest, "keep me").map_err(|error| error.to_string())?;
 
         let result = relocate_artifacts(&ArtifactRelocationOptions {
@@ -1565,9 +1586,63 @@ mod tests {
         if manifest.exists() {
             return Err("final manifest was written after temp path collision".to_owned());
         }
+        if expected_copy.exists() {
+            return Err("artifact copy happened before temp manifest rejection".to_owned());
+        }
         let temp_content = fs::read_to_string(&temp_manifest).map_err(|error| error.to_string())?;
         if temp_content != "keep me" {
             return Err("existing temp manifest was unexpectedly truncated".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn relocation_apply_rejects_existing_manifest_before_copying() -> TestResult {
+        let workspace = temp_path("existing-final-manifest-workspace");
+        let source = workspace.join("target/debug/sample.o");
+        fs::create_dir_all(parent_dir(&source)?).map_err(|error| error.to_string())?;
+        fs::write(&source, "artifact bytes\n").map_err(|error| error.to_string())?;
+        let destination = temp_path("existing-final-manifest-destination");
+        let expected_copy = destination
+            .join(RELOCATION_DIR)
+            .join("target/debug/sample.o");
+        let manifest = temp_path("existing-final-manifest").join("relocation.json");
+        fs::create_dir_all(parent_dir(&manifest)?).map_err(|error| error.to_string())?;
+        fs::write(&manifest, "keep final").map_err(|error| error.to_string())?;
+
+        let result = relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &workspace,
+            source_path: Some(&source),
+            destination_root: Some(&destination),
+            manifest_path: &manifest,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Apply,
+            force_with_explicit_path: false,
+        });
+
+        match result {
+            Err(DomainError::Storage { message, repair }) => {
+                if !message.contains("relocation manifest path already exists before publish") {
+                    return Err(format!("unexpected storage error message: {message}"));
+                }
+                if repair.as_deref()
+                    != Some("Choose a new manifest path; this command will not overwrite.")
+                {
+                    return Err(format!("unexpected repair hint: {repair:?}"));
+                }
+            }
+            other => {
+                return Err(format!(
+                    "expected existing manifest storage error, got {other:?}"
+                ));
+            }
+        }
+        let final_content = fs::read_to_string(&manifest).map_err(|error| error.to_string())?;
+        if final_content != "keep final" {
+            return Err("existing final manifest was unexpectedly overwritten".to_owned());
+        }
+        if expected_copy.exists() {
+            return Err("artifact copy happened before existing manifest rejection".to_owned());
         }
         Ok(())
     }
@@ -1952,7 +2027,9 @@ mod tests {
             return Err("restore wrote an original from the wrong workspace manifest".to_owned());
         }
         if parent_dir(&original)?.exists() {
-            return Err("restore created parent directories outside the active workspace".to_owned());
+            return Err(
+                "restore created parent directories outside the active workspace".to_owned(),
+            );
         }
         Ok(())
     }
@@ -1998,6 +2075,50 @@ mod tests {
         }
         if original.exists() {
             return Err("restore wrote original after relocated hash mismatch".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn relocation_restore_rejects_missing_manifest_hash_before_writing_original() -> TestResult {
+        let workspace = temp_path("restore-missing-hash-workspace");
+        let original = workspace.join("target/debug/restored.o");
+        let destination = temp_path("restore-missing-hash-destination")
+            .join(RELOCATION_DIR)
+            .join("target/debug/restored.o");
+        fs::create_dir_all(parent_dir(&destination)?).map_err(|error| error.to_string())?;
+        fs::write(&destination, "restore bytes\n").map_err(|error| error.to_string())?;
+        let manifest_path = temp_path("restore-missing-hash-manifest").join("relocation.json");
+        let mut manifest =
+            relocation_manifest_for(&workspace, &original, &destination, &manifest_path)?;
+        manifest.entries[0].blake3 = None;
+        write_relocation_manifest(&manifest_path, &manifest)?;
+
+        let result = relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &workspace,
+            source_path: None,
+            destination_root: None,
+            manifest_path: &manifest_path,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Restore,
+            force_with_explicit_path: false,
+        });
+
+        match result {
+            Err(DomainError::Usage { message, repair }) => {
+                if !message.contains("missing required blake3 hash") {
+                    return Err(format!("unexpected usage error message: {message}"));
+                }
+                if repair.as_deref()
+                    != Some("Use a relocation manifest created by `ee artifact relocate --apply`.")
+                {
+                    return Err(format!("unexpected repair hint: {repair:?}"));
+                }
+            }
+            other => return Err(format!("expected missing hash usage error, got {other:?}")),
+        }
+        if original.exists() {
+            return Err("restore wrote original from a hashless manifest entry".to_owned());
         }
         Ok(())
     }

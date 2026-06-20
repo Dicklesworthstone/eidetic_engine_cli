@@ -177,7 +177,10 @@ pub fn check_install_with_required_surfaces(
     let current_binary_path = current_binary.as_deref().map(normalize_path);
     if let (Some(current_path), Some(first_binary)) =
         (current_binary_path.as_deref(), path.first_binary.as_deref())
-        && first_binary != current_path
+        && path
+            .binaries
+            .first()
+            .is_some_and(|binary| !binary.is_current_binary)
     {
         findings.push(InstallFinding::warning(
             InstallFindingCode::CurrentBinaryShadowed,
@@ -601,11 +604,11 @@ pub fn evaluate_install_freshness(
         installed_version.version.as_deref(),
         source_version.version.as_deref(),
     );
-    let shadowed = current_binary
-        .path
-        .as_deref()
-        .zip(path.first_binary.as_deref())
-        .is_some_and(|(current, first)| current != first);
+    let shadowed = current_binary.path.is_some()
+        && path
+            .binaries
+            .first()
+            .is_some_and(|binary| !binary.is_current_binary);
 
     let verdict = if !missing_required_surfaces.is_empty() {
         InstallFreshnessVerdict::MissingRequiredSurface
@@ -799,7 +802,12 @@ fn read_cargo_toml_version(path: &Path) -> InstallVersionEvidence {
     let Some(version) = package.get("version").and_then(toml_edit::Item::as_str) else {
         return unknown_source_version("cargo_toml_missing_version", Some(path_string));
     };
-    version_evidence(Some(version.to_owned()), "cargo_toml", "ok", None)
+    version_evidence(
+        Some(version.to_owned()),
+        "cargo_toml",
+        "ok",
+        Some(path_string),
+    )
 }
 
 fn read_release_manifest_version(path: &Path) -> InstallVersionEvidence {
@@ -899,14 +907,17 @@ fn analyze_path(
         .map(|raw| env::split_paths(raw).collect())
         .unwrap_or_default();
     let current = current_binary.map(normalize_path);
+    let current_identity = current_binary.map(path_identity);
     let mut binaries = Vec::new();
     for (ordinal, entry) in entries.iter().enumerate() {
         let candidate = entry.join(executable_name);
         if candidate.is_file() {
             let path = normalize_path(&candidate);
+            let identity = path_identity(&candidate);
             let version_probe = probe_ee_binary_version(&candidate);
             binaries.push(PathBinary {
-                is_current_binary: current.as_ref() == Some(&path),
+                is_current_binary: current_identity.as_ref() == Some(&identity)
+                    || current.as_ref() == Some(&path),
                 path,
                 ordinal,
                 version: version_probe.version,
@@ -1331,6 +1342,12 @@ fn inferred_target_triple() -> String {
 
 fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn path_identity(path: &Path) -> String {
+    path.canonicalize()
+        .map(|canonical| normalize_path(&canonical))
+        .unwrap_or_else(|_| normalize_path(path))
 }
 
 fn select_install_backup_path(install_path: &Path) -> Result<PathBuf, String> {
@@ -2445,6 +2462,71 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn path_analysis_treats_symlink_to_current_binary_as_current() -> TestResult {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_dir = tempdir.path().join("real");
+        let path_dir = tempdir.path().join("path");
+        fs::create_dir_all(&real_dir).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&path_dir).map_err(|error| error.to_string())?;
+        let real_binary = real_dir.join("ee");
+        fs::write(&real_binary, "#!/bin/sh\necho 'ee 9.8.7'\n")
+            .map_err(|error| error.to_string())?;
+        let mut permissions = fs::metadata(&real_binary)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&real_binary, permissions).map_err(|error| error.to_string())?;
+        let path_binary = path_dir.join("ee");
+        symlink(&real_binary, &path_binary).map_err(|error| error.to_string())?;
+        let path_env = env::join_paths([path_dir.as_path()]).map_err(|error| error.to_string())?;
+
+        let analysis = analyze_path("ee", Some(&real_binary), Some(path_env));
+
+        ensure_equal(analysis.status, InstallPathStatus::Ok, "path status")?;
+        ensure(
+            analysis.current_binary_on_path,
+            "symlinked PATH entry should count as current binary",
+        )?;
+        ensure_equal(analysis.duplicate_count, 1, "duplicate count")?;
+        let binary = analysis
+            .binaries
+            .first()
+            .ok_or_else(|| "expected one PATH binary".to_owned())?;
+        ensure(binary.is_current_binary, "PATH binary identity")?;
+        ensure_equal(
+            binary.path.clone(),
+            normalize_path(&path_binary),
+            "reported PATH binary remains the symlink path",
+        )?;
+        ensure_equal(
+            binary.version.as_deref(),
+            Some("9.8.7"),
+            "symlinked PATH binary version",
+        )?;
+
+        let current = current_binary(&normalize_path(&real_binary), "9.8.7");
+        let report = evaluate_install_freshness(
+            freshness_source(Some("9.8.7")),
+            &current,
+            &analysis,
+            &[],
+            &["install_check"],
+        );
+        ensure_equal(
+            report.verdict,
+            InstallFreshnessVerdict::Fresh,
+            "freshness verdict",
+        )?;
+        ensure(
+            report.authoritative,
+            "fresh symlinked PATH binary is authoritative",
+        )
+    }
+
     #[test]
     fn idempotency_key_is_stable_for_same_inputs() -> TestResult {
         let left = install_idempotency_key(
@@ -2609,6 +2691,37 @@ mod tests {
                 .iter()
                 .any(|finding| matches!(finding.code, InstallFindingCode::BinaryNotOnPath)),
             "binary_not_on_path finding",
+        )
+    }
+
+    #[test]
+    fn cargo_toml_source_version_keeps_source_path() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let cargo_toml = tempdir.path().join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"
+[package]
+name = "eidetic-engine"
+version = "9.8.7"
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let evidence = read_cargo_toml_version(&cargo_toml);
+
+        ensure_equal(evidence.version, Some("9.8.7".to_owned()), "version")?;
+        ensure_equal(evidence.source.as_str(), "cargo_toml", "source")?;
+        ensure_equal(evidence.status.as_str(), "ok", "status")?;
+        ensure_equal(
+            evidence.path,
+            Some(normalize_path(&cargo_toml)),
+            "source path",
+        )?;
+        ensure_equal(
+            evidence.path_class,
+            Some("host_local_path".to_owned()),
+            "source path class",
         )
     }
 

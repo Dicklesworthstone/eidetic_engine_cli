@@ -924,8 +924,9 @@ pub fn collect_diff_paths_via_git(
 pub enum RecallCursorResolution {
     /// No cursor supplied; start at rank offset zero.
     Fresh,
-    /// Cursor validated; resume from this rank offset.
-    Resume(usize),
+    /// Cursor validated; resume from this rank offset if the post-ranking
+    /// total still matches the cursor's honest remaining-count claim.
+    Resume { offset: usize, dropped_count: usize },
     /// Cursor malformed, tampered, or bound to a different query
     /// (`cursor_invalid`).
     RejectedInvalid,
@@ -962,12 +963,21 @@ pub fn resolve_recall_cursor(
         Ok(payload) if payload.target_schema != RECALL_SCHEMA_V1 => {
             RecallCursorResolution::RejectedInvalid
         }
-        // The rank offset rides in `positionKey`; a non-numeric key is a
-        // tampered or foreign cursor.
-        Ok(payload) => match payload.position_key.parse::<usize>() {
-            Ok(offset) => RecallCursorResolution::Resume(offset),
-            Err(_) => RecallCursorResolution::RejectedInvalid,
-        },
+        // The rank offset rides in `positionKey`; `droppedCount` is the
+        // remaining ranked-item count at issuance. Both must survive parsing
+        // so the caller can reject cursors that no longer partition honestly.
+        Ok(payload) => {
+            let Ok(offset) = payload.position_key.parse::<usize>() else {
+                return RecallCursorResolution::RejectedInvalid;
+            };
+            let Ok(dropped_count) = usize::try_from(payload.dropped_count) else {
+                return RecallCursorResolution::RejectedInvalid;
+            };
+            RecallCursorResolution::Resume {
+                offset,
+                dropped_count,
+            }
+        }
         Err(CursorRejection::Invalid) => RecallCursorResolution::RejectedInvalid,
         Err(CursorRejection::Stale {
             cursor_generation,
@@ -977,6 +987,18 @@ pub fn resolve_recall_cursor(
             current_generation: i64::try_from(current_generation).unwrap_or(i64::MAX),
         },
     }
+}
+
+/// Check that a decoded recall cursor still describes the ranked result set.
+/// A stale, forged, or legacy cursor must not silently restart, skip, or
+/// duplicate items; the CLI maps `false` to the rejected-cursor empty page.
+#[must_use]
+pub fn recall_cursor_page_is_honest(
+    offset: usize,
+    dropped_count: usize,
+    total_matched: usize,
+) -> bool {
+    offset > 0 && offset < total_matched && total_matched - offset == dropped_count
 }
 
 /// One response-level degraded entry for the recall CLI surface: the three
@@ -1347,7 +1369,10 @@ mod cli_surface_tests {
         let cursor = encode_recall_cursor(&query, 3, 1, 7).expect("cursor encodes");
         assert_eq!(
             resolve_recall_cursor(Some(cursor.as_str()), &query, 7),
-            RecallCursorResolution::Resume(3)
+            RecallCursorResolution::Resume {
+                offset: 3,
+                dropped_count: 1,
+            }
         );
         assert_eq!(
             resolve_recall_cursor(Some("garbage"), &query, 7),
@@ -1881,7 +1906,10 @@ mod tests {
 
         assert_eq!(
             resolve_recall_cursor(Some(encoded.as_str()), &query, 7),
-            RecallCursorResolution::Resume(2)
+            RecallCursorResolution::Resume {
+                offset: 2,
+                dropped_count: 2,
+            }
         );
 
         let mut second_query = query.clone();
@@ -1914,7 +1942,10 @@ mod tests {
         // Round-trips against the same query and generation.
         assert_eq!(
             resolve_recall_cursor(Some(encoded.as_str()), &query, 7),
-            RecallCursorResolution::Resume(2)
+            RecallCursorResolution::Resume {
+                offset: 2,
+                dropped_count: 1,
+            }
         );
 
         // Tampered wire form -> BLAKE3 MAC fails -> invalid (never a silent
@@ -1954,8 +1985,33 @@ mod tests {
         // Same query and generation still validates.
         assert_eq!(
             resolve_recall_cursor(Some(encoded.as_str()), &query, 7),
-            RecallCursorResolution::Resume(2)
+            RecallCursorResolution::Resume {
+                offset: 2,
+                dropped_count: 1,
+            }
         );
+    }
+
+    #[test]
+    fn cursor_honesty_requires_offset_and_dropped_count_to_match_total() {
+        assert!(recall_cursor_page_is_honest(2, 2, 4));
+        assert!(!recall_cursor_page_is_honest(0, 4, 4));
+        assert!(!recall_cursor_page_is_honest(3, 2, 4));
+        assert!(!recall_cursor_page_is_honest(2, 1, 4));
+        assert!(!recall_cursor_page_is_honest(4, 0, 4));
+
+        let query = path_query(&["src/*.rs"]);
+        let cursor = encode_recall_cursor(&query, 3, 99, 7).expect("cursor encodes");
+        let RecallCursorResolution::Resume {
+            offset,
+            dropped_count,
+        } = resolve_recall_cursor(Some(cursor.as_str()), &query, 7)
+        else {
+            panic!("cursor should authenticate before honesty check");
+        };
+        assert_eq!(offset, 3);
+        assert_eq!(dropped_count, 99);
+        assert!(!recall_cursor_page_is_honest(offset, dropped_count, 4));
     }
 
     #[test]

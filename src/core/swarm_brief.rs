@@ -7304,8 +7304,7 @@ fn workspace_git_submodule_state(raw: &str) -> Option<WorkspaceGitSubmoduleState
 }
 
 fn normalize_workspace_git_path(path: &str) -> Option<String> {
-    let trimmed = path.trim();
-    let unquoted = unquote_git_path(trimmed)?;
+    let unquoted = unquote_git_path(path)?;
     let path = Path::new(&unquoted);
     if path.is_absolute() {
         return None;

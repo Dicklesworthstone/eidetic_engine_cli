@@ -1492,36 +1492,50 @@ fn classify_status(
     {
         return "fallback_detected";
     }
-    let topology_blocker = degraded_codes.iter().any(|code| {
-        matches!(
-            code.as_str(),
-            "rch_verify_topology_blocked"
-                | "rch_verify_local_fallback_refused"
-                | "rch_verify_remote_marker_missing"
-                | "rch_verify_known_blocker_active"
-                | "rch_verify_cargo_path_dependency_version_blocked"
-                | "rch_verify_no_worker_capacity"
-                | "rch_verify_build_admission_denied"
-                | "rch_verify_client_daemon_version_skew"
-        )
-    });
-    if topology_blocker {
+    if degraded_codes
+        .iter()
+        .any(|code| rch_verify_environment_blocker_code(code))
+    {
         return "blocked";
     }
     if degraded_codes
         .iter()
         .any(|code| code == "rch_verify_remote_command_failed")
-        && !success
     {
         return "failed";
     }
     match (success, exit_code) {
         (true, Some(0)) => "passed",
-        (true, _) => "passed",
+        (true, Some(_)) => "failed",
+        (true, None) => "unknown",
         (false, Some(0)) => "unknown",
         (false, Some(_)) => "failed",
         (false, None) => "blocked",
     }
+}
+
+fn rch_verify_environment_blocker_code(code: &str) -> bool {
+    matches!(
+        code,
+        "rch_verify_topology_blocked"
+            | "rch_verify_local_fallback_refused"
+            | "rch_verify_remote_marker_missing"
+            | "rch_verify_known_blocker_active"
+            | "rch_verify_capacity_or_timeout"
+            | "rch_verify_remote_transport_timeout"
+            | "rch_verify_no_worker_capacity"
+            | "rch_verify_all_workers_preflight_failed"
+            | "rch_verify_worker_health_threshold_blocked"
+            | "rch_verify_worker_disk_full"
+            | "rch_verify_remote_checkout_incomplete"
+            | "rch_verify_cargo_workspace_inheritance_blocked"
+            | "rch_verify_cargo_path_dependency_version_blocked"
+            | "rch_verify_worker_filter_ignored"
+            | "rch_verify_worker_quarantine_ignored"
+            | "rch_verify_build_admission_denied"
+            | "rch_verify_client_daemon_version_skew"
+            | "rch_verify_not_offloaded"
+    )
 }
 
 fn degraded_codes_from(value: &JsonValue) -> Vec<String> {
@@ -1762,6 +1776,29 @@ mod tests {
         ]);
         let row = parse_rch_verify_v1(&proof).expect("parse");
         assert_eq!(row.status, "blocked");
+    }
+
+    #[test]
+    fn classifies_producer_success_nonzero_remote_command_as_failed() {
+        let mut proof = baseline_success();
+        proof["success"] = json!(true);
+        proof["exit_code"] = json!(101);
+        proof["stderr_tail"] = json!("error[E0425]: cannot find value `missing` in this scope");
+        proof["degraded_codes"] = json!(["rch_verify_remote_command_failed"]);
+        let row = parse_rch_verify_v1(&proof).expect("parse failed remote command proof");
+        assert_eq!(row.status, "failed");
+    }
+
+    #[test]
+    fn classifies_dry_run_no_exit_as_unknown() {
+        let mut proof = baseline_success();
+        proof["success"] = json!(true);
+        proof["exit_code"] = JsonValue::Null;
+        proof["stdout_tail"] = json!("dry run: explicit rch exec planned");
+        proof["worker_id"] = JsonValue::Null;
+        proof["degraded_codes"] = json!(["rch_verify_dry_run"]);
+        let row = parse_rch_verify_v1(&proof).expect("parse dry-run proof");
+        assert_eq!(row.status, "unknown");
     }
 
     fn blocked_topology_recurrence_proof() -> JsonValue {
@@ -2021,10 +2058,20 @@ determinism = { version = "0.1.0", path = "crates/determinism" }
     #[test]
     fn classify_status_table() {
         assert_eq!(classify_status(true, Some(0), &[]), "passed");
+        assert_eq!(classify_status(true, Some(101), &[]), "failed");
+        assert_eq!(classify_status(true, None, &[]), "unknown");
         assert_eq!(classify_status(false, Some(1), &[]), "failed");
         assert_eq!(classify_status(false, None, &[]), "blocked");
         assert_eq!(
-            classify_status(false, Some(1), &["rch_verify_topology_blocked".to_owned()]),
+            classify_status(true, Some(1), &["rch_verify_topology_blocked".to_owned()]),
+            "blocked"
+        );
+        assert_eq!(
+            classify_status(
+                true,
+                Some(1),
+                &["rch_verify_capacity_or_timeout".to_owned()]
+            ),
             "blocked"
         );
         assert_eq!(
@@ -2034,6 +2081,14 @@ determinism = { version = "0.1.0", path = "crates/determinism" }
                 &["rch_verify_local_fallback_detected".to_owned()]
             ),
             "fallback_detected"
+        );
+        assert_eq!(
+            classify_status(
+                true,
+                Some(101),
+                &["rch_verify_remote_command_failed".to_owned()]
+            ),
+            "failed"
         );
     }
 
