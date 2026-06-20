@@ -116,7 +116,8 @@ pub const DAEMON_WRITE_PARAMS_INVALID_CODE: &str = "daemon_write_params_invalid"
 /// Method dispatch name for routing a durable journal write through the daemon
 /// (Inc 4, bd-wx6ou.5). Like `ee.daemon.write` but for journal entries: the
 /// long-lived actor coalesces a batch of journal writes into one
-/// transaction/fsync (Inc 3). Workspace-scoped (`SameUidWorkspace`).
+/// database transaction boundary (Inc 3). Workspace-scoped
+/// (`SameUidWorkspace`).
 pub const METHOD_WRITE_JOURNAL: &str = "ee.daemon.write_journal";
 
 /// Error code returned when `ee.daemon.write_journal` params cannot be decoded
@@ -911,8 +912,8 @@ fn start_server_with_dispatch_policy(
                     };
                     // Inc 3/5: enable group-commit so the actor accumulates a
                     // batch; transaction-coalescible daemon journal/outcome ops
-                    // share ONE transaction/fsync, while remember ops (which
-                    // open their own connection) stay per-op.
+                    // share one DB transaction boundary, while remember ops
+                    // (which open their own connection) stay per-op.
                     let write_config = crate::core::write_owner::WriteHotPathConfig {
                         enabled: true,
                         group_commit_max_rows: 64,
@@ -934,7 +935,9 @@ fn start_server_with_dispatch_policy(
                 })
                 .map_err(|error| DaemonStartError::Bind {
                     path: socket_path.clone(),
-                    source: io::Error::other(format!("failed to spawn daemon write actor: {error}")),
+                    source: io::Error::other(format!(
+                        "failed to spawn daemon write actor: {error}"
+                    )),
                 })?;
             dispatch_policy.write_router = Some(DaemonWriteRouter {
                 runtime: Arc::clone(&runtime),
@@ -1908,8 +1911,11 @@ impl DaemonWriteParams {
             source: optional_string_any(object, &["source"])?,
             workflow_id: optional_string_any(object, &["workflow", "workflowId", "workflow_id"])?,
             auto_link: optional_bool_any(object, &["autoLink", "auto_link"])?.unwrap_or(true),
-            propose_candidates: optional_bool_any(object, &["proposeCandidates", "propose_candidates"])?
-                .unwrap_or(true),
+            propose_candidates: optional_bool_any(
+                object,
+                &["proposeCandidates", "propose_candidates"],
+            )?
+            .unwrap_or(true),
         })
     }
 
@@ -2278,13 +2284,7 @@ impl DaemonOutcomeParams {
         self.workspace_path.join(".ee").join("ee.db")
     }
 
-    fn into_parts(
-        self,
-    ) -> (
-        String,
-        crate::db::AuditedFeedbackEventInput,
-        String,
-    ) {
+    fn into_parts(self) -> (String, crate::db::AuditedFeedbackEventInput, String) {
         let event_id = self.event_id;
         let audit_id = self.audit_id;
         let input = crate::db::AuditedFeedbackEventInput {
@@ -2361,22 +2361,18 @@ fn parse_daemon_txn_batch_entry(
         });
     };
     match operation_type.as_str() {
-        DaemonJournalParams::ACTOR_OPERATION_TYPE => {
-            DaemonJournalParams::from_payload(payload)
-                .map(DaemonTxnBatchEntry::Journal)
-                .map_err(|message| crate::models::DomainError::Storage {
-                    message: format!("daemon journal payload decode failed: {message}"),
-                    repair: Some("retry the write".to_string()),
-                })
-        }
-        DaemonOutcomeParams::ACTOR_OPERATION_TYPE => {
-            DaemonOutcomeParams::from_payload(payload)
-                .map(DaemonTxnBatchEntry::Outcome)
-                .map_err(|message| crate::models::DomainError::Storage {
-                    message: format!("daemon outcome payload decode failed: {message}"),
-                    repair: Some("retry the write".to_string()),
-                })
-        }
+        DaemonJournalParams::ACTOR_OPERATION_TYPE => DaemonJournalParams::from_payload(payload)
+            .map(DaemonTxnBatchEntry::Journal)
+            .map_err(|message| crate::models::DomainError::Storage {
+                message: format!("daemon journal payload decode failed: {message}"),
+                repair: Some("retry the write".to_string()),
+            }),
+        DaemonOutcomeParams::ACTOR_OPERATION_TYPE => DaemonOutcomeParams::from_payload(payload)
+            .map(DaemonTxnBatchEntry::Outcome)
+            .map_err(|message| crate::models::DomainError::Storage {
+                message: format!("daemon outcome payload decode failed: {message}"),
+                repair: Some("retry the write".to_string()),
+            }),
         DaemonWriteParams::ACTOR_OPERATION_TYPE => DaemonWriteParams::from_payload(payload)
             .map(DaemonTxnBatchEntry::Remember)
             .map_err(|message| crate::models::DomainError::Storage {
@@ -2423,16 +2419,15 @@ fn execute_daemon_txn_batch(
             });
         }
     }
-    let connection =
-        crate::db::DbConnection::open_file(&database_path).map_err(|error| {
-            crate::models::DomainError::Storage {
-                message: format!(
-                    "daemon transaction batch could not open {}: {error}",
-                    database_path.display()
-                ),
-                repair: Some("ensure the workspace is initialized".to_string()),
-            }
-        })?;
+    let connection = crate::db::DbConnection::open_file(&database_path).map_err(|error| {
+        crate::models::DomainError::Storage {
+            message: format!(
+                "daemon transaction batch could not open {}: {error}",
+                database_path.display()
+            ),
+            repair: Some("ensure the workspace is initialized".to_string()),
+        }
+    })?;
     let mut prepared_entries = Vec::with_capacity(entries.len());
     for entry in entries {
         match entry {
@@ -2463,9 +2458,11 @@ fn execute_daemon_txn_batch(
                             &entry.workspace_id,
                             &entry.workspace_path,
                         )
-                        .map_err(|error| crate::db::DbError::MalformedRow {
-                            operation: crate::db::DbOperation::Execute,
-                            message: error.message().to_string(),
+                        .map_err(|error| {
+                            crate::db::DbError::MalformedRow {
+                                operation: crate::db::DbOperation::Execute,
+                                message: error.message().to_string(),
+                            }
                         })?;
                         let input = entry.clone().into_create_input();
                         let entry_id = input.entry_id.clone();
@@ -2538,7 +2535,9 @@ fn execute_daemon_txn_batch(
                             message: format!(
                                 "daemon remember batch committed, but coalesced index drain failed: {error}"
                             ),
-                            repair: Some("Run `ee index rebuild --workspace . --json`.".to_string()),
+                            repair: Some(
+                                "Run `ee index rebuild --workspace . --json`.".to_string(),
+                            ),
                         },
                     };
                 }
@@ -3686,8 +3685,14 @@ mod tests {
         assert_eq!(params.kind, "fact", "kind defaults to fact");
         assert_eq!(params.tags.as_deref(), Some("a,b"));
         assert!((params.confidence - 0.5).abs() < f32::EPSILON);
-        assert!(params.auto_link, "auto_link defaults true for ee-remember parity");
-        assert!(params.propose_candidates, "propose_candidates defaults true");
+        assert!(
+            params.auto_link,
+            "auto_link defaults true for ee-remember parity"
+        );
+        assert!(
+            params.propose_candidates,
+            "propose_candidates defaults true"
+        );
         // options() borrows the owned strings without panicking.
         assert_eq!(params.options().content, "remember this");
     }
@@ -3955,7 +3960,8 @@ mod tests {
             serde_json::json!({}),
         );
         let shutdown = AtomicBool::new(false);
-        let response = dispatch_with_echo_policy_and_workspace(&request, false, None, &shutdown, None);
+        let response =
+            dispatch_with_echo_policy_and_workspace(&request, false, None, &shutdown, None);
 
         assert!(response.error.is_none());
         assert!(shutdown.load(Ordering::SeqCst));

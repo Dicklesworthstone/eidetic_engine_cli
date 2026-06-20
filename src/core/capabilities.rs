@@ -496,6 +496,26 @@ impl CapabilitiesReport {
             ),
             CommandEntry::new("workspace", true, "Resolve and manage workspace identities"),
             CommandEntry::new(
+                "diag contention --use-daemon",
+                true,
+                "Read live daemon contention telemetry, including group-commit coalescing",
+            ),
+            CommandEntry::new(
+                "ee.daemon.telemetry",
+                true,
+                "Daemon RPC method for live contention and group-commit telemetry",
+            ),
+            CommandEntry::new(
+                "ee.daemon.write",
+                true,
+                "Daemon RPC method for durable memory writes through the write-owner actor",
+            ),
+            CommandEntry::new(
+                "ee.daemon.write_journal",
+                true,
+                "Daemon RPC method for durable journal writes through the write-owner actor",
+            ),
+            CommandEntry::new(
                 "daemon foreground decay_sweep",
                 true,
                 "Bounded foreground score-decay steward job",
@@ -820,6 +840,34 @@ mod tests {
             true,
             "non-decay foreground daemon jobs are available",
         )
+    }
+
+    #[test]
+    fn capabilities_report_advertises_group_commit_daemon_write_methods() -> TestResult {
+        let report = CapabilitiesReport::gather();
+        let names = report
+            .commands
+            .iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "diag contention --use-daemon",
+            "ee.daemon.telemetry",
+            "ee.daemon.write",
+            "ee.daemon.write_journal",
+        ] {
+            let command = report
+                .commands
+                .iter()
+                .find(|command| command.name == expected)
+                .ok_or_else(|| {
+                    format!("daemon write capability {expected} missing from {names:?}")
+                })?;
+            ensure(command.available, true, &format!("{expected} is available"))?;
+        }
+
+        Ok(())
     }
 
     #[test]

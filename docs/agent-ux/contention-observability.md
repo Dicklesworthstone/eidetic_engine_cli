@@ -26,9 +26,9 @@ Every source and the report overall carries a `posture` from one ordered enum:
 
 ## Sources
 
-The report always carries the three core sources, then includes the
-future-feature sub-reports only when their telemetry is available (omit-safe —
-absent, never `null`):
+The report always carries the three core sources, then includes optional
+sub-reports only when their telemetry is available (omit-safe — absent, never
+`null`):
 
 - **`writeLock`** — write-owner queue depth / wait, plus persisted
   `lockWaitMs` p50/p99 from the session-budget ledger. Hot/contended when
@@ -39,8 +39,10 @@ absent, never `null`):
   healthy pressure relief; follower timeouts, leader failures, or a poisoned
   state are the adverse signals. `coalesceEfficiency` is the fraction of
   would-be-duplicate computations avoided.
-- **`groupCommit`** *(present once Track B is wired)* — write-intake batching:
-  `fsyncSaved`, `writesCoalesced`, `avgBatchSize`.
+- **`groupCommit`** — daemon write-intake batching: `fsyncSaved`,
+  `writesCoalesced`, `avgBatchSize`. In one-shot mode this is only the current
+  process's counters; with `--use-daemon` it is the running daemon's live
+  accumulated coalescing.
 - **`indexIntake`** *(present once Track C is wired)* — index intake mode,
   rebuild count, and observed swap stalls.
 - **`l2Cache`** *(present once an aggregate accessor exists)* — pack-cache
@@ -58,6 +60,7 @@ copy-paste `suggestedCommands` in priority order. Stable reason codes include:
 | `write_lock_queue_backlog` / `write_lock_high_wait` / `write_lock_pressure` | writeLock | enable group-commit; route writers through the daemon write owner |
 | `read_pool_ad_hoc_bypass` / `read_pool_high_acquire_wait` / `read_pool_saturated` / `read_pool_disabled` | readPool | raise `EE_READ_POOL_SIZE`; investigate long-held snapshot pins |
 | `singleflight_follower_timeouts` / `singleflight_leader_failures` / `singleflight_state_poisoned` / `singleflight_active_coalescing` | singleflight | lower duplicate read pressure; restart to clear poisoned state |
+| `group_commit_active_coalescing` | groupCommit | informational: daemon write batching is absorbing durable-write pressure |
 | `index_swap_stalls` / `index_full_rebuild_amplification` | indexIntake | adopt incremental index intake |
 | `l2_cache_thrash` | l2Cache | raise `EE_L2_PACK_CACHE_BYTES` or narrow the pack workload |
 
@@ -74,8 +77,8 @@ A core source that was expected but not gathered this run is reported as a gap
 - `read_pool_unavailable`
 - `singleflight_unavailable`
 
-Future-feature sources (group-commit / incremental-index / L2) are simply
-omitted when absent — they are not reported as gaps.
+Optional sources (group-commit / incremental-index / L2) are simply omitted
+when absent — they are not reported as gaps.
 
 ## One-shot vs daemon observability
 
@@ -92,6 +95,20 @@ This is the key operational nuance:
   coalescing across the writes it services, so its group-commit and
   single-flight counters reflect genuine cross-request contention that a
   one-shot snapshot cannot see. This is the live posture readout.
+
+## Daemon write durability contract
+
+`ee.daemon.write` and `ee.daemon.write_journal` success means the daemon write
+owner has returned from the database transaction for that write. The database is
+the durable source of truth; search and derived indexes may lag and are
+rebuildable. Under the current WAL `synchronous=NORMAL` policy this is the
+normal SQLite committed-state contract for process/app crashes, not a promise
+that a fresh OS or power-loss checkpoint has already happened.
+
+The shipped `[write].group_commit_enabled` default remains `false`. The daemon
+write actor uses a bounded internal group-commit path for daemon-routed writes,
+while the global config default stays gated behind the RCH soak/perf proof
+before any broader default-on flip.
 
 If `--use-daemon` cannot reach the daemon, the command **degrades gracefully**:
 it falls back to the in-process snapshot, still exits 0, still emits a valid

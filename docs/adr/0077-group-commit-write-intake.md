@@ -11,11 +11,12 @@ Under a massive agent swarm (dozens of concurrent `ee` processes on a
 path is the single-writer WAL wall. Every durable write — `ee remember`,
 `ee outcome`, `ee journal append`, and the daemon write-owner flows — takes the
 per-DB-file write lock `FileWriteOwnerGuard` (`src/db/mod.rs:453-530`),
-opens its own transaction, and issues its own `fsync` at commit
-(`src/db/mod.rs:986`, `:1018`; WAL `synchronous=NORMAL` at `:1709`). N
-concurrent writers therefore serialize into N transactions and N `fsync`s, even
-when they arrive within microseconds of each other and could have shared one
-commit.
+and opens its own transaction (`src/db/mod.rs:986`, `:1018`; WAL
+`synchronous=NORMAL` at `:1709`). Under WAL `synchronous=NORMAL`, most commits
+do not issue a power-loss fsync; the hot-path win is fewer write-lock
+acquisitions, WAL commit boundaries, and commit round-trips. N concurrent
+writers therefore serialize into N transaction boundaries even when they arrive
+within microseconds of each other and could have shared one commit.
 
 The mechanism to fix this is already present but inert:
 
@@ -24,8 +25,8 @@ The mechanism to fix this is already present but inert:
   `group_commit_max_us` knobs.
 - `drain_group_commit()` exists but is never invoked
   (`src/core/write_owner.rs:1883`).
-- `WriteSpoolBatch` today batches **audit metadata only**, not the commit and
-  `fsync` themselves.
+- `WriteSpoolBatch` today batches **audit metadata only**, not the durable
+  transaction boundary itself.
 
 So the infrastructure is defined and disabled. What is missing is a documented
 contract for how concurrent in-flight writes coalesce, a configuration surface
@@ -78,6 +79,18 @@ registered in `src/config/env_registry.rs` and documented in
 The configuration must fail-safe to the per-write path when disabled or when any
 bound is unset or invalid. No bound may be unbounded.
 
+Default-on remains gated: this ADR keeps the shipped `[write]` default disabled
+until the RCH soak/perf proof for `bd-d67os.4` closes. The daemon-hosted write
+actor may use its bounded internal coalescing path for daemon-routed writes, but
+that does not flip the global one-shot/default CLI path.
+
+Success from `ee.daemon.write` / `ee.daemon.write_journal` means the daemon
+write owner returned from the database transaction for that write. The database
+is the durable source of truth; derived search/index assets may lag and remain
+rebuildable. With the current WAL `synchronous=NORMAL` setting, the ACK is the
+normal SQLite committed-state contract for process/app crashes rather than a
+fresh checkpoint or power-loss fsync guarantee.
+
 ### Telemetry schema
 
 `ee.write_group_commit.v1` (category `performance`, redaction-safe — counts and
@@ -110,11 +123,11 @@ left half-updated.
   proves the write-side SLO, and the scale envelope may later cite it.
 - **Incremental index intake** (Track C, `bd-d67os.5`) attacks the
   full-rebuild-per-write amplification. Group-commit and incremental intake are
-  independent and complementary: one reduces `fsync`s, the other reduces index
-  work, both on the same hot write path.
+  independent and complementary: one reduces durable transaction boundaries, the
+  other reduces index work, both on the same hot write path.
 - **Audit chain** is unchanged in cardinality and content. Group-commit moves
-  only the transaction and `fsync` boundary; `insert_audit` still produces one
-  row per write (see the caller-held-transaction handling at `7a28413d`).
+  only the transaction boundary; `insert_audit` still produces one row per write
+  (see the caller-held-transaction handling at `7a28413d`).
 
 ## Constraints
 
