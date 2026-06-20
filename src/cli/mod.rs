@@ -52186,6 +52186,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": data,
+                "degraded": top_level_degraded_from_data(&data),
             });
             write_stdout(stdout, &(response.to_string() + "\n"))
         }
@@ -53259,7 +53260,8 @@ where
         let json = serde_json::json!({
             "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": true,
-            "data": data
+            "data": data,
+            "degraded": [],
         });
         return write_stdout(stdout, &(json.to_string() + "\n"));
     }
@@ -53311,6 +53313,7 @@ where
             let json = serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
+                "degraded": [],
                 "data": {
                     "schema": DEMO_RUN_PLAN_SCHEMA_V1,
                     "command": "demo run",
@@ -53437,6 +53440,7 @@ where
         let json = serde_json::json!({
             "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": success,
+            "degraded": [],
             "data": {
                 "schema": DEMO_RUN_RESULT_SCHEMA_V1,
                 "command": "demo run",
@@ -53541,6 +53545,7 @@ where
         let json = serde_json::json!({
             "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": true,
+            "degraded": [],
             "data": {
                 "schema": DEMO_SHOW_SCHEMA_V1,
                 "command": "demo show",
@@ -53664,6 +53669,7 @@ where
         let json = serde_json::json!({
             "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": success,
+            "degraded": [],
             "data": {
                 "schema": DEMO_VERIFY_SCHEMA_V1,
                 "command": "demo verify",
