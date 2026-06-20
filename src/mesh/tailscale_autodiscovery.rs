@@ -207,12 +207,16 @@ impl TailscaleHelloProbe for TailscaleStatusCapabilityHelloProbe {
         let Some(capability) = peer.ee_capability.as_ref() else {
             return TailscalePeerHelloProbe::NonEe { elapsed_ms: 0 };
         };
-        let elapsed_ms = capability.latency_ms.min(remaining_budget_ms);
-        if capability.latency_ms > timeout_ms || capability.latency_ms > remaining_budget_ms {
-            return TailscalePeerHelloProbe::Timeout { elapsed_ms };
+        let effective_timeout_ms = timeout_ms.min(remaining_budget_ms);
+        if capability.latency_ms > effective_timeout_ms {
+            return TailscalePeerHelloProbe::Timeout {
+                elapsed_ms: effective_timeout_ms,
+            };
         }
         if !capability.respond || !capability.looks_like_ee() {
-            return TailscalePeerHelloProbe::NonEe { elapsed_ms };
+            return TailscalePeerHelloProbe::NonEe {
+                elapsed_ms: capability.latency_ms,
+            };
         }
         TailscalePeerHelloProbe::Granted {
             response: HelloResponse {
@@ -225,9 +229,9 @@ impl TailscaleHelloProbe for TailscaleStatusCapabilityHelloProbe {
                 responder_capabilities: Vec::new(),
                 responder_advertised_tags: peer.advertised_tags.clone(),
                 discovery_consent: true,
-                response_elapsed_micros: elapsed_ms.saturating_mul(1_000),
+                response_elapsed_micros: capability.latency_ms.saturating_mul(1_000),
             },
-            latency_ms: elapsed_ms,
+            latency_ms: capability.latency_ms,
         }
     }
 }
@@ -612,6 +616,26 @@ mod tests {
             self.outcomes.insert(node_key.to_owned(), outcome);
             self
         }
+    }
+
+    #[test]
+    fn status_capability_probe_timeout_consumes_effective_timeout_not_advertised_latency() {
+        let mut peer = peer("nodekey:alpha", &[EE_MESH_SERVICE_TAG]);
+        peer.ee_capability = Some(TailscalePeerEeCapability {
+            ee_version: "0.2.0".to_owned(),
+            ee_protocol_version: "1.0".to_owned(),
+            workspace_ids: vec!["workspace-alpha".to_owned()],
+            respond: true,
+            latency_ms: 1_000,
+        });
+
+        let mut probe = TailscaleStatusCapabilityHelloProbe;
+        let outcome = probe.probe(&peer, 750, 5_000);
+
+        assert_eq!(
+            outcome,
+            TailscalePeerHelloProbe::Timeout { elapsed_ms: 750 }
+        );
     }
 
     impl TailscaleHelloProbe for FakeProbe {
