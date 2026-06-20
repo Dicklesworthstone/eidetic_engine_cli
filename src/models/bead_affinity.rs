@@ -192,15 +192,16 @@ pub fn normalize_bead_text_tokens(text: &str) -> BTreeSet<String> {
 }
 
 /// Normalise a label-style bead surface (`labels[]` entries are
-/// already short, lower-case, dash-separated tokens in the source
-/// jsonl, e.g. `degraded-codes`, `retrieval`, `swarm-scale`). This
-/// helper keeps the dashes as token separators so a label like
-/// `swarm-scale` becomes two tokens (`swarm`, `scale`) without
-/// re-running the heavier free-text normaliser.
+/// already short, lower-case, punctuation-separated tokens in the
+/// source jsonl, e.g. `degraded-codes`, `implements-surface:search`,
+/// `swarm-scale`). This helper treats every non-ASCII-alphanumeric
+/// character as a separator so namespaced labels keep their searchable
+/// segments and stay aligned with the search-side bead-affinity
+/// tokenizer.
 #[must_use]
 pub fn normalize_bead_label_tokens(label: &str) -> BTreeSet<String> {
     label
-        .split(|c: char| c == '-' || c == '_' || c.is_whitespace())
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
         .filter(|token| token.len() >= BEAD_AFFINITY_MIN_TOKEN_LEN)
         .map(|token| token.to_ascii_lowercase())
         .collect()
@@ -537,6 +538,16 @@ mod tests {
     fn label_tokenizer_drops_short_segments() {
         let tokens = normalize_bead_label_tokens("a-bcd-e-fghi");
         let expected: BTreeSet<String> = ["bcd", "fghi"].into_iter().map(str::to_owned).collect();
+        assert_eq!(tokens, expected);
+    }
+
+    #[test]
+    fn label_tokenizer_splits_namespaced_beads_labels() {
+        let tokens = normalize_bead_label_tokens("implements-surface:query-file-tags");
+        let expected: BTreeSet<String> = ["implements", "surface", "query", "file", "tags"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
         assert_eq!(tokens, expected);
     }
 

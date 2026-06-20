@@ -125,7 +125,7 @@ mod tests {
     const SAMPLE_JSONL: &str = concat!(
         r#"{"id":"bd-other","title":"Unrelated","description":"","labels":["foo"]}"#,
         "\n",
-        r#"{"id":"bd-2942u","title":"swarmx.barp: bead-aware retrieval prioritization","description":"Bias ee context retrieval scoring with the active bead labels.","labels":["swarm-scale","retrieval","idea-wizard"]}"#,
+        r#"{"id":"bd-2942u","title":"swarmx.barp: bead-aware retrieval prioritization","description":"Bias ee context retrieval scoring with the active bead labels.","labels":["swarm-scale","retrieval","idea-wizard","implements-surface:query-file-tags"]}"#,
         "\n",
         r#"{"id":"bd-zzzz","title":"Another","description":"","labels":[]}"#,
         "\n",
@@ -140,6 +140,9 @@ mod tests {
         assert!(bead.label_tokens.contains("retrieval"));
         assert!(bead.label_tokens.contains("idea"));
         assert!(bead.label_tokens.contains("wizard"));
+        assert!(bead.label_tokens.contains("query"));
+        assert!(bead.label_tokens.contains("file"));
+        assert!(bead.label_tokens.contains("tags"));
         assert!(bead.title_tokens.contains("swarmx"));
         assert!(bead.title_tokens.contains("bead"));
         assert!(bead.title_tokens.contains("aware"));

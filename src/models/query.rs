@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
-use super::memory::Tag;
+use super::{memory::Tag, trust::TrustClass};
 
 fn normalized_query_token(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace('-', "_")
@@ -651,7 +651,13 @@ pub fn parse_filters(value: &serde_json::Value) -> Option<QueryFilters> {
     let mut filters = Vec::new();
 
     for (field, predicates) in object {
+        if field.trim().is_empty() {
+            return None;
+        }
         let pred_object = predicates.as_object()?;
+        if pred_object.is_empty() {
+            return None;
+        }
         let mut filter_predicates = Vec::new();
 
         for (operator_str, value) in pred_object {
@@ -1415,19 +1421,20 @@ impl TrustFilters {
 
 /// Check if a trust class meets the minimum threshold.
 fn trust_class_meets_minimum(actual: &str, min: &str) -> bool {
-    let order = [
-        "human_explicit",
-        "agent_validated",
-        "agent_assertion",
-        "cass_evidence",
-        "legacy_import",
-    ];
-    let actual_rank = order
-        .iter()
-        .position(|&c| c == actual)
-        .unwrap_or(order.len());
-    let min_rank = order.iter().position(|&c| c == min).unwrap_or(0);
+    let Some(actual_rank) = trust_class_rank(actual) else {
+        return false;
+    };
+    let Some(min_rank) = trust_class_rank(min) else {
+        return false;
+    };
     actual_rank <= min_rank
+}
+
+fn trust_class_rank(value: &str) -> Option<usize> {
+    let trust_class = value.parse::<TrustClass>().ok()?;
+    TrustClass::all()
+        .iter()
+        .position(|candidate| *candidate == trust_class)
 }
 
 /// Derive trust posture from trust class string (EE-260, ADR-0009).
@@ -2087,6 +2094,31 @@ mod tests {
     }
 
     #[test]
+    fn filter_parser_rejects_empty_fields_and_predicates() -> TestResult {
+        ensure(
+            parse_filters(&serde_json::json!({
+                "": {"eq": "procedural"}
+            }))
+            .is_none(),
+            "empty field names must not become literal match-all filters",
+        )?;
+        ensure(
+            parse_filters(&serde_json::json!({
+                "   ": {"eq": "procedural"}
+            }))
+            .is_none(),
+            "blank field names must not become literal match-all filters",
+        )?;
+        ensure(
+            parse_filters(&serde_json::json!({
+                "level": {}
+            }))
+            .is_none(),
+            "empty predicate objects must not silently match every candidate",
+        )
+    }
+
+    #[test]
     fn filter_contains_matches_substring() -> TestResult {
         let filters = parse_test_filters(serde_json::json!({
             "content": {"contains": "cargo"}
@@ -2297,6 +2329,24 @@ mod tests {
         ensure(
             !filters.matches("legacy_import", "legacy_evidence"),
             "legacy_import should fail min_class=agent_validated",
+        )
+    }
+
+    #[test]
+    fn trust_filters_unknown_min_class_fails_closed() -> TestResult {
+        let filters = TrustFilters {
+            min_class: Some("agent_inferred".to_string()),
+            exclude_classes: vec![],
+            require_posture: None,
+        };
+
+        ensure(
+            !filters.matches("human_explicit", "authoritative"),
+            "unknown min_class must not degrade into a human_explicit-only filter",
+        )?;
+        ensure(
+            !filters.matches("legacy_import", "legacy_evidence"),
+            "unknown min_class should reject lower trust classes too",
         )
     }
 
