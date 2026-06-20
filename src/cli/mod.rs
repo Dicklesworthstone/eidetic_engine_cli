@@ -59539,6 +59539,9 @@ impl NormalizedInvocation {
                     SentinelCommand::Explain => "sentinel explain".to_string(),
                 },
                 Command::Share(share) => match share {
+                    share::ShareCommand::Preview(args) if args.record_consent => {
+                        "share preview --record-consent".to_string()
+                    }
                     share::ShareCommand::Preview(_) => "share preview".to_string(),
                 },
                 Command::Subscribe(sub) => match sub {
@@ -76595,6 +76598,56 @@ mod tests {
         ensure(
             !dry_mutates,
             "review session --propose --dry-run previews without persisting",
+        )
+    }
+
+    #[test]
+    fn share_preview_record_consent_resolves_to_append_only_effect() -> TestResult {
+        // `ee share preview` is a dry-run exposure preview. Adding
+        // `--record-consent` appends an audit row via share.rs, so the
+        // normalized command path must not advertise the consent-writing
+        // variant as a read-only preview.
+        let manifest = crate::core::effect::EffectManifest::build();
+
+        let effect_for = |argv: &[&str]| -> Result<(String, bool), String> {
+            let cli = Cli::try_parse_from(argv.iter().copied())
+                .map_err(|error| format!("parse {argv:?}: {error}"))?;
+            let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
+            let path = super::NormalizedInvocation::from_cli(&cli, &args).command_path;
+            let effect = manifest
+                .get(&path)
+                .ok_or_else(|| format!("no effect manifest entry for {path:?}"))?;
+            Ok((path, effect.default_effect.is_mutating()))
+        };
+
+        let (plain_path, plain_mutates) =
+            effect_for(&["ee", "share", "preview", "--peer", "peer_alpha"])?;
+        ensure_equal(
+            &plain_path,
+            &"share preview".to_string(),
+            "plain share preview command_path",
+        )?;
+        ensure(
+            !plain_mutates,
+            "share preview without --record-consent must stay read-only",
+        )?;
+
+        let (consent_path, consent_mutates) = effect_for(&[
+            "ee",
+            "share",
+            "preview",
+            "--peer",
+            "peer_alpha",
+            "--record-consent",
+        ])?;
+        ensure_equal(
+            &consent_path,
+            &"share preview --record-consent".to_string(),
+            "record-consent command_path",
+        )?;
+        ensure(
+            consent_mutates,
+            "share preview --record-consent must classify as an audit append",
         )
     }
 

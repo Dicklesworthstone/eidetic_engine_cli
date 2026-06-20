@@ -1707,6 +1707,10 @@ impl EffectManifest {
                 "sentinel explain",
                 "Explain sentinel specifications and prior results",
             ),
+            CommandEffect::read_only_db(
+                "share preview",
+                "Preview outbound mesh sharing without exporting data or recording consent",
+            ),
             CommandEffect::read_only_db("show", "Show a persisted memory or artifact"),
             CommandEffect::read_only(
                 "situation classify",
@@ -2047,10 +2051,10 @@ impl EffectManifest {
                 "Create an external reflection request artifact and non-secret replay ledger row",
             ),
             CommandEffect::append_only_write(
-                "share preview",
+                "share preview --record-consent",
                 vec!["audit_log"],
-                "target peer id plus preview hash plus actor",
-                "Preview outbound mesh sharing without exporting data; --record-consent appends consent audit evidence",
+                "target peer id plus preview hash plus actor and reason",
+                "Record reviewed share-preview consent without exporting data",
             ),
             CommandEffect::append_only_write(
                 "mesh import",
