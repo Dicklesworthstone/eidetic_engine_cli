@@ -304,7 +304,7 @@ data:
         featureFlagsHash: <derived-asset-hash>
         inputManifestHash: null
         invalidates[0]:
-        repairAction: ee pack --workspace . --json
+        repairAction: ee pack "<task>" --workspace . --json
   agentInventory:
     schema: ee.agent.status.v1
     status: not_inspected

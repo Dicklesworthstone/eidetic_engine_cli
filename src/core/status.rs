@@ -88,7 +88,7 @@ const PACK_L2_CACHE_PATH: &str = "cache.pack_l2";
 const GRAPH_SNAPSHOT_PATH: &str = ".ee/graph";
 const GRAPH_SNAPSHOT_REFRESH_COMMAND: &str = "ee graph centrality-refresh --workspace .";
 const SEARCH_INDEX_REBUILD_COMMAND: &str = "ee index rebuild --workspace .";
-const PACK_L2_CACHE_REPAIR_COMMAND: &str = "ee pack --workspace . --json";
+const PACK_L2_CACHE_REPAIR_COMMAND: &str = "ee pack \"<task>\" --workspace . --json";
 const GRAPH_LIVE_COMPUTE_AVAILABLE: &str = "live_compute_available";
 #[cfg(not(feature = "graph"))]
 const GRAPH_LIVE_COMPUTE_UNAVAILABLE: &str = "live_compute_unavailable";
@@ -7510,6 +7510,11 @@ mod tests {
             pack_l2.freshness.schema,
             crate::core::derived_asset_freshness::DERIVED_ASSET_FRESHNESS_SCHEMA_V1,
             "pack L2 freshness schema",
+        )?;
+        ensure(
+            pack_l2.freshness.repair_action,
+            PACK_L2_CACHE_REPAIR_COMMAND,
+            "pack L2 repair action requires task placeholder",
         )
     }
 

@@ -22,7 +22,7 @@ pub const READ_FENCE_INDEX_REPAIR: &str = "ee index rebuild --workspace .";
 /// Repair when a graph snapshot trails the DB generation.
 pub const READ_FENCE_GRAPH_REPAIR: &str = "ee graph centrality-refresh --workspace .";
 /// Repair when the pack cache trails the DB generation.
-pub const READ_FENCE_CACHE_REPAIR: &str = "ee pack --workspace . --json";
+pub const READ_FENCE_CACHE_REPAIR: &str = "ee pack \"<task>\" --workspace . --json";
 /// Fallback repair when the stale asset name is not recognized by this model.
 pub const READ_FENCE_GENERIC_REPAIR: &str =
     "Inspect stale derived asset generations before retrying.";
@@ -221,7 +221,7 @@ fn repair_for_asset(asset: &str) -> Option<&'static str> {
     match normalized.as_str() {
         "search" | "search_index" | "index" => Some(READ_FENCE_INDEX_REPAIR),
         "graph" | "graph_snapshot" | "graph_snapshot_artifact" => Some(READ_FENCE_GRAPH_REPAIR),
-        "cache" | "pack_cache" | "pack_l2_cache" => Some(READ_FENCE_CACHE_REPAIR),
+        "cache" | "pack_cache" | "pack_l2_cache" | "l2_pack_cache" => Some(READ_FENCE_CACHE_REPAIR),
         _ => None,
     }
 }
@@ -235,8 +235,9 @@ fn push_unique_repair(repairs: &mut Vec<&'static str>, repair: &'static str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConsistencySeverity, ConsistencyVerdict, READ_FENCE_CONSISTENCY_SCHEMA_V1,
-        READ_FENCE_GRAPH_REPAIR, READ_FENCE_INDEX_REPAIR, ReadFence, evaluate_consistency,
+        ConsistencySeverity, ConsistencyVerdict, READ_FENCE_CACHE_REPAIR,
+        READ_FENCE_CONSISTENCY_SCHEMA_V1, READ_FENCE_GRAPH_REPAIR, READ_FENCE_INDEX_REPAIR,
+        ReadFence, evaluate_consistency,
     };
 
     fn assets() -> Vec<(String, u64)> {
@@ -330,6 +331,19 @@ mod tests {
         );
 
         assert_eq!(block.repair.as_deref(), Some(READ_FENCE_GRAPH_REPAIR));
+    }
+
+    #[test]
+    fn pack_cache_lag_uses_pack_repair_with_required_task_placeholder() {
+        let block = evaluate_consistency(
+            ReadFence::Latest,
+            12,
+            vec![("l2_pack_cache".to_string(), 11)],
+            false,
+        );
+
+        assert_eq!(block.repair.as_deref(), Some(READ_FENCE_CACHE_REPAIR));
+        assert!(READ_FENCE_CACHE_REPAIR.contains("\"<task>\""));
     }
 
     #[test]
