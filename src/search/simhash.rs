@@ -1,5 +1,5 @@
-//! 128-bit SimHash for insert-time embedding deduplication — scaffold
-//! (bd-3goqk, sub-bead of bd-1iltv).
+//! 128-bit SimHash helpers for insert-time embedding deduplication
+//! (bd-3goqk and follow-up slices under bd-1iltv).
 //!
 //! `HashEmbedder::default_256().embed_sync` currently runs unconditionally
 //! inside `remember_memory_inner`, so at 64-agent swarm scale every agent
@@ -8,13 +8,13 @@
 //! insert-time SimHash + cosine-confirm dedup that catches typo and
 //! whitespace variants the exact-text-hash LRU in bd-168gm misses.
 //!
-//! This scaffold owns the platform-agnostic SimHash math layer: a 128-bit
+//! This module owns the platform-agnostic SimHash math layer: a 128-bit
 //! Charikar fingerprint with deterministic token normalization, a Hamming
-//! distance helper, and the explicit normalization entry point that callers
-//! and tests can audit. The wiring into `remember_memory_inner`, the DB
-//! `content_simhash` column, and the workspace-scoped index live under sibling
-//! slices of bd-1iltv so that this module can land without touching any of the
-//! contested write-path files.
+//! distance helper, rollout configuration parsing, and the explicit
+//! normalization entry point that callers and tests can audit. The remember
+//! write path and the nullable `content_simhash` storage/lookup surface are
+//! now wired by sibling bd-1iltv slices; keep this module stable because stored
+//! fingerprints depend on its exact normalization and projection contract.
 //!
 //! Determinism contract: same input bytes always produce the same
 //! `SimHash128`, regardless of `HashMap` iteration order, platform, or
@@ -106,14 +106,24 @@ impl EmbedDedupConfig {
         hamming_k: Option<&str>,
         cosine_floor: Option<&str>,
     ) -> Result<Self, EmbedDedupConfigError> {
+        let defaults = Self::default();
         Ok(Self {
-            enabled: parse_bool_env(
-                EnvVar::EmbedDedupEnabled,
-                enabled.unwrap_or("false"),
-                "Set EE_EMBED_DEDUP_ENABLED to true or false.",
-            )?,
-            hamming_k: parse_hamming_k(hamming_k.unwrap_or("12"))?,
-            cosine_floor: parse_cosine_floor(cosine_floor.unwrap_or("0.97"))?,
+            enabled: match enabled {
+                Some(raw) => parse_bool_env(
+                    EnvVar::EmbedDedupEnabled,
+                    raw,
+                    "Set EE_EMBED_DEDUP_ENABLED to true or false.",
+                )?,
+                None => defaults.enabled,
+            },
+            hamming_k: match hamming_k {
+                Some(raw) => parse_hamming_k(raw)?,
+                None => defaults.hamming_k,
+            },
+            cosine_floor: match cosine_floor {
+                Some(raw) => parse_cosine_floor(raw)?,
+                None => defaults.cosine_floor,
+            },
         })
     }
 }

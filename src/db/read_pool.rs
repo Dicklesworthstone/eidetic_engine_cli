@@ -1019,7 +1019,12 @@ impl Deref for SnapshotPin<'_> {
     type Target = DbConnection;
 
     fn deref(&self) -> &Self::Target {
-        self.connection().deref()
+        match self.checked_connection() {
+            Ok(connection) => connection,
+            Err(error) => {
+                panic!("snapshot pin deref refused unavailable read snapshot: {error}")
+            }
+        }
     }
 }
 
@@ -2350,6 +2355,28 @@ mod tests {
         assert_eq!(error.operation(), Some(DbOperation::Query));
         assert!(error.to_string().contains("snapshot pin"));
         assert!(error.to_string().contains("poisoned"));
+        assert!(pin.is_poisoned());
+
+        drop(pin);
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0);
+        assert_eq!(stats.idle, 1);
+        assert_eq!(stats.active_pins, 0);
+    }
+
+    #[test]
+    fn snapshot_pin_deref_refuses_poisoned_pin_to_prevent_silent_stale_reads() {
+        let (_tempdir, _database_path, pool) = file_pool(1);
+        let pin = must(pool.pin_snapshot(), "snapshot pin opens");
+
+        assert_eq!(snapshot_item_count(&pin), 1);
+        let poisoned = pool.force_poison_active_pins();
+        assert_eq!(poisoned.len(), 1);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = snapshot_item_count(&pin);
+        }));
+        assert!(panic.is_err(), "poisoned snapshot deref must fail closed");
         assert!(pin.is_poisoned());
 
         drop(pin);

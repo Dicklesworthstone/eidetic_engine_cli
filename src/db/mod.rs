@@ -16814,22 +16814,16 @@ impl DbConnection {
         &self,
         token_hash: &str,
         used_at: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let rows = self.execute_for(
             DbOperation::Execute,
-            "UPDATE preflight_bypass_tokens SET used_count = used_count + 1, last_used_at = ?2 WHERE token_hash = ?1 AND used_count < max_uses",
+            "UPDATE preflight_bypass_tokens SET used_count = used_count + 1, last_used_at = ?2 WHERE token_hash = ?1 AND used_count < max_uses AND revoked_at IS NULL AND expires_at > ?2",
             &[
                 Value::Text(token_hash.to_string()),
                 Value::Text(used_at.to_string()),
             ],
         )?;
-        if rows == 0 {
-            return Err(DbError::MalformedRow {
-                operation: DbOperation::Execute,
-                message: "preflight bypass token use update affected no rows".to_string(),
-            });
-        }
-        Ok(())
+        Ok(rows > 0)
     }
 
     pub fn revoke_preflight_bypass_token(&self, token_hash: &str, revoked_at: &str) -> Result<()> {

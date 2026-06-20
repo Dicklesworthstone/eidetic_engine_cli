@@ -1167,17 +1167,7 @@ fn ensure_no_symlink_components(
 }
 
 fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(None)
+    crate::core::path_safety::first_existing_symlink_component(path)
 }
 
 fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), PackL2CacheError> {
@@ -2076,6 +2066,23 @@ mod tests {
             } => assert_eq!(path, file_root),
             other => return Err(format!("unexpected error: {other}")),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn error_or_invalid_symlink_scan_stops_cleanly_at_file_component() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let file_component = temp.path().join("not-a-directory");
+        fs::write(&file_component, b"already a file").map_err(|error| error.to_string())?;
+        let path_below_file = file_component.join("child.json");
+
+        let symlink = first_existing_symlink_component(&path_below_file)
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            symlink, None,
+            "a non-directory component should stop the existing-prefix scan, not become an IO failure"
+        );
         Ok(())
     }
 
