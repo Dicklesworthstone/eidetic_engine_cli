@@ -816,7 +816,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn workspace_permission_report_fails_when_ee_path_is_regular_file() -> TestResult {
-        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let raw_temp_root = std::env::temp_dir();
+        let temp_root = raw_temp_root.canonicalize().unwrap_or(raw_temp_root);
+        let tempdir = tempfile::Builder::new()
+            .prefix("ee-security-profile-")
+            .tempdir_in(temp_root)
+            .map_err(|error| error.to_string())?;
         let workspace = tempdir.path().join("workspace");
         std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
         std::fs::write(workspace.join(".ee"), b"not a directory")
