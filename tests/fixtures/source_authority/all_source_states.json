@@ -157,7 +157,18 @@
         "safety": "unavailable_or_manual_only"
       },
       "evidenceId": "sre-bv-0003",
-      "statusDetail": "bv not installed; ranking skipped"
+      "statusDetail": "bv not installed; ranking skipped",
+      "bvRobotNext": {
+        "commandId": "bv_robot_next",
+        "commandName": "bv --robot-next",
+        "commandTemplate": "bv --robot-next --format json",
+        "graphNodeCount": null,
+        "graphEdgeCount": null,
+        "skippedPhases": ["robot_next", "claim_command"],
+        "recommendationState": "unavailable",
+        "claimCommandSuppressed": true,
+        "fallbackCommand": null
+      }
     },
     {
       "sourceKind": "git",

@@ -72,6 +72,12 @@ Fixture scenarios:
   legacy BV copy-paste claim, continue with stale-safe
   `br --no-auto-import --allow-stale` inspection, and rerun
   `ee swarm work-packet --claim-gate` before mutating Beads.
+  The corresponding `ee.source_authority.snapshot.v1` `sourceKind=bv` record
+  carries the `bvRobotNext` extension from `bd-ifoh3.1`: command name, bounded
+  graph node/edge counts when known, skipped phases, recommendation posture,
+  `claimCommandSuppressed=true`, and the read-only fallback command. That
+  envelope is the only supported way to represent BV timeout/no-output in
+  machine output; it must not be collapsed into an empty queue.
 - `tracker_mismatch`: an otherwise claimable leaf is downgraded because Beads
   JSONL and DB state are not authoritative.
 - `rollup_only_no_claimable_child`: an open epic or parent has no claimable

@@ -185,6 +185,51 @@
     "sourceRecord": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "sourceKind": { "const": "bv" }
+            },
+            "required": ["sourceKind"]
+          },
+          "then": {
+            "required": ["bvRobotNext"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "sourceKind": { "const": "bv" },
+              "state": {
+                "enum": [
+                  "degraded_read_only",
+                  "unavailable",
+                  "timed_out",
+                  "stale_fallback",
+                  "corrupt_recovery",
+                  "contradicted"
+                ]
+              }
+            },
+            "required": ["sourceKind", "state", "bvRobotNext"]
+          },
+          "then": {
+            "properties": {
+              "bvRobotNext": {
+                "properties": {
+                  "claimCommandSuppressed": { "const": true },
+                  "recommendationState": {
+                    "not": {
+                      "enum": ["available", "empty_queue"]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
       "required": [
         "sourceKind",
         "state",
@@ -324,6 +369,90 @@
         "actionableQueue": {
           "$ref": "#/definitions/actionableQueueEvidence",
           "description": "Required extension block for sourceKind=actionable_queue records; absent for every other source kind. Per-source budget, timeout, and exit semantics stay on the shared sourceRecord fields (budget, exit, freshness, fallback)."
+        },
+        "bvRobotNext": {
+          "$ref": "#/definitions/bvRobotNextEvidence",
+          "description": "Optional extension block for sourceKind=bv records. It pins the bd-ifoh3.1 liveness envelope for BV robot-next timeout, no-output, partial-analysis, and recommendation-unavailable states."
+        }
+      }
+    },
+    "bvRobotNextEvidence": {
+      "type": "object",
+      "description": "BV robot-next liveness envelope. Bounded counts and enum-like phase names only; no raw BV stdout, raw tracker rows, private paths, or environment dumps. Non-ready postures must suppress claim commands so BV remains advisory until Beads/actionable-queue evidence and the claim gate agree.",
+      "additionalProperties": false,
+      "required": [
+        "commandId",
+        "commandName",
+        "commandTemplate",
+        "graphNodeCount",
+        "graphEdgeCount",
+        "skippedPhases",
+        "recommendationState",
+        "claimCommandSuppressed",
+        "fallbackCommand"
+      ],
+      "properties": {
+        "commandId": {
+          "type": "string",
+          "const": "bv_robot_next"
+        },
+        "commandName": {
+          "type": "string",
+          "const": "bv --robot-next"
+        },
+        "commandTemplate": {
+          "type": "string",
+          "const": "bv --robot-next --format json"
+        },
+        "graphNodeCount": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Known graph node count from BV or a stale-safe source; null when BV produced no parseable graph metadata."
+        },
+        "graphEdgeCount": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Known graph edge count from BV or a stale-safe source; null when BV produced no parseable graph metadata."
+        },
+        "skippedPhases": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "cycles",
+              "pagerank",
+              "betweenness",
+              "critical_path",
+              "topological_rank",
+              "robot_next",
+              "claim_command",
+              "unknown"
+            ]
+          },
+          "description": "Bounded graph-analysis phases skipped because of timeout, graph size, stale source, parse failure, or partial output."
+        },
+        "recommendationState": {
+          "type": "string",
+          "enum": [
+            "available",
+            "empty_queue",
+            "partial_analysis",
+            "timed_out",
+            "no_output",
+            "graph_too_large",
+            "stale_source",
+            "unavailable"
+          ],
+          "description": "available means BV produced a parseable recommendation. empty_queue means BV authoritatively found no recommendation. Every other value is degraded/advisory and must not be treated as candidate absence."
+        },
+        "claimCommandSuppressed": {
+          "type": "boolean",
+          "description": "Must be true for every non-ready or advisory posture. A false value is valid only when sourceRecord.state=ready and recommendationState=available; the claim gate still decides whether any mutating claim action may be shown."
+        },
+        "fallbackCommand": {
+          "type": ["string", "null"],
+          "maxLength": 240,
+          "description": "Read-only fallback command template, such as bv --robot-insights --format json or scripts/br_retry.sh actionable --json. Null only when recommendationState=available."
         }
       }
     },

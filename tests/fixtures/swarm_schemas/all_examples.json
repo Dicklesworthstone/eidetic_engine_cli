@@ -114,6 +114,64 @@
           "statusDetail": "live br ready timed out; stale-safe snapshot from 182s ago answered"
         },
         {
+          "sourceKind": "bv",
+          "state": "timed_out",
+          "authoritative": false,
+          "freshness": {
+            "capturedAt": null,
+            "ageMs": null,
+            "staleAfterMs": 300000,
+            "freshnessState": "unknown"
+          },
+          "budget": {
+            "commandBudgetMs": 30000,
+            "elapsedMs": 30000,
+            "timedOut": true,
+            "retriesUsed": 0,
+            "retryBudget": 0
+          },
+          "exit": {
+            "exitClass": "timeout",
+            "exitCode": 124
+          },
+          "partialData": {
+            "available": true,
+            "droppedSections": [
+              "cycles",
+              "robot_next",
+              "claim_command"
+            ],
+            "reason": "bv --robot-next timed out after partial graph analysis"
+          },
+          "fallback": {
+            "active": false,
+            "fallbackKind": null,
+            "fallbackAgeMs": null
+          },
+          "repair": {
+            "guidance": "Retry BV with a bounded robot-insights probe or fall back to the safe Beads actionable queue.",
+            "command": "bv --robot-insights --format json",
+            "safety": "read_only_probe"
+          },
+          "evidenceId": "sre-bv-9e27a6b3",
+          "statusDetail": "bv robot-next timed out; no claim command is available",
+          "bvRobotNext": {
+            "commandId": "bv_robot_next",
+            "commandName": "bv --robot-next",
+            "commandTemplate": "bv --robot-next --format json",
+            "graphNodeCount": 4079,
+            "graphEdgeCount": 6120,
+            "skippedPhases": [
+              "cycles",
+              "robot_next",
+              "claim_command"
+            ],
+            "recommendationState": "timed_out",
+            "claimCommandSuppressed": true,
+            "fallbackCommand": "bv --robot-insights --format json"
+          }
+        },
+        {
           "sourceKind": "rch",
           "state": "ready",
           "authoritative": true,

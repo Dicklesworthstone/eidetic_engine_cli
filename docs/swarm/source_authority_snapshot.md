@@ -34,6 +34,47 @@ byte order:
 A source that was not consulted still appears with `state=unavailable` and a
 `statusDetail` explaining why. Absence of a record is never meaningful.
 
+## BV robot-next liveness envelope
+
+Tracking bead: `bd-ifoh3.1`. `sourceKind=bv` records define the machine-readable
+liveness posture that BV's `--robot-next` surface should emit or that ee
+collectors should project when a bounded BV probe degrades. The envelope must
+distinguish a legitimate empty actionable queue from a failed or partial graph
+analysis.
+
+The shared `sourceRecord` fields carry the common posture:
+
+- `state=ready` only when BV returned a complete, parseable robot-next answer
+  inside budget.
+- `state=timed_out` when the command budget elapsed, even if another source
+  later supplied fallback evidence. Timeout is never candidate absence.
+- `state=degraded_read_only` when BV returned partial graph metrics but no
+  authoritative next action.
+- `state=unavailable` when the command failed to spawn, returned no stdout, or
+  produced unparseable output.
+- `budget.commandBudgetMs`, `budget.elapsedMs`, `budget.timedOut`, and
+  `exit.exitClass` record the bounded command result.
+- `freshness` records whether the BV evidence was live, stale, or unknown.
+- `partialData.droppedSections` names skipped graph phases such as `cycles`,
+  `pagerank`, `critical_path`, or `robot_next`.
+- `repair.command` points at the recommended read-only fallback, normally
+  `bv --robot-insights --format json` or the Beads/actionable-queue inspection
+  path when BV is not authoritative.
+
+`sourceRecord.bvRobotNext` is the BV-specific extension. It records
+`commandName`, bounded graph size when known, skipped phases, whether a
+recommendation was unavailable, and `claimCommandSuppressed`. In every
+non-ready posture `claimCommandSuppressed` MUST be true and no claim command may
+be emitted by BV, the source-authority snapshot, or the claim gate. If BV has
+partial metrics but no safe recommendation, the fallback command is advisory
+only; consumers must rerun the claim gate or inspect Beads before mutating
+tracker state.
+
+Support-bundle safety applies to the whole envelope: command strings are
+templates, graph sizes are counts only, skipped phases are enum-like names, and
+no raw tracker rows, raw BV stdout, private paths, or environment dumps are
+included.
+
 ## Collector projection
 
 The shipped collector is the work-packet projection in
