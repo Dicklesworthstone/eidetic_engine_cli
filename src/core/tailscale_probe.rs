@@ -496,8 +496,7 @@ pub fn probe_tailscale_socket_with_runner<R: TailscaleSocketProbeRunner>(
     }
 
     let prefs_output = runner.request(socket_path, "/localapi/v0/prefs", config.timeout_ms);
-    let prefs_json =
-        (prefs_output.success && !prefs_output.timed_out).then_some(prefs_output.stdout.as_slice());
+    let prefs_json = successful_localapi_json_payload(&prefs_output);
     let mut report = classify_status_payload(TailscaleStatusProbeInput {
         status_json: &status_output.stdout,
         prefs_json,
@@ -581,8 +580,7 @@ pub fn probe_tailscale_cli_with_runner<R: TailscaleCliProbeRunner>(
         &["debug", "localapi", "/localapi/v0/prefs"],
         config.timeout_ms,
     );
-    let prefs_json =
-        (prefs_output.success && !prefs_output.timed_out).then_some(prefs_output.stdout.as_slice());
+    let prefs_json = successful_localapi_json_payload(&prefs_output);
     let mut report = classify_status_payload(TailscaleStatusProbeInput {
         status_json: &status_output.stdout,
         prefs_json,
@@ -777,6 +775,31 @@ fn command_error_detail(output: &TailscaleCliCommandOutput) -> String {
     } else {
         trimmed.to_owned()
     }
+}
+
+fn successful_localapi_json_payload(output: &TailscaleCliCommandOutput) -> Option<&[u8]> {
+    (output.success && !output.timed_out)
+        .then(|| strip_localapi_debug_prelude(&output.stdout))
+        .filter(|payload| !payload.is_empty())
+}
+
+fn strip_localapi_debug_prelude(bytes: &[u8]) -> &[u8] {
+    let mut remaining = trim_ascii_start(bytes);
+    while remaining.first() == Some(&b'#') {
+        let Some(line_end) = remaining.iter().position(|byte| *byte == b'\n') else {
+            return remaining;
+        };
+        remaining = trim_ascii_start(&remaining[line_end + 1..]);
+    }
+    remaining
+}
+
+fn trim_ascii_start(bytes: &[u8]) -> &[u8] {
+    let first_non_whitespace = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    &bytes[first_non_whitespace..]
 }
 
 #[cfg(unix)]

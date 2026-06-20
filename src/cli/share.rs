@@ -224,6 +224,7 @@ fn share_preview_candidates<'a>(
         });
 
         let body_redaction = redact_secret_like_content(&memory.content);
+        let body_exportable = include_body && !body_redaction.redacted;
         candidates.push(SharePreviewCandidate {
             memory_id: &memory.id,
             level: &memory.level,
@@ -239,14 +240,14 @@ fn share_preview_candidates<'a>(
             } else {
                 "body_denied"
             },
-            policy_action: if include_body { "allow" } else { "deny" },
+            policy_action: if body_exportable { "allow" } else { "deny" },
             content_preview: &memory.content,
-            estimated_bytes: if include_body {
+            estimated_bytes: if body_exportable {
                 memory.content.len() as u64
             } else {
                 0
             },
-            body_bytes: if include_body {
+            body_bytes: if body_exportable {
                 memory.content.len() as u64
             } else {
                 0
@@ -695,6 +696,48 @@ mod tests {
             report
                 .denied_classes
                 .contains(&"redaction_class:embedding_denied".to_owned())
+        );
+    }
+
+    #[test]
+    fn body_redacted_preview_is_not_exportable() {
+        let memories = [stored_memory(
+            "mem_sharepreview00000000000004",
+            "Never send API_KEY=sk-proj-local-secret over mesh.",
+        )];
+        let candidates = share_preview_candidates(&memories, true, false);
+        let report = build_share_preview(&SharePreviewInput {
+            target_peer_id: "peer_alpha",
+            candidates: &candidates,
+            consent_required: true,
+            max_examples: 4,
+        });
+
+        assert_eq!(report.total_candidates, 3);
+        assert_eq!(report.exportable_count, 1);
+        assert_eq!(report.denied_count, 2);
+        assert_eq!(report.estimated_body_bytes, 0);
+        assert_eq!(report.counts_by_policy_action.get("allow"), Some(&1));
+        assert_eq!(report.counts_by_policy_action.get("deny"), Some(&2));
+        assert_eq!(
+            report.counts_by_redaction_class.get("body_redacted"),
+            Some(&1)
+        );
+        assert!(
+            report
+                .denied_classes
+                .contains(&"material_lane:body".to_owned())
+        );
+        assert!(
+            report
+                .denied_classes
+                .contains(&"redaction_class:body_redacted".to_owned())
+        );
+        assert!(
+            report
+                .examples
+                .iter()
+                .all(|example| !example.redacted_preview.contains("sk-proj"))
         );
     }
 

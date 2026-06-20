@@ -2554,6 +2554,9 @@ fn auto_enrollment_candidates_from_local(
         .into_iter()
         .flat_map(|report| report.peers.iter())
         .filter_map(|peer| {
+            if peer.online == Some(false) {
+                return None;
+            }
             let tailscale_ip = peer.tailscale_ips.first()?.clone();
             let capability = peer.ee_capability.as_ref().filter(|capability| {
                 capability.respond
@@ -4016,6 +4019,21 @@ mod tests {
                     hostname: Some("ee".to_owned()),
                     advertised_tags: Vec::new(),
                     online: Some(true),
+                    ee_capability: Some(TailscalePeerEeCapability {
+                        ee_version: "0.2.0".to_owned(),
+                        ee_protocol_version: "1.0".to_owned(),
+                        workspace_ids: vec!["workspace-alpha".to_owned()],
+                        respond: true,
+                        latency_ms: 1,
+                    }),
+                },
+                TailscalePeerReport {
+                    node_key: "nodekey:offline-ee".to_owned(),
+                    tailscale_ips: vec!["100.64.0.7".to_owned()],
+                    magic_dns_name: Some("offline-ee.tailnet.test.".to_owned()),
+                    hostname: Some("offline-ee".to_owned()),
+                    advertised_tags: Vec::new(),
+                    online: Some(false),
                     ee_capability: Some(TailscalePeerEeCapability {
                         ee_version: "0.2.0".to_owned(),
                         ee_protocol_version: "1.0".to_owned(),

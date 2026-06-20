@@ -201,6 +201,9 @@ impl TailscaleHelloProbe for TailscaleStatusCapabilityHelloProbe {
         timeout_ms: u64,
         remaining_budget_ms: u64,
     ) -> TailscalePeerHelloProbe {
+        if peer.online == Some(false) {
+            return TailscalePeerHelloProbe::NonEe { elapsed_ms: 0 };
+        }
         let Some(capability) = peer.ee_capability.as_ref() else {
             return TailscalePeerHelloProbe::NonEe { elapsed_ms: 0 };
         };
@@ -340,6 +343,10 @@ pub fn autodiscover_tailscale_peers<P: TailscaleHelloProbe>(
         }
 
         saw_policy_probe_candidate = true;
+        if peer.online == Some(false) {
+            report.skipped_peers.push(skipped(peer, "non_ee"));
+            continue;
+        }
         if elapsed_budget_ms >= config.total_budget_ms || probe.cancellation_requested() {
             budget_exhausted = true;
             report.skipped_peers.push(skipped(peer, "probe_timeout"));
@@ -794,6 +801,45 @@ mod tests {
             report.ee_capable_peers[0].discovery_policy_decision,
             "allowlisted"
         );
+    }
+
+    #[test]
+    fn autodiscovery_skips_explicitly_offline_peers_without_probing() {
+        let allowlist = BTreeSet::new();
+        let denylist = BTreeSet::new();
+        let mut offline_peer = peer("nodekey:alpha", &[EE_MESH_SERVICE_TAG]);
+        offline_peer.online = Some(false);
+        offline_peer.ee_capability = Some(TailscalePeerEeCapability {
+            ee_version: "0.2.0".to_owned(),
+            ee_protocol_version: "1.0".to_owned(),
+            workspace_ids: vec!["workspace-alpha".to_owned()],
+            respond: true,
+            latency_ms: 1,
+        });
+        let mut probe = FakeProbe::default().with(
+            "nodekey:alpha",
+            TailscalePeerHelloProbe::Granted {
+                response: response("nodekey:alpha", &["workspace-alpha"]),
+                latency_ms: 1,
+            },
+        );
+
+        let report = autodiscover_tailscale_peers(
+            Some(&local_report(vec![offline_peer])),
+            &config(
+                "workspace-alpha",
+                DiscoveryMode::ServiceTag,
+                &allowlist,
+                &denylist,
+            ),
+            &mut probe,
+        );
+
+        assert!(probe.calls.is_empty());
+        assert_eq!(report.probed_peer_count, 0);
+        assert!(report.ee_capable_peers.is_empty());
+        assert_eq!(report.skipped_peers[0].node_key, "nodekey:alpha");
+        assert_eq!(report.skipped_peers[0].reason, "non_ee");
     }
 
     #[test]
