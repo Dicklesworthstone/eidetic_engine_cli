@@ -88,6 +88,36 @@ fn has_finding(value: &serde_json::Value, code: &str) -> Result<bool, String> {
         .any(|finding| json_str(finding, "/code").ok().flatten() == Some(code)))
 }
 
+fn has_finding_with(
+    value: &serde_json::Value,
+    code: &str,
+    severity: &str,
+    next_action_fragment: &str,
+) -> Result<bool, String> {
+    for finding in json_array(value, "/data/findings")? {
+        let matches = json_str(finding, "/code")? == Some(code)
+            && json_str(finding, "/severity")? == Some(severity)
+            && json_str(finding, "/nextAction")?
+                .is_some_and(|next_action| next_action.contains(next_action_fragment));
+        if matches {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn ensure_finding_with(
+    value: &serde_json::Value,
+    code: &str,
+    severity: &str,
+    next_action_fragment: &str,
+) -> TestResult {
+    ensure(
+        has_finding_with(value, code, severity, next_action_fragment)?,
+        &format!("{code} {severity} finding should mention {next_action_fragment:?}"),
+    )
+}
+
 fn normalize_dynamic_value(value: &mut serde_json::Value, install_root: Option<&Path>) {
     match value {
         serde_json::Value::String(text) => {
@@ -200,6 +230,17 @@ fn write_fake_ee(path: &Path) -> TestResult {
 }
 
 #[cfg(unix)]
+fn write_fake_ee_version(path: &Path, version: &str) -> TestResult {
+    fs::write(path, format!("#!/bin/sh\nprintf 'ee {version}\\n'\n"))
+        .map_err(|error| error.to_string())?;
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| error.to_string())?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
 #[test]
 fn install_check_detects_duplicate_path_binaries_without_stderr() -> TestResult {
     let root = unique_artifact_dir("install-check")?;
@@ -267,6 +308,127 @@ fn install_check_detects_duplicate_path_binaries_without_stderr() -> TestResult 
         "duplicate finding present",
     )?;
     assert_install_golden("duplicate_path_check.json", value, Some(&root))
+}
+
+#[cfg(unix)]
+#[test]
+fn install_check_pins_shadowed_stale_path_contract_bd_3utv2_5() -> TestResult {
+    let root = unique_artifact_dir("install-shadow-skew")?;
+    let stale_dir = root.join("stale");
+    let current_dir = root.join("current");
+    fs::create_dir_all(&stale_dir).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&current_dir).map_err(|error| error.to_string())?;
+    write_fake_ee_version(&stale_dir.join("ee"), "0.1.0")?;
+    write_fake_ee_version(&current_dir.join("ee"), env!("CARGO_PKG_VERSION"))?;
+    let path_value = std::env::join_paths([stale_dir.as_path(), current_dir.as_path()])
+        .map_err(|error| error.to_string())?;
+    let path_arg = path_value
+        .to_str()
+        .ok_or_else(|| "PATH argument was not UTF-8".to_owned())?;
+    let install_dir = current_dir
+        .to_str()
+        .ok_or_else(|| "install dir was not UTF-8".to_owned())?;
+    let current_binary = current_dir.join("ee");
+    let current_binary_arg = current_binary
+        .to_str()
+        .ok_or_else(|| "current binary was not UTF-8".to_owned())?;
+
+    let output = run_ee(&[
+        "install",
+        "check",
+        "--json",
+        "--install-dir",
+        install_dir,
+        "--current-binary",
+        current_binary_arg,
+        "--path",
+        path_arg,
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--offline",
+    ])?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure(
+        output.status.success(),
+        &format!("install check should succeed; stderr: {stderr}"),
+    )?;
+    ensure(
+        stderr.is_empty(),
+        "JSON install check must not write stderr",
+    )?;
+    let value = parse_stdout(&output)?;
+
+    ensure_equal(
+        json_str(&value, "/data/path/status")?,
+        Some("duplicate"),
+        "PATH duplicate status",
+    )?;
+    ensure_equal(
+        json_str(&value, "/data/path/binaries/0/version")?,
+        Some("0.1.0"),
+        "first PATH binary version",
+    )?;
+    ensure_equal(
+        json_str(&value, "/data/path/binaries/0/versionStatus")?,
+        Some("reported"),
+        "first PATH binary version status",
+    )?;
+    ensure_equal(
+        json_bool(&value, "/data/path/binaries/0/isCurrentBinary")?,
+        Some(false),
+        "first PATH binary is stale shadow",
+    )?;
+    ensure_equal(
+        json_bool(&value, "/data/path/binaries/1/isCurrentBinary")?,
+        Some(true),
+        "second PATH binary is running binary",
+    )?;
+    ensure_equal(
+        json_str(&value, "/data/path/binaries/1/version")?,
+        Some(env!("CARGO_PKG_VERSION")),
+        "running PATH binary version",
+    )?;
+    ensure_equal(
+        json_str(&value, "/data/freshness/verdict")?,
+        Some("shadowed_binary"),
+        "freshness verdict",
+    )?;
+    ensure_equal(
+        json_bool(&value, "/data/freshness/authoritative")?,
+        Some(false),
+        "freshness fails closed",
+    )?;
+    ensure(
+        json_array(&value, "/data/freshness/blockingFindings")?
+            .iter()
+            .any(|finding| finding.as_str() == Some("current_binary_shadowed")),
+        "shadowed binary blocks claim-gate authority",
+    )?;
+    ensure_finding_with(
+        &value,
+        "duplicate_path_binary",
+        "warning",
+        "Remove stale duplicates",
+    )?;
+    ensure_finding_with(
+        &value,
+        "path_binary_version_mismatch",
+        "warning",
+        "rebuild/install the current release",
+    )?;
+    ensure_finding_with(
+        &value,
+        "current_binary_shadowed",
+        "warning",
+        "PATH/install-dir ordering",
+    )?;
+    ensure_finding_with(
+        &value,
+        "current_binary_shadowed",
+        "error",
+        "verified artifact adoption",
+    )?;
+    ensure_finding_with(&value, "offline_no_manifest", "info", "Pass --manifest")
 }
 
 #[test]
