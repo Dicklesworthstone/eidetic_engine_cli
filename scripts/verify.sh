@@ -1080,6 +1080,13 @@ run_stage "Output Governor E2E (bd-7lvbg.4)" "EE_GOVERNOR_E2E_CORPUS=120 ./scrip
 # --no-baseline-write opt-out (bd-7lvbg.6).
 run_stage "Pack Delta E2E (bd-7lvbg.6)" "./scripts/e2e_pack_delta.sh"
 
+# Gate 6.057: install-freshness claim-gate E2E — real binary + fake-PATH
+# fixtures (stale shim + current symlink) prove a stale/shadowed install fails
+# the swarm work-packet claim gate closed (safeToClaim=false, shadowed_binary,
+# no claim command) while a fresh binary stays authoritative and lets
+# downstream gates decide; emits ee.test_event.v1 evidence (bd-3utv2.7).
+run_stage "Install Freshness Claim-Gate E2E (bd-3utv2.7)" "./scripts/e2e_install_freshness.sh"
+
 # Gate 6.057: code-anchored recall plus harness hooks — real scratch git
 # workspace, anchored memories, recall path/diff selectors, Claude Code hook
 # install, PreToolUse context injection, and Bash failure journal capture.
