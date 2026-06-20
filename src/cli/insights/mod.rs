@@ -3711,7 +3711,7 @@ mod tests {
 
         connection
             .insert_memory(
-                "mem_houserulesglobal000000001",
+                "mem_houserulesglobal0000000001",
                 &CreateMemoryInput {
                     workspace_id: origin_workspace_id.clone(),
                     level: "semantic".to_owned(),
@@ -4378,7 +4378,7 @@ mod tests {
             .ok_or_else(|| "shared DB houseRules section should emit an item".to_owned())?;
         assert_eq!(
             item["memoryId"].as_str(),
-            Some("mem_houserulesglobal000000001")
+            Some("mem_houserulesglobal0000000001")
         );
         assert_eq!(item["interpretation"].as_str(), Some("house_rule"));
         assert_eq!(
@@ -4483,6 +4483,22 @@ mod tests {
                         Some(crate::graph::structural::STRUCTURAL_GRAPH_EVIDENCE_SCHEMA)
                     );
                     assert_eq!(item["evidence"]["algorithm"].as_str(), Some("core_number"));
+                    assert_eq!(
+                        item["evidence"]["graphType"].as_str(),
+                        Some(crate::graph::structural::STRUCTURAL_GRAPH_TYPE)
+                    );
+                }
+                "kTruss" => {
+                    assert_eq!(item["interpretation"].as_str(), Some("main_truss_member"));
+                    assert!(item["trussLevel"].as_u64().unwrap_or_default() >= 3);
+                    assert_eq!(
+                        item["evidence"]["schema"].as_str(),
+                        Some(crate::graph::health::HEALTH_STRUCTURAL_SCHEMA_V1)
+                    );
+                    assert_eq!(
+                        item["evidence"]["algorithm"].as_str(),
+                        Some("fnx_algorithms::k_truss")
+                    );
                     assert_eq!(
                         item["evidence"]["graphType"].as_str(),
                         Some(crate::graph::structural::STRUCTURAL_GRAPH_TYPE)
