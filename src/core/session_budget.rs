@@ -657,9 +657,8 @@ impl std::error::Error for SessionBudgetRecordError {}
 pub const SESSION_BUDGET_PLAN_SCHEMA_V1: &str = "ee.session_budget.plan.v1";
 
 const CARGO_REFUSAL_REASON: &str = "local cargo is structurally forbidden; \
-    use `scripts/rch_verify.sh --skip-known-blocker -- cargo test <target>` for verification";
-const CARGO_REFUSAL_ALTERNATIVE: &str =
-    "scripts/rch_verify.sh --skip-known-blocker -- cargo test --lib";
+    route the same verifier through `scripts/rch_verify.sh --summary --no-write -- <cargo command>`";
+const CARGO_REFUSAL_ALTERNATIVE_PREFIX: &str = "scripts/rch_verify.sh --summary --no-write -- ";
 
 const DEGRADED_PENALTY_MS: u64 = 10_000;
 const PLAN_MAX_FALLBACKS: usize = 3;
@@ -908,15 +907,33 @@ fn score_all_candidates(input: &BudgetPlannerInput) -> Vec<BudgetPlanEntry> {
 }
 
 fn collect_cargo_refusals(input: &BudgetPlannerInput) -> Vec<BudgetPlanRefusal> {
-    let hint = match input.task_hint.as_deref() {
-        Some(h) if h.to_ascii_lowercase().contains("cargo") => h,
-        _ => return Vec::new(),
+    let (hint, cargo_command) = match input.task_hint.as_deref() {
+        Some(hint) => match supported_cargo_verifier_command(hint) {
+            Some(command) => (hint, command),
+            None => return Vec::new(),
+        },
+        None => return Vec::new(),
     };
     vec![BudgetPlanRefusal {
         input: hint.to_owned(),
         reason: CARGO_REFUSAL_REASON.to_owned(),
-        alternative: Some(CARGO_REFUSAL_ALTERNATIVE.to_owned()),
+        alternative: Some(format!("{CARGO_REFUSAL_ALTERNATIVE_PREFIX}{cargo_command}")),
     }]
+}
+
+fn supported_cargo_verifier_command(hint: &str) -> Option<&str> {
+    let trimmed = hint
+        .trim()
+        .trim_matches(|ch| matches!(ch, '`' | '"' | '\''));
+    let mut parts = trimmed.split_whitespace();
+    if parts.next() != Some("cargo") {
+        return None;
+    }
+    match parts.next() {
+        Some("check" | "test" | "bench" | "clippy") => Some(trimmed),
+        Some("fmt") if parts.next() == Some("--check") => Some(trimmed),
+        _ => None,
+    }
 }
 
 fn summarize_ledger(path: Option<&Path>) -> BudgetLedgerSummary {
@@ -1363,14 +1380,26 @@ mod tests {
             "reason must mention forbidden: {}",
             refusal.reason
         );
-        assert!(
-            refusal
-                .alternative
-                .as_deref()
-                .unwrap_or("")
-                .contains("rch_verify"),
-            "alternative must reference rch_verify: {:?}",
-            refusal.alternative
+        assert_eq!(
+            refusal.alternative.as_deref(),
+            Some("scripts/rch_verify.sh --summary --no-write -- cargo test --lib"),
+            "alternative must preserve the refused cargo verifier target"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_specific_cargo_hint_preserves_target_in_refusal_alternative() -> TestResult {
+        let mut input = plan_input_clean();
+        input.task_hint = Some("cargo test --test session_budget_plan_golden".to_owned());
+        let plan = plan_cheapest_next_command(&input);
+
+        assert_eq!(plan.refusals.len(), 1, "must produce exactly one refusal");
+        assert_eq!(
+            plan.refusals[0].alternative.as_deref(),
+            Some(
+                "scripts/rch_verify.sh --summary --no-write -- cargo test --test session_budget_plan_golden"
+            )
         );
         Ok(())
     }
@@ -1384,6 +1413,19 @@ mod tests {
         assert!(
             plan.refusals.is_empty(),
             "non-cargo hint must not produce refusals"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_cargo_topic_without_verifier_command_no_refusal() -> TestResult {
+        let mut input = plan_input_clean();
+        input.task_hint = Some("review Cargo.toml dependency policy".to_owned());
+        let plan = plan_cheapest_next_command(&input);
+
+        assert!(
+            plan.refusals.is_empty(),
+            "Cargo.toml discussion is not a local cargo verifier command"
         );
         Ok(())
     }

@@ -45,8 +45,8 @@
   "refusals": [
     {
       "input": "cargo test --test session_budget_plan_golden",
-      "reason": "local cargo is structurally forbidden; use `scripts/rch_verify.sh --skip-known-blocker -- cargo test <target>` for verification",
-      "alternative": "scripts/rch_verify.sh --skip-known-blocker -- cargo test --lib"
+      "reason": "local cargo is structurally forbidden; route the same verifier through `scripts/rch_verify.sh --summary --no-write -- <cargo command>`",
+      "alternative": "scripts/rch_verify.sh --summary --no-write -- cargo test --test session_budget_plan_golden"
     }
   ],
   "ledgerSummary": {

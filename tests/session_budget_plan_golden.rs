@@ -131,7 +131,9 @@ fn rch_blocked_cargo_hint_refuses_local_cargo_and_matches_golden() -> TestResult
         plan.refusals
             .first()
             .and_then(|refusal| refusal.alternative.as_deref()),
-        Some("scripts/rch_verify.sh --skip-known-blocker -- cargo test --lib")
+        Some(
+            "scripts/rch_verify.sh --summary --no-write -- cargo test --test session_budget_plan_golden"
+        )
     );
     Ok(())
 }
