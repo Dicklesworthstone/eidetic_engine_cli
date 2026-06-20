@@ -863,11 +863,17 @@ pub fn append_journal_entries_stdin(
                 // Per-line independent persistence: each insert is its own
                 // implicit transaction, so a storage failure on this line
                 // reports here without rolling back earlier lines.
-                persist_prepared_entry(&connection, &workspace_path, &workspace_id, options, &prepared)
-                    .map(|stored| (prepared, stored))
-                    .map_err(|error| {
-                        JournalValidationError::new("journal_storage_failed", error.to_string())
-                    })
+                persist_prepared_entry(
+                    &connection,
+                    &workspace_path,
+                    &workspace_id,
+                    options,
+                    &prepared,
+                )
+                .map(|stored| (prepared, stored))
+                .map_err(|error| {
+                    JournalValidationError::new("journal_storage_failed", error.to_string())
+                })
             });
         match outcome {
             Ok((prepared, stored)) => {
@@ -948,9 +954,7 @@ pub fn list_journal_entries(
             degraded: vec![journal_disabled_degradation()],
         });
     }
-    if let Some(since) = options.since.as_deref() {
-        validate_rfc3339("--since", since)?;
-    }
+    let since = normalize_since_filter(options.since.as_deref())?;
     if let Some(kind) = options.kind.as_deref()
         && JournalKind::parse(kind).is_none()
     {
@@ -962,7 +966,7 @@ pub fn list_journal_entries(
     let filter = JournalEntryListFilter {
         session_key: options.session_key.clone(),
         agent_name: options.agent_name.clone(),
-        since: options.since.clone(),
+        since,
         kind: options.kind.as_deref().map(str::trim).map(str::to_owned),
         undistilled_only: options.undistilled_only,
         limit: options.limit,
@@ -1628,9 +1632,7 @@ pub fn distill_journal_entries(
             degraded: vec![journal_disabled_degradation()],
         });
     }
-    if let Some(since) = options.since.as_deref() {
-        validate_rfc3339("--since", since)?;
-    }
+    let since = normalize_since_filter(options.since.as_deref())?;
 
     let database_path = effective_database_path(&workspace_path, options.database_path);
     let connection = open_journal_database(&database_path)?;
@@ -1641,7 +1643,7 @@ pub fn distill_journal_entries(
     let filter = JournalEntryListFilter {
         session_key: options.session_key.clone(),
         agent_name: options.agent_name.clone(),
-        since: options.since.clone(),
+        since: since.clone(),
         kind: None,
         undistilled_only: false,
         limit: JOURNAL_DISTILL_SCAN_LIMIT,
@@ -1808,7 +1810,7 @@ pub fn distill_journal_entries(
         workspace_id,
         scope_session: options.session_key.clone(),
         scope_agent: options.agent_name.clone(),
-        scope_since: options.since.clone(),
+        scope_since: since,
         dry_run: !options.apply,
         scanned_count,
         proposals,
@@ -2251,6 +2253,15 @@ fn validate_rfc3339(flag: &str, raw: &str) -> Result<(), DomainError> {
     Ok(())
 }
 
+fn normalize_since_filter(raw: Option<&str>) -> Result<Option<String>, DomainError> {
+    raw.map(|value| {
+        let trimmed = value.trim();
+        validate_rfc3339("--since", trimmed)?;
+        Ok(trimmed.to_owned())
+    })
+    .transpose()
+}
+
 fn validate_field_bytes(
     code: &'static str,
     field: &str,
@@ -2550,18 +2561,14 @@ fn persist_prepared_entry_with_id(
             "structuredBytes": input.structured.as_ref().map_or(0, String::len),
         }),
     };
-    crate::core::write_owner::run_one_shot_write_intake(
-        workspace_path,
-        &write_operation,
-        || {
-            connection
-                .insert_journal_entry(&input)
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to store journal entry: {error}"),
-                    repair: Some("ee doctor".to_owned()),
-                })
-        },
-    )
+    crate::core::write_owner::run_one_shot_write_intake(workspace_path, &write_operation, || {
+        connection
+            .insert_journal_entry(&input)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to store journal entry: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            })
+    })
 }
 
 fn effective_database_path(workspace_path: &Path, database_path: Option<&Path>) -> PathBuf {
@@ -3217,6 +3224,36 @@ mod tests {
     }
 
     #[test]
+    fn list_since_filter_trims_before_database_filter() -> TestResult {
+        let (_dir, workspace_path, _database_path) = seed_journal_workspace("jrn-list-since")?;
+        let options = append_options(&workspace_path, None, JournalSource::Manual);
+        append_journal_entry(
+            &options,
+            &body_draft("old note should be outside a future filter"),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let future_since = " 9999-01-01T00:00:00Z ";
+        let future_list = list_journal_entries(&JournalListOptions {
+            workspace_path: &workspace_path,
+            database_path: None,
+            session_key: None,
+            agent_name: None,
+            since: Some(future_since.to_owned()),
+            kind: None,
+            undistilled_only: false,
+            limit: 10,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &future_list.entries.len(),
+            &0,
+            "since filters are trimmed before SQLite lexical comparison",
+        )
+    }
+
+    #[test]
     fn show_journal_entry_is_workspace_scoped_when_database_is_shared() -> TestResult {
         let (_dir_a, workspace_a, database_path) = seed_journal_workspace("jrn-shared-a")?;
         let (_dir_b, workspace_b, _database_b) = seed_journal_workspace("jrn-shared-b")?;
@@ -3786,6 +3823,57 @@ mod tests {
                 .iter()
                 .any(|degraded| degraded.code == DISTILL_NO_CANDIDATES_CODE),
             "scope had entries but no proposals -> distill_no_candidates",
+        )
+    }
+
+    #[test]
+    fn distill_since_filter_trims_before_database_filter() -> TestResult {
+        let (_dir, workspace_path, _database_path) = seed_journal_workspace("jrn-dst-since")?;
+        let options = append_options(&workspace_path, None, JournalSource::Hook);
+        append_journal_entry(
+            &options,
+            &failure_draft(
+                "cargo test --lib",
+                101,
+                "assertion failed",
+                "old failure should be outside a future since filter",
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let future_since = "9999-01-01T00:00:00Z";
+        let report = distill_journal_entries(&JournalDistillOptions {
+            workspace_path: &workspace_path,
+            database_path: None,
+            session_key: None,
+            agent_name: None,
+            since: Some(format!(" {future_since} ")),
+            apply: false,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &report.scope_since.as_deref(),
+            &Some(future_since),
+            "distill echoes the normalized since filter",
+        )?;
+        ensure_equal(
+            &report.scanned_count,
+            &0,
+            "future since filter excludes the stored entry",
+        )?;
+        ensure_equal(&report.proposals.len(), &0, "no proposals in empty scope")?;
+        ensure_equal(
+            &report.abstentions.len(),
+            &0,
+            "empty scope has no abstentions",
+        )?;
+        ensure(
+            !report
+                .degraded
+                .iter()
+                .any(|degraded| degraded.code == DISTILL_NO_CANDIDATES_CODE),
+            "empty scope is not an in-scope no-candidates degradation",
         )
     }
 
