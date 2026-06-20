@@ -1688,6 +1688,41 @@ fn verify_file_provenance_referent(
     span: Option<LineSpan>,
 ) -> VerifyProvenanceReferentReport {
     let path = provenance_workspace_path(workspace_path, raw_path);
+    // bd-3n8tt: refuse a symlinked referent (leaf or any parent) instead of
+    // following it with metadata/read/File::open, matching the memory-freshness
+    // contract (assess_memory_evidence_freshness rejects the same file:// shape
+    // with a "traverses symlinked path component" error). Otherwise the verifier
+    // hashes/opens the symlink target as if it were the workspace evidence file.
+    match super::path_safety::first_existing_symlink_component(&path) {
+        Ok(Some(symlink_path)) => {
+            return provenance_referent_report(
+                &uri.to_string(),
+                uri.scheme(),
+                VerifyProvenanceReferentStatus::Unverifiable,
+                "file_referent_symlinked".to_owned(),
+                None,
+                Some(format!(
+                    "Provenance file {} traverses symlinked path component {}; point the URI at a real workspace file.",
+                    path.display(),
+                    symlink_path.display()
+                )),
+            );
+        }
+        Ok(None) => {}
+        Err(_) => {
+            return provenance_referent_report(
+                &uri.to_string(),
+                uri.scheme(),
+                VerifyProvenanceReferentStatus::Unverifiable,
+                "file_referent_symlink_check_failed".to_owned(),
+                None,
+                Some(format!(
+                    "Could not confirm {} is free of symlinked path components.",
+                    path.display()
+                )),
+            );
+        }
+    }
     let Ok(metadata) = std::fs::metadata(&path) else {
         return provenance_referent_report(
             &uri.to_string(),
@@ -3079,6 +3114,42 @@ mod tests {
             &"file_referent_missing",
             "missing file reason",
         )
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn provenance_referent_refuses_symlinked_file_referent_bd_3n8tt() -> TestResult {
+        // bd-3n8tt: a file:// referent that traverses a symlink (leaf or parent)
+        // must be refused, not followed — matching the memory-freshness contract.
+        // Otherwise the verifier hashes/opens the symlink TARGET as if it were
+        // the workspace evidence file.
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(temp.path().join("outside.md"), "secret evidence\n")
+            .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(temp.path().join("outside.md"), temp.path().join("linked.md"))
+            .map_err(|error| error.to_string())?;
+
+        for uri in ["file://linked.md#L1", "file://linked.md"] {
+            let report = verify_provenance_referent(
+                uri,
+                &VerifyProvenanceReferentOptions {
+                    workspace_path: temp.path(),
+                    database: None,
+                    allow_network: false,
+                },
+            );
+            ensure_equal(
+                &report.status,
+                &VerifyProvenanceReferentStatus::Unverifiable,
+                "symlinked referent must not verify",
+            )?;
+            ensure_equal(
+                &report.reason.as_str(),
+                &"file_referent_symlinked",
+                "symlinked referent reason",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
