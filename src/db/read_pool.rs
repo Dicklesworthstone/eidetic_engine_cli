@@ -1602,16 +1602,76 @@ mod tests {
     #[test]
     fn happy_path_two_concurrent_snapshot_pins_do_not_deadlock() {
         let (_tempdir, database_path, pool) = file_pool(2);
+        let pool = Arc::new(pool);
+        let start = Arc::new(Barrier::new(3));
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let mut release_txs = Vec::new();
+        let mut handles = Vec::new();
 
-        let first = must(pool.pin_snapshot(), "first snapshot pin opens");
-        let second = must(pool.pin_snapshot(), "second snapshot pin opens");
-        assert_ne!(first.slot_id(), second.slot_id());
+        for reader in 0..2 {
+            let pool = Arc::clone(&pool);
+            let start = Arc::clone(&start);
+            let acquired_tx = acquired_tx.clone();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            release_txs.push(release_tx);
+            handles.push(thread::spawn(move || {
+                start.wait();
+                let pin = must(pool.pin_snapshot(), "reader snapshot pin opens");
+                let slot_id = pin.slot_id();
+                let before_insert = snapshot_item_count(&pin);
+                must(
+                    acquired_tx.send((reader, slot_id, before_insert)),
+                    "reader reports acquired snapshot pin",
+                );
+                must(release_rx.recv(), "main releases reader snapshot pin");
+                let after_insert = snapshot_item_count(&pin);
+                (reader, slot_id, before_insert, after_insert)
+            }));
+        }
+        drop(acquired_tx);
 
-        assert_eq!(snapshot_item_count(&first), 1);
-        assert_eq!(snapshot_item_count(&second), 1);
+        start.wait();
+        let mut acquired = Vec::new();
+        for _ in 0..2 {
+            acquired.push(must(
+                acquired_rx.recv_timeout(Duration::from_secs(5)),
+                "reader acquires snapshot pin before timeout",
+            ));
+        }
+
+        assert_eq!(
+            acquired
+                .iter()
+                .map(|(_reader, slot_id, _count)| *slot_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            2
+        );
+        assert!(
+            acquired
+                .iter()
+                .all(|(_reader, _slot_id, before_insert)| *before_insert == 1)
+        );
+
         insert_snapshot_item(&database_path, 2, "after");
-        assert_eq!(snapshot_item_count(&first), 1);
-        assert_eq!(snapshot_item_count(&second), 1);
+        for release_tx in release_txs {
+            must(release_tx.send(()), "main release signal sends");
+        }
+
+        let mut results = Vec::new();
+        for handle in handles {
+            match handle.join() {
+                Ok(result) => results.push(result),
+                Err(_) => panic!("reader thread panicked"),
+            }
+        }
+        results.sort_by_key(|(reader, _slot_id, _before_insert, _after_insert)| *reader);
+        assert_eq!(results.len(), 2);
+        assert_ne!(results[0].1, results[1].1);
+        for (_reader, _slot_id, before_insert, after_insert) in results {
+            assert_eq!(before_insert, 1);
+            assert_eq!(after_insert, 1);
+        }
     }
 
     #[test]
