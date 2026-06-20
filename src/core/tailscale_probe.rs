@@ -1010,7 +1010,7 @@ fn is_timeout_error(error: &io::Error) -> bool {
     )
 }
 
-fn http_response_body(response: &[u8]) -> Result<&[u8], String> {
+fn http_response_body(response: &[u8]) -> Result<Vec<u8>, String> {
     let header_end = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -1031,7 +1031,55 @@ fn http_response_body(response: &[u8]) -> Result<&[u8], String> {
     if status_code != Some("200") {
         return Err(format!("local API returned {status_line}"));
     }
-    Ok(&response[header_end + 4..])
+    let body = &response[header_end + 4..];
+    if has_chunked_transfer_encoding(&header) {
+        return decode_chunked_body(body);
+    }
+    Ok(body.to_vec())
+}
+
+fn has_chunked_transfer_encoding(header: &str) -> bool {
+    header.lines().any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        name.trim().eq_ignore_ascii_case("transfer-encoding")
+            && value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("chunked"))
+    })
+}
+
+fn decode_chunked_body(body: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoded = Vec::new();
+    let mut cursor = 0;
+    loop {
+        let line_end = body[cursor..]
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .ok_or_else(|| "chunked local API response had unterminated chunk size".to_owned())?;
+        let size_line = String::from_utf8_lossy(&body[cursor..cursor + line_end]);
+        let size_token = size_line.split(';').next().unwrap_or_default().trim();
+        let chunk_size = usize::from_str_radix(size_token, 16).map_err(|_| {
+            format!("chunked local API response had invalid chunk size `{size_token}`")
+        })?;
+        cursor += line_end + 2;
+        if chunk_size == 0 {
+            return Ok(decoded);
+        }
+        let chunk_end = cursor
+            .checked_add(chunk_size)
+            .ok_or_else(|| "chunked local API response chunk size overflowed".to_owned())?;
+        if chunk_end > body.len() {
+            return Err("chunked local API response ended before chunk payload".to_owned());
+        }
+        decoded.extend_from_slice(&body[cursor..chunk_end]);
+        cursor = chunk_end;
+        if body.get(cursor..cursor + 2) != Some(b"\r\n") {
+            return Err("chunked local API response chunk missing trailing CRLF".to_owned());
+        }
+        cursor += 2;
+    }
 }
 
 fn default_tailscale_socket_candidates() -> Vec<PathBuf> {
@@ -1477,8 +1525,27 @@ mod tests {
             b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"BackendState\":\"Running\"}",
         )?;
 
-        assert_eq!(body, br#"{"BackendState":"Running"}"#);
+        assert_eq!(body.as_slice(), br#"{"BackendState":"Running"}"#);
         Ok(())
+    }
+
+    #[test]
+    fn localapi_http_response_body_decodes_chunked_payload() -> TestResult {
+        let body = http_response_body(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10\r\n{\"BackendState\"\r\nb\r\n:\"Running\"}\r\n0\r\n\r\n",
+        )?;
+
+        assert_eq!(body.as_slice(), br#"{"BackendState":"Running"}"#);
+        Ok(())
+    }
+
+    #[test]
+    fn localapi_http_response_body_rejects_malformed_chunk_size() {
+        let error =
+            http_response_body(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n{}")
+                .expect_err("malformed chunk size should fail");
+
+        assert!(error.contains("invalid chunk size `zz`"));
     }
 
     #[test]
