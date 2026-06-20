@@ -102,7 +102,7 @@ fn parse_clause(chars: &mut Peekable<Chars<'_>>) -> Option<SearchQueryClause> {
     let value = if quoted {
         chars.next();
         if !remaining_contains_closing_quote(chars) {
-            let value = parse_bare(chars);
+            let value = parse_unclosed_quoted_bare(chars);
             if excluded && value.is_empty() {
                 return Some(SearchQueryClause::Term("-".to_string()));
             }
@@ -147,6 +147,30 @@ fn parse_bare(chars: &mut Peekable<Chars<'_>>) -> String {
     while let Some(next) = chars.peek().copied() {
         if is_query_separator(next) || next == '"' {
             break;
+        }
+        value.push(next);
+        chars.next();
+    }
+    value
+}
+
+fn parse_unclosed_quoted_bare(chars: &mut Peekable<Chars<'_>>) -> String {
+    let mut value = String::new();
+    while let Some(next) = chars.peek().copied() {
+        if is_query_separator(next) {
+            break;
+        }
+        if next == '"' {
+            break;
+        }
+        if next == '\\' {
+            chars.next();
+            if matches!(chars.peek(), Some('"')) {
+                chars.next();
+                break;
+            }
+            value.push(next);
+            continue;
         }
         value.push(next);
         chars.next();
@@ -381,6 +405,22 @@ mod tests {
             ]
         );
         assert_eq!(query.to_string(), "alpha beta -gamma");
+        assert_eq!(parse_search_query(&query.to_string()), query);
+    }
+
+    #[test]
+    fn search_query_parser_does_not_emit_escape_marker_for_unclosed_phrase() {
+        let query = parse_search_query(r#"alpha "beta \" gamma"#);
+
+        assert_eq!(
+            query.clauses(),
+            &[
+                SearchQueryClause::Term("alpha".to_string()),
+                SearchQueryClause::Term("beta".to_string()),
+                SearchQueryClause::Term("gamma".to_string()),
+            ]
+        );
+        assert_eq!(query.to_string(), "alpha beta gamma");
         assert_eq!(parse_search_query(&query.to_string()), query);
     }
 
