@@ -1,100 +1,111 @@
-//! Contract coverage for the `EffectManifest` daemon-subcommand entries
-//! (bd-30i43).
+//! Contract coverage for the daemon command's `EffectManifest` entry
+//! (bd-30i43, corrected by bd-d67os.21).
 //!
-//! `src/core/effect.rs::EffectManifest` is the agent-readable catalog of
-//! blast radius for every CLI subcommand. Trauma-guard, agent harnesses,
-//! and policy layers consult the manifest before invoking a command. The
-//! `daemon start` and `daemon stop` subcommands (bd-oja31, dispatched at
-//! `src/cli/mod.rs:41843-41847`) both mutate the filesystem — `start`
-//! binds a UDS file at `$XDG_RUNTIME_DIR/ee/daemon.sock` (or
-//! `$TMPDIR/ee-daemon.sock`) and `stop` `fs::remove_file()`s it — so
-//! both belong in the manifest under the `durable_write` effect class
-//! with an empty workspace-DB write surface (the socket lives outside
-//! the workspace).
+//! `src/core/effect.rs::EffectManifest` is the agent-readable catalog of blast
+//! radius for every CLI subcommand. Trauma-guard, agent harnesses, and policy
+//! layers consult it via the **normalized** command path. `src/cli/mod.rs`
+//! collapses *every* `Command::Daemon(_)` invocation (status, start, stop, …) to
+//! the single path `"daemon"` (`NormalizedInvocation::extract_command_path`), so
+//! the entry production actually looks up is `EffectManifest::get("daemon")`.
 //!
-//! This test pins both entries' existence and effect class so future
-//! manifest reshuffles do not silently drop them.
+//! The earlier revision of this test asserted `EffectManifest::get("daemon
+//! start")` / `get("daemon stop")` — manifest-only documentation rows that CLI
+//! normalization never produces — so it pinned paths the policy layers never
+//! consult (and against a stale `durable_write`/empty-surface framing). These
+//! tests instead pin (a) that daemon subcommands really normalize to `"daemon"`,
+//! and (b) the live `"daemon"` entry's classification, keeping the contract
+//! coupled to the path production uses.
 
-use ee::core::effect::{EffectClass, EffectManifest};
+use clap::Parser;
+use ee::cli::{Cli, NormalizedInvocation};
+use ee::core::effect::{EffectClass, EffectManifest, SideEffectClass};
+use std::ffi::OsString;
 
 type TestResult = Result<(), String>;
 
-fn ensure_equal<T: std::fmt::Debug + PartialEq>(
-    actual: &T,
-    expected: &T,
-    context: &str,
-) -> TestResult {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(format!("{context}: expected {expected:?}, got {actual:?}"))
-    }
+fn normalized_command_path(argv: &[&str]) -> Result<String, String> {
+    let cli = Cli::try_parse_from(argv.iter().copied())
+        .map_err(|error| format!("`{}` must parse: {error}", argv.join(" ")))?;
+    let args: Vec<OsString> = argv.iter().map(OsString::from).collect();
+    Ok(NormalizedInvocation::from_cli(&cli, &args).command_path)
 }
 
 #[test]
-fn daemon_start_is_declared_durable_write() -> TestResult {
-    let manifest = EffectManifest::build();
-    let effect = manifest
-        .get("daemon start")
-        .ok_or_else(|| "`daemon start` must appear in EffectManifest".to_string())?;
-    ensure_equal(
-        &effect.default_effect,
-        &EffectClass::DurableMemoryWrite,
-        "`daemon start` is durable_write (binds UDS file outside the workspace)",
-    )?;
-    if !effect.write_surfaces.db_tables.is_empty() {
-        return Err(format!(
-            "`daemon start` writes a UDS socket, not workspace DB tables; \
-             got db_tables = {:?}",
-            effect.write_surfaces.db_tables
-        ));
-    }
-    if !effect.description.contains("same-uid auth-required")
-        || !effect.description.contains("workspace-bound methods")
-    {
-        return Err(format!(
-            "`daemon start` manifest must document daemon RPC authorization; got {:?}",
-            effect.description
-        ));
+fn daemon_subcommands_normalize_to_the_daemon_manifest_path() -> TestResult {
+    // Every daemon subcommand collapses to the single normalized path "daemon"
+    // (src/cli/mod.rs `Command::Daemon(_) => "daemon"`). This is the key the
+    // policy / trauma-guard layers actually look up, so the manifest assertions
+    // below must target it — not "daemon start" / "daemon stop".
+    for argv in [
+        ["ee", "daemon", "status"],
+        ["ee", "daemon", "start"],
+        ["ee", "daemon", "stop"],
+    ] {
+        let path = normalized_command_path(&argv)?;
+        if path != "daemon" {
+            return Err(format!(
+                "`{}` must normalize to command path \"daemon\" (the manifest key policy \
+                 layers consult); got {path:?}",
+                argv.join(" ")
+            ));
+        }
     }
     Ok(())
 }
 
 #[test]
-fn daemon_stop_is_declared_durable_write() -> TestResult {
+fn normalized_daemon_entry_is_external_io_mixed_with_real_write_surface() -> TestResult {
+    // The entry production consults for any daemon invocation: external_io (UDS
+    // lifecycle) with a Mixed side-effect class (status is read-only; some
+    // foreground steward jobs mutate handler-owned DB state) and a NON-empty DB
+    // write surface — the opposite of the empty-surface, durable_write framing
+    // the previous test asserted against unreachable per-subcommand rows.
     let manifest = EffectManifest::build();
-    let effect = manifest
-        .get("daemon stop")
-        .ok_or_else(|| "`daemon stop` must appear in EffectManifest".to_string())?;
-    ensure_equal(
-        &effect.default_effect,
-        &EffectClass::DurableMemoryWrite,
-        "`daemon stop` is durable_write (removes UDS file)",
-    )?;
-    if !effect.write_surfaces.db_tables.is_empty() {
+    let effect = manifest.get("daemon").ok_or_else(|| {
+        "the normalized `daemon` command path must appear in EffectManifest".to_string()
+    })?;
+    if effect.default_effect != EffectClass::ExternalIo {
         return Err(format!(
-            "`daemon stop` removes a UDS socket, not workspace DB tables; \
-             got db_tables = {:?}",
-            effect.write_surfaces.db_tables
+            "`daemon` default effect must be external_io (UDS lifecycle); got {:?}",
+            effect.default_effect
         ));
+    }
+    if effect.mutation_contract.side_effect_class != SideEffectClass::Mixed {
+        return Err(format!(
+            "`daemon` side-effect class must be Mixed (subcommand-specific); got {:?}",
+            effect.mutation_contract.side_effect_class
+        ));
+    }
+    if effect.write_surfaces.db_tables.is_empty() {
+        return Err(
+            "`daemon` must declare the DB write surface a foreground steward job can touch; \
+             got empty db_tables"
+                .to_string(),
+        );
     }
     Ok(())
 }
 
 #[test]
-fn daemon_start_and_stop_entries_are_distinct() -> TestResult {
+fn daemon_start_stop_are_manifest_only_documentation_rows() -> TestResult {
+    // `daemon start` / `daemon stop` exist in the manifest to document the UDS
+    // socket lifecycle, but CLI normalization never produces these paths (proven
+    // by `daemon_subcommands_normalize_to_the_daemon_manifest_path`), so policy
+    // layers never look them up. Pin their actual `workspace_file_write` class so
+    // the documentation rows can't silently drift, while making explicit that
+    // they are NOT the consulted entry.
     let manifest = EffectManifest::build();
-    let start = manifest
-        .get("daemon start")
-        .ok_or_else(|| "`daemon start` missing from manifest".to_string())?;
-    let stop = manifest
-        .get("daemon stop")
-        .ok_or_else(|| "`daemon stop` missing from manifest".to_string())?;
-    if start.command_path == stop.command_path {
-        return Err(format!(
-            "`daemon start` and `daemon stop` collapsed to the same command_path: {}",
-            start.command_path
-        ));
+    for path in ["daemon start", "daemon stop"] {
+        let effect = manifest
+            .get(path)
+            .ok_or_else(|| format!("manifest-only documentation row `{path}` must exist"))?;
+        if effect.default_effect != EffectClass::WorkspaceFileWrite {
+            return Err(format!(
+                "`{path}` documents a UDS socket file write; expected workspace_file_write, \
+                 got {:?}",
+                effect.default_effect
+            ));
+        }
     }
     Ok(())
 }
