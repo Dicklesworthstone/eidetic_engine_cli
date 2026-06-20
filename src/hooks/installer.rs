@@ -523,35 +523,17 @@ fn ensure_hook_dir_is_not_symlink(hook_dir: &Path) -> Result<(), DomainError> {
 }
 
 fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainError> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        current.push(component.as_os_str());
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(None);
-            }
-            Err(error) => {
-                return Err(DomainError::Storage {
-                    message: format!(
-                        "Failed to inspect hook directory component '{}': {error}",
-                        current.display()
-                    ),
-                    repair: Some(
-                        "Choose a readable hook directory or re-run with corrected permissions."
-                            .to_owned(),
-                    ),
-                });
-            }
+    crate::core::path_safety::first_existing_symlink_component(path).map_err(|error| {
+        DomainError::Storage {
+            message: format!(
+                "Failed to inspect hook path '{}' for symlink safety: {error}",
+                path.display()
+            ),
+            repair: Some(
+                "Choose a readable hook path or re-run with corrected permissions.".to_owned(),
+            ),
         }
-    }
-    Ok(None)
+    })
 }
 
 #[derive(Debug)]
