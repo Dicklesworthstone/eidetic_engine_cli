@@ -78,6 +78,14 @@ Fixture scenarios:
   `claimCommandSuppressed=true`, and the read-only fallback command. That
   envelope is the only supported way to represent BV timeout/no-output in
   machine output; it must not be collapsed into an empty queue.
+- `bv_robot_insights_bounded_projection`: a compact advisory projection for
+  `bv --robot-insights` on large trackers (bd-ifoh3.6). It records command and
+  output budgets, graph node/edge counts, cycle-analysis skipped reason,
+  caps/omitted counts for top-what-if and map sections, and an explicitly
+  capped follow-up command. Any recommendations in this projection are graph
+  hints only: `claimCommandSuppressed=true` stays set until the same id appears
+  in `scripts/br_retry.sh actionable --json` and the work-packet claim gate
+  emits a runnable claim action.
 - `tracker_mismatch`: an otherwise claimable leaf is downgraded because Beads
   JSONL and DB state are not authoritative.
 - `rollup_only_no_claimable_child`: an open epic or parent has no claimable

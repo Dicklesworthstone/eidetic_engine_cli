@@ -1,0 +1,88 @@
+{
+  "schema": "ee.bv.robot_insights_projection.v1",
+  "projectionId": "bv-robot-insights-bounded-large-tracker-0001",
+  "command": {
+    "commandName": "bv --robot-insights",
+    "commandTemplate": "bv --robot-insights --format json --fields status,top_what_ifs,advanced_insights --limit 8 --max-bytes 32768",
+    "fallbackCommand": "scripts/br_retry.sh actionable --json",
+    "safety": "read_only_probe"
+  },
+  "budget": {
+    "commandBudgetMs": 30000,
+    "elapsedMs": 18420,
+    "maxBytes": 32768,
+    "estimatedBytes": 18432,
+    "truncated": true
+  },
+  "graph": {
+    "nodeCount": 4079,
+    "edgeCount": 6120,
+    "cycles": {
+      "state": "skipped",
+      "reason": "graph too large (>2000 nodes)"
+    },
+    "phaseStatus": {
+      "pagerank": "computed",
+      "critical_path": "computed",
+      "advanced_insights": "computed",
+      "cycles": "skipped"
+    }
+  },
+  "caps": {
+    "maxTopWhatIfs": 8,
+    "emittedTopWhatIfs": 3,
+    "omittedTopWhatIfs": 19,
+    "largeMapsTruncated": true,
+    "omittedSections": [
+      "full_pagerank_map",
+      "full_betweenness_map",
+      "raw_cycle_candidates"
+    ]
+  },
+  "recommendationPosture": {
+    "advisoryOnly": true,
+    "claimCommandSuppressed": true,
+    "requiresActionableQueue": true,
+    "requiresClaimGate": true,
+    "recommendationsContainNonActionable": true,
+    "explanation": "Robot-insights ranks graph pressure only. Items that are blocked, assigned, stale, or absent from the safe actionable queue remain diagnostic context."
+  },
+  "topWhatIfs": [
+    {
+      "id": "bd-blocked-example",
+      "status": "blocked",
+      "advisoryReason": "high graph leverage but dependency-blocked"
+    },
+    {
+      "id": "bd-in-progress-example",
+      "status": "in_progress",
+      "advisoryReason": "high graph leverage but already owned"
+    },
+    {
+      "id": "bd-open-example",
+      "status": "open",
+      "advisoryReason": "inspect with actionable queue and claim gate before mutation"
+    }
+  ],
+  "degraded": [
+    {
+      "code": "bv_robot_insights_cycles_skipped",
+      "severity": "warning",
+      "message": "Cycle analysis was skipped because the graph exceeded the bounded cycle budget.",
+      "repair": "bv --robot-insights --format json --fields status,top_what_ifs --limit 8 --max-bytes 32768"
+    },
+    {
+      "code": "bv_robot_insights_output_truncated",
+      "severity": "info",
+      "message": "Large maps and long arrays were capped for agent planning.",
+      "repair": "Increase --limit or --max-bytes only for read-only inspection."
+    }
+  ],
+  "supportBundleSafety": {
+    "rawTrackerRowsIncluded": false,
+    "rawStdoutIncluded": false,
+    "privatePathsIncluded": false,
+    "unboundedMapsIncluded": false
+  },
+  "provenanceHash": "blake3:1f6a26d8bd5c4037b7e1d45f0c6a9021"
+}

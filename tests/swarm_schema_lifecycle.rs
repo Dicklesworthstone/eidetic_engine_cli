@@ -3596,6 +3596,128 @@ fn work_packet_bv_timeout_no_output_is_contractual() -> TestResult {
 }
 
 #[test]
+fn work_packet_bv_robot_insights_projection_is_bounded_and_advisory() -> TestResult {
+    // bd-ifoh3.6: robot-insights can be useful on large trackers only when its
+    // graph output is bounded and clearly advisory. This pins the compact
+    // projection shape expected from BV or from an ee collector projection.
+    let fixture_path = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("swarm_work_packet")
+        .join("bv_robot_insights_bounded_projection.json");
+    let fixture = read_json(&fixture_path)?;
+    if string_field(&fixture, "/schema", "bv robot-insights fixture")?
+        != "ee.bv.robot_insights_projection.v1"
+    {
+        return Err("bv robot-insights fixture schema drifted".into());
+    }
+    if string_field(
+        &fixture,
+        "/command/commandTemplate",
+        "bv robot-insights fixture",
+    )? != "bv --robot-insights --format json --fields status,top_what_ifs,advanced_insights --limit 8 --max-bytes 32768"
+    {
+        return Err("bv robot-insights fixture must pin a bounded command template".into());
+    }
+    if fixture.pointer("/budget/maxBytes").and_then(Value::as_i64) != Some(32768)
+        || fixture.pointer("/budget/estimatedBytes").and_then(Value::as_i64) > Some(32768)
+        || fixture.pointer("/budget/truncated").and_then(Value::as_bool) != Some(true)
+    {
+        return Err("bv robot-insights fixture must report bounded output bytes".into());
+    }
+    if fixture.pointer("/graph/nodeCount").and_then(Value::as_i64).is_none_or(|count| count <= 2000)
+        || fixture.pointer("/graph/edgeCount").and_then(Value::as_i64).is_none_or(|count| count <= 4000)
+    {
+        return Err("bv robot-insights fixture must preserve large-graph shape".into());
+    }
+    if string_field(&fixture, "/graph/cycles/state", "bv robot-insights fixture")? != "skipped"
+        || !string_field(&fixture, "/graph/cycles/reason", "bv robot-insights fixture")?
+            .contains(">2000 nodes")
+    {
+        return Err("bv robot-insights fixture must pin cycle-analysis skip reason".into());
+    }
+    if fixture.pointer("/caps/maxTopWhatIfs").and_then(Value::as_i64) != Some(8)
+        || fixture.pointer("/caps/emittedTopWhatIfs").and_then(Value::as_i64).is_none_or(|count| count > 8)
+        || fixture.pointer("/caps/omittedTopWhatIfs").and_then(Value::as_i64).is_none_or(|count| count == 0)
+        || fixture.pointer("/caps/largeMapsTruncated").and_then(Value::as_bool) != Some(true)
+    {
+        return Err("bv robot-insights fixture must report top-what-if and map caps".into());
+    }
+
+    let omitted = string_array_at(&fixture, "/caps/omittedSections", "bv robot-insights fixture")?;
+    for section in ["full_pagerank_map", "full_betweenness_map", "raw_cycle_candidates"] {
+        if !omitted.iter().any(|item| item == section) {
+            return Err(format!("bv robot-insights fixture missing omitted section {section}"));
+        }
+    }
+    if fixture.pointer("/recommendationPosture/advisoryOnly").and_then(Value::as_bool) != Some(true)
+        || fixture.pointer("/recommendationPosture/claimCommandSuppressed").and_then(Value::as_bool) != Some(true)
+        || fixture.pointer("/recommendationPosture/requiresActionableQueue").and_then(Value::as_bool) != Some(true)
+        || fixture.pointer("/recommendationPosture/requiresClaimGate").and_then(Value::as_bool) != Some(true)
+        || fixture
+            .pointer("/recommendationPosture/recommendationsContainNonActionable")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Err("bv robot-insights recommendations must remain advisory".into());
+    }
+    let top_what_ifs = fixture
+        .pointer("/topWhatIfs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "bv robot-insights fixture missing topWhatIfs".to_owned())?;
+    let statuses = top_what_ifs
+        .iter()
+        .filter_map(|item| item.pointer("/status").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    for status in ["blocked", "in_progress", "open"] {
+        if !statuses.contains(status) {
+            return Err(format!("bv robot-insights fixture missing {status} example"));
+        }
+    }
+    let serialized =
+        serde_json::to_string(&fixture).map_err(|error| format!("serialize fixture: {error}"))?;
+    let lowered = serialized.to_ascii_lowercase();
+    for forbidden in [
+        "/users/",
+        "/private/",
+        "/home/",
+        "raw stdout",
+        "raw stderr",
+        "\"claimcommandaction\"",
+        "\"safe_to_claim\"",
+        "claimable",
+        "stack trace",
+    ] {
+        if lowered.contains(forbidden) {
+            return Err(format!(
+                "bv robot-insights fixture leaked forbidden detail {forbidden}"
+            ));
+        }
+    }
+    if fixture
+        .pointer("/supportBundleSafety/rawTrackerRowsIncluded")
+        .and_then(Value::as_bool)
+        != Some(false)
+        || fixture
+            .pointer("/supportBundleSafety/rawStdoutIncluded")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || fixture
+            .pointer("/supportBundleSafety/privatePathsIncluded")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || fixture
+            .pointer("/supportBundleSafety/unboundedMapsIncluded")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("bv robot-insights fixture must remain support-bundle safe".into());
+    }
+
+    Ok(())
+}
+
+#[test]
 fn work_packet_tracker_mismatch_blocks_claim_mutation() -> TestResult {
     // bd-1tlcd.3: when tracker integrity says Beads DB/JSONL state is not
     // authoritative, a visible ready candidate must stay explainable but cannot
