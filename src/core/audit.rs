@@ -1021,15 +1021,32 @@ fn timeline_db_generation(workspace: &Path, database_path: Option<&Path>) -> u64
     let Ok(connection) = DbConnection::open_file(&database_path) else {
         return 0;
     };
-    let workspace_path = workspace.to_string_lossy().into_owned();
-    let Ok(Some(workspace_row)) = connection.get_workspace_by_path(&workspace_path) else {
-        return 0;
-    };
-    connection
-        .get_workspace_generation(&workspace_row.id)
-        .ok()
-        .flatten()
-        .unwrap_or(0)
+    for workspace_path in timeline_workspace_path_candidates(workspace) {
+        match connection.get_workspace_by_path(&workspace_path) {
+            Ok(Some(workspace_row)) => {
+                return connection
+                    .get_workspace_generation(&workspace_row.id)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0);
+            }
+            Ok(None) => {}
+            Err(_) => return 0,
+        }
+    }
+    0
+}
+
+fn timeline_workspace_path_candidates(workspace: &Path) -> Vec<String> {
+    let raw = workspace.to_string_lossy().into_owned();
+    let mut candidates = vec![raw.clone()];
+    if let Ok(canonical) = workspace.canonicalize() {
+        let canonical = canonical.to_string_lossy().into_owned();
+        if canonical != raw {
+            candidates.push(canonical);
+        }
+    }
+    candidates
 }
 
 fn parse_optional_instant(
@@ -1730,6 +1747,62 @@ mod tests {
         assert_eq!(report.entries[0].surface, "memory");
         assert_eq!(report.entries[0].actor.as_deref(), Some("agent-a"));
         assert_eq!(report.pagination.total_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn timeline_generation_uses_canonical_workspace_path_fallback() -> TestResult {
+        let workspace = fixture_workspace("generation-canonical-fallback")?;
+        let database = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let canonical_workspace =
+            fs::canonicalize(&workspace).unwrap_or_else(|_| workspace.clone());
+        connection
+            .insert_workspace(
+                "wsp_01234567890123456789012345",
+                &CreateWorkspaceInput {
+                    path: canonical_workspace.to_string_lossy().into_owned(),
+                    name: Some("audit-test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000001",
+                &CreateMemoryInput {
+                    workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Run cargo fmt --check before release.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: Some("file://AGENTS.md".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec![],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let expected_generation = connection
+            .get_workspace_generation("wsp_01234567890123456789012345")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "workspace generation missing".to_owned())?;
+        assert!(
+            expected_generation > 0,
+            "fixture must prove a nonzero generation"
+        );
+        connection.close().map_err(|error| error.to_string())?;
+
+        let raw_equivalent_workspace = workspace.join(".");
+        let actual_generation =
+            timeline_db_generation(&raw_equivalent_workspace, Some(database.as_path()));
+
+        assert_eq!(actual_generation, expected_generation);
         Ok(())
     }
 
