@@ -987,6 +987,46 @@ fn assemble_bridge_primer(
         .map_err(|error| storage_error("Failed to assemble primer for agentsmd export", error))
 }
 
+/// Replace the marker-delimited managed region of `existing` with `block`,
+/// preserving every byte outside the markers (CRLF endings, a missing final
+/// newline, hand-written prefix/suffix) verbatim. Returns `(old_block,
+/// new_content)` where `old_block` is the original managed region (used for the
+/// dry-run diff).
+///
+/// Splicing by byte range — rather than rebuilding from `lines()` + a `\n`
+/// join — keeps an unchanged block a true no-op and honors the module contract
+/// that export NEVER edits outside its markers. `split_inclusive('\n')` aligns
+/// 1:1 with the `lines()` indices `scan_managed_block` recorded while retaining
+/// each line's terminator, so cumulative segment byte-lengths yield exact byte
+/// offsets for the managed region.
+fn splice_managed_block(existing: &str, found: &ManagedBlock, block: &str) -> (String, String) {
+    let segments: Vec<&str> = existing.split_inclusive('\n').collect();
+    let prefix_len: usize = segments[..found.begin_index].iter().map(|s| s.len()).sum();
+    let managed_len: usize = segments[found.begin_index..=found.end_index]
+        .iter()
+        .map(|s| s.len())
+        .sum();
+    let prefix = &existing[..prefix_len];
+    let managed_region = &existing[prefix_len..prefix_len + managed_len];
+    let suffix = &existing[prefix_len + managed_len..];
+    // Reattach the end-marker line's original terminator so the suffix stays
+    // byte-adjacent exactly as it was before the splice.
+    let end_terminator = if managed_region.ends_with("\r\n") {
+        "\r\n"
+    } else if managed_region.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
+    let mut content =
+        String::with_capacity(prefix.len() + block.len() + end_terminator.len() + suffix.len());
+    content.push_str(prefix);
+    content.push_str(block);
+    content.push_str(end_terminator);
+    content.push_str(suffix);
+    (managed_region.to_string(), content)
+}
+
 /// Execute `ee export agentsmd` (ADR 0065 §5 export contract).
 pub fn run_agentsmd_export(
     connection: &DbConnection,
@@ -1044,7 +1084,6 @@ pub fn run_agentsmd_export(
 
     let scan = scan_managed_block(&existing)
         .map_err(|reason| malformed_markers_error(&display_path, &reason))?;
-    let lines: Vec<&str> = existing.lines().collect();
     let (old_block, new_content) = match &scan {
         ManagedBlockScan::Missing => {
             // First export into an existing file: append the block after the
@@ -1073,22 +1112,7 @@ pub fn run_agentsmd_export(
                     .push(unmanaged_edit_degradation(&display_path));
                 return Ok(report);
             }
-            let old_block = lines[found.begin_index..=found.end_index].join("\n");
-            let mut content_lines: Vec<&str> = Vec::with_capacity(lines.len());
-            content_lines.extend_from_slice(&lines[..found.begin_index]);
-            let mut content = if content_lines.is_empty() {
-                String::new()
-            } else {
-                content_lines.join("\n") + "\n"
-            };
-            content.push_str(&block);
-            content.push('\n');
-            let tail = &lines[found.end_index + 1..];
-            if !tail.is_empty() {
-                content.push_str(&tail.join("\n"));
-                content.push('\n');
-            }
-            (old_block, content)
+            splice_managed_block(&existing, found, &block)
         }
     };
 
@@ -2088,6 +2112,64 @@ mod tests {
             scanned.recorded_hash.as_deref(),
             Some(managed_block_body_hash(&scanned.body).as_str()),
             "recorded hash matches the scanned body"
+        );
+    }
+
+    #[test]
+    fn export_splice_preserves_bytes_outside_markers_bd_3just() {
+        let sections = vec![section("rules", &[("mem_a", "Always run verify. [mem_a]")])];
+        let body = render_managed_body(&sections);
+        let block = render_managed_block(&body, 7);
+
+        // A hand-written suffix with NO trailing newline. Re-splicing the
+        // byte-identical block must be a true no-op: the old `lines()` rebuild
+        // appended a final newline here and reported a spurious change.
+        let suffix = "\n\n# hand notes\nno trailing newline";
+        let existing = format!("intro line\n\n{block}{suffix}");
+        let ManagedBlockScan::Found(found) = scan_managed_block(&existing).expect("scan") else {
+            panic!("expected managed block");
+        };
+        let (_old, spliced) = splice_managed_block(&existing, &found, &block);
+        assert_eq!(
+            spliced, existing,
+            "identical re-splice is byte-for-byte no-op; suffix without final newline preserved"
+        );
+
+        // CRLF line endings outside the managed block survive verbatim rather
+        // than being normalized to LF.
+        let crlf_existing = format!("intro\r\n\r\n{block}\r\ntail with crlf\r\nno final newline");
+        let ManagedBlockScan::Found(crlf_found) =
+            scan_managed_block(&crlf_existing).expect("scan crlf")
+        else {
+            panic!("expected managed block");
+        };
+        let (_crlf_old, crlf_spliced) = splice_managed_block(&crlf_existing, &crlf_found, &block);
+        assert_eq!(
+            crlf_spliced, crlf_existing,
+            "CRLF prefix/suffix preserved on identical re-splice"
+        );
+        assert!(
+            crlf_spliced.contains("tail with crlf\r\n"),
+            "CRLF terminator outside the markers not normalized to LF"
+        );
+
+        // A CHANGED block replaces only the marker region; prefix and suffix
+        // bytes are untouched.
+        let new_sections = vec![section("rules", &[("mem_a", "Updated rule. [mem_a]")])];
+        let new_block = render_managed_block(&render_managed_body(&new_sections), 8);
+        let (_old3, changed) = splice_managed_block(&existing, &found, &new_block);
+        assert!(
+            changed.starts_with("intro line\n\n"),
+            "prefix preserved across a real block change"
+        );
+        assert!(
+            changed.ends_with(suffix),
+            "suffix (no trailing newline) preserved across a real block change"
+        );
+        assert!(changed.contains("Updated rule."), "new block body present");
+        assert!(
+            !changed.contains("Always run verify."),
+            "old block body replaced"
         );
     }
 
