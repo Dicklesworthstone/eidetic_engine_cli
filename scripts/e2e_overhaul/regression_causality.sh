@@ -316,10 +316,10 @@ assert_file_jq "$UNKNOWN_CASE_STDOUT" \
     "true" "regression_unknown_next_commands_read_only"
 
 assert_jsonl_jq "$EE_TEST_LOG_PATH" \
-    '[select(.kind == "regression_causality_case")] | length' \
+    '[.[] | select(.kind == "regression_causality_case")] | length' \
     "2" "regression_case_event_count"
 assert_jsonl_jq "$EE_TEST_LOG_PATH" \
-    'all(select(.kind == "regression_causality_case"); (.fields.stdout_path | length) > 0 and (.fields.stderr_path | length) > 0 and (.exit_code == 0))' \
+    'all(.[] | select(.kind == "regression_causality_case"); (.fields.stdout_path | length) > 0 and (.fields.stderr_path | length) > 0 and (.exit_code == 0))' \
     "true" "regression_case_events_have_artifacts"
 
 if [ "$EE_TEST_LOG_ASSERTS_FAIL" -ne 0 ]; then
