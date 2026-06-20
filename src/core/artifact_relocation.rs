@@ -273,11 +273,26 @@ fn restore_relocation(
 ) -> Result<ArtifactRelocationReport, DomainError> {
     let manifest = read_manifest(options.manifest_path)?;
     let mut restored = false;
+    let mut restore_source_allowed = true;
     for entry in &manifest.entries {
         let original = manifest_entry_path(entry, "originalPath", &entry.original_path)?;
         let destination = manifest_entry_path(entry, "destinationPath", &entry.destination_path)?;
         reject_existing_symlink_component(&original)?;
         reject_existing_symlink_component(&destination)?;
+        let original_allowed = source_allowed(options.workspace_path, &original);
+        if !original_allowed && !options.force_with_explicit_path {
+            return Err(DomainError::PolicyDenied {
+                message: format!(
+                    "Refusing to restore artifact outside current workspace artifact roots: {}.",
+                    original.display()
+                ),
+                repair: Some(
+                    "Use --force-with-explicit-path only after explicit review of the manifest original paths."
+                        .to_owned(),
+                ),
+            });
+        }
+        restore_source_allowed &= original_allowed;
         if original.exists() {
             if let Some(expected) = entry.blake3.as_deref() {
                 verify_relocation_file_hash(
@@ -330,7 +345,7 @@ fn restore_relocation(
         restored,
         manifest_path: path_to_string(options.manifest_path),
         manifest_hash: Some(hash_file(options.manifest_path)?),
-        source_allowed: true,
+        source_allowed: restore_source_allowed || options.force_with_explicit_path,
         preservation_policy: "copy_preserve_no_delete_no_overwrite",
         recovery_actions: Vec::new(),
         manifest,
@@ -1890,6 +1905,54 @@ mod tests {
         }
         if !report.restored {
             return Err("restore report did not mark restored=true".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn relocation_restore_rejects_wrong_workspace_original_from_manifest() -> TestResult {
+        let active_workspace = temp_path("restore-active-workspace");
+        let manifest_workspace = temp_path("restore-manifest-workspace");
+        let original = manifest_workspace.join("target/debug/restored.o");
+        let destination = temp_path("restore-wrong-workspace-destination")
+            .join(RELOCATION_DIR)
+            .join("target/debug/restored.o");
+        fs::create_dir_all(parent_dir(&destination)?).map_err(|error| error.to_string())?;
+        fs::write(&destination, "restore bytes\n").map_err(|error| error.to_string())?;
+        let manifest_path = temp_path("restore-wrong-workspace-manifest").join("relocation.json");
+        let manifest =
+            relocation_manifest_for(&manifest_workspace, &original, &destination, &manifest_path)?;
+        write_relocation_manifest(&manifest_path, &manifest)?;
+
+        let result = relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &active_workspace,
+            source_path: None,
+            destination_root: None,
+            manifest_path: &manifest_path,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Restore,
+            force_with_explicit_path: false,
+        });
+
+        match result {
+            Err(DomainError::PolicyDenied { message, repair }) => {
+                if !message.contains("outside current workspace artifact roots") {
+                    return Err(format!("unexpected policy denial message: {message}"));
+                }
+                if repair
+                    .as_deref()
+                    .is_none_or(|repair| !repair.contains("--force-with-explicit-path"))
+                {
+                    return Err(format!("unexpected repair hint: {repair:?}"));
+                }
+            }
+            other => return Err(format!("expected policy denial, got {other:?}")),
+        }
+        if original.exists() {
+            return Err("restore wrote an original from the wrong workspace manifest".to_owned());
+        }
+        if parent_dir(&original)?.exists() {
+            return Err("restore created parent directories outside the active workspace".to_owned());
         }
         Ok(())
     }
