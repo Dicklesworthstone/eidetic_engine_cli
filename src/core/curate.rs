@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -3045,22 +3045,85 @@ fn count_workspace_cass_evidence_spans(
         })
 }
 
+fn list_workspace_cass_evidence_spans_for_scope(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &Path,
+    scope_path: Option<&Path>,
+) -> Result<Vec<StoredEvidenceSpan>, DomainError> {
+    let evidence_spans = list_workspace_cass_evidence_spans(connection, workspace_id)?;
+    let Some(scope_path) = scope_path else {
+        return Ok(evidence_spans);
+    };
+    let sessions = connection
+        .list_sessions(workspace_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list workspace CASS sessions: {error}"),
+            repair: Some("ee import cass --workspace . --json".to_owned()),
+        })?
+        .into_iter()
+        .filter(|session| review_session_matches_scope(session, workspace_path, scope_path))
+        .map(|session| session.id)
+        .collect::<BTreeSet<_>>();
+
+    Ok(evidence_spans
+        .into_iter()
+        .filter(|span| sessions.contains(&span.session_id))
+        .collect())
+}
+
+fn count_workspace_cass_evidence_spans_for_scope(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &Path,
+    scope_path: Option<&Path>,
+) -> Result<usize, DomainError> {
+    if scope_path.is_none() {
+        return count_workspace_cass_evidence_spans(connection, workspace_id);
+    }
+    Ok(list_workspace_cass_evidence_spans_for_scope(
+        connection,
+        workspace_id,
+        workspace_path,
+        scope_path,
+    )?
+    .len())
+}
+
 fn workspace_cass_review_candidates(
     connection: &DbConnection,
     workspace_id: &str,
+    workspace_path: &Path,
+    scope_path: Option<&Path>,
 ) -> Result<(usize, Vec<ReviewSessionCandidate>), DomainError> {
-    let sessions =
+    let mut sessions =
         connection
             .list_sessions(workspace_id)
             .map_err(|error| DomainError::Storage {
                 message: format!("Failed to list workspace CASS sessions: {error}"),
                 repair: Some("ee import cass --workspace . --json".to_owned()),
             })?;
-    let evidence_spans = list_workspace_cass_evidence_spans(connection, workspace_id)?;
+    if let Some(scope_path) = scope_path {
+        sessions
+            .retain(|session| review_session_matches_scope(session, workspace_path, scope_path));
+    }
+    let session_ids = sessions
+        .iter()
+        .map(|session| session.id.clone())
+        .collect::<BTreeSet<_>>();
+    let evidence_spans = list_workspace_cass_evidence_spans_for_scope(
+        connection,
+        workspace_id,
+        workspace_path,
+        scope_path,
+    )?;
 
     let evidence_count = evidence_spans.len();
     let mut spans_by_session = BTreeMap::<String, Vec<StoredEvidenceSpan>>::new();
     for span in evidence_spans {
+        if !session_ids.contains(&span.session_id) {
+            continue;
+        }
         spans_by_session
             .entry(span.session_id.clone())
             .or_default()
@@ -3088,6 +3151,75 @@ fn workspace_cass_review_candidates(
     });
 
     Ok((evidence_count, candidates))
+}
+
+fn review_workspace_scope_path(workspace_path: &Path, scope: Option<&Path>) -> PathBuf {
+    let raw = scope.unwrap_or(workspace_path);
+    let absolute = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        workspace_path.join(raw)
+    };
+    normalize_review_scope_path(&absolute)
+}
+
+fn normalize_review_scope_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() && !path.is_absolute() {
+                    out.push("..");
+                }
+            }
+            Component::Normal(segment) => out.push(segment),
+        }
+    }
+    out
+}
+
+fn review_scope_contains_path(scope_path: &Path, workspace_path: &Path, raw_path: &Path) -> bool {
+    let absolute = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        workspace_path.join(raw_path)
+    };
+    let candidate = normalize_review_scope_path(&absolute);
+    candidate == scope_path || candidate.starts_with(scope_path)
+}
+
+fn review_memory_matches_scope(
+    memory: &StoredMemory,
+    workspace_path: &Path,
+    scope_path: &Path,
+) -> bool {
+    memory
+        .provenance_uri
+        .as_deref()
+        .and_then(review_file_path_from_provenance_uri)
+        .is_some_and(|path| review_scope_contains_path(scope_path, workspace_path, &path))
+}
+
+fn review_session_matches_scope(
+    session: &StoredSession,
+    workspace_path: &Path,
+    scope_path: &Path,
+) -> bool {
+    session
+        .source_path
+        .as_deref()
+        .map(Path::new)
+        .is_some_and(|path| review_scope_contains_path(scope_path, workspace_path, path))
+}
+
+fn review_file_path_from_provenance_uri(raw: &str) -> Option<PathBuf> {
+    match ProvenanceUri::from_str(raw).ok()? {
+        ProvenanceUri::File { path, .. } => Some(PathBuf::from(path)),
+        _ => None,
+    }
 }
 
 fn build_review_session_candidates(
@@ -6857,10 +6989,8 @@ pub fn run_review_workspace(
     options: &ReviewWorkspaceOptions<'_>,
 ) -> Result<ReviewWorkspaceReport, DomainError> {
     let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
-    let scope_path = options
-        .scope
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| prepared.workspace_path.clone());
+    let scope_path = review_workspace_scope_path(&prepared.workspace_path, options.scope);
+    let scope_filter = options.scope.map(|_| scope_path.as_path());
 
     let next_action = if options.propose && !options.dry_run {
         "ee curate candidates --json".to_owned()
@@ -6870,20 +7000,35 @@ pub fn run_review_workspace(
 
     let connection = open_existing_database(&prepared.database_path)?;
 
-    let memories = connection
+    let mut memories = connection
         .list_memories(&prepared.workspace_id, None, false)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list memories: {error}"),
             repair: Some("ee memory list --json".to_owned()),
         })?;
+    if let Some(scope_path) = scope_filter {
+        memories.retain(|memory| {
+            review_memory_matches_scope(memory, &prepared.workspace_path, scope_path)
+        });
+    }
 
     let mut degraded = Vec::new();
     let (evidence_count, cass_candidates) = if options.include_cass {
         if options.propose {
-            workspace_cass_review_candidates(&connection, &prepared.workspace_id)?
+            workspace_cass_review_candidates(
+                &connection,
+                &prepared.workspace_id,
+                &prepared.workspace_path,
+                scope_filter,
+            )?
         } else {
             (
-                count_workspace_cass_evidence_spans(&connection, &prepared.workspace_id)?,
+                count_workspace_cass_evidence_spans_for_scope(
+                    &connection,
+                    &prepared.workspace_id,
+                    &prepared.workspace_path,
+                    scope_filter,
+                )?,
                 Vec::new(),
             )
         }
@@ -17788,6 +17933,145 @@ mod tests {
     }
 
     #[test]
+    fn review_workspace_scope_filters_memory_and_cass_evidence() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path().to_path_buf();
+        let database_path = workspace_path.join("ee.db");
+        let scope_a = workspace_path.join("path-a");
+        let scope_b = workspace_path.join("path-b");
+        fs::create_dir_all(&scope_a).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&scope_b).map_err(|error| error.to_string())?;
+
+        let workspace_id = test_workspace_id(&workspace_path);
+        let memory_a = MemoryId::from_uuid(uuid::Uuid::from_u128(601)).to_string();
+        let memory_b = MemoryId::from_uuid(uuid::Uuid::from_u128(602)).to_string();
+        let session_a = SessionId::from_uuid(uuid::Uuid::from_u128(603)).to_string();
+        let session_b = SessionId::from_uuid(uuid::Uuid::from_u128(604)).to_string();
+        let evidence_a = evidence_id(605);
+        let evidence_b = evidence_id(606);
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("review-workspace-scope-test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        insert_review_memory_with_provenance(
+            &connection,
+            &workspace_id,
+            &memory_a,
+            "Scoped memory says path-a review evidence should be retained.",
+            Some(format!(
+                "file://{}#L1",
+                scope_a.join("runbook.md").display()
+            )),
+        )?;
+        insert_review_memory_with_provenance(
+            &connection,
+            &workspace_id,
+            &memory_b,
+            "Out-of-scope memory says path-b evidence must be filtered.",
+            Some(format!(
+                "file://{}#L1",
+                scope_b.join("runbook.md").display()
+            )),
+        )?;
+
+        let mut input_a = session_input(&workspace_id, "cass-scope-a");
+        input_a.source_path = Some(scope_a.join("session-a.jsonl").display().to_string());
+        connection
+            .insert_session(&session_a, &input_a)
+            .map_err(|error| error.to_string())?;
+        let mut input_b = session_input(&workspace_id, "cass-scope-b");
+        input_b.source_path = Some(scope_b.join("session-b.jsonl").display().to_string());
+        connection
+            .insert_session(&session_b, &input_b)
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_evidence_span(
+                &evidence_a,
+                &evidence_span_input(
+                    &workspace_id,
+                    &session_a,
+                    None,
+                    "scope-a-span",
+                    1,
+                    "Always run cargo fmt before release handoff.",
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_evidence_span(
+                &evidence_b,
+                &evidence_span_input(
+                    &workspace_id,
+                    &session_b,
+                    None,
+                    "scope-b-span",
+                    1,
+                    "Always run cargo fmt before unrelated handoff.",
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = run_review_workspace(&ReviewWorkspaceOptions {
+            workspace_path: workspace_path.as_path(),
+            database_path: Some(database_path.as_path()),
+            scope: Some(scope_a.as_path()),
+            include_cass: true,
+            propose: true,
+            dry_run: true,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.scope_path, scope_a.display().to_string());
+        assert_eq!(report.memory_count, 1);
+        assert_eq!(report.evidence_count, 1);
+        assert_eq!(report.candidate_count, 2);
+        assert!(
+            report
+                .candidates
+                .iter()
+                .any(|candidate| candidate.target_memory_id.as_deref() == Some(memory_a.as_str()))
+        );
+        assert!(
+            report
+                .candidates
+                .iter()
+                .any(|candidate| candidate.source_ids == vec![evidence_a.clone()])
+        );
+        assert!(
+            report.candidates.iter().all(|candidate| {
+                candidate.target_memory_id.as_deref() != Some(memory_b.as_str())
+                    && !candidate.source_ids.iter().any(|id| id == &evidence_b)
+            }),
+            "scoped review leaked out-of-scope candidates: {:?}",
+            report.candidates
+        );
+
+        let report_only = run_review_workspace(&ReviewWorkspaceOptions {
+            workspace_path: workspace_path.as_path(),
+            database_path: Some(database_path.as_path()),
+            scope: Some(scope_a.as_path()),
+            include_cass: true,
+            propose: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(report_only.memory_count, 1);
+        assert_eq!(report_only.evidence_count, 1);
+        assert_eq!(report_only.candidate_count, 0);
+        Ok(())
+    }
+
+    #[test]
     fn review_workspace_include_cass_without_propose_reports_evidence_only() -> TestResult {
         let fixture = review_session_fixture()?;
 
@@ -23802,6 +24086,22 @@ mod tests {
         memory_id: &str,
         content: &str,
     ) -> Result<(), String> {
+        insert_review_memory_with_provenance(
+            connection,
+            workspace_id,
+            memory_id,
+            content,
+            Some("cass-session://cass-review-session-a#L1-L2".to_owned()),
+        )
+    }
+
+    fn insert_review_memory_with_provenance(
+        connection: &DbConnection,
+        workspace_id: &str,
+        memory_id: &str,
+        content: &str,
+        provenance_uri: Option<String>,
+    ) -> Result<(), String> {
         connection
             .insert_memory(
                 memory_id,
@@ -23814,7 +24114,7 @@ mod tests {
                     confidence: 0.55,
                     utility: 0.5,
                     importance: 0.5,
-                    provenance_uri: Some("cass-session://cass-review-session-a#L1-L2".to_owned()),
+                    provenance_uri,
                     trust_class: "cass_evidence".to_owned(),
                     trust_subclass: Some("session-span".to_owned()),
                     tags: vec!["cass".to_owned()],
