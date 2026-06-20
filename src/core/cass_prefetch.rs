@@ -608,6 +608,92 @@ impl CassPrefetchHistory {
     }
 }
 
+/// Per-(agent, workspace) store of rolling CASS prefetch histories that the
+/// daemon coordinator (bd-16pwc.4) accumulates from observed context requests.
+///
+/// Each `(AgentScope, workspace)` pair owns an isolated [`CassPrefetchHistory`]:
+/// the [`AgentScope`] newtype (bd-298n0) already makes cross-agent flattening
+/// unrepresentable, and keying additionally on the workspace keeps one agent's
+/// two workspaces apart. Observations are retained most-recent-first and trimmed
+/// to a fixed rolling window (clamped to `[1, MAX_PREFETCH_HISTORY]`) so the
+/// `O(N)` predictor always sees a bounded, in-admission-bounds history. The
+/// store is pure and deterministic; the daemon thread wiring (post-context
+/// hook, idle-budget scheduling, shutdown cancellation) lives in the dispatch
+/// slice, not here.
+#[derive(Clone, Debug)]
+pub struct CassPrefetchHistoryStore {
+    window: usize,
+    histories: BTreeMap<(AgentScope, String), CassPrefetchHistory>,
+}
+
+impl CassPrefetchHistoryStore {
+    /// Create a store whose per-key rolling window is `window`, clamped to
+    /// `[1, MAX_PREFETCH_HISTORY]` so a caller cannot disable trimming or drive
+    /// the `O(N)` predictor past the bd-1suaa admission bound.
+    #[must_use]
+    pub fn new(window: usize) -> Self {
+        Self {
+            window: window.clamp(1, MAX_PREFETCH_HISTORY),
+            histories: BTreeMap::new(),
+        }
+    }
+
+    /// Record one observed `topic` for `(agent_scope, workspace)`, stamping the
+    /// `generation` it was measured against on the history and `corpus_revision`
+    /// on the observation, then trim to the most-recent `window` entries. The
+    /// history is created on first observation; two distinct scopes or
+    /// workspaces never share an accumulator (bd-298n0). `topic` is redacted at
+    /// [`TopicId`] construction (bd-3aczq), so a secret-shaped fragment cannot
+    /// enter the accumulator.
+    pub fn observe(
+        &mut self,
+        agent_scope: impl Into<AgentScope>,
+        workspace: impl Into<String>,
+        topic: impl Into<String>,
+        generation: PrefetchGeneration,
+        corpus_revision: &CorpusRevision,
+    ) {
+        let scope = agent_scope.into();
+        let entry = self
+            .histories
+            .entry((scope.clone(), workspace.into()))
+            .or_insert_with(|| CassPrefetchHistory::new(scope, Vec::new()));
+        // Most-recent-first: the newest observation goes to the front, stamped
+        // with the live corpus revision so the revision gate can later reject a
+        // trail measured against a since-regenerated index.
+        entry.recent_first.insert(
+            0,
+            CassPrefetchObservation::new(topic).with_corpus_revision(corpus_revision.clone()),
+        );
+        entry.recent_first.truncate(self.window);
+        entry.generation = generation;
+    }
+
+    /// Borrow the rolling history for `(agent_scope, workspace)`, or `None` if
+    /// nothing has been observed for that pair yet.
+    #[must_use]
+    pub fn history_for(
+        &self,
+        agent_scope: &AgentScope,
+        workspace: &str,
+    ) -> Option<&CassPrefetchHistory> {
+        self.histories
+            .get(&(agent_scope.clone(), workspace.to_owned()))
+    }
+
+    /// Number of distinct `(agent, workspace)` histories retained.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.histories.len()
+    }
+
+    /// True when no observations have been recorded for any pair.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.histories.is_empty()
+    }
+}
+
 /// A single predicted candidate the speculative pre-fetcher emits for
 /// idle-slot warming.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1593,6 +1679,96 @@ mod tests {
             serde_json::from_str(r#"{"agentScope":"   ","recentFirst":[{"topicId":"current"}]}"#)
                 .expect("deserialize blank scoped history");
         assert!(decoded.agent_scope.is_unknown());
+    }
+
+    #[test]
+    fn history_store_accumulates_most_recent_first_bd_16pwc_4() {
+        let mut store = CassPrefetchHistoryStore::new(DEFAULT_PREFETCH_HISTORY_WINDOW);
+        let scope = test_agent_scope();
+        let rev = CorpusRevision::from("corpus:v1");
+        let generation = PrefetchGeneration::new(3, 7);
+        for topic in ["alpha", "bravo", "charlie"] {
+            store.observe(scope.clone(), "ws-a", topic, generation, &rev);
+        }
+        let history = store.history_for(&scope, "ws-a").expect("history present");
+        let topics: Vec<&str> = history.iter().map(|o| o.topic_id.as_str()).collect();
+        assert_eq!(topics, vec!["charlie", "bravo", "alpha"]);
+        assert_eq!(history.generation, generation);
+        assert!(history.corpus_revision_is_coherent_with(&rev));
+        assert!(history.is_within_admission_bounds());
+    }
+
+    #[test]
+    fn history_store_trims_to_window_bd_16pwc_4() {
+        let mut store = CassPrefetchHistoryStore::new(2);
+        let scope = test_agent_scope();
+        let rev = CorpusRevision::from("corpus:v1");
+        let generation = PrefetchGeneration::new(1, 1);
+        for topic in ["t1", "t2", "t3", "t4"] {
+            store.observe(scope.clone(), "ws", topic, generation, &rev);
+        }
+        let history = store.history_for(&scope, "ws").expect("history present");
+        let topics: Vec<&str> = history.iter().map(|o| o.topic_id.as_str()).collect();
+        assert_eq!(topics, vec!["t4", "t3"]);
+    }
+
+    #[test]
+    fn history_store_isolates_distinct_scopes_and_workspaces_bd_16pwc_4() {
+        let mut store = CassPrefetchHistoryStore::new(DEFAULT_PREFETCH_HISTORY_WINDOW);
+        let rev = CorpusRevision::from("corpus:v1");
+        let generation = PrefetchGeneration::new(1, 1);
+        let alice = AgentScope::new("alice");
+        let bob = AgentScope::new("bob");
+        store.observe(alice.clone(), "ws-a", "alice-topic", generation, &rev);
+        store.observe(bob.clone(), "ws-a", "bob-topic", generation, &rev);
+        store.observe(alice.clone(), "ws-b", "alice-other-ws", generation, &rev);
+        assert_eq!(store.len(), 3);
+        // Same workspace, different agents: no shared accumulator (bd-298n0).
+        let alice_a: Vec<&str> = store
+            .history_for(&alice, "ws-a")
+            .unwrap()
+            .iter()
+            .map(|o| o.topic_id.as_str())
+            .collect();
+        assert_eq!(alice_a, vec!["alice-topic"]);
+        let bob_a: Vec<&str> = store
+            .history_for(&bob, "ws-a")
+            .unwrap()
+            .iter()
+            .map(|o| o.topic_id.as_str())
+            .collect();
+        assert_eq!(bob_a, vec!["bob-topic"]);
+        // Same agent, different workspace: also isolated.
+        let alice_b: Vec<&str> = store
+            .history_for(&alice, "ws-b")
+            .unwrap()
+            .iter()
+            .map(|o| o.topic_id.as_str())
+            .collect();
+        assert_eq!(alice_b, vec!["alice-other-ws"]);
+    }
+
+    #[test]
+    fn history_store_window_clamps_to_admission_bound_bd_16pwc_4() {
+        // An oversized window is clamped so the predictor never sees a history
+        // past the bd-1suaa admission bound, even after many observations.
+        let mut store = CassPrefetchHistoryStore::new(MAX_PREFETCH_HISTORY + 100);
+        let scope = test_agent_scope();
+        let rev = CorpusRevision::from("corpus:v1");
+        let generation = PrefetchGeneration::new(1, 1);
+        for n in 0..(MAX_PREFETCH_HISTORY + 50) {
+            store.observe(scope.clone(), "ws", format!("topic-{n}"), generation, &rev);
+        }
+        let history = store.history_for(&scope, "ws").expect("history present");
+        assert!(history.len() <= MAX_PREFETCH_HISTORY);
+        assert!(history.is_within_admission_bounds());
+    }
+
+    #[test]
+    fn history_store_missing_pair_returns_none_bd_16pwc_4() {
+        let store = CassPrefetchHistoryStore::new(DEFAULT_PREFETCH_HISTORY_WINDOW);
+        assert!(store.is_empty());
+        assert!(store.history_for(&test_agent_scope(), "nope").is_none());
     }
 
     #[test]
