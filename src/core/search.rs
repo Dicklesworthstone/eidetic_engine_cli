@@ -1912,6 +1912,36 @@ impl SearchDegradation {
     }
 
     #[must_use]
+    fn global_memory_disabled(reason: super::global_store::GlobalInclusionReason) -> Self {
+        Self {
+            code: super::global_store::GLOBAL_MEMORY_DISABLED_CODE.to_string(),
+            severity: "info".to_string(),
+            message: format!(
+                "Global memory lane did not contribute to this search: {}.",
+                reason.as_str()
+            ),
+            repair: Some(match reason {
+                super::global_store::GlobalInclusionReason::StoreAbsent => {
+                    "Create a global memory with `ee remember --global ...`.".to_string()
+                }
+                super::global_store::GlobalInclusionReason::NotParticipating => {
+                    "Enable this workspace's global-lane participation before global retrieval."
+                        .to_string()
+                }
+                super::global_store::GlobalInclusionReason::DisabledByConfig => {
+                    "Set `[memory] include_global = true` in .ee/config.toml.".to_string()
+                }
+                super::global_store::GlobalInclusionReason::DisabledByFlag => {
+                    "Retry without --no-global.".to_string()
+                }
+                super::global_store::GlobalInclusionReason::Included => {
+                    "No repair needed.".to_string()
+                }
+            }),
+        }
+    }
+
+    #[must_use]
     fn tombstone_visibility_unavailable(error: &str) -> Self {
         Self {
             code: "tombstone_visibility_unavailable".to_string(),
@@ -8266,6 +8296,23 @@ fn global_store_lexical_hits(
             return Vec::new();
         }
     };
+    let inclusion = super::global_store::resolve_global_inclusion(
+        &super::global_store::GlobalInclusionInput {
+            store_present: paths.database_path.exists(),
+            // The separate-store implementation has not yet grown a repository
+            // participation row; default participation preserves the existing
+            // opt-in-by-presence behavior while routing through the policy core.
+            participating: true,
+            config_enabled: true,
+            no_global_flag: false,
+        },
+    );
+    if !inclusion.included {
+        if matches!(options.memory_scope, MemoryScope::Global) {
+            degraded.push(SearchDegradation::global_memory_disabled(inclusion.reason));
+        }
+        return Vec::new();
+    }
     let memories =
         match super::global_store::read_global_store_memories(&paths, options.include_tombstoned) {
             Ok(memories) => memories,

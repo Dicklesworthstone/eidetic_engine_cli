@@ -2363,6 +2363,18 @@ fn run_context_pack_with_performance_inner(
             .filtered_count
             .saturating_add(scope_stats.candidates_excluded_by_scope);
     }
+    let global_fan_in_filtered = apply_global_store_pack_policy(
+        &mut candidates,
+        &global_store_memory_ids,
+        request.budget.max_tokens(),
+        &mut degraded,
+    );
+    if global_fan_in_filtered > 0 {
+        trace.filter_input_count = trace.filter_input_count.max(scope_filter_input_count);
+        trace.filtered_count = trace
+            .filtered_count
+            .saturating_add(global_fan_in_filtered);
+    }
 
     let redaction_filter_input_count =
         candidate_filter_input_count.saturating_add(trace.focus_candidate_count);
@@ -4130,6 +4142,264 @@ fn sort_context_candidates(candidates: &mut [PackCandidate]) {
             .then_with(|| left.section.cmp(&right.section))
             .then_with(|| left.memory_id.cmp(&right.memory_id))
     });
+}
+
+fn apply_global_store_pack_policy(
+    candidates: &mut Vec<PackCandidate>,
+    global_store_memory_ids: &BTreeSet<String>,
+    max_tokens: u32,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> usize {
+    if candidates.is_empty() || global_store_memory_ids.is_empty() {
+        return 0;
+    }
+
+    let conflicts = global_lane_conflicts_for_candidates(candidates, global_store_memory_ids);
+    annotate_global_lane_conflicts(candidates, &conflicts);
+    push_global_lane_conflict_degradation(degraded, &conflicts);
+
+    let protected_global_ids = conflicts
+        .iter()
+        .map(|conflict| conflict.global_id.clone())
+        .collect::<BTreeSet<_>>();
+    let global_positions = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| {
+            let memory_id = candidate.memory_id.to_string();
+            global_store_memory_ids.contains(&memory_id)
+                && !protected_global_ids.contains(&memory_id)
+        })
+        .map(|(index, candidate)| (index, u64::from(candidate.estimated_tokens)))
+        .collect::<Vec<_>>();
+    if global_positions.is_empty() {
+        return 0;
+    }
+
+    let costs = global_positions
+        .iter()
+        .map(|(_, cost)| *cost)
+        .collect::<Vec<_>>();
+    let fan_in = crate::core::global_store::bounded_global_fan_in(
+        &costs,
+        u64::from(max_tokens),
+        crate::core::global_store::DEFAULT_GLOBAL_FAN_IN_BASIS_POINTS,
+        false,
+    );
+    let selected_positions = fan_in
+        .selected
+        .iter()
+        .filter_map(|selected| global_positions.get(*selected).map(|(index, _)| *index))
+        .collect::<BTreeSet<_>>();
+    if selected_positions.len() == global_positions.len() {
+        return 0;
+    }
+
+    let total_global_candidates = global_positions.len();
+    let selected_global_candidates = selected_positions.len();
+    let before = candidates.len();
+    let mut index = 0_usize;
+    candidates.retain(|candidate| {
+        let current = index;
+        index = index.saturating_add(1);
+        let memory_id = candidate.memory_id.to_string();
+        !global_store_memory_ids.contains(&memory_id)
+            || protected_global_ids.contains(&memory_id)
+            || selected_positions.contains(&current)
+    });
+    let removed = before.saturating_sub(candidates.len());
+    if removed > 0 {
+        let total_suffix = if total_global_candidates == 1 { "" } else { "s" };
+        let removed_suffix = if removed == 1 { "" } else { "s" };
+        push_degradation(
+            degraded,
+            "global_lane_fan_in_limited",
+            ContextResponseSeverity::Low,
+            format!(
+                "Global memory fan-in kept {selected_global_candidates}/{total_global_candidates} non-conflict global candidate{total_suffix} within the {} token cap; {removed} global candidate{removed_suffix} omitted before pack selection.",
+                fan_in.cap_tokens,
+            ),
+            Some(
+                "Use a narrower query or raise the global fan-in quota before relying on more global memories."
+                    .to_string(),
+            ),
+        );
+    }
+    removed
+}
+
+fn global_lane_conflicts_for_candidates(
+    candidates: &[PackCandidate],
+    global_store_memory_ids: &BTreeSet<String>,
+) -> Vec<crate::core::global_store::LaneConflict> {
+    if candidates.is_empty() || global_store_memory_ids.is_empty() {
+        return Vec::new();
+    }
+    let saw_workspace = candidates
+        .iter()
+        .any(|candidate| !global_store_memory_ids.contains(&candidate.memory_id.to_string()));
+    let saw_global = candidates
+        .iter()
+        .any(|candidate| global_store_memory_ids.contains(&candidate.memory_id.to_string()));
+    if !saw_workspace || !saw_global {
+        return Vec::new();
+    }
+
+    let lane_candidates = candidates
+        .iter()
+        .map(|candidate| {
+            let id = candidate.memory_id.to_string();
+            crate::core::global_store::LaneCandidate {
+                lane: if global_store_memory_ids.contains(&id) {
+                    crate::core::global_store::MemoryLane::Global
+                } else {
+                    crate::core::global_store::MemoryLane::Workspace
+                },
+                conflict_key: global_lane_conflict_key(candidate),
+                content_hash: global_lane_content_hash(&candidate.content),
+                id,
+            }
+        })
+        .collect::<Vec<_>>();
+    crate::core::global_store::surface_lane_conflicts(&lane_candidates)
+}
+
+fn global_lane_conflict_key(candidate: &PackCandidate) -> String {
+    if let Some(token) = first_global_lane_subject_token(&candidate.content) {
+        return format!("{}:{token}", candidate.section.as_str());
+    }
+    candidate.diversity_key.clone().unwrap_or_else(|| {
+        format!("{}:{}", candidate.section.as_str(), candidate.memory_id)
+    })
+}
+
+fn first_global_lane_subject_token(content: &str) -> Option<String> {
+    content
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|token| token.len() >= 3)
+        .map(str::to_ascii_lowercase)
+        .find(|token| !global_lane_subject_stopword(token))
+}
+
+fn global_lane_subject_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "about"
+            | "after"
+            | "again"
+            | "agent"
+            | "always"
+            | "before"
+            | "current"
+            | "global"
+            | "memory"
+            | "must"
+            | "never"
+            | "policy"
+            | "project"
+            | "repo"
+            | "rule"
+            | "shared"
+            | "should"
+            | "that"
+            | "this"
+            | "when"
+            | "with"
+            | "without"
+            | "workspace"
+    )
+}
+
+fn global_lane_content_hash(content: &str) -> String {
+    let normalized = content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    blake3::hash(normalized.as_bytes()).to_hex().to_string()
+}
+
+fn annotate_global_lane_conflicts(
+    candidates: &mut [PackCandidate],
+    conflicts: &[crate::core::global_store::LaneConflict],
+) {
+    if conflicts.is_empty() {
+        return;
+    }
+    let mut by_memory_id: BTreeMap<String, Vec<&crate::core::global_store::LaneConflict>> =
+        BTreeMap::new();
+    for conflict in conflicts {
+        by_memory_id
+            .entry(conflict.workspace_id.clone())
+            .or_default()
+            .push(conflict);
+        by_memory_id
+            .entry(conflict.global_id.clone())
+            .or_default()
+            .push(conflict);
+    }
+    for candidate in candidates {
+        let memory_id = candidate.memory_id.to_string();
+        let Some(conflicts) = by_memory_id.get(&memory_id) else {
+            continue;
+        };
+        let markers = conflicts
+            .iter()
+            .map(|conflict| {
+                format!(
+                    "key={} kind={} workspaceId={} globalId={} bothSurfaced={} workspaceOverrides={}",
+                    conflict.conflict_key,
+                    conflict.kind.as_str(),
+                    conflict.workspace_id,
+                    conflict.global_id,
+                    conflict.both_surfaced,
+                    conflict.workspace_overrides,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        candidate.why = format!("{} globalLane={markers}.", candidate.why);
+    }
+}
+
+fn push_global_lane_conflict_degradation(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    conflicts: &[crate::core::global_store::LaneConflict],
+) {
+    let contradiction_keys = conflicts
+        .iter()
+        .filter(|conflict| {
+            matches!(
+                conflict.kind,
+                crate::core::global_store::LaneConflictKind::Contradiction
+            )
+        })
+        .map(|conflict| conflict.conflict_key.clone())
+        .collect::<BTreeSet<_>>();
+    if contradiction_keys.is_empty() {
+        return;
+    }
+    let keys = contradiction_keys
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let subject_suffix = if contradiction_keys.len() == 1 { "" } else { "s" };
+    push_degradation(
+        degraded,
+        "global_lane_conflict_deferred",
+        ContextResponseSeverity::Info,
+        format!(
+            "Global/workspace lane contradiction detected for {} subject{subject_suffix} ({keys}); both sides remain in the pack candidate pool with globalLane markers.",
+            contradiction_keys.len(),
+        ),
+        Some(
+            "Review the conflicting workspace/global memories and tombstone or revise the stale lane row."
+                .to_string(),
+        ),
+    );
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -10740,6 +11010,28 @@ mod tests {
         .map_err(|error| error.to_string())
     }
 
+    fn global_policy_candidate(
+        seed: u128,
+        content: &str,
+        estimated_tokens: u32,
+    ) -> Result<PackCandidate, String> {
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(seed));
+        let provenance =
+            PackProvenance::new(ProvenanceUri::EeMemory(memory_id), "global policy fixture")
+                .map_err(|error| error.to_string())?;
+        PackCandidate::new(PackCandidateInput {
+            memory_id,
+            section: PackSection::ProceduralRules,
+            content: content.to_string(),
+            estimated_tokens,
+            relevance: UnitScore::parse(0.8).map_err(|error| error.to_string())?,
+            utility: UnitScore::parse(0.7).map_err(|error| error.to_string())?,
+            provenance: vec![provenance],
+            why: "selected by fixture".to_string(),
+        })
+        .map_err(|error| error.to_string())
+    }
+
     fn tier_memory(
         memory_id: MemoryId,
         confidence: f32,
@@ -10968,6 +11260,82 @@ mod tests {
         assert_eq!(left_summary, right_summary);
         assert_eq!(left[0].memory_id, lower_id);
         assert!(left[0].why.contains("tierAdmission tier=hot"));
+        Ok(())
+    }
+
+    #[test]
+    fn global_store_pack_policy_bounds_non_conflict_global_candidates() -> Result<(), String> {
+        let workspace = global_policy_candidate(100, "workspace release checklist", 10)?;
+        let global_a = global_policy_candidate(101, "global cargo format convention", 100)?;
+        let global_b = global_policy_candidate(102, "global rustfmt setup convention", 100)?;
+        let global_c = global_policy_candidate(103, "global docs update convention", 40)?;
+        let global_b_id = global_b.memory_id.to_string();
+        let mut candidates = vec![workspace, global_a, global_b, global_c];
+        let global_store_memory_ids = candidates
+            .iter()
+            .skip(1)
+            .map(|candidate| candidate.memory_id.to_string())
+            .collect::<BTreeSet<_>>();
+        let mut degraded = Vec::new();
+
+        let removed = super::apply_global_store_pack_policy(
+            &mut candidates,
+            &global_store_memory_ids,
+            1_000,
+            &mut degraded,
+        );
+
+        assert_eq!(removed, 1);
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.memory_id.to_string() == global_b_id),
+            "second 100-token global should overflow the 150-token quota"
+        );
+        assert!(
+            degraded
+                .iter()
+                .any(|entry| entry.code == "global_lane_fan_in_limited")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn global_store_pack_policy_keeps_and_marks_conflicting_global_candidate() -> Result<(), String>
+    {
+        let workspace = global_policy_candidate(110, "Never rebase in shared checkouts.", 10)?;
+        let global = global_policy_candidate(111, "Always rebase before pushing this repo.", 500)?;
+        let global_id = global.memory_id.to_string();
+        let mut candidates = vec![workspace, global];
+        let global_store_memory_ids = [global_id.clone()].into_iter().collect::<BTreeSet<_>>();
+        let mut degraded = Vec::new();
+
+        let removed = super::apply_global_store_pack_policy(
+            &mut candidates,
+            &global_store_memory_ids,
+            100,
+            &mut degraded,
+        );
+
+        assert_eq!(
+            removed, 0,
+            "conflicting global rows are protected from fan-in trimming"
+        );
+        let global_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.memory_id.to_string() == global_id)
+            .ok_or_else(|| "conflicting global candidate should remain visible".to_string())?;
+        assert!(
+            global_candidate.why.contains("globalLane=")
+                && global_candidate.why.contains("kind=contradiction"),
+            "conflicting global candidate should carry a marker: {}",
+            global_candidate.why
+        );
+        assert!(
+            degraded
+                .iter()
+                .any(|entry| entry.code == "global_lane_conflict_deferred")
+        );
         Ok(())
     }
 
