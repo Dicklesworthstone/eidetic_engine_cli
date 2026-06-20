@@ -399,30 +399,118 @@ fn hash_collection_bindings_from_markers(
             continue;
         }
         if let Some(binding) = binding_name_before_colon(markers, colon_index) {
-            if !bindings.iter().any(|existing| existing == &binding) {
-                bindings.push(binding);
-            }
+            push_unique_binding(&mut bindings, binding);
+        }
+    }
+
+    for equals_index in markers
+        .iter()
+        .enumerate()
+        .filter_map(|(index, marker)| (marker == &NonLiteralToken::Punct('=')).then_some(index))
+    {
+        if !markers_match_hash_collection_constructor(markers, equals_index + 1, type_name) {
+            continue;
+        }
+        if let Some(binding) = binding_name_before_equals(markers, equals_index) {
+            push_unique_binding(&mut bindings, binding);
         }
     }
     bindings
 }
 
+fn push_unique_binding(bindings: &mut Vec<String>, binding: String) {
+    if !bindings.iter().any(|existing| existing == &binding) {
+        bindings.push(binding);
+    }
+}
+
+fn markers_match_hash_collection_constructor(
+    markers: &[NonLiteralToken],
+    start: usize,
+    type_name: &str,
+) -> bool {
+    let Some(path_end) = hash_collection_type_path_end(markers, start, type_name) else {
+        return false;
+    };
+    let Some(method_path_start) = hash_collection_constructor_method_start(markers, path_end)
+    else {
+        return false;
+    };
+    matches!(
+        ident_at(markers, method_path_start),
+        Some("new" | "with_capacity" | "from" | "default")
+    )
+}
+
+fn hash_collection_constructor_method_start(
+    markers: &[NonLiteralToken],
+    path_end: usize,
+) -> Option<usize> {
+    let mut double_colon_index = path_end;
+    if double_colon_at(markers, double_colon_index)
+        && matches!(
+            markers.get(double_colon_index + 2),
+            Some(NonLiteralToken::Punct('<'))
+        )
+    {
+        double_colon_index = skip_angle_group(markers, double_colon_index + 2)?;
+    } else if matches!(
+        markers.get(double_colon_index),
+        Some(NonLiteralToken::Punct('<'))
+    ) {
+        double_colon_index = skip_angle_group(markers, double_colon_index)?;
+    }
+    double_colon_at(markers, double_colon_index).then_some(double_colon_index + 2)
+}
+
+fn skip_angle_group(markers: &[NonLiteralToken], start: usize) -> Option<usize> {
+    let mut depth = 0_usize;
+    for (index, marker) in markers.iter().enumerate().skip(start) {
+        match marker {
+            NonLiteralToken::Punct('<') => depth += 1,
+            NonLiteralToken::Punct('>') => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn markers_match_hash_collection_type(
+    markers: &[NonLiteralToken],
+    start: usize,
+    type_name: &str,
+) -> bool {
+    let Some(path_end) = hash_collection_type_path_end(markers, start, type_name) else {
+        return false;
+    };
+    matches!(markers.get(path_end), Some(NonLiteralToken::Punct('<')))
+}
+
+fn hash_collection_type_path_end(
     markers: &[NonLiteralToken],
     mut start: usize,
     type_name: &str,
-) -> bool {
+) -> Option<usize> {
     if double_colon_at(markers, start) {
         start += 2;
     }
-    (ident_at(markers, start) == Some(type_name)
-        && matches!(markers.get(start + 1), Some(NonLiteralToken::Punct('<'))))
-        || (ident_at(markers, start) == Some("std")
-            && double_colon_at(markers, start + 1)
-            && ident_at(markers, start + 3) == Some("collections")
-            && double_colon_at(markers, start + 4)
-            && ident_at(markers, start + 6) == Some(type_name)
-            && matches!(markers.get(start + 7), Some(NonLiteralToken::Punct('<'))))
+    if ident_at(markers, start) == Some(type_name) {
+        return Some(start + 1);
+    }
+    if ident_at(markers, start) == Some("std")
+        && double_colon_at(markers, start + 1)
+        && ident_at(markers, start + 3) == Some("collections")
+        && double_colon_at(markers, start + 4)
+        && ident_at(markers, start + 6) == Some(type_name)
+    {
+        return Some(start + 7);
+    }
+    None
 }
 
 fn binding_name_before_colon(markers: &[NonLiteralToken], colon_index: usize) -> Option<String> {
@@ -436,6 +524,36 @@ fn binding_name_before_colon(markers: &[NonLiteralToken], colon_index: usize) ->
             Some(name.clone())
         }
     })
+}
+
+fn binding_name_before_equals(markers: &[NonLiteralToken], equals_index: usize) -> Option<String> {
+    let binding_index = equals_index.checked_sub(1)?;
+    let binding = ident_at(markers, binding_index)?;
+    if binding == "_" {
+        return None;
+    }
+
+    if binding_index
+        .checked_sub(1)
+        .and_then(|index| ident_at(markers, index))
+        == Some("let")
+    {
+        return Some(binding.to_owned());
+    }
+
+    if binding_index
+        .checked_sub(1)
+        .and_then(|index| ident_at(markers, index))
+        == Some("mut")
+        && binding_index
+            .checked_sub(2)
+            .and_then(|index| ident_at(markers, index))
+            == Some("let")
+    {
+        return Some(binding.to_owned());
+    }
+
+    None
 }
 
 fn hash_collection_iteration_call(markers: &[NonLiteralToken], binding: &str) -> bool {
@@ -722,6 +840,76 @@ mod tests {
     }
 
     #[test]
+    fn hash_collection_iteration_detection_catches_inferred_constructor_bindings() {
+        let markers = [
+            ident("let"),
+            ident("mut"),
+            ident("map"),
+            punct('='),
+            ident("HashMap"),
+            punct(':'),
+            punct(':'),
+            ident("new"),
+            ident("let"),
+            ident("set"),
+            punct('='),
+            ident("std"),
+            punct(':'),
+            punct(':'),
+            ident("collections"),
+            punct(':'),
+            punct(':'),
+            ident("HashSet"),
+            punct(':'),
+            punct(':'),
+            ident("with_capacity"),
+            ident("let"),
+            ident("typed_map"),
+            punct('='),
+            ident("HashMap"),
+            punct(':'),
+            punct(':'),
+            punct('<'),
+            ident("String"),
+            punct(','),
+            ident("String"),
+            punct('>'),
+            punct(':'),
+            punct(':'),
+            ident("default"),
+        ];
+
+        assert_eq!(
+            hash_collection_bindings_from_markers(&markers, "HashMap"),
+            vec!["map".to_owned(), "typed_map".to_owned()]
+        );
+        assert_eq!(
+            hash_collection_bindings_from_markers(&markers, "HashSet"),
+            vec!["set".to_owned()]
+        );
+
+        let mut map_iteration = markers.to_vec();
+        map_iteration.extend([ident("map"), punct('.'), ident("iter")]);
+        let mut set_iteration = markers.to_vec();
+        set_iteration.extend([ident("set"), punct('.'), ident("drain")]);
+        let mut typed_map_iteration = markers.to_vec();
+        typed_map_iteration.extend([ident("typed_map"), punct('.'), ident("values")]);
+
+        assert!(contains_hash_collection_iteration(
+            &map_iteration,
+            "HashMap"
+        ));
+        assert!(contains_hash_collection_iteration(
+            &set_iteration,
+            "HashSet"
+        ));
+        assert!(contains_hash_collection_iteration(
+            &typed_map_iteration,
+            "HashMap"
+        ));
+    }
+
+    #[test]
     fn hash_collection_iteration_detection_ignores_receiver_suffixes() {
         let markers = [
             ident("map"),
@@ -759,5 +947,30 @@ mod tests {
         ];
 
         assert!(hash_collection_bindings_from_markers(&markers, "HashMap").is_empty());
+    }
+
+    #[test]
+    fn hash_collection_binding_detection_ignores_non_let_constructor_assignments() {
+        let markers = [
+            ident("field"),
+            punct('='),
+            ident("HashMap"),
+            punct(':'),
+            punct(':'),
+            ident("new"),
+            ident("field"),
+            punct('.'),
+            ident("iter"),
+            ident("let"),
+            ident("_"),
+            punct('='),
+            ident("HashMap"),
+            punct(':'),
+            punct(':'),
+            ident("new"),
+        ];
+
+        assert!(hash_collection_bindings_from_markers(&markers, "HashMap").is_empty());
+        assert!(!contains_hash_collection_iteration(&markers, "HashMap"));
     }
 }
