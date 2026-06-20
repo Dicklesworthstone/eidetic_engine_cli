@@ -1549,6 +1549,7 @@ pub fn generate_harness_hook_install(
     let snippets = harness_hook_snippets(options.target, &ee_binary);
     let mut plan = harness_hook_plan(options.target, &settings_path, &snippets, mode);
     let mut written_paths = Vec::new();
+    let report_read_only = !options.target.supported() || (!options.install && !options.undo);
 
     if !options.target.supported() {
         capability_gaps.push(HarnessHookCapabilityGap {
@@ -1632,7 +1633,7 @@ pub fn generate_harness_hook_install(
         harness_display_name: options.target.display_name().to_owned(),
         mode: mode.to_owned(),
         supported: options.target.supported(),
-        read_only: !options.install && !options.undo,
+        read_only: report_read_only,
         workspace: options.workspace.display().to_string(),
         settings_path: settings_path
             .as_deref()
@@ -1853,6 +1854,156 @@ fn harness_settings_path_can_be_written(settings_path: &Path) -> bool {
                     .unwrap_or(false)
             }),
         Err(_) => false,
+    }
+}
+
+fn ensure_harness_path_is_not_symlink(path: &Path, role: &str) -> Result<(), DomainError> {
+    if let Some(symlink_path) = first_existing_symlink_component(path)? {
+        let message = if symlink_path == path {
+            format!(
+                "Refusing to use harness {role} '{}': path is a symlink",
+                path.display()
+            )
+        } else {
+            format!(
+                "Refusing to use harness {role} '{}': path traverses symlink '{}'",
+                path.display(),
+                symlink_path.display()
+            )
+        };
+        return Err(DomainError::PolicyDenied {
+            message,
+            repair: Some(
+                "Remove the symlink or pass an explicit regular harness settings path.".to_owned(),
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn preflight_harness_write_target(path: &Path, role: &str) -> Result<(), DomainError> {
+    ensure_harness_path_is_not_symlink(path, role)?;
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::PolicyDenied {
+            message: format!(
+                "Refusing to write harness {role} '{}': path is a symlink",
+                path.display()
+            ),
+            repair: Some(
+                "Remove the symlink or pass an explicit regular harness settings path.".to_owned(),
+            ),
+        }),
+        Ok(metadata) if metadata.is_dir() => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write harness {role} '{}': path is a directory",
+                path.display()
+            ),
+            repair: Some("Choose a regular harness settings file path.".to_owned()),
+        }),
+        Ok(metadata) if !metadata.is_file() => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write harness {role} '{}': path is not a regular file",
+                path.display()
+            ),
+            repair: Some("Replace the special file with a regular settings file.".to_owned()),
+        }),
+        Ok(metadata) if metadata.permissions().readonly() => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to write harness {role} '{}': path is read-only",
+                path.display()
+            ),
+            repair: Some("Fix harness settings permissions and retry.".to_owned()),
+        }),
+        Ok(_) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect harness {role} '{}': {error}",
+                path.display()
+            ),
+            repair: Some("Check harness settings path permissions and retry.".to_owned()),
+        }),
+    }
+}
+
+fn preflight_harness_backup_source(path: &Path) -> Result<(), DomainError> {
+    ensure_harness_path_is_not_symlink(path, "backup path")?;
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::PolicyDenied {
+            message: format!(
+                "Refusing to restore harness backup '{}': path is a symlink",
+                path.display()
+            ),
+            repair: Some("Remove the symlink and restore from a regular backup file.".to_owned()),
+        }),
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to restore harness backup '{}': path is not a regular file",
+                path.display()
+            ),
+            repair: Some("Restore from a regular harness backup file.".to_owned()),
+        }),
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect harness backup '{}': {error}",
+                path.display()
+            ),
+            repair: Some("Check harness backup path permissions and retry.".to_owned()),
+        }),
+    }
+}
+
+fn preflight_harness_backup_target(path: &Path) -> Result<(), DomainError> {
+    ensure_harness_path_is_not_symlink(path, "backup path")?;
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::PolicyDenied {
+            message: format!(
+                "Refusing to use harness backup '{}': path is a symlink",
+                path.display()
+            ),
+            repair: Some("Remove the symlink and retry harness hook installation.".to_owned()),
+        }),
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(metadata) if metadata.is_dir() => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to use harness backup '{}': path is a directory",
+                path.display()
+            ),
+            repair: Some("Choose a regular harness backup file path.".to_owned()),
+        }),
+        Ok(_) => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to use harness backup '{}': path is not a regular file",
+                path.display()
+            ),
+            repair: Some("Replace the special file with a regular backup file.".to_owned()),
+        }),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(DomainError::Storage {
+            message: format!(
+                "Failed to inspect harness backup '{}': {error}",
+                path.display()
+            ),
+            repair: Some("Check harness backup path permissions and retry.".to_owned()),
+        }),
     }
 }
 
@@ -2539,6 +2690,7 @@ fn install_harness_settings_document(
     backup_path: &Path,
     snippets: &[HarnessHookSnippet],
 ) -> Result<bool, DomainError> {
+    preflight_harness_write_target(settings_path, "settings path")?;
     let existing_text = match fs::read_to_string(settings_path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => "{}".to_owned(),
@@ -2580,23 +2732,34 @@ fn install_harness_settings_document(
         return Ok(false);
     }
 
-    if settings_path.exists() && !backup_path.exists() {
-        if let Some(parent) = backup_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
-                message: format!(
-                    "Failed to create harness backup directory '{}': {error}",
-                    parent.display()
-                ),
-                repair: Some("Check harness config directory permissions and retry.".to_owned()),
-            })?;
+    preflight_harness_backup_target(backup_path)?;
+    if settings_path.exists() {
+        preflight_harness_write_target(settings_path, "settings path")?;
+        if !backup_path.exists() {
+            if let Some(parent) = backup_path.parent() {
+                fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
+                    message: format!(
+                        "Failed to create harness backup directory '{}': {error}",
+                        parent.display()
+                    ),
+                    repair: Some(
+                        "Check harness config directory permissions and retry.".to_owned(),
+                    ),
+                })?;
+            }
+            preflight_harness_backup_target(backup_path)?;
+            if !backup_path.exists() {
+                fs::copy(settings_path, backup_path).map_err(|error| DomainError::Storage {
+                    message: format!(
+                        "Failed to write harness settings backup '{}': {error}",
+                        backup_path.display()
+                    ),
+                    repair: Some(
+                        "Check harness config directory permissions and retry.".to_owned(),
+                    ),
+                })?;
+            }
         }
-        fs::copy(settings_path, backup_path).map_err(|error| DomainError::Storage {
-            message: format!(
-                "Failed to write harness settings backup '{}': {error}",
-                backup_path.display()
-            ),
-            repair: Some("Check harness config directory permissions and retry.".to_owned()),
-        })?;
     }
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
@@ -2607,6 +2770,7 @@ fn install_harness_settings_document(
             repair: Some("Check harness config directory permissions and retry.".to_owned()),
         })?;
     }
+    preflight_harness_write_target(settings_path, "settings path")?;
     fs::write(settings_path, new_text).map_err(|error| DomainError::Storage {
         message: format!(
             "Failed to write harness settings '{}': {error}",
@@ -2621,6 +2785,8 @@ fn restore_harness_settings_backup(
     settings_path: &Path,
     backup_path: &Path,
 ) -> Result<(), DomainError> {
+    preflight_harness_backup_source(backup_path)?;
+    preflight_harness_write_target(settings_path, "settings path")?;
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent).map_err(|error| DomainError::Storage {
             message: format!(
@@ -2630,6 +2796,8 @@ fn restore_harness_settings_backup(
             repair: Some("Check harness config directory permissions and retry.".to_owned()),
         })?;
     }
+    preflight_harness_backup_source(backup_path)?;
+    preflight_harness_write_target(settings_path, "settings path")?;
     fs::copy(backup_path, settings_path).map_err(|error| DomainError::Storage {
         message: format!(
             "Failed to restore harness settings backup '{}': {error}",
@@ -4661,6 +4829,207 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn harness_install_rejects_symlinked_settings_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let sensitive_path = temp.path().join("sensitive-settings.json");
+        fs::write(&sensitive_path, "{}\n").map_err(|e| e.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+        symlink(&sensitive_path, &settings_path).map_err(|e| e.to_string())?;
+
+        let error = match generate_harness_hook_install(&harness_options(
+            HarnessHookTarget::ClaudeCode,
+            settings_path.clone(),
+            true,
+            false,
+        )) {
+            Ok(_) => return Err("install should reject symlinked settings path".to_owned()),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error.message().contains("path is a symlink"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert_eq!(
+            fs::read_to_string(&sensitive_path).map_err(|e| e.to_string())?,
+            "{}\n",
+            "install must not write through a symlinked settings path"
+        );
+        assert!(
+            fs::symlink_metadata(&settings_path)
+                .map_err(|e| e.to_string())?
+                .file_type()
+                .is_symlink(),
+            "symlinked settings path must remain untouched"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_install_rejects_symlinked_backup_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+        fs::write(&settings_path, "{}\n").map_err(|e| e.to_string())?;
+        let sensitive_backup_target = temp.path().join("sensitive-backup.json");
+        fs::write(&sensitive_backup_target, "do not overwrite\n").map_err(|e| e.to_string())?;
+        let backup_path = harness_backup_path(&settings_path);
+        symlink(&sensitive_backup_target, &backup_path).map_err(|e| e.to_string())?;
+
+        let error = match generate_harness_hook_install(&harness_options(
+            HarnessHookTarget::ClaudeCode,
+            settings_path.clone(),
+            true,
+            false,
+        )) {
+            Ok(_) => return Err("install should reject symlinked backup path".to_owned()),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error.message().contains("path is a symlink"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert_eq!(
+            fs::read_to_string(&sensitive_backup_target).map_err(|e| e.to_string())?,
+            "do not overwrite\n",
+            "install must not write through a symlinked backup path"
+        );
+        assert_eq!(
+            fs::read_to_string(&settings_path).map_err(|e| e.to_string())?,
+            "{}\n",
+            "settings must not be changed after backup preflight fails"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_install_rejects_symlinked_backup_path_without_existing_settings() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+        let sensitive_backup_target = temp.path().join("sensitive-backup.json");
+        fs::write(&sensitive_backup_target, "not a backup\n").map_err(|e| e.to_string())?;
+        let backup_path = harness_backup_path(&settings_path);
+        symlink(&sensitive_backup_target, &backup_path).map_err(|e| e.to_string())?;
+
+        let error = match generate_harness_hook_install(&harness_options(
+            HarnessHookTarget::ClaudeCode,
+            settings_path.clone(),
+            true,
+            false,
+        )) {
+            Ok(_) => {
+                return Err(
+                    "install should reject symlinked backup path even without settings".to_owned(),
+                );
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error.message().contains("path is a symlink"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert!(
+            !settings_path.exists(),
+            "settings must not be written when backup preflight fails"
+        );
+        assert_eq!(
+            fs::read_to_string(&sensitive_backup_target).map_err(|e| e.to_string())?,
+            "not a backup\n",
+            "install must not treat a symlinked backup target as an undo backup"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_undo_rejects_symlinked_settings_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let sensitive_path = temp.path().join("sensitive-settings.json");
+        fs::write(&sensitive_path, "do not overwrite\n").map_err(|e| e.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+        symlink(&sensitive_path, &settings_path).map_err(|e| e.to_string())?;
+        fs::write(harness_backup_path(&settings_path), "{}\n").map_err(|e| e.to_string())?;
+
+        let error = match generate_harness_hook_install(&harness_options(
+            HarnessHookTarget::ClaudeCode,
+            settings_path.clone(),
+            false,
+            true,
+        )) {
+            Ok(_) => return Err("undo should reject symlinked settings path".to_owned()),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error.message().contains("path is a symlink"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert_eq!(
+            fs::read_to_string(&sensitive_path).map_err(|e| e.to_string())?,
+            "do not overwrite\n",
+            "undo must not restore through a symlinked settings path"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harness_undo_rejects_symlinked_backup_path() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let settings_path = temp.path().join("settings.json");
+        fs::write(&settings_path, "current settings\n").map_err(|e| e.to_string())?;
+        let sensitive_backup_source = temp.path().join("sensitive-backup-source.json");
+        fs::write(&sensitive_backup_source, "{}\n").map_err(|e| e.to_string())?;
+        let backup_path = harness_backup_path(&settings_path);
+        symlink(&sensitive_backup_source, &backup_path).map_err(|e| e.to_string())?;
+
+        let error = match generate_harness_hook_install(&harness_options(
+            HarnessHookTarget::ClaudeCode,
+            settings_path.clone(),
+            false,
+            true,
+        )) {
+            Ok(_) => return Err("undo should reject symlinked backup path".to_owned()),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            error.message().contains("path is a symlink"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert_eq!(
+            fs::read_to_string(&settings_path).map_err(|e| e.to_string())?,
+            "current settings\n",
+            "undo must not restore from a symlinked backup path"
+        );
+        Ok(())
+    }
+
     #[test]
     fn gemini_reports_capability_gap_without_writing() -> TestResult {
         let temp = TempDir::new().map_err(|e| e.to_string())?;
@@ -4674,6 +5043,10 @@ mod tests {
         .map_err(|e| e.message())?;
 
         assert!(!report.supported);
+        assert!(
+            report.read_only,
+            "unsupported Gemini install must be reported as read-only"
+        );
         assert!(report.written_paths.is_empty());
         assert!(!settings_path.exists());
         assert!(
@@ -4682,6 +5055,30 @@ mod tests {
                 .iter()
                 .any(|gap| gap.code == "harness_hooks_unsupported"),
             "Gemini must report an explicit capability gap"
+        );
+
+        let undo_settings_path = temp.path().join("gemini-undo-settings.json");
+        let undo_report = generate_harness_hook_install(&harness_options(
+            HarnessHookTarget::Gemini,
+            undo_settings_path.clone(),
+            false,
+            true,
+        ))
+        .map_err(|e| e.message())?;
+
+        assert!(!undo_report.supported);
+        assert!(
+            undo_report.read_only,
+            "unsupported Gemini undo must be reported as read-only"
+        );
+        assert!(undo_report.written_paths.is_empty());
+        assert!(!undo_settings_path.exists());
+        assert!(
+            undo_report
+                .capability_gaps
+                .iter()
+                .any(|gap| gap.code == "harness_hooks_unsupported"),
+            "Gemini undo must report the explicit capability gap"
         );
         Ok(())
     }

@@ -156,9 +156,10 @@ where
 
 /// Compare two keys by canonical ULID payload when both support it.
 ///
-/// If either key is not a bare payload or public `<prefix>_<payload>` ID, this
-/// falls back to ordinary lexical ordering so fixture and imported IDs keep the
-/// same deterministic behavior as [`sort_by_ulid_payload_or_lexical`].
+/// If neither key is a bare payload or public `<prefix>_<payload>` ID, this
+/// falls back to ordinary lexical ordering. Mixed canonical/non-canonical pairs
+/// sort canonical IDs first so this comparator remains a total order for
+/// `sort_by` callers.
 #[must_use]
 pub fn compare_ulid_payload_or_lexical(left: &str, right: &str) -> Ordering {
     match (
@@ -169,7 +170,9 @@ pub fn compare_ulid_payload_or_lexical(left: &str, right: &str) -> Ordering {
             compare_validated_payloads(left, left_offset, right, right_offset)
                 .then_with(|| left.cmp(right))
         }
-        _ => left.cmp(right),
+        (Err(_), Err(_)) => left.cmp(right),
+        (Ok(_), Err(_)) => Ordering::Less,
+        (Err(_), Ok(_)) => Ordering::Greater,
     }
 }
 
@@ -385,6 +388,41 @@ mod tests {
         assert_eq!(
             compare_ulid_payload_or_lexical("mem_fixture_b", "mem_fixture_a"),
             std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn payload_comparator_is_transitive_for_mixed_canonical_and_fixture_ids() {
+        let low_payload_high_prefix = "z_01J0000000000000000000000A";
+        let high_payload_low_prefix = "a_02J0000000000000000000000A";
+        let fixture_between_prefixes = "m_fixture";
+
+        assert_eq!(
+            compare_ulid_payload_or_lexical(low_payload_high_prefix, high_payload_low_prefix),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_ulid_payload_or_lexical(high_payload_low_prefix, fixture_between_prefixes),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_ulid_payload_or_lexical(fixture_between_prefixes, low_payload_high_prefix),
+            std::cmp::Ordering::Greater
+        );
+
+        let mut rows = vec![
+            fixture_between_prefixes.to_owned(),
+            high_payload_low_prefix.to_owned(),
+            low_payload_high_prefix.to_owned(),
+        ];
+        rows.sort_by(|left, right| compare_ulid_payload_or_lexical(left, right));
+        assert_eq!(
+            rows,
+            vec![
+                low_payload_high_prefix.to_owned(),
+                high_payload_low_prefix.to_owned(),
+                fixture_between_prefixes.to_owned(),
+            ]
         );
     }
 

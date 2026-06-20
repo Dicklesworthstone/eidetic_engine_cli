@@ -24,18 +24,26 @@ fn env_flag_truthy(value: Option<String>) -> bool {
 }
 
 fn has_explicit_machine_output_flag(args: &[OsString]) -> bool {
-    for arg in args.iter().skip(1) {
+    let mut args = args.iter().skip(1).peekable();
+    while let Some(arg) = args.next() {
         if arg.as_os_str() == std::ffi::OsStr::new("--") {
             return false;
         }
         let Some(value) = arg.to_str() else {
             continue;
         };
-        if value == "--json"
-            || value == "-j"
-            || value == "--robot"
-            || value == "--format"
-            || value.starts_with("--format=")
+        if value == "--json" || value == "-j" || value == "--robot" {
+            return true;
+        }
+        if let Some(format) = value.strip_prefix("--format=")
+            && !format.is_empty()
+        {
+            return true;
+        }
+        if value == "--format"
+            && let Some(next) = args.peek()
+            && next.as_os_str() != std::ffi::OsStr::new("--")
+            && next.to_str().is_some_and(|value| !value.starts_with('-'))
         {
             return true;
         }
@@ -146,20 +154,20 @@ const DEFAULT_TRACE_NOISE_TARGETS: &[&str] = &[
     "ee::output::error",
 ];
 
-fn tracing_filter_with_runtime_noise_defaults(mut value: String) -> String {
-    let trimmed = value.trim();
-    if trimmed.eq_ignore_ascii_case("off") {
-        return value;
+fn tracing_filter_with_runtime_noise_defaults(value: String) -> String {
+    let mut normalized = value.trim().to_owned();
+    if normalized.eq_ignore_ascii_case("off") {
+        return normalized;
     }
 
     for target in DEFAULT_TRACE_NOISE_TARGETS {
-        if !tracing_filter_has_target(&value, target) {
-            value.push(',');
-            value.push_str(target);
-            value.push_str("=error");
+        if !tracing_filter_has_target(&normalized, target) {
+            normalized.push(',');
+            normalized.push_str(target);
+            normalized.push_str("=error");
         }
     }
-    value
+    normalized
 }
 
 fn tracing_filter_has_target(value: &str, target: &str) -> bool {
@@ -332,6 +340,61 @@ mod tests {
     }
 
     #[test]
+    fn bare_format_flag_does_not_suppress_mode_injection() {
+        let missing_format_value = [
+            OsString::from("ee"),
+            OsString::from("status"),
+            OsString::from("--format"),
+        ];
+        assert_eq!(
+            injected_output_flag_for_modes(&missing_format_value, true, false),
+            Some(OsString::from("--json")),
+            "agent mode should still force JSON parse errors"
+        );
+        assert_eq!(
+            injected_output_flag_for_modes(&missing_format_value, false, true),
+            Some(OsString::from("--format=hook")),
+            "hook mode should still force hook parse errors"
+        );
+
+        let separator_after_format = [
+            OsString::from("ee"),
+            OsString::from("status"),
+            OsString::from("--format"),
+            OsString::from("--"),
+        ];
+        assert_eq!(
+            injected_output_flag_for_modes(&separator_after_format, true, false),
+            Some(OsString::from("--json")),
+            "a separator is not a renderer value"
+        );
+
+        let empty_format_value = [
+            OsString::from("ee"),
+            OsString::from("status"),
+            OsString::from("--format="),
+        ];
+        assert_eq!(
+            injected_output_flag_for_modes(&empty_format_value, true, false),
+            Some(OsString::from("--json")),
+            "an empty --format= value is not a renderer"
+        );
+
+        let next_flag_after_format = [
+            OsString::from("ee"),
+            OsString::from("status"),
+            OsString::from("--format"),
+            OsString::from("--workspace"),
+            OsString::from("."),
+        ];
+        assert_eq!(
+            injected_output_flag_for_modes(&next_flag_after_format, false, true),
+            Some(OsString::from("--format=hook")),
+            "another flag is not a renderer value"
+        );
+    }
+
+    #[test]
     fn tracing_filter_emits_json_events_when_rust_log_matches() {
         let output = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
@@ -417,6 +480,34 @@ mod tests {
         assert!(
             child_target.contains("ee::output::error=error"),
             "child targets must not suppress the parent default: {child_target}"
+        );
+    }
+
+    #[test]
+    fn tracing_filter_trims_outer_whitespace_before_parsing_directives() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_env_filter_from_env(Some(" warn ".to_owned())))
+            .with_writer(SharedMakeWriter(Arc::clone(&output)))
+            .with_ansi(false)
+            .json()
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "ee_trace_test", event = "visible", "trimmed_warn");
+        });
+
+        let captured = String::from_utf8(output.lock().expect("writer buffer poisoned").clone())
+            .expect("tracing output is utf-8");
+        assert!(
+            captured.contains("trimmed_warn"),
+            "whitespace-padded RUST_LOG directives must keep their intended level: {captured:?}"
+        );
+
+        assert_eq!(
+            tracing_filter_with_runtime_noise_defaults(" off ".to_owned()),
+            "off",
+            "the off directive should be normalized before EnvFilter parsing"
         );
     }
 }
