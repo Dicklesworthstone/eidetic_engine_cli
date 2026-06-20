@@ -91,15 +91,14 @@ mcp = []
 # Reserved (status: reserved). No cfg-gates in src/ today. Reserved for the
 # future localhost HTTP/SSE adapter described in AGENTS.md §Module Layout.
 serve = []
-# Reserved (status: reserved). One cfg-gate at src/science/mod.rs:1999.
-# The corresponding CLI surface `ee analyze science-status` is
-# CommandEffect::degraded_unavailable. Reserved for the future analytics
-# subsystem (EE-171). See docs/feature_flag_registry.md and
-# docs/silent-fallback-inventory.md.
+# Reserved (status: reserved). The default build already includes lightweight
+# deterministic science metrics and the read-only `ee analyze science-status`
+# surface; this empty flag is retained for future heavier analytics backends
+# (EE-171). See docs/feature_flag_registry.md and docs/silent-fallback-inventory.md.
 science-analytics = []
 
 [dependencies]
-asupersync = { version = "=0.3.4", default-features = false, features = ["tracing-integration"] }
+asupersync = { version = "=0.3.5", default-features = false, features = ["tracing-integration"] }
 arc-swap = { version = "1.7" }
 base64 = { version = "0.22.1" }
 blake3 = { version = "1.5" }
@@ -323,7 +322,7 @@ name = "witness_retention_e2e"
 path = "tests/contracts/witness_retention_e2e.rs"
 
 [patch.crates-io]
-asupersync = { path = "../asupersync" }
+asupersync = { path = "/dp/asupersync" }
 fsqlite = { path = "../frankensqlite/crates/fsqlite" }
 fsqlite-core = { path = "../frankensqlite/crates/fsqlite-core" }
 fsqlite-error = { path = "../frankensqlite/crates/fsqlite-error" }

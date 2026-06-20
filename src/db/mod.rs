@@ -851,7 +851,7 @@ impl DbConnection {
             }
             (DatabaseLocation::File(path), DatabaseOpenMode::ReadOnly) => {
                 let path = database_path_string(path, DbOperation::OpenReadOnly)?;
-                FrankenConnection::open_file_read_only(path)
+                FrankenConnection::open_schema_only(path)
                     .map_err(|source| DbError::sqlmodel(DbOperation::OpenReadOnly, source))?
             }
             (DatabaseLocation::File(path), DatabaseOpenMode::SchemaOnly) => {
