@@ -1956,7 +1956,7 @@ pub fn extract_agent_operating_contract(
     let mut report = AgentOperatingContractReport::new();
     for file_name in ["AGENTS.md", "README.md"] {
         let path = options.workspace.join(file_name);
-        match fs::read_to_string(&path) {
+        match read_agent_contract_source_file(&path) {
             Ok(text) => docs.push((file_name.to_owned(), text)),
             Err(error) => report
                 .degraded
@@ -1972,6 +1972,36 @@ pub fn extract_agent_operating_contract(
     report.readiness_evidence = agent_operating_contract_readiness_evidence(&options.readiness);
     Ok(report)
 }
+
+fn read_agent_contract_source_file(path: &Path) -> Result<String, std::io::Error> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_agent_contract_source_open_no_follow(&mut options);
+    let mut file = options.open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "agent operating contract source `{}` must be a regular file",
+                path.display()
+            ),
+        ));
+    }
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_agent_contract_source_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_agent_contract_source_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 /// Extract operating rules from already-loaded markdown documents.
 #[must_use]
@@ -3168,6 +3198,52 @@ RULE NUMBER 2: NO WORKTREES. EVER.
                 .any(|rule| rule.id == "agent.no_tokio_runtime"),
             true,
             "extracts available AGENTS rule",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_operating_contract_rejects_symlinked_doc_sources() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = temp_workspace()?;
+        let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_agents = outside.path().join("AGENTS.md");
+        let outside_readme = outside.path().join("README.md");
+        std::fs::write(
+            &outside_agents,
+            "# Outside AGENTS\n\nNever run `git worktree add`.\n",
+        )
+        .map_err(|error| error.to_string())?;
+        std::fs::write(
+            &outside_readme,
+            "# Outside README\n\nEvery machine-facing command supports stable JSON output.\n",
+        )
+        .map_err(|error| error.to_string())?;
+        symlink(&outside_agents, workspace.path().join("AGENTS.md"))
+            .map_err(|error| error.to_string())?;
+        symlink(&outside_readme, workspace.path().join("README.md"))
+            .map_err(|error| error.to_string())?;
+
+        let report = extract_agent_operating_contract(&AgentOperatingContractOptions {
+            workspace: workspace.path().to_path_buf(),
+            ..AgentOperatingContractOptions::default()
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            report.rules.is_empty(),
+            true,
+            "symlinked docs must not be parsed as workspace contract sources",
+        )?;
+        ensure(
+            report
+                .degraded
+                .iter()
+                .filter(|entry| entry.code == "agent_contract_source_unavailable")
+                .count(),
+            2,
+            "both symlinked docs are reported unavailable",
         )
     }
 
