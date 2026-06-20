@@ -2745,8 +2745,9 @@ fn record_outcome_in_txn(
             audit_id,
             sprt_audit,
         } => {
-            let audit_id =
-                insert_feedback_event_audited_with_id_in_txn(connection, event_id, input, audit_id)?;
+            let audit_id = insert_feedback_event_audited_with_id_in_txn(
+                connection, event_id, input, audit_id,
+            )?;
             if let Some(sprt_audit) = sprt_audit {
                 insert_sprt_quarantine_decision_audit_in_txn(connection, sprt_audit)?;
             }
@@ -6550,6 +6551,94 @@ mod tests {
     }
 
     #[test]
+    fn outcome_batch_dry_run_counts_would_quarantine_lines() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-batch-dry-run-quarantine")?;
+        let first = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: None,
+            source_type: "automated_check".to_string(),
+            source_id: Some("batch-dry-run-source".to_string()),
+            reason: Some("First event establishes the source bucket.".to_string()),
+            evidence_json: None,
+            session_id: None,
+            event_id: Some("fb_00000000000000000000000883".to_string()),
+            actor: Some("test".to_string()),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: 1,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &first.status,
+            &OutcomeRecordStatus::Recorded,
+            "first event records",
+        )?;
+
+        let input = format!(
+            r#"{{"target":"{}","signal":"harmful","sourceType":"automated_check","sourceId":"batch-dry-run-source","reason":"Dry-run should preview quarantine.","eventId":"fb_00000000000000000000000884"}}"#,
+            OUTCOME_TEST_MEMORY_ID
+        );
+        let batch = super::record_outcome_batch_stdin(
+            &super::OutcomeBatchOptions {
+                database_path: &database,
+                actor: Some("test".to_string()),
+                agent_name: None,
+                dry_run: true,
+                harmful_per_source_per_hour: 1,
+                harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+                prompt_injection_guard: true,
+            },
+            &input,
+        )
+        .map_err(|error| error.message())?;
+
+        ensure_equal(&batch.status, &"dry_run", "batch status")?;
+        ensure_equal(&batch.dry_run, &true, "batch dry-run flag")?;
+        ensure_equal(&batch.line_count, &1_usize, "line count")?;
+        ensure_equal(&batch.recorded_count, &0_usize, "recorded count")?;
+        ensure_equal(&batch.quarantined_count, &1_usize, "quarantined count")?;
+        ensure_equal(&batch.failed_count, &0_usize, "failed count")?;
+        let result = batch
+            .results
+            .first()
+            .ok_or_else(|| "batch result missing".to_string())?;
+        ensure_equal(
+            &result.status,
+            &"would_quarantine",
+            "dry-run line status previews quarantine",
+        )?;
+        ensure_equal(
+            &result.event_id,
+            &Some("fb_00000000000000000000000884".to_string()),
+            "dry-run event id is reported",
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let live_events = connection
+            .list_feedback_events_for_target("memory", OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &live_events.len(),
+            &1_usize,
+            "dry-run does not add live event",
+        )?;
+        let quarantined = connection
+            .list_feedback_quarantine(OUTCOME_TEST_WORKSPACE_ID, Some("pending"))
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &quarantined.len(),
+            &0_usize,
+            "dry-run does not create quarantine row",
+        )
+    }
+
+    #[test]
     fn harmful_burst_quarantine_is_source_scoped_and_preserves_target_trust() -> TestResult {
         let (_dir, database) = seed_outcome_database("ee-outcome-source-scoped-quarantine")?;
         let first_source_a = record_outcome(&OutcomeRecordOptions {
@@ -7189,7 +7278,8 @@ pub fn record_outcome_batch_stdin(
         };
         match record_outcome(&line_options) {
             Ok(report) => {
-                let quarantined = report.status == OutcomeRecordStatus::Quarantined;
+                let quarantined = report.status == OutcomeRecordStatus::Quarantined
+                    || (options.dry_run && report.quarantine.is_some());
                 if quarantined {
                     quarantined_count += 1;
                 } else {
@@ -7197,7 +7287,9 @@ pub fn record_outcome_batch_stdin(
                 }
                 results.push(OutcomeBatchLineResult {
                     line: line_number,
-                    status: if options.dry_run {
+                    status: if options.dry_run && quarantined {
+                        "would_quarantine"
+                    } else if options.dry_run {
                         "would_record"
                     } else if quarantined {
                         "quarantined"
