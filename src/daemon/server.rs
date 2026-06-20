@@ -24,6 +24,7 @@
 
 #![cfg(unix)]
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
@@ -1932,6 +1933,10 @@ impl DaemonWriteParams {
         }
     }
 
+    fn database_path(&self) -> PathBuf {
+        self.workspace_path.join(".ee").join("ee.db")
+    }
+
     /// `operation_type` tag for the `WriteOperation::Custom` that carries these
     /// params through the write-owner actor (Inc 2).
     const ACTOR_OPERATION_TYPE: &'static str = "ee.daemon.remember";
@@ -2305,6 +2310,13 @@ impl DaemonOutcomeParams {
 enum DaemonTxnBatchEntry {
     Journal(DaemonJournalParams),
     Outcome(DaemonOutcomeParams),
+    Remember(DaemonWriteParams),
+}
+
+enum PreparedDaemonTxnBatchEntry {
+    Journal(DaemonJournalParams),
+    Outcome(DaemonOutcomeParams),
+    Remember(crate::core::memory::PreparedRememberTxnWrite),
 }
 
 impl DaemonTxnBatchEntry {
@@ -2312,6 +2324,7 @@ impl DaemonTxnBatchEntry {
         match self {
             Self::Journal(params) => params.database_path(),
             Self::Outcome(params) => params.database_path(),
+            Self::Remember(params) => params.database_path(),
         }
     }
 }
@@ -2328,6 +2341,7 @@ fn batch_is_daemon_txn_coalescible(
                 WriteOperation::Custom { operation_type, .. }
                     if operation_type == DaemonJournalParams::ACTOR_OPERATION_TYPE
                         || operation_type == DaemonOutcomeParams::ACTOR_OPERATION_TYPE
+                        || operation_type == DaemonWriteParams::ACTOR_OPERATION_TYPE
             )
         })
 }
@@ -2343,7 +2357,7 @@ fn parse_daemon_txn_batch_entry(
     else {
         return Err(crate::models::DomainError::Storage {
             message: "daemon transaction batch received a non-Custom operation".to_string(),
-            repair: Some("only daemon journal/outcome ops are batched here".to_string()),
+            repair: Some("only daemon journal/outcome/remember ops are batched here".to_string()),
         });
     };
     match operation_type.as_str() {
@@ -2363,9 +2377,15 @@ fn parse_daemon_txn_batch_entry(
                     repair: Some("retry the write".to_string()),
                 })
         }
+        DaemonWriteParams::ACTOR_OPERATION_TYPE => DaemonWriteParams::from_payload(payload)
+            .map(DaemonTxnBatchEntry::Remember)
+            .map_err(|message| crate::models::DomainError::Storage {
+                message: format!("daemon remember payload decode failed: {message}"),
+                repair: Some("retry the write".to_string()),
+            }),
         _ => Err(crate::models::DomainError::Storage {
             message: format!("unsupported daemon transaction op: {operation_type}"),
-            repair: Some("only daemon journal/outcome ops are batched here".to_string()),
+            repair: Some("only daemon journal/outcome/remember ops are batched here".to_string()),
         }),
     }
 }
@@ -2413,12 +2433,31 @@ fn execute_daemon_txn_batch(
                 repair: Some("ensure the workspace is initialized".to_string()),
             }
         })?;
-    connection
+    let mut prepared_entries = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match entry {
+            DaemonTxnBatchEntry::Journal(entry) => {
+                prepared_entries.push(PreparedDaemonTxnBatchEntry::Journal(entry));
+            }
+            DaemonTxnBatchEntry::Outcome(entry) => {
+                prepared_entries.push(PreparedDaemonTxnBatchEntry::Outcome(entry));
+            }
+            DaemonTxnBatchEntry::Remember(entry) => {
+                let write = crate::core::memory::prepare_remember_txn_write_for_connection(
+                    &connection,
+                    &entry.options(),
+                    true,
+                )?;
+                prepared_entries.push(PreparedDaemonTxnBatchEntry::Remember(write));
+            }
+        }
+    }
+    let mut results = connection
         .with_transaction(|| {
-            let mut out = Vec::with_capacity(entries.len());
-            for entry in entries {
+            let mut out = Vec::with_capacity(prepared_entries.len());
+            for entry in &prepared_entries {
                 match entry {
-                    DaemonTxnBatchEntry::Journal(entry) => {
+                    PreparedDaemonTxnBatchEntry::Journal(entry) => {
                         crate::core::journal::ensure_workspace(
                             &connection,
                             &entry.workspace_id,
@@ -2428,15 +2467,15 @@ fn execute_daemon_txn_batch(
                             operation: crate::db::DbOperation::Execute,
                             message: error.message().to_string(),
                         })?;
-                        let input = entry.into_create_input();
+                        let input = entry.clone().into_create_input();
                         let entry_id = input.entry_id.clone();
                         connection.insert_journal_entry(&input)?;
                         out.push(WriteResult::Success {
                             entity_id: Some(entry_id),
                         });
                     }
-                    DaemonTxnBatchEntry::Outcome(entry) => {
-                        let (event_id, input, audit_id) = entry.into_parts();
+                    PreparedDaemonTxnBatchEntry::Outcome(entry) => {
+                        let (event_id, input, audit_id) = entry.clone().into_parts();
                         crate::core::outcome::record_outcome_feedback_event_in_txn(
                             &connection,
                             &event_id,
@@ -2447,6 +2486,15 @@ fn execute_daemon_txn_batch(
                             entity_id: Some(event_id),
                         });
                     }
+                    PreparedDaemonTxnBatchEntry::Remember(write) => {
+                        crate::core::memory::record_prepared_remember_txn_write_in_txn(
+                            &connection,
+                            write,
+                        )?;
+                        out.push(WriteResult::Success {
+                            entity_id: Some(write.memory_id().to_owned()),
+                        });
+                    }
                 }
             }
             Ok(out)
@@ -2454,7 +2502,50 @@ fn execute_daemon_txn_batch(
         .map_err(|error| crate::models::DomainError::Storage {
             message: format!("daemon transaction batch failed: {error}"),
             repair: Some("retry the write".to_string()),
-        })
+        })?;
+
+    let mut index_drains: BTreeMap<String, (String, PathBuf)> = BTreeMap::new();
+    for (index, entry) in prepared_entries.into_iter().enumerate() {
+        if let PreparedDaemonTxnBatchEntry::Remember(write) = entry {
+            let index_dir = write.index_dir().to_path_buf();
+            match crate::core::memory::finish_prepared_remember_txn_write(&connection, write) {
+                Ok(report) => {
+                    index_drains.insert(
+                        report.workspace_id.clone(),
+                        (report.workspace_id.clone(), index_dir),
+                    );
+                    results[index] = WriteResult::Success {
+                        entity_id: Some(report.memory_id.to_string()),
+                    };
+                }
+                Err(error) => {
+                    results[index] = WriteResult::Failed { error };
+                }
+            }
+        }
+    }
+    for (_, (workspace_id, index_dir)) in index_drains {
+        if let Err(error) = crate::core::index::process_pending_index_jobs_coalesced(
+            &connection,
+            &workspace_id,
+            &index_dir,
+            None,
+        ) {
+            for result in &mut results {
+                if matches!(result, WriteResult::Success { .. }) {
+                    *result = WriteResult::Failed {
+                        error: crate::models::DomainError::SearchIndex {
+                            message: format!(
+                                "daemon remember batch committed, but coalesced index drain failed: {error}"
+                            ),
+                            repair: Some("Run `ee index rebuild --workspace . --json`.".to_string()),
+                        },
+                    };
+                }
+            }
+        }
+    }
+    Ok(results)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3741,6 +3832,67 @@ mod tests {
         assert!(
             entries.is_empty(),
             "journal insert must roll back when a later outcome op fails"
+        );
+    }
+
+    #[test]
+    fn daemon_remember_batch_commits_memories_and_drains_index_jobs() {
+        let dir = tempfile::Builder::new()
+            .prefix("daemon-remember-batch")
+            .tempdir_in(std::env::temp_dir())
+            .expect("tempdir");
+        let workspace_path = dir.path().canonicalize().expect("canonical workspace");
+        let database_path = workspace_path.join(".ee").join("ee.db");
+        std::fs::create_dir_all(workspace_path.join(".ee")).expect("create .ee");
+
+        let remember_op = |content: &str| crate::core::write_owner::WriteOperation::Custom {
+            operation_type: DaemonWriteParams::ACTOR_OPERATION_TYPE.to_string(),
+            payload: serde_json::to_value(DaemonWriteParams {
+                workspace_path: workspace_path.clone(),
+                content: content.to_string(),
+                level: "procedural".to_string(),
+                kind: "rule".to_string(),
+                tags: Some("daemon-batch".to_string()),
+                confidence: 0.8,
+                source: Some("test://daemon-remember-batch".to_string()),
+                workflow_id: None,
+                auto_link: false,
+                propose_candidates: false,
+            })
+            .expect("remember payload"),
+        };
+
+        let results = execute_daemon_txn_batch(&[
+            remember_op("Daemon remember batch row one."),
+            remember_op("Daemon remember batch row two."),
+        ])
+        .expect("remember batch");
+        assert_eq!(results.len(), 2);
+        let memory_ids = results
+            .into_iter()
+            .map(|result| match result {
+                crate::core::write_owner::WriteResult::Success {
+                    entity_id: Some(id),
+                } => id,
+                other => panic!("expected successful memory result, got {other:?}"),
+            })
+            .collect::<Vec<_>>();
+
+        let connection = crate::db::DbConnection::open_file(&database_path).expect("open db");
+        let mut workspace_id = None;
+        for memory_id in &memory_ids {
+            let memory = connection
+                .get_memory(memory_id)
+                .expect("query memory")
+                .expect("memory exists");
+            workspace_id = Some(memory.workspace_id);
+        }
+        let pending = connection
+            .list_pending_search_index_jobs(&workspace_id.expect("workspace id"), None)
+            .expect("pending jobs");
+        assert!(
+            pending.is_empty(),
+            "daemon remember batch should drain deferred memory index jobs"
         );
     }
 

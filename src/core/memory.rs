@@ -2185,6 +2185,43 @@ struct RememberStoreOverride {
     index_dir: PathBuf,
 }
 
+struct RememberFinishInput {
+    prepared: PreparedRememberMemory,
+    memory_id: String,
+    audit_id: String,
+    index_job_id: String,
+    memory_input: CreateMemoryInput,
+    policy_bypass: Option<RememberPolicyBypassReport>,
+    near_duplicates: Vec<RememberNearDuplicate>,
+    defer_index_processing: bool,
+    auto_link: bool,
+    propose_candidates: bool,
+    write_replay_guard: RememberWriteReplayGuard,
+}
+
+pub(crate) struct PreparedRememberTxnWrite {
+    finish: RememberFinishInput,
+    typed_fields_json: Option<String>,
+    embed_dedup_decision: RememberEmbedDedupDecision,
+    embed_dedup_link_id: Option<String>,
+    audit_details: String,
+    index_input: CreateSearchIndexJobInput,
+}
+
+impl PreparedRememberTxnWrite {
+    pub(crate) fn memory_id(&self) -> &str {
+        &self.finish.memory_id
+    }
+
+    pub(crate) fn workspace_id(&self) -> &str {
+        &self.finish.prepared.workspace_id
+    }
+
+    pub(crate) fn index_dir(&self) -> &Path {
+        &self.finish.prepared.index_dir
+    }
+}
+
 struct RememberWriteReplayGuard {
     workspace_path: PathBuf,
     armed: bool,
@@ -3570,6 +3607,203 @@ fn workspace_insert_lost_race(error: &impl ToString) -> bool {
         || message.contains("unique constraint failed: workspaces.id")
 }
 
+fn build_prepared_remember_txn_write(
+    connection: &DbConnection,
+    prepared: PreparedRememberMemory,
+    id_source: &mut RememberIdSource<'_>,
+    defer_index_processing: bool,
+    auto_link: bool,
+    propose_candidates: bool,
+    write_replay_guard: RememberWriteReplayGuard,
+) -> Result<PreparedRememberTxnWrite, DomainError> {
+    let memory_id = prepared.memory_id.to_string();
+    let audit_id = id_source.next_audit_id();
+    let policy_bypass_audit_id = prepared
+        .policy_bypass
+        .as_ref()
+        .map(|_| id_source.next_audit_id());
+    let index_job_id = id_source.next_search_index_job_id();
+    let memory_input = CreateMemoryInput {
+        workspace_id: prepared.workspace_id.clone(),
+        level: prepared.level.as_str().to_owned(),
+        kind: prepared.kind.as_str().to_owned(),
+        content: prepared.content.clone(),
+        workflow_id: prepared.workflow_id.clone(),
+        confidence: prepared.confidence,
+        utility: UnitScore::neutral().into_inner(),
+        importance: UnitScore::neutral().into_inner(),
+        provenance_uri: prepared.provenance_uri.clone(),
+        trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+        trust_subclass: super::memory_scope::remember_trust_subclass("ee remember"),
+        tags: prepared.tags.clone(),
+        valid_from: prepared.valid_from.clone(),
+        valid_to: prepared.valid_to.clone(),
+    };
+    let policy_bypass = prepared
+        .policy_bypass
+        .clone()
+        .zip(policy_bypass_audit_id)
+        .map(|(bypass, audit_id)| bypass.with_audit_id(audit_id));
+    let index_input = CreateSearchIndexJobInput {
+        workspace_id: prepared.workspace_id.clone(),
+        job_type: SearchIndexJobType::SingleDocument,
+        document_source: Some("memory".to_owned()),
+        document_id: Some(memory_id.clone()),
+        documents_total: 1,
+    };
+    let embed_dedup_decision = remember_embed_dedup_decision_from_env(connection, &memory_input)?;
+    let near_duplicates = remember_near_duplicates_from_embed_dedup_decision(&embed_dedup_decision);
+    let embed_dedup_link_id = embed_dedup_decision
+        .link
+        .as_ref()
+        .map(|_| generate_memory_link_id());
+    let audit_details = remember_audit_details(&memory_id, &memory_input, policy_bypass.as_ref());
+    let typed_fields_json = crate::models::memory::extract_typed_memory_fields_json_with_redactor(
+        &prepared.kind,
+        &prepared.content,
+        |value| crate::policy::redact_secret_like_content(value).content,
+    )
+    .map_err(|error| remember_usage_error(format!("typed field extraction failed: {error}")))?;
+
+    Ok(PreparedRememberTxnWrite {
+        finish: RememberFinishInput {
+            prepared,
+            memory_id,
+            audit_id,
+            index_job_id,
+            memory_input,
+            policy_bypass,
+            near_duplicates,
+            defer_index_processing,
+            auto_link,
+            propose_candidates,
+            write_replay_guard,
+        },
+        typed_fields_json,
+        embed_dedup_decision,
+        embed_dedup_link_id,
+        audit_details,
+        index_input,
+    })
+}
+
+pub(crate) fn prepare_remember_txn_write_for_connection(
+    connection: &DbConnection,
+    options: &RememberMemoryOptions<'_>,
+    defer_index_processing: bool,
+) -> Result<PreparedRememberTxnWrite, DomainError> {
+    let mut id_source = RememberIdSource::Ambient;
+    let prepared = prepare_remember_memory_with_store(options, id_source.next_memory_id(), None)?;
+    if options.dry_run {
+        return Err(DomainError::Usage {
+            message: "daemon remember batching cannot persist a dry-run request".to_owned(),
+            repair: Some("submit dry-run remember requests through the direct CLI path".to_owned()),
+        });
+    }
+    let write_replay_guard = RememberWriteReplayGuard::arm(&prepared.workspace_path)?;
+    ensure_database_parent_exists(&prepared.database_path)?;
+    migrate_remember_database_with_retry(connection)?;
+    ensure_workspace(
+        connection,
+        &prepared.workspace_id,
+        &prepared.workspace_path,
+    )?;
+    // The daemon write-owner is already the per-process serializer for this
+    // batch. We keep the direct CLI advisory lock on the direct path, but do
+    // not acquire one per memory here; multiple same-workspace remembers in one
+    // daemon batch would otherwise contend with their own first lock holder.
+    build_prepared_remember_txn_write(
+        connection,
+        prepared,
+        &mut id_source,
+        defer_index_processing,
+        options.auto_link,
+        options.propose_candidates,
+        write_replay_guard,
+    )
+}
+
+pub(crate) fn record_prepared_remember_txn_write_in_txn(
+    connection: &DbConnection,
+    write: &PreparedRememberTxnWrite,
+) -> crate::db::Result<()> {
+    record_remembered_memory_in_txn(
+        connection,
+        &write.finish.memory_id,
+        &write.finish.audit_id,
+        &write.finish.index_job_id,
+        &write.finish.memory_input,
+        write.typed_fields_json.as_deref(),
+        &write.embed_dedup_decision,
+        write.embed_dedup_link_id.as_deref(),
+        &write.audit_details,
+        &write.index_input,
+        write.finish.policy_bypass.as_ref(),
+        None,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "transaction-local primitive mirrors the storage/audit/index inputs"
+)]
+fn record_remembered_memory_in_txn(
+    connection: &DbConnection,
+    memory_id: &str,
+    audit_id: &str,
+    index_job_id: &str,
+    memory_input: &CreateMemoryInput,
+    typed_fields_json: Option<&str>,
+    embed_dedup_decision: &RememberEmbedDedupDecision,
+    embed_dedup_link_id: Option<&str>,
+    audit_details: &str,
+    index_input: &CreateSearchIndexJobInput,
+    policy_bypass: Option<&RememberPolicyBypassReport>,
+    audit_lane: Option<&AuditLaneHandle>,
+) -> crate::db::Result<()> {
+    match embed_dedup_decision.content_simhash {
+        Some(content_simhash) => connection.insert_memory_with_content_simhash(
+            memory_id,
+            memory_input,
+            content_simhash,
+        )?,
+        None => connection.insert_memory(memory_id, memory_input)?,
+    }
+    if let Some(typed_fields_json) = typed_fields_json {
+        connection.set_memory_typed_fields_json(memory_id, Some(typed_fields_json))?;
+    }
+    if let (Some(link), Some(link_id)) = (embed_dedup_decision.link.as_ref(), embed_dedup_link_id) {
+        connection.insert_memory_link(
+            link_id,
+            &CreateMemoryLinkInput {
+                src_memory_id: memory_id.to_owned(),
+                dst_memory_id: link.target_memory_id.clone(),
+                relation: MemoryLinkRelation::Related,
+                weight: 1.0,
+                confidence: link.cosine_similarity.clamp(0.0, 1.0),
+                directed: true,
+                evidence_count: 2,
+                last_reinforced_at: None,
+                source: MemoryLinkSource::Auto,
+                created_by: Some("ee remember".to_owned()),
+                metadata_json: embed_dedup_decision.link_metadata_json(),
+            },
+        )?;
+    }
+    if audit_lane.is_none() {
+        emit_remember_audit_events(
+            connection,
+            None,
+            memory_id,
+            audit_id,
+            memory_input,
+            audit_details,
+            policy_bypass,
+        )?;
+    }
+    connection.insert_search_index_job(index_job_id, index_input)
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "transaction retry helper mirrors the existing storage/audit/index inputs"
@@ -3590,49 +3824,20 @@ fn store_remembered_memory_with_retry(
 ) -> Result<(), DomainError> {
     for attempt in 0..REMEMBER_CONTENTION_MAX_ATTEMPTS {
         match connection.with_transaction(|| {
-            match embed_dedup_decision.content_simhash {
-                Some(content_simhash) => connection.insert_memory_with_content_simhash(
-                    memory_id,
-                    memory_input,
-                    content_simhash,
-                )?,
-                None => connection.insert_memory(memory_id, memory_input)?,
-            }
-            if let Some(typed_fields_json) = typed_fields_json {
-                connection.set_memory_typed_fields_json(memory_id, Some(typed_fields_json))?;
-            }
-            if let (Some(link), Some(link_id)) =
-                (embed_dedup_decision.link.as_ref(), embed_dedup_link_id)
-            {
-                connection.insert_memory_link(
-                    link_id,
-                    &CreateMemoryLinkInput {
-                        src_memory_id: memory_id.to_owned(),
-                        dst_memory_id: link.target_memory_id.clone(),
-                        relation: MemoryLinkRelation::Related,
-                        weight: 1.0,
-                        confidence: link.cosine_similarity.clamp(0.0, 1.0),
-                        directed: true,
-                        evidence_count: 2,
-                        last_reinforced_at: None,
-                        source: MemoryLinkSource::Auto,
-                        created_by: Some("ee remember".to_owned()),
-                        metadata_json: embed_dedup_decision.link_metadata_json(),
-                    },
-                )?;
-            }
-            if audit_lane.is_none() {
-                emit_remember_audit_events(
-                    connection,
-                    None,
-                    memory_id,
-                    audit_id,
-                    memory_input,
-                    audit_details,
-                    policy_bypass,
-                )?;
-            }
-            connection.insert_search_index_job(index_job_id, index_input)
+            record_remembered_memory_in_txn(
+                connection,
+                memory_id,
+                audit_id,
+                index_job_id,
+                memory_input,
+                typed_fields_json,
+                embed_dedup_decision,
+                embed_dedup_link_id,
+                audit_details,
+                index_input,
+                policy_bypass,
+                audit_lane,
+            )
         }) {
             Ok(()) => {
                 if let Some(audit_lane) = audit_lane {
@@ -3687,6 +3892,240 @@ fn store_remembered_memory_with_retry(
     Err(DomainError::Storage {
         message: "Failed to store memory: retry loop exhausted".to_owned(),
         repair: Some("ee doctor".to_string()),
+    })
+}
+
+pub(crate) fn finish_prepared_remember_txn_write(
+    connection: &DbConnection,
+    write: PreparedRememberTxnWrite,
+) -> Result<RememberMemoryReport, DomainError> {
+    finish_remember_memory_after_primary_commit(connection, write.finish)
+}
+
+fn finish_remember_memory_after_primary_commit(
+    connection: &DbConnection,
+    finish: RememberFinishInput,
+) -> Result<RememberMemoryReport, DomainError> {
+    let RememberFinishInput {
+        prepared,
+        memory_id,
+        audit_id,
+        index_job_id,
+        memory_input,
+        policy_bypass,
+        near_duplicates,
+        defer_index_processing,
+        auto_link,
+        propose_candidates,
+        mut write_replay_guard,
+    } = finish;
+
+    append_remember_audit_jsonl(&prepared, &audit_id, &memory_id, &memory_input)?;
+
+    let (mut auto_links, mut auto_link_status, mut auto_link_degradations) =
+        match create_auto_links_for_remember(
+            connection,
+            &prepared.workspace_id,
+            &memory_id,
+            prepared.workflow_id.as_deref(),
+            auto_link,
+        ) {
+            Ok(auto_links) => {
+                let status =
+                    auto_link_status(prepared.workflow_id.as_deref(), auto_link, &auto_links);
+                let degradations = if status == "no_workflow_required" {
+                    vec![RememberSuggestedLinkDegradation {
+                        code: "auto_link_disabled".to_owned(),
+                        severity: "info".to_owned(),
+                        message:
+                            "Automatic memory linking requires a workflow context. Use `ee memory link <from> <to> --relation <type>` to add explicit links."
+                                .to_owned(),
+                        repair: "ee memory link --help".to_owned(),
+                    }]
+                } else {
+                    Vec::new()
+                };
+                (auto_links, status.to_owned(), degradations)
+            }
+            Err(error) => (
+                Vec::new(),
+                "degraded".to_owned(),
+                vec![RememberSuggestedLinkDegradation {
+                    code: "remember_auto_link_failed".to_owned(),
+                    severity: "low".to_owned(),
+                    message: format!(
+                        "Remembered the memory, but workflow auto-linking failed: {}",
+                        error.message()
+                    ),
+                    repair: "Run `ee doctor --json` and inspect memory link indexes.".to_owned(),
+                }],
+            ),
+        };
+
+    let (mut suggested_links, mut suggested_link_status, suggested_link_degradations) =
+        match suggest_links_for_remember(
+            connection,
+            &prepared.workspace_id,
+            &memory_id,
+            &prepared.tags,
+        ) {
+            Ok(suggested_links) => {
+                let status = if suggested_links.is_empty() {
+                    "no_candidates"
+                } else {
+                    "ready"
+                };
+                (suggested_links, status.to_owned(), Vec::new())
+            }
+            Err(error) => (
+                Vec::new(),
+                "degraded".to_owned(),
+                vec![RememberSuggestedLinkDegradation {
+                    code: "remember_link_suggestion_failed".to_owned(),
+                    severity: "low".to_owned(),
+                    message: format!(
+                        "Remembered the memory, but link suggestions failed: {}",
+                        error.message()
+                    ),
+                    repair: "Run `ee doctor --json` and inspect memory tag/link indexes."
+                        .to_owned(),
+                }],
+            ),
+        };
+
+    {
+        let existing_auto_link_targets: BTreeSet<String> = auto_links
+            .iter()
+            .map(|link| link.target_memory_id.clone())
+            .collect();
+        match persist_high_confidence_cotag_links(
+            connection,
+            &prepared.workspace_id,
+            &memory_id,
+            auto_link,
+            &existing_auto_link_targets,
+            &suggested_links,
+        ) {
+            Ok(cotag_links) if !cotag_links.is_empty() => {
+                let persisted: BTreeSet<String> = cotag_links
+                    .iter()
+                    .map(|link| link.target_memory_id.clone())
+                    .collect();
+                suggested_links.retain(|link| !persisted.contains(&link.target_memory_id));
+                if suggested_links.is_empty() && suggested_link_status == "ready" {
+                    suggested_link_status = "no_candidates".to_owned();
+                }
+                auto_links.extend(cotag_links);
+                auto_link_degradations
+                    .retain(|degradation| degradation.code != "auto_link_disabled");
+                if auto_link_status == "no_workflow_required" || auto_link_status == "no_candidates"
+                {
+                    auto_link_status = "linked".to_owned();
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                auto_link_degradations.push(RememberSuggestedLinkDegradation {
+                    code: "remember_cotag_auto_link_failed".to_owned(),
+                    severity: "low".to_owned(),
+                    message: format!(
+                        "Remembered the memory, but co-tag auto-linking failed: {}",
+                        error.message()
+                    ),
+                    repair: "Run `ee doctor --json` and inspect memory link indexes.".to_owned(),
+                });
+            }
+        }
+    }
+
+    let index_dir = prepared.index_dir.clone();
+    let index_report = if defer_index_processing {
+        IndexProcessingJobReport {
+            job_id: index_job_id.clone(),
+            job_type: SearchIndexJobType::SingleDocument.as_str().to_owned(),
+            document_source: Some("memory".to_owned()),
+            document_id: None,
+            outcome: "skipped".to_owned(),
+            processing_mode: "deferred_to_coalesced_batch_rebuild".to_owned(),
+            documents_total: 1,
+            documents_indexed: 0,
+            error: None,
+            fallback_to_full: None,
+        }
+    } else {
+        process_remember_index_job_with_retry(connection, &index_job_id, &index_dir)?
+    };
+    let index_status = remember_index_status(&index_report);
+
+    let (curation_candidate, curation_candidate_status, curation_candidate_degradations) =
+        match propose_curation_candidate_for_remember(
+            connection,
+            &prepared,
+            &memory_id,
+            &memory_input,
+            propose_candidates,
+        ) {
+            Ok(report) => (
+                report.candidate,
+                report.status.to_owned(),
+                report.degradations,
+            ),
+            Err(error) => (
+                None,
+                "degraded".to_owned(),
+                vec![RememberSuggestedLinkDegradation {
+                    code: "auto_propose_failed".to_owned(),
+                    severity: "low".to_owned(),
+                    message: format!(
+                        "Remembered the memory, but curation candidate proposal failed: {}",
+                        error.message()
+                    ),
+                    repair: "Run `ee curate candidates --json` and inspect the review queue."
+                        .to_owned(),
+                }],
+            ),
+        };
+
+    write_replay_guard.mark_clean()?;
+
+    Ok(RememberMemoryReport {
+        version: env!("CARGO_PKG_VERSION"),
+        memory_id: prepared.memory_id,
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path,
+        database_path: prepared.database_path,
+        content: prepared.content,
+        workflow_id: prepared.workflow_id,
+        level: prepared.level,
+        kind: prepared.kind,
+        confidence: prepared.confidence,
+        tags: prepared.tags,
+        source: prepared.provenance_uri,
+        producer: remember_producer_metadata(),
+        valid_from: prepared.valid_from,
+        valid_to: prepared.valid_to,
+        validity_status: prepared.validity_status,
+        validity_window_kind: prepared.validity_window_kind,
+        dry_run: false,
+        persisted: true,
+        revision_number: 1,
+        revision_group_id: None,
+        audit_id: Some(audit_id),
+        index_job_id: Some(index_job_id),
+        index_status,
+        effect_ids: Vec::new(),
+        suggested_links,
+        suggested_link_status,
+        suggested_link_degradations,
+        redaction_status: "checked".to_owned(),
+        policy_bypass,
+        auto_links,
+        auto_link_status,
+        auto_link_degradations,
+        curation_candidate,
+        curation_candidate_status,
+        curation_candidate_degradations,
+        near_duplicates,
     })
 }
 
