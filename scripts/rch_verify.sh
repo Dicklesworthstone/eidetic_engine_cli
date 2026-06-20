@@ -154,12 +154,18 @@ RCH_MANIFEST_FIX_SIDECAR_BIN="/Users/jemanuel/.local/bin/rch-manifestfix-2026060
 RCH_E327_SIDECAR_BIN="/Users/jemanuel/.local/bin/rch-33720a8"
 RCH_MACOS_SOURCE_BIN="/Volumes/USBNVME16TB/temp_agent_space/rch-macos-target/debug/rch"
 DEFAULT_RCH_BIN="/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch"
+RCH_LOCAL_BIN="/Users/jemanuel/.local/bin/rch"
+RCH_PATH_BIN="$(command -v rch 2>/dev/null || true)"
 if [ -z "${RCH_BIN:-}" ]; then
+    # Prefer the currently installed client. Older sidecar clients are kept as
+    # last-resort fallbacks because their worker wrappers may lag daemon fixes.
     for rch_candidate in \
-        "$RCH_MANIFEST_FIX_SIDECAR_BIN" \
-        "$RCH_E327_SIDECAR_BIN" \
+        "$RCH_LOCAL_BIN" \
+        "$RCH_PATH_BIN" \
+        "$DEFAULT_RCH_BIN" \
         "$RCH_MACOS_SOURCE_BIN" \
-        "$DEFAULT_RCH_BIN"
+        "$RCH_MANIFEST_FIX_SIDECAR_BIN" \
+        "$RCH_E327_SIDECAR_BIN"
     do
         if host_can_run_executable "$rch_candidate"; then
             RCH_BIN="$rch_candidate"
@@ -171,6 +177,7 @@ if [ -z "${RCH_BIN:-}" ]; then
     RCH_BIN="rch"
 fi
 PROJECT_ROOT="$PWD"
+DEFAULT_RCH_ALIAS_PROJECT_ROOT="/tmp/rch-users-jemanuel"
 
 validate_env_override() {
     local item="${1:?environment override required}"
@@ -2332,7 +2339,7 @@ run_rch_invocation_once() {
         "RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
         "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
         "RCH_CANONICAL_PROJECT_ROOT=${RCH_CANONICAL_PROJECT_ROOT:-$(dirname "$(dirname "$PROJECT_ROOT")")}" \
-        "RCH_ALIAS_PROJECT_ROOT=${RCH_ALIAS_PROJECT_ROOT:-/data}" \
+        "RCH_ALIAS_PROJECT_ROOT=${RCH_ALIAS_PROJECT_ROOT:-$DEFAULT_RCH_ALIAS_PROJECT_ROOT}" \
         "RCH_VISIBILITY=${RCH_VISIBILITY:-summary}" \
         "${RCH_INVOCATION[@]}"
     local status=$?
@@ -2366,7 +2373,7 @@ run_rch_invocation_retry() {
         "RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
         "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
         "RCH_CANONICAL_PROJECT_ROOT=${RCH_CANONICAL_PROJECT_ROOT:-$(dirname "$(dirname "$PROJECT_ROOT")")}" \
-        "RCH_ALIAS_PROJECT_ROOT=${RCH_ALIAS_PROJECT_ROOT:-/data}" \
+        "RCH_ALIAS_PROJECT_ROOT=${RCH_ALIAS_PROJECT_ROOT:-$DEFAULT_RCH_ALIAS_PROJECT_ROOT}" \
         "RCH_VISIBILITY=${RCH_VISIBILITY:-summary}" \
         "${RCH_INVOCATION[@]}"
     local status=$?
