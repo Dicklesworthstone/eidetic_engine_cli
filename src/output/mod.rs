@@ -1555,6 +1555,9 @@ fn command_name_from_schema(schema: &str) -> String {
         "ee.swarm.work_packet.v1" | "ee.swarm.work-packet.v1" | "ee.swarm_work_packet.v1" => {
             "swarm work-packet".to_string()
         }
+        "ee.swarm.work_packet.claim_gate.v1"
+        | "ee.swarm.work-packet.claim-gate.v1"
+        | "ee.swarm_work_packet_claim_gate.v1" => "swarm work-packet claim-gate".to_string(),
         _ => String::new(),
     }
 }
@@ -1923,6 +1926,34 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
         "swarm work-packet" => match preset {
             FieldProfile::Minimal => &["schema", "workspace", "redactionStatus"],
             FieldProfile::Summary => &["schema", "workspace", "redactionStatus", "degraded"],
+            FieldProfile::Standard | FieldProfile::Full => &["*"],
+        },
+        "swarm work-packet claim-gate" => match preset {
+            FieldProfile::Minimal => &[
+                "schema",
+                "workspace",
+                "redactionStatus",
+                "verdict",
+                "safeToClaim",
+            ],
+            FieldProfile::Summary => &[
+                "schema",
+                "workspace",
+                "redactionStatus",
+                "requestedCandidateId",
+                "verdict",
+                "safeToClaim",
+                "selectedCandidate",
+                "sourceAuthority",
+                "actionableQueue",
+                "resourceAdmission",
+                "unsafeReasons",
+                "staleReasons",
+                "degradedCodes",
+                "nextCommandActions",
+                "claimCommandAction",
+                "recoveryActions",
+            ],
             FieldProfile::Standard | FieldProfile::Full => &["*"],
         },
         "swarm repair-plan" => match preset {

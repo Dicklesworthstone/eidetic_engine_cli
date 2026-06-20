@@ -183,6 +183,95 @@ fn field_selector_presets_apply_to_every_matrix_row() -> TestResult {
 }
 
 #[test]
+fn claim_gate_summary_preset_uses_gate_safety_fields_bd_kua65_1() -> TestResult {
+    let response = json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": {
+            "schema": "ee.swarm.work_packet.claim_gate.v1",
+            "gateId": "swarm_work_packet_claim_gate_test",
+            "packetId": "swarm_work_packet_test",
+            "workspace": "[WORKSPACE]",
+            "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+            "requestedCandidateId": "bd-kua65.1",
+            "verdict": "blocked_by_verification",
+            "safeToClaim": false,
+            "selectedCandidate": null,
+            "sourceAuthority": {"trackerAuthoritative": true},
+            "actionableQueue": {"queueState": "evaluated", "rowCount": 0},
+            "resourceAdmission": {"status": "allowed"},
+            "unsafeReasons": ["rch_remote_verification_required"],
+            "staleReasons": [],
+            "sourceRefs": [],
+            "degradedCodes": [],
+            "nextCommandActions": [{
+                "commandId": "bead_show_candidate",
+                "displayCommand": "br show bd-kua65.1 --json",
+                "argv": ["br", "show", "bd-kua65.1", "--json"],
+                "shellRequired": false,
+                "mutatesState": false,
+                "copySafety": "safe_structured_argv",
+                "requiredSubstrate": "beads",
+                "when": "inspect candidate"
+            }],
+            "claimCommandAction": null,
+            "recoveryActions": []
+        },
+        "degraded": []
+    })
+    .to_string();
+
+    let selected = apply_field_selector_to_json(&response, &FieldSelector::parse("summary"))
+        .map_err(|error| error.to_string())?;
+    let selected_json: Value =
+        serde_json::from_str(&selected).map_err(|error| error.to_string())?;
+    assert_data_keys(
+        &selected_json,
+        &[
+            "schema",
+            "workspace",
+            "redactionStatus",
+            "requestedCandidateId",
+            "verdict",
+            "safeToClaim",
+            "selectedCandidate",
+            "sourceAuthority",
+            "actionableQueue",
+            "resourceAdmission",
+            "unsafeReasons",
+            "staleReasons",
+            "degradedCodes",
+            "nextCommandActions",
+            "claimCommandAction",
+            "recoveryActions",
+        ],
+        "claim-gate summary",
+    )?;
+    if selected_json.pointer("/data/command").is_some() {
+        return Err("claim-gate summary must not request default command field".to_string());
+    }
+    if selected_json.pointer("/data/safeToClaim").and_then(Value::as_bool) != Some(false) {
+        return Err("claim-gate summary must preserve safeToClaim".to_string());
+    }
+    if selected_json.pointer("/data/verdict").and_then(Value::as_str)
+        != Some("blocked_by_verification")
+    {
+        return Err("claim-gate summary must preserve verdict".to_string());
+    }
+
+    let unknown = apply_field_selector_to_json(&response, &FieldSelector::parse("command"))
+        .expect_err("explicit command field must remain invalid for claim-gate data");
+    let unknown_json: Value =
+        serde_json::from_str(&error_response_json(&unknown)).map_err(|error| error.to_string())?;
+    if unknown_json.pointer("/error/code").and_then(Value::as_str) != Some("usage_unknown_field") {
+        return Err(format!(
+            "explicit unknown field code mismatch for claim-gate: {unknown_json}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn status_and_swarm_brief_full_keys_are_preset_reachable() -> TestResult {
     for coverage in [
         FullKeyCoverage {
