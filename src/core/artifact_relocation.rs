@@ -672,9 +672,19 @@ fn prepare_manifest_output_path(manifest_path: &Path) -> Result<(), DomainError>
 }
 
 fn relocation_manifest_temp_path(manifest_path: &Path) -> PathBuf {
-    let mut temp_path = manifest_path.to_owned();
-    temp_path.set_extension("tmp");
-    temp_path
+    // Append ".tmp" to the FULL file name rather than replacing the extension.
+    // set_extension("tmp") yields temp_path == manifest_path when the requested
+    // manifest path already ends in ".tmp" (e.g. `--manifest relocation.tmp`):
+    // the temp write would then create the final path, and the publish guard
+    // (`ensure_relocation_manifest_final_path_missing`) would fail because the
+    // final path now exists — leaving the manifest on disk while reporting an
+    // error (bd-1whq0). Appending keeps the temp sibling guaranteed distinct
+    // from manifest_path for every input.
+    let mut file_name = manifest_path
+        .file_name()
+        .map_or_else(std::ffi::OsString::new, std::ffi::OsString::from);
+    file_name.push(".tmp");
+    manifest_path.with_file_name(file_name)
 }
 
 fn non_empty_parent(path: &Path) -> Option<&Path> {
@@ -1592,6 +1602,70 @@ mod tests {
         let temp_content = fs::read_to_string(&temp_manifest).map_err(|error| error.to_string())?;
         if temp_content != "keep me" {
             return Err("existing temp manifest was unexpectedly truncated".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn relocation_apply_succeeds_when_manifest_path_ends_in_tmp() -> TestResult {
+        // bd-1whq0: a manifest path ending in ".tmp" must not collide with the
+        // temporary publish path. Previously `relocation_manifest_temp_path`
+        // used set_extension("tmp"), so temp_path == manifest_path; the temp
+        // write created the final path and publish then errored (final exists),
+        // copying artifacts while reporting failure. The temp sibling is now
+        // guaranteed distinct, so apply succeeds and publishes atomically.
+        let base = temp_path("bd1whq0-tmp-manifest");
+        fs::create_dir_all(&base).map_err(|error| error.to_string())?;
+        // Resolve any symlinked path component (e.g. the worker's /Users alias
+        // when this is RCH-verified from the /Users checkout) so the relocation
+        // symlink-safety guards see a regular-directory path rather than denying
+        // the whole operation before the temp-path logic under test runs.
+        let base = fs::canonicalize(&base).map_err(|error| error.to_string())?;
+        let workspace = base.join("workspace");
+        let source = workspace.join("target/debug/sample.o");
+        fs::create_dir_all(parent_dir(&source)?).map_err(|error| error.to_string())?;
+        fs::write(&source, "artifact bytes\n").map_err(|error| error.to_string())?;
+        let destination = base.join("destination");
+        let expected_copy = destination
+            .join(RELOCATION_DIR)
+            .join("target/debug/sample.o");
+        let manifest = base.join("manifest").join("relocation.tmp");
+        fs::create_dir_all(parent_dir(&manifest)?).map_err(|error| error.to_string())?;
+
+        // The temp sibling must differ from a manifest path that already ends in
+        // ".tmp" (the regression this test guards).
+        let temp_sibling = relocation_manifest_temp_path(&manifest);
+        if temp_sibling == manifest {
+            return Err(format!(
+                "temp path must differ from a .tmp manifest path; both resolved to {}",
+                manifest.display()
+            ));
+        }
+
+        relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &workspace,
+            source_path: Some(&source),
+            destination_root: Some(&destination),
+            manifest_path: &manifest,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Apply,
+            force_with_explicit_path: false,
+        })
+        .map_err(|error| format!("apply with a .tmp manifest path should succeed: {error:?}"))?;
+
+        if !manifest.exists() {
+            return Err("manifest was not published at the requested .tmp path".to_owned());
+        }
+        if !expected_copy.exists() {
+            return Err(
+                "artifact was not copied during a successful .tmp-manifest apply".to_owned(),
+            );
+        }
+        if temp_sibling.exists() {
+            return Err(format!(
+                "temporary manifest {} was left on disk after publish",
+                temp_sibling.display()
+            ));
         }
         Ok(())
     }
