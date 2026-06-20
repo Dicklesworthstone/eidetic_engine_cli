@@ -152,6 +152,35 @@ assert_jq() {
     fi
 }
 
+mesh_contacted_peer_count() {
+    local path="${1:?path required}"
+    jq -r '
+        def contacted_peer_count:
+          if type == "boolean" then
+            if . then 1 else 0 end
+          elif type == "number" then
+            .
+          elif type == "string" then
+            if test("^(true|yes)$"; "i") then 1
+            elif test("^(false|no)$"; "i") then 0
+            else (tonumber? // 0)
+            end
+          else
+            0
+          end;
+        [
+          .data.contactedPeers? // empty,
+          .data.contacted_peers? // empty,
+          .data.peers?.contacted? // empty,
+          .data.summary?.contactedPeers? // empty,
+          .data.summary?.contacted_peers? // empty
+        ]
+        | map(select(. != null))
+        | first // 0
+        | contacted_peer_count
+      ' "$path"
+}
+
 require_tailnet_artifact_dir_opt_in() {
     if [ "$ARTIFACT_DIR_SOURCE" = "fallback" ] && [ "${EE_TAILNET_TMP_OK:-0}" != "1" ]; then
         skip "set EE_E2E_ARTIFACT_DIR to a private directory for retained tailnet artifacts, or set EE_TAILNET_TMP_OK=1 to allow the temporary fallback"
@@ -390,17 +419,7 @@ DEFERRED_PRESENT="$(jq -r '
     ]
     | any(. == "mesh_sync_once_network_deferred")
 ' "$SYNC_ONCE_JSON")"
-CONTACTED_PEERS="$(jq -r '
-    [
-      .data.contactedPeers? // empty,
-      .data.contacted_peers? // empty,
-      .data.peers?.contacted? // empty,
-      .data.summary?.contactedPeers? // empty,
-      .data.summary?.contacted_peers? // empty
-    ]
-    | map(select(. != null))
-    | first // 0
-' "$SYNC_ONCE_JSON")"
+CONTACTED_PEERS="$(mesh_contacted_peer_count "$SYNC_ONCE_JSON")"
 
 # Scenario C — `ee mesh status --json` after the sync tick. Baseline
 # diff-friendly snapshot.

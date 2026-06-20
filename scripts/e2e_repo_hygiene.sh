@@ -77,6 +77,7 @@ patterns=(
     "/pass*.jsonl"
     "/fix_*.sh"
     "/find_*.sh"
+    "/*-upgrade-progress.json"
 )
 
 paths=(
@@ -99,6 +100,7 @@ paths=(
     "pass_dummy.jsonl"
     "fix_dummy.sh"
     "find_dummy.sh"
+    "claude-upgrade-progress.json"
 )
 
 if [ "${#patterns[@]}" -ne "${#paths[@]}" ]; then
