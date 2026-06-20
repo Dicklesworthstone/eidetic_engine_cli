@@ -486,6 +486,19 @@ fn resolve_file_path(raw_path: &str, workspace_root: &Path) -> PathBuf {
 }
 
 fn read_limited_utf8(path: &Path, max_bytes: u64) -> Result<Option<String>, String> {
+    // bd-6i8gq: reject ANY symlinked path component (parent or leaf), not just a
+    // symlinked final file. fs::symlink_metadata only declines to follow the
+    // LAST component, so a symlinked PARENT directory was still traversed and its
+    // target read as if it were the workspace evidence file. Mirrors the
+    // memory-freshness contract, which rejects any symlinked provenance component.
+    if let Some(symlink_path) = crate::core::path_safety::first_existing_symlink_component(path)
+        .map_err(|error| format!("Could not check provenance source for symlinks: {error}"))?
+    {
+        return Err(format!(
+            "Refusing to follow symlinked provenance path component {}.",
+            symlink_path.display()
+        ));
+    }
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -781,6 +794,39 @@ mod tests {
         assert_eq!(health.health, ProvenancePointerStatus::Missing);
         assert_eq!(health.pointers[0].reason_code, "source_file_missing");
         assert_eq!(health.pointers[0].moved_to, None);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_provenance_under_symlinked_parent_is_refused_bd_6i8gq() -> Result<(), String> {
+        use std::os::unix::fs::symlink;
+
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let evidence = "provenance evidence reachable only via a symlinked parent directory";
+        fs::write(outside.path().join("evidence.md"), format!("{evidence}\n"))
+            .map_err(|error| error.to_string())?;
+        // workspace/linked-dir is a symlink to `outside`; evidence.md itself is a
+        // regular file, so the leaf-only is_symlink check would miss it.
+        symlink(outside.path(), workspace.path().join("linked-dir"))
+            .map_err(|error| error.to_string())?;
+
+        let health = assess_memory_provenance_health(
+            &memory(
+                "mem_symlinked_parent",
+                evidence,
+                Some("file://linked-dir/evidence.md#L1".to_string()),
+            ),
+            Some(workspace.path()),
+        );
+
+        assert_eq!(health.health, ProvenancePointerStatus::Unverifiable);
+        assert_eq!(
+            health.pointers[0].status,
+            ProvenancePointerStatus::Unverifiable
+        );
+        assert_eq!(health.pointers[0].reason_code, "source_unreadable");
         Ok(())
     }
 
