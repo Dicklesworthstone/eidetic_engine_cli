@@ -176,9 +176,9 @@ use crate::core::memory::{
     RememberMemoryReport, RememberOutcome, RememberWriteControls, ReviseMemoryOptions,
     ReviseReason, WorkflowCloseOptions, WorkflowCloseReport, WorkflowCreateOptions,
     build_memory_timeline, close_workflow, create_workflow, expire_memory, get_memory_details,
-    list_memories, remember_git_capture_candidate_from_repo, remember_memory_batch_stdin,
-    remember_global_memory_with_controls, remember_memory_with_controls, revise_memory,
-    update_memory_level, update_memory_link, update_memory_tags,
+    list_memories, remember_git_capture_candidate_from_repo, remember_global_memory_with_controls,
+    remember_memory_batch_stdin, remember_memory_with_controls, revise_memory, update_memory_level,
+    update_memory_link, update_memory_tags,
 };
 use crate::core::orient::{OrientDecisionOptions, orient_decisions};
 use crate::core::outcome::{
@@ -222,12 +222,10 @@ use crate::core::profile::{
     ProfileConfigError, ProfileConfigOptions, ProfileConfigReport, VerificationRecipe,
     apply_profile_config, plan_profile_config,
 };
-use crate::core::provenance_health::{
-    ProvenanceHealthOptions, generate_provenance_health_report,
-};
 use crate::core::proof_verify::{
     ProofCheckReport, ProofCheckStatus, SystemProofCommandRunner, run_proof_checks,
 };
+use crate::core::provenance_health::{ProvenanceHealthOptions, generate_provenance_health_report};
 use crate::core::rehearse::{
     CommandSpec, RehearsalProfile, RehearseInspectOptions, RehearsePlanOptions,
     RehearsePromotePlanOptions, RehearseRunOptions, inspect_rehearsal, plan_rehearsal,
@@ -5955,6 +5953,10 @@ pub struct JournalListArgs {
     /// Maximum entries to show.
     #[arg(long, short = 'n', default_value_t = 50)]
     pub limit: u32,
+
+    /// Resume an output-governed page sequence from a continuation cursor.
+    #[arg(long, value_name = "CURSOR")]
+    pub cursor: Option<String>,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -14452,6 +14454,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
+                "degraded": [],
             });
             write_stdout(
                 stdout,
@@ -14466,6 +14469,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
+                "degraded": [],
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -14581,6 +14585,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
+                "degraded": [],
             });
             write_stdout(
                 stdout,
@@ -14595,6 +14600,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
+                "degraded": [],
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -14998,6 +15004,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
+                "degraded": [],
             });
             write_stdout(
                 stdout,
@@ -15012,6 +15019,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
+                "degraded": [],
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -15082,7 +15090,8 @@ where
                         "fixtures": entries,
                         "fixtureCount": entries.len(),
                         "fixtureDir": dir.display().to_string()
-                    }
+                    },
+                    "degraded": [],
                 });
                 let _ = stdout.write_all(json.to_string().as_bytes());
                 let _ = stdout.write_all(b"\n");
@@ -15316,7 +15325,8 @@ where
                 "dataHashes": data_hashes,
                 "firstFailure": first_failure,
                 "reports": reports,
-            }
+            },
+            "degraded": [],
         });
         let _ = stdout.write_all(json.to_string().as_bytes());
         let _ = stdout.write_all(b"\n");
@@ -16398,10 +16408,12 @@ where
 }
 
 fn focus_response_json(report: &FocusReport) -> String {
+    let data = report.data_json();
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
-        "data": report.data_json(),
+        "degraded": top_level_degraded_from_data(&data),
+        "data": data,
     })
     .to_string()
 }
@@ -16831,6 +16843,7 @@ where
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": data,
+                    "degraded": [],
                 })
                 .to_string(),
             ) + "\n"),
@@ -16844,6 +16857,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": data,
+                "degraded": [],
             })
             .to_string()
                 + "\n"),
@@ -17102,6 +17116,11 @@ where
     let report = crate::science::analyze_drift(&options);
     let data = report.data_json();
     let success = report.degradations.is_empty();
+    let degraded = if success {
+        Vec::new()
+    } else {
+        aggregate_drift_degraded_json(&report.degradations)
+    };
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
@@ -17115,6 +17134,7 @@ where
                         "schema": crate::models::RESPONSE_SCHEMA_V2,
                         "success": success,
                         "data": data,
+                        "degraded": degraded.clone(),
                     })
                     .to_string(),
                 ) + "\n"),
@@ -17124,31 +17144,17 @@ where
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            if success {
-                write_stdout(
-                    stdout,
-                    &(serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V2,
-                        "success": true,
-                        "data": data,
-                    })
-                    .to_string()
-                        + "\n"),
-                );
-            } else {
-                let degraded = aggregate_drift_degraded_json(&report.degradations);
-                write_stdout(
-                    stdout,
-                    &(serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V2,
-                        "success": false,
-                        "data": data,
-                        "degraded": degraded,
-                    })
-                    .to_string()
-                        + "\n"),
-                );
-            }
+            write_stdout(
+                stdout,
+                &(serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
+                    "success": success,
+                    "data": data,
+                    "degraded": degraded,
+                })
+                .to_string()
+                    + "\n"),
+            );
         }
     }
     if success {
@@ -17177,6 +17183,11 @@ where
     let report = crate::science::analyze_clustering(&options);
     let data = report.data_json();
     let success = report.degradations.is_empty();
+    let degraded = if success {
+        Vec::new()
+    } else {
+        aggregate_clustering_degraded_json(&report.degradations)
+    };
 
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
@@ -17190,6 +17201,7 @@ where
                         "schema": crate::models::RESPONSE_SCHEMA_V2,
                         "success": success,
                         "data": data,
+                        "degraded": degraded.clone(),
                     })
                     .to_string(),
                 ) + "\n"),
@@ -17199,31 +17211,17 @@ where
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            if success {
-                write_stdout(
-                    stdout,
-                    &(serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V2,
-                        "success": true,
-                        "data": data,
-                    })
-                    .to_string()
-                        + "\n"),
-                );
-            } else {
-                let degraded = aggregate_clustering_degraded_json(&report.degradations);
-                write_stdout(
-                    stdout,
-                    &(serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V2,
-                        "success": false,
-                        "data": data,
-                        "degraded": degraded,
-                    })
-                    .to_string()
-                        + "\n"),
-                );
-            }
+            write_stdout(
+                stdout,
+                &(serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
+                    "success": success,
+                    "data": data,
+                    "degraded": degraded,
+                })
+                .to_string()
+                    + "\n"),
+            );
         }
     }
     if success {
@@ -17278,11 +17276,7 @@ where
                     backup_redaction_fields(&report),
                     backup_redaction_patterns(&report),
                 );
-                let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V2,
-                    "success": true,
-                    "data": data,
-                });
+                let json = response_v2_json_from_data(data);
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
         },
@@ -17361,11 +17355,7 @@ where
                 backup_redaction_fields(report),
                 backup_redaction_patterns(report),
             );
-            let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V2,
-                "success": true,
-                "data": data,
-            });
+            let json = response_v2_json_from_data(data);
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
     }
@@ -17436,11 +17426,7 @@ where
 
     match list_backups(&options) {
         Ok(report) => {
-            let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V2,
-                "success": true,
-                "data": report.data_json(),
-            });
+            let json = response_v2_json_from_data(report.data_json());
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
                     let count = report.backups.len();
@@ -17487,11 +17473,7 @@ where
 
     match inspect_backup(&options) {
         Ok(report) => {
-            let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V2,
-                "success": true,
-                "data": report.data_json(),
-            });
+            let json = response_v2_json_from_data(report.data_json());
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
                     let mut out = format!("Backup: {}\n", report.backup_id);
@@ -17560,6 +17542,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report.data_json(),
+                "degraded": [],
             });
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
@@ -17627,11 +17610,7 @@ where
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
-                let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V2,
-                    "success": true,
-                    "data": report.data_json(),
-                });
+                let json = response_v2_json_from_data(report.data_json());
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
         },
@@ -17971,6 +17950,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report.data_json(),
+                "degraded": [],
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -18005,6 +17985,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report.data_json(),
+                "degraded": [],
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -18038,6 +18019,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report.data_json(),
+                "degraded": [],
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -18430,6 +18412,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": data,
+                "degraded": top_level_degraded_from_data(&data),
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -18761,6 +18744,24 @@ where
         "degraded": [],
     })
     .to_string()
+}
+
+fn top_level_degraded_from_data(data: &serde_json::Value) -> serde_json::Value {
+    data.get("degraded")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .map(serde_json::Value::Array)
+        .unwrap_or_else(|| serde_json::json!([]))
+}
+
+fn response_v2_json_from_data(data: serde_json::Value) -> serde_json::Value {
+    let degraded = top_level_degraded_from_data(&data);
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "degraded": degraded,
+        "data": data,
+    })
 }
 
 fn active_response_schema_stdout(text: &str) -> Result<Cow<'_, str>, DomainError> {
@@ -19348,7 +19349,8 @@ fn doctor_robot_docs_json() -> String {
                 "ee.doctor.run_state.v1",
                 "ee.doctor.action_line.v1"
             ]
-        }
+        },
+        "degraded": [],
     })
     .to_string()
 }
@@ -19624,7 +19626,8 @@ fn doctor_robot_triage_json(report: &DoctorReport) -> String {
             "entries": entries,
             "sideEffectFree": true,
             "configMutation": "never",
-        }
+        },
+        "degraded": [],
     })
     .to_string()
 }
@@ -20177,6 +20180,7 @@ where
                 let json = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
+                    "degraded": [],
                     "data": report.data_json(),
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
@@ -20302,6 +20306,7 @@ where
                 let json = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
+                    "degraded": [],
                     "data": report.data_json(),
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
@@ -20396,6 +20401,7 @@ where
                 let json = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
+                    "degraded": [],
                     "data": report.data_json(),
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
@@ -20445,6 +20451,7 @@ where
                 let json = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
+                    "degraded": [],
                     "data": report.data_json(),
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
@@ -20493,6 +20500,7 @@ where
                 let json = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
+                    "degraded": [],
                     "data": report.data_json(),
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
@@ -20547,6 +20555,7 @@ where
                 let json = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
+                    "degraded": [],
                     "data": report.data_json(),
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
@@ -23130,7 +23139,8 @@ where
             "schema": output_schema,
             "effect": perf_effect_json(command_path),
             "report": perf_report_value(report),
-        }
+        },
+        "degraded": [],
     })
     .to_string()
 }
@@ -23541,6 +23551,7 @@ where
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
+        "degraded": [],
     });
     write_stdout(stdout, &(rendered.to_string() + "\n"))
 }
@@ -23846,6 +23857,7 @@ where
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
+        "degraded": top_level_degraded_from_data(&data),
     });
     write_stdout(stdout, &(rendered.to_string() + "\n"))
 }
@@ -25382,7 +25394,8 @@ where
         "data": {
             "command": command,
             "report": report,
-        }
+        },
+        "degraded": [],
     });
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => {
@@ -25670,10 +25683,12 @@ where
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
+            let data = report.data_json();
             let json = serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
-                "data": report.data_json(),
+                "data": data,
+                "degraded": top_level_degraded_from_data(&data),
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -25801,10 +25816,12 @@ where
 fn recorder_events_list_response_json(
     report: &crate::core::recorder::RecorderEventsListReport,
 ) -> String {
+    let data = report.data_json();
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
-        "data": report.data_json(),
+        "data": data,
+        "degraded": top_level_degraded_from_data(&data),
     })
     .to_string()
 }
@@ -25914,7 +25931,8 @@ where
                 "targetId": args.target_id,
                 "author": args.author,
                 "summary": args.summary,
-            }
+            },
+            "degraded": [],
         });
         return write_stdout(stdout, &(output.to_string() + "\n"));
     }
@@ -25964,7 +25982,8 @@ where
             "targetId": args.target_id,
             "author": args.author,
             "createdAt": now,
-        }
+        },
+        "degraded": [],
     });
     write_stdout(stdout, &(output.to_string() + "\n"))
 }
@@ -26025,7 +26044,8 @@ where
                     "linkedRecorderEventIds": stored.trace.linked_recorder_event_ids,
                     "linkedCausalTraceIds": stored.trace.linked_causal_trace_ids,
                     "createdAt": stored.trace.created_at,
-                }
+                },
+                "degraded": [],
             });
             write_stdout(stdout, &(output.to_string() + "\n"))
         }
@@ -26109,7 +26129,8 @@ where
                     "targetId": args.target_id,
                     "count": trace_summaries.len(),
                     "traces": trace_summaries,
-                }
+                },
+                "degraded": [],
             });
             write_stdout(stdout, &(output.to_string() + "\n"))
         }
@@ -27720,6 +27741,7 @@ where
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
+        "degraded": degraded.clone(),
     });
 
     match cli.renderer() {
@@ -27830,6 +27852,7 @@ where
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
+        "degraded": degraded.clone(),
     });
 
     match cli.renderer() {
@@ -28052,10 +28075,7 @@ fn report_envelope_json(data: serde_json::Value) -> String {
         .finish()
 }
 
-fn read_only_report_storage_error(
-    surface: &str,
-    error: impl std::fmt::Display,
-) -> DomainError {
+fn read_only_report_storage_error(surface: &str, error: impl std::fmt::Display) -> DomainError {
     DomainError::Storage {
         message: format!("{surface} failed to read workspace storage: {error}"),
         repair: Some("Run `ee init --workspace . --json` for a new workspace, or pass --database <PATH> pointing at an initialized ee database.".to_string()),
@@ -31865,6 +31885,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": data,
+                "degraded": top_level_degraded_from_data(&data),
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -32805,10 +32826,12 @@ where
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
+            let data = graph_feature_enrichment_data_json(&report);
             let json = serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
-                "data": graph_feature_enrichment_data_json(&report),
+                "data": data,
+                "degraded": top_level_degraded_from_data(&data),
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -33099,10 +33122,12 @@ where
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
+            let data = graph_export_data_json(report);
             let json = serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
-                "data": graph_export_data_json(report),
+                "data": data,
+                "degraded": top_level_degraded_from_data(&data),
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -36080,10 +36105,15 @@ where
 
     let full_json = output::render_context_response_json_with_options(response, render_options);
     let current = context_delta_snapshot_from_response(response, &full_json);
+    let kernel_max_delta_bytes = if markdown_delta {
+        None
+    } else {
+        args.max_delta_bytes
+    };
     let mut delta = match compute_context_delta(
         &prior,
         &current,
-        ContextDeltaOptions::new(args.max_delta_bytes),
+        ContextDeltaOptions::new(kernel_max_delta_bytes),
     ) {
         Ok(delta) => delta,
         Err(error) => {
@@ -36132,20 +36162,28 @@ where
     // declare a 1-byte transport overhead. Without this the boundary
     // case where the rendered envelope exactly fits the budget would
     // overshoot stdout by one byte (the trailing newline).
-    match delta.finalize_with_budget_and_transport_overhead(args.max_delta_bytes, 1) {
-        Ok(_) => {}
-        Err(error) => {
-            push_context_delta_degradation(
-                response,
-                CONTEXT_DELTA_PRIOR_UNKNOWN_CODE,
-                ContextResponseSeverity::Low,
-                format!(
-                    "Context delta envelope could not be re-measured after merging response \
-                     degradations: {error}; emitting the full pack instead."
-                ),
-                Some("Retry without --since to receive a full context pack.".to_string()),
-            );
-            return None;
+    if markdown_delta {
+        // The envelope's serverDecision.format must describe the emission
+        // honestly before byte-budgeting: markdown deltas are prompt text, not
+        // serialized JSON envelopes.
+        delta.data.server_decision.format = "markdown";
+        delta.finalize_markdown_with_budget(args.max_delta_bytes, 1);
+    } else {
+        match delta.finalize_with_budget_and_transport_overhead(args.max_delta_bytes, 1) {
+            Ok(_) => {}
+            Err(error) => {
+                push_context_delta_degradation(
+                    response,
+                    CONTEXT_DELTA_PRIOR_UNKNOWN_CODE,
+                    ContextResponseSeverity::Low,
+                    format!(
+                        "Context delta envelope could not be re-measured after merging response \
+                         degradations: {error}; emitting the full pack instead."
+                    ),
+                    Some("Retry without --since to receive a full context pack.".to_string()),
+                );
+                return None;
+            }
         }
     }
     if !delta.emits_delta() {
@@ -36156,9 +36194,6 @@ where
     }
 
     let rendered = if markdown_delta {
-        // The envelope's serverDecision.format must describe the emission
-        // honestly even though markdown consumers never see the JSON form.
-        delta.data.server_decision.format = "markdown";
         crate::core::context_delta::render_context_delta_markdown(&delta)
     } else {
         serde_json::to_string(&delta).unwrap_or_else(|_| {
@@ -41233,6 +41268,7 @@ fn format_review_session_json(report: &ReviewSessionReport) -> String {
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report,
+        "degraded": [],
     })
     .to_string()
 }
@@ -41402,10 +41438,12 @@ fn impact_error_to_domain(error: ImpactError) -> DomainError {
 }
 
 fn format_impact_json(report: &ImpactReport) -> String {
+    let data = report.data_json();
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
-        "data": report.data_json(),
+        "data": data,
+        "degraded": top_level_degraded_from_data(&data),
     })
     .to_string()
 }
@@ -41744,10 +41782,12 @@ fn similar_error_to_domain_error(error: &SimilarError) -> DomainError {
 }
 
 fn format_similar_json(report: &SimilarReport) -> String {
+    let data = report.data_json();
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
-        "data": report.data_json(),
+        "data": data,
+        "degraded": top_level_degraded_from_data(&data),
     })
     .to_string()
 }
@@ -41795,6 +41835,7 @@ fn format_search_json_with_mesh_and_recalibration(
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
+        "degraded": top_level_degraded_from_data(&data),
     })
     .to_string()
 }
@@ -42145,6 +42186,7 @@ where
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
+                    "degraded": [],
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
@@ -42230,6 +42272,7 @@ where
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": data,
+                    "degraded": top_level_degraded_from_data(data),
                 })
                 .to_string(),
             ) + "\n"),
@@ -42242,6 +42285,7 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": data,
+                "degraded": top_level_degraded_from_data(data),
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
@@ -42970,6 +43014,7 @@ where
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
+        "degraded": top_level_degraded_from_data(data),
     });
     write_stdout(stdout, &(json.to_string() + "\n"))
 }
@@ -42993,6 +43038,7 @@ where
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
+                    "degraded": [],
                 })
                 .to_string(),
             ) + "\n"),
@@ -43032,11 +43078,7 @@ fn try_append_journal_via_daemon(
         return None;
     }
     let result = response.result?;
-    if result
-        .get("success")
-        .and_then(serde_json::Value::as_bool)
-        != Some(true)
-    {
+    if result.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
         return None;
     }
     let entity_matches = result
@@ -43068,9 +43110,7 @@ where
     W: Write,
     E: Write,
 {
-    use crate::core::journal::{
-        JournalEntryDraft, JournalSource, append_journal_entries_stdin,
-    };
+    use crate::core::journal::{JournalEntryDraft, JournalSource, append_journal_entries_stdin};
 
     let workspace_path = cli.resolve_workspace();
     let source = match args.source.as_deref() {
@@ -43155,6 +43195,7 @@ where
                             "schema": crate::models::RESPONSE_SCHEMA_V2,
                             "success": true,
                             "data": report.data_json(),
+                            "degraded": [],
                         })
                         .to_string(),
                     ) + "\n"),
@@ -43189,11 +43230,8 @@ where
 
     let entry_id = crate::core::journal::generate_journal_entry_id();
     if args.daemon_write && crate::core::journal::journal_capture_enabled(&workspace_path) {
-        match crate::core::journal::prepare_journal_daemon_write(
-            &options,
-            &draft,
-            entry_id.clone(),
-        ) {
+        match crate::core::journal::prepare_journal_daemon_write(&options, &draft, entry_id.clone())
+        {
             Ok(prepared) => {
                 if let Some(report) = try_append_journal_via_daemon(args, &options, &prepared) {
                     return write_journal_append_report(cli, &report, stdout);
@@ -43219,6 +43257,7 @@ where
     W: Write,
     E: Write,
 {
+    set_governor_resume_cursor(args.cursor.as_deref());
     let workspace_path = cli.resolve_workspace();
     let options = crate::core::journal::JournalListOptions {
         workspace_path: &workspace_path,
@@ -43243,6 +43282,7 @@ where
                         "schema": crate::models::RESPONSE_SCHEMA_V2,
                         "success": true,
                         "data": report.data_json(),
+                        "degraded": [],
                     })
                     .to_string(),
                 ) + "\n"),
@@ -43285,6 +43325,7 @@ where
                         "schema": crate::models::RESPONSE_SCHEMA_V2,
                         "success": true,
                         "data": report.data_json(),
+                        "degraded": [],
                     })
                     .to_string(),
                 ) + "\n"),
@@ -43333,6 +43374,7 @@ where
                         "schema": crate::models::RESPONSE_SCHEMA_V2,
                         "success": true,
                         "data": report.data_json(),
+                        "degraded": [],
                     })
                     .to_string(),
                 ) + "\n"),
@@ -46028,6 +46070,7 @@ fn format_why_not_json(report: &crate::pack::WhyNotSelectedReport) -> String {
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
+        "degraded": Vec::<&str>::new(),
         "data": report,
     })
     .to_string()
@@ -48958,6 +49001,7 @@ where
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": data,
+                    "degraded": top_level_degraded_from_data(data),
                 })
                 .to_string(),
             ) + "\n"),
@@ -51140,7 +51184,8 @@ where
         let json = serde_json::json!({
             "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": true,
-            "data": report.data_json()
+            "data": report.data_json(),
+            "degraded": [],
         });
         let _ = stdout.write_all(json.to_string().as_bytes());
         let _ = stdout.write_all(b"\n");
@@ -51194,7 +51239,8 @@ where
         let json = serde_json::json!({
             "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": true,
-            "data": report.data_json()
+            "data": report.data_json(),
+            "degraded": [],
         });
         let _ = stdout.write_all(json.to_string().as_bytes());
         let _ = stdout.write_all(b"\n");
@@ -55084,6 +55130,7 @@ where
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
+        "degraded": [],
     });
 
     match cli.renderer() {
@@ -56520,6 +56567,7 @@ where
             "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": success,
             "data": data,
+            "degraded": [],
         })
     } else {
         serde_json::json!({
@@ -56573,6 +56621,7 @@ where
             "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": success,
             "data": data,
+            "degraded": [],
         })
     } else {
         serde_json::json!({
@@ -56952,10 +57001,12 @@ where
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
+                let data = report.data_json();
                 let response = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
-                    "data": report.data_json(),
+                    "data": data,
+                    "degraded": top_level_degraded_from_data(&data),
                 });
                 write_stdout(stdout, &(response.to_string() + "\n"))
             }
@@ -58892,6 +58943,7 @@ where
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
+        "degraded": [],
     })
     .to_string()
 }
@@ -59432,6 +59484,9 @@ impl NormalizedInvocation {
                     HandoffCommand::RotateKey(_) => "handoff rotate-key".to_string(),
                 },
                 Command::Health(health) => match &health.command {
+                    Some(HealthCommand::Scorecard(args)) if args.record_snapshot => {
+                        "health scorecard --record-snapshot".to_string()
+                    }
                     Some(HealthCommand::Scorecard(_)) => "health scorecard".to_string(),
                     None => "health".to_string(),
                 },
@@ -60753,6 +60808,25 @@ mod tests {
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn ensure_response_top_level_degraded_empty(
+        rendered: &str,
+        context: &str,
+    ) -> Result<serde_json::Value, String> {
+        let value: serde_json::Value =
+            serde_json::from_str(rendered).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            &format!("{context} response schema"),
+        )?;
+        ensure_equal(
+            &value["degraded"],
+            &serde_json::json!([]),
+            &format!("{context} top-level degraded"),
+        )?;
+        Ok(value)
     }
 
     fn ensure_contains(haystack: &str, needle: &str, context: &str) -> TestResult {
@@ -64046,7 +64120,7 @@ mod tests {
     }
 
     #[test]
-    fn analyze_science_status_json_is_response_enveloped() -> TestResult {
+    fn analyze_science_status_json_includes_top_level_degraded() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "--json", "analyze", "science-status"]);
         ensure_equal(
             &exit,
@@ -64191,6 +64265,16 @@ mod tests {
             &value["schema"],
             &serde_json::json!("ee.response.v2"),
             "response schema",
+        )?;
+        ensure_equal(
+            &value["degraded"],
+            &value["data"]["degraded"],
+            "top-level degraded mirrors focus data",
+        )?;
+        ensure_equal(
+            &value["degraded"][0]["code"],
+            &serde_json::json!("focus_state_absent"),
+            "absent focus state degraded code",
         )?;
         ensure_equal(
             &value["data"]["command"],
@@ -69761,6 +69845,82 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(feature = "mcp"))]
+    #[test]
+    fn mcp_serve_stdio_disabled_json_includes_top_level_degraded() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "mcp", "serve-stdio"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "mcp serve-stdio exit")?;
+        ensure(stderr.is_empty(), "mcp serve-stdio JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "response schema",
+        )?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "success")?;
+        ensure_equal(
+            &value["degraded"],
+            &serde_json::json!([]),
+            "top-level degraded",
+        )?;
+        ensure_equal(
+            &value["data"]["capabilityGap"]["code"],
+            &serde_json::json!("mcp_feature_disabled"),
+            "capability gap code",
+        )
+    }
+
+    #[test]
+    fn mcp_validate_json_includes_top_level_degraded() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "mcp", "validate"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "mcp validate exit")?;
+        ensure(stderr.is_empty(), "mcp validate JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "response schema",
+        )?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "success")?;
+        ensure_equal(
+            &value["degraded"],
+            &serde_json::json!([]),
+            "top-level degraded",
+        )?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!("mcp validate"),
+            "command",
+        )
+    }
+
+    #[test]
+    fn eval_list_json_includes_top_level_degraded() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "eval", "list"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "eval list exit")?;
+        ensure(stderr.is_empty(), "eval list JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "response schema",
+        )?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "success")?;
+        ensure_equal(
+            &value["degraded"],
+            &serde_json::json!([]),
+            "top-level degraded",
+        )?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!("eval list"),
+            "command",
+        )
+    }
+
     #[test]
     fn stream_isolation_contract_documentation() -> TestResult {
         // This test documents the stream isolation contract for agent consumers.
@@ -71232,7 +71392,7 @@ mod tests {
             "--min-free-bytes",
             "0",
             "--artifact-destination",
-            "target/sync-down",
+            "/Volumes/USBNVME16TB/temp_agent_space/test-sync-down",
             "--json",
         ]);
         ensure_equal(
@@ -73012,6 +73172,13 @@ mod tests {
             &degraded[0]["sources"],
             &serde_json::json!(["backup_export"]),
             "export source label",
+        )?;
+
+        let envelope = super::response_v2_json_from_data(data);
+        ensure_equal(
+            &envelope["degraded"],
+            &envelope["data"]["degraded"],
+            "export response envelope mirrors data degraded",
         )
     }
 
@@ -74117,6 +74284,223 @@ mod tests {
     }
 
     #[test]
+    fn index_json_success_outputs_include_top_level_degraded() -> TestResult {
+        let workspace = init_cli_workspace("index-envelope-degraded")?;
+        let cases = vec![
+            (
+                "index rebuild",
+                vec![
+                    "ee",
+                    "--json",
+                    "--workspace",
+                    workspace.as_str(),
+                    "index",
+                    "rebuild",
+                    "--dry-run",
+                ],
+                "index_rebuild",
+            ),
+            (
+                "index reembed",
+                vec![
+                    "ee",
+                    "--json",
+                    "--workspace",
+                    workspace.as_str(),
+                    "index",
+                    "reembed",
+                    "--dry-run",
+                ],
+                "index_reembed",
+            ),
+            (
+                "index status",
+                vec![
+                    "ee",
+                    "--json",
+                    "--workspace",
+                    workspace.as_str(),
+                    "index",
+                    "status",
+                ],
+                "index_status",
+            ),
+            (
+                "index vacuum",
+                vec![
+                    "ee",
+                    "--json",
+                    "--workspace",
+                    workspace.as_str(),
+                    "index",
+                    "vacuum",
+                ],
+                "index_vacuum",
+            ),
+        ];
+
+        for (context, args, command) in cases {
+            let (exit, stdout, stderr) = invoke(&args);
+            ensure_equal(&exit, &ProcessExitCode::Success, &format!("{context} exit"))?;
+            ensure(stderr.is_empty(), format!("{context} JSON stderr clean"))?;
+            let value = ensure_response_top_level_degraded_empty(&stdout, context)?;
+            ensure_equal(
+                &value["success"],
+                &serde_json::json!(true),
+                &format!("{context} success"),
+            )?;
+            ensure_equal(
+                &value["data"]["command"],
+                &serde_json::json!(command),
+                &format!("{context} command"),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn subscribe_poll_json_includes_top_level_degraded() -> TestResult {
+        let workspace = init_cli_workspace("subscribe-poll-envelope-degraded")?;
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            workspace.as_str(),
+            "subscribe",
+            "poll",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "subscribe poll exit")?;
+        ensure(stderr.is_empty(), "subscribe poll JSON stderr clean")?;
+        let value = ensure_response_top_level_degraded_empty(&stdout, "subscribe poll")?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!("subscribe poll"),
+            "subscribe poll command",
+        )
+    }
+
+    #[test]
+    fn daemon_status_json_includes_top_level_degraded() -> TestResult {
+        let workspace = init_cli_workspace("daemon-status-envelope-degraded")?;
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            workspace.as_str(),
+            "daemon",
+            "status",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "daemon status exit")?;
+        ensure(stderr.is_empty(), "daemon status JSON stderr clean")?;
+        let value = ensure_response_top_level_degraded_empty(&stdout, "daemon status")?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!(crate::serve::DAEMON_STATUS_SCHEMA_V1),
+            "daemon status schema",
+        )
+    }
+
+    #[test]
+    fn economy_response_json_includes_top_level_degraded() -> TestResult {
+        let rendered = super::economy_response_json(
+            "economy report",
+            "report",
+            &serde_json::json!({"status": "ok"}),
+        );
+        let value = ensure_response_top_level_degraded_empty(&rendered, "economy report")?;
+        ensure_equal(
+            &value["data"]["command"],
+            &serde_json::json!("economy report"),
+            "economy command",
+        )
+    }
+
+    #[test]
+    fn demo_json_success_outputs_include_top_level_degraded() -> TestResult {
+        let workspace = init_cli_workspace("demo-envelope-degraded")?;
+        fs::write(
+            Path::new(&workspace).join("demo.yaml"),
+            "\
+schema: ee.demo_file.v1
+version: 1
+demos:
+  - id: demo_00000000000000000000000001
+    title: envelope fixture
+    description: verifies response envelope shape
+    tags:
+      - envelope
+    commands:
+      - command: \"printf demo\"
+        expected_exit_code: 0
+",
+        )
+        .map_err(|error| format!("write demo manifest: {error}"))?;
+
+        let demo_id = "demo_00000000000000000000000001";
+        let cases = vec![
+            (
+                "demo list",
+                vec![
+                    "ee",
+                    "--json",
+                    "--workspace",
+                    workspace.as_str(),
+                    "demo",
+                    "list",
+                ],
+                "demo list",
+            ),
+            (
+                "demo run dry-run",
+                vec![
+                    "ee",
+                    "--json",
+                    "--workspace",
+                    workspace.as_str(),
+                    "demo",
+                    "run",
+                    demo_id,
+                    "--dry-run",
+                ],
+                "demo run",
+            ),
+            (
+                "demo show",
+                vec![
+                    "ee",
+                    "--json",
+                    "--workspace",
+                    workspace.as_str(),
+                    "demo",
+                    "show",
+                    demo_id,
+                ],
+                "demo show",
+            ),
+        ];
+
+        for (context, args, command) in cases {
+            let (exit, stdout, stderr) = invoke(&args);
+            ensure_equal(&exit, &ProcessExitCode::Success, &format!("{context} exit"))?;
+            ensure(stderr.is_empty(), format!("{context} JSON stderr clean"))?;
+            let value = ensure_response_top_level_degraded_empty(&stdout, context)?;
+            ensure_equal(
+                &value["success"],
+                &serde_json::json!(true),
+                &format!("{context} success"),
+            )?;
+            ensure_equal(
+                &value["data"]["command"],
+                &serde_json::json!(command),
+                &format!("{context} command"),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn search_json_returns_error_when_index_missing() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = tempdir.path().to_string_lossy().into_owned();
@@ -74470,6 +74854,61 @@ mod tests {
     }
 
     #[test]
+    fn why_not_json_includes_top_level_degraded() -> TestResult {
+        let report = crate::pack::WhyNotSelectedReport {
+            schema: "ee.why_not_selected.v1",
+            memory_id: "mem_release_policy".to_owned(),
+            task_hash: "taskhash".to_owned(),
+            selected: false,
+            retrieval_stage_reached: "candidate_pool".to_owned(),
+            primary_reason: "below_score_frontier".to_owned(),
+            reason_source: "test_fixture".to_owned(),
+            filters_applied: Vec::new(),
+            redaction_scope_exclusions: Vec::new(),
+            degraded: Vec::new(),
+            scores: crate::pack::WhyNotSelectionScoreReport {
+                target_relevance: 0.42,
+                target_utility: 0.50,
+                target_composite: 0.46,
+                last_included_memory_id: Some("mem_last_included".to_owned()),
+                last_included_composite: Some(0.51),
+            },
+            score_delta_to_last_included: Some(0.05),
+            token_budget_frontier: crate::pack::WhyNotTokenBudgetFrontier {
+                max_tokens: 4000,
+                used_tokens: 2500,
+                target_estimated_tokens: 120,
+                required_additional_tokens: 0,
+                could_fit_with_budget: Some(2620),
+            },
+            freshness_penalty: crate::pack::WhyNotFreshnessPenalty {
+                value: 0.0,
+                signals: Vec::new(),
+            },
+            trust_penalty: crate::pack::WhyNotTrustPenalty {
+                value: 0.0,
+                trust_class: "confirmed".to_owned(),
+                posture: "trusted".to_owned(),
+            },
+            counterfactual_hints: Vec::new(),
+            provenance: Vec::new(),
+        };
+
+        let rendered = super::format_why_not_json(&report);
+        let value = ensure_response_top_level_degraded_empty(&rendered, "why-not")?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!("ee.why_not_selected.v1"),
+            "why-not data schema",
+        )?;
+        ensure_equal(
+            &value["data"]["memoryId"],
+            &serde_json::json!("mem_release_policy"),
+            "why-not data memory id",
+        )
+    }
+
+    #[test]
     fn memory_lifecycle_json_outputs_include_top_level_degraded() -> TestResult {
         let rendered_reports = vec![
             (
@@ -74589,13 +75028,7 @@ mod tests {
         ];
 
         for (context, rendered, command) in rendered_reports {
-            let value: serde_json::Value = serde_json::from_str(&rendered)
-                .map_err(|error| format!("{context} json should parse: {error}"))?;
-            ensure_equal(
-                &value["degraded"],
-                &serde_json::json!([]),
-                &format!("{context} top-level degraded"),
-            )?;
+            let value = ensure_response_top_level_degraded_empty(&rendered, context)?;
             ensure_equal(
                 &value["data"]["command"],
                 &serde_json::json!(command),
@@ -77414,7 +77847,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_robot_docs_json_wraps_in_ee_response_v2_envelope() -> TestResult {
+    fn doctor_robot_docs_json_includes_top_level_degraded() -> TestResult {
         // bd-34ivx: `ee doctor --robot-docs` must ride the canonical
         // ee.response.v2 envelope; the bare bundle previously emitted
         // at the top level now lives at `.data` with its inner
@@ -77435,6 +77868,11 @@ mod tests {
             "envelope success must be true",
         )?;
         ensure_equal(
+            &value.pointer("/degraded"),
+            &Some(&serde_json::json!([])),
+            "top-level degraded must be an empty array",
+        )?;
+        ensure_equal(
             &value
                 .pointer("/data/schema")
                 .and_then(serde_json::Value::as_str),
@@ -77450,7 +77888,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_robot_triage_json_wraps_in_ee_response_v2_envelope() -> TestResult {
+    fn doctor_robot_triage_json_includes_top_level_degraded() -> TestResult {
         // bd-34ivx: `ee doctor --robot-triage` must ride the canonical
         // ee.response.v2 envelope; the bare triage report previously
         // emitted at the top level now lives at `.data` with its inner
@@ -77470,6 +77908,11 @@ mod tests {
                 .and_then(serde_json::Value::as_bool),
             &Some(true),
             "envelope success must be true",
+        )?;
+        ensure_equal(
+            &value.pointer("/degraded"),
+            &Some(&serde_json::json!([])),
+            "top-level degraded must be an empty array",
         )?;
         ensure_equal(
             &value
