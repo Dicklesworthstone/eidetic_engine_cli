@@ -52,7 +52,8 @@ use crate::cache::pack_l2::{
 use crate::config::{
     ConfigFile, EnvVar, GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
     GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY,
-    GRAPH_PACK_DNA_MAX_ITEMS_KEY, ReadPoolConfig, WorkspaceLocation, read_env_var,
+    GRAPH_PACK_DNA_MAX_ITEMS_KEY, ReadPoolConfig, WorkspaceLocation, parse_env_bool_flag,
+    read_env_var,
 };
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
@@ -2027,6 +2028,7 @@ fn run_context_pack_with_performance_inner(
         DatabaseConfig::file(database_path.clone()),
         read_pool_config,
     );
+    let read_pool_ad_hoc_bypass_baseline = read_pool.stats().ad_hoc_bypass_count;
     let read_snapshot = if pin_snapshot {
         read_pool.pin_snapshot_with_metadata(context_snapshot_pin_metadata(&request))
     } else {
@@ -2725,7 +2727,15 @@ fn run_context_pack_with_performance_inner(
         &mut draft,
         &mut degraded,
     );
-    push_context_read_pool_degradations(&mut degraded, &read_pool.stats());
+    let read_pool_stats = read_pool.stats();
+    let read_pool_request_ad_hoc_bypass_count = read_pool_stats
+        .ad_hoc_bypass_count
+        .saturating_sub(read_pool_ad_hoc_bypass_baseline);
+    push_context_read_pool_degradations(
+        &mut degraded,
+        &read_pool_stats,
+        read_pool_request_ad_hoc_bypass_count,
+    );
     if options.include_tombstoned
         && tombstoned_item_count > 0
         && !degraded
@@ -7392,11 +7402,7 @@ fn read_env_u64(var: EnvVar) -> Option<u64> {
 }
 
 fn read_env_bool(var: EnvVar) -> Option<bool> {
-    read_env_var(var).and_then(|raw| match raw.as_str() {
-        "true" => Some(true),
-        "false" => Some(false),
-        _ => None,
-    })
+    read_env_var(var).and_then(|raw| parse_env_bool_flag(&raw))
 }
 
 fn checked_context_read_snapshot<'snapshot>(
@@ -7412,8 +7418,9 @@ fn checked_context_read_snapshot<'snapshot>(
 fn push_context_read_pool_degradations(
     degraded: &mut Vec<ContextResponseDegradation>,
     stats: &PoolStats,
+    request_ad_hoc_bypass_count: u64,
 ) {
-    if stats.ad_hoc_bypass_count > 0
+    if request_ad_hoc_bypass_count > 0
         && !degraded
             .iter()
             .any(|entry| entry.code == READ_POOL_ACQUIRE_TIMEOUT_CODE)
@@ -7424,8 +7431,8 @@ fn push_context_read_pool_degradations(
             ContextResponseSeverity::Medium,
             format!(
                 "Read pool acquire timeout opened {} ad-hoc read connection{} for this request.",
-                stats.ad_hoc_bypass_count,
-                plural_suffix(stats.ad_hoc_bypass_count as usize)
+                request_ad_hoc_bypass_count,
+                plural_suffix(request_ad_hoc_bypass_count as usize)
             ),
             Some("increase storage.read_pool.size".to_string()),
         );
@@ -14728,7 +14735,7 @@ pub fn unrelated_context() -> u64 {{
             ..PoolStats::default()
         };
 
-        super::push_context_read_pool_degradations(&mut degraded, &stats);
+        super::push_context_read_pool_degradations(&mut degraded, &stats, 2);
 
         ensure_equal(&degraded.len(), &1, "degraded count")?;
         ensure_equal(
@@ -14745,6 +14752,20 @@ pub fn unrelated_context() -> u64 {{
     }
 
     #[test]
+    fn context_read_pool_degradations_ignore_prior_ad_hoc_bypasses() -> Result<(), String> {
+        let mut degraded = Vec::new();
+        let stats = PoolStats {
+            ad_hoc_bypass_count: 2,
+            ..PoolStats::default()
+        };
+
+        super::push_context_read_pool_degradations(&mut degraded, &stats, 0);
+
+        ensure_equal(&degraded.len(), &0, "degraded count")?;
+        Ok(())
+    }
+
+    #[test]
     fn context_read_pool_degradations_emit_undersized_after_full_window() -> Result<(), String> {
         let mut degraded = Vec::new();
         let stats = PoolStats {
@@ -14756,7 +14777,7 @@ pub fn unrelated_context() -> u64 {{
             ..PoolStats::default()
         };
 
-        super::push_context_read_pool_degradations(&mut degraded, &stats);
+        super::push_context_read_pool_degradations(&mut degraded, &stats, 0);
 
         ensure_equal(&degraded.len(), &1, "degraded count")?;
         ensure_equal(
@@ -14784,7 +14805,7 @@ pub fn unrelated_context() -> u64 {{
             ..PoolStats::default()
         };
 
-        super::push_context_read_pool_degradations(&mut degraded, &stats);
+        super::push_context_read_pool_degradations(&mut degraded, &stats, 0);
 
         ensure_equal(&degraded.len(), &0, "degraded count")?;
         Ok(())

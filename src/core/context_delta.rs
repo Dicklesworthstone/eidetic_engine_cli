@@ -229,6 +229,60 @@ impl ContextDeltaEnvelope {
 
         Ok(measured)
     }
+
+    /// Finalize byte accounting for the markdown delta transport.
+    ///
+    /// Markdown deltas are not the serialized JSON envelope, so they must
+    /// enforce `--max-delta-bytes` against the prompt text that will actually
+    /// be emitted. The JSON envelope still carries `tokenSavings` internally,
+    /// and keeping it aligned with the rendered markdown makes fallback
+    /// decisions and tests reason about the same transport shape.
+    pub fn finalize_markdown_with_budget(
+        &mut self,
+        max_delta_bytes: Option<u64>,
+        transport_overhead_bytes: u64,
+    ) -> u64 {
+        let measured = measured_total(
+            render_context_delta_markdown(self).len() as u64,
+            transport_overhead_bytes,
+        );
+        let token_count = self.data.token_savings.net_pack_tokens;
+        let full_bytes = self.data.token_savings.full_bytes;
+        self.data.token_savings = token_savings(full_bytes, measured, token_count);
+
+        if let Some(budget) = max_delta_bytes
+            && measured > budget
+        {
+            if self.data.server_decision.fallback_reason.is_none() {
+                self.data.server_decision.fallback_reason =
+                    Some(ContextDeltaFallbackReason::DeltaLargerThanFull);
+            }
+            let already_marked = self
+                .degraded
+                .iter()
+                .any(|entry| entry.code == CONTEXT_DELTA_OVERSIZED_CODE);
+            if !already_marked {
+                self.degraded.push(ContextDeltaDegradation {
+                    code: CONTEXT_DELTA_OVERSIZED_CODE.to_string(),
+                    severity: "info".to_string(),
+                    message: format!(
+                        "Markdown delta document exceeded the configured {budget} byte limit; \
+                         emit the full pack instead."
+                    ),
+                    repair: None,
+                    details: None,
+                });
+                let remeasured = measured_total(
+                    render_context_delta_markdown(self).len() as u64,
+                    transport_overhead_bytes,
+                );
+                self.data.token_savings = token_savings(full_bytes, remeasured, token_count);
+                return remeasured;
+            }
+        }
+
+        measured
+    }
 }
 
 fn measured_total(serialized_len: u64, transport_overhead_bytes: u64) -> u64 {
@@ -940,6 +994,114 @@ mod tests {
                 "markdown delta rendering drifted from the golden:\n--- expected\n{expected}\n+++ actual\n{rendered}"
             ));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn markdown_finalize_accounts_for_rendered_transport_bytes() -> TestResult {
+        let mut envelope = ContextDeltaEnvelope {
+            schema: CONTEXT_DELTA_SCHEMA_V1,
+            success: true,
+            data: ContextDeltaPayload {
+                prior_pack_hash: "blake3:prior0000".to_string(),
+                new_pack_hash: "blake3:new0000".to_string(),
+                workspace_id: None,
+                base_db_generation: Some(1),
+                new_db_generation: Some(2),
+                prior_feature_flag_set_hash: None,
+                new_feature_flag_set_hash: None,
+                items: ContextDeltaItems {
+                    added: vec![
+                        ContextDeltaItemSnapshot::new("mem_added_01")
+                            .with_field("content", json!("Run cargo fmt --check before release.")),
+                    ],
+                    removed: Vec::new(),
+                    modified: Vec::new(),
+                },
+                token_savings: token_savings(1_000, 0, 10),
+                server_decision: ContextDeltaServerDecision {
+                    computed_from_server_verified_pack_record: true,
+                    delta_chained: false,
+                    format: "markdown",
+                    fallback_reason: None,
+                },
+                trace: None,
+            },
+            degraded: Vec::new(),
+        };
+        let body_bytes = render_context_delta_markdown(&envelope).len() as u64;
+        let overhead = 1;
+        let exact_budget = body_bytes + overhead;
+
+        let final_bytes = envelope.finalize_markdown_with_budget(Some(exact_budget), overhead);
+
+        assert!(envelope.emits_delta());
+        assert_eq!(final_bytes, exact_budget);
+        assert_eq!(envelope.data.token_savings.delta_bytes, exact_budget);
+        assert_eq!(
+            envelope.data.token_savings.saved_bytes,
+            envelope.data.token_savings.full_bytes as i64 - exact_budget as i64,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn markdown_finalize_falls_back_when_rendered_transport_exceeds_budget() -> TestResult {
+        let mut envelope = ContextDeltaEnvelope {
+            schema: CONTEXT_DELTA_SCHEMA_V1,
+            success: true,
+            data: ContextDeltaPayload {
+                prior_pack_hash: "blake3:prior0000".to_string(),
+                new_pack_hash: "blake3:new0000".to_string(),
+                workspace_id: None,
+                base_db_generation: Some(1),
+                new_db_generation: Some(2),
+                prior_feature_flag_set_hash: None,
+                new_feature_flag_set_hash: None,
+                items: ContextDeltaItems {
+                    added: vec![
+                        ContextDeltaItemSnapshot::new("mem_added_01")
+                            .with_field("content", json!("Run cargo fmt --check before release.")),
+                    ],
+                    removed: Vec::new(),
+                    modified: Vec::new(),
+                },
+                token_savings: token_savings(1_000, 0, 10),
+                server_decision: ContextDeltaServerDecision {
+                    computed_from_server_verified_pack_record: true,
+                    delta_chained: false,
+                    format: "markdown",
+                    fallback_reason: None,
+                },
+                trace: None,
+            },
+            degraded: Vec::new(),
+        };
+        let body_bytes = render_context_delta_markdown(&envelope).len() as u64;
+        let overhead = 1;
+        let tight_budget = body_bytes;
+
+        let final_bytes = envelope.finalize_markdown_with_budget(Some(tight_budget), overhead);
+
+        assert!(!envelope.emits_delta());
+        assert_eq!(
+            envelope.data.server_decision.fallback_reason,
+            Some(ContextDeltaFallbackReason::DeltaLargerThanFull),
+        );
+        assert_eq!(
+            envelope
+                .degraded
+                .iter()
+                .filter(|entry| entry.code == CONTEXT_DELTA_OVERSIZED_CODE)
+                .count(),
+            1,
+        );
+        let rendered_after_marker = render_context_delta_markdown(&envelope);
+        assert_eq!(
+            envelope.data.token_savings.delta_bytes,
+            rendered_after_marker.len() as u64 + overhead,
+        );
+        assert_eq!(final_bytes, envelope.data.token_savings.delta_bytes);
         Ok(())
     }
 

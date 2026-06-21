@@ -41,6 +41,7 @@ const SINGLEFLIGHT_REQUIRED_TELEMETRY_PHASES: [&str; 5] = [
 const GRAPH_FEATURE_ENRICHMENT_FOLLOWER_TIMEOUT: Duration = Duration::from_secs(30);
 const GRAPH_FEATURE_ENRICHMENT_BURST_SCHEMA_V1: &str =
     "ee.graph.feature_enrichment.singleflight_burst.v1";
+const GRAPH_FEATURE_ENRICHMENT_BURST_FOLLOWER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 const GRAPH_FEATURE_ENRICHMENT_BURST_MAX_IDENTICAL_REQUESTS: usize = 32;
 const GRAPH_FEATURE_ENRICHMENT_BURST_MAX_DISTINCT_REQUESTS: usize = 8;
 const GRAPH_FEATURE_ENRICHMENT_BURST_MAX_NODE_COUNT: usize = 256;
@@ -734,6 +735,13 @@ pub fn run_graph_feature_enrichment_burst_smoke(
     let group = Arc::new(SingleFlightGroup::new());
     let executions = Arc::new(AtomicUsize::new(0));
     let identical_barrier = Arc::new(Barrier::new(identical_count));
+    let identical_key = graph_feature_enrichment_singleflight_key(
+        workspace_identity,
+        77,
+        Some(13),
+        "burst_smoke",
+        enrichment_options,
+    );
     let mut handles = Vec::with_capacity(identical_count.saturating_add(distinct_count));
 
     for _ in 0..identical_count {
@@ -741,6 +749,7 @@ pub fn run_graph_feature_enrichment_burst_smoke(
         let executions = Arc::clone(&executions);
         let options = enrichment_options.clone();
         let identical_barrier = Arc::clone(&identical_barrier);
+        let identical_key_hash = identical_key.key_hash.clone();
         let workspace_identity = workspace_identity.to_owned();
         handles.push(thread::spawn(move || {
             identical_barrier.wait();
@@ -756,8 +765,13 @@ pub fn run_graph_feature_enrichment_burst_smoke(
                     options: &options,
                 },
                 || {
+                    wait_for_followers(
+                        &group,
+                        &identical_key_hash,
+                        identical_count.saturating_sub(1),
+                        GRAPH_FEATURE_ENRICHMENT_BURST_FOLLOWER_JOIN_TIMEOUT,
+                    );
                     executions.fetch_add(1, Ordering::SeqCst);
-                    thread::sleep(Duration::from_millis(50));
                     crate::graph::enrich_graph_features(
                         &burst_centrality_report(node_count, 0),
                         &options,
@@ -879,24 +893,13 @@ fn run_graph_feature_enrichment_with_group<F>(
 where
     F: FnOnce() -> crate::graph::GraphFeatureEnrichmentReport,
 {
-    let max_features = input.options.max_features.to_string();
-    let min_combined_score = stable_f64_option(input.options.min_combined_score);
-    let max_selection_boost = stable_f64_option(input.options.max_selection_boost);
-    let option_pairs = [
-        ("source_mode", input.source_mode),
-        ("max_features", max_features.as_str()),
-        ("min_combined_score_bits", min_combined_score.as_str()),
-        ("max_selection_boost_bits", max_selection_boost.as_str()),
-    ];
-    let mut key_input = SingleFlightKeyInput::new(
-        SingleFlightSurface::GraphFeatureEnrichment,
+    let key = graph_feature_enrichment_singleflight_key(
         input.workspace_identity,
         input.workspace_generation,
-        crate::graph::GRAPH_FEATURE_ENRICHMENT_SCHEMA_V1,
+        input.graph_generation,
+        input.source_mode,
+        input.options,
     );
-    key_input.graph_generation = input.graph_generation;
-    key_input.option_pairs = &option_pairs;
-    let key = SingleFlightKey::from_input(&key_input);
 
     let mut run = input
         .group
@@ -915,6 +918,56 @@ where
             .push(graph_feature_enrichment_timeout_degradation());
     }
     Ok(run)
+}
+
+fn graph_feature_enrichment_singleflight_key(
+    workspace_identity: &str,
+    workspace_generation: u64,
+    graph_generation: Option<u64>,
+    source_mode: &str,
+    options: &crate::graph::GraphFeatureEnrichmentOptions,
+) -> SingleFlightKey {
+    let max_features = options.max_features.to_string();
+    let min_combined_score = stable_f64_option(options.min_combined_score);
+    let max_selection_boost = stable_f64_option(options.max_selection_boost);
+    let option_pairs = [
+        ("source_mode", source_mode),
+        ("max_features", max_features.as_str()),
+        ("min_combined_score_bits", min_combined_score.as_str()),
+        ("max_selection_boost_bits", max_selection_boost.as_str()),
+    ];
+    let mut key_input = SingleFlightKeyInput::new(
+        SingleFlightSurface::GraphFeatureEnrichment,
+        workspace_identity,
+        workspace_generation,
+        crate::graph::GRAPH_FEATURE_ENRICHMENT_SCHEMA_V1,
+    );
+    key_input.graph_generation = graph_generation;
+    key_input.option_pairs = &option_pairs;
+    SingleFlightKey::from_input(&key_input)
+}
+
+fn wait_for_followers<T>(
+    group: &SingleFlightGroup<T>,
+    key_hash: &str,
+    expected_followers: usize,
+    timeout: Duration,
+) {
+    if expected_followers == 0 {
+        return;
+    }
+    let started = Instant::now();
+    loop {
+        let follower_count = group.entries.lock().map_or(0, |entries| {
+            entries
+                .get(key_hash)
+                .map_or(0, |entry| entry.followers.load(Ordering::SeqCst))
+        });
+        if follower_count >= expected_followers || started.elapsed() >= timeout {
+            return;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn stable_f64_option(value: f64) -> String {

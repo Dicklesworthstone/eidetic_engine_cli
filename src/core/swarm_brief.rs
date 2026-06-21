@@ -1325,10 +1325,15 @@ fn translate_source_run_evidence(
         SourceRunStatus::TimedOut => Err(SwarmBriefCommandError::TimedOut {
             timeout_ms: evidence.timing.timeout_ms,
         }),
-        SourceRunStatus::SpawnFailed => Err(SwarmBriefCommandError::Unavailable(format!(
-            "{} spawn failed",
-            evidence.source.source_id
-        ))),
+        SourceRunStatus::SpawnFailed => {
+            let detail = stderr.trim();
+            let message = if detail.is_empty() {
+                format!("{} spawn failed", evidence.source.source_id)
+            } else {
+                format!("{} spawn failed: {detail}", evidence.source.source_id)
+            };
+            Err(SwarmBriefCommandError::Unavailable(message))
+        }
         SourceRunStatus::ParseFailed
         | SourceRunStatus::StaleSource
         | SourceRunStatus::MalformedStore
@@ -13715,6 +13720,10 @@ mod source_run_adapter_tests {
         match result {
             Err(SwarmBriefCommandError::Unavailable(message)) => {
                 assert!(message.contains("spawn failed"), "got {message}");
+                assert!(
+                    message.contains("No such file or directory"),
+                    "got {message}"
+                );
             }
             other => panic!("expected Unavailable; got {other:?}"),
         }

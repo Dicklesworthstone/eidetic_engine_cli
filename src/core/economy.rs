@@ -1181,9 +1181,10 @@ fn is_stale_signal(signal: &str) -> bool {
 }
 
 fn is_tail_risk_tag(tag: &str) -> bool {
+    let tag = tag.trim().to_ascii_lowercase().replace('_', "-");
     matches!(
-        tag,
-        "tail-risk" | "tail_risk" | "risk-reserve" | "safety-critical" | "protected"
+        tag.as_str(),
+        "tail-risk" | "risk-reserve" | "safety-critical" | "protected"
     )
 }
 
@@ -1873,6 +1874,36 @@ mod tests {
         assert_eq!(plan.recommendations[0].action, "reserve_review");
         assert_eq!(plan.recommendations[0].estimated_token_savings, 0);
         assert!(!plan.recommendations[0].action.contains("retire"));
+        Ok(())
+    }
+
+    #[test]
+    fn tail_risk_tag_detection_normalizes_case_and_separators() -> TestResult {
+        let fixture = fixture()?;
+        let memory_id = "mem_00000000000000000000000024";
+        add_memory(
+            &fixture,
+            memory_id,
+            "Preserve safety critical fallback evidence.",
+            0.9,
+            0.2,
+            &[" Tail_Risk "],
+        )?;
+        make_stale(&fixture, memory_id)?;
+
+        let score = score_artifact(&score_options(&fixture, memory_id)).map_err(|e| e.message())?;
+        assert!(score.tail_risk_protected);
+
+        let plan = generate_prune_plan(&EconomyPrunePlanOptions {
+            workspace_path: fixture.workspace.clone(),
+            database_path: fixture.database.clone(),
+            dry_run: true,
+            max_recommendations: 10,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(plan.recommendations[0].action, "reserve_review");
+        assert_eq!(plan.recommendations[0].estimated_token_savings, 0);
         Ok(())
     }
 

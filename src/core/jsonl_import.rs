@@ -431,6 +431,7 @@ pub struct JsonlImportFooterSummary {
     pub export_id: String,
     pub total_records: u64,
     pub memory_count: u64,
+    pub artifact_count: u64,
     pub tag_count: u64,
     pub success: bool,
 }
@@ -441,6 +442,7 @@ impl JsonlImportFooterSummary {
             export_id: footer.export_id.clone(),
             total_records: footer.total_records,
             memory_count: footer.memory_count,
+            artifact_count: footer.artifact_count,
             tag_count: footer.tag_count,
             success: footer.success,
         }
@@ -451,6 +453,7 @@ impl JsonlImportFooterSummary {
             "exportId": self.export_id,
             "totalRecords": self.total_records,
             "memoryCount": self.memory_count,
+            "artifactCount": self.artifact_count,
             "tagCount": self.tag_count,
             "success": self.success,
         })
@@ -502,6 +505,7 @@ struct ParsedJsonlImport {
     memories: Vec<ExportMemoryRecord>,
     tags_by_memory: BTreeMap<String, BTreeSet<String>>,
     tag_lines_by_memory: BTreeMap<String, u32>,
+    artifact_records: u32,
     tag_records: u32,
     issues: Vec<JsonlImportIssue>,
     records_total: u32,
@@ -680,6 +684,7 @@ fn parse_jsonl_source(input: &str) -> ParsedJsonlImport {
         memories: Vec::new(),
         tags_by_memory: BTreeMap::new(),
         tag_lines_by_memory: BTreeMap::new(),
+        artifact_records: 0,
         tag_records: 0,
         issues: Vec::new(),
         records_total: 0,
@@ -740,8 +745,11 @@ fn parse_jsonl_source(input: &str) -> ParsedJsonlImport {
             }
             EXPORT_TAG_SCHEMA_V1 => parse_tag_record(&mut parsed, line_number, value),
             EXPORT_FOOTER_SCHEMA_V1 => parse_footer_record(&mut parsed, line_number, value),
+            EXPORT_ARTIFACT_SCHEMA_V1 => {
+                parsed.artifact_records = parsed.artifact_records.saturating_add(1);
+                parsed.ignored_records = parsed.ignored_records.saturating_add(1);
+            }
             EXPORT_AGENT_SCHEMA_V1
-            | EXPORT_ARTIFACT_SCHEMA_V1
             | EXPORT_AUDIT_SCHEMA_V1
             | EXPORT_LINK_SCHEMA_V1
             | EXPORT_WORKSPACE_SCHEMA_V1 => {
@@ -980,6 +988,7 @@ fn validate_header_and_footer(parsed: &mut ParsedJsonlImport, first_schema: Opti
                 ),
             ));
         }
+        let parsed_artifact_count = u64::from(parsed.artifact_records);
         let parsed_tag_count = u64::from(parsed.tag_records);
         let parsed_record_count = u64::from(parsed.records_total);
         if footer.total_records != parsed_record_count {
@@ -989,6 +998,16 @@ fn validate_header_and_footer(parsed: &mut ParsedJsonlImport, first_schema: Opti
                 format!(
                     "footer total_records {} does not match parsed JSONL records {}",
                     footer.total_records, parsed_record_count
+                ),
+            ));
+        }
+        if footer.artifact_count != parsed_artifact_count {
+            parsed.issues.push(JsonlImportIssue::warning(
+                None,
+                "footer_artifact_count_mismatch",
+                format!(
+                    "footer artifact_count {} does not match parsed artifact records {}",
+                    footer.artifact_count, parsed_artifact_count
                 ),
             ));
         }
@@ -1950,6 +1969,39 @@ mod tests {
             }),
             true,
             "tag count warning",
+        )
+    }
+
+    #[test]
+    fn parse_jsonl_source_warns_on_footer_artifact_count_mismatch() -> TestResult {
+        let artifact_line = r#"{"schema":"ee.export.artifact.v1"}"#;
+        let input = sample_jsonl()
+            .replace(
+                r#"{"schema":"ee.export.footer.v1""#,
+                &format!("{artifact_line}\n{{\"schema\":\"ee.export.footer.v1\""),
+            )
+            .replace("\"total_records\":4", "\"total_records\":5")
+            .replace(
+                "\"memory_count\":1,\"link_count\"",
+                "\"memory_count\":1,\"artifact_count\":2,\"link_count\"",
+            );
+        let parsed = parse_jsonl_source(&input);
+
+        ensure(parsed.has_errors(), false, "warning only")?;
+        ensure(parsed.artifact_records, 1, "raw artifact records")?;
+        ensure(
+            parsed.ignored_records,
+            1,
+            "artifact row remains ignored for import",
+        )?;
+        ensure(
+            parsed.issues.iter().any(|issue| {
+                issue.line.is_none()
+                    && issue.code == "footer_artifact_count_mismatch"
+                    && issue.severity == JsonlImportIssueSeverity::Warning
+            }),
+            true,
+            "artifact count warning",
         )
     }
 

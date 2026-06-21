@@ -1192,7 +1192,7 @@ fn backup_list_symlink_component(path: &Path) -> Result<Option<PathBuf>, DomainE
 ///
 /// Returns a [`DomainError`] if the manifest cannot be read or parsed as JSON.
 pub fn inspect_backup(options: &BackupInspectOptions) -> Result<BackupInspectReport, DomainError> {
-    let backup_path = normalize_path(&options.backup_path);
+    let backup_path = normalize_backup_input_path(&options.backup_path)?;
     let manifest_path = backup_path.join(MANIFEST_FILE);
     if backup_relative_path_has_symlink_component(&backup_path, Path::new(MANIFEST_FILE))? {
         return Err(DomainError::Storage {
@@ -1243,7 +1243,7 @@ pub fn inspect_backup(options: &BackupInspectOptions) -> Result<BackupInspectRep
 ///
 /// Returns a [`DomainError`] if the manifest cannot be inspected.
 pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport, DomainError> {
-    let backup_path = normalize_path(&options.backup_path);
+    let backup_path = normalize_backup_input_path(&options.backup_path)?;
     let inspect = inspect_backup(&BackupInspectOptions {
         backup_path: backup_path.clone(),
     })?;
@@ -1448,8 +1448,8 @@ pub fn restore_backup_to_side_path(
     options: &BackupRestoreOptions,
 ) -> Result<BackupRestoreReport, DomainError> {
     let workspace_path = normalize_path(&options.workspace_path);
-    let backup_path = normalize_path(&options.backup_path);
-    let side_path = normalize_path(&options.side_path);
+    let backup_path = normalize_backup_input_path(&options.backup_path)?;
+    let side_path = normalize_restore_side_path(&options.side_path)?;
     ensure_side_path_outside_workspace(&workspace_path, &side_path)?;
 
     let inspect = inspect_backup(&BackupInspectOptions {
@@ -4531,6 +4531,42 @@ fn normalize_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn normalize_backup_input_path(path: &Path) -> Result<PathBuf, DomainError> {
+    if let Some(symlink_path) = first_existing_symlink_component(path)? {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "backup path '{}' traverses symbolic link '{}'; backup inspect, verify, and restore require a self-contained backup directory",
+                path.display(),
+                symlink_path.display()
+            ),
+            repair: Some("choose a self-contained backup directory".to_owned()),
+        });
+    }
+    Ok(normalize_path(path))
+}
+
+fn normalize_restore_side_path(path: &Path) -> Result<PathBuf, DomainError> {
+    if let Some(symlink_path) = first_existing_symlink_component(path)? {
+        let message = if symlink_path == path {
+            format!(
+                "side path '{}' is a symbolic link; restore requires an isolated real directory",
+                path.display()
+            )
+        } else {
+            format!(
+                "side path '{}' traverses symbolic link '{}'; restore requires an isolated real directory",
+                path.display(),
+                symlink_path.display()
+            )
+        };
+        return Err(DomainError::PolicyDenied {
+            message,
+            repair: Some("choose a real, non-symlink directory for --side-path".to_owned()),
+        });
+    }
+    Ok(normalize_path(path))
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -6570,6 +6606,46 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn inspect_backup_rejects_symlinked_backup_directory_before_canonicalize() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_backup_path = tempdir.path().join("real-backup");
+        fs::create_dir_all(&real_backup_path).map_err(|error| error.to_string())?;
+        fs::write(
+            real_backup_path.join(MANIFEST_FILE),
+            serde_json::to_vec(&json!({
+                "schema": BACKUP_MANIFEST_SCHEMA_V1,
+                "backupId": "backup-test",
+                "artifacts": [],
+            }))
+            .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let linked_backup_path = tempdir.path().join("linked-backup");
+        std::os::unix::fs::symlink(&real_backup_path, &linked_backup_path)
+            .map_err(|error| error.to_string())?;
+
+        let result = inspect_backup(&BackupInspectOptions {
+            backup_path: linked_backup_path,
+        });
+
+        match result {
+            Err(DomainError::PolicyDenied { message, repair }) => {
+                ensure(
+                    message.contains("traverses symbolic link"),
+                    "symlinked backup directory should be rejected before canonicalization",
+                )?;
+                ensure_equal(
+                    repair.as_deref(),
+                    Some("choose a self-contained backup directory"),
+                    "symlinked backup directory repair",
+                )
+            }
+            other => Err(format!("expected policy denied error, got {other:?}")),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn verify_backup_rejects_symlink_artifact_path() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let backup_path = tempdir.path().join("backup");
@@ -6965,6 +7041,61 @@ mod tests {
         ensure(
             !real_root.join("restore-side-path").exists(),
             "restore must not write through a symlinked side-path parent",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_backup_rejects_symlinked_side_path_before_canonicalize() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let (tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("backups");
+        let created = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: Some("restore-symlink-side-path".to_owned()),
+            redaction_level: RedactionLevel::None,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let real_side_path = tempdir.path().join("real-side-path");
+        fs::create_dir_all(&real_side_path).map_err(|error| error.to_string())?;
+        let linked_side_path = tempdir.path().join("linked-side-path");
+        symlink(&real_side_path, &linked_side_path).map_err(|error| error.to_string())?;
+
+        let result = restore_backup_to_side_path(&BackupRestoreOptions {
+            workspace_path: workspace,
+            backup_path: PathBuf::from(&created.backup_path),
+            side_path: linked_side_path,
+            restore_graph_cache: true,
+            dry_run: false,
+        });
+
+        match result {
+            Err(DomainError::PolicyDenied { message, repair }) => {
+                ensure(
+                    message.contains("symbolic link"),
+                    "symlinked side path should be rejected before canonicalization",
+                )?;
+                ensure_equal(
+                    repair.as_deref(),
+                    Some("choose a real, non-symlink directory for --side-path"),
+                    "symlinked side path repair",
+                )?;
+            }
+            other => return Err(format!("expected policy denied error, got {other:?}")),
+        }
+        ensure(
+            fs::read_dir(&real_side_path)
+                .map_err(|error| error.to_string())?
+                .next()
+                .is_none(),
+            "restore must not write through a symlinked side path",
         )
     }
 

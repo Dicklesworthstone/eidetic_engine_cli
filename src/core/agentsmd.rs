@@ -193,6 +193,13 @@ pub enum ManagedBlockScan {
     Found(ManagedBlock),
 }
 
+fn is_marker_begin_line(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix(MARKER_BEGIN_PREFIX) else {
+        return false;
+    };
+    rest.chars().next().is_some_and(char::is_whitespace) || rest == "-->"
+}
+
 /// Scan file content for the ee:agentsmd managed block. Returns an error
 /// description for structurally broken markers (unterminated, repeated, or
 /// out of order) so callers refuse instead of guessing at boundaries.
@@ -202,7 +209,7 @@ pub fn scan_managed_block(content: &str) -> Result<ManagedBlockScan, String> {
     let lines: Vec<&str> = content.lines().collect();
     for (index, raw_line) in lines.iter().enumerate() {
         let line = raw_line.trim();
-        if line.starts_with(MARKER_BEGIN_PREFIX) {
+        if is_marker_begin_line(line) {
             if begin.is_some() {
                 return Err(format!(
                     "nested ee:agentsmd begin marker at line {}",
@@ -2075,6 +2082,10 @@ mod tests {
     fn scan_reports_missing_markers() {
         assert_eq!(
             scan_managed_block("no markers here\n").expect("scan"),
+            ManagedBlockScan::Missing
+        );
+        assert_eq!(
+            scan_managed_block("<!-- ee:agentsmd:beginning is just prose -->\n").expect("scan"),
             ManagedBlockScan::Missing
         );
     }

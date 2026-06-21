@@ -452,6 +452,7 @@ pub fn set_focus(options: &FocusSetOptions) -> Result<FocusReport, DomainError> 
     }
     state.focal_memory_id = focal_memory_id;
     canonicalize_state(&mut state);
+    ensure_requested_pins_are_in_focus("focus set", &pinned_memory_ids, &state)?;
     state.validate().map_err(focus_validation_error)?;
 
     write_focus_state(&loaded.storage_path, &state)?;
@@ -525,6 +526,9 @@ pub fn add_focus(options: &FocusAddOptions) -> Result<FocusReport, DomainError> 
         state = state.with_item(item).map_err(focus_validation_error)?;
         changed = true;
     }
+
+    ensure_requested_pins_are_in_focus("focus add", &pinned_memory_ids, &state)?;
+    changed |= apply_requested_pins(&mut state, &pinned_memory_ids, &mut explanations);
 
     if let Some(focal) = focal_memory_id {
         state.focal_memory_id = Some(focal);
@@ -1248,6 +1252,51 @@ fn ensure_capacity(capacity: usize) -> Result<(), DomainError> {
     Ok(())
 }
 
+fn ensure_requested_pins_are_in_focus(
+    command: &'static str,
+    pinned_memory_ids: &BTreeSet<MemoryId>,
+    state: &FocusState,
+) -> Result<(), DomainError> {
+    let missing = pinned_memory_ids
+        .iter()
+        .filter(|memory_id| !state.contains_memory(**memory_id))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(DomainError::Usage {
+            message: format!(
+                "Pinned memory IDs for {command} are not present in the focus set: {}.",
+                missing.join(", ")
+            ),
+            repair: Some(format!(
+                "Only pass --pin for memory IDs that are active after `ee {command}`."
+            )),
+        })
+    }
+}
+
+fn apply_requested_pins(
+    state: &mut FocusState,
+    pinned_memory_ids: &BTreeSet<MemoryId>,
+    explanations: &mut Vec<FocusExplanation>,
+) -> bool {
+    let mut changed = false;
+    for item in &mut state.items {
+        if pinned_memory_ids.contains(&item.memory_id) && !item.pinned {
+            item.pinned = true;
+            changed = true;
+            explanations.push(FocusExplanation::for_memory(
+                "focus_pin_updated",
+                item.memory_id.to_string(),
+                "Memory was already present in the focus set and is now pinned.",
+            ));
+        }
+    }
+    changed
+}
+
 fn validate_requested_memory_ids(
     workspace_path: &Path,
     memory_ids: &[MemoryId],
@@ -1485,6 +1534,14 @@ mod tests {
         WorkspaceId::from_uuid(Uuid::from_u128(seed))
     }
 
+    fn is_pinned(state: &FocusState, memory_id: &str) -> bool {
+        state
+            .items
+            .iter()
+            .find(|item| item.memory_id.to_string() == memory_id)
+            .is_some_and(|item| item.pinned)
+    }
+
     fn focus_state(ids: &[MemoryId], capacity: usize) -> Result<FocusState, DomainError> {
         let mut state = FocusState::new(workspace_id(1), capacity, "2026-05-04T00:00:00Z")
             .map_err(focus_validation_error)?;
@@ -1559,6 +1616,32 @@ mod tests {
     }
 
     #[test]
+    fn set_focus_rejects_pin_outside_memory_ids() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let first = memory_id(12).to_string();
+        let outside = memory_id(13).to_string();
+
+        let result = set_focus(&FocusSetOptions {
+            workspace_path: dir.path().to_path_buf(),
+            memory_ids: vec![first],
+            focal_memory_id: None,
+            pinned_memory_ids: vec![outside],
+            capacity: 2,
+            reason: "test focus".to_owned(),
+            provenance: Vec::new(),
+            scope: FocusScope::default(),
+        });
+
+        let error = result.expect_err("pin outside focus set should be rejected");
+        ensure(error.code(), "usage", "pin outside focus usage error")?;
+        ensure(
+            error.message().contains("not present in the focus set"),
+            true,
+            "pin outside focus message",
+        )
+    }
+
+    #[test]
     fn add_focus_refuses_capacity_overflow_without_eviction() -> TestResult {
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let first = memory_id(20).to_string();
@@ -1624,6 +1707,92 @@ mod tests {
             report.state.focal_memory_id.map(|id| id.to_string()),
             Some(second),
             "new focal",
+        )
+    }
+
+    #[test]
+    fn add_focus_can_pin_existing_memory() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let first = memory_id(26).to_string();
+        let second = memory_id(27).to_string();
+        set_focus(&FocusSetOptions {
+            workspace_path: dir.path().to_path_buf(),
+            memory_ids: vec![first.clone()],
+            focal_memory_id: None,
+            pinned_memory_ids: Vec::new(),
+            capacity: 2,
+            reason: "seed".to_owned(),
+            provenance: Vec::new(),
+            scope: FocusScope::default(),
+        })
+        .map_err(|error| error.message())?;
+
+        let report = add_focus(&FocusAddOptions {
+            workspace_path: dir.path().to_path_buf(),
+            memory_ids: vec![second.clone()],
+            focal_memory_id: None,
+            pinned_memory_ids: vec![first.clone()],
+            capacity: None,
+            reason: "add second".to_owned(),
+            provenance: Vec::new(),
+            scope: FocusScope::default(),
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            is_pinned(&report.state, &first),
+            true,
+            "existing item pinned",
+        )?;
+        ensure(
+            is_pinned(&report.state, &second),
+            false,
+            "new item unpinned",
+        )?;
+        ensure(report.state.pinned_count(), 1, "pinned count")?;
+        ensure(
+            report
+                .explanations
+                .iter()
+                .any(|explanation| explanation.code == "focus_pin_updated"),
+            true,
+            "pin update explanation",
+        )
+    }
+
+    #[test]
+    fn add_focus_rejects_pin_not_present_after_add() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let first = memory_id(28).to_string();
+        set_focus(&FocusSetOptions {
+            workspace_path: dir.path().to_path_buf(),
+            memory_ids: vec![first],
+            focal_memory_id: None,
+            pinned_memory_ids: Vec::new(),
+            capacity: 2,
+            reason: "seed".to_owned(),
+            provenance: Vec::new(),
+            scope: FocusScope::default(),
+        })
+        .map_err(|error| error.message())?;
+
+        let result = add_focus(&FocusAddOptions {
+            workspace_path: dir.path().to_path_buf(),
+            memory_ids: vec![memory_id(29).to_string()],
+            focal_memory_id: None,
+            pinned_memory_ids: vec![memory_id(30).to_string()],
+            capacity: None,
+            reason: "add second".to_owned(),
+            provenance: Vec::new(),
+            scope: FocusScope::default(),
+        });
+
+        let error = result.expect_err("pin outside resulting focus set should be rejected");
+        ensure(error.code(), "usage", "pin outside add usage error")?;
+        ensure(
+            error.message().contains("not present in the focus set"),
+            true,
+            "pin outside add message",
         )
     }
 

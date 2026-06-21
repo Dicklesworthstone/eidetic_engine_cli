@@ -2270,6 +2270,12 @@ fn walkdir_recurse(dir: &Path, depth: usize, max_depth: usize, result: &mut Vec<
 }
 
 fn install_artifact_path_has_symlink_component(root: &Path, relative: &Path) -> io::Result<bool> {
+    if let Ok(metadata) = fs::symlink_metadata(root)
+        && metadata.file_type().is_symlink()
+    {
+        return Ok(true);
+    }
+
     let mut current = root.to_path_buf();
     for component in relative.components() {
         match component {
@@ -3452,6 +3458,47 @@ version = "9.8.7"
                 .as_ref()
                 .is_some_and(|message| message.contains("symbolic link")),
             "execute error should report symlink artifact",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_install_plan_rejects_symlink_artifact_root() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_artifact_root = tempdir.path().join("real-artifacts");
+        fs::create_dir_all(&real_artifact_root).map_err(|error| error.to_string())?;
+        let linked_artifact_root = tempdir.path().join("linked-artifacts");
+        std::os::unix::fs::symlink(&real_artifact_root, &linked_artifact_root)
+            .map_err(|error| error.to_string())?;
+        let artifact_name = "ee-x86_64-unknown-linux-gnu.tar.xz";
+        let artifact_bytes = b"not a real archive";
+        fs::write(real_artifact_root.join(artifact_name), artifact_bytes)
+            .map_err(|error| error.to_string())?;
+        let artifact = InstallArtifactSelection {
+            artifact_id: "ee-9.9.9-x86_64-unknown-linux-gnu".to_owned(),
+            release_version: "9.9.9".to_owned(),
+            file_name: artifact_name.to_owned(),
+            target_triple: "x86_64-unknown-linux-gnu".to_owned(),
+            archive_format: "tar_xz".to_owned(),
+            checksum_algorithm: "blake3".to_owned(),
+            checksum: blake3::hash(artifact_bytes).to_hex().to_string(),
+            signature: "missing".to_owned(),
+        };
+        let report = executable_plan_for_artifact(artifact, &tempdir.path().join("bin/ee"));
+
+        let result = execute_install_plan(&report, &linked_artifact_root);
+
+        ensure(!result.success, "symlink artifact root execute should fail")?;
+        ensure(
+            !result.artifact_verified,
+            "symlink root bytes must not count as verified artifact",
+        )?;
+        ensure(
+            result
+                .error_message
+                .as_ref()
+                .is_some_and(|message| message.contains("symbolic link")),
+            "execute error should report symlink artifact root",
         )
     }
 

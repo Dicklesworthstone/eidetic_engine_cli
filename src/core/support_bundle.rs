@@ -7117,13 +7117,10 @@ fn resolve_bundle_file_no_symlinks(
     relative: &str,
 ) -> Result<PathBuf, DomainError> {
     let relative_path = Path::new(relative);
-    if relative_path.is_absolute()
-        || relative_path.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::Prefix(_) | Component::RootDir
-            )
-        })
+    let mut components = relative_path.components();
+    if relative.contains('\\')
+        || !matches!(components.next(), Some(Component::Normal(_)))
+        || components.next().is_some()
     {
         return Err(DomainError::Storage {
             message: format!("Unsafe support bundle manifest path: {relative}."),
@@ -9935,6 +9932,114 @@ mod tests {
         assert!(
             !report.files_found.contains(&"../outside.json".to_owned()),
             "parent traversal entry must not count as collected bundle evidence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_bundle_marks_nested_manifest_entry_mismatch() -> TestResult {
+        let root = unique_test_path("inspect-nested-entry");
+        let bundle_dir = root.join("bundle");
+        let nested_dir = bundle_dir.join("nested");
+        fs::create_dir_all(&nested_dir)
+            .map_err(|error| format!("failed to create nested bundle dir: {error}"))?;
+        let nested_path = "nested/evidence.json".to_owned();
+        let payload = "{\"ok\":true}";
+        fs::write(nested_dir.join("evidence.json"), payload)
+            .map_err(|error| format!("failed to write nested bundle file: {error}"))?;
+
+        let manifest = BundleManifest {
+            schema: SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1.to_owned(),
+            bundle_id: "test-bundle".to_owned(),
+            created_at: "2026-05-16T00:00:00Z".to_owned(),
+            workspace_path: "redacted-workspace".to_owned(),
+            ee_version: "test".to_owned(),
+            files: vec![ManifestEntry {
+                path: nested_path.clone(),
+                size_bytes: payload.len() as u64,
+                content_hash: compute_hash(payload),
+                redacted: true,
+            }],
+            total_size_bytes: payload.len() as u64,
+            redaction_applied: true,
+            redaction_reasons: vec![],
+        };
+        fs::write(
+            bundle_dir.join(MANIFEST_FILE),
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("failed to write manifest: {error}"))?;
+
+        let report = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir,
+            verify_hashes: true,
+        })
+        .map_err(|error| error.message())?;
+        assert!(
+            !report.valid,
+            "nested manifest entry must not validate even when its hash matches"
+        );
+        assert!(
+            report.hash_mismatches.contains(&nested_path),
+            "nested manifest entry should be reported as a mismatch"
+        );
+        assert!(
+            !report.files_found.contains(&nested_path),
+            "nested manifest entry must not count as collected bundle evidence"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_bundle_marks_backslash_manifest_entry_mismatch() -> TestResult {
+        let root = unique_test_path("inspect-backslash-entry");
+        let bundle_dir = root.join("bundle");
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+        let manifest_path = "nested\\evidence.json".to_owned();
+        let payload = "{\"ok\":true}";
+        fs::write(bundle_dir.join(&manifest_path), payload)
+            .map_err(|error| format!("failed to write backslash bundle file: {error}"))?;
+
+        let manifest = BundleManifest {
+            schema: SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1.to_owned(),
+            bundle_id: "test-bundle".to_owned(),
+            created_at: "2026-05-16T00:00:00Z".to_owned(),
+            workspace_path: "redacted-workspace".to_owned(),
+            ee_version: "test".to_owned(),
+            files: vec![ManifestEntry {
+                path: manifest_path.clone(),
+                size_bytes: payload.len() as u64,
+                content_hash: compute_hash(payload),
+                redacted: true,
+            }],
+            total_size_bytes: payload.len() as u64,
+            redaction_applied: true,
+            redaction_reasons: vec![],
+        };
+        fs::write(
+            bundle_dir.join(MANIFEST_FILE),
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("failed to write manifest: {error}"))?;
+
+        let report = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir,
+            verify_hashes: true,
+        })
+        .map_err(|error| error.message())?;
+        assert!(
+            !report.valid,
+            "backslash manifest entry must not validate even when its hash matches"
+        );
+        assert!(
+            report.hash_mismatches.contains(&manifest_path),
+            "backslash manifest entry should be reported as a mismatch"
+        );
+        assert!(
+            !report.files_found.contains(&manifest_path),
+            "backslash manifest entry must not count as collected bundle evidence"
         );
         Ok(())
     }

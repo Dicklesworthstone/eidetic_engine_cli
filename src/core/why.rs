@@ -1914,94 +1914,7 @@ fn redact_why_search_result_provenance_uri(value: String) -> String {
 }
 
 fn redact_why_absolute_path_like_segments(input: &str) -> String {
-    const REDACTED_PATH: &str = "[REDACTED_PATH]";
-    const UNIX_PATH_PREFIXES: &[&str] = &[
-        "/home/",
-        "/Users/",
-        "/Volumes/",
-        "/private/",
-        "/var/",
-        "/tmp/",
-        "/data/",
-        "/dp/",
-        "/workspace/",
-        "/repo/",
-        "/etc/",
-    ];
-
-    let mut output = String::with_capacity(input.len());
-    let mut cursor = 0usize;
-    while cursor < input.len() {
-        let remaining = &input[cursor..];
-        let previous = input[..cursor].chars().next_back();
-        if let Some(prefix_len) = why_path_prefix_len(remaining, UNIX_PATH_PREFIXES, previous) {
-            output.push_str(REDACTED_PATH);
-            cursor += prefix_len;
-            while cursor < input.len() {
-                let next = input[cursor..].chars().next().unwrap_or('\0');
-                if next.is_whitespace()
-                    || matches!(
-                        next,
-                        '"' | '\''
-                            | '`'
-                            | '<'
-                            | '>'
-                            | ')'
-                            | ']'
-                            | '}'
-                            | ','
-                            | ';'
-                            | '|'
-                            | '?'
-                            | '#'
-                    )
-                {
-                    break;
-                }
-                cursor += next.len_utf8();
-            }
-            continue;
-        }
-
-        let next = remaining.chars().next().unwrap_or('\0');
-        output.push(next);
-        cursor += next.len_utf8();
-    }
-
-    output
-}
-
-/// Length of an absolute-path-like prefix at the start of `remaining`, if any.
-///
-/// Matches one of the Unix prefixes verbatim, or any ASCII alphabetic drive
-/// letter followed by `:` and either `\` or `/` — covering both casing variants
-/// (`C:\`, `c:\`) and both Windows separator conventions (`C:\`, `C:/`). This
-/// mirrors `search_projection_path_prefix_len` introduced by bd-gbfzk for the
-/// search-projection redactor.
-fn why_path_prefix_len(
-    remaining: &str,
-    unix_prefixes: &[&str],
-    previous: Option<char>,
-) -> Option<usize> {
-    if let Some(prefix) = unix_prefixes
-        .iter()
-        .find(|prefix| remaining.starts_with(**prefix))
-    {
-        if previous.is_none_or(|ch| ch != ':' && !ch.is_ascii_alphanumeric()) {
-            return Some(prefix.len());
-        }
-    }
-
-    let bytes = remaining.as_bytes();
-    if previous.is_none_or(|ch| !ch.is_ascii_alphanumeric())
-        && bytes.first().is_some_and(|byte| byte.is_ascii_alphabetic())
-        && matches!(bytes.get(1), Some(b':'))
-        && matches!(bytes.get(2), Some(b'\\' | b'/'))
-    {
-        Some(3)
-    } else {
-        None
-    }
+    crate::search::redact_search_projection_absolute_path_like_segments(input)
 }
 
 fn generic_unsupported_storage(
@@ -5336,6 +5249,32 @@ mod tests {
             result.is_none(),
             true,
             "find_embed_dedup_link must return None when no embed-dedup memory_link row exists for the memory",
+        )
+    }
+
+    #[test]
+    fn why_redacts_path_segments_with_spaces_without_tail_leakage() -> TestResult {
+        let redacted = super::redact_why_absolute_path_like_segments(
+            r#"source=file:///Users/alice/My Project/session.jsonl label=/workspace/Plain Path/log.txt note=done"#,
+        );
+
+        ensure(
+            redacted,
+            r#"source=file://[REDACTED_PATH] label=[REDACTED_PATH] note=done"#.to_owned(),
+            "why path redaction must consume spaced path tails",
+        )
+    }
+
+    #[test]
+    fn why_redacts_case_insensitive_macos_roots_and_env_paths() -> TestResult {
+        let redacted = super::redact_why_absolute_path_like_segments(
+            r#"users=/USERS/alice/private/session.jsonl volumes=/VOLUMES/USB/private/log.txt home=$HOME/.ssh/config ordinary=docs/USERS.md done=ok"#,
+        );
+
+        ensure(
+            redacted,
+            r#"users=[REDACTED_PATH] volumes=[REDACTED_PATH] home=[REDACTED_PATH] ordinary=docs/USERS.md done=ok"#.to_owned(),
+            "why redaction should mirror search projection path roots",
         )
     }
 

@@ -1430,7 +1430,8 @@ pub(crate) fn process_pending_index_jobs_coalesced(
     // error falls back to the proven full-rebuild path, so the published index
     // state is always correct; only the all-upsert case takes the merge path.
     let incremental_batch = coalesced_incremental_batch(&claimed, &indexable_docs);
-    let mut processing_mode = COALESCED_MODE;
+    let mut processing_mode = COALESCED_MODE.to_owned();
+    let mut fallback_to_full = None;
     let holder_id = generate_index_holder_id();
     acquire_index_publish_lock(db, workspace_id, &holder_id)?;
     let incremental_outcome = match incremental_batch {
@@ -1443,26 +1444,42 @@ pub(crate) fn process_pending_index_jobs_coalesced(
         ),
         None => IncrementalApplyOutcome::FullRebuildRequired,
     };
-    let build_result = match incremental_outcome {
+    let full_rebuild_required = match incremental_outcome {
         IncrementalApplyOutcome::Applied { .. } => {
-            processing_mode = COALESCED_INCREMENTAL_MODE;
-            Ok(())
+            processing_mode = COALESCED_INCREMENTAL_MODE.to_owned();
+            false
         }
-        IncrementalApplyOutcome::Fallback { .. } | IncrementalApplyOutcome::FullRebuildRequired => {
-            (|| -> Result<(), String> {
-                let _recovery_action =
-                    recover_interrupted_publish(index_dir).map_err(|error| error.to_string())?;
-                let staging_dir =
-                    create_publish_staging_dir(index_dir).map_err(|error| error.to_string())?;
-                build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs).and_then(
-                    |_stats| {
-                        write_index_metadata(&staging_dir, published_generation, documents_total)
-                            .and_then(|()| publish_staged_index(index_dir, &staging_dir))
-                            .map_err(|error| error.to_string())
-                    },
-                )
-            })()
+        IncrementalApplyOutcome::Fallback { reason, detail } => {
+            tracing::info!(
+                target: "ee::index",
+                workspace_id = %workspace_id,
+                claimed_jobs = claimed.len(),
+                fallback_to_full = reason.as_str(),
+                detail = %detail,
+                "coalesced incremental index intake fell back to full rebuild"
+            );
+            processing_mode.push_str("_fallback_to_full");
+            fallback_to_full = Some(reason.as_str().to_owned());
+            true
         }
+        IncrementalApplyOutcome::FullRebuildRequired => true,
+    };
+    let build_result = if full_rebuild_required {
+        (|| -> Result<(), String> {
+            let _recovery_action =
+                recover_interrupted_publish(index_dir).map_err(|error| error.to_string())?;
+            let staging_dir =
+                create_publish_staging_dir(index_dir).map_err(|error| error.to_string())?;
+            build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs).and_then(
+                |_stats| {
+                    write_index_metadata(&staging_dir, published_generation, documents_total)
+                        .and_then(|()| publish_staged_index(index_dir, &staging_dir))
+                        .map_err(|error| error.to_string())
+                },
+            )
+        })()
+    } else {
+        Ok(())
     };
     release_index_publish_lock(db, workspace_id, &holder_id);
 
@@ -1477,8 +1494,8 @@ pub(crate) fn process_pending_index_jobs_coalesced(
                     document_source: job.document_source.clone(),
                     document_id: job.document_id.clone(),
                     outcome: "completed".to_owned(),
-                    processing_mode: processing_mode.to_owned(),
-                    fallback_to_full: None,
+                    processing_mode: processing_mode.clone(),
+                    fallback_to_full: fallback_to_full.clone(),
                     documents_total,
                     documents_indexed: documents_total,
                     error: None,
@@ -1498,8 +1515,8 @@ pub(crate) fn process_pending_index_jobs_coalesced(
                     document_source: job.document_source.clone(),
                     document_id: job.document_id.clone(),
                     outcome: "failed".to_owned(),
-                    processing_mode: processing_mode.to_owned(),
-                    fallback_to_full: None,
+                    processing_mode: processing_mode.clone(),
+                    fallback_to_full: fallback_to_full.clone(),
                     documents_total,
                     documents_indexed: 0,
                     error: Some(error_message),
@@ -1997,7 +2014,8 @@ async fn apply_incremental_index_batch(
     generation: u64,
     documents_total: u32,
 ) -> Result<u32, IncrementalFallback> {
-    validate_incremental_index_metadata(index_dir, generation)?;
+    let max_generation_lag = u64::try_from(documents.len()).unwrap_or(u64::MAX).max(1);
+    validate_incremental_index_metadata(index_dir, generation, max_generation_lag)?;
     for document in documents {
         upsert_incremental_document(cx, index_dir, stack.clone(), document).await?;
     }
@@ -2024,7 +2042,7 @@ async fn apply_incremental_index_change(
     generation: u64,
     documents_total: u32,
 ) -> Result<u32, IncrementalFallback> {
-    validate_incremental_index_metadata(index_dir, generation)?;
+    validate_incremental_index_metadata(index_dir, generation, 1)?;
 
     match document {
         Some(document) => {
@@ -2053,6 +2071,7 @@ async fn apply_incremental_index_change(
 fn validate_incremental_index_metadata(
     index_dir: &Path,
     generation: u64,
+    max_generation_lag: u64,
 ) -> Result<(), IncrementalFallback> {
     ensure_index_path_has_no_symlinks(index_dir, "apply incremental index intake").map_err(
         |error| {
@@ -2120,6 +2139,15 @@ fn validate_incremental_index_metadata(
             IncrementalFallbackReason::GenerationSkew,
             format!(
                 "index generation {index_generation} is ahead of database generation {generation}"
+            ),
+        ));
+    }
+    let generation_lag = generation.saturating_sub(index_generation);
+    if generation_lag > max_generation_lag {
+        return Err(incremental_fallback(
+            IncrementalFallbackReason::GenerationSkew,
+            format!(
+                "index generation {index_generation} is {generation_lag} generations behind database generation {generation}; max incremental lag is {max_generation_lag}"
             ),
         ));
     }
@@ -5351,10 +5379,8 @@ mod tests {
         let lazy = Arc::new(EeLazyModel2VecEmbedder::new(unique_test_dir(
             "lazy-model-pending-posture",
         )));
-        let stack = EmbedderStack::from_parts(
-            lazy.clone() as Arc<dyn crate::search::Embedder>,
-            None,
-        );
+        let stack =
+            EmbedderStack::from_parts(lazy.clone() as Arc<dyn crate::search::Embedder>, None);
         let pending = embedding_posture_from_stack(
             &connection,
             workspace_id,
@@ -5389,7 +5415,10 @@ mod tests {
             EmbeddingVectorCoverage::new(0, 3),
         )
         .map_err(|error| error.to_string())?;
-        ensure(!failed.semantic_pending(), "failed load is no longer pending")?;
+        ensure(
+            !failed.semantic_pending(),
+            "failed load is no longer pending",
+        )?;
         ensure(
             failed.mode == EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH,
             "failed load should become deterministic hash fallback",
@@ -5503,7 +5532,10 @@ mod tests {
         let records = connection
             .list_embedding_metadata_records(workspace_id)
             .map_err(|error| error.to_string())?;
-        ensure(records.len() == 1, "promotion should not duplicate registry row")?;
+        ensure(
+            records.len() == 1,
+            "promotion should not duplicate registry row",
+        )?;
         ensure(
             records[0].registry.status == ModelRegistryStatus::Available,
             "declared row should become Available after loaded semantic proof",
@@ -5926,9 +5958,8 @@ mod tests {
     fn incremental_doc_ops() -> impl Strategy<Value = Vec<IncrementalDocOp>> {
         prop::collection::vec(
             prop_oneof![
-                (0u8..8, 0u8..16).prop_map(|(slot, term)| {
-                    IncrementalDocOp::Upsert { slot, term }
-                }),
+                (0u8..8, 0u8..16)
+                    .prop_map(|(slot, term)| { IncrementalDocOp::Upsert { slot, term } }),
                 (0u8..8).prop_map(|slot| IncrementalDocOp::Delete { slot }),
             ],
             1..24,
@@ -5980,12 +6011,10 @@ mod tests {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchSnapshotRow>, String> {
-        let index =
-            Arc::new(crate::search::TwoTierIndex::open(
-                index_dir,
-                crate::search::TwoTierConfig::default(),
-            )
-            .map_err(|error| error.to_string())?);
+        let index = Arc::new(
+            crate::search::TwoTierIndex::open(index_dir, crate::search::TwoTierConfig::default())
+                .map_err(|error| error.to_string())?,
+        );
         let fast_embedder =
             Arc::new(HashEmbedder::default_256()) as Arc<dyn crate::search::Embedder>;
         let searcher = crate::search::TwoTierSearcher::new(
@@ -6212,6 +6241,190 @@ mod tests {
     }
 
     #[test]
+    fn incremental_single_document_rejects_preexisting_stale_generation_gap() -> TestResult {
+        let root = unique_test_dir("incremental-stale-generation-gap");
+        let index_dir = root.join("index");
+        build_index_sync(
+            &index_dir,
+            hash_fallback_embedder_stack(),
+            vec![test_indexable_doc("doc-alpha", "alpha content")],
+        )?;
+        write_index_metadata(&index_dir, 1, 1).map_err(|error| error.to_string())?;
+
+        let outcome = apply_incremental_index_change_sync(
+            &index_dir,
+            hash_fallback_embedder_stack(),
+            "doc-beta",
+            Some(test_indexable_doc("doc-beta", "beta content")),
+            3,
+            2,
+        );
+
+        match outcome {
+            IncrementalApplyOutcome::Fallback { reason, detail } => {
+                ensure(
+                    reason == IncrementalFallbackReason::GenerationSkew,
+                    format!("expected generation_skew fallback, got {reason:?}: {detail}"),
+                )?;
+                ensure(
+                    detail.contains("2 generations behind database generation 3"),
+                    format!("fallback detail should describe stale gap: {detail}"),
+                )
+            }
+            other => Err(format!("unexpected incremental outcome: {other:?}")),
+        }
+    }
+
+    #[test]
+    fn incremental_batch_allows_bounded_generation_lag_for_claimed_documents() -> TestResult {
+        let root = unique_test_dir("incremental-batch-generation-lag");
+        let index_dir = root.join("index");
+        build_index_sync(
+            &index_dir,
+            hash_fallback_embedder_stack(),
+            vec![test_indexable_doc("doc-alpha", "alpha content")],
+        )?;
+        write_index_metadata(&index_dir, 1, 1).map_err(|error| error.to_string())?;
+
+        let outcome = apply_incremental_index_batch_sync(
+            &index_dir,
+            hash_fallback_embedder_stack(),
+            vec![
+                test_indexable_doc("doc-beta", "beta content"),
+                test_indexable_doc("doc-gamma", "gamma content"),
+            ],
+            3,
+            3,
+        );
+
+        ensure(
+            matches!(
+                outcome,
+                IncrementalApplyOutcome::Applied {
+                    documents_indexed: 2
+                }
+            ),
+            format!("unexpected incremental batch outcome: {outcome:?}"),
+        )
+    }
+
+    #[test]
+    fn coalesced_incremental_fallback_reports_generation_skew_reason() -> TestResult {
+        let root = unique_test_dir("coalesced-generation-skew-report");
+        std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let root = std::fs::canonicalize(&root).map_err(|error| error.to_string())?;
+        let index_dir = root.join("index");
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_012345678901234567890123cf";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: root.to_string_lossy().into_owned(),
+                    name: Some("coalesced generation skew report".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let add_memory_job = |memory_id: &str, job_id: &str, content: &str| -> Result<(), String> {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: workspace_id.to_owned(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: Some("test://coalesced-generation-skew".to_owned()),
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .insert_search_index_job(
+                    job_id,
+                    &crate::db::CreateSearchIndexJobInput {
+                        workspace_id: workspace_id.to_owned(),
+                        job_type: crate::db::SearchIndexJobType::SingleDocument,
+                        document_source: Some("memory".to_owned()),
+                        document_id: Some(memory_id.to_owned()),
+                        documents_total: 1,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        };
+
+        let seed_memory_id = "mem_012345678901234567890123cs";
+        add_memory_job(
+            seed_memory_id,
+            "sidx_012345678901234567890123cs",
+            "seed alpha document for coalesced fallback report",
+        )?;
+        let seed = process_index_job_for_connection(
+            &connection,
+            "sidx_012345678901234567890123cs",
+            &index_dir,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            seed.outcome == "completed",
+            format!("seed index job did not complete: {seed:?}"),
+        )?;
+
+        connection
+            .add_memory_tags(seed_memory_id, &["retagged".to_owned()])
+            .map_err(|error| error.to_string())?;
+        add_memory_job(
+            "mem_012345678901234567890123cb",
+            "sidx_012345678901234567890123cb",
+            "beta document added after an unindexed tag generation bump",
+        )?;
+
+        let reports =
+            process_pending_index_jobs_coalesced(&connection, workspace_id, &index_dir, None)
+                .map_err(|error| error.to_string())?;
+        ensure(
+            reports.len() == 1,
+            format!("expected one coalesced report, got {reports:?}"),
+        )?;
+        let report = &reports[0];
+        ensure(
+            report.outcome == "completed",
+            format!("coalesced fallback rebuild should complete: {report:?}"),
+        )?;
+        ensure(
+            report.fallback_to_full.as_deref()
+                == Some(IncrementalFallbackReason::GenerationSkew.as_str()),
+            format!("expected generation_skew fallback report, got {report:?}"),
+        )?;
+        ensure(
+            report.processing_mode.contains("fallback_to_full"),
+            format!(
+                "expected fallback processing mode marker, got {}",
+                report.processing_mode
+            ),
+        )?;
+        ensure(
+            report.documents_indexed == 2,
+            format!(
+                "fallback full rebuild should publish both documents, got {}",
+                report.documents_indexed
+            ),
+        )?;
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
     fn single_document_job_full_rebuilds_when_sibling_jobs_pending() -> TestResult {
         // bd-2qmvp: a single-document index job that runs while a sibling
         // memory's index job is still pending must NOT incrementally apply only
@@ -6242,42 +6455,41 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let add_memory_job =
-            |memory_id: &str, job_id: &str, content: &str| -> Result<(), String> {
-                connection
-                    .insert_memory(
-                        memory_id,
-                        &crate::db::CreateMemoryInput {
-                            workspace_id: workspace_id.to_owned(),
-                            level: "procedural".to_owned(),
-                            kind: "rule".to_owned(),
-                            content: content.to_owned(),
-                            workflow_id: None,
-                            confidence: 0.9,
-                            utility: 0.5,
-                            importance: 0.5,
-                            provenance_uri: Some("test://bd-2qmvp".to_owned()),
-                            trust_class: "human_explicit".to_owned(),
-                            trust_subclass: None,
-                            tags: Vec::new(),
-                            valid_from: None,
-                            valid_to: None,
-                        },
-                    )
-                    .map_err(|error| error.to_string())?;
-                connection
-                    .insert_search_index_job(
-                        job_id,
-                        &crate::db::CreateSearchIndexJobInput {
-                            workspace_id: workspace_id.to_owned(),
-                            job_type: crate::db::SearchIndexJobType::SingleDocument,
-                            document_source: Some("memory".to_owned()),
-                            document_id: Some(memory_id.to_owned()),
-                            documents_total: 1,
-                        },
-                    )
-                    .map_err(|error| error.to_string())
-            };
+        let add_memory_job = |memory_id: &str, job_id: &str, content: &str| -> Result<(), String> {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: workspace_id.to_owned(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: Some("test://bd-2qmvp".to_owned()),
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .insert_search_index_job(
+                    job_id,
+                    &crate::db::CreateSearchIndexJobInput {
+                        workspace_id: workspace_id.to_owned(),
+                        job_type: crate::db::SearchIndexJobType::SingleDocument,
+                        document_source: Some("memory".to_owned()),
+                        document_id: Some(memory_id.to_owned()),
+                        documents_total: 1,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        };
 
         // Seed an existing index so the single-document incremental path is a
         // live option; an absent index would fall back to a full rebuild
@@ -6334,7 +6546,8 @@ mod tests {
             ),
         )?;
         ensure(
-            beta.processing_mode.contains("sibling_pending_full_rebuild"),
+            beta.processing_mode
+                .contains("sibling_pending_full_rebuild"),
             format!(
                 "expected sibling-pending full-rebuild processing mode, got {}",
                 beta.processing_mode

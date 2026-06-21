@@ -610,6 +610,13 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
                 || symlink_inspection_failed
                 || (lexical_external_path && has_parent_dir_component));
         let external = trusted_external_path(&path, external_root);
+        let check_admitted = build_admission_check_admitted(
+            required,
+            has_required_space,
+            untrusted_external_path,
+            external_required_active,
+            external,
+        );
 
         if required && !has_required_space {
             degraded.push(BuildAdmissionDegradation {
@@ -697,7 +704,7 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
             nearest_existing_ancestor: nearest.as_ref().map(|path| path_to_string(path)),
             bytes_available,
             min_free_bytes: options.min_free_bytes,
-            admitted: !required || (has_required_space && !untrusted_external_path),
+            admitted: check_admitted,
             external_required: external_required_active,
             external,
             symlink_component: symlink_component
@@ -706,9 +713,7 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
         });
     }
 
-    let admitted = degraded
-        .iter()
-        .all(|entry| entry.code != "build_admission_denied");
+    let admitted = checks.iter().all(|check| check.admitted);
     let recovery_actions = build_admission_recovery_actions(&degraded, admitted);
 
     BuildAdmissionReport {
@@ -727,6 +732,18 @@ pub fn gather_build_admission_report(options: &BuildAdmissionOptions) -> BuildAd
         degraded,
         recovery_actions,
     }
+}
+
+fn build_admission_check_admitted(
+    required: bool,
+    has_required_space: bool,
+    untrusted_external_path: bool,
+    external_required_active: bool,
+    external: bool,
+) -> bool {
+    let capacity_admitted = !required || has_required_space;
+    let external_admitted = !external_required_active || external;
+    capacity_admitted && !untrusted_external_path && external_admitted
 }
 
 fn build_admission_recovery_actions(
@@ -776,7 +793,7 @@ fn build_admission_recovery_actions(
             priority: 4,
             kind: "ask_human",
             target: "build_admission",
-            reason: "One or more required build paths are below the admission threshold."
+            reason: "One or more build paths failed local admission or external-root policy."
                 .to_owned(),
             suggestion: "Ask the human before any cleanup; this diagnostic does not delete files."
                 .to_owned(),
@@ -2498,6 +2515,40 @@ mod tests {
                 "ask_human",
             ],
             "action kinds",
+        )
+    }
+
+    #[test]
+    fn build_admission_check_requires_external_paths_when_external_root_active() -> TestResult {
+        ensure(
+            build_admission_check_admitted(true, true, false, true, true),
+            true,
+            "required external path admitted",
+        )?;
+        ensure(
+            build_admission_check_admitted(true, true, false, true, false),
+            false,
+            "required local path refused when external root is active",
+        )?;
+        ensure(
+            build_admission_check_admitted(false, false, false, true, false),
+            false,
+            "explicit artifact destination outside external root refused",
+        )?;
+        ensure(
+            build_admission_check_admitted(false, false, false, false, false),
+            true,
+            "optional path is not refused when external root is unavailable",
+        )?;
+        ensure(
+            build_admission_check_admitted(true, false, false, true, true),
+            false,
+            "required path below free-space threshold refused",
+        )?;
+        ensure(
+            build_admission_check_admitted(true, true, true, true, true),
+            false,
+            "symlink or parent-directory external path refused",
         )
     }
 

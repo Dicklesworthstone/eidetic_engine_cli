@@ -340,6 +340,31 @@ fn diff_name_only_changed_paths(name_only_text: &str) -> Vec<String> {
     paths.into_iter().collect()
 }
 
+fn unified_diff_non_path_line(line: &str) -> bool {
+    line.starts_with("--- ")
+        || line.starts_with("diff ")
+        || line.starts_with("index ")
+        || line.starts_with("@@")
+        || line.starts_with("new file mode ")
+        || line.starts_with("deleted file mode ")
+        || line.starts_with("old mode ")
+        || line.starts_with("new mode ")
+        || line.starts_with("similarity index ")
+        || line.starts_with("dissimilarity index ")
+        || line.starts_with("rename from ")
+        || line.starts_with("rename to ")
+        || line.starts_with("copy from ")
+        || line.starts_with("copy to ")
+        || line.starts_with("Binary files ")
+        || line.starts_with("GIT binary patch")
+        || line.starts_with("literal ")
+        || line.starts_with("delta ")
+        || line.starts_with('+')
+        || line.starts_with('-')
+        || line.starts_with(' ')
+        || line.starts_with('\\')
+}
+
 /// Extract the changed path set from `git diff --name-only` output (one path
 /// per line) or a unified diff (`+++ b/<path>` headers). Paths are
 /// normalized, deduplicated, and sorted; `/dev/null` targets are skipped.
@@ -372,15 +397,7 @@ pub fn diff_changed_paths(diff_text: &str) -> Vec<String> {
             paths.insert(normalize_recall_path_selector(target));
             continue;
         }
-        if line.starts_with("--- ")
-            || line.starts_with("diff ")
-            || line.starts_with("index ")
-            || line.starts_with("@@")
-            || line.starts_with('+')
-            || line.starts_with('-')
-            || line.starts_with(' ')
-            || line.starts_with('\\')
-        {
+        if unified_diff_non_path_line(line) {
             continue;
         }
         // `--name-only` form: a bare path per line.
@@ -1578,6 +1595,42 @@ mod tests {
         assert_eq!(
             diff_changed_paths(unified),
             vec!["src/db/mod.rs".to_owned()]
+        );
+    }
+
+    #[test]
+    fn unified_diff_metadata_lines_are_not_paths() {
+        let unified = concat!(
+            "diff --git a/src/new.rs b/src/new.rs\n",
+            "new file mode 100644\n",
+            "index 0000000..1111111\n",
+            "--- /dev/null\n",
+            "+++ b/src/new.rs\n",
+            "@@ -0,0 +1 @@\n",
+            "+pub fn new_file() {}\n",
+            "diff --git a/src/old_name.rs b/src/renamed.rs\n",
+            "similarity index 87%\n",
+            "rename from src/old_name.rs\n",
+            "rename to src/renamed.rs\n",
+            "--- a/src/old_name.rs\n",
+            "+++ b/src/renamed.rs\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+            "diff --git a/assets/logo.bin b/assets/logo.bin\n",
+            "Binary files a/assets/logo.bin and b/assets/logo.bin differ\n",
+            "diff --git a/src/mode_only.rs b/src/mode_only.rs\n",
+            "old mode 100644\n",
+            "new mode 100755\n",
+            "diff --git a/src/deleted.rs b/src/deleted.rs\n",
+            "deleted file mode 100644\n",
+            "--- a/src/deleted.rs\n",
+            "+++ /dev/null\n",
+        );
+
+        assert_eq!(
+            diff_changed_paths(unified),
+            vec!["src/new.rs".to_owned(), "src/renamed.rs".to_owned()]
         );
     }
 

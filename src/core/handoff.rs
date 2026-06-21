@@ -4147,12 +4147,16 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         "shadow_policy_summary": shadow_policy_summary,
         "created_at": created_at,
     });
-    let capsule_content = sign_capsule_content(
-        capsule_content,
-        &options.workspace,
-        options.bind_to_machine,
-        options.machine_salt_path.as_deref(),
-    )?;
+    let capsule_content = if options.dry_run {
+        capsule_content
+    } else {
+        sign_capsule_content(
+            capsule_content,
+            &options.workspace,
+            options.bind_to_machine,
+            options.machine_salt_path.as_deref(),
+        )?
+    };
 
     let content_str = crate::core::serialize_pretty_or_error(&capsule_content);
     report.content_hash = compute_content_hash(&content_str);
@@ -5866,6 +5870,37 @@ memories_revised = 3
             &report.schema,
             &HANDOFF_CREATE_SCHEMA_V1.to_owned(),
             "schema",
+        )
+    }
+
+    #[test]
+    fn handoff_create_dry_run_does_not_write_capsule_or_hmac_keys() -> TestResult {
+        let dir = repo_tempdir()?;
+        let output = dir.path().join("handoff.json");
+        let machine_salt_path = dir.path().join("machine-salt");
+
+        let report = create_handoff(&CreateOptions {
+            workspace: dir.path().to_path_buf(),
+            output: output.clone(),
+            profile: CapsuleProfile::Resume,
+            since: None,
+            dry_run: true,
+            task_frame_id: None,
+            bind_to_machine: true,
+            machine_salt_path: Some(machine_salt_path.clone()),
+            redaction_level: RedactionLevel::Standard,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(report.dry_run, "report marks dry-run")?;
+        ensure(!output.exists(), "dry-run must not write capsule output")?;
+        ensure(
+            !hmac_workspace_secret_path(dir.path()).exists(),
+            "dry-run must not create workspace HMAC key",
+        )?;
+        ensure(
+            !machine_salt_path.exists(),
+            "dry-run must not create machine-bound HMAC salt",
         )
     }
 

@@ -278,6 +278,12 @@ pub enum DerivedAssetStoreError {
         expected_key: String,
         actual_key: String,
     },
+    MetadataMismatch {
+        path: PathBuf,
+        field: &'static str,
+        expected: String,
+        actual: String,
+    },
     DestinationExists {
         path: PathBuf,
         existing_hash: String,
@@ -292,9 +298,9 @@ impl DerivedAssetStoreError {
     pub const fn code(&self) -> Option<&'static str> {
         match self {
             Self::HashMismatch { .. } => Some(DERIVED_ASSET_HASH_MISMATCH_CODE),
-            Self::SchemaMismatch { .. } | Self::DescriptorMismatch { .. } => {
-                Some(DERIVED_ASSET_SCHEMA_MISMATCH_CODE)
-            }
+            Self::SchemaMismatch { .. }
+            | Self::DescriptorMismatch { .. }
+            | Self::MetadataMismatch { .. } => Some(DERIVED_ASSET_SCHEMA_MISMATCH_CODE),
             _ => None,
         }
     }
@@ -341,6 +347,16 @@ impl fmt::Display for DerivedAssetStoreError {
             } => write!(
                 formatter,
                 "derived asset descriptor mismatch at {}: expected key {expected_key}, actual key {actual_key}",
+                path.display()
+            ),
+            Self::MetadataMismatch {
+                path,
+                field,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "derived asset metadata mismatch at {}: field {field} expected {expected}, actual {actual}",
                 path.display()
             ),
             Self::DestinationExists {
@@ -431,7 +447,13 @@ impl DerivedAssetStore {
         };
 
         match read_object_manifest(&metadata_path) {
-            Ok(manifest) => validate_object_manifest(&manifest, &key, descriptor, &metadata_path)?,
+            Ok(manifest) => validate_object_manifest(
+                &manifest,
+                &key,
+                descriptor,
+                bytes.len() as u64,
+                &metadata_path,
+            )?,
             Err(DerivedAssetStoreError::Io { source, .. })
                 if source.kind() == io::ErrorKind::NotFound =>
             {
@@ -445,7 +467,9 @@ impl DerivedAssetStore {
 
         let reference_path = self.reference_path(&key, workspace_fingerprint);
         match read_ref_manifest(&reference_path) {
-            Ok(manifest) => validate_ref_manifest(&manifest, &key, &reference_path)?,
+            Ok(manifest) => {
+                validate_ref_manifest(&manifest, &key, workspace_fingerprint, &reference_path)?
+            }
             Err(DerivedAssetStoreError::Io { source, .. })
                 if source.kind() == io::ErrorKind::NotFound =>
             {
@@ -531,8 +555,14 @@ impl DerivedAssetStore {
         let body_path = self.body_path(&key);
         let metadata_path = self.object_metadata_path(&key);
         let manifest = read_object_manifest(&metadata_path)?;
-        validate_object_manifest(&manifest, &key, descriptor, &metadata_path)?;
         let body = read_body_file(&body_path, "read_body")?;
+        validate_object_manifest(
+            &manifest,
+            &key,
+            descriptor,
+            body.len() as u64,
+            &metadata_path,
+        )?;
         descriptor.validate_body(&body)
     }
 
@@ -657,7 +687,19 @@ impl DerivedAssetStore {
                 }
                 Ok(manifest) => match read_body_file(&body_path, "read_body") {
                     Ok(bytes) => match manifest.descriptor.validate_body(&bytes) {
-                        Ok(()) => false,
+                        Ok(()) => match validate_object_manifest(
+                            &manifest,
+                            key,
+                            &manifest.descriptor,
+                            bytes.len() as u64,
+                            &metadata_path,
+                        ) {
+                            Ok(()) => false,
+                            Err(_) => {
+                                schema_mismatch_count = schema_mismatch_count.saturating_add(1);
+                                true
+                            }
+                        },
                         Err(DerivedAssetStoreError::HashMismatch { .. }) => {
                             hash_mismatch_count = hash_mismatch_count.saturating_add(1);
                             true
@@ -816,6 +858,7 @@ fn validate_object_manifest(
     manifest: &DerivedAssetObjectManifest,
     key: &str,
     descriptor: &DerivedAssetDescriptor,
+    expected_bytes: u64,
     path: &Path,
 ) -> Result<(), DerivedAssetStoreError> {
     if manifest.schema != DERIVED_ASSET_OBJECT_SCHEMA_V1 {
@@ -832,12 +875,26 @@ fn validate_object_manifest(
             actual_key: manifest.key.clone(),
         });
     }
+    validate_metadata_field(
+        path,
+        "bytes",
+        expected_bytes.to_string(),
+        manifest.bytes.to_string(),
+    )?;
+    validate_metadata_field(path, "reuse_mode", "read_only", &manifest.reuse_mode)?;
+    validate_metadata_field(
+        path,
+        "cleanup_policy",
+        CLEANUP_POLICY,
+        &manifest.cleanup_policy,
+    )?;
     Ok(())
 }
 
 fn validate_ref_manifest(
     manifest: &DerivedAssetRefManifest,
     key: &str,
+    workspace_fingerprint: &str,
     path: &Path,
 ) -> Result<(), DerivedAssetStoreError> {
     if manifest.schema != DERIVED_ASSET_REF_SCHEMA_V1 {
@@ -854,7 +911,34 @@ fn validate_ref_manifest(
             actual_key: manifest.key.clone(),
         });
     }
+    validate_metadata_field(
+        path,
+        "workspace_fingerprint_hash",
+        blake3_body_hash(workspace_fingerprint.as_bytes()),
+        &manifest.workspace_fingerprint_hash,
+    )?;
+    validate_metadata_field(path, "lease_policy", CLEANUP_POLICY, &manifest.lease_policy)?;
     Ok(())
+}
+
+fn validate_metadata_field(
+    path: &Path,
+    field: &'static str,
+    expected: impl Into<String>,
+    actual: impl AsRef<str>,
+) -> Result<(), DerivedAssetStoreError> {
+    let expected = expected.into();
+    let actual = actual.as_ref();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(DerivedAssetStoreError::MetadataMismatch {
+            path: path.to_path_buf(),
+            field,
+            expected,
+            actual: actual.to_owned(),
+        })
+    }
 }
 
 fn read_object_manifest(path: &Path) -> Result<DerivedAssetObjectManifest, DerivedAssetStoreError> {
@@ -1174,11 +1258,12 @@ fn workspace_ref_file_stem(workspace_fingerprint: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DERIVED_ASSET_BODY_MAX_BYTES, DERIVED_ASSET_HASH_MISMATCH_CODE,
+        CLEANUP_POLICY, DERIVED_ASSET_BODY_MAX_BYTES, DERIVED_ASSET_HASH_MISMATCH_CODE,
         DERIVED_ASSET_MANIFEST_MAX_BYTES, DERIVED_ASSET_REF_SCHEMA_V1,
         DERIVED_ASSET_SCHEMA_MISMATCH_CODE, DerivedAssetDescriptor, DerivedAssetObjectManifest,
-        DerivedAssetStore, DerivedAssetStoreError, blake3_body_hash,
+        DerivedAssetRefManifest, DerivedAssetStore, DerivedAssetStoreError, blake3_body_hash,
         default_derived_asset_store_root_from_env, first_existing_symlink_component,
+        workspace_ref_file_stem,
     };
     use serde_json::Value;
     use std::collections::BTreeMap;
@@ -1470,6 +1555,103 @@ mod tests {
             "schema mismatch variant",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn validate_object_rejects_manifest_byte_count_mismatch() -> TestResult {
+        let root = unique_test_path("manifest-byte-count-mismatch");
+        let store = DerivedAssetStore::new(root.join("store"));
+        let body = b"derived-asset-body";
+        let descriptor = descriptor(
+            "graph_snapshot",
+            "ee.test.graph_snapshot.v1",
+            "blake3:source",
+            "blake3:config",
+            "blake3:binary",
+            &blake3_body_hash(body),
+        );
+        let key = descriptor.key();
+        let object_dir = store.root().join("objects").join(&key);
+        fs::create_dir_all(&object_dir).map_err(|error| error.to_string())?;
+        fs::write(object_dir.join("body.bin"), body).map_err(|error| error.to_string())?;
+        let mut manifest = DerivedAssetObjectManifest::new(&key, &descriptor, body.len() as u64);
+        manifest.bytes = manifest.bytes.saturating_add(1);
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| format!("serialize manifest: {error}"))?;
+        fs::write(object_dir.join("metadata.json"), manifest_bytes)
+            .map_err(|error| error.to_string())?;
+
+        let error = match store.validate_object(&descriptor) {
+            Ok(()) => return Err("manifest byte-count mismatch should fail validation".to_owned()),
+            Err(error) => error,
+        };
+
+        ensure_equal(
+            &error.code(),
+            &Some(DERIVED_ASSET_SCHEMA_MISMATCH_CODE),
+            "byte-count mismatch code",
+        )?;
+        ensure(
+            matches!(
+                error,
+                DerivedAssetStoreError::MetadataMismatch { field: "bytes", .. }
+            ),
+            "byte-count mismatch variant",
+        )
+    }
+
+    #[test]
+    fn put_rejects_ref_manifest_with_mismatched_workspace_hash() -> TestResult {
+        let root = unique_test_path("ref-workspace-hash-mismatch");
+        let store = DerivedAssetStore::new(root.join("store"));
+        let body = b"derived-asset-ref";
+        let descriptor = descriptor(
+            "support_bundle_derived_asset",
+            "ee.test.support_bundle_asset.v1",
+            "blake3:source",
+            "blake3:config",
+            "blake3:binary",
+            &blake3_body_hash(body),
+        );
+        let key = descriptor.key();
+        let refs_dir = store.root().join("refs").join(&key);
+        fs::create_dir_all(&refs_dir).map_err(|error| error.to_string())?;
+        let reference_path =
+            refs_dir.join(format!("{}.json", workspace_ref_file_stem("workspace-a")));
+        let stale_ref = DerivedAssetRefManifest {
+            schema: DERIVED_ASSET_REF_SCHEMA_V1.to_owned(),
+            key,
+            workspace_fingerprint_hash: blake3_body_hash(b"workspace-b"),
+            lease_policy: CLEANUP_POLICY.to_owned(),
+        };
+        let ref_bytes = serde_json::to_vec_pretty(&stale_ref)
+            .map_err(|error| format!("serialize ref: {error}"))?;
+        fs::write(&reference_path, ref_bytes).map_err(|error| error.to_string())?;
+
+        let error = match store.put_bytes(&descriptor, "workspace-a", body) {
+            Ok(outcome) => {
+                return Err(format!(
+                    "stale ref manifest should reject put, got outcome {outcome:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+
+        ensure_equal(
+            &error.code(),
+            &Some(DERIVED_ASSET_SCHEMA_MISMATCH_CODE),
+            "workspace hash mismatch code",
+        )?;
+        ensure(
+            matches!(
+                error,
+                DerivedAssetStoreError::MetadataMismatch {
+                    field: "workspace_fingerprint_hash",
+                    ..
+                }
+            ),
+            "workspace hash mismatch variant",
+        )
     }
 
     #[test]

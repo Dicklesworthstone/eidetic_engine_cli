@@ -178,9 +178,11 @@ pub fn summarize_git_ahead_with_log_state(
     let mixed_bead_ahead = bead_refs.len() > 1
         || (ahead_count > 1 && !bead_refs.is_empty() && has_commit_without_bead);
     let ambiguous_bead_attribution = ahead_count > 1 && has_commit_without_bead;
+    let missing_ab_status = branch.ahead_count.is_none() || branch.behind_count.is_none();
     let diverged_from_upstream = behind_count > 0;
     let ambiguous_ahead = ahead_count > 0
         && (ambiguous_bead_attribution
+            || missing_ab_status
             || diverged_from_upstream
             || commits.len() != ahead_count
             || branch.upstream_ref.is_none()
@@ -640,6 +642,30 @@ mod tests {
                 .degraded
                 .iter()
                 .any(|entry| entry.code == GIT_AHEAD_DETACHED_HEAD_CODE)
+        );
+    }
+
+    #[test]
+    fn partial_branch_ab_with_positive_ahead_stays_risky() {
+        let snapshot = summarize_git_ahead(
+            concat!(
+                "# branch.oid abcdef\n",
+                "# branch.head main\n",
+                "# branch.upstream origin/main\n",
+                "# branch.ab +1 missing-behind\n",
+            ),
+            Some("1111111111111111\x1fCodex\x1ffix: partial branch status (bd-2gc7r.1)\n"),
+        );
+
+        assert_eq!(snapshot.state, GIT_AHEAD_STATE_STATUS_MISSING_AB);
+        assert_eq!(snapshot.ahead_count, 1);
+        assert!(snapshot.ambiguous_ahead);
+        assert!(snapshot.peer_owned_ahead_risk);
+        assert!(
+            snapshot
+                .degraded
+                .iter()
+                .any(|entry| entry.code == GIT_AHEAD_STATUS_MISSING_AB_CODE)
         );
     }
 

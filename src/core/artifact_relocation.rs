@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use chrono::{SecondsFormat, Utc};
@@ -192,6 +192,7 @@ fn plan_or_apply_relocation(
         });
     }
     reject_existing_symlink_component(&source)?;
+    let source = canonicalize_existing_relocation_source(&source)?;
     let source_allowed = source_allowed(options.workspace_path, &source);
     if !source_allowed && !options.force_with_explicit_path {
         return Err(DomainError::PolicyDenied {
@@ -207,6 +208,10 @@ fn plan_or_apply_relocation(
     }
 
     let destination_root = absolutize(destination_root);
+    if options.mode == ArtifactRelocationMode::Apply {
+        reject_existing_symlink_component(&destination_root)?;
+    }
+    let destination_root = normalize_relocation_manifest_path(&destination_root);
     let entry_status = if options.mode == ArtifactRelocationMode::Apply {
         "copied"
     } else {
@@ -235,7 +240,6 @@ fn plan_or_apply_relocation(
     };
 
     if options.mode == ArtifactRelocationMode::Apply {
-        reject_existing_symlink_component(&destination_root)?;
         reject_existing_symlink_component(options.manifest_path)?;
         prepare_manifest_output_path(options.manifest_path)?;
         apply_manifest_copy(&manifest)?;
@@ -936,10 +940,13 @@ fn destination_for_source(
     current: &Path,
     destination_root: &Path,
 ) -> PathBuf {
-    let workspace = absolutize(workspace);
+    let workspace = normalize_relocation_manifest_path(&absolutize(workspace));
+    let root_source = normalize_relocation_manifest_path(root_source);
+    let current = normalize_relocation_manifest_path(current);
+    let destination_root = normalize_relocation_manifest_path(destination_root);
     let relative = current.strip_prefix(&workspace).ok().or_else(|| {
         current
-            .strip_prefix(root_source)
+            .strip_prefix(&root_source)
             .ok()
             .filter(|path| !path.as_os_str().is_empty())
     });
@@ -1036,6 +1043,40 @@ fn absolutize(path: &Path) -> PathBuf {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
+    }
+}
+
+fn canonicalize_existing_relocation_source(path: &Path) -> Result<PathBuf, DomainError> {
+    fs::canonicalize(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "failed to resolve artifact source {}: {error}",
+            path.display()
+        ),
+        repair: Some(
+            "Choose an existing artifact path with inspectable parent directories.".to_owned(),
+        ),
+    })
+}
+
+fn normalize_relocation_manifest_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
     }
 }
 
@@ -1166,6 +1207,12 @@ mod tests {
         fs::create_dir_all(parent_dir(manifest_path)?).map_err(|error| error.to_string())?;
         let json = serde_json::to_string_pretty(manifest).map_err(|error| error.to_string())?;
         fs::write(manifest_path, json).map_err(|error| error.to_string())
+    }
+
+    fn has_dot_path_component(raw_path: &str) -> bool {
+        Path::new(raw_path)
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
     }
 
     #[test]
@@ -1399,6 +1446,103 @@ mod tests {
         ensure(
             report.manifest.entries.len() == 1,
             "canonical source should produce one relocation entry",
+        )
+    }
+
+    #[test]
+    fn relocation_plan_normalizes_force_reviewed_parent_component_source() -> TestResult {
+        let workspace = temp_path("force-parent-source-workspace");
+        let source = workspace.join("src/main.rs");
+        fs::create_dir_all(parent_dir(&source)?).map_err(|error| error.to_string())?;
+        fs::write(&source, "fn main() {}\n").map_err(|error| error.to_string())?;
+        let reviewed_source = workspace.join("target/../src/main.rs");
+        let destination = temp_path("force-parent-source-destination");
+        let manifest = temp_path("force-parent-source-manifest").join("relocation.json");
+
+        let report = relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &workspace,
+            source_path: Some(&reviewed_source),
+            destination_root: Some(&destination),
+            manifest_path: &manifest,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Plan,
+            force_with_explicit_path: true,
+        })
+        .map_err(|error| error.to_string())?;
+
+        let entry = report
+            .manifest
+            .entries
+            .first()
+            .ok_or_else(|| "expected one relocation entry".to_owned())?;
+        ensure(
+            !has_dot_path_component(&entry.original_path),
+            format!(
+                "planned original path should be normalized for apply: {}",
+                entry.original_path
+            ),
+        )?;
+        ensure(
+            !has_dot_path_component(&entry.destination_path),
+            format!(
+                "planned destination path should be normalized for apply: {}",
+                entry.destination_path
+            ),
+        )?;
+        ensure(
+            entry
+                .destination_path
+                .ends_with("ee-relocated-artifacts/src/main.rs"),
+            format!(
+                "unexpected normalized destination: {}",
+                entry.destination_path
+            ),
+        )
+    }
+
+    #[test]
+    fn relocation_apply_normalizes_parent_component_destination_root() -> TestResult {
+        let workspace = temp_path("apply-parent-destination-workspace");
+        let source = workspace.join("target/debug/sample.o");
+        fs::create_dir_all(parent_dir(&source)?).map_err(|error| error.to_string())?;
+        fs::write(&source, "artifact bytes\n").map_err(|error| error.to_string())?;
+        let destination_base = temp_path("apply-parent-destination");
+        let destination = destination_base.join("scratch/../archive");
+        let manifest = temp_path("apply-parent-destination-manifest").join("relocation.json");
+
+        let report = relocate_artifacts(&ArtifactRelocationOptions {
+            workspace_path: &workspace,
+            source_path: Some(&source),
+            destination_root: Some(&destination),
+            manifest_path: &manifest,
+            actor: Some("test"),
+            mode: ArtifactRelocationMode::Apply,
+            force_with_explicit_path: false,
+        })
+        .map_err(|error| error.to_string())?;
+
+        let entry = report
+            .manifest
+            .entries
+            .first()
+            .ok_or_else(|| "expected one relocation entry".to_owned())?;
+        ensure(
+            !has_dot_path_component(&entry.destination_path),
+            format!(
+                "applied destination path should be normalized for restore: {}",
+                entry.destination_path
+            ),
+        )?;
+        let expected_copy = destination_base
+            .join("archive")
+            .join(RELOCATION_DIR)
+            .join("target/debug/sample.o");
+        ensure(
+            expected_copy.exists(),
+            format!(
+                "expected normalized destination copy at {}",
+                expected_copy.display()
+            ),
         )
     }
 

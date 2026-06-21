@@ -33,7 +33,7 @@ use super::profile::{
 /// that embed the recommendation (status, doctor, support bundle, swarm brief)
 /// MUST hold this constant rather than redeclaring the string literal so the
 /// schema lifecycle can register it in one place.
-pub const BUDGET_DELTA_RECOMMENDATION_SCHEMA_V1: &str = "ee.host_calibration.budget_delta.v1";
+pub const BUDGET_DELTA_RECOMMENDATION_SCHEMA_V1: &str = "ee.host_calibration.recommendation.v1";
 pub const HOST_CALIBRATION_POSTURE_SCHEMA_V1: &str = "ee.host_calibration.posture.v1";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -407,6 +407,22 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn recommendation_schema_id_matches_registered_contract() {
+        let report = host_class_report(
+            HostClass::Workstation,
+            OperatingProfile::Workstation,
+            HostCalibrationFreshness::Fresh,
+        );
+        let recommendation = recommend_budget_deltas(&report, OperatingProfile::Workstation);
+
+        assert_eq!(
+            BUDGET_DELTA_RECOMMENDATION_SCHEMA_V1,
+            "ee.host_calibration.recommendation.v1"
+        );
+        assert_eq!(recommendation.schema, BUDGET_DELTA_RECOMMENDATION_SCHEMA_V1);
+    }
 
     fn host_class_report(
         host_class: HostClass,

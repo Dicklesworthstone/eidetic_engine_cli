@@ -286,7 +286,7 @@ pub struct SystemSourceRunClock;
 
 impl SourceRunClock for SystemSourceRunClock {
     fn now_rfc3339(&self) -> Option<String> {
-        Some(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true))
+        Some(Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true))
     }
 }
 
@@ -1359,6 +1359,22 @@ mod tests {
             evidence.timing.timeout_ms >= 1,
             "evidence timeout_ms must satisfy the v1 schema minimum, got {}",
             evidence.timing.timeout_ms
+        );
+    }
+
+    #[test]
+    fn system_clock_preserves_subsecond_precision_for_run_id_entropy() {
+        let captured_at = SystemSourceRunClock
+            .now_rfc3339()
+            .expect("system source-run clock must return a timestamp");
+
+        assert!(
+            captured_at.contains('.'),
+            "source-run timestamps need subsecond precision because run_id derives from captured_at; got {captured_at}"
+        );
+        assert!(
+            captured_at.ends_with('Z'),
+            "source-run timestamps should stay UTC-normalized; got {captured_at}"
         );
     }
 

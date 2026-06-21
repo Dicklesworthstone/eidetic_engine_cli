@@ -14,7 +14,7 @@ use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use crate::config::{
     EnvVar, GRAPH_FEATURE_SKYLINE_ENABLED_KEY, WorkspaceDiagnostic, WorkspaceDiagnosticSeverity,
     WorkspaceResolution, WorkspaceResolutionMode, WorkspaceResolutionRequest,
-    WorkspaceResolutionSource, diagnose_workspace_resolution, read_env_var,
+    WorkspaceResolutionSource, diagnose_workspace_resolution, parse_env_bool_flag, read_env_var,
     read_env_var_or_default, read_env_var_os, resolve_workspace, workspace_config,
 };
 use crate::db::{
@@ -860,11 +860,7 @@ fn pack_l2_config_dependencies(
 }
 
 fn read_env_bool(var: EnvVar) -> Option<bool> {
-    read_env_var(var).and_then(|raw| match raw.as_str() {
-        "true" => Some(true),
-        "false" => Some(false),
-        _ => None,
-    })
+    read_env_var(var).and_then(|raw| parse_env_bool_flag(&raw))
 }
 
 fn high_watermark_lag(source: Option<u64>, asset: Option<u64>) -> Option<u64> {
@@ -3204,10 +3200,7 @@ fn mesh_enabled_for_tailscale_probe() -> bool {
 }
 
 fn matches_truthy_env(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    parse_env_bool_flag(value).unwrap_or(false)
 }
 
 fn current_tailscale_platform() -> TailscalePlatform {

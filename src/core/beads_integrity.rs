@@ -597,6 +597,7 @@ fn compose_integrity_report_with_metadata(
         inputs.jsonl_record_count,
         inputs.db_record_count,
         db_integrity_ok,
+        inputs.external_changes_pending_import,
         inputs.dirty_issue_count,
         inputs.merge_artifact_paths,
     );
@@ -856,6 +857,7 @@ fn safe_repair_candidate_for_report(
     jsonl_record_count: u64,
     db_record_count: u64,
     db_integrity_ok: bool,
+    external_changes_pending_import: bool,
     dirty_issue_count: u64,
     merge_artifact_paths: &[String],
 ) -> bool {
@@ -866,6 +868,7 @@ fn safe_repair_candidate_for_report(
     db_integrity_ok
         && jsonl_record_count == db_record_count
         && parse_error.line == jsonl_record_count.saturating_add(1)
+        && !external_changes_pending_import
         && dirty_issue_count == 0
         && merge_artifact_paths.is_empty()
 }
@@ -1732,6 +1735,38 @@ mod tests {
             &report.repair_command_candidate,
             &None,
             "stale guard evidence has no repair command",
+        )
+    }
+
+    #[test]
+    fn parse_error_refuses_repair_when_pending_import_metadata_is_stale() -> TestResult {
+        let report = compose_integrity_report(BeadsIntegrityInputs {
+            jsonl_record_count: 100,
+            db_record_count: 100,
+            external_changes_pending_import: true,
+            dirty_issue_count: 0,
+            jsonl_parse_error: Some(JsonlParseError {
+                line: 101,
+                column: None,
+                excerpt: "}] }".to_owned(),
+            }),
+            ..base_inputs(&[], None)
+        });
+
+        ensure_equal(
+            &report.safe_repair_candidate,
+            &Some(false),
+            "metadata-only stale guard evidence refuses repair recommendation",
+        )?;
+        ensure_equal(
+            &report.repair_classification,
+            &Some(BeadsIntegrityRepairClassification::StaleDbGuardRisk),
+            "metadata-only stale guard repair classification",
+        )?;
+        ensure_equal(
+            &report.repair_command_candidate,
+            &None,
+            "metadata-only stale guard evidence has no repair command",
         )
     }
 

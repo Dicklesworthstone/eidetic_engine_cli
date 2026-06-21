@@ -929,9 +929,13 @@ fn supported_cargo_verifier_command(hint: &str) -> Option<&str> {
     if parts.next() != Some("cargo") {
         return None;
     }
-    match parts.next() {
-        Some("check" | "test" | "bench" | "clippy") => Some(trimmed),
-        Some("fmt") if parts.next() == Some("--check") => Some(trimmed),
+    let subcommand = match parts.next()? {
+        toolchain if toolchain.starts_with('+') => parts.next()?,
+        subcommand => subcommand,
+    };
+    match subcommand {
+        "check" | "test" | "bench" | "clippy" => Some(trimmed),
+        "fmt" if parts.any(|part| part == "--check") => Some(trimmed),
         _ => None,
     }
 }
@@ -1400,6 +1404,34 @@ mod tests {
             Some(
                 "scripts/rch_verify.sh --summary --no-write -- cargo test --test session_budget_plan_golden"
             )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_cargo_toolchain_selector_hint_produces_refusal() -> TestResult {
+        let mut input = plan_input_clean();
+        input.task_hint = Some("cargo +nightly test --lib".to_owned());
+        let plan = plan_cheapest_next_command(&input);
+
+        assert_eq!(plan.refusals.len(), 1, "must produce exactly one refusal");
+        assert_eq!(
+            plan.refusals[0].alternative.as_deref(),
+            Some("scripts/rch_verify.sh --summary --no-write -- cargo +nightly test --lib")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_cargo_fmt_check_with_extra_flags_produces_refusal() -> TestResult {
+        let mut input = plan_input_clean();
+        input.task_hint = Some("cargo fmt --all -- --check".to_owned());
+        let plan = plan_cheapest_next_command(&input);
+
+        assert_eq!(plan.refusals.len(), 1, "must produce exactly one refusal");
+        assert_eq!(
+            plan.refusals[0].alternative.as_deref(),
+            Some("scripts/rch_verify.sh --summary --no-write -- cargo fmt --all -- --check")
         );
         Ok(())
     }

@@ -72,13 +72,15 @@ pub struct AuditEvent {
 impl AuditEvent {
     #[must_use]
     pub fn new(workspace_id: impl Into<String>, audit_seq: u64, action: impl Into<String>) -> Self {
+        let workspace_id = workspace_id.into();
+        let action = action.into();
         Self {
-            audit_id: format!("audit_lane_{audit_seq:020}"),
-            workspace_id: workspace_id.into(),
+            audit_id: audit_lane_audit_id(&workspace_id, audit_seq, &action),
+            workspace_id,
             actor: None,
             request_id: None,
             audit_seq,
-            action: action.into(),
+            action,
             target_type: None,
             target_id: None,
             details: None,
@@ -115,6 +117,19 @@ impl AuditEvent {
             details: self.details.clone(),
         }
     }
+}
+
+fn audit_lane_audit_id(workspace_id: &str, audit_seq: u64, action: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.audit_lane.audit_id.v1");
+    hasher.update(&[0]);
+    hasher.update(workspace_id.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&audit_seq.to_be_bytes());
+    hasher.update(&[0]);
+    hasher.update(action.as_bytes());
+    let digest = hasher.finalize();
+    format!("audit_{}", &digest.to_hex()[..32])
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -449,13 +464,7 @@ impl AuditLane {
             let batch_len = batch.len() as u64;
             if let Err(source) = sink(&batch) {
                 return Err(AuditLaneDrainError {
-                    report: self.finish_drain_report(
-                        phase,
-                        drained_events,
-                        batches,
-                        batch_len,
-                        1,
-                    ),
+                    report: self.finish_drain_report(phase, drained_events, batches, batch_len, 1),
                     source,
                 });
             }
@@ -752,6 +761,54 @@ mod tests {
         assert_eq!(rendered.target_type, input.target_type);
         assert_eq!(rendered.target_id, input.target_id);
         assert_eq!(rendered.details, input.details);
+    }
+
+    #[test]
+    fn audit_event_new_generates_schema_valid_deterministic_id() {
+        let event = AuditEvent::new("workspace-a", 11, "memory.create");
+        let same = AuditEvent::new("workspace-a", 11, "memory.create");
+        let other_workspace = AuditEvent::new("workspace-b", 11, "memory.create");
+        let other_action = AuditEvent::new("workspace-a", 11, "memory.update");
+
+        assert_eq!(event.audit_id, same.audit_id);
+        assert_ne!(event.audit_id, other_workspace.audit_id);
+        assert_ne!(event.audit_id, other_action.audit_id);
+        assert!(event.audit_id.starts_with("audit_"));
+        assert_eq!(event.audit_id.len(), 38);
+        assert!(
+            event.audit_id["audit_".len()..]
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+            "{} must preserve the audit_log id contract",
+            event.audit_id
+        );
+    }
+
+    #[test]
+    fn insert_audit_event_accepts_default_event_id() -> Result<(), String> {
+        const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/audit-lane-default-id-test".to_owned(),
+                    name: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let event = AuditEvent::new(WORKSPACE_ID, 42, "memory.create");
+
+        insert_audit_event(&connection, &event).map_err(|error| error.to_string())?;
+
+        let stored = connection
+            .get_audit(&event.audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("audit row {} missing", event.audit_id))?;
+        assert_eq!(stored.workspace_id.as_deref(), Some(WORKSPACE_ID));
+        assert_eq!(stored.action, "memory.create");
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]

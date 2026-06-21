@@ -1477,18 +1477,24 @@ const TAIL_STORE_HEADROOM_MULTIPLIER: u32 = 4;
 const TAIL_STORE_HEADROOM_CAP: u32 = 10_000;
 
 /// Decide how many rows to ask the SQL layer for when servicing
-/// `tail_recording_from_store`. Always returns at least `options.limit + 1`
-/// (the `+1` lets `tail_recording_from_events` set `has_more` correctly without
-/// a separate `COUNT(*)` round-trip), and applies headroom when the filter
-/// requires post-fetch evaluation. With `limit = 0`, this still fetches one row
-/// so the public tail report can return zero events while distinguishing
-/// "matching data exists" from "no matching data".
+/// `tail_recording_from_store`. Positive limits fetch at least
+/// `options.limit + 1` rows (the `+1` lets `tail_recording_from_events` set
+/// `has_more` correctly without a separate `COUNT(*)` round-trip), and apply
+/// headroom when the filter requires post-fetch evaluation. With `limit = 0`,
+/// SQL-pushable filters still fetch one row so the public tail report can
+/// return zero events while distinguishing "matching data exists" from
+/// "no matching data". Client-side filters need an unbounded DB window because
+/// a one-row probe can be filtered out even when later rows match.
 fn tail_recording_store_sql_limit(options: &RecorderTailOptions) -> u32 {
     let needs_extra_filtering = options.from_sequence.is_some()
         || options
             .filter
             .as_ref()
             .is_some_and(RecorderEventFilter::has_client_only_terms);
+
+    if options.limit == 0 {
+        return if needs_extra_filtering { 0 } else { 1 };
+    }
 
     let base = if needs_extra_filtering {
         options
