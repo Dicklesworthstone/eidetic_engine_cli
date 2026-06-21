@@ -6,7 +6,7 @@
 //! and must be both round-trippable through JSON and stable across
 //! tool versions.
 //!
-//! Eleven schemes are recognised in v1:
+//! Thirty-two schemes are recognised in v1:
 //!
 //! | Scheme            | Body shape                                          |
 //! |-------------------|-----------------------------------------------------|
@@ -20,6 +20,13 @@
 //! | `git-sha://`      | Opaque commit/revision identifier                   |
 //! | `flamegraph://`   | Opaque profiler artifact reference                  |
 //! | `ee-reflect://`   | Opaque reflection request/result identifier         |
+//! | `sec-filing://` `earnings-call://` `analyst-note://` | Opaque investment evidence |
+//! | `case://` `pacer://` `westlaw://` | Opaque legal evidence       |
+//! | `ga4://` `mixpanel://` `campaign://` | Opaque marketing evidence |
+//! | `interview://` `linear://` `notion://` | Opaque product evidence |
+//! | `cve://` `mitre://` `incident://` | Opaque security evidence     |
+//! | `pubmed://` `guideline://` `emr://` | Opaque clinical evidence  |
+//! | `crm://` `salesforce://` `gong://` | Opaque sales evidence      |
 //!
 //! The parser is strict about scheme syntax but does not perform deep
 //! semantic validation of opaque bodies — file paths, CASS session ids,
@@ -39,6 +46,37 @@ use std::fmt;
 use std::str::FromStr;
 
 use super::id::{MemoryId, ParseIdError};
+
+const ACCEPTED_PROVENANCE_SCHEMES: &str = "cass-session, file, ee-mem, http, https, agent-mail, manual, bench-run, git-sha, flamegraph, ee-reflect, sec-filing, earnings-call, analyst-note, case, pacer, westlaw, ga4, mixpanel, campaign, interview, linear, notion, cve, mitre, incident, pubmed, guideline, emr, crm, salesforce, gong";
+
+const REGISTERED_EXTERNAL_SCHEMES: &[&str] = &[
+    "manual",
+    "bench-run",
+    "git-sha",
+    "flamegraph",
+    "ee-reflect",
+    "sec-filing",
+    "earnings-call",
+    "analyst-note",
+    "case",
+    "pacer",
+    "westlaw",
+    "ga4",
+    "mixpanel",
+    "campaign",
+    "interview",
+    "linear",
+    "notion",
+    "cve",
+    "mitre",
+    "incident",
+    "pubmed",
+    "guideline",
+    "emr",
+    "crm",
+    "salesforce",
+    "gong",
+];
 
 /// Inclusive line range used by `cass-session://` and `file://` URIs.
 ///
@@ -212,7 +250,7 @@ impl FromStr for ProvenanceUri {
             "ee-mem" => parse_ee_memory(input, body),
             "http" | "https" => parse_web(input, &scheme, body),
             "agent-mail" => parse_agent_mail(input, body),
-            "manual" | "bench-run" | "git-sha" | "flamegraph" | "ee-reflect" => {
+            external_scheme if is_registered_external_scheme(external_scheme) => {
                 parse_external(input, &scheme, body)
             }
             _ => Err(ProvenanceUriError::UnknownScheme {
@@ -352,15 +390,16 @@ fn parse_external(
     })
 }
 
+fn is_registered_external_scheme(scheme: &str) -> bool {
+    REGISTERED_EXTERNAL_SCHEMES.contains(&scheme)
+}
+
 fn external_scheme_name(scheme: &str) -> &'static str {
-    match scheme {
-        "manual" => "manual",
-        "bench-run" => "bench-run",
-        "git-sha" => "git-sha",
-        "flamegraph" => "flamegraph",
-        "ee-reflect" => "ee-reflect",
-        _ => "external",
-    }
+    REGISTERED_EXTERNAL_SCHEMES
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == scheme)
+        .unwrap_or("external")
 }
 
 /// Split a body into `(value, optional_line_span)` using `#` as the
@@ -446,7 +485,7 @@ impl fmt::Display for ProvenanceUriError {
             ),
             Self::UnknownScheme { input, scheme } => write!(
                 formatter,
-                "unknown provenance scheme `{scheme}` in `{input}`; expected one of cass-session, file, ee-mem, http, https, agent-mail, manual, bench-run, git-sha, flamegraph, ee-reflect"
+                "unknown provenance scheme `{scheme}` in `{input}`; expected one of {ACCEPTED_PROVENANCE_SCHEMES}"
             ),
             Self::EmptyBody { input, scheme } => write!(
                 formatter,
@@ -766,6 +805,45 @@ mod tests {
     }
 
     #[test]
+    fn readme_domain_external_schemes_round_trip() {
+        for input in [
+            "sec-filing://AAPL/10-K/2026",
+            "earnings-call://AAPL/2026-Q1",
+            "analyst-note://firm/report-123",
+            "case://smith-v-jones",
+            "pacer://docket/1-23-cv-456",
+            "westlaw://2026-WL-123456",
+            "ga4://property/123/session/456",
+            "mixpanel://project/event-789",
+            "campaign://spring-launch/variant-a",
+            "interview://participant-42",
+            "linear://TEAM-123",
+            "notion://workspace/page-abc",
+            "cve://CVE-2026-1234",
+            "mitre://attack/T1059",
+            "incident://IR-2026-06-20",
+            "pubmed://12345678",
+            "guideline://org/topic/version",
+            "emr://patient-redacted/encounter-1",
+            "crm://account/acme",
+            "salesforce://opportunity/006xx000004",
+            "gong://call/abc123",
+        ] {
+            let parsed = must_parse(input);
+            match &parsed {
+                ProvenanceUri::External { scheme, body } => {
+                    let (expected_scheme, expected_body) =
+                        input.split_once("://").expect("fixture has scheme");
+                    assert_eq!(scheme, expected_scheme);
+                    assert_eq!(body, expected_body);
+                }
+                other => panic!("wrong variant for `{input}`: {other:?}"),
+            }
+            assert_eq!(parsed.to_string(), input);
+        }
+    }
+
+    #[test]
     fn external_evidence_rejects_empty_or_control_body() {
         for (input, expected_scheme) in [
             ("manual://", "manual"),
@@ -773,6 +851,9 @@ mod tests {
             ("git-sha://", "git-sha"),
             ("flamegraph://", "flamegraph"),
             ("ee-reflect://", "ee-reflect"),
+            ("sec-filing://", "sec-filing"),
+            ("pubmed://", "pubmed"),
+            ("crm://", "crm"),
         ] {
             let err = must_fail(input);
             match err {
@@ -901,6 +982,15 @@ mod tests {
         assert_eq!(
             must_parse("ee-reflect://reflect_req_abcdef").scheme(),
             "ee-reflect"
+        );
+        assert_eq!(
+            must_parse("sec-filing://AAPL/10-K/2026").scheme(),
+            "sec-filing"
+        );
+        assert_eq!(must_parse("pubmed://12345678").scheme(), "pubmed");
+        assert_eq!(
+            must_parse("salesforce://opportunity/006").scheme(),
+            "salesforce"
         );
     }
 

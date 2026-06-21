@@ -545,8 +545,8 @@ fn encode_crockford(input: &[u8; 16], output: &mut [u8; ENCODED_LEN]) {
     for byte in input {
         value = (value << 8) | u128::from(*byte);
     }
-    // The top two bits of the 130-bit space are zero, so the leading
-    // base-32 symbol is between 0 and 3.
+    // The top two bits of the 130-bit space are zero, leaving three
+    // UUID payload bits in the leading base-32 symbol, so it is 0-7.
     for (i, slot) in output.iter_mut().enumerate() {
         let shift = (ENCODED_LEN - 1 - i) * 5;
         let index = if shift >= 128 {
@@ -893,6 +893,19 @@ mod tests {
         let bad = format!("mem_{payload}");
         let err = unwrap_err(MemoryId::from_str(&bad))?;
         assert!(matches!(err, ParseIdError::PayloadOverflow { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_accepts_max_128_bit_payload_with_leading_7() -> TestResult {
+        let id = MemoryId::from_uuid(Uuid::from_u128(u128::MAX));
+        let rendered = id.to_string();
+        let payload = rendered
+            .strip_prefix("mem_")
+            .ok_or_else(|| format!("memory id missing prefix: {rendered}"))?;
+        assert_eq!(payload.chars().next(), Some('7'));
+        let parsed = unwrap_ok(MemoryId::from_str(&rendered))?;
+        assert_eq!(parsed.into_uuid(), Uuid::from_u128(u128::MAX));
         Ok(())
     }
 

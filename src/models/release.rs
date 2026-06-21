@@ -1130,6 +1130,12 @@ fn verify_signature_file(
 }
 
 fn release_artifact_path_has_symlink_component(root: &Path, relative: &Path) -> io::Result<bool> {
+    if let Ok(metadata) = fs::symlink_metadata(root)
+        && metadata.file_type().is_symlink()
+    {
+        return Ok(true);
+    }
+
     let mut current = root.to_path_buf();
     for component in relative.components() {
         match component {
@@ -1345,6 +1351,44 @@ mod tests {
         ensure(
             !codes.contains(&ReleaseVerificationCode::ChecksumMismatch),
             "symlink target bytes must not be accepted as artifact evidence",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verification_rejects_symlink_artifact_root() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_artifact_root = tempdir.path().join("real-artifacts");
+        fs::create_dir_all(&real_artifact_root).map_err(|error| error.to_string())?;
+        let linked_artifact_root = tempdir.path().join("linked-artifacts");
+        std::os::unix::fs::symlink(&real_artifact_root, &linked_artifact_root)
+            .map_err(|error| error.to_string())?;
+        let artifact_bytes = b"trusted archive bytes";
+        let artifact = ReleaseArtifact::from_bytes(
+            "0.1.0",
+            "commit-a",
+            "x86_64-unknown-linux-gnu",
+            artifact_bytes,
+        );
+        fs::write(real_artifact_root.join(&artifact.file_name), artifact_bytes)
+            .map_err(|error| error.to_string())?;
+        let manifest = ReleaseManifest::new("0.1.0", "commit-a", vec![artifact]);
+
+        let report = manifest.verify(Some(&linked_artifact_root));
+        let codes = finding_codes(&report);
+
+        ensure_equal(
+            report.status,
+            ReleaseVerificationStatus::Failed,
+            "symlink artifact root status",
+        )?;
+        ensure(
+            codes.contains(&ReleaseVerificationCode::UnsafeArtifactPath),
+            "symlink artifact root should be rejected before hashing",
+        )?;
+        ensure(
+            !codes.contains(&ReleaseVerificationCode::ChecksumMismatch),
+            "symlink root bytes must not be accepted as artifact evidence",
         )
     }
 

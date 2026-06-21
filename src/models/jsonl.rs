@@ -795,6 +795,8 @@ pub struct ExportFooter {
     pub completed_at: String,
     pub total_records: u64,
     pub memory_count: u64,
+    #[serde(default)]
+    pub artifact_count: u64,
     pub link_count: u64,
     pub tag_count: u64,
     pub audit_count: u64,
@@ -816,6 +818,7 @@ pub struct ExportFooterBuilder {
     completed_at: Option<String>,
     total_records: u64,
     memory_count: u64,
+    artifact_count: u64,
     link_count: u64,
     tag_count: u64,
     audit_count: u64,
@@ -846,6 +849,12 @@ impl ExportFooterBuilder {
     #[must_use]
     pub fn memory_count(mut self, memory_count: u64) -> Self {
         self.memory_count = memory_count;
+        self
+    }
+
+    #[must_use]
+    pub fn artifact_count(mut self, artifact_count: u64) -> Self {
+        self.artifact_count = artifact_count;
         self
     }
 
@@ -901,6 +910,7 @@ impl ExportFooterBuilder {
             )?,
             total_records: self.total_records,
             memory_count: self.memory_count,
+            artifact_count: self.artifact_count,
             link_count: self.link_count,
             tag_count: self.tag_count,
             audit_count: self.audit_count,
@@ -2182,6 +2192,7 @@ mod tests {
             .completed_at("2026-04-30T12:01:00Z")
             .total_records(100)
             .memory_count(50)
+            .artifact_count(7)
             .link_count(20)
             .tag_count(25)
             .audit_count(5)
@@ -2194,6 +2205,7 @@ mod tests {
         assert_eq!(footer.export_id, "exp-001");
         assert_eq!(footer.total_records, 100);
         assert_eq!(footer.memory_count, 50);
+        assert_eq!(footer.artifact_count, 7);
         assert!(footer.success);
         assert_eq!(footer.checksum, Some("abc123".to_owned()));
     }
@@ -2691,6 +2703,7 @@ mod tests {
                 .completed_at("2026-04-30T12:07:00Z")
                 .total_records(6)
                 .memory_count(1)
+                .artifact_count(1)
                 .link_count(1)
                 .tag_count(1)
                 .audit_count(1)
@@ -2807,6 +2820,7 @@ mod tests {
                     .completed_at("2026-04-30T12:07:00Z")
                     .total_records(6)
                     .memory_count(1)
+                    .artifact_count(1)
                     .link_count(1)
                     .tag_count(1)
                     .audit_count(1)
