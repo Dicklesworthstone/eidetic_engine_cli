@@ -1,14 +1,15 @@
 //! Contract checks for canonical graph audit actions.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use ee::core::graph_audit::{
-    ALL_GRAPH_AUDIT_ACTIONS, AlgorithmDegradedInputs, ResultCachedInputs, ResultEvictedInputs,
-    ResultEvictedReason, SNAPSHOT_TARGET_TYPE, SnapshotArchivedInputs, SnapshotArchivedReason,
-    SnapshotRefreshedInputs, WITNESS_TARGET_TYPE, build_algorithm_degraded_payload,
-    build_result_cached_payload, build_result_evicted_payload, build_snapshot_archived_payload,
-    build_snapshot_refreshed_payload, graph_algorithm_result_audit_target_id,
-    insert_graph_audit_payload,
+    ALL_GRAPH_AUDIT_ACTIONS, AlgorithmDegradedInputs, DEGRADED_EMIT_MUTATION_KIND,
+    DERIVED_DELETE_MUTATION_KIND, DERIVED_WRITE_MUTATION_KIND, ResultCachedInputs,
+    ResultEvictedInputs, ResultEvictedReason, SNAPSHOT_TARGET_TYPE, STATE_CHANGE_MUTATION_KIND,
+    SnapshotArchivedInputs, SnapshotArchivedReason, SnapshotRefreshedInputs, WITNESS_TARGET_TYPE,
+    build_algorithm_degraded_payload, build_result_cached_payload, build_result_evicted_payload,
+    build_snapshot_archived_payload, build_snapshot_refreshed_payload,
+    graph_algorithm_result_audit_target_id, insert_graph_audit_payload,
 };
 use ee::db::{CreateWorkspaceInput, DbConnection};
 
@@ -65,6 +66,10 @@ fn graph_audit_actions_round_trip_through_audit_log() -> TestResult {
             snapshot_version: Some(7),
         }),
     ];
+    let expected_mutation_kinds = payloads
+        .iter()
+        .map(|payload| (payload.action, payload.mutation_kind))
+        .collect::<BTreeMap<_, _>>();
 
     for payload in payloads {
         insert_graph_audit_payload(&conn, WORKSPACE_ID, "graph", payload)
@@ -109,10 +114,36 @@ fn graph_audit_actions_round_trip_through_audit_log() -> TestResult {
         .iter()
         .filter(|entry| entry.action.starts_with("graph."))
     {
+        let expected_mutation_kind = expected_mutation_kinds
+            .get(entry.action.as_str())
+            .ok_or_else(|| format!("unexpected graph audit action {}", entry.action))?;
+        if entry.mutation_kind.as_str() != *expected_mutation_kind {
+            return Err(format!(
+                "{} persisted mutation_kind {}; expected {}",
+                entry.action, entry.mutation_kind, expected_mutation_kind
+            ));
+        }
         if entry.details.as_deref().is_none_or(str::is_empty) {
             return Err(format!(
                 "{} audit details should be populated",
                 entry.action
+            ));
+        }
+    }
+    let persisted_mutation_kinds = entries
+        .iter()
+        .filter(|entry| entry.action.starts_with("graph."))
+        .map(|entry| entry.mutation_kind.as_str())
+        .collect::<BTreeSet<_>>();
+    for expected in [
+        STATE_CHANGE_MUTATION_KIND,
+        DERIVED_WRITE_MUTATION_KIND,
+        DERIVED_DELETE_MUTATION_KIND,
+        DEGRADED_EMIT_MUTATION_KIND,
+    ] {
+        if !persisted_mutation_kinds.contains(expected) {
+            return Err(format!(
+                "graph audit mutation_kind {expected} missing from audit_log"
             ));
         }
     }

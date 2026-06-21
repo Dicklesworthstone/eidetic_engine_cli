@@ -168,6 +168,9 @@ fn write_bundle(
         });
     }
     entries.sort_by(|left, right| left.path.cmp(&right.path));
+    let total_size_bytes = entries
+        .iter()
+        .fold(0u64, |total, entry| total.saturating_add(entry.size_bytes));
 
     let manifest = BundleManifest {
         schema: schema.to_owned(),
@@ -176,7 +179,7 @@ fn write_bundle(
         workspace_path: "/redacted/workspace".to_owned(),
         ee_version: "0.1.0-test".to_owned(),
         files: entries,
-        total_size_bytes: 0,
+        total_size_bytes,
         redaction_applied,
         redaction_reasons: vec!["synthetic_redaction".to_owned()],
     };

@@ -104,10 +104,10 @@
         "candidates": [
           {
             "actionsMutateState": false,
-            "deltaCount": 7,
+            "deltaCount": 6,
             "id": "bd-scanned",
             "mayEmitClaimCommand": false,
-            "needsFreshClaimGate": true,
+            "needsFreshClaimGate": false,
             "state": "scanned_and_unsafe",
             "workClass": "tracker_only"
           },
@@ -132,11 +132,9 @@
         ],
         "recommendedAction": "stop_or_coordinate",
         "topCommandIds": [
-          "bead_show_candidate:bd-scanned",
-          "claim_gate_retry:bd-scanned"
+          "bead_show_candidate:bd-scanned"
         ],
         "topCopySafety": [
-          "safe_structured_argv",
           "safe_structured_argv"
         ]
       },

@@ -11,7 +11,7 @@ use std::process::Command;
 
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
 const EFFECT_SOURCE: &str = include_str!("../src/core/effect.rs");
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 397;
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 399;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",
@@ -537,6 +537,63 @@ fn effect_manifest_covers_recent_read_only_surfaces() -> TestResult {
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn effect_manifest_distinguishes_health_scorecard_snapshot_write() -> TestResult {
+    use ee::core::effect::{EffectClass, EffectManifest, IdempotencyClass, SideEffectClass};
+
+    let manifest = EffectManifest::build();
+
+    let read_only = manifest
+        .get("health scorecard")
+        .ok_or_else(|| "health scorecard not in manifest".to_owned())?;
+    ensure(
+        read_only.default_effect,
+        EffectClass::ReadOnly,
+        "plain health scorecard remains read-only",
+    )?;
+    ensure(
+        read_only.mutation_contract.side_effect_class,
+        SideEffectClass::ReadOnly,
+        "plain health scorecard mutation contract remains read-only",
+    )?;
+
+    let snapshot = manifest
+        .get("health scorecard --record-snapshot")
+        .ok_or_else(|| "health scorecard --record-snapshot not in manifest".to_owned())?;
+    ensure(
+        snapshot.default_effect,
+        EffectClass::DurableMemoryWrite,
+        "scorecard snapshot mode writes durable state",
+    )?;
+    ensure(
+        snapshot.mutation_contract.side_effect_class,
+        SideEffectClass::AuditedMutation,
+        "scorecard snapshot mode uses audited mutation contract",
+    )?;
+    ensure(
+        snapshot
+            .write_surfaces
+            .db_tables
+            .contains(&"debt_snapshots"),
+        true,
+        "scorecard snapshot mode records debt_snapshots",
+    )?;
+    ensure(
+        snapshot.idempotency,
+        IdempotencyClass::Idempotent,
+        "scorecard snapshot mode is idempotent by workspace/day/generation",
+    )?;
+    let preview = snapshot
+        .mutation_contract
+        .dry_run_behavior
+        .ok_or_else(|| "scorecard snapshot mode missing no-write preview contract".to_owned())?;
+    ensure(
+        preview.contains("omit --record-snapshot"),
+        true,
+        "scorecard snapshot mode names its no-write preview path",
+    )
 }
 
 #[test]

@@ -352,10 +352,19 @@ fn subscribe_poll_reports_stale_cursor_with_real_database() -> TestResult {
     let degraded = stale_json["data"]["degraded"]
         .as_array()
         .ok_or_else(|| "degraded should be an array".to_string())?;
+    let top_level_degraded = stale_json["degraded"]
+        .as_array()
+        .ok_or_else(|| "top-level degraded should be an array".to_string())?;
     ensure(
         degraded
             .iter()
             .any(|entry| entry["code"] == serde_json::json!("subscribe_cursor_stale")),
         "stale cursor should emit subscribe_cursor_stale degradation",
+    )?;
+    ensure(
+        top_level_degraded
+            .iter()
+            .any(|entry| entry["code"] == serde_json::json!("subscribe_cursor_stale")),
+        "stale cursor degradation should be mirrored at the response top level",
     )
 }

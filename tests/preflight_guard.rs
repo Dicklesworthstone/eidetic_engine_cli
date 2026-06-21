@@ -592,6 +592,33 @@ fn rm_rf_builtin_matches_command_positions_and_wrappers() {
 }
 
 #[test]
+fn unsafe_cleanup_blocks_shell_wrapped_find_exec_and_xargs_deletion() {
+    let registry = PreflightGuardRegistry::with_builtins();
+
+    for command in [
+        "find . -name '*.tmp' -exec sh -c 'rm -f \"$1\"' sh {} \\;",
+        "find . -name '*.tmp' -execdir bash -lc 'rm -rf \"$1\"' bash {} +",
+        "find . -type d -exec sh -c 'find \"$1\" -name stale -delete' sh {} \\;",
+        "rg TODO src | xargs sh -c 'rm -f \"$@\"' sh",
+        "rg stale src | xargs python -c 'import os, sys; os.remove(sys.argv[1])'",
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(
+            report.exit_code, 7,
+            "shell-wrapped cleanup command `{command}` should halt"
+        );
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|matched| matched.rule_id == "builtin:unsafe_cleanup"),
+            "command `{command}` did not cite unsafe cleanup guard: {:?}",
+            report.matches
+        );
+    }
+}
+
+#[test]
 fn force_push_warns_but_exits_zero() {
     let registry = PreflightGuardRegistry::with_builtins();
     for command in [

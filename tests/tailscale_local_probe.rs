@@ -321,6 +321,7 @@ fn local_probe_treats_malformed_status_json_as_daemon_unreachable_not_panic() ->
     });
     assert!(report.installed);
     assert!(!report.daemon_reachable);
+    assert_eq!(report.platform, TailscalePlatform::Linux);
     assert_eq!(
         report.degradations[0].code,
         TAILSCALE_DAEMON_UNREACHABLE_CODE
@@ -441,12 +442,12 @@ fn cli_probe_short_circuits_without_runner_calls_when_mesh_disabled() -> TestRes
 #[test]
 fn cli_probe_reports_not_installed_when_no_binary_candidate_exists() -> TestResult {
     let mut runner = FakeCliRunner::default();
-    let report = probe_tailscale_cli_with_runner(
-        &cli_probe_config("/opt/homebrew/bin/tailscale"),
-        &mut runner,
-    );
+    let mut config = cli_probe_config("/opt/homebrew/bin/tailscale");
+    config.platform_hint = TailscalePlatform::MacosOpen;
+    let report = probe_tailscale_cli_with_runner(&config, &mut runner);
 
     assert!(!report.installed);
+    assert_eq!(report.platform, TailscalePlatform::MacosOpen);
     assert!(runner.calls.is_empty());
     assert_eq!(report.degradations[0].code, "tailscale_not_installed");
     Ok(())
@@ -731,14 +732,86 @@ fn cli_probe_rejects_relative_override_without_running_it() -> TestResult {
 }
 
 #[test]
+fn cli_probe_treats_blank_binary_override_as_unset() -> TestResult {
+    let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+    runner.version = Some(TailscaleCliCommandOutput::success(good_version_output(), 3));
+    runner.status = Some(TailscaleCliCommandOutput::success(healthy_status(), 4));
+    runner.prefs = Some(TailscaleCliCommandOutput::success(
+        br#"{"ShieldsUp": false}"#.as_slice(),
+        5,
+    ));
+    let mut config = cli_probe_config("/opt/homebrew/bin/tailscale");
+    config.binary_override = Some(Path::new("   ").to_path_buf());
+
+    let report = probe_tailscale_cli_with_runner(&config, &mut runner);
+
+    assert!(report.installed);
+    assert!(report.binary_authentic);
+    assert_eq!(
+        report.binary_absolute_path.as_deref(),
+        Some(Path::new("/opt/homebrew/bin/tailscale"))
+    );
+    assert_eq!(
+        runner.calls,
+        vec![
+            "--version",
+            "status --json --self=true --peers=true",
+            "debug localapi /localapi/v0/prefs"
+        ]
+    );
+    assert!(
+        report
+            .degradations
+            .iter()
+            .all(|entry| entry.code != TAILSCALE_BINARY_INAUTHENTIC_CODE),
+        "{:?}",
+        report.degradations
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_probe_trims_absolute_binary_override_before_running() -> TestResult {
+    let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
+    runner.version = Some(TailscaleCliCommandOutput::success(good_version_output(), 3));
+    runner.status = Some(TailscaleCliCommandOutput::success(healthy_status(), 4));
+    runner.prefs = Some(TailscaleCliCommandOutput::success(
+        br#"{"ShieldsUp": false}"#.as_slice(),
+        5,
+    ));
+    let mut config = cli_probe_config("/not/used/tailscale");
+    config.binary_override = Some(Path::new(" /opt/homebrew/bin/tailscale ").to_path_buf());
+
+    let report = probe_tailscale_cli_with_runner(&config, &mut runner);
+
+    assert!(report.installed);
+    assert!(report.binary_authentic);
+    assert_eq!(
+        report.binary_absolute_path.as_deref(),
+        Some(Path::new("/opt/homebrew/bin/tailscale"))
+    );
+    assert_eq!(
+        runner.calls,
+        vec![
+            "--version",
+            "status --json --self=true --peers=true",
+            "debug localapi /localapi/v0/prefs"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
 fn cli_probe_reports_timeout_when_version_command_times_out() -> TestResult {
     let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
     runner.version = Some(TailscaleCliCommandOutput::timeout(2_501));
     let mut config = cli_probe_config("/opt/homebrew/bin/tailscale");
     config.timeout_ms = 2_500;
+    config.platform_hint = TailscalePlatform::Windows;
 
     let report = probe_tailscale_cli_with_runner(&config, &mut runner);
 
+    assert_eq!(report.platform, TailscalePlatform::Windows);
     assert_eq!(report.degradations[0].code, TAILSCALE_PROBE_TIMEOUT_CODE);
     assert!(
         report.degradations[0].message.contains("2500ms"),
@@ -890,12 +963,12 @@ fn cli_probe_skips_optional_prefs_when_status_consumes_timeout_budget() -> TestR
 fn cli_probe_reports_binary_inauthentic_when_version_output_is_malformed() -> TestResult {
     let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
     runner.version = Some(TailscaleCliCommandOutput::success("not tailscale", 3));
+    let mut config = cli_probe_config("/opt/homebrew/bin/tailscale");
+    config.platform_hint = TailscalePlatform::MacosOpen;
 
-    let report = probe_tailscale_cli_with_runner(
-        &cli_probe_config("/opt/homebrew/bin/tailscale"),
-        &mut runner,
-    );
+    let report = probe_tailscale_cli_with_runner(&config, &mut runner);
 
+    assert_eq!(report.platform, TailscalePlatform::MacosOpen);
     assert_eq!(
         report.degradations[0].code,
         TAILSCALE_BINARY_INAUTHENTIC_CODE
@@ -910,12 +983,12 @@ fn cli_probe_reports_daemon_unreachable_when_status_command_fails() -> TestResul
     let mut runner = FakeCliRunner::with_existing("/opt/homebrew/bin/tailscale");
     runner.version = Some(TailscaleCliCommandOutput::success(good_version_output(), 3));
     runner.status = Some(TailscaleCliCommandOutput::failure("daemon offline", 4));
+    let mut config = cli_probe_config("/opt/homebrew/bin/tailscale");
+    config.platform_hint = TailscalePlatform::MacosSandboxed;
 
-    let report = probe_tailscale_cli_with_runner(
-        &cli_probe_config("/opt/homebrew/bin/tailscale"),
-        &mut runner,
-    );
+    let report = probe_tailscale_cli_with_runner(&config, &mut runner);
 
+    assert_eq!(report.platform, TailscalePlatform::MacosSandboxed);
     assert_eq!(
         report.degradations[0].code,
         TAILSCALE_DAEMON_UNREACHABLE_CODE
@@ -1033,9 +1106,20 @@ fn cli_probe_timeout_env_parser_uses_default_for_missing_or_invalid_values() -> 
 
 #[test]
 fn local_probe_timeout_report_is_deterministic() -> TestResult {
-    let first = TailscaleLocalReport::timed_out(TailscaleProbeMethod::Cli, 1_501, 1_500);
-    let second = TailscaleLocalReport::timed_out(TailscaleProbeMethod::Cli, 1_501, 1_500);
+    let first = TailscaleLocalReport::timed_out(
+        TailscaleProbeMethod::Cli,
+        1_501,
+        1_500,
+        TailscalePlatform::MacosOpen,
+    );
+    let second = TailscaleLocalReport::timed_out(
+        TailscaleProbeMethod::Cli,
+        1_501,
+        1_500,
+        TailscalePlatform::MacosOpen,
+    );
     assert_eq!(first, second);
+    assert_eq!(first.platform, TailscalePlatform::MacosOpen);
     assert_eq!(first.degradations[0].code, TAILSCALE_PROBE_TIMEOUT_CODE);
     Ok(())
 }

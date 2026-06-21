@@ -188,6 +188,57 @@ fn high_trust_writes_without_evidence_trip_the_dedicated_reason() {
     );
 }
 
+#[test]
+fn high_trust_missing_evidence_ratio_uses_high_trust_denominator() {
+    // A single unsupported high-trust write should not be diluted by many
+    // low-trust evidenced writes from the same source.
+    let config = WriteImmuneQuarantineConfig {
+        max_writes_per_window: 100,
+        max_near_duplicate_ratio: 1.0,
+        max_missing_evidence_ratio: 1.0,
+        max_high_trust_missing_evidence_ratio: 0.5,
+        ..WriteImmuneQuarantineConfig::default()
+    };
+    let mut observations = Vec::new();
+    for i in 0..9 {
+        observations.push(obs(
+            "mixed-source",
+            &format!("low trust evidenced content item {i}"),
+            "agent_assertion",
+            true,
+            10 + i,
+        ));
+    }
+    observations.push(obs(
+        "mixed-source",
+        "unsupported high trust claim",
+        "agent_validated",
+        false,
+        30,
+    ));
+
+    let stats = compute_source_write_stats(&observations, window());
+    let row = stats
+        .iter()
+        .find(|stats| stats.source_id == "mixed-source")
+        .expect("mixed-source stats present");
+    let decision = evaluate_write_immune_quarantine(row, &config);
+    let reason_codes = decision
+        .reasons
+        .iter()
+        .map(|reason| reason.code)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert_eq!(decision.high_trust_missing_evidence_ratio, 1.0);
+    assert_eq!(decision.action, "quarantine");
+    assert_eq!(
+        reason_codes,
+        ["high_trust_missing_evidence_ratio_exceeded"]
+            .into_iter()
+            .collect()
+    );
+}
+
 /// Build a quarantining decision for a spamming source over generous defaults.
 fn quarantining_decision() -> ee::core::write_owner::WriteImmuneQuarantineDecision {
     let config = WriteImmuneQuarantineConfig::default();

@@ -286,14 +286,18 @@ fn scan_fixture(source: &str) -> Vec<Finding> {
                 message: "inject temp directory at the boundary instead of calling env::temp_dir",
             });
         }
-        if hash_collection_iteration_call(&compact_line, &hash_map_bindings) {
+        if hash_collection_iteration_call(&compact_line, &hash_map_bindings)
+            || hash_collection_direct_iteration_call(line, "HashMap")
+        {
             findings.push(Finding {
                 line: line_no,
                 code: "hashmap_iteration",
                 message: "sort HashMap entries before deterministic output",
             });
         }
-        if hash_collection_iteration_call(&compact_line, &hash_set_bindings) {
+        if hash_collection_iteration_call(&compact_line, &hash_set_bindings)
+            || hash_collection_direct_iteration_call(line, "HashSet")
+        {
             findings.push(Finding {
                 line: line_no,
                 code: "hashset_iteration",
@@ -622,7 +626,10 @@ fn source_markers(line: &str) -> Vec<SourceMarker> {
                 }
             }
             markers.push(SourceMarker::Ident(ident));
-        } else if matches!(ch, ':' | '<' | '>' | '=') {
+        } else if matches!(
+            ch,
+            ':' | '<' | '>' | '=' | '.' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | ','
+        ) {
             markers.push(SourceMarker::Punct(ch));
         }
     }
@@ -725,16 +732,12 @@ fn hash_collection_type_path_end(
 }
 
 fn binding_name_before_colon(markers: &[SourceMarker], colon_index: usize) -> Option<String> {
-    markers[..colon_index].iter().rev().find_map(|marker| {
-        let SourceMarker::Ident(name) = marker else {
-            return None;
-        };
-        if matches!(name.as_str(), "let" | "mut" | "ref" | "_") {
-            None
-        } else {
-            Some(name.clone())
-        }
-    })
+    let binding = ident_at(markers, colon_index.checked_sub(1)?)?;
+    if matches!(binding, "let" | "mut" | "ref" | "_") {
+        None
+    } else {
+        Some(binding.to_owned())
+    }
 }
 
 fn binding_name_before_equals(markers: &[SourceMarker], equals_index: usize) -> Option<String> {
@@ -790,6 +793,106 @@ fn hash_collection_iteration_call(line: &str, bindings: &[String]) -> bool {
             .iter()
             .any(|method| contains_receiver_method_call(line, binding, method))
     })
+}
+
+fn hash_collection_direct_iteration_call(line: &str, type_name: &str) -> bool {
+    let markers = source_markers(line);
+    let mut start = 0;
+    while start < markers.len() {
+        let Some(path_end) = hash_collection_type_path_end(&markers, start, type_name) else {
+            start += 1;
+            continue;
+        };
+        let Some(method_path_start) = hash_collection_constructor_method_start(&markers, path_end)
+        else {
+            start = path_end.max(start + 1);
+            continue;
+        };
+        if !matches!(
+            ident_at(&markers, method_path_start),
+            Some("new" | "with_capacity" | "from" | "default")
+        ) {
+            start = method_path_start + 1;
+            continue;
+        }
+        if constructor_chain_has_iteration(&markers, method_path_start) {
+            return true;
+        }
+        start = method_path_start + 1;
+    }
+
+    false
+}
+
+fn constructor_chain_has_iteration(markers: &[SourceMarker], method_index: usize) -> bool {
+    let Some(mut index) = constructor_invocation_end(markers, method_index) else {
+        return false;
+    };
+
+    while matches!(markers.get(index), Some(SourceMarker::Punct('.'))) {
+        let method_name_index = index + 1;
+        if matches!(
+            ident_at(markers, method_name_index),
+            Some("iter" | "keys" | "values" | "into_iter" | "drain")
+        ) {
+            return true;
+        }
+
+        index = method_name_index + 1;
+        if double_colon_at(markers, index)
+            && matches!(markers.get(index + 2), Some(SourceMarker::Punct('<')))
+        {
+            let Some(next_index) = skip_angle_group(markers, index + 2) else {
+                return false;
+            };
+            index = next_index;
+        }
+        if matches!(markers.get(index), Some(SourceMarker::Punct('('))) {
+            let Some(next_index) = skip_balanced_punct_group(markers, index, '(', ')') else {
+                return false;
+            };
+            index = next_index;
+        }
+    }
+
+    false
+}
+
+fn constructor_invocation_end(markers: &[SourceMarker], method_index: usize) -> Option<usize> {
+    let mut cursor = method_index + 1;
+    if double_colon_at(markers, cursor)
+        && matches!(markers.get(cursor + 2), Some(SourceMarker::Punct('<')))
+    {
+        cursor = skip_angle_group(markers, cursor + 2)?;
+    }
+
+    match markers.get(cursor) {
+        Some(SourceMarker::Punct('(')) => skip_balanced_punct_group(markers, cursor, '(', ')'),
+        _ => None,
+    }
+}
+
+fn skip_balanced_punct_group(
+    markers: &[SourceMarker],
+    start: usize,
+    open: char,
+    close: char,
+) -> Option<usize> {
+    let mut depth = 0_usize;
+    for (index, marker) in markers.iter().enumerate().skip(start) {
+        match marker {
+            SourceMarker::Punct(ch) if *ch == open => depth += 1,
+            SourceMarker::Punct(ch) if *ch == close => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn contains_receiver_method_call(line: &str, receiver: &str, method: &str) -> bool {
@@ -1155,6 +1258,67 @@ mod self_tests {
         let report = render_report(&scan_fixture(fixture));
         assert_eq!(report.matches("hashmap_iteration").count(), 2);
         assert_eq!(report.matches("hashset_iteration").count(), 1);
+    }
+
+    #[test]
+    fn direct_hash_collection_constructor_chains_emit_known_violations() {
+        let fixture = r#"
+            use std::collections::HashMap;
+
+            #[determinism::required]
+            fn ambient(_: &ee::runtime::determinism::Deterministic<Seed>) {
+                for _ in HashMap::<String, String>::from([("a".to_owned(), "b".to_owned())]).iter() {}
+                for _ in std::collections::HashSet::<String>::from(["a".to_owned()]).into_iter() {}
+                let _ = HashMap::<String, String>::new();
+                for _ in unrelated.iter() {}
+            }
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert_eq!(report.matches("hashmap_iteration").count(), 1);
+        assert_eq!(report.matches("hashset_iteration").count(), 1);
+    }
+
+    #[test]
+    fn direct_hash_collection_constructor_scan_ignores_argument_iteration() {
+        let fixture = r#"
+            use std::collections::HashMap;
+
+            #[determinism::required]
+            fn ambient(_: &ee::runtime::determinism::Deterministic<Seed>) {
+                let _ = HashMap::<String, String>::from(entries.iter()).len();
+                consume(std::collections::HashSet::<String>::new(), items.iter());
+            }
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert!(
+            !report.contains("hashmap_iteration"),
+            "constructor argument iteration must not look like HashMap iteration: {report}"
+        );
+        assert!(
+            !report.contains("hashset_iteration"),
+            "sibling argument iteration must not look like HashSet iteration: {report}"
+        );
+    }
+
+    #[test]
+    fn hash_collection_binding_scan_ignores_wildcard_typed_parameters() {
+        let fixture = r#"
+            use std::collections::HashMap;
+
+            #[determinism::required]
+            fn ambient(
+                _: &ee::runtime::determinism::Deterministic<Seed>,
+                previous: Vec<String>,
+                _: HashMap<String, String>,
+            ) {
+                for _ in previous.iter() {}
+            }
+        "#;
+        let report = render_report(&scan_fixture(fixture));
+        assert!(
+            !report.contains("hashmap_iteration"),
+            "wildcard HashMap parameters must not bind an earlier parameter: {report}"
+        );
     }
 
     #[test]

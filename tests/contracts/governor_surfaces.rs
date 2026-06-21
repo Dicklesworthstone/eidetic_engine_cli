@@ -315,6 +315,47 @@ fn seed_memories(workspace: &Path, count: usize) -> TestResult {
     Ok(())
 }
 
+fn seed_journal_entries(workspace: &Path, count: usize) -> TestResult {
+    let init = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("init")
+        .output()
+        .map_err(|error| format!("failed to run ee init: {error}"))?;
+    ensure(
+        init.status.success(),
+        format!(
+            "ee init should succeed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )?;
+    for index in 0..count {
+        let body = format!(
+            "Governor journal contract seed entry {index:02}: {}",
+            "release workflow output governor continuation cursor ".repeat(12)
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .arg("--workspace")
+            .arg(workspace)
+            .arg("journal")
+            .arg("append")
+            .arg(&body)
+            .arg("--session")
+            .arg("governor-contract")
+            .arg("--json")
+            .output()
+            .map_err(|error| format!("failed to run ee journal append: {error}"))?;
+        ensure(
+            output.status.success(),
+            format!(
+                "ee journal append {index} should succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+    }
+    Ok(())
+}
+
 // ============================================================================
 // schema list — the no-DB demonstration surface
 // ============================================================================
@@ -492,6 +533,69 @@ fn memory_list_cursor_drain_partitions_exactly() -> TestResult {
         "id",
     )?;
     assert_exact_partition(&drained, &full_ids, "memory list")
+}
+
+// ============================================================================
+// journal list
+// ============================================================================
+
+#[test]
+fn journal_list_invalid_cursor_is_an_empty_page() -> TestResult {
+    let workspace = isolated_workspace("journal-invalid")?;
+    seed_journal_entries(&workspace, 3)?;
+    let value = run_ee_in(
+        &workspace,
+        &[
+            "journal",
+            "list",
+            "--limit",
+            "3",
+            "--cursor",
+            "not-a-valid-cursor",
+            "--json",
+        ],
+    )?;
+    ensure(
+        element_ids(&value, "/data/entries", "entryId").is_empty(),
+        "an invalid journal list cursor must yield an empty page, never a restarted one",
+    )?;
+    ensure(
+        degraded_entry_with_code(&value, "cursor_invalid").is_some(),
+        "journal list must report cursor_invalid for a rejected cursor",
+    )
+}
+
+#[test]
+fn journal_list_cursor_drain_partitions_exactly() -> TestResult {
+    let workspace = isolated_workspace("journal-drain")?;
+    seed_journal_entries(&workspace, 8)?;
+    let full = run_ee_in(&workspace, &["journal", "list", "--limit", "8", "--json"])?;
+    let full_ids = element_ids(&full, "/data/entries", "entryId");
+    ensure(
+        full_ids.len() == 8,
+        format!(
+            "journal list must return the 8 seeded rows, got {}",
+            full_ids.len()
+        ),
+    )?;
+
+    let first_page_args = [
+        "journal",
+        "list",
+        "--limit",
+        "8",
+        "--max-output-tokens",
+        "1600",
+        "--json",
+    ];
+    let first_page = run_ee_in(&workspace, &first_page_args)?;
+    ensure(
+        continuation_cursor(&first_page).is_some(),
+        "a 1600-token ceiling must truncate the seeded journal list and offer a cursor",
+    )?;
+
+    let drained = drain_ids(&workspace, &first_page_args, "/data/entries", "entryId")?;
+    assert_exact_partition(&drained, &full_ids, "journal list")
 }
 
 // ============================================================================

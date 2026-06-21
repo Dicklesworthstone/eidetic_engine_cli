@@ -124,6 +124,12 @@ fn inferred_hash_collection_iteration(_: &ee::runtime::determinism::Deterministi
     for _ in inferred_set.drain() {}
 }
 
+#[determinism::required]
+fn direct_hash_collection_iteration(_: &ee::runtime::determinism::Deterministic<Seed>) {
+    for _ in HashMap::<String, String>::from([("a".to_owned(), "b".to_owned())]).iter() {}
+    for _ in std::collections::HashSet::<String>::from(["a".to_owned()]).into_iter() {}
+}
+
 fn benign_documentation_mentions() {
     let _ = "rand::random::<u64>() random::<u64>() getrandom::fill(&mut bytes) SystemRandom::new() Instant::now() SystemTime::now() chrono::Utc::now() MemoryId::now() std::env::current_dir() env::current_dir() std::env::temp_dir() env::temp_dir() std::fs::read_dir(.) HashSet";
     // rand::thread_rng();

@@ -295,6 +295,50 @@ fn sync_summary_is_redaction_safe_and_status_ready() -> TestResult {
 }
 
 #[test]
+fn sync_summary_counts_blocked_only_peers_in_budget_window() -> TestResult {
+    let peer_id = "node_key=blocked-peer@example.tailnet";
+    let origin = MeshOriginKey::new("blocked-origin");
+
+    let summary = build_sync_summary(MeshSyncSummaryInput {
+        last_round_completed_at: Some("2026-05-19T22:10:30.000Z".to_owned()),
+        origins_tracked: 1,
+        peer_outcomes: Vec::new(),
+        retry_policy: MeshAntiEntropyRetryPolicy::default(),
+        current_attempts: 5,
+        next_retry_after: Some("2026-05-19T22:25:30.000Z".to_owned()),
+        blocked_ranges: vec![MeshBlockedRange {
+            key: MeshRangeKey::new(peer_id, origin, 41, 58),
+            retry_after: "2026-05-19T22:25:30.000Z".to_owned(),
+            reason: MeshBlockedRangeReason::MaxAttemptsExceeded,
+        }],
+        degraded: Vec::new(),
+    });
+
+    assert_eq!(
+        summary.peer_count, 1,
+        "blocked-range peers are part of the current budget window even without a fulfilled outcome"
+    );
+    assert_eq!(summary.per_peer_counts, Vec::new());
+    assert_eq!(summary.blocked_ranges.len(), 1);
+    assert!(summary.blocked_ranges[0].peer_alias.starts_with("peer_"));
+    assert!(
+        summary
+            .degraded
+            .contains(&degraded_codes::ROUND_BLOCKED.to_owned())
+    );
+
+    let serialized = serde_json::to_string(&summary).map_err(|error| error.to_string())?;
+    for forbidden in ["node_key=", "@example", "blocked-origin"] {
+        assert!(
+            !serialized.contains(forbidden),
+            "summary leaked raw identity fragment {forbidden}: {serialized}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn two_peer_partition_rejoin_converges() -> TestResult {
     let peer_a = "peer-a";
     let peer_b = "peer-b";

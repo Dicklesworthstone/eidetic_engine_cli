@@ -361,6 +361,7 @@ fn bypass_audit_records_token_hash_matches_and_blocking_memories() {
     .expect("bypass audit records");
 
     assert_eq!(report.token_hash_prefix, issued.token_hash_prefix);
+    assert_eq!(report.command_hash, issued.command_hash);
 
     let audits = connection
         .list_audit_by_action(audit_actions::PREFLIGHT_BYPASS, Some(10))
@@ -381,6 +382,7 @@ fn bypass_audit_records_token_hash_matches_and_blocking_memories() {
     assert_eq!(details["schema"], "ee.preflight.bypass.v1");
     assert_eq!(details["token_hash_prefix"], issued.token_hash_prefix);
     assert_eq!(details["command"], "rm -rf /tmp/work");
+    assert_eq!(details["commandHash"], issued.command_hash);
     assert_eq!(details["rule_ids"][0], "builtin:rm_rf_tmp");
     assert_eq!(
         details["matched_memory_ids"][0],

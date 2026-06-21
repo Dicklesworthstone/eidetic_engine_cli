@@ -193,6 +193,36 @@
       "expectedRuleIds": [
         "builtin:filesystem_create"
       ]
+    },
+    {
+      "id": "find_exec_shell_delete",
+      "category": "unsafe_cleanup",
+      "command": "find . -name '*.tmp' -exec sh -c 'rm -f \"$1\"' sh {} \\;",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:unsafe_cleanup"
+      ]
+    },
+    {
+      "id": "xargs_shell_delete",
+      "category": "unsafe_cleanup",
+      "command": "rg TODO src | xargs sh -c 'rm -f \"$@\"' sh",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:unsafe_cleanup"
+      ]
+    },
+    {
+      "id": "find_exec_nested_find_delete",
+      "category": "unsafe_cleanup",
+      "command": "find . -type d -exec sh -c 'find \"$1\" -name stale -delete' sh {} \\;",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:unsafe_cleanup"
+      ]
     }
   ],
   "plannedCases": []

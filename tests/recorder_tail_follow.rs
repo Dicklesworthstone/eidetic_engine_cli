@@ -352,6 +352,54 @@ fn recorder_tail_applies_headroom_when_client_only_filter_terms_present() -> Tes
 }
 
 #[test]
+fn recorder_tail_limit_zero_client_filter_detects_sparse_match() -> TestResult {
+    // `limit=0` returns no events but still promises `has_more=true` whenever
+    // matching data exists. Client-only filters must inspect enough DB rows to
+    // honor that promise even if the newest row is not a match.
+    let conn = connect()?;
+    insert_run(&conn, "run_zero_sparse", "active")?;
+    insert_event(
+        &conn,
+        "run_zero_sparse",
+        1,
+        "tool_call",
+        "2026-05-06T10:00:01Z",
+        "redacted",
+    )?;
+    insert_event(
+        &conn,
+        "run_zero_sparse",
+        2,
+        "tool_call",
+        "2026-05-06T10:00:02Z",
+        "clean",
+    )?;
+
+    let filter =
+        RecorderEventFilter::parse_expression("redacted=true").map_err(|error| error.message())?;
+    let report = tail_recording_from_store(
+        &conn,
+        &RecorderTailOptions {
+            run_id: Some("run_zero_sparse".to_owned()),
+            since: None,
+            limit: 0,
+            from_sequence: None,
+            follow: false,
+            filter: Some(filter),
+        },
+    )
+    .map_err(|error| error.message())?;
+
+    assert!(report.events.is_empty());
+    assert_eq!(report.total_events, 1);
+    assert!(
+        report.has_more,
+        "limit=0 should report matching data despite returning no events"
+    );
+    Ok(())
+}
+
+#[test]
 fn recorder_tail_follow_idle_timeout_exits_without_hanging() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
     fs::create_dir_all(tempdir.path().join(".ee")).map_err(|error| error.to_string())?;
