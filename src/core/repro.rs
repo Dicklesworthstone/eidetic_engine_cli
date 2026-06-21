@@ -1107,16 +1107,29 @@ fn verify_required_pack_file(
                 error,
             }
         }
-        Err(error) => VerificationResult {
-            path: relative_path.to_string(),
-            expected_hash: expected_artifacts
-                .get(relative_path)
-                .map(|expected| expected.hash.clone())
-                .unwrap_or_default(),
-            actual_hash: None,
-            passed: false,
-            error: Some(error),
-        },
+        Err(error) => {
+            // verify_required_pack_file is only invoked for REQUIRED pack
+            // members, so a read failure here means a required artifact is
+            // absent or unusable. Surface the absent case as explicit
+            // "missing required artifact" replay evidence rather than a bare
+            // filesystem error, and report a present-but-unreadable member
+            // distinctly so triage is unambiguous. See bd-1dtzr.
+            let detail = if pack_path.join(relative_path).exists() {
+                format!("required artifact `{relative_path}` unreadable: {error}")
+            } else {
+                format!("missing required artifact `{relative_path}`: {error}")
+            };
+            VerificationResult {
+                path: relative_path.to_string(),
+                expected_hash: expected_artifacts
+                    .get(relative_path)
+                    .map(|expected| expected.hash.clone())
+                    .unwrap_or_default(),
+                actual_hash: None,
+                passed: false,
+                error: Some(detail),
+            }
+        }
     }
 }
 
