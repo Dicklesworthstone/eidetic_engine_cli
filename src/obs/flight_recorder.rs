@@ -421,7 +421,12 @@ pub fn record_workload(
     let deduped_flag_names = sorted_unique_strs(inputs.command.flag_names);
     let deduped_memory_hashes = sorted_unique_strs(inputs.memory_hashes);
     let deduped_codes = sorted_unique_strs(inputs.degraded_codes);
-    let trace_id = derive_trace_id(inputs, &deduped_flag_names);
+    let trace_id = derive_trace_id(
+        inputs,
+        &deduped_flag_names,
+        &deduped_memory_hashes,
+        &deduped_codes,
+    );
     Ok(AgentWorkloadTrace {
         schema: AGENT_WORKLOAD_TRACE_SCHEMA_V1.to_owned(),
         side_effect_free: true,
@@ -975,40 +980,106 @@ fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-/// Derive the trace id from the recorder's non-text inputs. Does NOT
-/// embed any task / query / memory body content — only the verb chain,
-/// positional arity, output format, exit code, elapsed ms, response
-/// byte count, harness program, and the recorded-at timestamp. The
-/// result is stable: identical inputs produce identical ids.
-fn derive_trace_id(inputs: &FlightRecorderInputs<'_>, flag_names: &[&str]) -> String {
+/// Derive the trace id from the recorder's redaction-safe row fields. Does NOT
+/// embed any task / query / memory body content. The result is stable after the
+/// same dedupe/sort normalization used for schema `uniqueItems` fields.
+fn derive_trace_id(
+    inputs: &FlightRecorderInputs<'_>,
+    flag_names: &[&str],
+    memory_hashes: &[&str],
+    degraded_codes: &[&str],
+) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(AGENT_WORKLOAD_TRACE_SCHEMA_V1.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(inputs.recorded_at_rfc3339.as_bytes());
-    hasher.update(b"\0");
-    for verb in inputs.command.verbs {
-        hasher.update(verb.as_bytes());
-        hasher.update(b"\0");
-    }
-    hasher.update(b"|");
-    for flag in flag_names {
-        hasher.update(flag.as_bytes());
-        hasher.update(b"\0");
-    }
-    hasher.update(b"|");
-    if let Some(output_format) = inputs.command.output_format {
-        hasher.update(output_format.as_bytes());
-    }
-    hasher.update(b"|");
+    update_str(&mut hasher, "schema", AGENT_WORKLOAD_TRACE_SCHEMA_V1);
+    update_str(
+        &mut hasher,
+        "redaction_level",
+        inputs.redaction_level.as_str(),
+    );
+    update_str(&mut hasher, "recorded_at", inputs.recorded_at_rfc3339);
+    update_str_list(&mut hasher, "command.verbs", inputs.command.verbs);
+    update_str_list(&mut hasher, "command.flag_names", flag_names);
+    update_optional_str(
+        &mut hasher,
+        "command.output_format",
+        inputs.command.output_format,
+    );
+    hasher.update(b"command.positional_arity\0");
     hasher.update(&inputs.command.positional_arity.to_le_bytes());
+    hasher.update(b"exit_code\0");
     hasher.update(&[inputs.exit_code]);
+    hasher.update(b"elapsed_ms\0");
     hasher.update(&inputs.elapsed_ms.to_le_bytes());
+    hasher.update(b"response_byte_count\0");
     hasher.update(&inputs.response_byte_count.to_le_bytes());
-    hasher.update(inputs.harness_program.as_str().as_bytes());
+    update_optional_u64(
+        &mut hasher,
+        "response_token_estimate",
+        inputs.response_token_estimate,
+    );
+    update_optional_str(
+        &mut hasher,
+        "token_estimator_id",
+        inputs.token_estimator_id.map(TokenEstimatorId::as_str),
+    );
+    update_str(
+        &mut hasher,
+        "harness_identity.program",
+        inputs.harness_program.as_str(),
+    );
+    update_optional_str(
+        &mut hasher,
+        "harness_identity.model_family",
+        inputs.harness_model_family,
+    );
+    update_str_list(&mut hasher, "memory_references.hash", memory_hashes);
+    update_str_list(&mut hasher, "degraded_codes", degraded_codes);
     let digest = hasher.finalize().to_hex();
     let mut id = String::from("trc_");
     id.push_str(&digest.as_str()[..32]);
     id
+}
+
+fn update_str(hasher: &mut blake3::Hasher, label: &str, value: &str) {
+    hasher.update(label.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(value.as_bytes());
+    hasher.update(b"\0");
+}
+
+fn update_optional_str(hasher: &mut blake3::Hasher, label: &str, value: Option<&str>) {
+    hasher.update(label.as_bytes());
+    hasher.update(b"\0");
+    if let Some(value) = value {
+        hasher.update(b"some\0");
+        hasher.update(value.as_bytes());
+    } else {
+        hasher.update(b"none");
+    }
+    hasher.update(b"\0");
+}
+
+fn update_optional_u64(hasher: &mut blake3::Hasher, label: &str, value: Option<u64>) {
+    hasher.update(label.as_bytes());
+    hasher.update(b"\0");
+    if let Some(value) = value {
+        hasher.update(b"some\0");
+        hasher.update(&value.to_le_bytes());
+    } else {
+        hasher.update(b"none");
+    }
+    hasher.update(b"\0");
+}
+
+fn update_str_list(hasher: &mut blake3::Hasher, label: &str, values: &[&str]) {
+    hasher.update(label.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(&usize_to_u64(values.len()).to_le_bytes());
+    for value in values {
+        hasher.update(b"\0");
+        hasher.update(value.as_bytes());
+    }
+    hasher.update(b"\0");
 }
 
 /// Posture vocabulary the flight recorder reports to `ee status` / `ee doctor`.
@@ -1319,6 +1390,56 @@ mod tests {
         assert_eq!(
             trace.trace_id, baseline.trace_id,
             "duplicate-only flags must not perturb the stable trace identity"
+        );
+    }
+
+    #[test]
+    fn trace_id_distinguishes_redaction_safe_row_fields() {
+        let baseline = record_workload(&baseline_inputs()).expect("baseline validates");
+
+        let mut changed_memory = baseline_inputs();
+        changed_memory.memory_hashes = &["blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"];
+        let changed_memory =
+            record_workload(&changed_memory).expect("changed memory hash validates");
+        assert_ne!(
+            changed_memory.trace_id, baseline.trace_id,
+            "different selected memory hashes must produce different trace ids"
+        );
+
+        let mut changed_degradation = baseline_inputs();
+        changed_degradation.degraded_codes = &["context_pack_truncated"];
+        let changed_degradation =
+            record_workload(&changed_degradation).expect("changed degradation validates");
+        assert_ne!(
+            changed_degradation.trace_id, baseline.trace_id,
+            "different degraded codes must produce different trace ids"
+        );
+
+        let mut changed_token_estimate = baseline_inputs();
+        changed_token_estimate.response_token_estimate = Some(2_049);
+        let changed_token_estimate =
+            record_workload(&changed_token_estimate).expect("changed token estimate validates");
+        assert_ne!(
+            changed_token_estimate.trace_id, baseline.trace_id,
+            "different response token estimates must produce different trace ids"
+        );
+
+        let mut changed_model_family = baseline_inputs();
+        changed_model_family.harness_model_family = Some("claude-sonnet");
+        let changed_model_family =
+            record_workload(&changed_model_family).expect("changed model family validates");
+        assert_ne!(
+            changed_model_family.trace_id, baseline.trace_id,
+            "different harness model families must produce different trace ids"
+        );
+
+        let mut changed_redaction = baseline_inputs();
+        changed_redaction.redaction_level = RedactionLevel::Audit;
+        let changed_redaction =
+            record_workload(&changed_redaction).expect("changed redaction level validates");
+        assert_ne!(
+            changed_redaction.trace_id, baseline.trace_id,
+            "different redaction levels must produce different trace ids"
         );
     }
 

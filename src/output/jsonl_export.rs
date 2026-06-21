@@ -1075,6 +1075,7 @@ impl<W: Write> JsonlExporter<W> {
         let final_record_count = self.records_written.saturating_add(1);
         footer.total_records = final_record_count;
         footer.memory_count = self.memory_count;
+        footer.artifact_count = self.artifact_count;
         footer.link_count = self.link_count;
         footer.tag_count = self.tag_count;
         footer.audit_count = self.audit_count;
@@ -1938,6 +1939,21 @@ mod tests {
             exporter.write_memory(memory).expect("write memory");
         }
 
+        let artifact = ExportArtifactRecord::builder()
+            .artifact_id("art-001")
+            .workspace_id("ws-123")
+            .source_kind("file")
+            .artifact_type("log")
+            .content_hash("blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .media_type("text/plain")
+            .size_bytes(42)
+            .redaction_status("checked")
+            .created_at("2026-04-30T12:00:00Z")
+            .updated_at("2026-04-30T12:00:00Z")
+            .build()
+            .expect("artifact has required fields");
+        exporter.write_artifact(artifact).expect("write artifact");
+
         let footer = ExportFooter::builder()
             .export_id("test-export")
             .completed_at("2026-04-30T12:01:00Z")
@@ -1946,11 +1962,14 @@ mod tests {
         let stats = exporter.write_footer(footer).expect("write footer");
 
         assert_eq!(stats.memory_count, 3);
-        assert_eq!(stats.total_records, 5);
+        assert_eq!(stats.artifact_count, 1);
+        assert_eq!(stats.total_records, 6);
         let written = String::from_utf8(output).expect("valid utf8");
         let footer_json = written.lines().last().expect("footer line");
         let footer: ExportFooter = serde_json::from_str(footer_json).expect("footer parses");
         assert_eq!(footer.total_records, stats.total_records);
+        assert_eq!(footer.memory_count, stats.memory_count);
+        assert_eq!(footer.artifact_count, stats.artifact_count);
     }
 
     #[test]

@@ -629,9 +629,10 @@ pub fn load_profile_from_env() -> SecurityProfile {
 mod tests {
     use std::str::FromStr;
 
+    #[cfg(unix)]
+    use super::shell_quote_path;
     use super::{
         FilePermissionCheck, FilePermissionReport, SecurityProfile, check_workspace_permissions,
-        shell_quote_path,
     };
 
     type TestResult = Result<(), String>;

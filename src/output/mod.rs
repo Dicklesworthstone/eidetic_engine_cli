@@ -2361,7 +2361,7 @@ pub fn render_context_response_json_with_options(
     options: ContextJsonRenderOptions,
 ) -> String {
     if let Some(cached_json) = &response.cached_json {
-        return cached_json.clone();
+        return context_response_cached_json_with_top_level_degraded(cached_json);
     }
 
     let rendered_text = options.include_rendered_text.then(|| {
@@ -2370,6 +2370,12 @@ pub fn render_context_response_json_with_options(
             options.include_non_affecting_degradations,
         )
     });
+    // Keep the top-level ee.response.v2 envelope and data.degraded in lockstep.
+    // Both apply the same default filter for non-affecting degradation signals.
+    let aggregated_degraded =
+        aggregate_context_degraded(response.data.degraded.iter().filter(|d| {
+            options.include_non_affecting_degradations || d.category().included_by_default()
+        }));
     let mut b = JsonBuilder::with_capacity(2048 + rendered_text.as_ref().map_or(0, String::len));
     b.field_str("schema", response.schema);
     b.field_bool("success", response.success);
@@ -2697,24 +2703,38 @@ pub fn render_context_response_json_with_options(
                 build_context_response_pagination(pagination_obj, pagination);
             });
         }
-        // Bead bd-17c65.5.2 (E2): filter the per-response degraded[]
-        // array by category. The DegradedCategory::AffectsThisResponse
-        // signals always emit; build-time feature gaps and
-        // workspace-state conditions are filtered out unless the
-        // caller passes --include-non-affecting-degradations
-        // (options.include_non_affecting_degradations).
-        let filtered_degraded = response
-            .data
-            .degraded
-            .iter()
-            .filter(|d| {
-                options.include_non_affecting_degradations
-                    || d.category().included_by_default()
-            });
-        let degraded = aggregate_context_degraded(filtered_degraded);
-        d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
+        d.field_array_of_objects("degraded", &aggregated_degraded, build_aggregated_degradation);
     });
+    b.field_array_of_objects(
+        "degraded",
+        &aggregated_degraded,
+        build_aggregated_degradation,
+    );
     b.finish()
+}
+
+fn context_response_cached_json_with_top_level_degraded(cached_json: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(cached_json) else {
+        return cached_json.to_owned();
+    };
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some(RESPONSE_SCHEMA_V2) {
+        return cached_json.to_owned();
+    }
+    let Some(object) = value.as_object_mut() else {
+        return cached_json.to_owned();
+    };
+    if object.contains_key("degraded") {
+        return cached_json.to_owned();
+    }
+    let degraded = object
+        .get("data")
+        .and_then(|data| data.get("degraded"))
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .map(serde_json::Value::Array)
+        .unwrap_or_else(|| serde_json::json!([]));
+    object.insert("degraded".to_string(), degraded);
+    serde_json::to_string(&value).unwrap_or_else(|_| cached_json.to_owned())
 }
 
 fn build_context_response_pagination(
@@ -18119,11 +18139,12 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        Degradation, DegradationSeverity, FieldProfile, JsonBuilder, OutputContext,
-        OutputEnvironment, Renderer, ResponseEnvelope, SHADOW_RUN_SCHEMA_V1, ShadowRunComparison,
-        ShadowRunReport, build_aggregated_degradation, error_response_json, escape_json_string,
-        help_text, human_status, render_agent_docs_json, render_agent_docs_toon,
-        render_context_response_json, render_context_response_markdown,
+        ContextJsonRenderOptions, Degradation, DegradationSeverity, FieldProfile, JsonBuilder,
+        OutputContext, OutputEnvironment, Renderer, ResponseEnvelope, SHADOW_RUN_SCHEMA_V1,
+        ShadowRunComparison, ShadowRunReport, build_aggregated_degradation, error_response_json,
+        escape_json_string, help_text, human_status, render_agent_docs_json,
+        render_agent_docs_toon, render_context_response_json,
+        render_context_response_json_with_options, render_context_response_markdown,
         render_context_response_toon, render_dependency_diagnostics_json,
         render_doctor_concise_json, render_doctor_concise_toon, render_doctor_json,
         render_doctor_json_filtered, render_doctor_toon, render_fix_plan_json,
@@ -18192,7 +18213,8 @@ mod tests {
         RCH_WORKER_PRESSURE_SCHEMA_V1, RchWorkerPressureObservation, RchWorkerPressureReport,
     };
     use crate::core::tailscale_probe::{
-        DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS, TailscaleLocalReport, TailscaleProbeMethod,
+        DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS, TailscaleLocalReport, TailscalePlatform,
+        TailscaleProbeMethod,
     };
     use crate::core::{
         BUILD_TIMESTAMP_POLICY, BuildFeature, BuildInfo, BuildProvenanceDegradation,
@@ -19495,12 +19517,14 @@ mod tests {
             TailscaleProbeMethod::Cli,
             1_501,
             DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS,
+            TailscalePlatform::Other,
         );
         tailscale.degradations.push(
             TailscaleLocalReport::timed_out(
                 TailscaleProbeMethod::Cli,
                 1_501,
                 DEFAULT_TAILSCALE_PROBE_TIMEOUT_MS,
+                TailscalePlatform::Other,
             )
             .degradations[0]
                 .clone(),
@@ -20801,6 +20825,68 @@ mod tests {
             &entry["repairKind"].as_str(),
             &Some("template"),
             "context degraded repair kind",
+        )
+    }
+
+    #[test]
+    fn context_response_json_mirrors_degraded_to_top_level_envelope() -> TestResult {
+        let mut response = context_response_fixture()?;
+        response.data.degraded.push(
+            crate::pack::ContextResponseDegradation::new(
+                "template_repair_fixture",
+                crate::pack::ContextResponseSeverity::Medium,
+                "fixture degradation",
+                Some("ee preflight check --cmd <command> --json".to_string()),
+            )
+            .map_err(|error| format!("degradation rejected: {error:?}"))?,
+        );
+
+        let json = render_context_response_json(&response);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        ensure_top_level_degraded_mirrors_data_degraded(&parsed, "context response")?;
+        ensure_equal(
+            &parsed["degraded"][0]["code"].as_str(),
+            &Some("template_repair_fixture"),
+            "context response top-level degraded code",
+        )
+    }
+
+    #[test]
+    fn cached_context_response_json_backfills_top_level_degraded() -> TestResult {
+        let cached_json = serde_json::json!({
+            "schema": RESPONSE_SCHEMA_V2,
+            "success": true,
+            "data": {
+                "command": "pack",
+                "pack": {
+                    "schema": crate::models::PACK_SCHEMA_V2,
+                    "query": "prepare release"
+                },
+                "degraded": [{
+                    "code": "template_repair_fixture",
+                    "severity": "medium",
+                    "message": "fixture degradation",
+                    "repair": "ee preflight check --cmd <command> --json",
+                    "sources": ["context"]
+                }]
+            }
+        })
+        .to_string();
+        let request = ContextRequest::from_query("prepare release")
+            .map_err(|error| format!("request rejected: {error:?}"))?;
+        let response = ContextResponse::from_cached_json(request, cached_json);
+
+        let rendered = render_context_response_json(&response);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+
+        ensure_top_level_degraded_mirrors_data_degraded(&parsed, "cached context response")?;
+        ensure_equal(
+            &parsed["degraded"][0]["code"].as_str(),
+            &Some("template_repair_fixture"),
+            "cached context response top-level degraded code",
         )
     }
 

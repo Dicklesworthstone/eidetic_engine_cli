@@ -27,7 +27,7 @@ use rustix::io::Errno;
 use serde_json::{Value as JsonValue, json};
 
 use crate::cache::pack_l2::{PackL2Cache, PackL2CacheOptions};
-use crate::config::{ConfigFile, EnvVar, read_env_var};
+use crate::config::{ConfigFile, EnvVar, parse_env_bool_flag, read_env_var};
 use crate::core::backup::{BackupCreateOptions, BackupCreateReport, create_backup};
 use crate::core::curate::{
     CurateDispositionOptions, CurateDispositionReport, run_curation_disposition,
@@ -6475,11 +6475,7 @@ fn steward_read_env_u64(var: EnvVar) -> Option<u64> {
 }
 
 fn steward_read_env_bool(var: EnvVar) -> Option<bool> {
-    read_env_var(var).and_then(|raw| match raw.as_str() {
-        "true" => Some(true),
-        "false" => Some(false),
-        _ => None,
-    })
+    read_env_var(var).and_then(|raw| parse_env_bool_flag(&raw))
 }
 
 fn graph_snapshot_prune_holder_id() -> String {
