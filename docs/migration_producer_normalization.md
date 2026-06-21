@@ -26,7 +26,7 @@ This commit lands only the **pure normalization helper plus inline unit tests**.
 ### Phase 1 — Producer-identity capture (this commit)
 
 - `normalize_producer_id` available under `crate::policy`.
-- `NormalizedProducerId { kind, canonical, original }` exposes both the canonical key and the original raw string. `attribution_key()` returns the `<kind>:<canonical>` form to use as the index key in feedback tables.
+- `NormalizedProducerId { kind, canonical, original }` exposes the canonical key, best-effort kind metadata, and original raw string. `attribution_key()` returns the canonical key without a kind prefix so heuristic kind drift cannot fragment feedback counters; reporting adapters that need a self-describing public key should compose `<kind>:<canonical>` at that boundary.
 - Inline tests cover pane ids, Agent Mail handles, harnesses, humans, reflection contexts, workflows, empty/whitespace inputs, and `attribution_key` disambiguation across kinds.
 
 ### Phase 2 — Wire normalization at the write site (follow-up bead)
@@ -34,9 +34,10 @@ This commit lands only the **pure normalization helper plus inline unit tests**.
 When `record_outcome`, `record_harmful_feedback`, and `apply_curation_audit` write a new audit row or feedback event:
 
 1. Read the raw producer identifier from the existing source (`actor`, `producer.id`, `derivation_metadata.producer.payload.externalProducer.id`, …).
-2. Call `normalize_producer_id(raw)` and store **both**:
+2. Call `normalize_producer_id(raw)` and store:
    - `producer.id_raw = <original input verbatim>`
    - `producer.id_canonical = <NormalizedProducerId.attribution_key()>`
+   - `producer.id_kind = <NormalizedProducerId.kind.as_str()>` when a schema or report needs explanatory metadata
 3. Continue indexing harmful-feedback by `id_canonical` rather than `id_raw`.
 4. Schema bump: add `producerIdCanonical` (string, non-secret, deterministic) alongside the existing `producerIdRaw`/`actor` fields in `derivation_metadata_json` and the relevant audit event schemas. Bump the schema version (`ee.audit.derived_memory_created.v2`, `ee.outcome.feedback_event.v2`, …) and add a failure-mode fixture for any newly-emitted degradation.
 

@@ -100,7 +100,7 @@ impl NormalizedProducerId {
     /// True when the input was empty or pure whitespace.
     #[must_use]
     pub fn is_unknown_empty(&self) -> bool {
-        self.kind == ProducerIdKind::Unknown && self.canonical.is_empty()
+        self.kind == ProducerIdKind::Unknown && self.original.trim().is_empty()
     }
 }
 
@@ -252,7 +252,11 @@ pub fn normalize_producer_id(raw: &str) -> NormalizedProducerId {
     }
     NormalizedProducerId {
         kind: ProducerIdKind::Unknown,
-        canonical: sanitized,
+        canonical: if sanitized.is_empty() {
+            hashed_unknown_canonical(trimmed)
+        } else {
+            sanitized
+        },
         original,
     }
 }
@@ -320,6 +324,11 @@ fn sanitize_fallback(s: &str) -> String {
         .collect::<String>()
         .trim_matches(['_', '-'])
         .to_owned()
+}
+
+fn hashed_unknown_canonical(s: &str) -> String {
+    let hash = blake3::hash(s.as_bytes()).to_hex().to_string();
+    format!("unknown_{}", &hash[..12])
 }
 
 #[cfg(test)]
@@ -519,6 +528,21 @@ mod tests {
         assert!(!n.canonical.is_empty());
         assert!(!n.canonical.contains('/'));
         assert!(!n.canonical.contains('!'));
+    }
+
+    #[test]
+    fn punctuation_only_unknown_gets_non_empty_stable_key() {
+        let first = norm("!!!");
+        let same = norm(" !!! ");
+        let different = norm("???");
+        let blank = norm("   ");
+
+        assert_eq!(first.kind, ProducerIdKind::Unknown);
+        assert!(first.canonical.starts_with("unknown_"));
+        assert!(!first.is_unknown_empty());
+        assert_eq!(first.canonical, same.canonical);
+        assert_ne!(first.canonical, different.canonical);
+        assert_ne!(first.canonical, blank.canonical);
     }
 
     #[test]

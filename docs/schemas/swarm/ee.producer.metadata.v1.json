@@ -8,7 +8,7 @@
   "additionalProperties": false,
   "properties": {
     "schema": {"type": "string", "const": "ee.producer.metadata.v1"},
-    "sourceSystem": {"type": "string", "enum": ["cli", "cass", "audit", "agent_mail", "recorder", "curation", "verification", "unknown"]},
+    "sourceSystem": {"type": "string", "enum": ["cli", "cass", "audit", "agent_mail", "recorder", "curation", "verification", "coordination_fallback", "unknown"]},
     "identity": {
       "type": "object",
       "required": ["status", "agentName", "harness", "model"],

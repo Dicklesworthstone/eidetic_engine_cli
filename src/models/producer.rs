@@ -37,6 +37,7 @@ pub enum ProducerSourceSystem {
     Recorder,
     Curation,
     Verification,
+    CoordinationFallback,
     Unknown,
 }
 
@@ -51,6 +52,7 @@ impl ProducerSourceSystem {
             Self::Recorder => "recorder",
             Self::Curation => "curation",
             Self::Verification => "verification",
+            Self::CoordinationFallback => "coordination_fallback",
             Self::Unknown => "unknown",
         }
     }
@@ -527,6 +529,36 @@ mod tests {
             metadata.run.workspace_fingerprint.as_deref(),
             Some("repo:abc")
         );
+    }
+
+    #[test]
+    fn coordination_fallback_source_system_round_trips() -> TestResult {
+        let metadata = ProducerMetadata::unknown_agent(
+            ProducerSourceSystem::CoordinationFallback,
+            Some("coord-fallback-20260515"),
+            None,
+            Some("repo:abc"),
+            Some("2026-05-15T11:21:00Z"),
+        );
+
+        let json = metadata.to_json_string()?;
+        assert!(json.contains(r#""sourceSystem":"coordination_fallback""#));
+
+        let decoded: ProducerMetadata = serde_json::from_str(&json)?;
+        assert_eq!(
+            decoded.source_system,
+            ProducerSourceSystem::CoordinationFallback
+        );
+        assert_eq!(
+            decoded.run.run_id.as_deref(),
+            Some("coord-fallback-20260515")
+        );
+        assert_eq!(
+            decoded.run.workspace_fingerprint.as_deref(),
+            Some("repo:abc")
+        );
+        assert_eq!(decoded.observed_at.as_deref(), Some("2026-05-15T11:21:00Z"));
+        Ok(())
     }
 
     #[test]

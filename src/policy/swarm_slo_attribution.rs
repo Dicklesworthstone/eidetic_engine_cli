@@ -205,16 +205,17 @@ pub fn adapt_swarm_slo_coordination_event(
 
 fn producer_attribution(raw: &str) -> SwarmSloProducerAttribution {
     let normalized = crate::policy::normalize_producer_id(raw);
+    let producer_kind = normalized.kind.as_str();
     let canonical_hash = stable_hash(&normalized.canonical);
     let original_hash = stable_hash(&normalized.original);
     let redacted = producer_key_needs_redaction(&normalized);
     let attribution_key = if redacted {
-        format!("{}:{canonical_hash}", normalized.kind.as_str())
+        format!("{producer_kind}:{canonical_hash}")
     } else {
-        normalized.attribution_key()
+        format!("{producer_kind}:{}", normalized.attribution_key())
     };
     SwarmSloProducerAttribution {
-        kind: normalized.kind.as_str(),
+        kind: producer_kind,
         attribution_key,
         canonical_hash,
         original_hash,
