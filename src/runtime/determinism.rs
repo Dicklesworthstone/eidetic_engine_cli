@@ -340,7 +340,18 @@ impl<S> Deterministic<S> {
 
     fn next_word(&mut self, domain: &[u8]) -> u64 {
         let ordinal = self.next_counter();
-        splitmix64(self.seed.as_u64() ^ ordinal ^ stable_domain_word(domain))
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"ee.determinism.rng_word.v2");
+        hasher.update(&self.seed.as_u64().to_be_bytes());
+        hasher.update(&[0]);
+        hasher.update(self.scope.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(domain);
+        hasher.update(&ordinal.to_be_bytes());
+        let digest = hasher.finalize();
+        let mut bytes = [0_u8; 8];
+        bytes.copy_from_slice(&digest.as_bytes()[..8]);
+        u64::from_be_bytes(bytes)
     }
 }
 
@@ -424,20 +435,6 @@ impl<S> RandomnessConsumer for DeterministicOrder<'_, S> {
     fn consumer_kind(&self) -> &'static str {
         "deterministic_order"
     }
-}
-
-fn stable_domain_word(domain: &[u8]) -> u64 {
-    let digest = blake3::hash(domain);
-    let mut bytes = [0_u8; 8];
-    bytes.copy_from_slice(&digest.as_bytes()[..8]);
-    u64::from_be_bytes(bytes)
-}
-
-fn splitmix64(mut value: u64) -> u64 {
-    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    value ^ (value >> 31)
 }
 
 fn escape_scope_label(label: &str) -> String {
@@ -554,6 +551,22 @@ mod tests {
             &escape_scope_label("scope:%#tail"),
             &"scope%3A%25%23tail".to_owned(),
             "escaped mixed delimiter label",
+        )
+    }
+
+    #[test]
+    fn rng_words_domain_separate_seed_from_counter() -> TestResult {
+        let mut seed_one = Deterministic::from_seed(1);
+        let seed_one_first = seed_one.rng().next_u64();
+
+        let mut seed_zero = Deterministic::from_seed(0);
+        let _seed_zero_first = seed_zero.rng().next_u64();
+        let seed_zero_second = seed_zero.rng().next_u64();
+
+        ensure_not_equal(
+            &seed_one_first,
+            &seed_zero_second,
+            "seed and ordinal must not collapse to the same RNG stream position",
         )
     }
 

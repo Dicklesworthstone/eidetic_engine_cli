@@ -134,7 +134,7 @@ where
 }
 
 /// Stable-sort by canonical ULID payload when all keys support it, otherwise
-/// fall back to ordinary lexical key ordering.
+/// fall back to [`compare_ulid_payload_or_lexical`].
 ///
 /// This is intended for production hot paths that should benefit from radix
 /// sorting for normal public `ee` IDs while still accepting synthetic fixtures
@@ -150,7 +150,7 @@ where
     {
         let _ = sort_by_ulid_payload(items, key);
     } else {
-        items.sort_by(|left, right| key(left).cmp(key(right)));
+        items.sort_by(|left, right| compare_ulid_payload_or_lexical(key(left), key(right)));
     }
 }
 
@@ -373,6 +373,27 @@ mod tests {
         assert_eq!(
             sorted_ids,
             vec!["mem_fixture_a", "mem_fixture_b", "mem_fixture_c"]
+        );
+    }
+
+    #[test]
+    fn fallback_sort_preserves_payload_order_for_mixed_canonical_and_fixture_ids() {
+        let mut rows = vec![
+            ("z_01J0000000000000000000000A".to_owned(), 0_usize),
+            ("fixture_between_prefixes".to_owned(), 1),
+            ("a_02J0000000000000000000000A".to_owned(), 2),
+        ];
+
+        sort_by_ulid_payload_or_lexical(&mut rows, |row| &row.0);
+
+        let sorted_ids = rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>();
+        assert_eq!(
+            sorted_ids,
+            vec![
+                "z_01J0000000000000000000000A",
+                "a_02J0000000000000000000000A",
+                "fixture_between_prefixes",
+            ]
         );
     }
 

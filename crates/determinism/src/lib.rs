@@ -321,11 +321,29 @@ fn contains_deterministic_seed_type(tokens: TokenStream) -> bool {
 fn collect_non_literal_token_markers(tokens: TokenStream, output: &mut Vec<NonLiteralToken>) {
     for token in tokens {
         match token {
-            TokenTree::Group(group) => collect_non_literal_token_markers(group.stream(), output),
+            TokenTree::Group(group) => {
+                let delimiter = group.delimiter();
+                if let Some((open, _)) = delimiter_markers(delimiter) {
+                    output.push(NonLiteralToken::Punct(open));
+                }
+                collect_non_literal_token_markers(group.stream(), output);
+                if let Some((_, close)) = delimiter_markers(delimiter) {
+                    output.push(NonLiteralToken::Punct(close));
+                }
+            }
             TokenTree::Ident(ident) => output.push(NonLiteralToken::Ident(ident.to_string())),
             TokenTree::Punct(punct) => output.push(NonLiteralToken::Punct(punct.as_char())),
             TokenTree::Literal(_) => {}
         }
+    }
+}
+
+fn delimiter_markers(delimiter: Delimiter) -> Option<(char, char)> {
+    match delimiter {
+        Delimiter::Parenthesis => Some(('(', ')')),
+        Delimiter::Brace => Some(('{', '}')),
+        Delimiter::Bracket => Some(('[', ']')),
+        Delimiter::None => None,
     }
 }
 
@@ -391,6 +409,7 @@ fn contains_hash_collection_iteration(markers: &[NonLiteralToken], type_name: &s
     hash_collection_bindings_from_markers(markers, type_name)
         .iter()
         .any(|binding| hash_collection_iteration_call(markers, binding))
+        || hash_collection_direct_iteration_call(markers, type_name)
 }
 
 fn hash_collection_bindings_from_markers(
@@ -526,16 +545,12 @@ fn hash_collection_type_path_end(
 }
 
 fn binding_name_before_colon(markers: &[NonLiteralToken], colon_index: usize) -> Option<String> {
-    markers[..colon_index].iter().rev().find_map(|marker| {
-        let NonLiteralToken::Ident(name) = marker else {
-            return None;
-        };
-        if matches!(name.as_str(), "let" | "mut" | "ref" | "_") {
-            None
-        } else {
-            Some(name.clone())
-        }
-    })
+    let binding = ident_at(markers, colon_index.checked_sub(1)?)?;
+    if matches!(binding, "let" | "mut" | "ref" | "_") {
+        None
+    } else {
+        Some(binding.to_owned())
+    }
 }
 
 fn binding_name_before_equals(markers: &[NonLiteralToken], equals_index: usize) -> Option<String> {
@@ -572,6 +587,105 @@ fn hash_collection_iteration_call(markers: &[NonLiteralToken], binding: &str) ->
     ["iter", "keys", "values", "into_iter", "drain"]
         .iter()
         .any(|method| contains_receiver_method_call(markers, binding, method))
+}
+
+fn hash_collection_direct_iteration_call(markers: &[NonLiteralToken], type_name: &str) -> bool {
+    let mut start = 0;
+    while start < markers.len() {
+        let Some(path_end) = hash_collection_type_path_end(markers, start, type_name) else {
+            start += 1;
+            continue;
+        };
+        let Some(method_path_start) = hash_collection_constructor_method_start(markers, path_end)
+        else {
+            start = path_end.max(start + 1);
+            continue;
+        };
+        if !matches!(
+            ident_at(markers, method_path_start),
+            Some("new" | "with_capacity" | "from" | "default")
+        ) {
+            start = method_path_start + 1;
+            continue;
+        }
+        if constructor_chain_has_iteration(markers, method_path_start) {
+            return true;
+        }
+        start = method_path_start + 1;
+    }
+
+    false
+}
+
+fn constructor_chain_has_iteration(markers: &[NonLiteralToken], method_index: usize) -> bool {
+    let Some(mut index) = constructor_invocation_end(markers, method_index) else {
+        return false;
+    };
+
+    while matches!(markers.get(index), Some(NonLiteralToken::Punct('.'))) {
+        let method_name_index = index + 1;
+        if matches!(
+            ident_at(markers, method_name_index),
+            Some("iter" | "keys" | "values" | "into_iter" | "drain")
+        ) {
+            return true;
+        }
+
+        index = method_name_index + 1;
+        if double_colon_at(markers, index)
+            && matches!(markers.get(index + 2), Some(NonLiteralToken::Punct('<')))
+        {
+            let Some(next_index) = skip_angle_group(markers, index + 2) else {
+                return false;
+            };
+            index = next_index;
+        }
+        if matches!(markers.get(index), Some(NonLiteralToken::Punct('('))) {
+            let Some(next_index) = skip_balanced_punct_group(markers, index, '(', ')') else {
+                return false;
+            };
+            index = next_index;
+        }
+    }
+
+    false
+}
+
+fn constructor_invocation_end(markers: &[NonLiteralToken], method_index: usize) -> Option<usize> {
+    let mut cursor = method_index + 1;
+    if double_colon_at(markers, cursor)
+        && matches!(markers.get(cursor + 2), Some(NonLiteralToken::Punct('<')))
+    {
+        cursor = skip_angle_group(markers, cursor + 2)?;
+    }
+
+    match markers.get(cursor) {
+        Some(NonLiteralToken::Punct('(')) => skip_balanced_punct_group(markers, cursor, '(', ')'),
+        _ => None,
+    }
+}
+
+fn skip_balanced_punct_group(
+    markers: &[NonLiteralToken],
+    start: usize,
+    open: char,
+    close: char,
+) -> Option<usize> {
+    let mut depth = 0_usize;
+    for (index, marker) in markers.iter().enumerate().skip(start) {
+        match marker {
+            NonLiteralToken::Punct(ch) if *ch == open => depth += 1,
+            NonLiteralToken::Punct(ch) if *ch == close => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn contains_receiver_method_call(
@@ -943,6 +1057,153 @@ mod tests {
             &typed_map_iteration,
             "HashMap"
         ));
+    }
+
+    #[test]
+    fn hash_collection_iteration_detection_catches_direct_constructor_chains() {
+        let direct_map_iteration = [
+            ident("HashMap"),
+            punct(':'),
+            punct(':'),
+            punct('<'),
+            ident("String"),
+            punct(','),
+            ident("String"),
+            punct('>'),
+            punct(':'),
+            punct(':'),
+            ident("from"),
+            punct('('),
+            ident("entries"),
+            punct('.'),
+            ident("values"),
+            punct('('),
+            punct(')'),
+            punct(')'),
+            punct('.'),
+            ident("iter"),
+        ];
+        let direct_set_iteration = [
+            ident("std"),
+            punct(':'),
+            punct(':'),
+            ident("collections"),
+            punct(':'),
+            punct(':'),
+            ident("HashSet"),
+            punct(':'),
+            punct(':'),
+            ident("default"),
+            punct('('),
+            punct(')'),
+            punct('.'),
+            ident("into_iter"),
+        ];
+
+        assert!(contains_hash_collection_iteration(
+            &direct_map_iteration,
+            "HashMap"
+        ));
+        assert!(contains_hash_collection_iteration(
+            &direct_set_iteration,
+            "HashSet"
+        ));
+    }
+
+    #[test]
+    fn hash_collection_direct_constructor_detection_stops_at_statement_boundary() {
+        let markers = [
+            ident("HashMap"),
+            punct(':'),
+            punct(':'),
+            ident("new"),
+            punct('('),
+            punct(')'),
+            punct(';'),
+            ident("map"),
+            punct('.'),
+            ident("iter"),
+        ];
+
+        assert!(!contains_hash_collection_iteration(&markers, "HashMap"));
+    }
+
+    #[test]
+    fn hash_collection_direct_constructor_detection_ignores_argument_iteration() {
+        let constructor_from_iterator = [
+            ident("HashMap"),
+            punct(':'),
+            punct(':'),
+            ident("from"),
+            punct('('),
+            ident("entries"),
+            punct('.'),
+            ident("iter"),
+            punct('('),
+            punct(')'),
+            punct(')'),
+            punct('.'),
+            ident("len"),
+            punct('('),
+            punct(')'),
+        ];
+        let sibling_iteration_after_constructor_argument = [
+            ident("consume"),
+            punct('('),
+            ident("HashSet"),
+            punct(':'),
+            punct(':'),
+            ident("new"),
+            punct('('),
+            punct(')'),
+            punct(','),
+            ident("items"),
+            punct('.'),
+            ident("iter"),
+            punct('('),
+            punct(')'),
+            punct(')'),
+        ];
+
+        assert!(!contains_hash_collection_iteration(
+            &constructor_from_iterator,
+            "HashMap"
+        ));
+        assert!(!contains_hash_collection_iteration(
+            &sibling_iteration_after_constructor_argument,
+            "HashSet"
+        ));
+    }
+
+    #[test]
+    fn hash_collection_binding_detection_ignores_wildcard_typed_parameters() {
+        let markers = [
+            ident("fn"),
+            ident("ambient"),
+            punct('('),
+            ident("previous"),
+            punct(':'),
+            ident("Vec"),
+            punct('<'),
+            ident("String"),
+            punct('>'),
+            punct(','),
+            ident("_"),
+            punct(':'),
+            ident("HashMap"),
+            punct('<'),
+            ident("String"),
+            punct(','),
+            ident("String"),
+            punct('>'),
+            punct(')'),
+            ident("previous"),
+            punct('.'),
+            ident("iter"),
+        ];
+
+        assert!(hash_collection_bindings_from_markers(&markers, "HashMap").is_empty());
+        assert!(!contains_hash_collection_iteration(&markers, "HashMap"));
     }
 
     #[test]

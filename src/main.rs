@@ -36,19 +36,36 @@ fn has_explicit_machine_output_flag(args: &[OsString]) -> bool {
             return true;
         }
         if let Some(format) = value.strip_prefix("--format=")
-            && !format.is_empty()
+            && is_known_output_format(format)
         {
             return true;
         }
         if value == "--format"
             && let Some(next) = args.peek()
             && next.as_os_str() != std::ffi::OsStr::new("--")
-            && next.to_str().is_some_and(|value| !value.starts_with('-'))
+            && next
+                .to_str()
+                .is_some_and(|value| !value.starts_with('-') && is_known_output_format(value))
         {
             return true;
         }
     }
     false
+}
+
+fn is_known_output_format(value: &str) -> bool {
+    matches!(
+        value,
+        "human"
+            | "json"
+            | "toon"
+            | "jsonl"
+            | "compact"
+            | "hook"
+            | "markdown"
+            | "binary"
+            | "mermaid"
+    )
 }
 
 fn injected_output_flag_for_modes(
@@ -391,6 +408,41 @@ mod tests {
             injected_output_flag_for_modes(&next_flag_after_format, false, true),
             Some(OsString::from("--format=hook")),
             "another flag is not a renderer value"
+        );
+    }
+
+    #[test]
+    fn malformed_format_value_does_not_suppress_mode_injection() {
+        let invalid_split_format = [
+            OsString::from("ee"),
+            OsString::from("--format"),
+            OsString::from("status"),
+        ];
+        assert_eq!(
+            injected_output_flag_for_modes(&invalid_split_format, true, false),
+            Some(OsString::from("--json")),
+            "agent mode should still force JSON for invalid split --format values"
+        );
+        assert_eq!(
+            injected_output_flag_for_modes(&invalid_split_format, false, true),
+            Some(OsString::from("--format=hook")),
+            "hook mode should still force hook output for invalid split --format values"
+        );
+
+        let invalid_equals_format = [
+            OsString::from("ee"),
+            OsString::from("status"),
+            OsString::from("--format=bogus"),
+        ];
+        assert_eq!(
+            injected_output_flag_for_modes(&invalid_equals_format, true, false),
+            Some(OsString::from("--json")),
+            "agent mode should still force JSON for invalid --format=value values"
+        );
+        assert_eq!(
+            injected_output_flag_for_modes(&invalid_equals_format, false, true),
+            Some(OsString::from("--format=hook")),
+            "hook mode should still force hook output for invalid --format=value values"
         );
     }
 
