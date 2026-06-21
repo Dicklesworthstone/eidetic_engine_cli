@@ -127,12 +127,20 @@ impl PathExpander {
     /// when `~` is used, missing environment variable, unclosed `${...}`,
     /// empty variable, invalid variable name.
     pub fn expand(&self, input: &str) -> Result<PathBuf, PathExpansionError> {
-        let after_tilde = self.expand_tilde(input)?;
-        let expanded = self.expand_env(input, &after_tilde)?;
+        if let Some((home, rest)) = self.tilde_home_and_rest(input)? {
+            let expanded_rest = self.expand_env(input, rest)?;
+            let mut joined = home.to_string_lossy().into_owned();
+            push_tilde_rest(&mut joined, &expanded_rest);
+            return Ok(PathBuf::from(joined));
+        }
+        let expanded = self.expand_env(input, input)?;
         Ok(PathBuf::from(expanded))
     }
 
-    fn expand_tilde(&self, input: &str) -> Result<String, PathExpansionError> {
+    fn tilde_home_and_rest<'a>(
+        &'a self,
+        input: &'a str,
+    ) -> Result<Option<(&'a PathBuf, &'a str)>, PathExpansionError> {
         if let Some(rest) = input.strip_prefix('~') {
             if rest.is_empty() || rest.starts_with('/') || (cfg!(windows) && rest.starts_with('\\'))
             {
@@ -144,12 +152,10 @@ impl PathExpander {
                         });
                     }
                 };
-                let mut joined = home.to_string_lossy().into_owned();
-                push_tilde_rest(&mut joined, rest);
-                return Ok(joined);
+                return Ok(Some((home, rest)));
             }
         }
-        Ok(input.to_owned())
+        Ok(None)
     }
 
     fn expand_env(&self, input: &str, source: &str) -> Result<String, PathExpansionError> {
@@ -328,6 +334,24 @@ mod tests {
     fn tilde_slash_does_not_turn_root_home_into_double_slash() {
         let expander = fixed(Some("/"), &[]);
         assert_eq!(expander.expand("~/ee.db"), Ok(PathBuf::from("/ee.db")));
+    }
+
+    #[test]
+    fn tilde_home_prefix_is_not_env_expanded() {
+        let expander = fixed(Some("/home/$agent"), &[("agent", "expanded")]);
+        assert_eq!(
+            expander.expand("~/ee.db"),
+            Ok(PathBuf::from("/home/$agent/ee.db"))
+        );
+    }
+
+    #[test]
+    fn tilde_home_prefix_does_not_require_env_for_literal_dollar() {
+        let expander = fixed(Some("/home/$agent"), &[]);
+        assert_eq!(
+            expander.expand("~/ee.db"),
+            Ok(PathBuf::from("/home/$agent/ee.db"))
+        );
     }
 
     #[test]

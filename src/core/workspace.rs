@@ -199,6 +199,8 @@ pub struct WorkspaceHygieneReport {
     pub staging_groups: Vec<WorkspaceHygieneStagingGroup>,
     #[serde(rename = "pathClassifications")]
     pub classifications: Vec<ClassificationRow>,
+    #[serde(skip)]
+    advisory_classifications: Vec<ClassificationRow>,
     #[serde(rename = "doNotCommit")]
     pub do_not_commit: Vec<String>,
     #[serde(rename = "needsHumanReview")]
@@ -737,6 +739,7 @@ fn build_workspace_hygiene_report_from_inputs(
     let bucket_counts = workspace_hygiene_bucket_counts(&classifications_all);
     let kind_counts = workspace_hygiene_kind_counts(&classifications_all);
     let staging_groups_all = workspace_hygiene_staging_groups(&classifications_all, &coordination);
+    let advisory_classifications = workspace_hygiene_advisory_classifications(&classifications_all);
     let do_not_commit_all =
         workspace_hygiene_paths_for_bucket(&classifications_all, Bucket::DoNotCommit);
     let needs_human_review_all =
@@ -795,6 +798,7 @@ fn build_workspace_hygiene_report_from_inputs(
         kind_counts,
         staging_groups,
         classifications,
+        advisory_classifications,
         do_not_commit,
         needs_human_review,
         output_truncation,
@@ -1144,6 +1148,7 @@ fn workspace_hygiene_paths_for_kind(report: &WorkspaceHygieneReport, kind: Kind)
     report
         .classifications
         .iter()
+        .chain(report.advisory_classifications.iter())
         .filter(|row| row.kind == kind)
         .map(|row| row.path.clone())
         .collect::<BTreeSet<_>>()
@@ -1152,13 +1157,12 @@ fn workspace_hygiene_paths_for_kind(report: &WorkspaceHygieneReport, kind: Kind)
 }
 
 fn workspace_hygiene_is_scratch_only(report: &WorkspaceHygieneReport) -> bool {
+    let scratch_count = workspace_hygiene_count(&report.kind_counts, Kind::Scratch.as_str());
+    let do_not_commit_count =
+        workspace_hygiene_count(&report.bucket_counts, Bucket::DoNotCommit.as_str());
     report.dirty_path_count > 0
-        && report.classifications.len() == report.dirty_path_count
-        && !report.classifications.is_empty()
-        && report
-            .classifications
-            .iter()
-            .all(|row| row.kind == Kind::Scratch)
+        && scratch_count == report.dirty_path_count
+        && do_not_commit_count == report.dirty_path_count
         && report.staging_groups.is_empty()
 }
 
@@ -1725,6 +1729,13 @@ fn workspace_hygiene_kind_counts(rows: &[ClassificationRow]) -> Vec<WorkspaceHyg
         .collect()
 }
 
+fn workspace_hygiene_count(counts: &[WorkspaceHygieneCount], name: &str) -> usize {
+    counts
+        .iter()
+        .find(|count| count.name == name)
+        .map_or(0, |count| count.count)
+}
+
 fn workspace_hygiene_staging_groups(
     rows: &[ClassificationRow],
     coordination: &HygieneCoordinationOverlay,
@@ -1819,6 +1830,15 @@ fn workspace_hygiene_paths_for_bucket(rows: &[ClassificationRow], bucket: Bucket
         }
     }
     paths.into_iter().collect()
+}
+
+fn workspace_hygiene_advisory_classifications(
+    rows: &[ClassificationRow],
+) -> Vec<ClassificationRow> {
+    rows.iter()
+        .filter(|row| matches!(row.kind, Kind::SecretRisk | Kind::Binary))
+        .cloned()
+        .collect()
 }
 
 fn workspace_hygiene_truncate_classifications(
@@ -4499,6 +4519,61 @@ mod tests {
     }
 
     #[test]
+    fn hygiene_agent_harness_detects_high_risk_rows_omitted_from_visible_classifications() {
+        let mut entries = (0..WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS)
+            .map(|index| status_entry(&format!("src/visible/file_{index:05}.rs"), ".", "M"))
+            .collect::<Vec<_>>();
+        entries.push(status_entry("zzzz/secrets.toml", ".", "M"));
+        let mut large_binary = status_entry("zzzz/result.bin", ".", "M");
+        large_binary.metadata = Some(WorkspaceGitPathMetadata {
+            exists: true,
+            file_type: "file".to_owned(),
+            size_bytes: Some(2_000_000),
+            large_file: true,
+            skip_reason: Some("binary".to_owned()),
+        });
+        entries.push(large_binary);
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(entries),
+            &AgentMailCoordinationInput::Available {
+                reservations: Vec::new(),
+                active_agents: Vec::new(),
+            },
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        assert_eq!(
+            report.classifications.len(),
+            WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS
+        );
+        assert!(
+            report
+                .classifications
+                .iter()
+                .all(|row| row.kind == Kind::Source),
+            "visible classifications should contain only the sorted source prefix"
+        );
+        assert!(report.output_truncation.truncated);
+
+        let advisory = workspace_hygiene_agent_harness_advisory(&report, true);
+
+        assert_eq!(advisory.recommended_exit_code, 6);
+        let secret = advisory
+            .reasons
+            .iter()
+            .find(|reason| reason.code == "secret_risk")
+            .expect("secret risk reason");
+        assert_eq!(secret.paths, vec!["zzzz/secrets.toml".to_owned()]);
+        let binary = advisory
+            .reasons
+            .iter()
+            .find(|reason| reason.code == "unknown_high_risk_binary")
+            .expect("binary reason");
+        assert_eq!(binary.paths, vec!["zzzz/result.bin".to_owned()]);
+    }
+
+    #[test]
     fn hygiene_agent_harness_strict_mode_reports_failure_reasons() {
         let agent_mail = AgentMailCoordinationInput::Available {
             reservations: vec![AgentMailReservation {
@@ -4572,6 +4647,43 @@ mod tests {
                 "drift-report.txt".to_owned(),
                 "line-length-probe-output.txt".to_owned()
             ]
+        );
+    }
+
+    #[test]
+    fn hygiene_agent_harness_detects_truncated_scratch_only_commit() {
+        let entries = (0..=WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS)
+            .map(|index| status_entry(&format!("drift-report-{index:05}.txt"), ".", "M"))
+            .collect::<Vec<_>>();
+        let report = hygiene_report_from_parts(
+            hygiene_snapshot(entries),
+            &AgentMailCoordinationInput::Available {
+                reservations: Vec::new(),
+                active_agents: Vec::new(),
+            },
+            BeadsMetadataSignal::Unknown,
+            &[],
+        );
+
+        assert_eq!(
+            report.classifications.len(),
+            WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS
+        );
+        assert_eq!(
+            report.dirty_path_count,
+            WORKSPACE_HYGIENE_MAX_PATH_CLASSIFICATIONS + 1
+        );
+        assert!(report.output_truncation.truncated);
+
+        let advisory = workspace_hygiene_agent_harness_advisory(&report, true);
+
+        assert_eq!(advisory.recommended_exit_code, 6);
+        assert!(
+            advisory
+                .reasons
+                .iter()
+                .any(|reason| reason.code == "scratch_only_commit"),
+            "truncated scratch-only dirty set must still fail strict mode: {advisory:#?}"
         );
     }
 

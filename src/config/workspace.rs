@@ -32,7 +32,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use super::env_registry::{read_os as read_env_var_os, EnvVar};
+use super::env_registry::{EnvVar, read_os as read_env_var_os};
 use serde::{Deserialize, Serialize};
 
 use super::PathExpander;
@@ -948,8 +948,15 @@ impl WorkspaceDiagnostic {
         }
     }
 
-    fn nested_markers(selected_source: WorkspaceResolutionSource, roots: Vec<PathBuf>) -> Self {
-        let selected_root = roots.first().cloned();
+    fn nested_markers(
+        selected_source: WorkspaceResolutionSource,
+        selected_root: PathBuf,
+        roots: Vec<PathBuf>,
+    ) -> Self {
+        let conflicting_root = roots
+            .iter()
+            .find(|root| roots_differ(root, &selected_root))
+            .cloned();
         Self {
             code: "workspace_nested_markers",
             severity: WorkspaceDiagnosticSeverity::Warning,
@@ -960,9 +967,9 @@ impl WorkspaceDiagnostic {
             repair: "Use `--workspace <path>` for writes when working inside nested repositories."
                 .to_owned(),
             selected_source: Some(selected_source),
-            selected_root,
+            selected_root: Some(selected_root),
             conflicting_source: Some(WorkspaceResolutionSource::Discovered),
-            conflicting_root: roots.get(1).cloned(),
+            conflicting_root,
             marker_roots: roots,
         }
     }
@@ -1144,6 +1151,7 @@ pub fn diagnose_workspace_resolution(
     if marker_roots.len() > 1 {
         diagnostics.push(WorkspaceDiagnostic::nested_markers(
             resolution.source,
+            resolution.location.root.clone(),
             marker_roots,
         ));
     }
@@ -1343,10 +1351,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        detect_git_worktree, discover, discover_from_current_dir, installation_salt_path_from_env,
-        resolve_workspace, workspace_scope_from_repository_root, WorkspaceError, WorkspaceLocation,
+        WORKSPACE_ENV_VAR, WORKSPACE_MARKER, WorkspaceError, WorkspaceLocation,
         WorkspaceResolutionMode, WorkspaceResolutionRequest, WorkspaceResolutionSource,
-        WorkspaceScopeKind, WORKSPACE_ENV_VAR, WORKSPACE_MARKER,
+        WorkspaceScopeKind, detect_git_worktree, discover, discover_from_current_dir,
+        installation_salt_path_from_env, resolve_workspace, workspace_scope_from_repository_root,
     };
 
     type TestResult = Result<(), String>;
@@ -1788,6 +1796,39 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_report_nested_markers_with_explicit_selected_root() -> TestResult {
+        let scratch = ScratchDir::new("diag-nested-explicit")?;
+        let outer = scratch.make_dir("outer")?;
+        scratch.make_dir("outer/.ee")?;
+        let inner = scratch.make_dir("outer/inner")?;
+        scratch.make_dir("outer/inner/.ee")?;
+        let leaf = scratch.make_dir("outer/inner/src/leaf")?;
+        let request = WorkspaceResolutionRequest::new(leaf, WorkspaceResolutionMode::ExistingOnly)
+            .with_explicit_workspace(outer.clone());
+
+        let resolved = resolve_workspace(&request).map_err(|error| error.to_string())?;
+        let diagnostics = super::diagnose_workspace_resolution(&request, &resolved);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "workspace_nested_markers")
+            .ok_or_else(|| "missing nested marker diagnostic".to_string())?;
+
+        assert_eq!(resolved.source, WorkspaceResolutionSource::Explicit);
+        assert_eq!(resolved.location.root, outer);
+        assert_eq!(
+            diagnostic.selected_source,
+            Some(WorkspaceResolutionSource::Explicit)
+        );
+        assert_eq!(diagnostic.selected_root, Some(outer));
+        assert_eq!(
+            diagnostic.conflicting_source,
+            Some(WorkspaceResolutionSource::Discovered)
+        );
+        assert_eq!(diagnostic.conflicting_root, Some(inner));
+        Ok(())
+    }
+
+    #[test]
     fn workspace_location_new_computes_config_dir() {
         let location = WorkspaceLocation::new(PathBuf::from("/tmp/example"));
         assert_eq!(location.root, PathBuf::from("/tmp/example"));
@@ -1887,9 +1928,8 @@ mod tests {
     // --- Canonicalization tests (EE-PRIV-WS-001) ---
 
     use super::{
-        canonicalize_workspace_path, create_installation_salt, rand_salt,
-        read_existing_installation_salt, CanonicalizationError, PlatformCaseHandling,
-        SymlinkPolicy,
+        CanonicalizationError, PlatformCaseHandling, SymlinkPolicy, canonicalize_workspace_path,
+        create_installation_salt, rand_salt, read_existing_installation_salt,
     };
 
     #[test]

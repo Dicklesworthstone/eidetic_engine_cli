@@ -89,6 +89,15 @@ pub use workspace::{
 
 pub const SUBSYSTEM: &str = "config";
 
+#[must_use]
+pub(crate) fn parse_env_bool_flag(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 fn trace_minhash_rank_centrality_config(
     phase: &'static str,
@@ -305,8 +314,9 @@ mod tests {
 
     use super::{
         RedactionDefaultSurface, first_existing_config_symlink_component,
-        open_workspace_config_file_for_read, subsystem_name, trace_minhash_rank_centrality_config,
-        workspace_output_redaction_enabled, workspace_redaction_default,
+        open_workspace_config_file_for_read, parse_env_bool_flag, subsystem_name,
+        trace_minhash_rank_centrality_config, workspace_output_redaction_enabled,
+        workspace_redaction_default,
     };
     use crate::models::RedactionLevel;
 
@@ -318,6 +328,25 @@ mod tests {
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
         std::env::temp_dir().join(format!("ee-{label}-{}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn parse_env_bool_flag_accepts_documented_forms() -> TestResult {
+        for value in ["true", "TRUE", " 1 ", "yes", "on"] {
+            ensure_equal(
+                &parse_env_bool_flag(value),
+                &Some(true),
+                &format!("truthy form {value:?}"),
+            )?;
+        }
+        for value in ["false", "FALSE", " 0 ", "no", "off"] {
+            ensure_equal(
+                &parse_env_bool_flag(value),
+                &Some(false),
+                &format!("falsey form {value:?}"),
+            )?;
+        }
+        ensure_equal(&parse_env_bool_flag("maybe"), &None, "invalid form")
     }
 
     fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult
