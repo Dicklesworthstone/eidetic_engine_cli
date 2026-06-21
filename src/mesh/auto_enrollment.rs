@@ -420,9 +420,11 @@ pub fn plan_auto_enrollment(input: AutoEnrollmentInput) -> AutoEnrollmentResult 
     let local_tailnet = input.tailnet_id.as_deref();
     let legacy_tailnet_changed = local_tailnet.is_some_and(|tailnet_id| {
         existing_enabled.iter().any(|peer| {
-            peer.tailnet_id
-                .as_deref()
-                .is_some_and(|existing| existing != tailnet_id)
+            peer.is_auto_managed()
+                && peer
+                    .tailnet_id
+                    .as_deref()
+                    .is_some_and(|existing| existing != tailnet_id)
         })
     });
     let identity_guard = identity_guard_for_input(&input, &existing_enabled);
@@ -1129,6 +1131,31 @@ mod tests {
         assert_eq!(
             result.materialization.peers_to_revoke,
             vec!["nodekey:manual"]
+        );
+    }
+
+    #[test]
+    fn auto_enrollment_replace_manual_ignores_manual_peer_tailnet_drift() {
+        let mut input = input(vec![candidate("nodekey:alpha")]);
+        let mut manual = manual_peer("nodekey:manual");
+        manual.tailnet_id = Some("tailnet-old".to_owned());
+        input.existing_peers = vec![manual];
+        input.options.replace_manual_with_auto = true;
+
+        let result = plan_auto_enrollment(input);
+
+        assert_eq!(result.outcome, "materialized");
+        assert!(result.materialization.manual_to_auto_migration_intended);
+        assert_eq!(
+            result.materialization.peers_to_revoke,
+            vec!["nodekey:manual"]
+        );
+        assert!(
+            !result
+                .degraded
+                .iter()
+                .any(|item| item.code == AUTO_ENROLLMENT_TAILNET_CHANGED_CODE),
+            "manual peer tailnet drift must not trigger stale auto-materialized binding refusal"
         );
     }
 

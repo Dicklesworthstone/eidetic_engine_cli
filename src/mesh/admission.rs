@@ -495,7 +495,9 @@ pub fn admission_status(decisions: &[MeshAdmissionDecision]) -> MeshAdmissionSta
         .filter(|peer| peer.reason == MeshAdmissionReason::BudgetExhausted)
         .count();
     let peer_count = per_peer.len();
-    let local_tier1_unaffected = !decisions.is_empty()
+    let has_peer_pressure =
+        throttled_peer_count > 0 || rejected_peer_count > 0 || budget_exhausted_peer_count > 0;
+    let local_tier1_unaffected = has_peer_pressure
         && decisions
             .iter()
             .all(|decision| decision.local_tier1_unaffected);
@@ -817,6 +819,27 @@ mod tests {
         assert!(!status.local_tier1_unaffected);
         assert!(status.degraded.is_empty());
         assert_eq!(doctor.peer_count, 0);
+        assert_eq!(doctor.posture, MeshAdmissionDoctorPosture::Ok);
+        assert!(doctor.signals.is_empty());
+    }
+
+    #[test]
+    fn allowed_only_status_does_not_emit_peer_pressure_signal() {
+        let limits = MeshAdmissionLimits::conservative_default();
+        let allowed = decide_admission(
+            limits,
+            &MeshPeerAdmissionState::new("peer-ok"),
+            &MeshAdmissionRequest::new("peer-ok", MeshAdmissionRequestKind::TipAdvertise, NOW),
+        );
+        let status = admission_status(&[allowed]);
+        let doctor = admission_doctor_report(&status);
+
+        assert_eq!(status.peer_count, 1);
+        assert_eq!(status.throttled_peer_count, 0);
+        assert_eq!(status.rejected_peer_count, 0);
+        assert_eq!(status.budget_exhausted_peer_count, 0);
+        assert!(!status.local_tier1_unaffected);
+        assert!(status.degraded.is_empty());
         assert_eq!(doctor.posture, MeshAdmissionDoctorPosture::Ok);
         assert!(doctor.signals.is_empty());
     }

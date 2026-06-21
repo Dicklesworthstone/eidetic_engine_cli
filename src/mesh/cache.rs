@@ -898,6 +898,33 @@ pub fn plan_eager_metadata_cache(
 pub fn plan_policy_gated_lazy_body_fetch(
     input: &MeshLazyBodyFetchInput<'_>,
 ) -> MeshLazyBodyFetchPlan {
+    if !input.query_requires_body {
+        return lazy_body_plan(
+            input,
+            MeshLazyBodyFetchAction::KeepMetadataOnly,
+            MeshCacheStatus::MetadataOnly,
+            false,
+            None,
+            MeshCachedBodyLocation::MetadataOnly,
+            Some("lazy_body_not_required"),
+            Vec::new(),
+            "lazy_body_not_required",
+        );
+    }
+    if !input.policy_body_fetch_allowed {
+        return lazy_body_plan(
+            input,
+            MeshLazyBodyFetchAction::KeepMetadataOnly,
+            MeshCacheStatus::MetadataOnly,
+            false,
+            None,
+            MeshCachedBodyLocation::MetadataOnly,
+            Some("body_fetch_denied_by_policy"),
+            vec!["mesh_body_fetch_denied_by_policy"],
+            "body_fetch_denied_by_policy",
+        );
+    }
+
     if let Some(cached_hash) = input.cached_local_body_hash {
         if cached_hash == input.expected_content_hash {
             return lazy_body_plan(
@@ -925,32 +952,6 @@ pub fn plan_policy_gated_lazy_body_fetch(
         );
     }
 
-    if !input.query_requires_body {
-        return lazy_body_plan(
-            input,
-            MeshLazyBodyFetchAction::KeepMetadataOnly,
-            MeshCacheStatus::MetadataOnly,
-            false,
-            None,
-            MeshCachedBodyLocation::MetadataOnly,
-            Some("lazy_body_not_required"),
-            Vec::new(),
-            "lazy_body_not_required",
-        );
-    }
-    if !input.policy_body_fetch_allowed {
-        return lazy_body_plan(
-            input,
-            MeshLazyBodyFetchAction::KeepMetadataOnly,
-            MeshCacheStatus::MetadataOnly,
-            false,
-            None,
-            MeshCachedBodyLocation::MetadataOnly,
-            Some("body_fetch_denied_by_policy"),
-            vec!["mesh_body_fetch_denied_by_policy"],
-            "body_fetch_denied_by_policy",
-        );
-    }
     if !input.remote_body_available {
         return lazy_body_plan(
             input,
@@ -1581,6 +1582,35 @@ mod tests {
     }
 
     #[test]
+    fn lazy_body_fetch_does_not_use_cached_body_when_policy_denies_body() {
+        let expected = blake3_content_hash(b"remote body");
+        let plan = plan_policy_gated_lazy_body_fetch(&MeshLazyBodyFetchInput {
+            body_cache_key: "body-cache-alpha",
+            expected_content_hash: &expected,
+            policy_body_fetch_allowed: false,
+            query_requires_body: true,
+            remote_body_available: true,
+            cached_local_body_hash: Some(&expected),
+            fetched_body: Some(b"remote body"),
+            freshness_ref: Some("seq:42"),
+        });
+
+        assert_eq!(plan.action, MeshLazyBodyFetchAction::KeepMetadataOnly);
+        assert_eq!(plan.cache_status, MeshCacheStatus::MetadataOnly);
+        assert!(!plan.body_persist_allowed);
+        assert_eq!(plan.actual_local_body_hash, None);
+        assert_eq!(plan.denial_reason, Some("body_fetch_denied_by_policy"));
+        assert_eq!(
+            plan.degraded_codes,
+            vec!["mesh_body_fetch_denied_by_policy"]
+        );
+        assert_eq!(
+            plan.provenance.location,
+            MeshCachedBodyLocation::MetadataOnly
+        );
+    }
+
+    #[test]
     fn lazy_body_fetch_waits_until_body_is_needed() {
         let plan = plan_policy_gated_lazy_body_fetch(&MeshLazyBodyFetchInput {
             body_cache_key: "body-cache-alpha",
@@ -1596,6 +1626,32 @@ mod tests {
         assert_eq!(plan.action, MeshLazyBodyFetchAction::KeepMetadataOnly);
         assert_eq!(plan.denial_reason, Some("lazy_body_not_required"));
         assert_eq!(plan.actual_local_body_hash, None);
+    }
+
+    #[test]
+    fn lazy_body_fetch_does_not_use_cached_body_until_query_needs_body() {
+        let expected = blake3_content_hash(b"remote body");
+        let plan = plan_policy_gated_lazy_body_fetch(&MeshLazyBodyFetchInput {
+            body_cache_key: "body-cache-alpha",
+            expected_content_hash: &expected,
+            policy_body_fetch_allowed: true,
+            query_requires_body: false,
+            remote_body_available: true,
+            cached_local_body_hash: Some(&expected),
+            fetched_body: Some(b"remote body"),
+            freshness_ref: Some("seq:42"),
+        });
+
+        assert_eq!(plan.action, MeshLazyBodyFetchAction::KeepMetadataOnly);
+        assert_eq!(plan.cache_status, MeshCacheStatus::MetadataOnly);
+        assert!(!plan.body_persist_allowed);
+        assert_eq!(plan.actual_local_body_hash, None);
+        assert_eq!(plan.denial_reason, Some("lazy_body_not_required"));
+        assert!(plan.degraded_codes.is_empty());
+        assert_eq!(
+            plan.provenance.location,
+            MeshCachedBodyLocation::MetadataOnly
+        );
     }
 
     #[test]

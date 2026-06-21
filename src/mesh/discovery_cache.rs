@@ -18,6 +18,7 @@ pub const DISCOVERY_CACHE_TAILNET_CHANGED_CODE: &str =
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiscoveryCacheRefreshReason {
     Missing,
+    InvalidSchema,
     TtlExpired,
     WorkspaceMismatch,
     TailnetChanged,
@@ -30,6 +31,7 @@ impl DiscoveryCacheRefreshReason {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Missing => "missing",
+            Self::InvalidSchema => "invalid_schema",
             Self::TtlExpired => "ttl_expired",
             Self::WorkspaceMismatch => "workspace_mismatch",
             Self::TailnetChanged => "tailnet_changed",
@@ -44,6 +46,7 @@ impl DiscoveryCacheRefreshReason {
             Self::WorkspaceMismatch => Some(DISCOVERY_CACHE_WORKSPACE_MISMATCH_CODE),
             Self::TailnetChanged => Some(DISCOVERY_CACHE_TAILNET_CHANGED_CODE),
             Self::Missing
+            | Self::InvalidSchema
             | Self::TtlExpired
             | Self::ExplicitRefresh
             | Self::AutoEnrollCompleted => None,
@@ -180,6 +183,9 @@ pub fn evaluate_discovery_cache(
         };
     };
 
+    if entry.schema != DISCOVERY_CACHE_SCHEMA_V1 {
+        return refresh_with(entry, DiscoveryCacheRefreshReason::InvalidSchema);
+    }
     if lookup.auto_enroll_completed {
         return refresh_with(entry, DiscoveryCacheRefreshReason::AutoEnrollCompleted);
     }
@@ -262,6 +268,18 @@ mod tests {
 
         assert!(!decision.hit());
         assert_eq!(decision.refreshed_reason(), Some("ttl_expired"));
+        assert_eq!(decision.degraded_code(), None);
+    }
+
+    #[test]
+    fn discovery_cache_refreshes_on_invalid_schema() {
+        let mut entry = cache(30);
+        entry.schema = "ee.mesh.discovery_cache.v0".to_owned();
+
+        let decision = evaluate_discovery_cache(Some(&entry), lookup(101));
+
+        assert!(!decision.hit());
+        assert_eq!(decision.refreshed_reason(), Some("invalid_schema"));
         assert_eq!(decision.degraded_code(), None);
     }
 

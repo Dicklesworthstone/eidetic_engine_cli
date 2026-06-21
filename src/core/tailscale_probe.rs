@@ -171,8 +171,12 @@ impl TailscaleLocalReport {
     }
 
     #[must_use]
-    pub fn not_installed(method: TailscaleProbeMethod, elapsed_ms: u64) -> Self {
-        let mut report = Self::base(method, elapsed_ms, TailscalePlatform::Other);
+    pub fn not_installed(
+        method: TailscaleProbeMethod,
+        elapsed_ms: u64,
+        platform: TailscalePlatform,
+    ) -> Self {
+        let mut report = Self::base(method, elapsed_ms, platform);
         report.degradations.push(TailscaleProbeDegradation::new(
             TAILSCALE_NOT_INSTALLED_CODE,
             "warning",
@@ -186,9 +190,10 @@ impl TailscaleLocalReport {
     pub fn daemon_unreachable(
         method: TailscaleProbeMethod,
         elapsed_ms: u64,
+        platform: TailscalePlatform,
         detail: impl Into<String>,
     ) -> Self {
-        let mut report = Self::base(method, elapsed_ms, TailscalePlatform::Other);
+        let mut report = Self::base(method, elapsed_ms, platform);
         report.installed = true;
         report.degradations.push(TailscaleProbeDegradation::new(
             TAILSCALE_DAEMON_UNREACHABLE_CODE,
@@ -204,8 +209,9 @@ impl TailscaleLocalReport {
         method: TailscaleProbeMethod,
         elapsed_ms: u64,
         timeout_budget_ms: u64,
+        platform: TailscalePlatform,
     ) -> Self {
-        let mut report = Self::base(method, elapsed_ms, TailscalePlatform::Other);
+        let mut report = Self::base(method, elapsed_ms, platform);
         report.installed = true;
         report.degradations.push(TailscaleProbeDegradation::new(
             TAILSCALE_PROBE_TIMEOUT_CODE,
@@ -221,13 +227,10 @@ impl TailscaleLocalReport {
         path: PathBuf,
         version_raw: impl Into<String>,
         elapsed_ms: u64,
+        platform: TailscalePlatform,
         detail: impl Into<String>,
     ) -> Self {
-        let mut report = Self::base(
-            TailscaleProbeMethod::Cli,
-            elapsed_ms,
-            TailscalePlatform::Other,
-        );
+        let mut report = Self::base(TailscaleProbeMethod::Cli, elapsed_ms, platform);
         report.installed = true;
         report.binary_absolute_path = Some(path);
         report.binary_version_raw = Some(version_raw.into());
@@ -467,7 +470,11 @@ pub fn probe_tailscale_local_with_runners<
         return probe_tailscale_cli_with_runner(cli_config, cli_runner);
     }
 
-    TailscaleLocalReport::not_installed(TailscaleProbeMethod::Socket, 0)
+    TailscaleLocalReport::not_installed(
+        TailscaleProbeMethod::Socket,
+        0,
+        socket_config.platform_hint,
+    )
 }
 
 pub fn probe_tailscale_socket_with_runner<R: TailscaleSocketProbeRunner>(
@@ -485,12 +492,14 @@ pub fn probe_tailscale_socket_with_runner<R: TailscaleSocketProbeRunner>(
             TailscaleProbeMethod::Socket,
             status_output.elapsed_ms,
             config.timeout_ms,
+            config.platform_hint,
         );
     }
     if !status_output.success {
         return TailscaleLocalReport::daemon_unreachable(
             TailscaleProbeMethod::Socket,
             status_output.elapsed_ms,
+            config.platform_hint,
             command_error_detail(&status_output),
         );
     }
@@ -537,7 +546,11 @@ pub fn probe_tailscale_cli_with_runner<R: TailscaleCliProbeRunner>(
     }
 
     let Some(binary_path) = resolve_tailscale_binary(config, runner) else {
-        return TailscaleLocalReport::not_installed(TailscaleProbeMethod::Cli, 0);
+        return TailscaleLocalReport::not_installed(
+            TailscaleProbeMethod::Cli,
+            0,
+            config.platform_hint,
+        );
     };
     if let Err(degradation) = validate_binary_path(&binary_path) {
         let mut report =
@@ -554,6 +567,7 @@ pub fn probe_tailscale_cli_with_runner<R: TailscaleCliProbeRunner>(
             TailscaleProbeMethod::Cli,
             version_output.elapsed_ms,
             config.timeout_ms,
+            config.platform_hint,
         );
     }
     let version_raw = String::from_utf8_lossy(&version_output.stdout).to_string();
@@ -568,6 +582,7 @@ pub fn probe_tailscale_cli_with_runner<R: TailscaleCliProbeRunner>(
             binary_path,
             version_raw,
             version_output.elapsed_ms,
+            config.platform_hint,
             detail,
         );
     }
@@ -579,6 +594,7 @@ pub fn probe_tailscale_cli_with_runner<R: TailscaleCliProbeRunner>(
             TailscaleProbeMethod::Cli,
             version_output.elapsed_ms,
             config.timeout_ms,
+            config.platform_hint,
         );
     };
 
@@ -595,12 +611,14 @@ pub fn probe_tailscale_cli_with_runner<R: TailscaleCliProbeRunner>(
             TailscaleProbeMethod::Cli,
             status_elapsed_ms,
             config.timeout_ms,
+            config.platform_hint,
         );
     }
     if !status_output.success {
         return TailscaleLocalReport::daemon_unreachable(
             TailscaleProbeMethod::Cli,
             status_elapsed_ms,
+            config.platform_hint,
             command_error_detail(&status_output),
         );
     }
@@ -652,6 +670,7 @@ pub fn classify_status_payload(input: TailscaleStatusProbeInput<'_>) -> Tailscal
             return TailscaleLocalReport::daemon_unreachable(
                 input.method,
                 input.elapsed_ms,
+                input.platform_hint,
                 format!("malformed status JSON ({error})"),
             );
         }
@@ -796,13 +815,26 @@ fn resolve_tailscale_binary<R: TailscaleCliProbeRunner>(
     runner: &R,
 ) -> Option<PathBuf> {
     if let Some(path) = &config.binary_override {
-        return Some(path.clone());
+        if let Some(path) = normalize_tailscale_binary_override(path) {
+            return Some(path);
+        }
     }
     config
         .binary_candidates
         .iter()
         .find(|path| path.is_absolute() && runner.binary_exists(path))
         .cloned()
+}
+
+fn normalize_tailscale_binary_override(path: &Path) -> Option<PathBuf> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    if let Some(raw) = path.to_str() {
+        let trimmed = raw.trim();
+        return (!trimmed.is_empty()).then(|| PathBuf::from(trimmed));
+    }
+    Some(path.to_path_buf())
 }
 
 fn resolve_tailscale_socket<R: TailscaleSocketProbeRunner>(

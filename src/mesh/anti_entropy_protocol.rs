@@ -875,14 +875,17 @@ pub fn build_sync_summary(input: MeshSyncSummaryInput) -> MeshAntiEntropySyncSum
             .saturating_add(outcome.ranges_fulfilled);
     }
 
+    let mut peer_aliases = counts_by_peer.keys().cloned().collect::<BTreeSet<_>>();
     let mut degraded = input.degraded.into_iter().collect::<BTreeSet<_>>();
     let mut blocked_ranges = input
         .blocked_ranges
         .into_iter()
         .map(|range| {
+            let peer_alias = peer_alias(&range.key.peer_id);
+            peer_aliases.insert(peer_alias.clone());
             degraded.insert(range.reason.degraded_code().to_owned());
             MeshBlockedRangeSummary {
-                peer_alias: peer_alias(&range.key.peer_id),
+                peer_alias,
                 origin_alias: range.key.origin.redacted_alias(),
                 start_seq: range.key.start_seq,
                 end_seq: range.key.end_seq,
@@ -905,7 +908,7 @@ pub fn build_sync_summary(input: MeshSyncSummaryInput) -> MeshAntiEntropySyncSum
         schema: MESH_ANTI_ENTROPY_SYNC_SUMMARY_SCHEMA_V1,
         last_round_completed_at: input.last_round_completed_at,
         origins_tracked: input.origins_tracked,
-        peer_count: counts_by_peer.len(),
+        peer_count: peer_aliases.len(),
         per_peer_counts: counts_by_peer.into_values().collect(),
         backoff_posture: MeshBackoffPosture {
             initial_ms: input.retry_policy.initial_ms,

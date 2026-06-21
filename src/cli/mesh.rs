@@ -1057,11 +1057,18 @@ fn build_tailscale_autodiscovery_report_from_local(
     local: Option<&TailscaleLocalReport>,
 ) -> TailscaleAutodiscoveryReport {
     let workspace_path = cli.resolve_workspace();
-    let lists = load_workspace_lists(&workspace_path).unwrap_or_default();
+    let policy_state = load_discovery_policy_state(&workspace_path, None, None).ok();
+    let discovery_mode = policy_state.as_ref().map_or_else(
+        || DiscoveryMode::from_env_discovery(|_| {}),
+        |state| state.discovery_mode,
+    );
+    let lists = policy_state
+        .map(|state| state.lists)
+        .unwrap_or_else(|| load_workspace_lists(&workspace_path).unwrap_or_default());
     let mut config = TailscaleAutodiscoveryConfig::new(
         snapshot.mesh_enabled,
         &snapshot.workspace_id,
-        DiscoveryMode::from_env_discovery(|_| {}),
+        discovery_mode,
         &lists.allowlist,
         &lists.denylist,
     );
@@ -3922,6 +3929,103 @@ mod tests {
 
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0].code, MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE);
+    }
+
+    #[test]
+    fn autodiscovery_uses_persisted_workspace_discovery_policy() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace_path = tmp.path();
+        let node_key = "nodekey:00000000000000000000000000000000000000000000000000000000000000aa";
+        write_workspace_policy_modes(
+            &discovery_policy_config_path(workspace_path),
+            DiscoveryMode::Allowlist,
+            DiscoveryMode::ServiceTag,
+        )
+        .expect("write discovery policy config");
+        write_node_key_list(
+            &workspace_path.join(".ee").join(DISCOVERY_ALLOWLIST_FILE),
+            &std::collections::BTreeSet::from([node_key.to_owned()]),
+        )
+        .expect("write discovery allowlist");
+
+        let cli = Cli::try_parse_from([
+            "ee",
+            "--workspace",
+            workspace_path.to_str().expect("utf8 workspace path"),
+            "--json",
+        ])
+        .expect("parse cli");
+        let snapshot = MeshForegroundSnapshot {
+            workspace_id: "wsp_test_workspace".to_owned(),
+            workspace_path: workspace_path.display().to_string(),
+            database_path: workspace_path
+                .join(".ee")
+                .join("ee.db")
+                .display()
+                .to_string(),
+            initialized: true,
+            mesh_enabled: true,
+            mode: "cache".to_owned(),
+            storage: MeshStorageCounts::default(),
+            peers: Vec::new(),
+            cursors: Vec::new(),
+            events: Vec::new(),
+            degraded: Vec::new(),
+        };
+        let local = TailscaleLocalReport {
+            schema: crate::core::tailscale_probe::TAILSCALE_LOCAL_SCHEMA_V1,
+            installed: true,
+            daemon_reachable: true,
+            authenticated: true,
+            binary_authentic: true,
+            binary_version_raw: None,
+            binary_absolute_path: None,
+            shields_up: Some(false),
+            tailnet_id: Some("tailnet-alpha".to_owned()),
+            tailnet_display_name: Some("alpha.example".to_owned()),
+            self_node_key: Some(
+                "nodekey:0000000000000000000000000000000000000000000000000000000000000001"
+                    .to_owned(),
+            ),
+            self_tailscale_ip: Some("100.64.0.1".to_owned()),
+            self_magic_dns_name: Some("self.tailnet.test.".to_owned()),
+            self_advertised_tags: Vec::new(),
+            peers: vec![TailscalePeerReport {
+                node_key: node_key.to_owned(),
+                tailscale_ips: vec!["100.64.0.2".to_owned()],
+                magic_dns_name: Some("allowed.tailnet.test.".to_owned()),
+                hostname: Some("allowed".to_owned()),
+                advertised_tags: Vec::new(),
+                online: Some(true),
+                ee_capability: Some(TailscalePeerEeCapability {
+                    ee_version: "0.2.0".to_owned(),
+                    ee_protocol_version: "1.0".to_owned(),
+                    workspace_ids: vec!["wsp_test_workspace".to_owned()],
+                    respond: true,
+                    latency_ms: 1,
+                }),
+            }],
+            version: Some("1.66.0".to_owned()),
+            probe_method: TailscaleProbeMethod::Cli,
+            probe_elapsed_ms: 10,
+            platform: TailscalePlatform::Linux,
+            degradations: Vec::new(),
+        };
+
+        let report = build_tailscale_autodiscovery_report_from_local(&cli, &snapshot, Some(&local));
+
+        assert_eq!(report.probed_peer_count, 1);
+        assert_eq!(report.eligible_peer_count, 1);
+        assert_eq!(report.ee_capable_peers[0].node_key, node_key);
+        assert_eq!(
+            report.ee_capable_peers[0].discovery_policy_decision,
+            "allowlisted"
+        );
+        assert!(
+            report.skipped_peers.is_empty(),
+            "{:?}",
+            report.skipped_peers
+        );
     }
 
     #[test]

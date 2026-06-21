@@ -18,6 +18,10 @@ use super::{Cli, write_domain_error, write_stdout};
 const SHARE_PREVIEW_COMMAND: &str = "share preview";
 const SHARE_CONSENT_ACTION: &str = "mesh.share.consent";
 const EMBEDDING_ESTIMATED_BYTES: u64 = 1536 * 4;
+const SHARE_EVENT_CONSENT_RECORDED: &str = "consent_recorded";
+const SHARE_EVENT_EXPORT_AFTER_CONSENT: &str = "export_after_consent";
+const SHARE_EVENT_EXPORT_NOT_PERFORMED: &str = "export_not_performed";
+const SHARE_EVENT_PREVIEW_GENERATED: &str = "preview_generated";
 
 /// Subcommands for `ee share`.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -322,6 +326,7 @@ fn record_share_consent(
     report: &SharePreviewReport,
 ) -> Result<ShareConsentRecord, DomainError> {
     let audit = share_preview_consent_audit(report, true, false, args.consent_reason);
+    let events = share_consent_audit_events(&audit);
     let details = json!({
         "schema": audit.schema,
         "targetPeerId": &audit.target_peer_id,
@@ -330,10 +335,7 @@ fn record_share_consent(
         "exportAfterConsent": audit.export_after_consent,
         "dryRun": audit.dry_run,
         "reason": &audit.reason,
-        "events": [
-            "consent_recorded",
-            "export_after_consent"
-        ]
+        "events": events,
     });
     let audit_id = generate_audit_id();
     connection
@@ -351,6 +353,15 @@ fn record_share_consent(
         .map_err(|error| storage_error("Failed to record share-preview consent audit", error))?;
 
     Ok(ShareConsentRecord { audit_id, audit })
+}
+
+fn share_consent_audit_events(audit: &SharePreviewConsentAudit) -> Vec<&'static str> {
+    let export_event = if audit.export_after_consent {
+        SHARE_EVENT_EXPORT_AFTER_CONSENT
+    } else {
+        SHARE_EVENT_EXPORT_NOT_PERFORMED
+    };
+    vec![SHARE_EVENT_CONSENT_RECORDED, export_event]
 }
 
 fn write_share_preview_report<W>(
@@ -428,24 +439,26 @@ fn share_preview_events(
 ) -> Vec<JsonValue> {
     let mut events = vec![
         json!({
-            "event": "preview_generated",
+            "event": SHARE_EVENT_PREVIEW_GENERATED,
             "previewHash": preview_hash,
         }),
         json!({
-            "event": "export_not_performed",
+            "event": SHARE_EVENT_EXPORT_NOT_PERFORMED,
             "dryRun": true,
         }),
     ];
     if let Some(record) = consent_record {
         events.push(json!({
-            "event": "consent_recorded",
+            "event": SHARE_EVENT_CONSENT_RECORDED,
             "auditId": &record.audit_id,
             "previewHash": &record.audit.preview_hash,
         }));
-        events.push(json!({
-            "event": "export_after_consent",
-            "performed": record.audit.export_after_consent,
-        }));
+        if record.audit.export_after_consent {
+            events.push(json!({
+                "event": SHARE_EVENT_EXPORT_AFTER_CONSENT,
+                "performed": true,
+            }));
+        }
     }
     events
 }
@@ -739,6 +752,46 @@ mod tests {
                 .iter()
                 .all(|example| !example.redacted_preview.contains("sk-proj"))
         );
+    }
+
+    #[test]
+    fn consent_preview_events_do_not_claim_export_when_dry_run() {
+        let memories = [stored_memory(
+            "mem_sharepreview00000000000005",
+            "Public release note can be shared after review.",
+        )];
+        let candidates = share_preview_candidates(&memories, true, false);
+        let report = build_share_preview(&SharePreviewInput {
+            target_peer_id: "peer_alpha",
+            candidates: &candidates,
+            consent_required: true,
+            max_examples: 1,
+        });
+        let audit = share_preview_consent_audit(&report, true, false, "reviewed");
+        let audit_events = share_consent_audit_events(&audit);
+
+        assert_eq!(
+            audit_events,
+            vec![
+                SHARE_EVENT_CONSENT_RECORDED,
+                SHARE_EVENT_EXPORT_NOT_PERFORMED
+            ]
+        );
+
+        let record = ShareConsentRecord {
+            audit_id: "aud_sharepreview00000000000001".to_owned(),
+            audit,
+        };
+        let events = share_preview_events("blake3:preview", Some(&record));
+        let event_names = events
+            .iter()
+            .filter_map(|event| event.get("event").and_then(JsonValue::as_str))
+            .collect::<Vec<_>>();
+
+        assert!(event_names.contains(&SHARE_EVENT_PREVIEW_GENERATED));
+        assert!(event_names.contains(&SHARE_EVENT_EXPORT_NOT_PERFORMED));
+        assert!(event_names.contains(&SHARE_EVENT_CONSENT_RECORDED));
+        assert!(!event_names.contains(&SHARE_EVENT_EXPORT_AFTER_CONSENT));
     }
 
     #[test]
