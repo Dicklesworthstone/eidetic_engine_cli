@@ -282,7 +282,11 @@ impl PackL2Cache {
         publish_cache_entry_temp_file(&temp_path, &path)?;
         touch_cache_entry_mtime_best_effort(&path, stored_at_epoch_seconds);
         sync_directory(&self.root)?;
-        let eviction = self.evict_best_effort_at(stored_at_epoch_seconds)?;
+        let duplicate_cleanup = self.prune_duplicate_key_entries_best_effort(key, &path)?;
+        let eviction = merge_cache_cleanup_reports(
+            duplicate_cleanup,
+            self.evict_best_effort_at(stored_at_epoch_seconds)?,
+        );
 
         Ok(PackL2WriteReport {
             key: key.to_owned(),
@@ -387,7 +391,11 @@ impl PackL2Cache {
         publish_cache_entry_temp_file(&temp_path, &path)?;
         touch_cache_entry_mtime_best_effort(&path, stored_at_epoch_seconds);
         sync_directory(&self.root)?;
-        let eviction = self.evict_best_effort_at(stored_at_epoch_seconds)?;
+        let duplicate_cleanup = self.prune_duplicate_key_entries_best_effort(key, &path)?;
+        let eviction = merge_cache_cleanup_reports(
+            duplicate_cleanup,
+            self.evict_best_effort_at(stored_at_epoch_seconds)?,
+        );
 
         Ok(PackL2WriteReport {
             key: key.to_owned(),
@@ -536,6 +544,76 @@ impl PackL2Cache {
                 .then_with(|| left_path.cmp(right_path))
         });
         Ok(candidates.into_iter().map(|(path, _)| path).collect())
+    }
+
+    fn prune_duplicate_key_entries_best_effort(
+        &self,
+        key: &str,
+        retained_path: &Path,
+    ) -> Result<PackL2EvictionReport, PackL2CacheError> {
+        ensure_no_symlink_components(&self.root, "inspect_root")?;
+        let key_stem = cache_file_stem(key);
+        let mut report = PackL2EvictionReport::default();
+        let mut bytes_current = 0_u64;
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(report),
+            Err(error) => {
+                return Err(PackL2CacheError::Io {
+                    path: self.root.clone(),
+                    operation: "read_dir",
+                    source: error,
+                });
+            }
+        };
+
+        for entry in entries {
+            let Ok(entry) = entry else {
+                report.skipped = report.skipped.saturating_add(1);
+                continue;
+            };
+            let path = entry.path();
+            if path == retained_path {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|file_name| file_name.to_str()) else {
+                continue;
+            };
+            if file_name != cache_file_name(key)
+                && !body_hashed_file_name_matches(file_name, &key_stem)
+            {
+                continue;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                report.skipped = report.skipped.saturating_add(1);
+                continue;
+            };
+            if file_type.is_symlink() {
+                report.skipped = report.skipped.saturating_add(1);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                report.skipped = report.skipped.saturating_add(1);
+                continue;
+            };
+            let byte_len = metadata.len();
+            report.bytes_before = report.bytes_before.saturating_add(byte_len);
+            bytes_current = bytes_current.saturating_add(byte_len);
+            let candidate = EvictionCandidate {
+                path,
+                byte_len,
+                stored_epoch_seconds: 0,
+                last_used_epoch_seconds: 0,
+                expired: false,
+            };
+            remove_eviction_candidate_file(&candidate, &mut report, &mut bytes_current);
+        }
+
+        report.bytes_after = bytes_current;
+        Ok(report)
     }
 
     fn temp_path(
@@ -839,6 +917,23 @@ fn record_eviction_candidate_removed(
     report.removed = report.removed.saturating_add(1);
     report.bytes_removed = report.bytes_removed.saturating_add(candidate.byte_len);
     *bytes_current = bytes_current.saturating_sub(candidate.byte_len);
+}
+
+fn merge_cache_cleanup_reports(
+    duplicate_cleanup: PackL2EvictionReport,
+    eviction: PackL2EvictionReport,
+) -> PackL2EvictionReport {
+    PackL2EvictionReport {
+        removed: duplicate_cleanup.removed.saturating_add(eviction.removed),
+        skipped: duplicate_cleanup.skipped.saturating_add(eviction.skipped),
+        bytes_before: eviction
+            .bytes_before
+            .saturating_add(duplicate_cleanup.bytes_removed),
+        bytes_removed: duplicate_cleanup
+            .bytes_removed
+            .saturating_add(eviction.bytes_removed),
+        bytes_after: eviction.bytes_after,
+    }
 }
 
 fn decode_pack_l2_cache_entry(
@@ -1557,6 +1652,53 @@ mod tests {
             }
             PackL2CacheLookup::Miss(miss) => {
                 return Err(format!("newest duplicate-key entry should hit: {miss:?}"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn same_second_compressed_rewrite_prunes_stale_same_key_entry() -> TestResult {
+        let (_temp, cache) = cache(10_000, Duration::from_secs(10_000))?;
+        let key = "blake3:same-second-repeat";
+        let old_pack = json!({"payload": "old"});
+        let new_pack = json!({"payload": "new"});
+
+        let old_report = cache
+            .put_compressed_at(key, &old_pack, 100)
+            .map_err(|error| error.to_string())?;
+        let new_report = cache
+            .put_compressed_at(key, &new_pack, 100)
+            .map_err(|error| error.to_string())?;
+
+        assert_ne!(
+            old_report.path, new_report.path,
+            "different same-second payloads should publish distinct body-hashed entries"
+        );
+        assert!(
+            !old_report.path.exists(),
+            "a same-second rewrite must remove the prior same-key entry"
+        );
+        assert!(
+            new_report.path.exists(),
+            "same-second rewrite must retain the newly published entry"
+        );
+        assert_eq!(
+            new_report.eviction.removed, 1,
+            "same-key cleanup should be counted in the write cleanup report"
+        );
+
+        let lookup = cache.get_at(key, 100).map_err(|error| error.to_string())?;
+        match lookup {
+            PackL2CacheLookup::Hit(hit) => {
+                assert_eq!(hit.path, new_report.path);
+                assert_eq!(hit.stored_at_epoch_seconds, 100);
+                assert_eq!(hit.pack_json, new_pack);
+            }
+            PackL2CacheLookup::Miss(miss) => {
+                return Err(format!(
+                    "same-second rewrite should hit the retained entry: {miss:?}"
+                ));
             }
         }
         Ok(())

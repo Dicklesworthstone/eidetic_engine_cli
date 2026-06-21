@@ -775,7 +775,7 @@ fn redact_search_projection_ref(value: &str) -> String {
     redact_search_projection_absolute_path_like_segments(&secret_redacted)
 }
 
-fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
+pub(crate) fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
     const REDACTED_PATH: &str = "[REDACTED_PATH]";
     const UNIX_PATH_PREFIXES: &[&str] = &[
         "/home/",

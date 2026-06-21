@@ -8449,7 +8449,7 @@ fn stored_embedding_metadata_record_from_entry(
         return Ok(None);
     };
 
-    if !metadata_json.contains(EMBEDDING_METADATA_SCHEMA_V1) {
+    if !metadata_json_declares_embedding_metadata_schema(metadata_json)? {
         return Ok(None);
     }
 
@@ -8464,6 +8464,19 @@ fn stored_embedding_metadata_record_from_entry(
         registry: entry,
         metadata,
     }))
+}
+
+fn metadata_json_declares_embedding_metadata_schema(metadata_json: &str) -> Result<bool> {
+    let value: serde_json::Value =
+        serde_json::from_str(metadata_json).map_err(|error| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: format!("model registry metadata_json is invalid JSON: {error}"),
+        })?;
+
+    Ok(value
+        .get("schema")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|schema| schema == EMBEDDING_METADATA_SCHEMA_V1))
 }
 
 fn stored_model_registry_entry_from_row(row: &Row) -> Result<StoredModelRegistryEntry> {
@@ -16313,12 +16326,15 @@ fn build_audit_entry(
     input: &CreateAuditInput,
     timestamp: String,
     prev_row_hash: Option<String>,
+    mutation_kind_override: Option<&str>,
 ) -> StoredAuditEntry {
     let surface = input
         .target_type
         .clone()
         .unwrap_or_else(|| audit_surface_from_action(&input.action));
-    let mutation_kind = input.action.clone();
+    let mutation_kind = mutation_kind_override
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| input.action.clone());
     let before_hash = audit_detail_hash(
         input.details.as_deref(),
         &[
@@ -16442,6 +16458,26 @@ fn push_audit_insert_params(
 impl DbConnection {
     /// Insert a new audit log entry.
     pub fn insert_audit(&self, id: &str, input: &CreateAuditInput) -> Result<()> {
+        self.insert_audit_internal(id, input, None)
+    }
+
+    /// Insert a new audit log entry with an explicit mutation-kind
+    /// classification.
+    pub fn insert_audit_with_mutation_kind(
+        &self,
+        id: &str,
+        input: &CreateAuditInput,
+        mutation_kind: &str,
+    ) -> Result<()> {
+        self.insert_audit_internal(id, input, Some(mutation_kind))
+    }
+
+    fn insert_audit_internal(
+        &self,
+        id: &str,
+        input: &CreateAuditInput,
+        mutation_kind: Option<&str>,
+    ) -> Result<()> {
         // For file databases, the hash-read and row-insert must be atomic under the
         // write-owner flock so concurrent callers cannot fork the audit chain.
         // When already inside with_transaction() (depth > 0), the outer flock already
@@ -16466,8 +16502,13 @@ impl DbConnection {
                 // already provides atomicity, so fall through to the direct path.
                 match self.with_transaction(|| {
                     let prev_row_hash = self.latest_audit_row_hash()?;
-                    let entry =
-                        build_audit_entry(id, input, Utc::now().to_rfc3339(), prev_row_hash);
+                    let entry = build_audit_entry(
+                        id,
+                        input,
+                        Utc::now().to_rfc3339(),
+                        prev_row_hash,
+                        mutation_kind,
+                    );
                     self.insert_prepared_audit_entry(&entry)?;
                     Ok(())
                 }) {
@@ -16477,7 +16518,13 @@ impl DbConnection {
             }
         }
         let prev_row_hash = self.latest_audit_row_hash()?;
-        let entry = build_audit_entry(id, input, Utc::now().to_rfc3339(), prev_row_hash);
+        let entry = build_audit_entry(
+            id,
+            input,
+            Utc::now().to_rfc3339(),
+            prev_row_hash,
+            mutation_kind,
+        );
         self.insert_prepared_audit_entry(&entry)?;
         Ok(())
     }
@@ -16498,7 +16545,8 @@ impl DbConnection {
             let mut prepared_entries = Vec::with_capacity(entries.len());
             for (id, input) in entries {
                 let timestamp = next_audit_batch_timestamp(&mut last_timestamp);
-                let mut entry = build_audit_entry(id, input, timestamp, prev_row_hash.clone());
+                let mut entry =
+                    build_audit_entry(id, input, timestamp, prev_row_hash.clone(), None);
                 let this_row_hash = compute_audit_row_hash(&entry);
                 entry.this_row_hash = Some(this_row_hash.clone());
                 prev_row_hash = Some(this_row_hash);
@@ -28043,6 +28091,80 @@ mod tests {
             &names,
             &vec!["model2vec-base"],
             "list includes only parsed embedding metadata records",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn embedding_metadata_records_skip_non_embedding_schema_mentions() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let input = embedding_metadata_input(ModelProvider::Model2Vec, "model2vec-base");
+        connection.insert_embedding_metadata_record("mdl_91234567890123456789012345", &input)?;
+
+        let mut generic = model_registry_input(
+            ModelProvider::Hash,
+            "hash-mentions-embedding-schema",
+            ModelPurpose::Embedding,
+        );
+        generic.metadata_json = Some(
+            r#"{"schema":"ee.model_registry.v1","note":"mentions ee.embedding.metadata.v1 without declaring it"}"#
+                .to_string(),
+        );
+        connection.insert_model_registry_entry("mdl_92234567890123456789012345", &generic)?;
+
+        let generic_record =
+            connection.get_embedding_metadata_record("mdl_92234567890123456789012345")?;
+        ensure(
+            generic_record.is_none(),
+            "generic model metadata should not be parsed as embedding metadata",
+        )?;
+
+        let records =
+            connection.list_embedding_metadata_records("wsp_01234567890123456789012345")?;
+        let names: Vec<&str> = records
+            .iter()
+            .map(|record| record.registry.model_name.as_str())
+            .collect();
+        ensure_equal(
+            &names,
+            &vec!["model2vec-base"],
+            "list skips generic metadata even when another field mentions the embedding schema",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn embedding_metadata_records_reject_declared_embedding_schema_corruption() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let mut corrupt = model_registry_input(
+            ModelProvider::Model2Vec,
+            "model2vec-corrupt-metadata",
+            ModelPurpose::Embedding,
+        );
+        corrupt.metadata_json =
+            Some(r#"{"schema":"ee.embedding.metadata.v1","dimension":384}"#.to_string());
+        connection.insert_model_registry_entry("mdl_95234567890123456789012345", &corrupt)?;
+
+        let result = connection.get_embedding_metadata_record("mdl_95234567890123456789012345");
+        ensure(
+            matches!(
+                result,
+                Err(DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    ..
+                })
+            ),
+            "declared embedding metadata schema must still validate fail-closed",
         )?;
 
         connection.close()?;

@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::Serialize;
-use sqlmodel_core::Value;
+use sqlmodel_core::{Row, Value};
 
 use crate::db::shard::{
     self, SHARD_FANOUT_CATALOG_SCHEMA_VERSION, SHARD_FANOUT_MIGRATION_AUDIT_SCHEMA_V1,
@@ -34,7 +34,10 @@ use crate::db::shard::{
     ShardFanoutMigrationWorkspacePlan, ShardFanoutPreserveSourceError,
     ShardFanoutPreservedSourceReport,
 };
-use crate::db::{DatabaseConfig, DbConnection, MIGRATIONS, MigrationRecord, WalCheckpointMode};
+use crate::db::{
+    DatabaseConfig, DbConnection, DbError, DbOperation, MIGRATIONS, MigrationRecord,
+    StoredAuditEntry, WalCheckpointMode, compute_audit_row_hash,
+};
 use crate::models::DomainError;
 
 /// Schema id for the apply-mode report. Distinct from the planner schema so
@@ -495,6 +498,9 @@ fn copy_workspace_to_shard(
     attach_source_database(&target, &plan.source_database_path)?;
     let copy_result = target.with_transaction(|| {
         for table in ordered_copy_tables(source_tables, &target_tables) {
+            if table == "audit_log" {
+                continue;
+            }
             copy_table_for_workspace(
                 &target,
                 &table,
@@ -503,7 +509,14 @@ fn copy_workspace_to_shard(
                 &target_tables,
             )?;
         }
-        insert_migration_audit_event(&target, plan, workspace, shard_id)?;
+        copy_rechained_audit_log_for_workspace(
+            &target,
+            plan,
+            workspace,
+            shard_id,
+            source_tables,
+            &target_tables,
+        )?;
         Ok(())
     });
     let detach_result = target.execute_raw("DETACH DATABASE \"source\"");
@@ -851,12 +864,79 @@ fn copy_table_for_workspace(
     target.execute_raw(&sql)
 }
 
+fn copy_rechained_audit_log_for_workspace(
+    target: &DbConnection,
+    plan: &ShardFanoutMigrationPlan,
+    workspace: &ShardFanoutMigrationWorkspacePlan,
+    shard_id: &str,
+    source_tables: &BTreeSet<String>,
+    target_tables: &BTreeSet<String>,
+) -> crate::db::Result<()> {
+    if !target_tables.contains("audit_log") {
+        return Ok(());
+    }
+
+    let migration_audit_id = migration_audit_id(&workspace.workspace_id);
+    let mut prev_row_hash = Some(insert_migration_audit_event(
+        target,
+        plan,
+        workspace,
+        shard_id,
+        &migration_audit_id,
+    )?);
+
+    if !source_tables.contains("audit_log") {
+        return Ok(());
+    }
+
+    let source_columns = table_columns_db(target, "audit_log", Some("source"))?;
+    if !source_columns.iter().any(|column| column == "workspace_id") {
+        return Ok(());
+    }
+
+    let source_column_set = source_columns
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let select_columns = [
+        audit_source_column_expr(&source_column_set, "id"),
+        audit_source_column_expr(&source_column_set, "workspace_id"),
+        audit_source_column_expr(&source_column_set, "timestamp"),
+        audit_source_column_expr(&source_column_set, "actor"),
+        audit_source_column_expr(&source_column_set, "action"),
+        audit_source_column_expr(&source_column_set, "target_type"),
+        audit_source_column_expr(&source_column_set, "target_id"),
+        audit_source_column_expr(&source_column_set, "details"),
+        audit_source_column_expr(&source_column_set, "surface"),
+        audit_source_column_expr(&source_column_set, "mutation_kind"),
+        audit_source_column_expr(&source_column_set, "before_hash"),
+        audit_source_column_expr(&source_column_set, "after_hash"),
+    ];
+    let sql = format!(
+        "SELECT {} FROM {} AS row WHERE row.\"workspace_id\" = {} AND row.\"id\" != {} ORDER BY row.\"timestamp\" ASC, row.\"workspace_id\" ASC, row.\"id\" ASC",
+        select_columns.join(", "),
+        table_ref(Some("source"), "audit_log"),
+        sqlite_string_literal(&workspace.workspace_id),
+        sqlite_string_literal(&migration_audit_id)
+    );
+    for row in target.query(&sql, &[])? {
+        let mut entry = audit_entry_from_copy_row(&row, prev_row_hash.clone())?;
+        let this_row_hash = compute_audit_row_hash(&entry);
+        entry.this_row_hash = Some(this_row_hash.clone());
+        insert_rechained_audit_entry(target, &entry)?;
+        prev_row_hash = Some(this_row_hash);
+    }
+
+    Ok(())
+}
+
 fn insert_migration_audit_event(
     target: &DbConnection,
     plan: &ShardFanoutMigrationPlan,
     workspace: &ShardFanoutMigrationWorkspacePlan,
     shard_id: &str,
-) -> crate::db::Result<()> {
+    audit_id: &str,
+) -> crate::db::Result<String> {
     let details = serde_json::json!({
         "schema": SHARD_FANOUT_MIGRATION_AUDIT_SCHEMA_V1,
         "workspace_id": workspace.workspace_id.clone(),
@@ -878,20 +958,119 @@ fn insert_migration_audit_event(
         "recovery": [],
         "message": "Shard fan-out migration copied workspace rows and preserved source database."
     });
+    let mut entry = StoredAuditEntry {
+        id: audit_id.to_owned(),
+        workspace_id: Some(workspace.workspace_id.clone()),
+        timestamp: MIGRATION_AUDIT_TIMESTAMP.to_owned(),
+        actor: Some(MIGRATION_ACTOR.to_owned()),
+        action: MIGRATION_AUDIT_ACTION.to_owned(),
+        target_type: Some("workspace".to_owned()),
+        target_id: Some(workspace.workspace_id.clone()),
+        details: Some(details.to_string()),
+        surface: "shard_fanout".to_owned(),
+        mutation_kind: "migration".to_owned(),
+        before_hash: None,
+        after_hash: None,
+        prev_row_hash: None,
+        this_row_hash: None,
+    };
+    let this_row_hash = compute_audit_row_hash(&entry);
+    entry.this_row_hash = Some(this_row_hash.clone());
+    insert_rechained_audit_entry(target, &entry)?;
+    Ok(this_row_hash)
+}
+
+fn audit_source_column_expr(source_columns: &BTreeSet<&str>, column: &str) -> String {
+    if source_columns.contains(column) {
+        format!("row.{}", sqlite_identifier(column))
+    } else {
+        "NULL".to_owned()
+    }
+}
+
+fn audit_entry_from_copy_row(
+    row: &Row,
+    prev_row_hash: Option<String>,
+) -> crate::db::Result<StoredAuditEntry> {
+    let action = required_audit_copy_text(row, 4, "action")?;
+    let target_type = optional_audit_copy_text(row, 5);
+    let surface = optional_audit_copy_text(row, 8)
+        .or_else(|| target_type.clone())
+        .unwrap_or_else(|| audit_surface_from_action(&action));
+    let mutation_kind = optional_audit_copy_text(row, 9).unwrap_or_else(|| action.clone());
+
+    Ok(StoredAuditEntry {
+        id: required_audit_copy_text(row, 0, "id")?,
+        workspace_id: Some(required_audit_copy_text(row, 1, "workspace_id")?),
+        timestamp: required_audit_copy_text(row, 2, "timestamp")?,
+        actor: optional_audit_copy_text(row, 3),
+        action,
+        target_type,
+        target_id: optional_audit_copy_text(row, 6),
+        details: optional_audit_copy_text(row, 7),
+        surface,
+        mutation_kind,
+        before_hash: optional_audit_copy_text(row, 10),
+        after_hash: optional_audit_copy_text(row, 11),
+        prev_row_hash,
+        this_row_hash: None,
+    })
+}
+
+fn required_audit_copy_text(row: &Row, index: usize, field: &str) -> crate::db::Result<String> {
+    let value = row
+        .get(index)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned);
+    value.ok_or_else(|| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("shard fan-out audit_log copy missing required {field}"),
+    })
+}
+
+fn optional_audit_copy_text(row: &Row, index: usize) -> Option<String> {
+    row.get(index)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+}
+
+fn insert_rechained_audit_entry(
+    target: &DbConnection,
+    entry: &StoredAuditEntry,
+) -> crate::db::Result<()> {
     let sql = format!(
-        "INSERT OR IGNORE INTO audit_log (id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, NULL, NULL, NULL, NULL)",
-        sqlite_string_literal(&migration_audit_id(&workspace.workspace_id)),
-        sqlite_string_literal(&workspace.workspace_id),
-        sqlite_string_literal(MIGRATION_AUDIT_TIMESTAMP),
-        sqlite_string_literal(MIGRATION_ACTOR),
-        sqlite_string_literal(MIGRATION_AUDIT_ACTION),
-        sqlite_string_literal("workspace"),
-        sqlite_string_literal(&workspace.workspace_id),
-        sqlite_string_literal(&details.to_string()),
-        sqlite_string_literal("shard_fanout"),
-        sqlite_string_literal("migration")
+        "INSERT OR IGNORE INTO audit_log (id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+        sqlite_string_literal(&entry.id),
+        optional_sqlite_string_literal(entry.workspace_id.as_deref()),
+        sqlite_string_literal(&entry.timestamp),
+        optional_sqlite_string_literal(entry.actor.as_deref()),
+        sqlite_string_literal(&entry.action),
+        optional_sqlite_string_literal(entry.target_type.as_deref()),
+        optional_sqlite_string_literal(entry.target_id.as_deref()),
+        optional_sqlite_string_literal(entry.details.as_deref()),
+        sqlite_string_literal(&entry.surface),
+        sqlite_string_literal(&entry.mutation_kind),
+        optional_sqlite_string_literal(entry.before_hash.as_deref()),
+        optional_sqlite_string_literal(entry.after_hash.as_deref()),
+        optional_sqlite_string_literal(entry.prev_row_hash.as_deref()),
+        optional_sqlite_string_literal(entry.this_row_hash.as_deref())
     );
     target.execute_raw(&sql)
+}
+
+fn audit_surface_from_action(action: &str) -> String {
+    let surface = action
+        .split_once('.')
+        .map(|(surface, _)| surface)
+        .unwrap_or("global")
+        .trim();
+    if surface.is_empty() {
+        "global".to_owned()
+    } else {
+        surface.to_owned()
+    }
 }
 
 fn write_catalog_row(
@@ -1468,6 +1647,8 @@ mod tests {
             1
         );
         assert_eq!(scalar_count(&shard_b, "SELECT COUNT(*) FROM memories")?, 1);
+        assert_shard_audit_chain(&shard_a, WSP_A, MEM_A)?;
+        assert_shard_audit_chain(&shard_b, WSP_B, MEM_B)?;
         drop(shard_a);
         drop(shard_b);
 
@@ -1534,5 +1715,50 @@ mod tests {
         rows.first()
             .and_then(|row| row.get(0).and_then(|value| value.as_i64()))
             .ok_or_else(|| format!("query returned no count: {sql}"))
+    }
+
+    fn assert_shard_audit_chain(
+        conn: &DbConnection,
+        workspace_id: &str,
+        expected_memory_id: &str,
+    ) -> TestResult {
+        let mut rows = conn
+            .list_audit_entries(None, None)
+            .map_err(|error| error.to_string())?;
+        rows.sort_by(|left, right| {
+            left.timestamp
+                .cmp(&right.timestamp)
+                .then_with(|| left.workspace_id.cmp(&right.workspace_id))
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        assert_eq!(
+            rows.len(),
+            2,
+            "shard should contain the migration audit row plus the copied workspace audit row"
+        );
+        assert_eq!(rows[0].id, migration_audit_id(workspace_id));
+        assert_eq!(rows[0].prev_row_hash, None);
+        assert_eq!(rows[1].target_id, Some(expected_memory_id.to_owned()));
+
+        let mut expected_prev_hash = None;
+        for row in &rows {
+            assert_eq!(row.workspace_id, Some(workspace_id.to_owned()));
+            assert_eq!(
+                row.prev_row_hash, expected_prev_hash,
+                "shard-local audit row {} must point at the previous local row",
+                row.id
+            );
+            let computed = compute_audit_row_hash(row);
+            assert_eq!(
+                row.this_row_hash.as_deref(),
+                Some(computed.as_str()),
+                "shard-local audit row {} must carry its canonical hash",
+                row.id
+            );
+            expected_prev_hash = row.this_row_hash.clone();
+        }
+
+        Ok(())
     }
 }

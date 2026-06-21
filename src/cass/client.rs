@@ -672,12 +672,12 @@ impl CassClient {
     /// Build a `cass sessions --json` invocation for import discovery.
     pub fn sessions_invocation(&self, workspace_path: &Path, limit: u32) -> CassInvocation {
         let mut args = vec![
-            "sessions".to_owned(),
-            "--workspace".to_owned(),
-            workspace_path.to_string_lossy().into_owned(),
-            "--json".to_owned(),
-            "--limit".to_owned(),
-            limit.to_string(),
+            OsString::from("sessions"),
+            OsString::from("--workspace"),
+            workspace_path.as_os_str().to_owned(),
+            OsString::from("--json"),
+            OsString::from("--limit"),
+            OsString::from(limit.to_string()),
         ];
         append_data_dir_args_from_env(&mut args);
         self.invocation(args)
@@ -690,12 +690,12 @@ impl CassClient {
         limit: u32,
     ) -> Result<CassInvocation, CassError> {
         let mut args = vec![
-            "sessions".to_owned(),
-            "--workspace".to_owned(),
-            workspace_path.to_string_lossy().into_owned(),
-            "--json".to_owned(),
-            "--limit".to_owned(),
-            limit.to_string(),
+            OsString::from("sessions"),
+            OsString::from("--workspace"),
+            workspace_path.as_os_str().to_owned(),
+            OsString::from("--json"),
+            OsString::from("--limit"),
+            OsString::from(limit.to_string()),
         ];
         append_data_dir_args_from_env(&mut args);
         self.import_invocation(args)
@@ -765,15 +765,19 @@ impl CassClient {
     }
 }
 
-fn append_data_dir_args_from_env(args: &mut Vec<String>) {
+fn append_data_dir_args_from_env(args: &mut Vec<OsString>) {
     let Some(data_dir) = std::env::var_os("CASS_DATA_DIR") else {
         return;
     };
+    append_data_dir_args(args, data_dir);
+}
+
+fn append_data_dir_args(args: &mut Vec<OsString>, data_dir: OsString) {
     if data_dir.is_empty() {
         return;
     }
-    args.push("--data-dir".to_owned());
-    args.push(data_dir.to_string_lossy().into_owned());
+    args.push(OsString::from("--data-dir"));
+    args.push(data_dir);
 }
 
 impl Default for CassClient {
@@ -784,9 +788,11 @@ impl Default for CassClient {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsStr;
+    use std::ffi::{OsStr, OsString};
     #[cfg(unix)]
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
@@ -912,6 +918,36 @@ mod tests {
             ],
         );
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sessions_invocation_preserves_non_utf8_workspace_path() {
+        let workspace = PathBuf::from(OsString::from_vec(b"/tmp/ee-cass-\xff-workspace".to_vec()));
+        let client = CassClient::new_default();
+        let invocation = client.sessions_invocation(&workspace, 3);
+
+        assert_eq!(invocation.args()[2].as_os_str(), workspace.as_os_str());
+        assert!(
+            invocation.args()[2].to_str().is_none(),
+            "regression fixture must stay non-UTF-8"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_data_dir_args_preserves_non_utf8_value() {
+        let data_dir = OsString::from_vec(b"/tmp/ee-cass-data-\xff".to_vec());
+        let mut args = Vec::new();
+
+        super::append_data_dir_args(&mut args, data_dir.clone());
+
+        assert_eq!(args[0], OsString::from("--data-dir"));
+        assert_eq!(args[1], data_dir);
+        assert!(
+            args[1].to_str().is_none(),
+            "regression fixture must stay non-UTF-8"
+        );
     }
 
     #[test]
