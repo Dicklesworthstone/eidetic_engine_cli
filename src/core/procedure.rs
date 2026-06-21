@@ -1512,6 +1512,7 @@ fn verify_procedure_for_promotion(
     };
     let source_results = evidence_ids
         .iter()
+        .filter(|source_id| !is_procedure_provenance_uri(source_id))
         .map(|source_id| {
             let source_kind = promotion_evidence_source_kind(workspace, source_id);
             inspect_named_verification_source(&options, &source_kind, source_id)
@@ -1568,12 +1569,16 @@ fn promote_persisted_procedure(
         });
     }
     let threshold = promotion_evidence_threshold(target_maturity);
-    if stored.evidence_uris.len() < threshold {
+    // Only verifiable evidence (eval fixtures, repro packs, claims, recorder
+    // runs) counts toward the promotion threshold; `cass-run://` source-run
+    // provenance is lineage, not evidence. See bd-d67os.24.
+    let verification_evidence = procedure_verification_evidence_uris(&stored.evidence_uris);
+    if verification_evidence.len() < threshold {
         return Err(DomainError::PolicyDenied {
             message: format!(
                 "procedure promotion to {} requires at least {threshold} evidence URI(s); found {}",
                 target_maturity.as_str(),
-                stored.evidence_uris.len()
+                verification_evidence.len()
             ),
             repair: Some(format!(
                 "add evidence before running ee procedure promote {procedure_id} --to {}",
@@ -1583,6 +1588,29 @@ fn promote_persisted_procedure(
     }
     let verification_report =
         verify_procedure_for_promotion(&options.workspace, procedure_id, &stored.evidence_uris)?;
+    // Durable promotion must apply the SAME evidence gate the dry-run path previews.
+    // The evidence-URI count threshold above is necessary but not sufficient: a
+    // count-sufficient but unresolvable / failed / skipped evidence set must NOT
+    // promote a procedure to a higher maturity or stamp last_validated_at. This
+    // mirrors the dry-run `blocked` predicate (fail_count > 0 || overall_result !=
+    // "passed") so `ee procedure promote --dry-run` and the durable run can never
+    // disagree. See bd-d67os.24.
+    if verification_report.fail_count > 0 || verification_report.overall_result != "passed" {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "procedure promotion to {} requires passing verification evidence; verification reported {} ({} passed, {} failed, {} skipped)",
+                target_maturity.as_str(),
+                verification_report.overall_result,
+                verification_report.pass_count,
+                verification_report.fail_count,
+                verification_report.skip_count,
+            ),
+            repair: Some(format!(
+                "resolve evidence sources so verification passes, then run ee procedure promote {procedure_id} --to {}",
+                target_maturity.as_str()
+            )),
+        });
+    }
 
     let generated_at = Utc::now().to_rfc3339();
     let promotion_id = format!("pprom_{}", generate_id());
@@ -3847,6 +3875,26 @@ fn procedure_source_runs(evidence_uris: &[String]) -> Vec<String> {
     evidence_uris
         .iter()
         .filter_map(|uri| uri.strip_prefix("cass-run://").map(str::to_owned))
+        .collect()
+}
+
+/// `cass-run://...` URIs record where a procedure came from (session/recorder
+/// lineage). They are provenance, not verification evidence: they must not count
+/// toward the promotion evidence threshold and must not be inspected as
+/// verification fixtures (doing so spuriously fails promotion on a source-run id
+/// that has no eval-fixture/repro-pack on disk). See bd-d67os.24.
+fn is_procedure_provenance_uri(uri: &str) -> bool {
+    uri.trim().starts_with("cass-run://")
+}
+
+/// The subset of stored evidence URIs that represent verifiable evidence
+/// (eval fixtures, repro packs, claims, recorder runs) rather than source-run
+/// provenance.
+fn procedure_verification_evidence_uris(evidence_uris: &[String]) -> Vec<String> {
+    evidence_uris
+        .iter()
+        .filter(|uri| !is_procedure_provenance_uri(uri))
+        .cloned()
         .collect()
 }
 

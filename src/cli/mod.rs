@@ -61508,6 +61508,26 @@ mod tests {
         Ok((workspace, procedure_id))
     }
 
+    /// Materialize a passing eval-fixture verification source for `evidence_id`
+    /// inside `workspace`, so a durable `ee procedure promote` whose stored
+    /// evidence URI is `evidence://<evidence_id>` resolves to a passing
+    /// verification instead of an unresolved/failed one. Mirrors the on-disk
+    /// layout `verification_source_candidate_paths` searches. See bd-d67os.24.
+    fn write_passing_procedure_evidence(workspace: &str, evidence_id: &str) -> TestResult {
+        let dir = std::path::Path::new(workspace)
+            .join(".ee")
+            .join("procedure-verification")
+            .join("eval_fixture");
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("create procedure evidence dir: {error}"))?;
+        std::fs::write(
+            dir.join(format!("{evidence_id}.json")),
+            br#"{"result":"passed","message":"release verification fixture"}"#,
+        )
+        .map_err(|error| format!("write procedure evidence fixture: {error}"))?;
+        Ok(())
+    }
+
     fn ensure_repair_command_parses(repair: &str, context: &str) -> TestResult {
         if !repair.starts_with("ee ") || repair.contains('<') || repair.contains('>') {
             return Ok(());
@@ -66961,6 +66981,11 @@ mod tests {
     #[test]
     fn procedure_promote_without_dry_run_persists_when_evidence_threshold_met() -> TestResult {
         let (workspace, procedure_id) = propose_cli_procedure("ee-procedure-promote-persisted")?;
+        // Durable promotion now gates on real evidence verification, not just the
+        // evidence-URI count. Materialize a passing eval-fixture source for the
+        // proposed `evidence://ev_release_log` URI so verification resolves to
+        // `passed` and the procedure can legitimately promote. See bd-d67os.24.
+        write_passing_procedure_evidence(workspace.as_str(), "ev_release_log")?;
         let (exit, stdout, stderr) = invoke(&[
             "ee",
             "--json",
@@ -67005,6 +67030,65 @@ mod tests {
             &value["data"]["audit"]["recorded"],
             &serde_json::json!(true),
             "audit recorded",
+        )
+    }
+
+    #[test]
+    fn procedure_promote_durable_refuses_when_evidence_verification_fails() -> TestResult {
+        // The evidence-URI count threshold (1 for `validated`) is met by the
+        // proposed `evidence://ev_release_log`, but that source is never
+        // materialized, so verification resolves to `failed`. Durable promotion
+        // must refuse with policy_denied and must NOT mutate procedure maturity.
+        // Regression for bd-d67os.24 (count-only gate let invalid evidence promote).
+        let (workspace, procedure_id) = propose_cli_procedure("ee-procedure-promote-refuse")?;
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            workspace.as_str(),
+            "procedure",
+            "promote",
+            procedure_id.as_str(),
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::PolicyDenied,
+            "durable promote refuse exit",
+        )?;
+        ensure(stderr.is_empty(), "durable promote refuse stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.error.v2"),
+            "refuse error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("policy_denied"),
+            "refuse policy code",
+        )?;
+
+        // Maturity must be untouched: a fresh proposal is `provisional`, and the
+        // refused promotion must not have advanced it to `validated`.
+        let (show_exit, show_stdout, show_stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            workspace.as_str(),
+            "procedure",
+            "show",
+            procedure_id.as_str(),
+        ]);
+        ensure_equal(&show_exit, &ProcessExitCode::Success, "procedure show exit")?;
+        ensure(show_stderr.is_empty(), "procedure show stderr clean")?;
+        let show_value: serde_json::Value =
+            serde_json::from_str(&show_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &show_value["procedure"]["status"],
+            &serde_json::json!("provisional"),
+            "refused promotion leaves maturity provisional",
         )
     }
 
