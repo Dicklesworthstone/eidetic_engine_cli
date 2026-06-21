@@ -177,7 +177,8 @@ pub fn insert_graph_audit_payload(
     actor: &str,
     payload: GraphAuditPayload,
 ) -> Result<(), DbError> {
-    conn.insert_audit(
+    let mutation_kind = payload.mutation_kind;
+    conn.insert_audit_with_mutation_kind(
         &generate_audit_id(),
         &CreateAuditInput {
             workspace_id: Some(workspace_id.to_owned()),
@@ -187,6 +188,7 @@ pub fn insert_graph_audit_payload(
             target_id: Some(payload.target_id),
             details: Some(payload.details.to_string()),
         },
+        mutation_kind,
     )
 }
 

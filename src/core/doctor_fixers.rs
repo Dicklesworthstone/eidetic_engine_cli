@@ -220,8 +220,8 @@ pub fn fix_cass_integration_drift(workspace_root: &Path) -> FixerDispatch {
         "warning",
         workspace_root.join(".ee/cass"),
         &[
-            "Run `ee cass import --refresh` against the affected workspace.",
-            "Confirm `ee cass status` reports cache_high_watermark matching the source corpus.",
+            "Run `ee import cass --dry-run --json` to preview the affected workspace import.",
+            "Run `ee import cass --json` to refresh imported CASS evidence from the source corpus.",
         ],
     )
 }
@@ -428,7 +428,20 @@ mod tests {
     #[test]
     fn cass_integration_drift_is_manual() {
         let dispatch = fix_cass_integration_drift(&root());
-        assert!(matches!(dispatch.op, Op::Manual { .. }));
+        let Op::Manual { steps } = &dispatch.op else {
+            panic!("expected Manual");
+        };
+        assert_eq!(
+            steps,
+            &[
+                "Run `ee import cass --dry-run --json` to preview the affected workspace import.",
+                "Run `ee import cass --json` to refresh imported CASS evidence from the source corpus.",
+            ]
+        );
+        assert!(
+            steps.iter().all(|step| !step.contains("ee cass")),
+            "manual CASS repair steps must use the shipped `ee import cass` surface"
+        );
         assert!(dispatch.op.is_advisory());
     }
 

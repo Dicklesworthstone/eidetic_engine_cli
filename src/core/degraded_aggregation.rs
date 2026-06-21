@@ -123,8 +123,9 @@ struct AggregatedAccumulator {
 ///    severity never silently outranks a real one.
 /// 3. **Repair-hint deduplication** — the canonical repair hint is
 ///    the one emitted by the highest-severity source. When two
-///    emitters tie on severity the first-seen hint wins, which is
-///    deterministic given the input order.
+///    emitters tie on severity, the lexicographically smallest
+///    `(source, message, repair)` tuple wins so output stays
+///    independent of input iterator order.
 /// 4. **Truncation** — at most
 ///    [`DEGRADED_AGGREGATION_MAX_ENTRIES`] aggregates are returned.
 ///    When the input would produce more, the visible array is

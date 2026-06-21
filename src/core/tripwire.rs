@@ -471,12 +471,7 @@ pub fn list_tripwires_from_records(tripwires: &[Tripwire], options: &ListOptions
             .then_with(|| left.id.cmp(&right.id))
     });
 
-    if let Some(limit) = options.limit {
-        filtered.truncate(limit);
-    }
-
-    report.tripwires = filtered.iter().map(TripwireSummary::from).collect();
-    report.total_count = report.tripwires.len();
+    report.total_count = filtered.len();
     report.armed_count = filtered
         .iter()
         .filter(|tripwire| tripwire.state == TripwireState::Armed)
@@ -493,6 +488,10 @@ pub fn list_tripwires_from_records(tripwires: &[Tripwire], options: &ListOptions
         .iter()
         .filter(|tripwire| tripwire.state == TripwireState::Error)
         .count();
+    if let Some(limit) = options.limit {
+        filtered.truncate(limit);
+    }
+    report.tripwires = filtered.iter().map(TripwireSummary::from).collect();
     report
 }
 
@@ -608,7 +607,7 @@ fn list_tripwires_from_database(
             options.preflight_run_id.as_deref(),
             options.tripwire_type.map(TripwireType::as_str),
             options.include_disarmed,
-            options.limit,
+            None,
         )
         .map_err(storage_error("Failed to list tripwires"))?;
     let tripwires = stored
@@ -1493,7 +1492,7 @@ mod tests {
 
         let report = list_tripwires(&options).map_err(|e| e.message())?;
 
-        ensure(report.total_count <= 2, true, "respects limit")
+        ensure(report.tripwires.len() <= 2, true, "respects limit")
     }
 
     #[test]
@@ -1661,6 +1660,60 @@ mod tests {
         ensure(report.triggered_count, 1, "triggered count")?;
         ensure(report.tripwires[0].id.as_str(), "tw_a", "stable order")?;
         ensure(report.tripwires[1].id.as_str(), "tw_b", "stable order")
+    }
+
+    #[test]
+    fn list_tripwires_limit_does_not_truncate_matching_counts() -> TestResult {
+        let first = Tripwire::new(
+            "tw_a",
+            "pf_release",
+            TripwireType::Custom,
+            "task_contains_any(\"format\")",
+            TripwireAction::Warn,
+            "2026-05-03T20:00:00Z",
+        );
+        let second = Tripwire::new(
+            "tw_b",
+            "pf_release",
+            TripwireType::Custom,
+            "task_contains_any(\"deploy\")",
+            TripwireAction::Warn,
+            "2026-05-03T20:01:00Z",
+        )
+        .triggered("2026-05-03T20:02:00Z");
+        let third = Tripwire::new(
+            "tw_c",
+            "pf_release",
+            TripwireType::Custom,
+            "task_contains_any(\"audit\")",
+            TripwireAction::Audit,
+            "2026-05-03T20:03:00Z",
+        );
+
+        let report = list_tripwires_from_records(
+            &[first, second, third],
+            &ListOptions {
+                workspace: PathBuf::from("."),
+                preflight_run_id: Some("pf_release".to_owned()),
+                limit: Some(2),
+                ..Default::default()
+            },
+        );
+
+        ensure(report.tripwires.len(), 2, "returned page length")?;
+        ensure(report.total_count, 3, "total matching count")?;
+        ensure(report.armed_count, 2, "armed matching count")?;
+        ensure(report.triggered_count, 1, "triggered matching count")?;
+        ensure(
+            report.tripwires[0].id.as_str(),
+            "tw_a",
+            "stable order first",
+        )?;
+        ensure(
+            report.tripwires[1].id.as_str(),
+            "tw_b",
+            "stable order second",
+        )
     }
 
     #[test]

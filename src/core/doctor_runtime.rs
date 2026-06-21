@@ -703,6 +703,18 @@ pub struct RunSummary {
 /// (same bytes for `WriteFile`, same mode for `Chmod`, target already gone
 /// for `QuarantineByRename`), returns `NoOpIdempotent` and records nothing.
 pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, DoctorRuntimeError> {
+    // Every writing action is later replayed by path from actions.jsonl. A
+    // relative path may pass the blast-radius check when the current directory
+    // is inside an allowed root, but undo from a different current directory
+    // would then target a different filesystem location. Refuse before backup,
+    // mutation, or logging.
+    if op.is_writing() && !path.is_absolute() {
+        return Err(DoctorRuntimeError::BlastRadiusExceeded {
+            path: path.to_path_buf(),
+            allowed_roots: ctx.blast_radius_roots.clone(),
+        });
+    }
+
     // Blast-radius check. Advisory ops (Manual/EmitDiagnostic) skip this so
     // the doctor can emit observability findings about external state.
     if op.is_writing() && !is_path_in_blast_radius(path, &ctx.blast_radius_roots) {
@@ -2582,6 +2594,29 @@ mod tests {
         // But the action is recorded.
         let actions = fs::read_to_string(ctx.run_dir().join("actions.jsonl")).unwrap();
         assert!(actions.contains("write_file"));
+    }
+
+    #[test]
+    fn mutate_refuses_relative_writing_paths_before_logging_actions() {
+        let ws = fresh_workspace();
+        let cwd = std::env::current_dir().expect("current dir");
+        let mut ctx = RunContext::start(ws.path(), "sha", vec![cwd], /*dry_run*/ true).unwrap();
+
+        let result = mutate(
+            &mut ctx,
+            Path::new("./relative-doctor-runtime-created-dir"),
+            Op::CreateDirAll { mode: 0o755 },
+        );
+
+        assert!(matches!(
+            result,
+            Err(DoctorRuntimeError::BlastRadiusExceeded { .. })
+        ));
+        let actions = fs::read_to_string(ctx.run_dir().join("actions.jsonl")).unwrap();
+        assert!(
+            actions.is_empty(),
+            "relative writing paths must fail before actions are logged"
+        );
     }
 
     #[test]

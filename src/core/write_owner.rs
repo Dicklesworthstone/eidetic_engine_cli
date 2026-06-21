@@ -952,7 +952,7 @@ pub struct WriteImmuneQuarantineDecision {
     pub near_duplicate_ratio: f32,
     /// Missing-evidence ratio observed in the explicit window.
     pub missing_evidence_ratio: f32,
-    /// High-trust missing-evidence ratio observed in the explicit window.
+    /// High-trust missing-evidence ratio observed among high-trust writes.
     pub high_trust_missing_evidence_ratio: f32,
 }
 
@@ -965,8 +965,9 @@ pub fn evaluate_write_immune_quarantine(
     let missing_evidence_ratio = ratio_u32(stats.evidence_missing_count, stats.write_count);
     let high_trust_missing_evidence_count =
         high_trust_missing_evidence_count(stats, &config.high_trust_classes);
+    let high_trust_writes = high_trust_write_count(stats, &config.high_trust_classes);
     let high_trust_missing_evidence_ratio =
-        ratio_u32(high_trust_missing_evidence_count, stats.write_count);
+        ratio_u32(high_trust_missing_evidence_count, high_trust_writes);
 
     let mut reasons = Vec::new();
     if stats.write_count > config.max_writes_per_window {
@@ -1025,6 +1026,14 @@ fn high_trust_missing_evidence_count(
     high_trust_classes
         .iter()
         .filter_map(|trust_class| stats.evidence_missing_by_trust_class.get(trust_class))
+        .copied()
+        .fold(0_u32, u32::saturating_add)
+}
+
+fn high_trust_write_count(stats: &SourceWriteStats, high_trust_classes: &BTreeSet<String>) -> u32 {
+    high_trust_classes
+        .iter()
+        .filter_map(|trust_class| stats.trust_class_counts.get(trust_class))
         .copied()
         .fold(0_u32, u32::saturating_add)
 }

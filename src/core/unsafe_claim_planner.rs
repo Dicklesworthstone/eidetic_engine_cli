@@ -1246,9 +1246,8 @@ pub fn recommend_unsafe_claim_alternates(
         let priority = candidate.priority.unwrap_or(2);
         let mut reason_group_refs = candidate.reason_group_refs.clone();
         let mut deltas = candidate.candidate_specific_deltas.clone();
-        let needs_fresh_claim_gate = state
-            == UnsafeClaimAlternateCandidateState::PlausibleButRequiresGate
-            || state == UnsafeClaimAlternateCandidateState::ScannedAndUnsafe;
+        let needs_fresh_claim_gate =
+            state == UnsafeClaimAlternateCandidateState::PlausibleButRequiresGate;
 
         if reason_group_refs.is_empty() {
             match state {
@@ -1307,9 +1306,7 @@ pub fn recommend_unsafe_claim_alternates(
         }
 
         let mut next_command_actions = vec![bead_show_action(&candidate.candidate_id)];
-        if state != UnsafeClaimAlternateCandidateState::BlockedOrOwned
-            && state != UnsafeClaimAlternateCandidateState::NotFound
-        {
+        if needs_fresh_claim_gate {
             next_command_actions.push(claim_gate_retry_action(&candidate.candidate_id));
         }
 
@@ -3035,6 +3032,27 @@ mod tests {
                 .iter()
                 .all(|candidate| !candidate.may_emit_claim_command),
             "unsafe-plan alternates never emit claim commands",
+        )?;
+        let scanned = plan
+            .candidates
+            .iter()
+            .find(|candidate| candidate.candidate_id == "bd-scanned")
+            .ok_or("missing scanned alternate")?;
+        ensure(
+            scanned.candidate_state == UnsafeClaimAlternateCandidateState::ScannedAndUnsafe
+                && !scanned.needs_fresh_claim_gate,
+            "already-scanned unsafe alternates must not request another fresh gate",
+        )?;
+        ensure(
+            scanned
+                .next_command_actions
+                .iter()
+                .all(|action| !action.command_id.starts_with("claim_gate_retry:")),
+            "already-scanned unsafe alternates must remain inspect-only",
+        )?;
+        ensure(
+            plan.next_command_actions == vec![bead_show_action("bd-scanned")],
+            "stop_or_coordinate plans should expose only read-only inspection for the top scanned-unsafe alternate",
         )
     }
 

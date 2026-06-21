@@ -617,14 +617,14 @@ fn object_string_field_eq_ignore_ascii_case(
         .is_some_and(|value| value.eq_ignore_ascii_case(expected))
 }
 
-fn object_string_field_compacts_to(
+fn object_string_value_compacts_to(
     object: &serde_json::Map<String, serde_json::Value>,
-    key: &str,
     expected: &str,
 ) -> bool {
-    object_field_case_insensitive(object, key)
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|value| compact_ascii_lowercase(value).contains(expected))
+    object
+        .values()
+        .filter_map(serde_json::Value::as_str)
+        .any(|value| compact_ascii_lowercase(value).contains(expected))
 }
 
 fn local_unsupported_evidence_claims(
@@ -664,7 +664,7 @@ fn local_unsupported_evidence_claims(
     if object_bool_field_is(object, "hashVerified", true) {
         claims.push("certificate hash verification");
     }
-    if object_string_field_compacts_to(object, "message", "certificateverificationpassed") {
+    if object_string_value_compacts_to(object, "certificateverificationpassed") {
         claims.push("certificate verification message");
     }
     if object_string_field_eq_ignore_ascii_case(object, "replayOutcome", "success") {
@@ -1207,6 +1207,26 @@ mod tests {
                 .all(|issue| issue.contains("/data")),
             "unsupported certificate claims should stay attributed to the claim-bearing object: {report:?}"
         );
+    }
+
+    #[test]
+    fn unsupported_evidence_claim_rejects_certificate_success_text_outside_message_field() {
+        let report = validate_no_unsupported_evidence_claims(
+            "certificate verify",
+            true,
+            false,
+            r#"{"schema":"ee.certificate.verify.v1","success":true,"data":{"summary":"Certificate verification passed"}}"#,
+        );
+        let backed_report = validate_no_unsupported_evidence_claims(
+            "certificate verify",
+            true,
+            false,
+            r#"{"schema":"ee.certificate.verify.v1","success":true,"data":{"summary":"Certificate verification passed","manifestHash":"blake3:abc123"}}"#,
+        );
+
+        assert!(!report.passed);
+        assert_eq!(report.issue_count, 1);
+        assert!(backed_report.passed);
     }
 
     #[test]

@@ -13,7 +13,8 @@ use std::path::{Component, Path, PathBuf};
 
 /// Walk the existing leading portion of `path` and return the first component
 /// that is a symbolic link, or `Ok(None)` if traversal reaches a component that
-/// does not yet exist without encountering one.
+/// does not yet exist without encountering one. A non-directory parent is an
+/// inspection error, not a missing tail.
 ///
 /// Structural anchors — the path prefix (`C:`, `\\?\C:`, a UNC share, …) and
 /// the root directory — are never symlinks and cannot be inspected in
@@ -32,14 +33,7 @@ pub(crate) fn first_existing_symlink_component(path: &Path) -> io::Result<Option
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => return Ok(Some(current)),
             Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(None);
-            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         }
     }
@@ -75,6 +69,22 @@ mod tests {
         path.push("ee-path-safety-does-not-exist-7f4e");
         path.push("nested");
         assert_eq!(first_existing_symlink_component(&path).unwrap(), None);
+    }
+
+    #[test]
+    fn regular_file_parent_is_inspection_error() {
+        let base = std::env::temp_dir().join(format!(
+            "ee-path-safety-{}-{}",
+            std::process::id(),
+            "notdir"
+        ));
+        let parent_file = base.join("parent");
+        fs::create_dir_all(&base).expect("create base dir");
+        fs::write(&parent_file, b"not a directory").expect("create parent file");
+
+        let error = first_existing_symlink_component(&parent_file.join("child"))
+            .expect_err("regular file parent is not a missing tail");
+        assert_eq!(error.kind(), io::ErrorKind::NotADirectory);
     }
 
     #[cfg(unix)]

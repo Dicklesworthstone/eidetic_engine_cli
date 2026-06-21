@@ -114,6 +114,7 @@ pub struct BypassTokenUseReport {
 pub struct PreflightBypassAuditReport {
     pub schema: String,
     pub token_hash_prefix: String,
+    pub command_hash: String,
     pub audit_id: String,
 }
 
@@ -496,6 +497,8 @@ pub fn record_preflight_bypass_audit(
         .iter()
         .map(|matched| matched.rule_id.clone())
         .collect::<Vec<_>>();
+    let command = normalize_bypass_command_scope(&options.command);
+    let command_hash = bypass_command_scope_hash(&command, &rule_ids);
     let audit_id = insert_token_audit(
         connection,
         &options.workspace_id,
@@ -505,7 +508,8 @@ pub fn record_preflight_bypass_audit(
         json!({
             "schema": PREFLIGHT_BYPASS_AUDIT_SCHEMA_V1,
             "token_hash_prefix": &prefix,
-            "command": options.command,
+            "command": &command,
+            "commandHash": &command_hash,
             "rule_ids": rule_ids,
             "matched_memory_ids": matched_memory_ids,
             "matches": options.matches,
@@ -517,6 +521,7 @@ pub fn record_preflight_bypass_audit(
         action = audit_actions::PREFLIGHT_BYPASS,
         workspace_id = %options.workspace_id,
         token_hash_prefix = %prefix,
+        command_hash = %command_hash,
         match_count = options.matches.len(),
         matched_memory_count = options.matched_memories.len(),
         "recorded preflight bypass provenance"
@@ -525,6 +530,7 @@ pub fn record_preflight_bypass_audit(
     Ok(PreflightBypassAuditReport {
         schema: PREFLIGHT_BYPASS_AUDIT_SCHEMA_V1.to_owned(),
         token_hash_prefix: prefix,
+        command_hash,
         audit_id,
     })
 }

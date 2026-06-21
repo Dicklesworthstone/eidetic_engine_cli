@@ -2109,22 +2109,41 @@ fn unsafe_cleanup_segment_matches(segment: &[String]) -> bool {
     };
     match command_name {
         "find" => find_segment_deletes(segment, command_index),
-        "xargs" => segment
-            .iter()
-            .skip(command_index + 1)
-            .any(|word| command_basename(word) == "rm"),
+        "xargs" => segment_tail_invokes_file_deletion(segment, command_index + 1),
         _ => false,
     }
 }
 
 fn find_segment_deletes(segment: &[String], command_index: usize) -> bool {
-    let mut words = segment.iter().skip(command_index + 1);
-    while let Some(word) = words.next() {
+    let mut index = command_index + 1;
+    while index < segment.len() {
+        let word = segment[index].as_str();
         if word == "-delete" {
             return true;
         }
         if word == "-exec" || word == "-execdir" {
-            return words.any(|candidate| command_basename(candidate) == "rm");
+            return segment_tail_invokes_file_deletion(segment, index + 1);
+        }
+        index += 1;
+    }
+    false
+}
+
+fn segment_tail_invokes_file_deletion(segment: &[String], start_index: usize) -> bool {
+    for index in start_index..segment.len() {
+        let Some(word) = segment.get(index) else {
+            continue;
+        };
+        if command_basename(word) == "rm" {
+            return true;
+        }
+        if let Some(shell_body) = shell_c_argument(segment, index) {
+            if matches_file_deletion(shell_body) || matches_unsafe_cleanup(shell_body) {
+                return true;
+            }
+        }
+        if inline_interpreter_body(segment, index).is_some_and(script_body_mentions_file_deletion) {
+            return true;
         }
     }
     false
@@ -4071,7 +4090,27 @@ action = "explode"
                 "find . -name '*.tmp' -exec rm {} ;",
                 "builtin:unsafe_cleanup",
             ),
+            (
+                "find . -name '*.tmp' -exec sh -c 'rm -f \"$1\"' sh {} \\;",
+                "builtin:unsafe_cleanup",
+            ),
+            (
+                "find . -name '*.tmp' -execdir bash -lc 'rm -rf \"$1\"' bash {} +",
+                "builtin:unsafe_cleanup",
+            ),
+            (
+                "find . -type d -exec sh -c 'find \"$1\" -name stale -delete' sh {} \\;",
+                "builtin:unsafe_cleanup",
+            ),
             ("rg TODO src | xargs rm", "builtin:unsafe_cleanup"),
+            (
+                "rg TODO src | xargs sh -c 'rm -f \"$@\"' sh",
+                "builtin:unsafe_cleanup",
+            ),
+            (
+                "rg stale src | xargs python -c 'import os, sys; os.remove(sys.argv[1])'",
+                "builtin:unsafe_cleanup",
+            ),
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
             assert_eq!(report.exit_code, 7, "command `{command}` should halt");
