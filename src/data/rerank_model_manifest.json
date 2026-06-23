@@ -1,16 +1,16 @@
 {
   "schema": "ee.model_manifest.v1",
   "model_id": "rerank-default-v1",
-  "hash_blake3": "8f7a6c5d4e3b2910f1e2d3c4b5a697887766554433221100ffeeddccbbaa9988",
-  "hash_sha256": "7a4d8f7c2e5b1a90766554433221100ffeeddccbbaa9988776655443322110aa",
-  "content_length_bytes": 83886080,
+  "hash_blake3": "37d93d7aa6d631751907e562f13460de0349671c6b0f0006543987b285a3e901",
+  "hash_sha256": "bc7423dae641b785e6cb1340a4873063bab7fc3f004acf543abfbba1e84a5212",
+  "content_length_bytes": 82777362,
   "source_uri": "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/rerank-default-v1/rerank-default-v1.tar.zst",
   "fallback_source_uris": [
     "https://huggingface.co/eidetic-engine/rerank-default-v1/resolve/main/rerank-default-v1.tar.zst"
   ],
   "license": "apache-2.0",
   "license_uri": "https://www.apache.org/licenses/LICENSE-2.0",
-  "quantization": "int8",
+  "quantization": "f32",
   "inference_dimensions": {
     "input_max_tokens": 512,
     "output_dimension": 1

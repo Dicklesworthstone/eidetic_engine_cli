@@ -59,7 +59,7 @@ use crate::search::plan_cache::{
     compute_search_config_hash, lookup_or_insert_process_plan,
 };
 use crate::search::{
-    Embedder, FlashRankReranker, HashEmbedder, Reranker, SpeedMode, TwoTierConfig, TwoTierIndex,
+    HashEmbedder, NativeReranker, Reranker, SpeedMode, TwoTierConfig, TwoTierIndex,
     TwoTierSearcher,
 };
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
@@ -93,9 +93,9 @@ const EMBED_MODEL_UNAVAILABLE_MODEL_ID: &str = "EE_EMBED_MODEL_PATH";
 const DEFAULT_SEARCH_RERANK_TOP_K: usize = 50;
 const RERANK_MODEL_UNAVAILABLE_REPAIR: &str =
     "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst";
-const RERANK_MODEL_ONNX_SUBDIR: &str = "onnx/model.onnx";
-const RERANK_MODEL_ONNX_LEGACY: &str = "model.onnx";
 const RERANK_MODEL_TOKENIZER: &str = "tokenizer.json";
+const RERANK_MODEL_SAFETENSORS_PRIMARY: &str = "model_f32.safetensors";
+const RERANK_MODEL_SAFETENSORS_FALLBACK: &str = "model.safetensors";
 const EMBED_MODEL_UNAVAILABLE_FEATURE_FLAG: &str = "embed-fast";
 const HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON: &str =
     "active embedder source frankensearch_hash_fallback reports semantic=false";
@@ -6449,14 +6449,14 @@ fn load_search_reranker(entry: &StoredModelRegistryEntry) -> Result<Arc<dyn Rera
     verify_reranker_registry_hash(entry)?;
     let source_path = reranker_entry_source_path(entry)?;
     let model_dir = unpacked_rerank_model_dir(&source_path)?;
-    let reranker = FlashRankReranker::load(&model_dir).map_err(|error| {
+    let reranker = NativeReranker::load(&model_dir).map_err(|error| {
         format!(
             "Failed to load rerank model {} from {}: {error}",
             entry.model_name,
             model_dir.display()
         )
     })?;
-    Ok(Arc::new(reranker))
+    Ok(Arc::new(frankensearch::SyncRerankerAdapter(reranker)))
 }
 
 fn verify_reranker_registry_hash(entry: &StoredModelRegistryEntry) -> Result<(), String> {
@@ -6529,14 +6529,14 @@ fn rerank_archive_sibling_dir(source_path: &Path) -> Option<PathBuf> {
 }
 
 fn ensure_rerank_model_dir_ready(model_dir: &Path) -> Result<PathBuf, String> {
-    let has_model = model_dir.join(RERANK_MODEL_ONNX_SUBDIR).is_file()
-        || model_dir.join(RERANK_MODEL_ONNX_LEGACY).is_file();
+    let has_model = model_dir.join(RERANK_MODEL_SAFETENSORS_PRIMARY).is_file()
+        || model_dir.join(RERANK_MODEL_SAFETENSORS_FALLBACK).is_file();
     let has_tokenizer = model_dir.join(RERANK_MODEL_TOKENIZER).is_file();
     if has_model && has_tokenizer {
         Ok(model_dir.to_path_buf())
     } else {
         Err(format!(
-            "Rerank model directory {} is missing tokenizer.json or ONNX model files.",
+            "Rerank model directory {} is missing tokenizer.json or safetensors model files.",
             model_dir.display()
         ))
     }
@@ -15735,10 +15735,10 @@ mod tests {
     fn unpacked_rerank_model_dir_requires_tokenizer_and_model() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let model_dir = temp.path().join("rerank-default-v1");
-        std::fs::create_dir_all(model_dir.join("onnx")).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&model_dir).map_err(|error| error.to_string())?;
         std::fs::write(model_dir.join(RERANK_MODEL_TOKENIZER), "{}")
             .map_err(|error| error.to_string())?;
-        std::fs::write(model_dir.join(RERANK_MODEL_ONNX_SUBDIR), b"onnx")
+        std::fs::write(model_dir.join(RERANK_MODEL_SAFETENSORS_PRIMARY), b"safetensors")
             .map_err(|error| error.to_string())?;
 
         assert_eq!(unpacked_rerank_model_dir(&model_dir)?, model_dir);

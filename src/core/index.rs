@@ -24,7 +24,7 @@ use crate::models::{
     EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, EMBEDDING_POSTURE_SCHEMA_V1,
 };
 use crate::search::{
-    CanonicalSearchDocument, Embedder, EmbedderStack, HashEmbedder, IndexBuilder,
+    CanonicalSearchDocument, EmbedderStack, HashEmbedder, IndexBuilder,
     artifact_to_document, memory_to_document_with_context_anchors_and_typed_fields,
     session_to_document,
 };

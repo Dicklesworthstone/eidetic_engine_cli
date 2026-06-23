@@ -117,6 +117,41 @@ fn frankensearch_default_features_enable_model2vec_download_without_fastembed() 
     );
 }
 
+/// bd-1nl13.9: the reranker is the pure-Rust frankentorch `native` backend, and
+/// the default dependency tree (which now includes it) must be free of the ONNX
+/// runtime (`ort`/`ort-sys`/`onnxruntime`). The forbidden-crate trees above
+/// (`default_feature_tree_excludes_forbidden_crates`, run with the native
+/// reranker enabled) cover tokio/hyper/etc.; this guard pins the ONNX removal so
+/// a regression that re-introduces the C++ reranker is caught by CI.
+#[test]
+fn native_reranker_enabled_and_onnx_runtime_absent() {
+    let manifest = std::fs::read_to_string(manifest_path())
+        .expect("Cargo.toml should be readable for native reranker guard");
+    let dependency_line = manifest
+        .lines()
+        .find(|line| line.trim_start().starts_with("frankensearch ="))
+        .expect("Cargo.toml must declare frankensearch dependency");
+    assert!(
+        dependency_line.contains("\"native\""),
+        "frankensearch dependency must enable the pure-Rust native reranker: {dependency_line}"
+    );
+
+    let tree = run_cargo_tree(&[]);
+    let onnx_hits: Vec<&str> = tree
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            let name = line.split_whitespace().next().unwrap_or("");
+            matches!(name, "ort" | "ort-sys" | "onnxruntime" | "onnxruntime-sys")
+        })
+        .collect();
+    assert!(
+        onnx_hits.is_empty(),
+        "ONNX runtime must be absent from the default (native-reranker) tree, found: {onnx_hits:?}.\n\
+         The reranker is pure-Rust (frankentorch); ort/onnxruntime must not return."
+    );
+}
+
 fn manifest_path() -> String {
     format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"))
 }

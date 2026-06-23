@@ -19,8 +19,8 @@ pub mod tag_bitmaps;
 
 pub use frankensearch::core::types::IndexableDocument;
 pub use frankensearch::{
-    Embedder, EmbedderStack, FlashRankReranker, HashEmbedder, IndexBuilder, Reranker, ScoreSource,
-    ScoredResult, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
+    Embedder, EmbedderStack, HashEmbedder, IndexBuilder, NativeReranker,
+    Reranker, ScoreSource, ScoredResult, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
 };
 #[cfg(feature = "lexical-bm25")]
 pub use frankensearch::{LexicalSearch, TantivyIndex};
