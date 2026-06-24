@@ -144,6 +144,10 @@ uuid = { version = "1", features = ["v7"] }
 # The default zstd features include zdict_builder; no forbidden async or HTTP
 # stack is introduced.
 zstd = { version = "0.13.3" }
+# Pure-Rust tar extraction to unpack the reranker model artifact (.tar.zst) into a
+# loadable model dir during `ee model fetch`. default-features off drops the
+# unix-only xattr extra so it cross-compiles to windows-msvc cleanly.
+tar = { version = "0.4", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }

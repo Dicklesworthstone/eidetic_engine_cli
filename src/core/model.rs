@@ -2657,6 +2657,60 @@ fn model_manifest_sha256_fingerprint(manifest: &ModelManifest) -> String {
 }
 
 /// Fetch and register the default rerank model.
+/// Unpack a verified rerank model `.tar.zst` into its sibling directory
+/// (`<stored_dir>/<stem>/`) so `load_search_reranker` / `unpacked_rerank_model_dir`
+/// can read the safetensors weights + tokenizer. Without this the reranker stays
+/// `rerank_model_unavailable` on every search. Idempotent: skips when already
+/// unpacked.
+fn unpack_rerank_model_artifact(archive_path: &Path, stored_dir: &Path) -> Result<(), DomainError> {
+    let stem = archive_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".tar.zst"))
+        .ok_or_else(|| DomainError::Configuration {
+            message: format!(
+                "Rerank model artifact {} is not a .tar.zst archive",
+                archive_path.display()
+            ),
+            repair: Some("Provide a .tar.zst rerank artifact.".to_string()),
+        })?;
+    let dest = stored_dir.join(stem);
+    // Idempotent: a previous fetch already unpacked the loadable model.
+    if dest.join("model_f32.safetensors").is_file() || dest.join("model.safetensors").is_file() {
+        return Ok(());
+    }
+    fs::create_dir_all(&dest).map_err(|error| DomainError::Configuration {
+        message: format!(
+            "Failed to create unpacked rerank model dir {}: {error}",
+            dest.display()
+        ),
+        repair: Some("Check model store permissions.".to_string()),
+    })?;
+    let file = fs::File::open(archive_path).map_err(|error| DomainError::Configuration {
+        message: format!(
+            "Failed to open rerank model archive {}: {error}",
+            archive_path.display()
+        ),
+        repair: Some("Re-run model fetch with a readable artifact.".to_string()),
+    })?;
+    let decoder =
+        zstd::stream::read::Decoder::new(file).map_err(|error| DomainError::Configuration {
+            message: format!("Failed to zstd-decode rerank model archive: {error}"),
+            repair: Some("Re-run model fetch with a valid .tar.zst artifact.".to_string()),
+        })?;
+    let mut archive = tar::Archive::new(decoder);
+    archive
+        .unpack(&dest)
+        .map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Failed to unpack rerank model archive into {}: {error}",
+                dest.display()
+            ),
+            repair: Some("Re-run model fetch with a valid .tar.zst artifact.".to_string()),
+        })?;
+    Ok(())
+}
+
 pub fn fetch_rerank_model(
     options: &ModelFetchOptions<'_>,
 ) -> Result<ModelFetchReport, DomainError> {
@@ -2731,6 +2785,10 @@ pub fn fetch_rerank_model(
             });
         }
     };
+
+    // Unpack the verified archive into its sibling model dir so the reranker is
+    // actually loadable; load_search_reranker requires the unpacked directory.
+    unpack_rerank_model_artifact(&stored_path, &stored_dir)?;
 
     let connection = DbConnection::open_file(&database_path).map_err(|error| {
         db_error_to_domain(
