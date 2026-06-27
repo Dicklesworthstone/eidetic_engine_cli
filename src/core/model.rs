@@ -17,10 +17,10 @@ use sha2::{Digest, Sha256};
 use crate::config::workspace_fingerprint;
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::index::{
-    DEFAULT_INDEX_SUBDIR, EmbeddingPosture, IndexHealth, IndexStatusOptions, IndexStatusReport,
-    POTION_MODEL_NAME, current_embedding_posture, default_embedder_model_root,
-    ensure_loaded_embedding_registry_record, get_index_status_with_connection,
-    potion_model_destination_dir,
+    DEFAULT_INDEX_SUBDIR, EMBEDDING_DOWNLOAD_TIMEOUT, EmbeddingPosture, IndexHealth,
+    IndexStatusOptions, IndexStatusReport, POTION_MODEL_NAME, current_embedding_posture,
+    default_embedder_model_root, ensure_loaded_embedding_registry_record,
+    get_index_status_with_connection, potion_model_destination_dir,
 };
 use crate::db::{
     CreateEmbeddingMetadataInput, CreateModelRegistryInput, DbConnection, DbError,
@@ -2606,29 +2606,46 @@ fn download_embedding_manifest(
 ) -> Result<(), DomainError> {
     let manifest = manifest.clone();
     let destination = destination.to_path_buf();
-    let result = crate::core::run_cli_future(async move {
+    crate::core::run_cli_future(async move {
         let cx = asupersync::Cx::for_testing();
         let downloader = ModelDownloader::with_defaults();
         let consent = DownloadConsent::granted(ConsentSource::Programmatic);
         let mut lifecycle = ModelLifecycle::new(manifest.clone(), consent);
-        let staged = downloader
-            .download_model(&cx, &manifest, &destination, &mut lifecycle, |_| {})
-            .await?;
-        manifest.promote_verified_installation(&staged, &destination)?;
-        Ok::<(), frankensearch::SearchError>(())
+        let download = async {
+            let staged = downloader
+                .download_model(&cx, &manifest, &destination, &mut lifecycle, |_| {})
+                .await?;
+            manifest.promote_verified_installation(&staged, &destination)?;
+            Ok::<(), frankensearch::SearchError>(())
+        };
+        // Race the download against a bounded deadline. On timeout the inner
+        // future is dropped, which synchronously closes the stalled socket, and
+        // `block_on` returns the Elapsed branch instead of parking forever.
+        match asupersync::time::TimeoutFuture::after(cx.now(), EMBEDDING_DOWNLOAD_TIMEOUT, download)
+            .await
+        {
+            Ok(result) => result.map_err(|error| DomainError::Configuration {
+                message: format!("Failed to download bundled embedding model: {error}"),
+                repair: Some(
+                    "Check network access, or set EE_EMBED_DOWNLOAD=off for lexical-only operation."
+                        .to_string(),
+                ),
+            }),
+            Err(_elapsed) => Err(DomainError::Configuration {
+                message: format!(
+                    "Bundled embedding model download exceeded its {}s time limit and was aborted (the connection most likely stalled)",
+                    EMBEDDING_DOWNLOAD_TIMEOUT.as_secs()
+                ),
+                repair: Some(format!(
+                    "Retry `ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}`, or set EE_EMBED_DOWNLOAD=off for lexical-only operation."
+                )),
+            }),
+        }
     })
     .map_err(|error| DomainError::Configuration {
         message: format!("Failed to start embedding model download runtime: {error}"),
         repair: Some(format!("ee model fetch {DEFAULT_EMBEDDING_MODEL_ALIAS}")),
-    })?;
-
-    result.map_err(|error| DomainError::Configuration {
-        message: format!("Failed to download bundled embedding model: {error}"),
-        repair: Some(
-            "Check network access, or set EE_EMBED_DOWNLOAD=off for lexical-only operation."
-                .to_string(),
-        ),
-    })
+    })?
 }
 
 fn model_manifest_sha256_fingerprint(manifest: &ModelManifest) -> String {

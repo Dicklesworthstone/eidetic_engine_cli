@@ -3165,6 +3165,33 @@ fn parse_embed_download_mode(raw: Option<&str>) -> EeEmbedDownloadMode {
     EeEmbedDownloadMode::Auto
 }
 
+/// Hard ceiling on a single bundled-embedding-model download (issue #12).
+///
+/// The download streams ~531 MiB (potion-128m: a 512 MiB safetensors file plus
+/// an 18 MiB tokenizer) over a single HTTP/1.1 connection, driven inline on the
+/// CLI's `current_thread` runtime via [`crate::core::run_cli_future`]. A
+/// cross-host 302 redirect plus a server-side FIN race in the asupersync H1
+/// streaming client can leave that socket parked (CLOSE-WAIT, unread bytes)
+/// with the runtime futex-asleep and **no timer pending**, so `block_on` never
+/// wakes and `ee model fetch` / `ee index rebuild` / search / init hang
+/// FOREVER.
+///
+/// Wrapping the whole download in a bounded timeout registers a timer, which
+/// guarantees the runtime wakes at the deadline and the hang surfaces as a
+/// retryable error (here: a graceful fall back to the deterministic hash
+/// embedder) instead of an infinite stall. The ceiling is deliberately generous
+/// so it can never trip a genuinely slow-but-working download: 1800 s tolerates
+/// a sustained ~295 KiB/s across the full 531 MiB — far below any usable link —
+/// while still bounding a true deadlock.
+///
+/// This is the safe, fully ee-side guard. The *precise* fix (a per-read idle
+/// timeout that surfaces a stalled connection in seconds with zero
+/// false-positive risk) belongs in frankensearch's download client
+/// (`crates/frankensearch-embed/src/model_download.rs`, which already builds its
+/// `HttpClient` from an `HttpClientConfig` that exposes `.timeout(..)`); that is
+/// a separate crate and out of scope here.
+pub(crate) const EMBEDDING_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(1800);
+
 struct EeLazyModel2VecEmbedder {
     model_root: PathBuf,
     fallback: Arc<dyn crate::search::Embedder>,
@@ -3209,11 +3236,32 @@ impl EeLazyModel2VecEmbedder {
         let downloader = ModelDownloader::with_defaults();
         let consent = DownloadConsent::granted(ConsentSource::Programmatic);
         let mut lifecycle = ModelLifecycle::new(manifest.clone(), consent);
-        let staged = downloader
-            .download_model(cx, &manifest, &destination, &mut lifecycle, |progress| {
+        let download =
+            downloader.download_model(cx, &manifest, &destination, &mut lifecycle, |progress| {
                 reporter.report(progress);
-            })
-            .await?;
+            });
+        // Bound the streaming download so a stalled connection (issue #12) can
+        // never park `block_on` forever: on timeout the download future is
+        // dropped (closing the socket) and the embedder degrades to the hash
+        // fallback in the caller instead of hanging the whole command.
+        let staged = match asupersync::time::TimeoutFuture::after(
+            cx.now(),
+            EMBEDDING_DOWNLOAD_TIMEOUT,
+            download,
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_elapsed) => {
+                return Err(SearchError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "bundled embedding model download exceeded its {}s time limit",
+                        EMBEDDING_DOWNLOAD_TIMEOUT.as_secs()
+                    ),
+                )));
+            }
+        };
         let backup = manifest.promote_verified_installation(&staged, &destination)?;
         reporter.finish_success();
         tracing::info!(
