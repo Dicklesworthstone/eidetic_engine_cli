@@ -1254,9 +1254,15 @@ fn optional_rfc3339_timestamp(
     source: &'static str,
     label: &'static str,
 ) -> Result<Option<String>, CassImportError> {
+    // Walk the candidate fields in priority order and use the first one that
+    // carries a usable timestamp. A present-but-null or empty/whitespace-only
+    // value is treated identically to an absent field (`Ok(None)`), so we keep
+    // falling through to the next candidate instead of committing to a hole.
+    // This is what lets `["ended_at", "modified"]` fall back to `modified`
+    // when `ended_at` is null, and vice-versa.
     for field in fields {
-        if item.get(field).is_some() {
-            return optional_rfc3339_timestamp_field(item, field, source, label);
+        if let Some(timestamp) = optional_rfc3339_timestamp_field(item, field, source, label)? {
+            return Ok(Some(timestamp));
         }
     }
     Ok(None)
@@ -1271,20 +1277,43 @@ fn optional_rfc3339_timestamp_field(
     let Some(value) = item.get(field) else {
         return Ok(None);
     };
-    let Some(timestamp) = value
-        .as_str()
-        .filter(|timestamp| !timestamp.is_empty() && timestamp.trim().len() == timestamp.len())
-    else {
+    // cass emits `"modified": null` for ongoing / never-finalized sessions (the
+    // live session never has a finalized end timestamp). serde surfaces JSON
+    // `null` as `Some(Value::Null)`, so it slips past a bare presence check and
+    // would otherwise reach `as_str() == None` and hard-error — aborting the
+    // whole batch import (issue #13). A present-null timestamp carries no
+    // information, so treat it exactly like an absent field: the session still
+    // imports, just with this timestamp left as `None`.
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(raw) = value.as_str() else {
+        // A non-null, non-string value (number, bool, object, ...) is a genuine
+        // type error in the emitter's output — fail loudly rather than guess.
+        return Err(CassImportError::InvalidJson {
+            source,
+            message: format!("{field} must be a string RFC3339 {label}"),
+        });
+    };
+    // Empty or whitespace-only strings likewise carry no timestamp; treat them
+    // as absent so a blank `modified` can never zero an otherwise-valid import.
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    // A value with real content but surrounding whitespace is malformed: we
+    // store timestamps verbatim (they participate in ordering/dedup), so reject
+    // padded values rather than silently trimming and changing the stored key.
+    if raw.trim().len() != raw.len() {
         return Err(CassImportError::InvalidJson {
             source,
             message: format!("{field} must be a non-empty RFC3339 {label}"),
         });
-    };
-    DateTime::parse_from_rfc3339(timestamp).map_err(|error| CassImportError::InvalidJson {
+    }
+    DateTime::parse_from_rfc3339(raw).map_err(|error| CassImportError::InvalidJson {
         source,
-        message: format!("invalid {field} RFC3339 {label} `{timestamp}`: {error}"),
+        message: format!("invalid {field} RFC3339 {label} `{raw}`: {error}"),
     })?;
-    Ok(Some(timestamp.to_owned()))
+    Ok(Some(raw.to_owned()))
 }
 
 fn millis_to_rfc3339(value: i64) -> Option<String> {
@@ -2510,6 +2539,140 @@ mod tests {
             &json["sessions"][0]["missingMetadata"],
             &json!(expected_missing),
             "reported missing metadata",
+        )
+    }
+
+    #[test]
+    fn null_cass_session_modified_imports_with_none_end(/* issue #13 */) -> TestResult {
+        // cass emits `"modified": null` for the live / never-finalized session.
+        // A null end timestamp on one session must NOT abort the whole batch:
+        // both sessions must parse, the null one with `ended_at = None`.
+        let input = br#"{
+          "sessions": [
+            {
+              "path": "/tmp/finished.jsonl",
+              "workspace": "/tmp/project",
+              "agent": "codex",
+              "modified": "2026-04-30T00:00:00Z"
+            },
+            {
+              "path": "/tmp/live.jsonl",
+              "workspace": "/tmp/project",
+              "agent": "codex",
+              "modified": null
+            }
+          ]
+        }"#;
+
+        let sessions = parse_sessions_json(input).map_err(|error| error.to_string())?;
+        ensure_equal(&sessions.len(), &2, "both sessions import")?;
+
+        let finished = sessions
+            .iter()
+            .find(|session| session.source_path.as_str() == "/tmp/finished.jsonl")
+            .ok_or_else(|| "missing finished session".to_string())?;
+        ensure_equal(
+            &finished.ended_at.as_deref(),
+            &Some("2026-04-30T00:00:00Z"),
+            "finished session keeps its end timestamp",
+        )?;
+
+        let live = sessions
+            .iter()
+            .find(|session| session.source_path.as_str() == "/tmp/live.jsonl")
+            .ok_or_else(|| "missing live session".to_string())?;
+        ensure_equal(
+            &live.ended_at,
+            &None::<String>,
+            "null modified imports as ended_at = None",
+        )?;
+        // The fallback content hash records `modified` as missing metadata so the
+        // hole stays observable rather than silently swallowed.
+        ensure(
+            live.missing_metadata
+                .iter()
+                .any(|field| field == "modified"),
+            format!(
+                "null modified should be observable in missing_metadata, got {:?}",
+                live.missing_metadata
+            ),
+        )
+    }
+
+    #[test]
+    fn null_cass_session_started_at_imports_with_none_start(/* issue #13 */) -> TestResult {
+        let input = br#"{
+          "sessions": [
+            {
+              "path": "/tmp/live.jsonl",
+              "workspace": "/tmp/project",
+              "agent": "codex",
+              "started_at": null,
+              "modified": "2026-04-30T00:00:00Z"
+            }
+          ]
+        }"#;
+
+        let sessions = parse_sessions_json(input).map_err(|error| error.to_string())?;
+        ensure_equal(&sessions.len(), &1, "session imports")?;
+        let first = sessions
+            .first()
+            .ok_or_else(|| "missing parsed session".to_string())?;
+        ensure_equal(
+            &first.started_at,
+            &None::<String>,
+            "null started_at imports as None",
+        )?;
+        ensure_equal(
+            &first.ended_at.as_deref(),
+            &Some("2026-04-30T00:00:00Z"),
+            "end timestamp still parses",
+        )
+    }
+
+    #[test]
+    fn empty_and_fallthrough_cass_session_timestamps(/* issue #13 */) -> TestResult {
+        // An empty/whitespace-only end timestamp is treated as absent, and a
+        // null leading candidate falls through to the next usable field.
+        let input = br#"{
+          "sessions": [
+            {
+              "path": "/tmp/blank.jsonl",
+              "workspace": "/tmp/project",
+              "agent": "codex",
+              "modified": "   "
+            },
+            {
+              "path": "/tmp/fallthrough.jsonl",
+              "workspace": "/tmp/project",
+              "agent": "codex",
+              "ended_at": null,
+              "modified": "2026-05-01T12:00:00Z"
+            }
+          ]
+        }"#;
+
+        let sessions = parse_sessions_json(input).map_err(|error| error.to_string())?;
+        ensure_equal(&sessions.len(), &2, "both sessions import")?;
+
+        let blank = sessions
+            .iter()
+            .find(|session| session.source_path.as_str() == "/tmp/blank.jsonl")
+            .ok_or_else(|| "missing blank session".to_string())?;
+        ensure_equal(
+            &blank.ended_at,
+            &None::<String>,
+            "whitespace-only modified imports as None",
+        )?;
+
+        let fallthrough = sessions
+            .iter()
+            .find(|session| session.source_path.as_str() == "/tmp/fallthrough.jsonl")
+            .ok_or_else(|| "missing fallthrough session".to_string())?;
+        ensure_equal(
+            &fallthrough.ended_at.as_deref(),
+            &Some("2026-05-01T12:00:00Z"),
+            "null ended_at falls through to modified",
         )
     }
 
