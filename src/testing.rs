@@ -282,6 +282,154 @@ pub fn test_hash(seed: u64) -> String {
     format!("{seed:064x}")
 }
 
+// ============================================================================
+// Schema-valid public id builders (frankensqlite 0.1.12 CHECK enforcement)
+// ============================================================================
+
+/// Build a deterministic, schema-valid public id of exactly `len` chars.
+///
+/// The database schema in `src/db/mod.rs` enforces
+/// `CHECK (id GLOB '<prefix>_*' AND length(id) = <len>)` on every typed-id
+/// column. frankensqlite 0.1.12 enforces these CHECKs that 0.1.9 silently
+/// ignored, so test fixtures must use ids of the right shape. Production ids
+/// are `<prefix>_<crockford-base32>` (see `src/models/id.rs`); the CHECK only
+/// constrains the prefix glob and the total length, so this builder emits
+/// readable, deterministic fixtures that satisfy the same invariant without
+/// minting real UUIDv7 payloads.
+///
+/// The body is derived from `seed`: its alphanumeric characters lowercased
+/// and truncated to fit, then right-padded with `'0'` to the exact length.
+/// The same `(prefix, len, seed)` always yields the same id, so
+/// cross-references inside a single test stay stable.
+///
+/// # Panics
+///
+/// Panics if `len` is too small to hold `"<prefix>_"` plus at least one body
+/// character — a programming error in the caller, never reachable from a
+/// well-formed prefix/length pair taken from the schema.
+#[must_use]
+pub fn valid_id(prefix: &str, len: usize, seed: &str) -> String {
+    let head_len = prefix.len() + 1; // "<prefix>_"
+    assert!(
+        len > head_len,
+        "id length {len} is too short for prefix `{prefix}_`"
+    );
+    let body_len = len - head_len;
+    let mut body: String = seed
+        .chars()
+        .filter_map(|character| {
+            let lower = character.to_ascii_lowercase();
+            lower.is_ascii_alphanumeric().then_some(lower)
+        })
+        .take(body_len)
+        .collect();
+    while body.len() < body_len {
+        body.push('0');
+    }
+    format!("{prefix}_{body}")
+}
+
+/// Deterministic, schema-valid workspace id (`wsp_…`, 30 chars).
+#[must_use]
+pub fn wsp(seed: &str) -> String {
+    valid_id("wsp", 30, seed)
+}
+
+/// Deterministic, schema-valid agent id (`agt_…`, 30 chars).
+#[must_use]
+pub fn agt(seed: &str) -> String {
+    valid_id("agt", 30, seed)
+}
+
+/// Deterministic, schema-valid memory id (`mem_…`, 30 chars).
+#[must_use]
+pub fn mem(seed: &str) -> String {
+    valid_id("mem", 30, seed)
+}
+
+/// Deterministic, schema-valid import-ledger id (`imp_…`, 30 chars).
+#[must_use]
+pub fn imp(seed: &str) -> String {
+    valid_id("imp", 30, seed)
+}
+
+/// Deterministic, schema-valid episode id (`ep_…`, 30 chars).
+#[must_use]
+pub fn ep(seed: &str) -> String {
+    valid_id("ep", 30, seed)
+}
+
+/// Deterministic, schema-valid model-registry id (`mdl_…`, 30 chars).
+#[must_use]
+pub fn mdl(seed: &str) -> String {
+    valid_id("mdl", 30, seed)
+}
+
+/// Deterministic, schema-valid agent-installation id (`agi_…`, 30 chars).
+#[must_use]
+pub fn agi(seed: &str) -> String {
+    valid_id("agi", 30, seed)
+}
+
+/// Deterministic, schema-valid agent-history-source id (`ahs_…`, 30 chars).
+#[must_use]
+pub fn ahs(seed: &str) -> String {
+    valid_id("ahs", 30, seed)
+}
+
+/// Deterministic, schema-valid context-pack id (`pack_…`, 31 chars).
+#[must_use]
+pub fn pack(seed: &str) -> String {
+    valid_id("pack", 31, seed)
+}
+
+/// Deterministic, schema-valid session id (`sess_…`, 31 chars).
+#[must_use]
+pub fn sess(seed: &str) -> String {
+    valid_id("sess", 31, seed)
+}
+
+/// Deterministic, schema-valid procedural-rule id (`rule_…`, 31 chars).
+#[must_use]
+pub fn rule(seed: &str) -> String {
+    valid_id("rule", 31, seed)
+}
+
+/// Deterministic, schema-valid memory-link id (`link_…`, 31 chars).
+#[must_use]
+pub fn link(seed: &str) -> String {
+    valid_id("link", 31, seed)
+}
+
+/// Deterministic, schema-valid evidence-span id (`ev_…`, 29 chars).
+#[must_use]
+pub fn ev(seed: &str) -> String {
+    valid_id("ev", 29, seed)
+}
+
+/// Deterministic, schema-valid audit-log id (`audit_…`, 32 chars).
+#[must_use]
+pub fn audit(seed: &str) -> String {
+    valid_id("audit", 32, seed)
+}
+
+/// Deterministic, schema-valid curation-candidate id (`curate_…`, 33 chars).
+#[must_use]
+pub fn curate(seed: &str) -> String {
+    valid_id("curate", 33, seed)
+}
+
+/// Deterministic, schema-valid artifact id (`art_…`, 30 chars).
+///
+/// The artifact CHECK is stricter (`GLOB 'art_[0-9a-f]*'`), so the body must
+/// be lowercase hex; we hash `seed` with blake3 (as production does in
+/// `src/core/artifact.rs`) and take the first 26 hex digits.
+#[must_use]
+pub fn art(seed: &str) -> String {
+    let digest = blake3::hash(seed.as_bytes()).to_hex();
+    format!("art_{}", &digest.as_str()[..26])
+}
+
 /// Create a deterministic lab runtime with the given seed.
 ///
 /// The lab runtime provides:

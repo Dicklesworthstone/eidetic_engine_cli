@@ -3944,7 +3944,7 @@ mod tests {
         })
         .to_string();
         conn.insert_audit(
-            "audit_whyhist000000000000000001",
+            &crate::testing::audit("whyhist"),
             &crate::db::CreateAuditInput {
                 workspace_id: Some(workspace_id.to_string()),
                 actor: Some("test-agent".to_string()),
@@ -4320,12 +4320,12 @@ mod tests {
             )
             .map_err(|e| e.to_string())?;
         for rule_id in [
-            "rule_whyloadbearingalpha00001",
-            "rule_whyloadbearingbeta000001",
+            crate::testing::rule("whyloadbearingalpha"),
+            crate::testing::rule("whyloadbearingbeta"),
         ] {
             connection
                 .insert_procedural_rule(
-                    rule_id,
+                    &rule_id,
                     &CreateProceduralRuleInput {
                         workspace_id: workspace_id.to_owned(),
                         content: format!("{rule_id} cites load-bearing evidence."),

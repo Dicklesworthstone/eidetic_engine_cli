@@ -636,7 +636,7 @@ mod tests {
         // Write a memory into the same store `remember --global` targets.
         connection
             .insert_memory(
-                "mem_global0000000000000000000001",
+                &crate::testing::mem("global"),
                 &CreateMemoryInput {
                     workspace_id: workspace_id.clone(),
                     level: "semantic".to_owned(),
@@ -647,7 +647,7 @@ mod tests {
                     utility: 0.0,
                     importance: 0.0,
                     provenance_uri: None,
-                    trust_class: "self".to_owned(),
+                    trust_class: "human_explicit".to_owned(),
                     trust_subclass: None,
                     tags: vec!["global".to_owned()],
                     valid_from: None,

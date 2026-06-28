@@ -5414,7 +5414,8 @@ mod tests {
     fn pending_lazy_model2vec_posture_is_not_hash_fallback() -> TestResult {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
-        let workspace_id = "wsp_lazypending0000000000000000";
+        let workspace_id = crate::testing::wsp("lazypending");
+        let workspace_id = workspace_id.as_str();
         connection
             .insert_workspace(
                 workspace_id,
@@ -5531,7 +5532,8 @@ mod tests {
     fn active_registry_promotes_declared_unavailable_bundled_row() -> TestResult {
         let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
-        let workspace_id = "wsp_declaredfirst00000000000000";
+        let workspace_id = crate::testing::wsp("declaredfirst");
+        let workspace_id = workspace_id.as_str();
         connection
             .insert_workspace(
                 workspace_id,
@@ -5549,7 +5551,7 @@ mod tests {
         metadata.deterministic = true;
         connection
             .insert_embedding_metadata_record(
-                "mdl_declaredfirst00000000000001",
+                &crate::testing::mdl("declaredfirst"),
                 &crate::db::CreateEmbeddingMetadataInput {
                     workspace_id: workspace_id.to_owned(),
                     provider: ModelProvider::Model2Vec,
@@ -8245,8 +8247,10 @@ mod tests {
 
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
-        let target_workspace_id = "wsp_vacuumtarget0000000000000";
-        let other_workspace_id = "wsp_vacuumother00000000000000";
+        let target_workspace_id = crate::testing::wsp("vacuumtarget");
+        let target_workspace_id = target_workspace_id.as_str();
+        let other_workspace_id = crate::testing::wsp("vacuumother");
+        let other_workspace_id = other_workspace_id.as_str();
         connection
             .insert_workspace(
                 target_workspace_id,

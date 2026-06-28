@@ -3466,9 +3466,10 @@ mod tests {
                     },
                 )
                 .map_err(|error| error.to_string())?;
+            let memory_id = crate::testing::mem("driftreadonlyfile");
             connection
                 .insert_memory(
-                    "mem_driftreadonlyfile00000001",
+                    &memory_id,
                     &CreateMemoryInput {
                         workspace_id: workspace_id.clone(),
                         level: "procedural".to_owned(),
@@ -3489,11 +3490,11 @@ mod tests {
                 )
                 .map_err(|error| error.to_string())?;
             connection
-                .execute_raw(
+                .execute_raw(&format!(
                     "UPDATE memories SET provenance_verification_status = 'mismatch', \
                      provenance_chain_hash = 'blake3:changed' \
-                     WHERE id = 'mem_driftreadonlyfile00000001'",
-                )
+                     WHERE id = '{memory_id}'"
+                ))
                 .map_err(|error| error.to_string())?;
             connection.close().map_err(|error| error.to_string())?;
         }

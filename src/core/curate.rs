@@ -19573,7 +19573,7 @@ mod tests {
         }
         connection
             .insert_memory_link(
-                "link_embeddingdedupmanual00000001",
+                &crate::testing::link("embeddingdedupmanual"),
                 &CreateMemoryLinkInput {
                     src_memory_id: memory_ids[3].clone(),
                     dst_memory_id: memory_ids[0].clone(),
@@ -19623,7 +19623,7 @@ mod tests {
         assert_eq!(candidate.candidate_type, "paraphrase_dedup_proposal");
         assert_eq!(candidate.proposal_source, "embedding_dedup");
         assert_eq!(candidate.audit.proposed_by, "embedding_dedup:v1");
-        assert_eq!(candidate.trust_class.as_deref(), Some("agent_assertion"));
+        assert_eq!(candidate.trust_class.as_deref(), Some("derived"));
         assert_eq!(candidate.target_memory_id.as_deref(), Some(memory_ids[0].as_str()));
         assert_eq!(
             candidate.member_memory_ids,
