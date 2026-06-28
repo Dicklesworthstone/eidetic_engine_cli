@@ -5118,6 +5118,7 @@ mod tests {
     use super::*;
     use crate::core::model::{BUNDLED_EMBEDDING_DIMENSION, BUNDLED_EMBEDDING_MODEL_REVISION};
     use crate::core::profile::OperatingProfile;
+    use crate::search::Embedder;
     use proptest::prelude::*;
     use proptest::test_runner::Config as ProptestConfig;
 

@@ -10022,7 +10022,7 @@ mod tests {
     use crate::db::{
         CreateFeedbackEventInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
     };
-    use crate::search::{EmbedderStack, IndexBuilder, IndexableDocument};
+    use crate::search::{Embedder, EmbedderStack, IndexBuilder, IndexableDocument};
 
     type TestResult = Result<(), String>;
 
