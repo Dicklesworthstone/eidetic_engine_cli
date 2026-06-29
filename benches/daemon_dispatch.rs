@@ -8,10 +8,11 @@
 
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use ee::daemon::protocol::DaemonRequest;
 use ee::daemon::server::{METHOD_CAPABILITIES, METHOD_CONTEXT, METHOD_ECHO, dispatch};
 use serde_json::json;
+use std::hint::black_box;
 
 const BENCH_GROUP_NAME: &str = "daemon_dispatch";
 const BENCH_AGENT_ID: &str = "bench-agent";

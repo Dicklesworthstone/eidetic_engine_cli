@@ -7,8 +7,9 @@
 //! the surface risky: bayesPosterior, loadBearing, HITS, revision lineage, and
 //! causal explanation.
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use serde_json::{Value, json};
+use std::hint::black_box;
 
 const GROUP_NAME: &str = "ee_why_toon_token_count";
 const PRE_EPIC_BASELINE_TOKENS: u32 = 800;

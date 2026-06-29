@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ee::cache::pack_compression::{
     PackCompressionDictionaryTrainingOutcome, PackCompressionSample,
     PackCompressionSampleSourceKind, PackCompressionTrainingOptions,
@@ -34,6 +34,7 @@ use ee::cache::pack_l2::{
     PackL2Cache, PackL2CacheLookup, PackL2CacheOptions, PackL2CompressionDictionary,
     PackL2WriteReport,
 };
+use std::hint::black_box;
 use tempfile::TempDir;
 
 use ee::core::context::{

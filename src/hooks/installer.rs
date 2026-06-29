@@ -1518,6 +1518,9 @@ pub fn simulate_harness_conformance(
     Ok(case)
 }
 
+// expect() calls below assert invariants already established by earlier
+// presence checks (settings/backup path existence); None is unreachable.
+#[allow(clippy::expect_used)]
 pub fn generate_harness_hook_install(
     options: &HarnessHookInstallOptions,
 ) -> Result<HarnessHookInstallReport, DomainError> {
@@ -2283,6 +2286,8 @@ fn harness_hook_plan(
         .collect()
 }
 
+// expect() asserts the supported-harness invariant guarded immediately above.
+#[allow(clippy::expect_used)]
 fn harness_hook_snippets(target: HarnessHookTarget, ee_binary: &Path) -> Vec<HarnessHookSnippet> {
     if !target.supported() {
         return Vec::new();
@@ -2808,6 +2813,8 @@ fn restore_harness_settings_backup(
     Ok(())
 }
 
+// expect() calls assert JSON-shape invariants validated earlier in this fn.
+#[allow(clippy::expect_used)]
 fn merge_harness_hooks(
     target: HarnessHookTarget,
     document: &mut serde_json::Value,

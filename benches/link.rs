@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use asupersync::lab::{LabConfig, LabRuntime};
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use serde_json::Value as JsonValue;
+use std::hint::black_box;
 use tempfile::TempDir;
 
 use ee::core::memory::{RememberMemoryOptions, remember_memory};

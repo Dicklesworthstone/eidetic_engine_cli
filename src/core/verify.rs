@@ -3126,8 +3126,11 @@ mod tests {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         std::fs::write(temp.path().join("outside.md"), "secret evidence\n")
             .map_err(|error| error.to_string())?;
-        std::os::unix::fs::symlink(temp.path().join("outside.md"), temp.path().join("linked.md"))
-            .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(
+            temp.path().join("outside.md"),
+            temp.path().join("linked.md"),
+        )
+        .map_err(|error| error.to_string())?;
 
         for uri in ["file://linked.md#L1", "file://linked.md"] {
             let report = verify_provenance_referent(

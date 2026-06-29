@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)] // test code may unwrap/expect
 use ee::policy::{
     SwarmSloPosture, SwarmSloResourceUsageInput, adapt_swarm_slo_resource_usage_event,
     detect_instruction_like_content, redact_secret_like_content,

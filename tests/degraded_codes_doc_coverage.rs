@@ -162,9 +162,7 @@ fn doc_section<'a>(doc_text: &'a str, code: &str) -> Option<&'a str> {
     let heading = format!("## `{code}`");
     let start = doc_text.find(&heading)?;
     let tail = &doc_text[start..];
-    let end = tail
-        .find("\n---\n")
-        .map_or(tail.len(), |separator| separator);
+    let end = tail.find("\n---\n").unwrap_or(tail.len());
     Some(&tail[..end])
 }
 

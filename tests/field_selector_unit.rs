@@ -250,10 +250,16 @@ fn claim_gate_summary_preset_uses_gate_safety_fields_bd_kua65_1() -> TestResult 
     if selected_json.pointer("/data/command").is_some() {
         return Err("claim-gate summary must not request default command field".to_string());
     }
-    if selected_json.pointer("/data/safeToClaim").and_then(Value::as_bool) != Some(false) {
+    if selected_json
+        .pointer("/data/safeToClaim")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
         return Err("claim-gate summary must preserve safeToClaim".to_string());
     }
-    if selected_json.pointer("/data/verdict").and_then(Value::as_str)
+    if selected_json
+        .pointer("/data/verdict")
+        .and_then(Value::as_str)
         != Some("blocked_by_verification")
     {
         return Err("claim-gate summary must preserve verdict".to_string());

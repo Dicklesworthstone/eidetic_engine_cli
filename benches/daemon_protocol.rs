@@ -10,12 +10,11 @@
 use std::io::Cursor;
 use std::time::Duration;
 
-use criterion::{
-    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
-};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use ee::daemon::protocol::{DaemonRequest, DaemonResponse, read_request, write_response};
 use ee::daemon::server::METHOD_ECHO;
 use serde_json::json;
+use std::hint::black_box;
 
 const BENCH_GROUP_NAME: &str = "daemon_protocol";
 const BENCH_AGENT_ID: &str = "bench-agent";

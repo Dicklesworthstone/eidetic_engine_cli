@@ -1,8 +1,4 @@
-use std::{
-    collections::BTreeSet,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeSet, fs, path::PathBuf};
 
 use ee::shadow::{
     RESOURCE_QUEUE_PRESSURE_BOUNDED_PREVIEW_MAX_CHARS, RESOURCE_QUEUE_PRESSURE_MAX_SOURCE_REFS,

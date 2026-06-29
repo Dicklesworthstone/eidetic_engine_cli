@@ -2408,9 +2408,7 @@ fn run_context_pack_with_performance_inner(
     );
     if global_fan_in_filtered > 0 {
         trace.filter_input_count = trace.filter_input_count.max(scope_filter_input_count);
-        trace.filtered_count = trace
-            .filtered_count
-            .saturating_add(global_fan_in_filtered);
+        trace.filtered_count = trace.filtered_count.saturating_add(global_fan_in_filtered);
     }
 
     let redaction_filter_input_count =
@@ -4254,7 +4252,11 @@ fn apply_global_store_pack_policy(
     });
     let removed = before.saturating_sub(candidates.len());
     if removed > 0 {
-        let total_suffix = if total_global_candidates == 1 { "" } else { "s" };
+        let total_suffix = if total_global_candidates == 1 {
+            ""
+        } else {
+            "s"
+        };
         let removed_suffix = if removed == 1 { "" } else { "s" };
         push_degradation(
             degraded,
@@ -4313,9 +4315,10 @@ fn global_lane_conflict_key(candidate: &PackCandidate) -> String {
     if let Some(token) = first_global_lane_subject_token(&candidate.content) {
         return format!("{}:{token}", candidate.section.as_str());
     }
-    candidate.diversity_key.clone().unwrap_or_else(|| {
-        format!("{}:{}", candidate.section.as_str(), candidate.memory_id)
-    })
+    candidate
+        .diversity_key
+        .clone()
+        .unwrap_or_else(|| format!("{}:{}", candidate.section.as_str(), candidate.memory_id))
 }
 
 fn first_global_lane_subject_token(content: &str) -> Option<String> {
@@ -4431,7 +4434,11 @@ fn push_global_lane_conflict_degradation(
         .cloned()
         .collect::<Vec<_>>()
         .join(", ");
-    let subject_suffix = if contradiction_keys.len() == 1 { "" } else { "s" };
+    let subject_suffix = if contradiction_keys.len() == 1 {
+        ""
+    } else {
+        "s"
+    };
     push_degradation(
         degraded,
         "global_lane_conflict_deferred",
@@ -10151,8 +10158,7 @@ mod tests {
     use asupersync::{CancelReason, Cx};
 
     use super::{
-        AccessLevel, CandidateResolutionMetrics, CapabilitySet, CommandContext,
-        ContextPagination,
+        AccessLevel, CandidateResolutionMetrics, CapabilitySet, CommandContext, ContextPagination,
         ContextPerformanceTrace, PackPersistenceSubspans, PackSlotAcquisition, PerformanceTiming,
         ReadSnapshotTrace, apply_pagination, candidate_selection_why, context_performance_json,
         focus_candidate_why, focus_relevance, open_pack_slot_lock_file, pack_assembly_slo_for_run,

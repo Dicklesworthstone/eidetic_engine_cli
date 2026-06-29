@@ -13,6 +13,7 @@
 //! long as the local cargo cache already has the manifest's resolved
 //! dependencies; it does not perform new network resolution.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)] // test code may unwrap/expect
 use std::collections::BTreeSet;
 use std::process::Command;
 

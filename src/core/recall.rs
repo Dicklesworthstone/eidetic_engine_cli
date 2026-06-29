@@ -2003,10 +2003,9 @@ mod tests {
 
         // Tampered wire form -> BLAKE3 MAC fails -> invalid (never a silent
         // resume of a forged offset).
-        let tampered = if encoded.starts_with('A') {
-            format!("B{}", &encoded[1..])
-        } else {
-            format!("A{}", &encoded[1..])
+        let tampered = match encoded.strip_prefix('A') {
+            Some(rest) => format!("B{rest}"),
+            None => format!("A{}", &encoded[1..]),
         };
         assert_eq!(
             resolve_recall_cursor(Some(tampered.as_str()), &query, 7),

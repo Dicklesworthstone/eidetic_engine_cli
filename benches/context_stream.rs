@@ -7,13 +7,14 @@
 use std::str::FromStr;
 use std::time::Instant;
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ee::models::{MemoryId, ProvenanceUri, TrustClass, UnitScore};
 use ee::output::streaming::{ContextStreamFrameOptions, context_response_stream_frames};
 use ee::pack::{
     ContextRequest, ContextResponse, PackCandidate, PackCandidateInput, PackProvenance,
     PackSection, PackTrustSignal, TokenBudget, assemble_draft,
 };
+use std::hint::black_box;
 use uuid::Uuid;
 
 const BENCH_GROUP_NAME: &str = "context_stream";

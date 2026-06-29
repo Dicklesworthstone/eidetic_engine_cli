@@ -7,11 +7,12 @@
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ee::db::{
     CreateMemoryInput, CreateWorkspaceInput, DbConnection, UpsertAgentContextProfileInput,
 };
 use ee::models::{AgentContextProfileCounts, WorkspaceId};
+use std::hint::black_box;
 
 const BENCH_GROUP_NAME: &str = "agent_profile";
 const FIXTURE_MEMORY_COUNT: usize = 1_000;

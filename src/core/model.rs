@@ -18,10 +18,13 @@ use crate::config::workspace_fingerprint;
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::index::{
     DEFAULT_INDEX_SUBDIR, EMBEDDING_DOWNLOAD_TIMEOUT, EmbeddingPosture, IndexHealth,
-    IndexStatusOptions, IndexStatusReport, POTION_MODEL_NAME, current_embedding_posture,
-    default_embedder_model_root, ensure_loaded_embedding_registry_record,
-    get_index_status_with_connection, potion_model_destination_dir,
+    IndexStatusOptions, POTION_MODEL_NAME, current_embedding_posture, default_embedder_model_root,
+    ensure_loaded_embedding_registry_record, get_index_status_with_connection,
+    potion_model_destination_dir,
 };
+// Test-only: constructed by the inline `#[cfg(test)]` suites below.
+#[cfg(test)]
+use crate::core::index::IndexStatusReport;
 use crate::db::{
     CreateEmbeddingMetadataInput, CreateModelRegistryInput, DbConnection, DbError,
     ModelRegistryUpsertOutcome, StoredModelRegistryEntry,
@@ -971,10 +974,11 @@ fn build_model_lifecycle_report(
         .ok()
         .and_then(|status| read_model_lifecycle_index_metadata(&status.index_dir).ok())
         .unwrap_or_default();
-    let mut index_degraded = index_status.as_ref().map_or_else(
-        |error| index_status_error_degradation(error),
-        |status| index_health_degradations(status.health, status.last_check_error.as_deref()),
-    );
+    let mut index_degraded = index_status
+        .as_ref()
+        .map_or_else(index_status_error_degradation, |status| {
+            index_health_degradations(status.health, status.last_check_error.as_deref())
+        });
     if index_status.is_ok()
         && index_metadata == ModelLifecycleIndexMetadata::default()
         && selected_embedding_entry.is_some()

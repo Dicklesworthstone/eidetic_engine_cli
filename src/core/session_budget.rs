@@ -854,6 +854,8 @@ pub fn plan_cheapest_next_command(input: &BudgetPlannerInput) -> BudgetPlan {
     }
 
     let mut iter = entries.into_iter();
+    // Invariant: `entries` is constructed non-empty just above.
+    #[allow(clippy::expect_used)]
     let recommendation = iter.next().expect("always at least one candidate");
     let fallbacks = iter.take(PLAN_MAX_FALLBACKS).collect();
 

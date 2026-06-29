@@ -6,10 +6,11 @@
 
 use std::time::Instant;
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ee::graph::gomory_hu::{GOMORY_HU_WEIGHT_ATTR, build_gomory_hu_tree, query_min_cut};
 use fnx_classes::Graph;
 use fnx_runtime::CgseValue;
+use std::hint::black_box;
 
 const BENCH_GROUP_NAME: &str = "graph_gomory_hu";
 const BUILD_BUDGET_P50_MS: f64 = 5000.0;

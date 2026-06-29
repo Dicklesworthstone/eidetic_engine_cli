@@ -8,8 +8,9 @@
 //! isolated — the core contract a `remember --global` write / global-tier read
 //! depends on.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)] // test code may unwrap/expect
 use ee::core::global_store::{
-    global_workspace_id, open_or_create_global_store, read_global_store_memories, GlobalStorePaths,
+    GlobalStorePaths, global_workspace_id, open_or_create_global_store, read_global_store_memories,
 };
 use ee::db::CreateMemoryInput;
 use std::path::Path;
@@ -43,9 +44,11 @@ fn global_store_persists_across_independent_opens_and_isolates_roots() {
 
     // A read before any write returns empty (the store does not exist yet),
     // so a global-tier read needs no separate pre-existence check.
-    assert!(read_global_store_memories(&paths, false)
-        .expect("read empty global store")
-        .is_empty());
+    assert!(
+        read_global_store_memories(&paths, false)
+            .expect("read empty global store")
+            .is_empty()
+    );
 
     // Invocation 1: create the separate store and write a user-global memory.
     {
@@ -115,7 +118,10 @@ fn pack_item_memory_ids(envelope: &serde_json::Value) -> Vec<String> {
         .map(|items| {
             items
                 .iter()
-                .filter_map(|item| item.pointer("/memoryId").and_then(serde_json::Value::as_str))
+                .filter_map(|item| {
+                    item.pointer("/memoryId")
+                        .and_then(serde_json::Value::as_str)
+                })
                 .map(str::to_owned)
                 .collect()
         })

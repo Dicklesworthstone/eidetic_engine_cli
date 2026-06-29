@@ -4,6 +4,7 @@
 //! canonical, examples are fixture-backed, docs exist, and availability markers
 //! match Beads state.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)] // test code may unwrap/expect
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1142,19 +1143,28 @@ fn source_authority_support_bundle_handoff_summary_is_redacted() -> TestResult {
     {
         return Err("source-authority handoff summary schema drifted".into());
     }
-    if string_field(&fixture, "/snapshotRef/schema", "source-authority handoff summary")?
-        != "ee.source_authority.snapshot.v1"
+    if string_field(
+        &fixture,
+        "/snapshotRef/schema",
+        "source-authority handoff summary",
+    )? != "ee.source_authority.snapshot.v1"
     {
         return Err("source-authority handoff summary must reference snapshot schema".into());
     }
-    if string_field(&fixture, "/redactionStatus", "source-authority handoff summary")?
-        != "paths_counts_subjects_only_no_content"
+    if string_field(
+        &fixture,
+        "/redactionStatus",
+        "source-authority handoff summary",
+    )? != "paths_counts_subjects_only_no_content"
     {
         return Err("source-authority handoff summary redactionStatus drifted".into());
     }
 
-    let generated_for =
-        string_array_at(&fixture, "/generatedFor", "source-authority handoff summary")?;
+    let generated_for = string_array_at(
+        &fixture,
+        "/generatedFor",
+        "source-authority handoff summary",
+    )?;
     for expected in ["support_bundle", "handoff_capsule", "agent_mail"] {
         if !generated_for.iter().any(|item| item == expected) {
             return Err(format!(
@@ -1382,8 +1392,7 @@ fn source_authority_bv_robot_next_no_output_fixture_is_bounded() -> TestResult {
     {
         return Err("bvRobotNext must pin sanitized large-graph shape".into());
     }
-    if string_field(bv_source, "/bvRobotNext/recommendationState", "bv source")? != "no_output"
-    {
+    if string_field(bv_source, "/bvRobotNext/recommendationState", "bv source")? != "no_output" {
         return Err("bvRobotNext must distinguish no_output from empty_queue".into());
     }
     if !bool_field(
@@ -2033,11 +2042,7 @@ fn repair_plan_contract_pins_action_vocabulary_and_stop_conditions() -> TestResu
         ));
     }
 
-    let safety_classes = string_array_at(
-        &schema,
-        "/definitions/safetyClass/enum",
-        schema_case.id,
-    )?;
+    let safety_classes = string_array_at(&schema, "/definitions/safetyClass/enum", schema_case.id)?;
     for required_class in [
         "read_only_probe",
         "coordination_mutation",
@@ -2095,7 +2100,9 @@ fn repair_plan_contract_pins_action_vocabulary_and_stop_conditions() -> TestResu
         .and_then(Value::as_array)
         .ok_or_else(|| "repair-plan fixture missing stopConditions".to_owned())?
         .iter()
-        .map(|entry| string_field(entry, "/id", "repair-plan stop condition").map(ToOwned::to_owned))
+        .map(|entry| {
+            string_field(entry, "/id", "repair-plan stop condition").map(ToOwned::to_owned)
+        })
         .collect::<Result<BTreeSet<_>, _>>()?;
     for required_stop in [
         "fresh_claim_gate_safe_to_claim",
@@ -3802,40 +3809,90 @@ fn work_packet_bv_robot_insights_projection_is_bounded_and_advisory() -> TestRes
         return Err("bv robot-insights fixture must pin a bounded command template".into());
     }
     if fixture.pointer("/budget/maxBytes").and_then(Value::as_i64) != Some(32768)
-        || fixture.pointer("/budget/estimatedBytes").and_then(Value::as_i64) > Some(32768)
-        || fixture.pointer("/budget/truncated").and_then(Value::as_bool) != Some(true)
+        || fixture
+            .pointer("/budget/estimatedBytes")
+            .and_then(Value::as_i64)
+            > Some(32768)
+        || fixture
+            .pointer("/budget/truncated")
+            .and_then(Value::as_bool)
+            != Some(true)
     {
         return Err("bv robot-insights fixture must report bounded output bytes".into());
     }
-    if fixture.pointer("/graph/nodeCount").and_then(Value::as_i64).is_none_or(|count| count <= 2000)
-        || fixture.pointer("/graph/edgeCount").and_then(Value::as_i64).is_none_or(|count| count <= 4000)
+    if fixture
+        .pointer("/graph/nodeCount")
+        .and_then(Value::as_i64)
+        .is_none_or(|count| count <= 2000)
+        || fixture
+            .pointer("/graph/edgeCount")
+            .and_then(Value::as_i64)
+            .is_none_or(|count| count <= 4000)
     {
         return Err("bv robot-insights fixture must preserve large-graph shape".into());
     }
     if string_field(&fixture, "/graph/cycles/state", "bv robot-insights fixture")? != "skipped"
-        || !string_field(&fixture, "/graph/cycles/reason", "bv robot-insights fixture")?
-            .contains(">2000 nodes")
+        || !string_field(
+            &fixture,
+            "/graph/cycles/reason",
+            "bv robot-insights fixture",
+        )?
+        .contains(">2000 nodes")
     {
         return Err("bv robot-insights fixture must pin cycle-analysis skip reason".into());
     }
-    if fixture.pointer("/caps/maxTopWhatIfs").and_then(Value::as_i64) != Some(8)
-        || fixture.pointer("/caps/emittedTopWhatIfs").and_then(Value::as_i64).is_none_or(|count| count > 8)
-        || fixture.pointer("/caps/omittedTopWhatIfs").and_then(Value::as_i64).is_none_or(|count| count == 0)
-        || fixture.pointer("/caps/largeMapsTruncated").and_then(Value::as_bool) != Some(true)
+    if fixture
+        .pointer("/caps/maxTopWhatIfs")
+        .and_then(Value::as_i64)
+        != Some(8)
+        || fixture
+            .pointer("/caps/emittedTopWhatIfs")
+            .and_then(Value::as_i64)
+            .is_none_or(|count| count > 8)
+        || fixture
+            .pointer("/caps/omittedTopWhatIfs")
+            .and_then(Value::as_i64)
+            .is_none_or(|count| count == 0)
+        || fixture
+            .pointer("/caps/largeMapsTruncated")
+            .and_then(Value::as_bool)
+            != Some(true)
     {
         return Err("bv robot-insights fixture must report top-what-if and map caps".into());
     }
 
-    let omitted = string_array_at(&fixture, "/caps/omittedSections", "bv robot-insights fixture")?;
-    for section in ["full_pagerank_map", "full_betweenness_map", "raw_cycle_candidates"] {
+    let omitted = string_array_at(
+        &fixture,
+        "/caps/omittedSections",
+        "bv robot-insights fixture",
+    )?;
+    for section in [
+        "full_pagerank_map",
+        "full_betweenness_map",
+        "raw_cycle_candidates",
+    ] {
         if !omitted.iter().any(|item| item == section) {
-            return Err(format!("bv robot-insights fixture missing omitted section {section}"));
+            return Err(format!(
+                "bv robot-insights fixture missing omitted section {section}"
+            ));
         }
     }
-    if fixture.pointer("/recommendationPosture/advisoryOnly").and_then(Value::as_bool) != Some(true)
-        || fixture.pointer("/recommendationPosture/claimCommandSuppressed").and_then(Value::as_bool) != Some(true)
-        || fixture.pointer("/recommendationPosture/requiresActionableQueue").and_then(Value::as_bool) != Some(true)
-        || fixture.pointer("/recommendationPosture/requiresClaimGate").and_then(Value::as_bool) != Some(true)
+    if fixture
+        .pointer("/recommendationPosture/advisoryOnly")
+        .and_then(Value::as_bool)
+        != Some(true)
+        || fixture
+            .pointer("/recommendationPosture/claimCommandSuppressed")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || fixture
+            .pointer("/recommendationPosture/requiresActionableQueue")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || fixture
+            .pointer("/recommendationPosture/requiresClaimGate")
+            .and_then(Value::as_bool)
+            != Some(true)
         || fixture
             .pointer("/recommendationPosture/recommendationsContainNonActionable")
             .and_then(Value::as_bool)
@@ -3853,7 +3910,9 @@ fn work_packet_bv_robot_insights_projection_is_bounded_and_advisory() -> TestRes
         .collect::<BTreeSet<_>>();
     for status in ["blocked", "in_progress", "open"] {
         if !statuses.contains(status) {
-            return Err(format!("bv robot-insights fixture missing {status} example"));
+            return Err(format!(
+                "bv robot-insights fixture missing {status} example"
+            ));
         }
     }
     let serialized =

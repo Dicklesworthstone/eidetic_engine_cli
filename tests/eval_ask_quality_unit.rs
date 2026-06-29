@@ -1,6 +1,6 @@
 use ee::eval::{
     ASK_REPORT_SCHEMA_V1, AskQualityActual, AskQualityCase, AskQualityCitationActual,
-    AskQualityExpectedSide, AskQualityExpectations, AskQualityGateMode, AskQualitySideActual,
+    AskQualityExpectations, AskQualityExpectedSide, AskQualityGateMode, AskQualitySideActual,
     AskQualityThresholds, PackQualityVerdict, compare_ask_quality, evaluate_ask_quality,
 };
 
@@ -142,7 +142,10 @@ fn ask_quality_compare_flags_wrong_citation_as_drift() -> TestResult {
     );
     let actual = actual(
         "ask.direct_toolchain",
-        &[("mem_wrong", "This span does not contain the expected answer.")],
+        &[(
+            "mem_wrong",
+            "This span does not contain the expected answer.",
+        )],
     );
 
     let comparison = compare_ask_quality(&case, &actual);
@@ -161,12 +164,19 @@ fn ask_quality_compare_enforces_abstention_calibration() -> TestResult {
     let case = abstention_case();
     let hallucinated = actual(
         "ask.unanswerable_lunar_invoice",
-        &[("mem_ask_unrelated_billing", "The invoice was approved by nobody in the corpus.")],
+        &[(
+            "mem_ask_unrelated_billing",
+            "The invoice was approved by nobody in the corpus.",
+        )],
     );
 
     let comparison = compare_ask_quality(&case, &hallucinated);
 
-    ensure(comparison.verdict, PackQualityVerdict::Regression, "verdict")?;
+    ensure(
+        comparison.verdict,
+        PackQualityVerdict::Regression,
+        "verdict",
+    )?;
     ensure_close(
         comparison.scores.abstention_calibration,
         0.0,
@@ -231,7 +241,10 @@ fn ask_quality_report_blocks_threshold_regressions() -> TestResult {
     };
     let actuals = vec![actual(
         "ask.direct_toolchain",
-        &[("mem_wrong", "This span does not contain the expected answer.")],
+        &[(
+            "mem_wrong",
+            "This span does not contain the expected answer.",
+        )],
     )];
 
     let report = evaluate_ask_quality("ask_v1", &expectations, &actuals);
@@ -243,7 +256,11 @@ fn ask_quality_report_blocks_threshold_regressions() -> TestResult {
         "aggregate verdict",
     )?;
     ensure(report.cases_total, 2, "case count")?;
-    ensure(report.cases_inconclusive, 1, "missing actual is inconclusive")?;
+    ensure(
+        report.cases_inconclusive,
+        1,
+        "missing actual is inconclusive",
+    )?;
     ensure(
         report
             .threshold_failures

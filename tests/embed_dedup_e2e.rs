@@ -471,7 +471,9 @@ fn remember_insert_dedup_real_binary_pins_durable_link_and_perf_events() -> Test
         "enabled duplicate near duplicate source",
     )?;
     ensure_equal(
-        &near_duplicates[0].get("hammingDistance").and_then(Value::as_u64),
+        &near_duplicates[0]
+            .get("hammingDistance")
+            .and_then(Value::as_u64),
         &Some(0),
         "enabled duplicate near duplicate hamming distance",
     )?;

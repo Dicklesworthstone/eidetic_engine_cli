@@ -5,9 +5,7 @@
 //! and asserting the standard JSON response envelope.
 
 use ee::cache::hotset::{GenerationGate, HotsetBudget, HotsetManifestBuilder};
-use ee::obs::test_log::{
-    EventKind, LogLevel, TestEvent, excerpt_stderr, hash_bytes, log_event_to,
-};
+use ee::obs::test_log::{EventKind, LogLevel, TestEvent, excerpt_stderr, hash_bytes, log_event_to};
 use ee::pack::{PackHotsetEntry, PackHotsetEntryKind, PackSection};
 use ee::search::SearchHotsetEntry;
 use serde_json::{Value as JsonValue, json};
@@ -219,9 +217,18 @@ fn emit_scenario_event(
         )
         .with_field("source_snapshot_hash", logged.manifest_hash.clone())
         .with_field("manifest_hash", logged.manifest_hash.clone())
-        .with_field("warmed_search_entries", data["admitted"]["searchEntries"].clone())
-        .with_field("warmed_pack_entries", data["admitted"]["packEntries"].clone())
-        .with_field("warmed_total_entries", data["admitted"]["totalEntries"].clone())
+        .with_field(
+            "warmed_search_entries",
+            data["admitted"]["searchEntries"].clone(),
+        )
+        .with_field(
+            "warmed_pack_entries",
+            data["admitted"]["packEntries"].clone(),
+        )
+        .with_field(
+            "warmed_total_entries",
+            data["admitted"]["totalEntries"].clone(),
+        )
         .with_field("elapsed_ms", logged.elapsed_ms)
         .with_field(
             "latency_sample_summary",
@@ -483,6 +490,12 @@ fn cache_prewarm_real_binary_emits_response_envelope_for_hotset_manifest() -> Te
             }
         }
     }
-    ensure(command_end_count >= 5, "event log should record command_end rows")?;
-    ensure(assert_ok_count >= 4, "event log should record scenario assertions")
+    ensure(
+        command_end_count >= 5,
+        "event log should record command_end rows",
+    )?;
+    ensure(
+        assert_ok_count >= 4,
+        "event log should record scenario assertions",
+    )
 }

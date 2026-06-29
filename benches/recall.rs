@@ -12,12 +12,13 @@
 
 #![allow(clippy::expect_used)]
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ee::core::recall::{
     RECALL_CANDIDATE_SCAN_CAP, RecallCandidateRow, RecallProvenanceRef, RecallQuery,
     evaluate_recall,
 };
 use ee::models::{MemoryAnchorFreshnessState, MemoryAnchorKind};
+use std::hint::black_box;
 
 const RECALL_BENCH_GROUP: &str = "ee_recall";
 const RECALL_OPERATION: &str = "ee_recall_evaluate";

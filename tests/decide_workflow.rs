@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)] // test code may unwrap/expect
 use chrono::{DateTime, Utc};
 use ee::core::decide::{
     DECIDE_LIST_SCHEMA_V1, DECIDE_RECORD_SCHEMA_V1, DECIDE_REVISIT_SCHEMA_V1, DecideListOptions,
@@ -282,11 +283,7 @@ fn decide_cli_supersedes_refuses_forks_and_filters_typed_fields() -> TestResult 
         "--rationale",
         "A fork should be rejected unless it supersedes the live decision.",
     ]);
-    ensure_equal(
-        &exit,
-        &ProcessExitCode::Usage,
-        "same-topic fork exit code",
-    )?;
+    ensure_equal(&exit, &ProcessExitCode::Usage, "same-topic fork exit code")?;
     let fork: Value = serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
     ensure_equal(
         &fork["error"]["code"],
@@ -331,14 +328,8 @@ fn decide_cli_supersedes_refuses_forks_and_filters_typed_fields() -> TestResult 
         .ok_or_else(|| format!("second decision missing memoryId: {second}"))?
         .to_owned();
 
-    let (exit, stdout, stderr) = invoke(&[
-        "ee",
-        "--json",
-        "--workspace",
-        &workspace,
-        "decide",
-        "list",
-    ]);
+    let (exit, stdout, stderr) =
+        invoke(&["ee", "--json", "--workspace", &workspace, "decide", "list"]);
     ensure_equal(&exit, &ProcessExitCode::Success, "head list exit")?;
     ensure_equal(&stderr, &String::new(), "head list stderr")?;
     let head_list: Value = serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
@@ -456,7 +447,11 @@ fn decide_cli_supersedes_refuses_forks_and_filters_typed_fields() -> TestResult 
         .as_array()
         .ok_or_else(|| format!("search results missing array: {search}"))?
         .iter()
-        .filter_map(|result| result["memoryId"].as_str().or_else(|| result["docId"].as_str()))
+        .filter_map(|result| {
+            result["memoryId"]
+                .as_str()
+                .or_else(|| result["docId"].as_str())
+        })
         .collect::<Vec<_>>();
     ensure_equal(
         &result_ids.contains(&second_id.as_str()),

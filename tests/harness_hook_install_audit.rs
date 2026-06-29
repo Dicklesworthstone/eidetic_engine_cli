@@ -57,7 +57,7 @@ fn install_audit_reports_missing_fresh_and_docs() -> TestResult {
     if missing.install_audit.hook_missing_count == 0 {
         return Err("missing audit should count missing installable hooks".to_owned());
     }
-    if missing.written_paths.len() != 0 || settings_path.exists() {
+    if !missing.written_paths.is_empty() || settings_path.exists() {
         return Err("read-only audit must not write a missing settings file".to_owned());
     }
     for doc_id in ["recall_hooks", "primer_hooks", "journal_hooks"] {
@@ -184,6 +184,9 @@ fn install_audit_reports_unsupported_and_unwritable_config() -> TestResult {
     let mut permissions = fs::metadata(&readonly_path)
         .map_err(|error| error.to_string())?
         .permissions();
+    // Test cleanup: restore writability so the tempdir can be removed; the
+    // broad-permission caveat of set_readonly(false) is irrelevant here.
+    #[allow(clippy::permissions_set_readonly_false)]
     permissions.set_readonly(false);
     fs::set_permissions(&readonly_path, permissions).map_err(|error| error.to_string())?;
 

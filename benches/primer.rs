@@ -18,11 +18,12 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ee::core::primer::{
     PrimerCandidate, PrimerCentralityRow, PrimerFormat, PrimerSettings, assemble_primer,
     primer_config_hash, run_primer_with_persistence,
 };
+use std::hint::black_box;
 
 const PRIMER_BENCH_GROUP: &str = "ee_primer";
 const PRIMER_COLD_OPERATION: &str = "ee_primer_cold_assemble";

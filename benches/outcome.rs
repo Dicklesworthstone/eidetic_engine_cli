@@ -13,8 +13,9 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use asupersync::lab::{LabConfig, LabRuntime};
-use criterion::{BenchmarkId, Criterion, black_box};
+use criterion::{BenchmarkId, Criterion};
 use serde_json::{Value as JsonValue, json};
+use std::hint::black_box;
 use tempfile::TempDir;
 
 use ee::core::memory::{RememberMemoryOptions, remember_memory};

@@ -121,9 +121,7 @@ impl PprPrefetchCuckooTable {
     }
 
     fn clear(&mut self) {
-        for bucket in &mut self.buckets {
-            *bucket = None;
-        }
+        self.buckets.fill(None);
         self.len = 0;
     }
 

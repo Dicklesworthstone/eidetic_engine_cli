@@ -3,8 +3,9 @@
 //! This intentionally benchmarks the admission policy rather than executing
 //! 100k-node algorithms during normal Criterion runs.
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ee::graph::scale_policy::{graph_scale_decisions, graph_scale_total_budget_ms};
+use std::hint::black_box;
 
 const BENCH_GROUP_NAME: &str = "graph_scale_policy";
 const SCALES: &[(&str, usize, usize)] = &[

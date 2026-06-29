@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ee::core::context::{
     ContextPackOptions, ContextPackOutputOptions, run_context_pack_with_performance,
 };
@@ -19,6 +19,7 @@ use ee::core::search::SearchSourceMode;
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 use ee::models::{MemoryScope, RedactionLevel, WorkspaceId};
 use ee::search::SpeedMode;
+use std::hint::black_box;
 use tempfile::TempDir;
 
 const TIERED_RECALL_BENCH_GROUP: &str = "ee_tiered_recall";

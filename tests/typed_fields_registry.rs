@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)] // test code may unwrap/expect
 use ee::core::search::{TypedMemoryFieldFilter, TypedMemoryFieldOperator};
 use ee::db::StoredMemory;
 use ee::models::MemoryKind;
@@ -68,10 +69,8 @@ fn typed_fields_registry_document_builder_attaches_indexed_metadata() {
         trust_class: "human_explicit".to_string(),
         trust_subclass: None,
         provenance_chain_hash: None,
-        provenance_chain_hash_version: ee::db::PROVENANCE_CHAIN_HASH_VERSION
-            .to_string(),
-        provenance_verification_status: ee::db::PROVENANCE_STATUS_UNVERIFIED
-            .to_string(),
+        provenance_chain_hash_version: ee::db::PROVENANCE_CHAIN_HASH_VERSION.to_string(),
+        provenance_verification_status: ee::db::PROVENANCE_STATUS_UNVERIFIED.to_string(),
         provenance_verified_at: None,
         provenance_verification_note: None,
         created_at: "2026-06-14T00:00:00Z".to_string(),

@@ -33,8 +33,7 @@ use crate::core::swarm_brief::{
     SwarmBriefCommandError, SwarmBriefCommandOutput, SwarmBriefCommandRunner, SwarmBriefCommit,
     SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefFileSurfaceRisk,
     SwarmBriefHostProfileSummary, SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus,
-    SwarmBriefThreadSummary,
-    agent_mail_snapshot_brief_retry_command_template,
+    SwarmBriefThreadSummary, agent_mail_snapshot_brief_retry_command_template,
     agent_mail_snapshot_producer_command_template, collect_swarm_brief,
 };
 use crate::core::verify_ledger::{RchVerifyRunView, list_rch_verify_blockers};

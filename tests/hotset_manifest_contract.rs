@@ -173,16 +173,19 @@ fn hotset_manifest_fixtures_pin_required_cases() -> TestResult {
             format!("{} mutation policy", fixture.name),
         )?;
         ensure(
-            parsed["redactionStatus"].as_str()
-                == Some("hashes_counts_bounded_labels_no_content"),
+            parsed["redactionStatus"].as_str() == Some("hashes_counts_bounded_labels_no_content"),
             format!("{} redaction status", fixture.name),
         )?;
         ensure(
-            parsed.pointer("/workspace/workspaceLabel").and_then(Value::as_str) == Some("."),
+            parsed
+                .pointer("/workspace/workspaceLabel")
+                .and_then(Value::as_str)
+                == Some("."),
             format!("{} workspace label must be symbolic", fixture.name),
         )?;
         ensure(
-            parsed.pointer("/sourceSnapshots")
+            parsed
+                .pointer("/sourceSnapshots")
                 .and_then(Value::as_array)
                 .is_some_and(|snapshots| !snapshots.is_empty()),
             format!("{} must include source snapshot evidence", fixture.name),
@@ -193,12 +196,16 @@ fn hotset_manifest_fixtures_pin_required_cases() -> TestResult {
             format!("{} item count", fixture.name),
         )?;
         ensure(
-            parsed.pointer("/summary/admittedCount").and_then(Value::as_u64)
+            parsed
+                .pointer("/summary/admittedCount")
+                .and_then(Value::as_u64)
                 == Some(fixture.expected_admitted_count),
             format!("{} admitted count", fixture.name),
         )?;
         ensure(
-            parsed.pointer("/summary/failClosedCount").and_then(Value::as_u64)
+            parsed
+                .pointer("/summary/failClosedCount")
+                .and_then(Value::as_u64)
                 == Some(fixture.expected_fail_closed_count),
             format!("{} fail-closed count", fixture.name),
         )?;
@@ -229,17 +236,16 @@ fn hotset_manifest_fixtures_pin_required_cases() -> TestResult {
 
 #[test]
 fn hotset_manifest_abstain_fixtures_block_prewarm_apply() -> TestResult {
-    for fixture in FIXTURES
-        .iter()
-        .filter(|fixture| fixture.expected_blocked)
-    {
+    for fixture in FIXTURES.iter().filter(|fixture| fixture.expected_blocked) {
         let parsed = parse_fixture(fixture)?;
         let items = as_array(&parsed, "/items", fixture.name)?;
-        ensure(!items.is_empty(), format!("{} must name blocked items", fixture.name))?;
+        ensure(
+            !items.is_empty(),
+            format!("{} must name blocked items", fixture.name),
+        )?;
         for item in items {
             ensure(
-                item.pointer("/admission/decision").and_then(Value::as_str)
-                    == Some("fail_closed"),
+                item.pointer("/admission/decision").and_then(Value::as_str) == Some("fail_closed"),
                 format!("{} item must fail closed: {item}", fixture.name),
             )?;
             ensure(
@@ -287,15 +293,24 @@ fn warm_hotset_manifest_fixture_covers_pack_search_and_read_pool_reuse() -> Test
         )?;
     }
     ensure(
-        parsed.pointer("/summary/classCounts/packL2Candidate").and_then(Value::as_u64) == Some(1),
+        parsed
+            .pointer("/summary/classCounts/packL2Candidate")
+            .and_then(Value::as_u64)
+            == Some(1),
         "warm fixture must count pack L2 candidates",
     )?;
     ensure(
-        parsed.pointer("/summary/classCounts/searchIndexShard").and_then(Value::as_u64) == Some(1),
+        parsed
+            .pointer("/summary/classCounts/searchIndexShard")
+            .and_then(Value::as_u64)
+            == Some(1),
         "warm fixture must count search-index candidates",
     )?;
     ensure(
-        parsed.pointer("/summary/classCounts/readPoolTarget").and_then(Value::as_u64) == Some(1),
+        parsed
+            .pointer("/summary/classCounts/readPoolTarget")
+            .and_then(Value::as_u64)
+            == Some(1),
         "warm fixture must count read-pool candidates",
     )
 }

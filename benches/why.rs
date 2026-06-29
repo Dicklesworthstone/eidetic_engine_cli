@@ -16,10 +16,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use asupersync::lab::{LabConfig, LabRuntime};
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::core::why::{WhyOptions, explain_memory};
 use ee::search::HashEmbedder;
+use std::hint::black_box;
 use tempfile::TempDir;
 
 const GROUP_NAME: &str = "ee_why";

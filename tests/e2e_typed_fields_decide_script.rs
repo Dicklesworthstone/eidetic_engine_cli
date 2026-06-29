@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-
+#![allow(clippy::unwrap_used, clippy::expect_used)] // test code may unwrap/expect
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;

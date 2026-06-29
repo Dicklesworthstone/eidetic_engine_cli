@@ -14,13 +14,14 @@
 use std::time::Duration;
 
 #[cfg(unix)]
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 #[cfg(unix)]
 use ee::daemon::protocol::DaemonRequest;
 #[cfg(unix)]
 use ee::daemon::server::{METHOD_CONTEXT, METHOD_ECHO, dispatch};
 #[cfg(unix)]
 use serde_json::json;
+use std::hint::black_box;
 #[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]

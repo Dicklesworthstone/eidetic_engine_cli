@@ -35,6 +35,9 @@ const PROOF_ARTIFACT_MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// can legitimately print a lot on failure, and a malformed local tool wrapper
 /// can print without bound. Keep the public strings useful while bounding
 /// verifier memory and JSON size.
+// Used by the lib build; appears unused when this module is compiled in
+// isolation by the proof_verify_core integration test via `#[path]`.
+#[allow(dead_code)]
 const PROOF_COMMAND_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

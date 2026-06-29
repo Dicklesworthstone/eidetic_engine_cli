@@ -6,9 +6,10 @@
 
 use std::time::Instant;
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ee::graph::hits::compute_hits;
 use fnx_classes::digraph::DiGraph;
+use std::hint::black_box;
 
 #[path = "../tests/support/graph_generator.rs"]
 mod graph_generator;

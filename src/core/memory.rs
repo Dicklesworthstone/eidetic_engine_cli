@@ -1373,13 +1373,7 @@ fn remember_memory_inner(
     audit_lane: Option<&AuditLaneHandle>,
     defer_index_processing: bool,
 ) -> Result<RememberMemoryReport, DomainError> {
-    remember_memory_inner_with_store(
-        options,
-        id_source,
-        audit_lane,
-        defer_index_processing,
-        None,
-    )
+    remember_memory_inner_with_store(options, id_source, audit_lane, defer_index_processing, None)
 }
 
 fn remember_memory_inner_with_store(
@@ -2213,6 +2207,8 @@ impl PreparedRememberTxnWrite {
         &self.finish.memory_id
     }
 
+    // Accessor kept for parity with memory_id()/index_dir(); not yet consumed.
+    #[allow(dead_code)]
     pub(crate) fn workspace_id(&self) -> &str {
         &self.finish.prepared.workspace_id
     }
@@ -2261,6 +2257,9 @@ impl Drop for RememberWriteReplayGuard {
     }
 }
 
+// Thin convenience wrapper retained for callers that do not supply a store;
+// currently unused (callers go through prepare_remember_memory_with_store).
+#[allow(dead_code)]
 fn prepare_remember_memory(
     options: &RememberMemoryOptions<'_>,
     memory_id: MemoryId,
@@ -2294,8 +2293,11 @@ fn prepare_remember_memory_with_store(
         .map_err(|error| remember_usage_error(error.to_string()))?
         .as_str()
         .to_owned();
-    let policy_bypass =
-        validate_remember_policy(&content, &caller_workspace_path, options.allow_secret_mention)?;
+    let policy_bypass = validate_remember_policy(
+        &content,
+        &caller_workspace_path,
+        options.allow_secret_mention,
+    )?;
     let workflow_id = parse_workflow_id(options.workflow_id)?;
     let level = MemoryLevel::from_str(options.level)
         .map_err(|error| remember_usage_error(error.to_string()))?;
@@ -3703,11 +3705,7 @@ pub(crate) fn prepare_remember_txn_write_for_connection(
     let write_replay_guard = RememberWriteReplayGuard::arm(&prepared.workspace_path)?;
     ensure_database_parent_exists(&prepared.database_path)?;
     migrate_remember_database_with_retry(connection)?;
-    ensure_workspace(
-        connection,
-        &prepared.workspace_id,
-        &prepared.workspace_path,
-    )?;
+    ensure_workspace(connection, &prepared.workspace_id, &prepared.workspace_path)?;
     // The daemon write-owner is already the per-process serializer for this
     // batch. We keep the direct CLI advisory lock on the direct path, but do
     // not acquire one per memory here; multiple same-workspace remembers in one
@@ -6374,9 +6372,8 @@ pub fn remember_global_memory_with_controls(
     let workspace_id = if options.dry_run {
         super::global_store::global_workspace_id(&paths)
     } else {
-        let (connection, workspace_id) =
-            super::global_store::open_or_create_global_store(&paths)
-                .map_err(remember_global_store_error)?;
+        let (connection, workspace_id) = super::global_store::open_or_create_global_store(&paths)
+            .map_err(remember_global_store_error)?;
         if let Err(error) = connection.close() {
             tracing::warn!(
                 target: "ee::memory",

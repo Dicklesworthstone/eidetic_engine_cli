@@ -89,8 +89,8 @@ fn remember(workspace: &str, content: &str) -> Result<String, String> {
             String::from_utf8_lossy(&out.stderr),
         ));
     }
-    let parsed: Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("remember stdout not JSON: {e}"))?;
+    let parsed: Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("remember stdout not JSON: {e}"))?;
     parsed["data"]["public_id"]
         .as_str()
         .or_else(|| parsed["data"]["memory_id"].as_str())
@@ -228,7 +228,10 @@ fn economy_report_with_seeded_memories_counts_artifacts() -> TestResult {
     init_workspace(&ws)?;
 
     remember(&ws, "Economy-pin: alpha constraint for cost estimation.")?;
-    remember(&ws, "Economy-pin: beta strategy for token budget allocation.")?;
+    remember(
+        &ws,
+        "Economy-pin: beta strategy for token budget allocation.",
+    )?;
     remember(&ws, "Economy-pin: gamma observation on attention reserves.")?;
 
     let (out, parsed) = run_economy_report(&ws, &[])?;
@@ -267,9 +270,7 @@ fn economy_report_with_seeded_memories_counts_artifacts() -> TestResult {
         .any(|entry| entry["artifactType"].as_str() == Some("memory"));
     ensure(
         has_memory_entry,
-        format!(
-            "artifactBreakdown must contain a 'memory' entry after seeding; got {breakdown:?}"
-        ),
+        format!("artifactBreakdown must contain a 'memory' entry after seeding; got {breakdown:?}"),
     )?;
 
     // Each breakdown entry must carry the required numeric fields
@@ -295,9 +296,7 @@ fn economy_report_without_init_returns_degraded_mode_error() -> TestResult {
     let (out, parsed) = run_economy_report(&ws, &[])?;
     ensure(
         !out.status.success(),
-        format!(
-            "economy report without init must exit non-zero; stdout={parsed}"
-        ),
+        format!("economy report without init must exit non-zero; stdout={parsed}"),
     )?;
 
     assert_error_envelope(&parsed)?;
@@ -322,9 +321,7 @@ fn economy_score_on_unknown_id_returns_not_found() -> TestResult {
     let (out, parsed) = run_economy_score(&ws, unknown_id, &[])?;
     ensure(
         !out.status.success(),
-        format!(
-            "economy score on unknown id must exit non-zero; stdout={parsed}"
-        ),
+        format!("economy score on unknown id must exit non-zero; stdout={parsed}"),
     )?;
 
     assert_error_envelope(&parsed)?;
@@ -430,9 +427,7 @@ fn economy_score_breakdown_flag_adds_breakdown_object() -> TestResult {
     let breakdown = &score["breakdown"];
     ensure(
         breakdown.is_object(),
-        format!(
-            "score.breakdown must be an object when --breakdown is passed; got {score}"
-        ),
+        format!("score.breakdown must be an object when --breakdown is passed; got {score}"),
     )?;
     ensure(
         breakdown["formula"].is_string(),

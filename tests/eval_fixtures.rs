@@ -2,9 +2,8 @@ use ee::eval::{
     ASK_QUALITY_EXPECTATIONS_SCHEMA_V1, CommandStep, DegradedBranch, EVAL_FIXTURE_SCHEMA_V1,
     EvaluationScenario, ExpectedOutput, FixtureScenario, PACK_QUALITY_EXPECTATIONS_SCHEMA_V1,
     RedactionClass, RedactionLeakDetector, SEMANTIC_RECALL_EXPECTATIONS_SCHEMA_V1,
-    SEMANTIC_RECALL_REPORT_SCHEMA_V1, STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1,
-    SourceMemoryFile, evaluate_semantic_recall_expectations, materialize_source_memories,
-    validate_fixture_scenario,
+    SEMANTIC_RECALL_REPORT_SCHEMA_V1, STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1, SourceMemoryFile,
+    evaluate_semantic_recall_expectations, materialize_source_memories, validate_fixture_scenario,
 };
 use ee::models::model_registry::{
     EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
@@ -54,8 +53,7 @@ const BUNDLED_EMBEDDINGS_SCENARIO: &str =
     include_str!("fixtures/eval/bundled_embeddings/scenario.json");
 const BUNDLED_EMBEDDINGS_SOURCE: &str =
     include_str!("fixtures/eval/bundled_embeddings/source_memory.json");
-const BUNDLED_EMBEDDINGS_README: &str =
-    include_str!("fixtures/eval/bundled_embeddings/README.md");
+const BUNDLED_EMBEDDINGS_README: &str = include_str!("fixtures/eval/bundled_embeddings/README.md");
 
 const METAMORPHIC_EVALUATION_SCENARIO: &str =
     include_str!("fixtures/eval/metamorphic_evaluation/scenario.json");
@@ -2485,11 +2483,7 @@ fn bundled_embeddings_semantic_recall_fixture_contract_is_complete() -> TestResu
             .any(|id| id == "usr_bundled_embedding_analyst_paraphrase"),
         "scenario id names analyst paraphrase regression",
     )?;
-    ensure_equal(
-        scenario.command_sequence.len(),
-        1,
-        "command sequence count",
-    )?;
+    ensure_equal(scenario.command_sequence.len(), 1, "command sequence count")?;
     ensure(
         scenario.command_sequence[0]
             .stdout_artifact_path
@@ -2516,10 +2510,10 @@ fn bundled_embeddings_semantic_recall_fixture_contract_is_complete() -> TestResu
     let memories = materialize_source_memories(&source).map_err(|error| error.to_string())?;
     ensure_equal(memories.len(), 3, "source memory count")?;
     ensure(
-        memories
-            .iter()
-            .any(|memory| memory.id == "mem_00000000000000000000000901"
-                && memory.content.contains("RBLX bookings/FCF watchlist")),
+        memories.iter().any(|memory| {
+            memory.id == "mem_00000000000000000000000901"
+                && memory.content.contains("RBLX bookings/FCF watchlist")
+        }),
         "source includes the analyst RBLX memory",
     )?;
 

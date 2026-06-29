@@ -4,11 +4,12 @@
 //! histories outside the measured closure so the benchmark tracks prediction
 //! work, not fixture construction.
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ee::core::cass_prefetch::{
     CassPrefetchHistory, DEFAULT_PREFETCH_TOP_K, MAX_PREFETCH_HISTORY,
     RecencyWeightedFrequencyPredictor, SpeculativePrefetch,
 };
+use std::hint::black_box;
 
 const BENCH_GROUP_NAME: &str = "cass_prefetch";
 const BENCH_AGENT_SCOPE: &str = "agent:bench";

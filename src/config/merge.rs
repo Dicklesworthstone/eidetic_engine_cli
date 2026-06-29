@@ -3227,11 +3227,7 @@ mod tests {
             &Some(8192),
             "env max tokens",
         )?;
-        ensure_equal(
-            &parsed.journal.enabled,
-            &Some(false),
-            "env journal enabled",
-        )?;
+        ensure_equal(&parsed.journal.enabled, &Some(false), "env journal enabled")?;
         ensure_equal(
             &parsed.journal.retention_days,
             &Some(21),

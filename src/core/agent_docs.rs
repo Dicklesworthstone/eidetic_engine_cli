@@ -1682,7 +1682,9 @@ mod tests {
         ensure(
             flush_recipe.command.contains("ee journal distill")
                 && flush_recipe.command.contains("--dry-run")
-                && flush_recipe.success_check.contains(crate::core::journal::JOURNAL_DISTILL_SCHEMA_V1),
+                && flush_recipe
+                    .success_check
+                    .contains(crate::core::journal::JOURNAL_DISTILL_SCHEMA_V1),
             "journal flush recipe is dry-run and schema-pinned",
         )?;
 

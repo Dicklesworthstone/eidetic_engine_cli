@@ -19,8 +19,8 @@ use ee::core::memory::{
     remember_memory_batch_stdin,
 };
 use ee::core::outcome::{
-    DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
-    OutcomeBatchOptions, OutcomeRecordOptions, record_outcome, record_outcome_batch_stdin,
+    DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR, OutcomeBatchOptions,
+    OutcomeRecordOptions, record_outcome, record_outcome_batch_stdin,
 };
 use ee::core::status::StatusReport;
 use ee::core::write_owner::{

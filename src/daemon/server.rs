@@ -501,7 +501,7 @@ impl DaemonServerHandle {
             && !task.is_finished()
         {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = runtime.block_on(task);
+                runtime.block_on(task);
             }));
         }
         self.write_runtime.take();
@@ -2050,6 +2050,8 @@ fn submit_op_via_actor(
         .with_degraded(super::DAEMON_OVERLOADED_CODE);
     };
     let write_result = router.runtime.block_on(async {
+        // Invariant: block_on always installs an ambient Cx for the closure.
+        #[allow(clippy::expect_used)]
         let cx = asupersync::Cx::current().expect("Runtime::block_on installs an ambient Cx");
         receiver.recv(&cx).await
     });
@@ -3953,7 +3955,7 @@ mod tests {
         // recv returns Disconnected and the task completes; the join must not
         // hang.
         drop(handle);
-        let _ = runtime.block_on(task);
+        runtime.block_on(task);
     }
 
     #[test]

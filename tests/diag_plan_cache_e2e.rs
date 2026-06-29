@@ -73,7 +73,10 @@ fn diag_plan_cache_real_binary_emits_response_envelope() -> TestResult {
         "top-level degraded array should be empty",
     )?;
     ensure(
-        response.pointer("/data/command").and_then(JsonValue::as_str) == Some("diag plan-cache"),
+        response
+            .pointer("/data/command")
+            .and_then(JsonValue::as_str)
+            == Some("diag plan-cache"),
         "diag plan-cache command field",
     )?;
     ensure(

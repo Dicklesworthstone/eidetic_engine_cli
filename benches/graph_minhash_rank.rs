@@ -6,10 +6,11 @@
 
 use std::time::Instant;
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ee::graph::DiGraph;
 use ee::graph::minhash_rank::{MinHashRankPolicy, compute_minhash_rank_with_policy};
 use fnx_algorithms::pagerank_directed;
+use std::hint::black_box;
 
 const BENCH_GROUP_NAME: &str = "graph_minhash_rank";
 const QUICK_WARMUP_ITERS: usize = 2;

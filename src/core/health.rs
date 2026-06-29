@@ -20,15 +20,15 @@ use crate::graph::health::{
     ContradictionCluster, ContradictionSeverity, HEALTH_STRUCTURAL_SCHEMA_V1, KTrussReport,
     compute_k_truss, detect_contradiction_clusters,
 };
-use crate::models::{CapabilityStatus, DomainError};
 use crate::models::degradation::{GRAPH_HEALTH_NO_CONTRADICTIONS_CODE, GRAPH_METRICS_UNAVAILABLE};
+use crate::models::{CapabilityStatus, DomainError};
 
 use super::build_info;
 use super::curate::stable_workspace_id;
 use super::learn::{LearnGapsOptions, show_gaps};
 use super::memory_debt::{
-    MemoryDebtDoctorOptions, MemoryDebtReport, MemoryDebtSnapshotOptions,
-    MemoryDebtSnapshotReport, run_memory_debt_doctor, run_memory_debt_snapshot,
+    MemoryDebtDoctorOptions, MemoryDebtReport, MemoryDebtSnapshotOptions, MemoryDebtSnapshotReport,
+    run_memory_debt_doctor, run_memory_debt_snapshot,
 };
 use super::status::{
     default_workspace_path, probe_runtime_capability, probe_search_capability,
@@ -493,7 +493,8 @@ impl HealthScorecardReport {
             }
         };
 
-        let structural = StructuralHealthReport::gather_from_connection(&connection, workspace_path);
+        let structural =
+            StructuralHealthReport::gather_from_connection(&connection, workspace_path);
         let mut snapshot_summary = snapshot_summary;
         snapshot_summary.history_count = history.len();
 
@@ -524,14 +525,15 @@ impl HealthScorecardReport {
         mut degraded: Vec<HealthScorecardDegradation>,
     ) -> Self {
         let evidence = health_scorecard_evidence(&memories, debt_report, learn_gaps, &structural);
-        degraded.extend(structural.degraded.iter().map(|entry| HealthScorecardDegradation {
-            code: format!("structural_health.{}", entry.code),
-            severity: entry.severity.clone(),
-            message: entry.message.clone(),
-            repair: entry
-                .repair
-                .clone()
-                .unwrap_or_else(|| "ee health --robot-insights --workspace . --json".to_owned()),
+        degraded.extend(structural.degraded.iter().map(|entry| {
+            HealthScorecardDegradation {
+                code: format!("structural_health.{}", entry.code),
+                severity: entry.severity.clone(),
+                message: entry.message.clone(),
+                repair: entry.repair.clone().unwrap_or_else(|| {
+                    "ee health --robot-insights --workspace . --json".to_owned()
+                }),
+            }
         }));
         if learn_gaps.is_none() {
             degraded.push(HealthScorecardDegradation {
@@ -623,7 +625,14 @@ fn health_scorecard_evidence(
         never_retrieved_count: class_count(&class_counts, "never_retrieved"),
         missing_provenance_count: memories
             .iter()
-            .filter(|memory| memory.provenance_uri.as_deref().unwrap_or("").trim().is_empty())
+            .filter(|memory| {
+                memory
+                    .provenance_uri
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
+            })
             .count(),
         unverified_provenance_count: memories
             .iter()
@@ -763,7 +772,10 @@ fn freshness_sub_score(evidence: &HealthScorecardEvidence) -> HealthScorecardSub
                 "unverifiedProvenance={}",
                 evidence.unverified_provenance_count
             ),
-            format!("mismatchedProvenance={}", evidence.mismatched_provenance_count),
+            format!(
+                "mismatchedProvenance={}",
+                evidence.mismatched_provenance_count
+            ),
             format!("staleAnchors={}", evidence.stale_anchor_count),
         ],
     )
@@ -783,10 +795,7 @@ fn trust_sub_score(evidence: &HealthScorecardEvidence) -> HealthScorecardSubScor
         "Trust-class calibration and low-trust memories that still win retrieval.",
         vec![
             format!("lowTrust={}", evidence.low_trust_count),
-            format!(
-                "lowTrustHighRank={}",
-                evidence.low_trust_high_rank_count
-            ),
+            format!("lowTrustHighRank={}", evidence.low_trust_high_rank_count),
         ],
     )
 }
@@ -795,9 +804,7 @@ fn redundancy_sub_score(evidence: &HealthScorecardEvidence) -> HealthScorecardSu
     let denominator = evidence.memory_count.max(1) as f64;
     let duplicate_ratio = evidence.exact_duplicate_memory_count as f64 / denominator;
     let score = bounded_score(
-        100.0
-            - duplicate_ratio * 70.0
-            - evidence.exact_duplicate_group_count as f64 * 5.0,
+        100.0 - duplicate_ratio * 70.0 - evidence.exact_duplicate_group_count as f64 * 5.0,
     );
     sub_score(
         "redundancy",
@@ -807,10 +814,7 @@ fn redundancy_sub_score(evidence: &HealthScorecardEvidence) -> HealthScorecardSu
         denominator,
         "Exact duplicate burden that can dilute retrieval and curation queues.",
         vec![
-            format!(
-                "duplicateGroups={}",
-                evidence.exact_duplicate_group_count
-            ),
+            format!("duplicateGroups={}", evidence.exact_duplicate_group_count),
             format!(
                 "duplicateMemories={}",
                 evidence.exact_duplicate_memory_count
@@ -969,7 +973,9 @@ fn health_score_from_debt_snapshot(snapshot: &StoredDebtSnapshot) -> Option<u32>
         } else {
             f64::from(snapshot.total_score) / item_count
         };
-        return Some(bounded_score(100.0 - debt_ratio * 45.0 - average_debt * 25.0));
+        return Some(bounded_score(
+            100.0 - debt_ratio * 45.0 - average_debt * 25.0,
+        ));
     }
     None
 }
@@ -1851,25 +1857,9 @@ mod tests {
             graph_max_k: 3,
         };
         let sub_scores = vec![
-            sub_score(
-                "coverage",
-                40,
-                0.25,
-                4.0,
-                10.0,
-                "coverage low",
-                vec![],
-            ),
+            sub_score("coverage", 40, 0.25, 4.0, 10.0, "coverage low", vec![]),
             sub_score("trust", 78, 0.20, 4.0, 6.0, "trust low", vec![]),
-            sub_score(
-                "redundancy",
-                55,
-                0.15,
-                4.0,
-                6.0,
-                "duplicate low",
-                vec![],
-            ),
+            sub_score("redundancy", 55, 0.15, 4.0, 6.0, "duplicate low", vec![]),
         ];
         let trend = HealthScorecardTrend {
             direction: "flat".to_owned(),

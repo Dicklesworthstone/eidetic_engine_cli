@@ -3,8 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use criterion::{BenchmarkId, Criterion, black_box};
+use criterion::{BenchmarkId, Criterion};
 use serde_json::{Value, json};
+use std::hint::black_box;
 
 use ee::core::status::{
     STATUS_BENCH_GROUP_NAME, STATUS_BENCH_SCALES, StatusBenchFixture, StatusBenchReport,

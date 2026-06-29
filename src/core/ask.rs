@@ -40,7 +40,11 @@ const ASK_QUERY_MISS_AUDIT_SAMPLE_RATE: f64 = 1.0;
 
 // ─── span scoring weights (ADR §2) ──────────────────────────────────────────
 
+// Retained ADR §2 span-scoring weights; W1/W2 are documented design constants
+// not yet consumed by the current scoring path.
+#[allow(dead_code)]
 const SPAN_W1_LEXICAL: f32 = 0.45;
+#[allow(dead_code)]
 const SPAN_W2_SEMANTIC: f32 = 0.35;
 const SPAN_W3_TRUST: f32 = 0.20;
 

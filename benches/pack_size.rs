@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use criterion::{BenchmarkId, Criterion, black_box};
+use criterion::{BenchmarkId, Criterion};
 use serde::{Deserialize, Serialize};
+use std::hint::black_box;
 use tempfile::TempDir;
 
 use ee::core::context::{ContextPackOptions, run_context_pack};

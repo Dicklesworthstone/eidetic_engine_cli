@@ -23,8 +23,7 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const SCHEMA_REL: &str = "docs/schemas/ee.index_intake.v1.json";
-const PERF_FIXTURE_REL: &str =
-    "tests/fixtures/golden/perf_artifact/incremental_index_intake.json";
+const PERF_FIXTURE_REL: &str = "tests/fixtures/golden/perf_artifact/incremental_index_intake.json";
 const E2E_SCRIPT_REL: &str = "scripts/e2e_incremental_index.sh";
 const REDACTION_CONST: &str = "counts_modes_no_content";
 
@@ -189,8 +188,7 @@ fn index_intake_modes_and_fallback_reasons_are_closed_sets() -> TestResult {
 fn incremental_index_e2e_perf_contract_is_pinned() -> TestResult {
     let fixture = load_json(PERF_FIXTURE_REL)?;
     ensure(
-        fixture.pointer("/schema").and_then(Value::as_str)
-            == Some("ee.perf.artifact_summary.v1"),
+        fixture.pointer("/schema").and_then(Value::as_str) == Some("ee.perf.artifact_summary.v1"),
         "incremental index perf fixture must use the normalized perf artifact summary schema",
     )?;
     ensure(

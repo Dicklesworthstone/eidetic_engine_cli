@@ -66,8 +66,8 @@ use crate::core::config_surface::{
 use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
     ContextPackOutputOptions, ContextPackOutputProfile, ContextTaskLens,
-    attach_pack_dna_to_context_response, explain_why_not_default,
-    context_request_from_options, run_context_pack_with_performance,
+    attach_pack_dna_to_context_response, context_request_from_options, explain_why_not_default,
+    run_context_pack_with_performance,
 };
 use crate::core::context_delta::{
     CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE, CONTEXT_DELTA_NO_BASELINE_CODE,
@@ -248,9 +248,10 @@ use crate::core::search::{
     run_diag_search, run_search, run_search_with_performance, run_similar,
 };
 use crate::core::sentinel::{SentinelCheckContext, observe_sentinel_explicit};
-use crate::core::session_budget::{
-    BudgetPlannerInput, SESSION_BUDGET_PLAN_SCHEMA_V1, plan_cheapest_next_command,
-};
+use crate::core::session_budget::{BudgetPlannerInput, plan_cheapest_next_command};
+// Test-only: referenced via `super::` by the inline `#[cfg(test)]` suite.
+#[cfg(test)]
+use crate::core::session_budget::SESSION_BUDGET_PLAN_SCHEMA_V1;
 use crate::core::status::{
     StatusOptions, StatusReport, StatusSkylineReport, WalStatusReport,
     wal_checkpoint_bytes_threshold,
@@ -34850,16 +34851,18 @@ fn context_stream_error_from_context_pack_error(
             "context_stream_pack_error",
             output::streaming::StreamSeverity::Medium,
         ),
-        ContextPackError::PolicyDenied(_) => {
-            ("context_stream_policy_denied", output::streaming::StreamSeverity::High)
-        }
+        ContextPackError::PolicyDenied(_) => (
+            "context_stream_policy_denied",
+            output::streaming::StreamSeverity::High,
+        ),
         ContextPackError::DeadlineExceeded(_) => (
             "context_stream_deadline_exceeded",
             output::streaming::StreamSeverity::Medium,
         ),
-        ContextPackError::Cancelled(_) => {
-            ("context_stream_cancelled", output::streaming::StreamSeverity::Low)
-        }
+        ContextPackError::Cancelled(_) => (
+            "context_stream_cancelled",
+            output::streaming::StreamSeverity::Low,
+        ),
     };
     output::streaming::StreamError::new(
         code,
@@ -35853,9 +35856,8 @@ where
         return match write_context_stream_tail(&response, frame_options.clone(), &mut writer) {
             Ok(()) => ProcessExitCode::Success,
             Err(error) => {
-                let stream_error = ContextPackError::Pack(format!(
-                    "Failed to render context stream: {error}"
-                ));
+                let stream_error =
+                    ContextPackError::Pack(format!("Failed to render context stream: {error}"));
                 match write_context_stream_terminal_error(
                     &stream_error,
                     &frame_options,
@@ -60631,21 +60633,21 @@ mod tests {
         MemoryCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
         RedactionLevelSource, ReflectCommand, ReflectRequestLedgerCommand, RegressCommand,
         RegressExplainArgs, RegressionSurfaceArg, RuleCommand, SESSION_BUDGET_PLAN_SCHEMA_V1,
-        SessionBudgetCommand, SessionBudgetPlanArgs, ShadowMode, SituationCommand, StatusArgs,
-        SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmRepairPlanArgs, SwarmWorkPacketArgs,
-        TaskFrameCommand, TaskFrameSubgoalCommand, TrustCommand, VerifyCommand, VerifyRchCommand,
-        WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode,
-        context_request_from_options, context_stream_header_frame,
-        context_stream_options_for_request, db_inspect_redact_source_uri,
-        diag_environment_attestation_response_json, environment_attestation_unavailable_sources,
-        format_impact_json, format_search_json_with_mesh_and_recalibration,
-        hook_git_readiness_response_json, hook_status_response_json, init_report_exit_code,
-        json_with_data_result_path, mesh, orient_next_commands,
-        parse_completion_audit_evidence_input, parse_context_profile, parse_lab_counterfactual_swap,
-        parse_lab_counterfactual_swap_revision, parse_search_source_mode_arg,
-        parse_verification_evidence_record_input, plan_cache_diag_degraded,
-        plan_cache_diag_response_json, read_environment_attestation_fixture_json, run,
-        write_context_stream_terminal_error, write_index_rebuild_error,
+        ShadowMode, SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand,
+        SwarmRepairPlanArgs, SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand,
+        TrustCommand, VerifyCommand, VerifyRchCommand, WorkflowCommand, WorkspaceCommand,
+        WorkspaceHygieneArgs, WorkspaceHygieneMode, context_request_from_options,
+        context_stream_header_frame, context_stream_options_for_request,
+        db_inspect_redact_source_uri, diag_environment_attestation_response_json,
+        environment_attestation_unavailable_sources, format_impact_json,
+        format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
+        hook_status_response_json, init_report_exit_code, json_with_data_result_path, mesh,
+        orient_next_commands, parse_completion_audit_evidence_input, parse_context_profile,
+        parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
+        parse_search_source_mode_arg, parse_verification_evidence_record_input,
+        plan_cache_diag_degraded, plan_cache_diag_response_json,
+        read_environment_attestation_fixture_json, run, write_context_stream_terminal_error,
+        write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
     use crate::core::impact::{
@@ -60753,7 +60755,11 @@ mod tests {
             .map_err(|error| format!("header write failed: {error}"))?;
         let header_text = probe.text();
         let header_lines: Vec<&str> = header_text.lines().collect();
-        ensure_equal(&header_lines.len(), &1, "header frame is flushed before pack result")?;
+        ensure_equal(
+            &header_lines.len(),
+            &1,
+            "header frame is flushed before pack result",
+        )?;
         let header_json: serde_json::Value = serde_json::from_str(header_lines[0])
             .map_err(|error| format!("header JSON parse failed: {error}"))?;
         ensure_equal(
@@ -60776,7 +60782,11 @@ mod tests {
 
         let final_text = probe.text();
         let final_lines: Vec<&str> = final_text.lines().collect();
-        ensure_equal(&final_lines.len(), &2, "stream has header plus terminal error")?;
+        ensure_equal(
+            &final_lines.len(),
+            &2,
+            "stream has header plus terminal error",
+        )?;
         let terminal_json: serde_json::Value = serde_json::from_str(final_lines[1])
             .map_err(|error| format!("terminal JSON parse failed: {error}"))?;
         ensure_equal(

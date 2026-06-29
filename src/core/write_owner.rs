@@ -48,10 +48,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
+use asupersync::Outcome;
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::cx::Cx;
 use asupersync::time::sleep as asupersync_sleep;
-use asupersync::Outcome;
 use crossbeam_queue::ArrayQueue;
 use serde::Serialize;
 
@@ -537,16 +537,15 @@ impl WriteOperation {
                 trust_class,
                 provenance_uri,
                 ..
-            } => {
-                workspace_id.len()
-                    .saturating_add(content.len())
-                    .saturating_add(level.len())
-                    .saturating_add(kind.len())
-                    .saturating_add(tags.iter().map(String::len).sum::<usize>())
-                    .saturating_add(source_id.as_ref().map_or(0, String::len))
-                    .saturating_add(trust_class.len())
-                    .saturating_add(provenance_uri.as_ref().map_or(0, String::len))
-            }
+            } => workspace_id
+                .len()
+                .saturating_add(content.len())
+                .saturating_add(level.len())
+                .saturating_add(kind.len())
+                .saturating_add(tags.iter().map(String::len).sum::<usize>())
+                .saturating_add(source_id.as_ref().map_or(0, String::len))
+                .saturating_add(trust_class.len())
+                .saturating_add(provenance_uri.as_ref().map_or(0, String::len)),
             Self::LinkCreate {
                 workspace_id,
                 source_id,
@@ -570,9 +569,9 @@ impl WriteOperation {
             Self::Custom {
                 operation_type,
                 payload,
-            } => operation_type
-                .len()
-                .saturating_add(serde_json::to_vec(payload).map_or(usize::MAX / 2, |bytes| bytes.len())),
+            } => operation_type.len().saturating_add(
+                serde_json::to_vec(payload).map_or(usize::MAX / 2, |bytes| bytes.len()),
+            ),
         }
     }
 
@@ -1396,11 +1395,7 @@ fn write_group_commit_telemetry_for_config(enabled: bool) -> WriteGroupCommitTel
     };
     let fsync_count = WRITE_GROUP_COMMIT_FSYNC_COUNT.load(Ordering::Acquire);
     let latency_total = WRITE_GROUP_COMMIT_LATENCY_TOTAL_US.load(Ordering::Acquire);
-    let latency_avg = if fsync_count == 0 {
-        0
-    } else {
-        latency_total / fsync_count
-    };
+    let latency_avg = latency_total.checked_div(fsync_count).unwrap_or(0);
     WriteGroupCommitTelemetry {
         schema: crate::models::WRITE_GROUP_COMMIT_SCHEMA_V1,
         generated_at: write_group_commit_generated_at(),
@@ -1503,11 +1498,7 @@ fn write_group_commit_percentile(latencies: &[u64], percentile: usize) -> u64 {
     }
     let mut sorted = latencies.to_vec();
     sorted.sort_unstable();
-    let rank = sorted
-        .len()
-        .saturating_mul(percentile)
-        .saturating_add(99)
-        / 100;
+    let rank = sorted.len().saturating_mul(percentile).saturating_add(99) / 100;
     let index = rank.saturating_sub(1).min(sorted.len().saturating_sub(1));
     sorted[index]
 }
@@ -1674,7 +1665,7 @@ impl WriteOwner {
     ///
     /// This method processes requests until the channel is closed or cancelled.
     /// The `process` callback is invoked for each operation.
-    pub async fn run<F>(mut self, cx: &Cx, mut process: F)
+    pub async fn run<F>(self, cx: &Cx, mut process: F)
     where
         F: FnMut(WriteOperation) -> WriteResult,
     {
@@ -1749,11 +1740,8 @@ impl WriteOwner {
                     &mut batch_bytes,
                 );
                 if batch.len() < max_batch_rows && config.group_commit_max_us > 0 {
-                    asupersync_sleep(
-                        cx.now(),
-                        Duration::from_micros(config.group_commit_max_us),
-                    )
-                    .await;
+                    asupersync_sleep(cx.now(), Duration::from_micros(config.group_commit_max_us))
+                        .await;
                     if cx.checkpoint().is_err() {
                         let error = write_group_commit_cancelled_error();
                         self.fail_request_group(
@@ -1920,10 +1908,7 @@ impl WriteOwner {
     }
 }
 
-fn order_group_commit_requests(
-    requests: Vec<WriteRequest>,
-    max_rows: usize,
-) -> Vec<WriteRequest> {
+fn order_group_commit_requests(requests: Vec<WriteRequest>, max_rows: usize) -> Vec<WriteRequest> {
     if requests.len() <= 1 {
         return requests;
     }
@@ -4438,8 +4423,8 @@ mod tests {
     }
 
     #[test]
-    fn write_owner_group_commit_closes_at_max_rows_and_preserves_fifo_across_batches(
-    ) -> Result<(), String> {
+    fn write_owner_group_commit_closes_at_max_rows_and_preserves_fifo_across_batches()
+    -> Result<(), String> {
         let (owner, handle) = WriteOwner::new(8);
         let mut receivers = Vec::new();
         for index in 0..5 {
@@ -4564,8 +4549,8 @@ mod tests {
     }
 
     #[test]
-    fn write_owner_group_commit_shutdown_with_empty_queue_reports_zero_work()
-    -> Result<(), String> {
+    fn write_owner_group_commit_shutdown_with_empty_queue_reports_zero_work() -> Result<(), String>
+    {
         let (owner, handle) = WriteOwner::new(2);
         drop(handle);
 
@@ -4581,7 +4566,9 @@ mod tests {
         })
         .map_err(|error| error.to_string())?;
         let Outcome::Ok(report) = outcome else {
-            return Err(format!("shutdown should return a clean report: {outcome:?}"));
+            return Err(format!(
+                "shutdown should return a clean report: {outcome:?}"
+            ));
         };
 
         assert!(report.telemetry.enabled);
@@ -4783,7 +4770,9 @@ mod tests {
         })
         .map_err(|error| error.to_string())?;
         let Outcome::Ok(report) = outcome else {
-            return Err(format!("failed batch should resolve and keep owner ok: {outcome:?}"));
+            return Err(format!(
+                "failed batch should resolve and keep owner ok: {outcome:?}"
+            ));
         };
 
         assert_eq!(report.generation_advances, 0);

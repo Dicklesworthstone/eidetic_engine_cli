@@ -1,7 +1,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ee::util::radix_ulid_sort::sort_by_ulid_payload;
+use std::hint::black_box;
 
 #[derive(Clone)]
 struct TieBreakRow {

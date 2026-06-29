@@ -259,10 +259,7 @@ fn prefixed_token<'a>(word: &'a str, prefix: &str) -> Option<&'a str> {
     // rejected to avoid false positives.
     let lowered_word = word.to_ascii_lowercase();
     let lowered_prefix = prefix.to_ascii_lowercase();
-    let prefix_self_bounds = prefix
-        .chars()
-        .next()
-        .is_some_and(is_prefix_start_delimiter);
+    let prefix_self_bounds = prefix.chars().next().is_some_and(is_prefix_start_delimiter);
     for (index, _) in lowered_word.match_indices(&lowered_prefix) {
         let prefix_is_token_start = prefix_self_bounds
             || word[..index]

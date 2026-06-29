@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)] // test code may unwrap/expect
 use ee::models::{DomainError, ProcessExitCode};
 use ee::output::{error_response_json, render_schema_export_json};
 use serde_json::Value;

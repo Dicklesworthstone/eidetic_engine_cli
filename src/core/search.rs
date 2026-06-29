@@ -59,9 +59,11 @@ use crate::search::plan_cache::{
     compute_search_config_hash, lookup_or_insert_process_plan,
 };
 use crate::search::{
-    HashEmbedder, NativeReranker, Reranker, SpeedMode, TwoTierConfig, TwoTierIndex,
-    TwoTierSearcher,
+    NativeReranker, Reranker, SpeedMode, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
 };
+// Test-only: used by the inline `#[cfg(test)]` suites further down.
+#[cfg(test)]
+use crate::search::HashEmbedder;
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 use frankensearch::LexicalSearch;
 
@@ -8296,8 +8298,8 @@ fn global_store_lexical_hits(
             return Vec::new();
         }
     };
-    let inclusion = super::global_store::resolve_global_inclusion(
-        &super::global_store::GlobalInclusionInput {
+    let inclusion =
+        super::global_store::resolve_global_inclusion(&super::global_store::GlobalInclusionInput {
             store_present: paths.database_path.exists(),
             // The separate-store implementation has not yet grown a repository
             // participation row; default participation preserves the existing
@@ -8305,8 +8307,7 @@ fn global_store_lexical_hits(
             participating: true,
             config_enabled: true,
             no_global_flag: false,
-        },
-    );
+        });
     if !inclusion.included {
         if matches!(options.memory_scope, MemoryScope::Global) {
             degraded.push(SearchDegradation::global_memory_disabled(inclusion.reason));
@@ -15738,8 +15739,11 @@ mod tests {
         std::fs::create_dir_all(&model_dir).map_err(|error| error.to_string())?;
         std::fs::write(model_dir.join(RERANK_MODEL_TOKENIZER), "{}")
             .map_err(|error| error.to_string())?;
-        std::fs::write(model_dir.join(RERANK_MODEL_SAFETENSORS_PRIMARY), b"safetensors")
-            .map_err(|error| error.to_string())?;
+        std::fs::write(
+            model_dir.join(RERANK_MODEL_SAFETENSORS_PRIMARY),
+            b"safetensors",
+        )
+        .map_err(|error| error.to_string())?;
 
         assert_eq!(unpacked_rerank_model_dir(&model_dir)?, model_dir);
         Ok(())

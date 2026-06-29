@@ -613,6 +613,87 @@ fn saved_percent(full_bytes: u64, saved_bytes: i64) -> f64 {
     ((saved_bytes as f64 / full_bytes as f64) * 10_000.0).round() / 100.0
 }
 
+/// Render a context-delta envelope as a compact markdown document
+/// (bd-7lvbg.6): added items in full (they ARE the new content),
+/// changed items as field-level lines, removed items as one-line id
+/// stubs — never full bodies. Unchanged items are intentionally not
+/// re-emitted; consumers apply the delta per
+/// docs/agent-ux/context-delta-apply.md.
+#[must_use]
+pub fn render_context_delta_markdown(envelope: &ContextDeltaEnvelope) -> String {
+    fn field_value_line(value: &JsonValue) -> String {
+        match value {
+            JsonValue::String(text) => text.clone(),
+            other => other.to_string(),
+        }
+    }
+
+    let payload = &envelope.data;
+    let mut out = String::with_capacity(1024);
+    out.push_str("# context delta\n\n");
+    out.push_str(&format!(
+        "**Prior:** `{}` → **New:** `{}`\n\n",
+        payload.prior_pack_hash, payload.new_pack_hash
+    ));
+    out.push_str(
+        "Unchanged items are not re-emitted. Apply per \
+         docs/agent-ux/context-delta-apply.md.\n",
+    );
+
+    out.push_str(&format!("\n## added ({})\n", payload.items.added.len()));
+    for (index, item) in payload.items.added.iter().enumerate() {
+        out.push_str(&format!("\n### {}. `{}`\n\n", index + 1, item.id));
+        for (name, value) in &item.fields {
+            out.push_str(&format!("- **{name}:** {}\n", field_value_line(value)));
+        }
+    }
+
+    out.push_str(&format!(
+        "\n## changed ({})\n",
+        payload.items.modified.len()
+    ));
+    for item in &payload.items.modified {
+        out.push_str(&format!("\n### `{}`\n\n", item.id));
+        for (field, change) in &item.field_changes {
+            match change {
+                ContextDeltaFieldChange::Pair(pair) => {
+                    out.push_str(&format!(
+                        "- **{field}:** {} → {}\n",
+                        field_value_line(&pair[0]),
+                        field_value_line(&pair[1]),
+                    ));
+                }
+                ContextDeltaFieldChange::Redacted(redaction) => {
+                    out.push_str(&format!(
+                        "- **{field}:** (prior value omitted: {:?}) → {}\n",
+                        redaction.reason,
+                        field_value_line(&redaction.new_value),
+                    ));
+                }
+            }
+        }
+    }
+
+    out.push_str(&format!(
+        "\n## removed ({})\n\n",
+        payload.items.removed.len()
+    ));
+    for id in &payload.items.removed {
+        out.push_str(&format!("- `{id}`\n"));
+    }
+
+    if !envelope.degraded.is_empty() {
+        out.push_str(&format!("\n## degraded ({})\n\n", envelope.degraded.len()));
+        for entry in &envelope.degraded {
+            out.push_str(&format!(
+                "- **{}** ({}): {}\n",
+                entry.code, entry.severity, entry.message
+            ));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -1134,85 +1215,4 @@ mod tests {
         }
         Ok(())
     }
-}
-
-/// Render a context-delta envelope as a compact markdown document
-/// (bd-7lvbg.6): added items in full (they ARE the new content),
-/// changed items as field-level lines, removed items as one-line id
-/// stubs — never full bodies. Unchanged items are intentionally not
-/// re-emitted; consumers apply the delta per
-/// docs/agent-ux/context-delta-apply.md.
-#[must_use]
-pub fn render_context_delta_markdown(envelope: &ContextDeltaEnvelope) -> String {
-    fn field_value_line(value: &JsonValue) -> String {
-        match value {
-            JsonValue::String(text) => text.clone(),
-            other => other.to_string(),
-        }
-    }
-
-    let payload = &envelope.data;
-    let mut out = String::with_capacity(1024);
-    out.push_str("# context delta\n\n");
-    out.push_str(&format!(
-        "**Prior:** `{}` → **New:** `{}`\n\n",
-        payload.prior_pack_hash, payload.new_pack_hash
-    ));
-    out.push_str(
-        "Unchanged items are not re-emitted. Apply per \
-         docs/agent-ux/context-delta-apply.md.\n",
-    );
-
-    out.push_str(&format!("\n## added ({})\n", payload.items.added.len()));
-    for (index, item) in payload.items.added.iter().enumerate() {
-        out.push_str(&format!("\n### {}. `{}`\n\n", index + 1, item.id));
-        for (name, value) in &item.fields {
-            out.push_str(&format!("- **{name}:** {}\n", field_value_line(value)));
-        }
-    }
-
-    out.push_str(&format!(
-        "\n## changed ({})\n",
-        payload.items.modified.len()
-    ));
-    for item in &payload.items.modified {
-        out.push_str(&format!("\n### `{}`\n\n", item.id));
-        for (field, change) in &item.field_changes {
-            match change {
-                ContextDeltaFieldChange::Pair(pair) => {
-                    out.push_str(&format!(
-                        "- **{field}:** {} → {}\n",
-                        field_value_line(&pair[0]),
-                        field_value_line(&pair[1]),
-                    ));
-                }
-                ContextDeltaFieldChange::Redacted(redaction) => {
-                    out.push_str(&format!(
-                        "- **{field}:** (prior value omitted: {:?}) → {}\n",
-                        redaction.reason,
-                        field_value_line(&redaction.new_value),
-                    ));
-                }
-            }
-        }
-    }
-
-    out.push_str(&format!(
-        "\n## removed ({})\n\n",
-        payload.items.removed.len()
-    ));
-    for id in &payload.items.removed {
-        out.push_str(&format!("- `{id}`\n"));
-    }
-
-    if !envelope.degraded.is_empty() {
-        out.push_str(&format!("\n## degraded ({})\n\n", envelope.degraded.len()));
-        for entry in &envelope.degraded {
-            out.push_str(&format!(
-                "- **{}** ({}): {}\n",
-                entry.code, entry.severity, entry.message
-            ));
-        }
-    }
-    out
 }

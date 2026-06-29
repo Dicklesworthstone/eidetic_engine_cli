@@ -2827,11 +2827,8 @@ pub fn capture_suggestions(
     let mut suggestions = Vec::new();
     let mut suppressed = Vec::new();
     for candidate in review_candidates {
-        let dedupe_status = capture_suggestion_dedupe_status(
-            &candidate,
-            &existing_candidates,
-            &existing_memories,
-        );
+        let dedupe_status =
+            capture_suggestion_dedupe_status(&candidate, &existing_candidates, &existing_memories);
         if capture_dedupe_status_suppresses(&dedupe_status) {
             suppressed.push(CaptureSuggestionSuppression {
                 candidate_id: candidate.candidate_id,
@@ -3294,8 +3291,7 @@ fn build_review_session_candidates(
 /// can recognize "propose a NEW memory" candidates without re-classifying
 /// the span content.
 pub const REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY: &str = "propose_new_memory";
-pub const REVIEW_CANDIDATE_KIND_SESSION_ARC_ANTI_PATTERN: &str =
-    "session_arc_anti_pattern";
+pub const REVIEW_CANDIDATE_KIND_SESSION_ARC_ANTI_PATTERN: &str = "session_arc_anti_pattern";
 pub const REVIEW_CANDIDATE_KIND_SESSION_ARC_RULE: &str = "session_arc_rule";
 const SESSION_ARC_CANDIDATE_CONFIDENCE: f32 = 0.82;
 
@@ -3707,7 +3703,7 @@ fn session_arc_failure_signal(excerpt: &str) -> bool {
                 | "red"
                 | "regression"
                 | "timeout"
-            )
+        )
     }) || excerpt.to_ascii_lowercase().contains("wrong approach")
 }
 
@@ -3726,7 +3722,7 @@ fn session_arc_resolution_signal(excerpt: &str) -> bool {
                 | "resolved"
                 | "verified"
                 | "works"
-            )
+        )
     })
 }
 
@@ -4538,13 +4534,14 @@ fn embedding_dedup_signal_from_link(link: &StoredMemoryLink) -> Option<Embedding
         return None;
     }
     let metadata: serde_json::Value = serde_json::from_str(link.metadata_json.as_deref()?).ok()?;
-    if metadata.get("relationship").and_then(serde_json::Value::as_str)
+    if metadata
+        .get("relationship")
+        .and_then(serde_json::Value::as_str)
         != Some("embedding_reuse")
     {
         return None;
     }
-    if metadata.get("schema").and_then(serde_json::Value::as_str)
-        != Some("ee.embed_dedup.link.v1")
+    if metadata.get("schema").and_then(serde_json::Value::as_str) != Some("ee.embed_dedup.link.v1")
     {
         return None;
     }
@@ -14181,15 +14178,9 @@ fn curation_candidate_dedupe_source(stored: &StoredCurationCandidate) -> Option<
         })
     {
         Some(source)
-    } else if stored
-        .reason
-        .starts_with("Embedding dedup proposal:")
-    {
+    } else if stored.reason.starts_with("Embedding dedup proposal:") {
         Some("embedding".to_owned())
-    } else if stored
-        .reason
-        .starts_with("Paraphrase dedup proposal:")
-    {
+    } else if stored.reason.starts_with("Paraphrase dedup proposal:") {
         Some("mutual_information".to_owned())
     } else {
         None
@@ -14783,10 +14774,10 @@ mod tests {
         REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY,
         REVIEW_CANDIDATE_KIND_SESSION_ARC_ANTI_PATTERN, REVIEW_CANDIDATE_KIND_SESSION_ARC_RULE,
         REVIEW_SESSION_SCHEMA_V1, REVIEW_WORKSPACE_SCHEMA_V1, ReflectionIngestOptions,
-        ReflectionProposeOptions, ReflectionRequestDurableLedgerOutcome, SESSION_ARC_SCHEMA_V1,
+        ReflectionProposeOptions, ReflectionRequestDurableLedgerOutcome,
         ReflectionRequestLedgerDiagnosticsOptions, ReflectionResultDurableIngestOutcome,
         ReviewSessionCandidate, ReviewSessionOptions, ReviewSessionReport, ReviewWorkspaceOptions,
-        apply_curation_candidate, build_bootstrap_session_candidates,
+        SESSION_ARC_SCHEMA_V1, apply_curation_candidate, build_bootstrap_session_candidates,
         build_review_session_candidates, candidate_summary_from_stored, capture_suggestions,
         evaluate_candidate_for_validation, evaluate_create_derived_candidate_for_validation,
         ingest_reflection_result, list_curation_candidates,
@@ -15393,9 +15384,11 @@ mod tests {
         ));
         assert_eq!(ingest.validation.source_lock, "current");
         assert_eq!(ingest.validation.replay_gate, "pending");
-        assert!(connection
-            .tombstone_memory(&memory_id)
-            .map_err(|error| error.to_string())?);
+        assert!(
+            connection
+                .tombstone_memory(&memory_id)
+                .map_err(|error| error.to_string())?
+        );
 
         let replay =
             ingest_reflection_result(&ingest_options).map_err(|error| error.to_string())?;
@@ -17415,15 +17408,19 @@ mod tests {
             .ok_or_else(|| "expected one capture suggestion".to_owned())?;
         assert_eq!(suggestion.dedupe_status.status, "unique");
         assert_eq!(suggestion.proposed_fields.level, "procedural");
-        assert!(suggestion.proposed_fields.tags.contains(&"ambient-capture".to_owned()));
+        assert!(
+            suggestion
+                .proposed_fields
+                .tags
+                .contains(&"ambient-capture".to_owned())
+        );
         assert!(!suggestion.evidence.is_empty());
         let workspace_arg =
             super::shell_quote_command_arg(&fixture.workspace_path.display().to_string());
         let session_arg = super::shell_quote_command_arg("cass-review-session-a");
         let candidate_arg = super::shell_quote_command_arg(&suggestion.candidate_id);
-        let expected_review = format!(
-            "ee review session {session_arg} --workspace {workspace_arg} --propose --json"
-        );
+        let expected_review =
+            format!("ee review session {session_arg} --workspace {workspace_arg} --propose --json");
         assert_eq!(suggestion.review_command, expected_review);
         assert_eq!(
             suggestion.accept_command,
@@ -17584,10 +17581,7 @@ mod tests {
             suppression.dedupe_status.status,
             "suppressed_existing_candidate"
         );
-        assert_eq!(
-            suppression.dedupe_status.method,
-            "curation_queue_exact_id"
-        );
+        assert_eq!(suppression.dedupe_status.method, "curation_queue_exact_id");
         assert_eq!(
             suppression.dedupe_status.matched_candidate_id.as_deref(),
             Some(rejected.candidate_id.as_str())
@@ -19624,7 +19618,10 @@ mod tests {
         assert_eq!(candidate.proposal_source, "embedding_dedup");
         assert_eq!(candidate.audit.proposed_by, "embedding_dedup:v1");
         assert_eq!(candidate.trust_class.as_deref(), Some("derived"));
-        assert_eq!(candidate.target_memory_id.as_deref(), Some(memory_ids[0].as_str()));
+        assert_eq!(
+            candidate.target_memory_id.as_deref(),
+            Some(memory_ids[0].as_str())
+        );
         assert_eq!(
             candidate.member_memory_ids,
             vec![
@@ -22760,16 +22757,15 @@ mod tests {
         )?;
 
         let missing_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(31)).to_string();
-        let missing_error =
-            super::run_curate_untombstone(&super::CurateUntombstoneOptions {
-                workspace_path,
-                database_path: Some(&database_path),
-                memory_id: &missing_memory_id,
-                actor: Some("MistySalmon"),
-                dry_run: true,
-                reason: Some("missing dry-run must not overstate restore plan"),
-            })
-            .expect_err("untombstone dry-run should reject missing memory");
+        let missing_error = super::run_curate_untombstone(&super::CurateUntombstoneOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            memory_id: &missing_memory_id,
+            actor: Some("MistySalmon"),
+            dry_run: true,
+            reason: Some("missing dry-run must not overstate restore plan"),
+        })
+        .expect_err("untombstone dry-run should reject missing memory");
         assert_eq!(missing_error.code(), "not_found");
 
         let active_error = super::run_curate_untombstone(&super::CurateUntombstoneOptions {
@@ -22822,17 +22818,16 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
-        let cross_workspace_error =
-            super::run_curate_tombstone(&super::CurateTombstoneOptions {
-                workspace_path,
-                database_path: Some(&database_path),
-                memory_id: &other_memory_id,
-                actor: Some("MistySalmon"),
-                dry_run: true,
-                reason: Some("cross-workspace dry-run must not overstate tombstone plan"),
-                allow_tombstone_load_bearing: true,
-            })
-            .expect_err("tombstone dry-run should reject cross-workspace memory");
+        let cross_workspace_error = super::run_curate_tombstone(&super::CurateTombstoneOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            memory_id: &other_memory_id,
+            actor: Some("MistySalmon"),
+            dry_run: true,
+            reason: Some("cross-workspace dry-run must not overstate tombstone plan"),
+            allow_tombstone_load_bearing: true,
+        })
+        .expect_err("tombstone dry-run should reject cross-workspace memory");
         assert_eq!(cross_workspace_error.code(), "not_found");
 
         connection

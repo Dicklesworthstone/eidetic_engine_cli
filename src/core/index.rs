@@ -16,7 +16,7 @@ use crate::db::{
 };
 use crate::models::MemoryId;
 use crate::models::model_registry::{
-    EmbeddingMetadataRecord, EmbeddingPooling, ModelDistanceMetric, ModelProvider, ModelPurpose,
+    EmbeddingMetadataRecord, EmbeddingPooling, ModelDistanceMetric, ModelProvider,
     ModelRegistryStatus,
 };
 use crate::models::{
@@ -24,9 +24,8 @@ use crate::models::{
     EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, EMBEDDING_POSTURE_SCHEMA_V1,
 };
 use crate::search::{
-    CanonicalSearchDocument, EmbedderStack, HashEmbedder, IndexBuilder,
-    artifact_to_document, memory_to_document_with_context_anchors_and_typed_fields,
-    session_to_document,
+    CanonicalSearchDocument, EmbedderStack, HashEmbedder, IndexBuilder, artifact_to_document,
+    memory_to_document_with_context_anchors_and_typed_fields, session_to_document,
 };
 #[cfg(feature = "lexical-bm25")]
 use crate::search::{LexicalSearch, TantivyIndex};

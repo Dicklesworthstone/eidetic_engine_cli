@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ee::core::context::{
     ContextPackOptions, ContextPackOutputOptions, run_context_pack_with_performance,
 };
@@ -26,6 +26,7 @@ use ee::graph::{CentralityRefreshOptions, CentralityRefreshStatus, refresh_graph
 use ee::models::{MemoryScope, RedactionLevel, WorkspaceId};
 use ee::pack::{DEFAULT_COORDINATION_STALE_AFTER_MS, PackResourceProfile};
 use ee::search::SpeedMode;
+use std::hint::black_box;
 use tempfile::TempDir;
 
 const BENCH_GROUP_NAME: &str = "graph_full_stack";

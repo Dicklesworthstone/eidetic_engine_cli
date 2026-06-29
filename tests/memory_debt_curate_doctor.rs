@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)] // test code may unwrap/expect
 use std::error::Error;
 use std::path::Path;
 
@@ -105,8 +106,14 @@ fn curate_doctor_total_score_reflects_full_debt_not_truncated_bd_3qagn()
     let report = run_memory_debt_doctor(&options)?;
     let data = report.data_json();
 
-    assert_eq!(data["summary"]["itemCount"], 2, "itemCount is the full debt set");
-    assert_eq!(data["summary"]["returnedCount"], 1, "returnedCount is truncated");
+    assert_eq!(
+        data["summary"]["itemCount"], 2,
+        "itemCount is the full debt set"
+    );
+    assert_eq!(
+        data["summary"]["returnedCount"], 1,
+        "returnedCount is truncated"
+    );
     assert_eq!(data["summary"]["truncated"], true);
 
     let total_score = data["summary"]["totalScore"]

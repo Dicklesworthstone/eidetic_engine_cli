@@ -12,11 +12,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use criterion::{BenchmarkId, Criterion, black_box};
+use criterion::{BenchmarkId, Criterion};
 use ee::pack::budget_classifier::{
     AdaptiveBudgetInput, RETRIEVAL_ENTROPY_SAMPLE_LIMIT, classify_adaptive_budget,
 };
 use serde::Serialize;
+use std::hint::black_box;
 
 const BENCH_GROUP_NAME: &str = "adaptive_budget";
 const PERCENTILE_SUMMARY_RELATIVE_PATH: &str = "criterion/adaptive_budget/percentiles.json";

@@ -1,7 +1,8 @@
 //! Size bench for graph result-cache params encoded as Roaring bitmaps.
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use serde_json::Value as JsonValue;
+use std::hint::black_box;
 
 use ee::graph::result_cache_keys::{
     GraphAlgorithmParamBitmap, canonical_graph_algorithm_params_json,

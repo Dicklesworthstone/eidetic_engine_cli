@@ -24,6 +24,7 @@
 //! fast, exhaustive gate — plus a direct parse-and-access regression for the
 //! exact crash, and a recursive sweep that forces every subcommand to build.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)] // test code may unwrap/expect
 use clap::{CommandFactory, Parser};
 use ee::cli::{Cli, Command, PlanCommand};
 

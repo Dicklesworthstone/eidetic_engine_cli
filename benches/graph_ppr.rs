@@ -7,11 +7,12 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ee::graph::ppr::compute_personalized_pagerank;
 use ee::graph::{AttrMap, DiGraph};
 use ee::models::MemoryId;
 use fnx_runtime::CgseValue;
+use std::hint::black_box;
 use uuid::Uuid;
 
 const BENCH_GROUP_NAME: &str = "graph_ppr";

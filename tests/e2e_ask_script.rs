@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-
+#![allow(clippy::unwrap_used, clippy::expect_used)] // test code may unwrap/expect
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -10,10 +10,7 @@ fn retained_scratch_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!(
-        "ee-ask-e2e-script-{}-{nanos}",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("ee-ask-e2e-script-{}-{nanos}", std::process::id()))
 }
 
 #[test]

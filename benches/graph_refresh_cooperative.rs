@@ -10,11 +10,12 @@
 use std::time::{Duration, Instant};
 
 use asupersync::Cx;
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ee::graph::cooperative_refresh::refresh_centrality_cooperative;
 use ee::graph::hits::compute_hits;
 use ee::graph::{AttrMap, DiGraph, MemoryGraphProjection, compute_betweenness, compute_pagerank};
 use fnx_runtime::CgseValue;
+use std::hint::black_box;
 
 const BENCH_GROUP_NAME: &str = "graph_refresh_cooperative";
 const REQUIRED_MANYCORE_SPEEDUP: f64 = 3.0;

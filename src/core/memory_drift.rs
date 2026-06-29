@@ -1623,10 +1623,7 @@ fn observe_path_anchor_freshness(
         );
     }
 
-    observed_path_anchor_status(
-        MemoryDriftStatus::Current,
-        "code_anchor_mtime_current",
-    )
+    observed_path_anchor_status(MemoryDriftStatus::Current, "code_anchor_mtime_current")
 }
 
 fn observed_path_anchor_status(
@@ -1660,9 +1657,9 @@ fn max_memory_drift_status(
 fn is_safe_workspace_relative_path(path: &Path) -> bool {
     !path.as_os_str().is_empty()
         && !path.is_absolute()
-        && path.components().all(|component| {
-            matches!(component, Component::Normal(_) | Component::CurDir)
-        })
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }
 
 fn memory_drift_status_from_stored_anchors(
@@ -1783,7 +1780,11 @@ fn git_output_bytes(workspace_path: &Path, args: &[&str]) -> Option<Vec<u8>> {
     Some(output.stdout)
 }
 
-fn git_blob_at_commit(workspace_path: &Path, commit: &str, normalized_path: &str) -> Option<Vec<u8>> {
+fn git_blob_at_commit(
+    workspace_path: &Path,
+    commit: &str,
+    normalized_path: &str,
+) -> Option<Vec<u8>> {
     if !is_hex_commit(commit) || !is_safe_workspace_relative_path(Path::new(normalized_path)) {
         return None;
     }
@@ -2883,8 +2884,8 @@ mod tests {
     }
 
     #[test]
-    fn code_anchor_report_rechecks_live_file_hash_even_when_stored_anchor_is_current(
-    ) -> Result<(), String> {
+    fn code_anchor_report_rechecks_live_file_hash_even_when_stored_anchor_is_current()
+    -> Result<(), String> {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let repo = tempdir.path();
         std::fs::create_dir_all(repo.join("src")).map_err(|error| error.to_string())?;
@@ -2986,8 +2987,8 @@ mod tests {
     }
 
     #[test]
-    fn code_anchor_report_marks_newer_mtime_suspect_without_commit_baseline(
-    ) -> Result<(), String> {
+    fn code_anchor_report_marks_newer_mtime_suspect_without_commit_baseline() -> Result<(), String>
+    {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = tempdir.path();
         std::fs::create_dir_all(workspace.join("src")).map_err(|error| error.to_string())?;

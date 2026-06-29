@@ -13,7 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
-use criterion::{BenchmarkId, Criterion, black_box};
+use criterion::{BenchmarkId, Criterion};
+use std::hint::black_box;
 use tempfile::TempDir;
 
 use ee::core::context::{

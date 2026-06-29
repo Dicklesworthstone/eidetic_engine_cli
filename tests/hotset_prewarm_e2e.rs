@@ -52,17 +52,26 @@ fn hotset_prewarm_script_emits_event_log_and_preserves_semantics() -> TestResult
         .map(|line| serde_json::from_str::<Value>(line).map_err(|error| error.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
 
-    ensure(events.len() >= 9, format!("expected at least 9 events: {event_text}"))?;
     ensure(
-        events.iter().all(|event| event["schema"].as_str() == Some("ee.test_event.v1")),
+        events.len() >= 9,
+        format!("expected at least 9 events: {event_text}"),
+    )?;
+    ensure(
+        events
+            .iter()
+            .all(|event| event["schema"].as_str() == Some("ee.test_event.v1")),
         "all events must use ee.test_event.v1",
     )?;
     ensure(
-        events.iter().any(|event| event["kind"].as_str() == Some("cache_prewarm")),
+        events
+            .iter()
+            .any(|event| event["kind"].as_str() == Some("cache_prewarm")),
         "event log must include cache_prewarm command",
     )?;
     ensure(
-        events.iter().any(|event| event["kind"].as_str() == Some("hotset_prewarm_summary")),
+        events
+            .iter()
+            .any(|event| event["kind"].as_str() == Some("hotset_prewarm_summary")),
         "event log must include final semantic summary",
     )?;
     ensure(

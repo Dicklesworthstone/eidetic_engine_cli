@@ -716,14 +716,11 @@ pub fn run_graph_feature_enrichment_burst_smoke(
     let requested_identical = burst_options.identical_requests;
     let requested_distinct = burst_options.distinct_requests;
     let requested_node_count = burst_options.node_count;
-    let identical_count = requested_identical
-        .max(2)
-        .min(GRAPH_FEATURE_ENRICHMENT_BURST_MAX_IDENTICAL_REQUESTS);
+    let identical_count =
+        requested_identical.clamp(2, GRAPH_FEATURE_ENRICHMENT_BURST_MAX_IDENTICAL_REQUESTS);
     let distinct_count =
         requested_distinct.min(GRAPH_FEATURE_ENRICHMENT_BURST_MAX_DISTINCT_REQUESTS);
-    let node_count = requested_node_count
-        .max(1)
-        .min(GRAPH_FEATURE_ENRICHMENT_BURST_MAX_NODE_COUNT);
+    let node_count = requested_node_count.clamp(1, GRAPH_FEATURE_ENRICHMENT_BURST_MAX_NODE_COUNT);
     let mut input_diagnoses = burst_input_diagnoses(
         requested_identical,
         requested_distinct,

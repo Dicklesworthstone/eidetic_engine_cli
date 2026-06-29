@@ -6,7 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use tempfile::TempDir;
 
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};

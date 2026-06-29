@@ -1284,7 +1284,12 @@ mod tests {
     #[test]
     fn journal_env_vars_are_registered_with_defaults() -> TestResult {
         let expected = [
-            (EnvVar::JournalEnabled, "EE_JOURNAL_ENABLED", "true", "memory"),
+            (
+                EnvVar::JournalEnabled,
+                "EE_JOURNAL_ENABLED",
+                "true",
+                "memory",
+            ),
             (
                 EnvVar::JournalRetentionDays,
                 "EE_JOURNAL_RETENTION_DAYS",

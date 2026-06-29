@@ -50,10 +50,10 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::core::house_rules::{
-    house_rules_quota, select_within_house_rules_quota, HouseRulesQuotaInput,
+    HouseRulesQuotaInput, house_rules_quota, select_within_house_rules_quota,
 };
 use crate::db::{CreateWorkspaceInput, DbConnection, StoredMemory};
 
@@ -680,8 +680,8 @@ mod tests {
         std::fs::create_dir_all(&paths.root).map_err(|error| error.to_string())?;
 
         {
-            let connection = DbConnection::open_file(&paths.database_path)
-                .map_err(|error| error.to_string())?;
+            let connection =
+                DbConnection::open_file(&paths.database_path).map_err(|error| error.to_string())?;
             assert!(
                 !connection
                     .migration_table_exists()
@@ -701,7 +701,9 @@ mod tests {
         let connection = DbConnection::open_file_read_only(&paths.database_path)
             .map_err(|error| error.to_string())?;
         assert!(
-            connection.needs_migration().map_err(|error| error.to_string())?,
+            connection
+                .needs_migration()
+                .map_err(|error| error.to_string())?,
             "read-only global store read must leave migration state pending"
         );
         assert!(
