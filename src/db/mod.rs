@@ -1942,11 +1942,43 @@ fn db_error_is_nested_transaction(error: &DbError) -> bool {
 }
 
 fn db_error_is_transient_sqlite_contention(error: &DbError) -> bool {
-    let DbError::SqlModel { source, .. } = error else {
-        return false;
-    };
+    match error {
+        DbError::SqlModel { source, .. } => {
+            sqlmodel_error_is_transient_sqlite_contention(source.as_ref())
+        }
+        // The cross-process write-owner flock gate (`lock_database_write_file`)
+        // surfaces contention as `DbError::InvalidPath` "could not acquire
+        // database write lock: ...". That gate is taken INSIDE the
+        // `retry_sqlite_contention` closure (see `execute_for`,
+        // `execute_raw_for`, and `begin_write_transaction`), so classifying it as
+        // transient lets every single-shot write retry the flock under swarm
+        // contention. Without it, writes that have no app-level retry of their
+        // own — notably `ee journal append` — fast-fail after the gate's small
+        // (~113 ms) budget while `ee remember` (64x app-level retry) survives
+        // (bd-d67os.26).
+        DbError::InvalidPath { message, .. } => {
+            write_owner_flock_contention_message_is_retryable(message)
+        }
+        _ => false,
+    }
+}
 
-    sqlmodel_error_is_transient_sqlite_contention(source.as_ref())
+/// Classify a write-owner flock-gate error message as transient contention.
+///
+/// `lock_database_write_file` returns `DbError::InvalidPath` with a
+/// "could not acquire database write lock: ..." message when it cannot take the
+/// exclusive `<db>.write.lock` flock within its bounded attempts. This mirrors
+/// the flock clause of the `remember` app-level predicate
+/// (`remember_write_contention_is_retryable`) so the shared DB path and the
+/// remember path agree on what counts as retryable flock contention.
+///
+/// Deliberately does NOT match "could not open database write lock" (a genuine
+/// path/permission failure) or the symlink-guard `InvalidPath` errors, so only
+/// true gate contention is retried.
+fn write_owner_flock_contention_message_is_retryable(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("could not acquire database write lock")
 }
 
 fn sqlmodel_error_is_transient_sqlite_contention(error: &sqlmodel_core::Error) -> bool {
@@ -36358,6 +36390,63 @@ mod tests {
             &super::advisory_lock_retry_delay(100),
             &Duration::from_millis(50),
             "large attempt delay cap",
+        )
+    }
+
+    #[test]
+    fn write_owner_flock_contention_classifies_as_transient() -> TestResult {
+        // The flock gate's contention exhaustion (lock_database_write_file) surfaces
+        // as DbError::InvalidPath; it must be retryable so single-shot writes
+        // (notably `ee journal append`) survive swarm contention via
+        // retry_sqlite_contention instead of fast-failing (bd-d67os.26).
+        let lock_path = std::path::PathBuf::from("/tmp/ee.db.write.lock");
+        let contention_timeout = super::DbError::InvalidPath {
+            operation: super::DbOperation::BeginTransaction,
+            path: lock_path.clone(),
+            message: "could not acquire database write lock: contention timeout".to_string(),
+        };
+        ensure_equal(
+            &super::db_error_is_transient_sqlite_contention(&contention_timeout),
+            &true,
+            "flock contention-timeout is transient",
+        )?;
+
+        // The errno variant (the actually-reached exhaustion message) shares the
+        // same "could not acquire database write lock" prefix and must also retry.
+        let contention_errno = super::DbError::InvalidPath {
+            operation: super::DbOperation::BeginTransaction,
+            path: lock_path.clone(),
+            message: "could not acquire database write lock: Resource temporarily unavailable"
+                .to_string(),
+        };
+        ensure_equal(
+            &super::db_error_is_transient_sqlite_contention(&contention_errno),
+            &true,
+            "flock acquire-errno is transient",
+        )?;
+
+        // A genuine OPEN failure (path/permission) is NOT contention; do not retry.
+        let open_failure = super::DbError::InvalidPath {
+            operation: super::DbOperation::BeginTransaction,
+            path: lock_path.clone(),
+            message: "could not open database write lock: permission denied".to_string(),
+        };
+        ensure_equal(
+            &super::db_error_is_transient_sqlite_contention(&open_failure),
+            &false,
+            "flock open failure is not transient",
+        )?;
+
+        // An unrelated InvalidPath (symlink guard) is NOT contention.
+        let symlink_guard = super::DbError::InvalidPath {
+            operation: super::DbOperation::BeginTransaction,
+            path: lock_path,
+            message: "database write lock path traverses a symbolic link".to_string(),
+        };
+        ensure_equal(
+            &super::db_error_is_transient_sqlite_contention(&symlink_guard),
+            &false,
+            "symlink-guard InvalidPath is not transient",
         )
     }
 
