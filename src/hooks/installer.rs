@@ -2426,6 +2426,8 @@ def emit(text):
     payload = {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name") or "PreToolUse", "additionalContext": header + "\n" + text}}
     print(json.dumps(payload, separators=(",", ":")))
 tool_input = data.get("tool_input") or {}
+if not isinstance(tool_input, dict):
+    sys.exit(0)
 paths = []
 for key in ("file_path", "path", "notebook_path"):
     value = tool_input.get(key)
@@ -2635,6 +2637,8 @@ if not ambient_enabled():
 if (data.get("tool_name") or "") != "Bash":
     sys.exit(0)
 tool_input = data.get("tool_input") or {}
+if not isinstance(tool_input, dict):
+    sys.exit(0)
 command = str(tool_input.get("command") or "")
 if not command.strip():
     sys.exit(0)
@@ -2663,7 +2667,11 @@ except Exception:
 if (data.get("tool_name") or "") != "Bash":
     sys.exit(0)
 tool_input = data.get("tool_input") or {}
+if not isinstance(tool_input, dict):
+    sys.exit(0)
 response = data.get("tool_response") or {}
+if not isinstance(response, dict):
+    sys.exit(0)
 exit_code = response.get("exit_code", response.get("exitCode", response.get("status")))
 try:
     exit_code = int(exit_code)
@@ -4768,6 +4776,73 @@ mod tests {
         assert!(preflight.contains("if result.returncode != 7:"));
         assert!(preflight.contains("\"permissionDecision\": \"deny\""));
         assert!(preflight.contains("provenance=ee:{SCHEMA}"));
+    }
+
+    /// Run a Python hook snippet under `python3 -c` with the given stdin JSON,
+    /// returning the process exit code. `ee` argv is a harmless placeholder that
+    /// must never actually be invoked for the fail-open cases under test.
+    fn run_python_snippet_exit_code(script: &str, stdin_json: &str) -> Option<i32> {
+        let mut child = Command::new("python3")
+            .arg("-c")
+            .arg(script)
+            .arg("/nonexistent/ee-binary")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .ok()?;
+        child
+            .stdin
+            .take()
+            .expect("stdin piped")
+            .write_all(stdin_json.as_bytes())
+            .ok()?;
+        let output = child.wait_with_output().ok()?;
+        output.status.code()
+    }
+
+    #[test]
+    fn pre_edit_hook_fails_open_on_string_tool_input() {
+        // Codex delivers apply_patch events with `tool_input` as the raw patch
+        // STRING, not a dict. The recall hook must fail open (exit 0), never
+        // crash with AttributeError. Regression for GH#17.
+        if Command::new("python3").arg("--version").output().is_err() {
+            eprintln!("python3 unavailable; skipping pre_edit fail-open test");
+            return;
+        }
+        let event = r#"{"hook_event_name":"PreToolUse","cwd":".","tool_name":"apply_patch","tool_input":"*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch\n"}"#;
+        let code = run_python_snippet_exit_code(pre_edit_python(), event);
+        assert_eq!(
+            code,
+            Some(0),
+            "pre_edit recall hook must fail open on string tool_input (apply_patch)"
+        );
+        // Guard text must be present so the fail-open path can't silently regress.
+        assert!(pre_edit_python().contains("if not isinstance(tool_input, dict):"));
+    }
+
+    #[test]
+    fn post_bash_failure_hook_fails_open_on_string_payloads() {
+        // Harden the journal hook against non-dict tool_input / tool_response.
+        // Regression for GH#17.
+        if Command::new("python3").arg("--version").output().is_err() {
+            eprintln!("python3 unavailable; skipping post_bash fail-open test");
+            return;
+        }
+        let string_input = r#"{"tool_name":"Bash","tool_input":"raw string","tool_response":{"exit_code":2}}"#;
+        assert_eq!(
+            run_python_snippet_exit_code(post_bash_failure_python(), string_input),
+            Some(0),
+            "post_bash hook must fail open on string tool_input"
+        );
+        let string_response = r#"{"tool_name":"Bash","tool_input":{"command":"false"},"tool_response":"raw string"}"#;
+        assert_eq!(
+            run_python_snippet_exit_code(post_bash_failure_python(), string_response),
+            Some(0),
+            "post_bash hook must fail open on string tool_response"
+        );
+        assert!(post_bash_failure_python().contains("if not isinstance(tool_input, dict):"));
+        assert!(post_bash_failure_python().contains("if not isinstance(response, dict):"));
     }
 
     #[test]
