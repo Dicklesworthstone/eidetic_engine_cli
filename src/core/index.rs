@@ -3053,12 +3053,36 @@ fn search_embedder_stack_for_settings(settings: &EeEmbedderSettings) -> Embedder
     );
 
     if settings.download_mode == EeEmbedDownloadMode::Off {
-        tracing::info!(
-            target: "ee::index::embedder",
-            model_root = %settings.model_root.display(),
-            "EE_EMBED_DOWNLOAD=off; using deterministic hash fallback"
-        );
-        return hash_fallback_embedder_stack();
+        // EE_EMBED_DOWNLOAD=off means "never fetch over the network", NOT "never
+        // use a model". A host that pre-populated the cache (air-gapped install)
+        // or already ran an ee-managed download must still get semantic search.
+        // Consult the on-disk model first and only fall back to the
+        // deterministic hash embedder when no local semantic model is present.
+        // `auto_detect_with` performs local detection only; the network download
+        // is driven separately by `EeLazyModel2VecEmbedder`, which we never
+        // construct here, so this stays offline. (GH#18: the previous
+        // unconditional hash fallback made search report
+        // `semantic:false / frankensearch_hash_fallback` even with a valid model
+        // on disk, contradicting `ee index reembed`.)
+        match EmbedderStack::auto_detect_with(Some(&settings.model_root)) {
+            Ok(stack) if stack.fast().is_semantic() => {
+                tracing::info!(
+                    target: "ee::index::embedder",
+                    model_root = %settings.model_root.display(),
+                    detected_fast = stack.fast().id(),
+                    "EE_EMBED_DOWNLOAD=off; using on-disk semantic model without downloading"
+                );
+                return stack_with_hash_quality_fallback(stack);
+            }
+            _ => {
+                tracing::info!(
+                    target: "ee::index::embedder",
+                    model_root = %settings.model_root.display(),
+                    "EE_EMBED_DOWNLOAD=off and no on-disk semantic model; using deterministic hash fallback"
+                );
+                return hash_fallback_embedder_stack();
+            }
+        }
     }
 
     match EmbedderStack::auto_detect_with(Some(&settings.model_root)) {
@@ -5351,6 +5375,34 @@ mod tests {
                 .quality()
                 .is_some_and(|quality| !quality.is_semantic()),
             "offline opt-out should retain the hash quality fallback",
+        )
+    }
+
+    #[test]
+    fn embed_download_off_consults_disk_and_never_builds_lazy_download_stub() -> TestResult {
+        // GH#18: Off mode must consult the on-disk model (via local-only
+        // auto-detect) and, when none is present, use the deterministic hash
+        // fallback. It must NEVER hand back the lazy potion download stub, which
+        // would fetch over the network on first embed — that would violate the
+        // offline opt-out. With no model on disk the fast tier is therefore the
+        // hash embedder, not the potion lazy stub.
+        let settings = EeEmbedderSettings {
+            model_root: unique_test_dir("embed-download-off-no-lazy"),
+            download_mode: EeEmbedDownloadMode::Off,
+        };
+        let stack = search_embedder_stack_for_settings(&settings);
+
+        ensure(
+            stack.fast().id() != POTION_MODEL_NAME,
+            "off mode must not return the lazy potion download stub",
+        )?;
+        ensure(
+            !stack.fast().is_semantic(),
+            "off mode with an empty cache must stay on the deterministic hash fallback",
+        )?;
+        ensure(
+            !stack.fast().is_ready() || stack.fast().category() == ModelCategory::HashEmbedder,
+            "off mode fast tier must be the hash embedder, never a download-capable model",
         )
     }
 
