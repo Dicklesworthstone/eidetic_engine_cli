@@ -159,7 +159,7 @@ async fn search_snapshot(
 
     Ok(results
         .iter()
-        .map(|result| (result.doc_id.clone(), format!("{:.6}", result.score)))
+        .map(|result| (result.doc_id.to_string(), format!("{:.6}", result.score)))
         .collect())
 }
 

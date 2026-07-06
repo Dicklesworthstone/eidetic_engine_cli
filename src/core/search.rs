@@ -7979,7 +7979,7 @@ fn scored_results_to_arm_hits(results: &[crate::search::ScoredResult]) -> Vec<Se
         .iter()
         .enumerate()
         .map(|(index, result)| SearchArmHit {
-            doc_id: result.doc_id.clone(),
+            doc_id: result.doc_id.to_string(),
             raw_score: result.score,
             rank: index + 1,
         })
@@ -7991,7 +7991,7 @@ fn vector_hits_to_arm_hits(results: &[frankensearch::core::types::VectorHit]) ->
         .iter()
         .enumerate()
         .map(|(index, result)| SearchArmHit {
-            doc_id: result.doc_id.clone(),
+            doc_id: result.doc_id.to_string(),
             raw_score: result.score,
             rank: index + 1,
         })
@@ -8226,14 +8226,14 @@ fn search_hit_from_scored_result(
     fusion_weights: SearchFusionWeights,
 ) -> SearchHit {
     let mut hit = SearchHit {
-        doc_id: result.doc_id,
+        doc_id: result.doc_id.to_string(),
         score: result.score,
         source: score_source_from_frankensearch(result.source),
         fast_score: result.fast_score,
         quality_score: result.quality_score,
         lexical_score: result.lexical_score,
         rerank_score: result.rerank_score,
-        metadata: result.metadata,
+        metadata: result.metadata.map(|m| (*m).clone()),
         explanation: None,
     };
     let fusion_adjustment = configured_fusion_adjustment(&hit, source_mode, fusion_weights);
@@ -15272,7 +15272,7 @@ mod tests {
     fn graph_only_config_does_not_zero_hybrid_recall_bd_d67os_19() {
         let hit = search_hit_from_scored_result(
             crate::search::ScoredResult {
-                doc_id: "mem_graph_weight_recall".to_owned(),
+                doc_id: "mem_graph_weight_recall".into(),
                 score: 0.02,
                 source: crate::search::ScoreSource::Hybrid,
                 index: None,
@@ -15653,7 +15653,7 @@ mod tests {
         // Fusion order: mem_0000 (highest fusion score) .. mem_0005 (lowest).
         let mut candidates: Vec<crate::search::ScoredResult> = (0..6)
             .map(|i| crate::search::ScoredResult {
-                doc_id: format!("mem_{i:04}"),
+                doc_id: format!("mem_{i:04}").into(),
                 score: (100 - i) as f32,
                 source: crate::search::ScoreSource::Hybrid,
                 index: None,
@@ -15665,7 +15665,7 @@ mod tests {
                 metadata: None,
             })
             .collect();
-        let fusion_order: Vec<String> = candidates.iter().map(|hit| hit.doc_id.clone()).collect();
+        let fusion_order: Vec<String> = candidates.iter().map(|hit| hit.doc_id.to_string()).collect();
         let candidate_count = candidates.len();
 
         let reranker: Arc<dyn Reranker> =
@@ -15684,7 +15684,7 @@ mod tests {
             )
             .await
             .map_err(|error| error.to_string())?;
-            let order: Vec<String> = candidates.iter().map(|hit| hit.doc_id.clone()).collect();
+            let order: Vec<String> = candidates.iter().map(|hit| hit.doc_id.to_string()).collect();
             Ok::<(Vec<String>, Option<f32>), String>((order, candidates[0].rerank_score))
         })
         .map_err(|error| error.to_string())??;

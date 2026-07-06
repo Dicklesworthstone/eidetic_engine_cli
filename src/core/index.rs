@@ -6135,7 +6135,7 @@ mod tests {
                 results
                     .into_iter()
                     .map(|result| SearchSnapshotRow {
-                        doc_id: result.doc_id,
+                        doc_id: result.doc_id.to_string(),
                         score: format!("{:.6}", result.score),
                     })
                     .collect(),

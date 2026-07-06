@@ -1709,7 +1709,7 @@ impl SearchScoreExplanation {
         );
 
         Self {
-            doc_id: result.doc_id.clone(),
+            doc_id: result.doc_id.to_string(),
             source: score_source_name(result.source),
             final_score,
             components,
@@ -3269,7 +3269,7 @@ mod tests {
     #[test]
     fn scored_result_explanation_preserves_components_in_stable_order() {
         let result = ScoredResult {
-            doc_id: "mem-release-rule".to_owned(),
+            doc_id: "mem-release-rule".into(),
             score: 0.875,
             source: ScoreSource::Hybrid,
             index: Some(17),
@@ -3278,10 +3278,10 @@ mod tests {
             lexical_score: Some(3.5),
             rerank_score: Some(0.91),
             explanation: None,
-            metadata: Some(json!({
+            metadata: Some(std::sync::Arc::new(json!({
                 "source": "memory",
                 "schema": super::CANONICAL_DOCUMENT_SCHEMA,
-            })),
+            }))),
         };
 
         let explanation = explain_scored_result(&result);
@@ -3316,7 +3316,7 @@ mod tests {
     #[test]
     fn scored_result_explanation_tags_semantic_quality_component_source() {
         let result = ScoredResult {
-            doc_id: "mem-quality-rule".to_owned(),
+            doc_id: "mem-quality-rule".into(),
             score: 0.93,
             source: ScoreSource::SemanticQuality,
             index: Some(3),
@@ -3342,7 +3342,7 @@ mod tests {
     #[test]
     fn scored_result_explanation_omits_absent_optional_scores() {
         let result = ScoredResult {
-            doc_id: "mem-lexical-only".to_owned(),
+            doc_id: "mem-lexical-only".into(),
             score: 1.25,
             source: ScoreSource::Lexical,
             index: None,
@@ -3376,7 +3376,7 @@ mod tests {
     #[test]
     fn scored_result_explanation_normalizes_non_finite_scores() {
         let result = ScoredResult {
-            doc_id: "mem-non-finite-score".to_owned(),
+            doc_id: "mem-non-finite-score".into(),
             score: f32::NAN,
             source: ScoreSource::Hybrid,
             index: None,

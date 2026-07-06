@@ -38,7 +38,7 @@ where
 #[test]
 fn scored_result_has_required_fields() -> TestResult {
     let result = ScoredResult {
-        doc_id: "test-doc-001".to_owned(),
+        doc_id: "test-doc-001".into(),
         score: 0.75,
         source: ScoreSource::Hybrid,
         index: Some(0),
@@ -47,10 +47,10 @@ fn scored_result_has_required_fields() -> TestResult {
         lexical_score: Some(2.5),
         rerank_score: Some(0.85),
         explanation: None,
-        metadata: Some(json!({"source": "memory"})),
+        metadata: Some(std::sync::Arc::new(json!({"source": "memory"}))),
     };
 
-    ensure_equal(&result.doc_id, &"test-doc-001".to_owned(), "doc_id")?;
+    ensure_equal(&result.doc_id, &"test-doc-001".into(), "doc_id")?;
     ensure((result.score - 0.75).abs() < 0.001, "score should be 0.75")?;
     ensure_equal(&result.source, &ScoreSource::Hybrid, "source")?;
     ensure_equal(&result.index, &Some(0), "index")?;
@@ -71,7 +71,7 @@ fn scored_result_has_required_fields() -> TestResult {
 #[test]
 fn scored_result_optional_fields_can_be_none() -> TestResult {
     let result = ScoredResult {
-        doc_id: "minimal-doc".to_owned(),
+        doc_id: "minimal-doc".into(),
         score: 1.0,
         source: ScoreSource::Lexical,
         index: None,
@@ -83,7 +83,7 @@ fn scored_result_optional_fields_can_be_none() -> TestResult {
         metadata: None,
     };
 
-    ensure_equal(&result.doc_id, &"minimal-doc".to_owned(), "doc_id")?;
+    ensure_equal(&result.doc_id, &"minimal-doc".into(), "doc_id")?;
     ensure(result.index.is_none(), "index should be None")?;
     ensure(result.fast_score.is_none(), "fast_score should be None")?;
     ensure(
@@ -202,7 +202,7 @@ fn hash_embedder_empty_text_does_not_panic() -> TestResult {
 #[test]
 fn semantic_scores_are_normalized_zero_to_one() -> TestResult {
     let result = ScoredResult {
-        doc_id: "norm-test".to_owned(),
+        doc_id: "norm-test".into(),
         score: 0.85,
         source: ScoreSource::Hybrid,
         index: Some(0),
@@ -238,7 +238,7 @@ fn semantic_scores_are_normalized_zero_to_one() -> TestResult {
 #[test]
 fn lexical_scores_can_exceed_one() -> TestResult {
     let result = ScoredResult {
-        doc_id: "lexical-test".to_owned(),
+        doc_id: "lexical-test".into(),
         score: 3.5,
         source: ScoreSource::Lexical,
         index: Some(0),
@@ -266,7 +266,7 @@ fn lexical_scores_can_exceed_one() -> TestResult {
 #[test]
 fn search_score_explanation_from_scored_result_preserves_doc_id() -> TestResult {
     let result = ScoredResult {
-        doc_id: "explanation-test-doc".to_owned(),
+        doc_id: "explanation-test-doc".into(),
         score: 0.77,
         source: ScoreSource::Hybrid,
         index: Some(5),
@@ -296,7 +296,7 @@ fn search_score_explanation_from_scored_result_preserves_doc_id() -> TestResult 
 #[test]
 fn search_score_explanation_includes_primary_score_component() -> TestResult {
     let result = ScoredResult {
-        doc_id: "primary-test".to_owned(),
+        doc_id: "primary-test".into(),
         score: 0.65,
         source: ScoreSource::SemanticFast,
         index: None,
@@ -324,7 +324,7 @@ fn search_score_explanation_includes_primary_score_component() -> TestResult {
 #[test]
 fn search_score_explanation_preserves_rerank_component() -> TestResult {
     let result = ScoredResult {
-        doc_id: "rerank-test".to_owned(),
+        doc_id: "rerank-test".into(),
         score: 0.92,
         source: ScoreSource::Reranked,
         index: Some(1),
@@ -363,7 +363,7 @@ fn search_score_explanation_preserves_rerank_component() -> TestResult {
 #[test]
 fn search_score_explanation_sanitizes_non_finite_rerank_component() -> TestResult {
     let result = ScoredResult {
-        doc_id: "rerank-non-finite".to_owned(),
+        doc_id: "rerank-non-finite".into(),
         score: f32::NAN,
         source: ScoreSource::Reranked,
         index: Some(2),
