@@ -307,7 +307,12 @@ impl ImpactAnchorSummary {
 
 pub fn run_impact(options: &ImpactOptions) -> Result<ImpactReport, ImpactError> {
     let started = Instant::now();
-    let query_anchor = CreateMemoryAnchorInput::from_raw(
+    let workspace_root = default_workspace_root(&options.workspace_path);
+    // Query surfaces consult the filesystem so a real workspace file anchors
+    // even when it is outside the lexical repo-path allowlist (GH#14). This
+    // keeps `ee impact --path` in agreement with `ee recall --path`, which
+    // already accepts any workspace-relative path selector.
+    let query_anchor = CreateMemoryAnchorInput::from_query_surface(
         "mem_impactquery000000000000000000",
         options.surface.kind,
         &options.surface.value,
@@ -315,6 +320,7 @@ pub fn run_impact(options: &ImpactOptions) -> Result<ImpactReport, ImpactError> 
         MemoryAnchorSource::Explicit,
         "impact.query",
         0,
+        Some(workspace_root.as_path()),
     )
     .ok_or(ImpactError::InvalidSurface {
         kind: options.surface.kind,
@@ -331,7 +337,6 @@ pub fn run_impact(options: &ImpactOptions) -> Result<ImpactReport, ImpactError> 
         .clone()
         .unwrap_or_else(|| default_workspace_database_path(&options.workspace_path));
     let connection = DbConnection::open_file(&database_path)?;
-    let workspace_root = default_workspace_root(&options.workspace_path);
     let workspace_id = resolve_workspace_id(&connection, &workspace_root)?;
     let scope_context = MemoryScopeContext::for_workspace(
         &workspace_root,

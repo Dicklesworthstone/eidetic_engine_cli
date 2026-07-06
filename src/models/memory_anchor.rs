@@ -203,10 +203,72 @@ impl CreateMemoryAnchorInput {
         generation: i64,
     ) -> Option<(Self, String)> {
         let normalized = normalize_anchor_value(anchor_kind, raw_value)?;
+        Some(Self::finish_from_normalized(
+            memory_id,
+            anchor_kind,
+            normalized,
+            confidence,
+            source,
+            provenance,
+            generation,
+        ))
+    }
+
+    /// Query-side anchor construction that consults the workspace filesystem
+    /// (GH#14). Extraction stays lexical-and-deterministic, but a *query*
+    /// surface (`ee impact --path`, `ee recall --path`) must accept any real
+    /// workspace-relative file that exists on disk, even when it falls outside
+    /// the lexical repo-path allowlist (e.g. root `CLAUDE.md`). The lexical
+    /// allowlist remains the fast path for junk-token hygiene; the filesystem
+    /// check is the fallback that binds real files. For non-`Path` kinds, or
+    /// when `workspace_root` is `None`, this behaves exactly like
+    /// [`Self::from_raw`].
+    #[must_use]
+    pub fn from_query_surface(
+        memory_id: &str,
+        anchor_kind: MemoryAnchorKind,
+        raw_value: &str,
+        confidence: f32,
+        source: MemoryAnchorSource,
+        provenance: impl Into<String>,
+        generation: i64,
+        workspace_root: Option<&std::path::Path>,
+    ) -> Option<Self> {
+        let normalized = normalize_anchor_value(anchor_kind, raw_value).or_else(|| {
+            if anchor_kind == MemoryAnchorKind::Path {
+                workspace_root
+                    .and_then(|root| existing_workspace_file_path(root, raw_value))
+            } else {
+                None
+            }
+        })?;
+        Some(
+            Self::finish_from_normalized(
+                memory_id,
+                anchor_kind,
+                normalized,
+                confidence,
+                source,
+                provenance,
+                generation,
+            )
+            .0,
+        )
+    }
+
+    fn finish_from_normalized(
+        memory_id: &str,
+        anchor_kind: MemoryAnchorKind,
+        normalized: String,
+        confidence: f32,
+        source: MemoryAnchorSource,
+        provenance: impl Into<String>,
+        generation: i64,
+    ) -> (Self, String) {
         let anchor_value_hash = memory_anchor_value_hash(anchor_kind, &normalized);
         let captured_span_hash = memory_anchor_span_hash(anchor_kind, &normalized);
         let redacted_anchor_value = redacted_anchor_value(anchor_kind, &anchor_value_hash);
-        Some((
+        (
             Self {
                 memory_id: memory_id.to_owned(),
                 anchor_kind,
@@ -220,8 +282,32 @@ impl CreateMemoryAnchorInput {
                 generation: generation.max(0),
             },
             normalized,
-        ))
+        )
     }
+}
+
+/// Resolve a query path selector to its normalized (workspace-relative) form
+/// **only if the file actually exists** under `workspace_root`. This is the
+/// filesystem fallback that lets a real workspace file anchor even when it is
+/// not covered by the lexical [`looks_like_repo_path`] allowlist (GH#14).
+///
+/// Selectors that are absolute, escape the workspace (`..`), carry a URL
+/// scheme, or resolve to a non-file (directory, missing path) return `None`,
+/// so junk tokens still fall through to the lexical hygiene rules.
+fn existing_workspace_file_path(workspace_root: &std::path::Path, raw: &str) -> Option<String> {
+    let cleaned = trim_token(raw);
+    let stripped = cleaned.strip_prefix("./").unwrap_or(cleaned);
+    if stripped.is_empty()
+        || stripped.contains("..")
+        || stripped.contains("://")
+        || stripped.starts_with('/')
+    {
+        return None;
+    }
+    workspace_root
+        .join(stripped)
+        .is_file()
+        .then(|| stripped.to_owned())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -949,6 +1035,96 @@ impl SurfaceCoverageFacet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_surface_binds_real_workspace_file_outside_lexical_allowlist() {
+        // GH#14: a real root file like CLAUDE.md is outside the lexical repo-path
+        // allowlist, but `ee impact --path CLAUDE.md` must anchor it because the
+        // file exists on disk. Extraction stays lexical; only the query surface
+        // consults the filesystem.
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+        std::fs::write(root.join("CLAUDE.md"), b"# guidance").expect("write file");
+
+        // Lexical-only (no workspace root) rejects CLAUDE.md as before.
+        assert!(
+            CreateMemoryAnchorInput::from_raw(
+                "mem_impactquery000000000000000000",
+                MemoryAnchorKind::Path,
+                "CLAUDE.md",
+                1.0,
+                MemoryAnchorSource::Explicit,
+                "impact.query",
+                0,
+            )
+            .is_none(),
+            "lexical path normalization should still reject CLAUDE.md"
+        );
+
+        // With the workspace root, the real file anchors.
+        let anchor = CreateMemoryAnchorInput::from_query_surface(
+            "mem_impactquery000000000000000000",
+            MemoryAnchorKind::Path,
+            "CLAUDE.md",
+            1.0,
+            MemoryAnchorSource::Explicit,
+            "impact.query",
+            0,
+            Some(root),
+        )
+        .expect("real workspace file must anchor as a path surface");
+        assert_eq!(anchor.anchor_kind, MemoryAnchorKind::Path);
+        // The bound hash must equal what extraction would compute for the same
+        // normalized path, so exact-anchor reverse lookups can ever match.
+        assert_eq!(
+            anchor.anchor_value_hash,
+            memory_anchor_value_hash(MemoryAnchorKind::Path, "CLAUDE.md")
+        );
+    }
+
+    #[test]
+    fn query_surface_rejects_phantom_and_escaping_paths() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let root = tempdir.path();
+
+        // A phantom file that is not lexically repo-shaped is rejected.
+        assert!(
+            CreateMemoryAnchorInput::from_query_surface(
+                "mem_impactquery000000000000000000",
+                MemoryAnchorKind::Path,
+                "PHANTOM.md",
+                1.0,
+                MemoryAnchorSource::Explicit,
+                "impact.query",
+                0,
+                Some(root),
+            )
+            .is_none(),
+            "a non-existent, non-repo-shaped path must not anchor"
+        );
+
+        // Even if it exists, an escaping/absolute selector is rejected.
+        assert!(existing_workspace_file_path(root, "../etc/passwd").is_none());
+        assert!(existing_workspace_file_path(root, "/etc/passwd").is_none());
+        assert!(existing_workspace_file_path(root, "https://example.com/x").is_none());
+
+        // A lexically repo-shaped path still normalizes even if absent on disk
+        // (preserves the offline/pre-indexed behavior for known prefixes).
+        assert!(
+            CreateMemoryAnchorInput::from_query_surface(
+                "mem_impactquery000000000000000000",
+                MemoryAnchorKind::Path,
+                "src/does/not/exist.rs",
+                1.0,
+                MemoryAnchorSource::Explicit,
+                "impact.query",
+                0,
+                Some(root),
+            )
+            .is_some(),
+            "repo-shaped paths keep the lexical fast path"
+        );
+    }
 
     #[test]
     fn extractor_finds_precise_code_and_schema_anchors() {
