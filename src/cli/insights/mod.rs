@@ -115,9 +115,31 @@ pub struct InsightsReport {
     pub explain_memory_id: Option<String>,
     pub explain_command: Option<String>,
     pub pagination: Option<InsightsPagination>,
+    /// Per-section pagination for the unscoped full bundle (GH#15). The scoped
+    /// `--section` path reports a single top-level `pagination`; the bundle
+    /// caps every section to `DEFAULT_SECTION_LIMIT` and records each section's
+    /// true `total` here so callers can tell an item list was truncated (and
+    /// re-request the full section via `ee insights --section <name>
+    /// --limit N`). Empty for the scoped and error paths, so it only appears on
+    /// the full-bundle response.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub section_pagination: Vec<SectionPagination>,
     pub available_sections: Vec<&'static str>,
     pub sections: Vec<InsightsSection>,
     pub degraded_signals: Vec<InsightsDegradedSignal>,
+}
+
+/// One section's pagination within the unscoped bundle: which section, and how
+/// many items it actually holds versus how many were returned after the
+/// default cap (GH#15). `total > returned` means the section was truncated.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionPagination {
+    pub name: &'static str,
+    pub limit: usize,
+    pub offset: usize,
+    pub returned: usize,
+    pub total: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -466,7 +488,7 @@ pub fn build_insights_report_with_options(
         return build_malformed_cursor_report(args, &registry, available_sections, mode);
     }
 
-    let (selected_section, sections, pagination, gated_degraded_signals) =
+    let (selected_section, sections, pagination, section_pagination, gated_degraded_signals) =
         if let Some(section) = args.section.as_deref() {
             let normalized = normalize_section_name(section);
             let Some((_, display_name, builder)) = registry
@@ -492,6 +514,7 @@ pub fn build_insights_report_with_options(
                 Some((*display_name).to_owned()),
                 vec![section.section],
                 Some(section.pagination),
+                Vec::new(),
                 built.degraded_signal.into_iter().collect::<Vec<_>>(),
             )
         } else {
@@ -511,12 +534,27 @@ pub fn build_insights_report_with_options(
                 })
                 .collect::<Result<Vec<_>, DomainError>>()?;
             let mut sections = Vec::with_capacity(built.len());
+            let mut section_pagination = Vec::with_capacity(built.len());
             let mut gate_degraded = Vec::new();
             for section in built {
-                sections.push(section.section);
                 gate_degraded.extend(section.degraded_signal);
+                // GH#15: cap the unscoped bundle. Without a per-section limit
+                // the bundle serialized every item of every section (a real
+                // workspace produced ~45k blindSpots items / ~58MB). Apply the
+                // same DEFAULT_SECTION_LIMIT the scoped `--section` path uses
+                // and record the true total so callers know the list was
+                // truncated and can re-request the full section.
+                let paginated = paginate_section(section.section, 0, DEFAULT_SECTION_LIMIT);
+                section_pagination.push(SectionPagination {
+                    name: paginated.section.name,
+                    limit: paginated.pagination.limit,
+                    offset: paginated.pagination.offset,
+                    returned: paginated.pagination.returned,
+                    total: paginated.pagination.total,
+                });
+                sections.push(paginated.section);
             }
-            (None, sections, None, gate_degraded)
+            (None, sections, None, section_pagination, gate_degraded)
         };
 
     let explain_memory_id = args.explain.clone();
@@ -547,6 +585,7 @@ pub fn build_insights_report_with_options(
         explain_memory_id,
         explain_command,
         pagination,
+        section_pagination,
         available_sections,
         sections,
         degraded_signals,
@@ -559,7 +598,9 @@ fn build_malformed_cursor_report(
     available_sections: Vec<&'static str>,
     mode: InsightsMode,
 ) -> Result<InsightsReport, DomainError> {
-    let (selected_section, sections, pagination) = if let Some(section) = args.section.as_deref() {
+    let (selected_section, sections, pagination, section_pagination) = if let Some(section) =
+        args.section.as_deref()
+    {
         let normalized = normalize_section_name(section);
         let Some((_, display_name, builder)) = registry
             .iter()
@@ -578,16 +619,25 @@ fn build_malformed_cursor_report(
             Some((*display_name).to_owned()),
             vec![section.section],
             Some(section.pagination),
+            Vec::new(),
         )
     } else {
-        (
-            None,
-            registry
-                .iter()
-                .map(|(_, _, builder)| builder())
-                .collect::<Vec<_>>(),
-            None,
-        )
+        // GH#15: the malformed-cursor bundle path must be bounded too, so a bad
+        // cursor can't sidestep the per-section cap and re-open the 58MB hole.
+        let mut sections = Vec::new();
+        let mut section_pagination = Vec::new();
+        for (_, _, builder) in registry {
+            let paginated = paginate_section(builder(), 0, DEFAULT_SECTION_LIMIT);
+            section_pagination.push(SectionPagination {
+                name: paginated.section.name,
+                limit: paginated.pagination.limit,
+                offset: paginated.pagination.offset,
+                returned: paginated.pagination.returned,
+                total: paginated.pagination.total,
+            });
+            sections.push(paginated.section);
+        }
+        (None, sections, None, section_pagination)
     };
 
     Ok(InsightsReport {
@@ -604,6 +654,7 @@ fn build_malformed_cursor_report(
             .as_ref()
             .map(|memory_id| format!("ee why {memory_id} --json")),
         pagination,
+        section_pagination,
         available_sections,
         sections,
         degraded_signals: vec![cursor_invalid_insights_signal()],
@@ -2473,6 +2524,20 @@ pub fn render_insights_markdown(report: &InsightsReport) -> String {
         let _ = writeln!(output, "- Summary: {}", section.summary);
         let _ = writeln!(output, "- Why it matters: {}", section.why_it_matters);
         let _ = writeln!(output, "- Items: {}", section.items.len());
+        // GH#15: surface bundle truncation in Markdown too, so a capped section
+        // is never silently short.
+        if let Some(page) = report
+            .section_pagination
+            .iter()
+            .find(|page| page.name == section.name)
+            && page.total > page.returned
+        {
+            let _ = writeln!(
+                output,
+                "- Showing {} of {} items (capped; run `ee insights --section {} --limit {} --json` for more)",
+                page.returned, page.total, section.name, page.total
+            );
+        }
         if !section.items.is_empty() {
             for (index, item) in section.items.iter().enumerate() {
                 let item_json = serde_json::to_string(item).unwrap_or_else(|_| "null".to_owned());
@@ -4067,6 +4132,90 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn full_bundle_reports_bounded_section_pagination_for_every_section() -> TestResult {
+        // GH#15: the unscoped bundle must carry a pagination entry for every
+        // section so callers always know the true item total, and every section
+        // must be bounded to the default cap.
+        let report = build_insights_report(&InsightsArgs {
+            section: None,
+            explain: None,
+            limit: DEFAULT_SECTION_LIMIT,
+            offset: 0,
+            json_stream: false,
+            cursor: None,
+        })
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.mode, InsightsMode::FullBundle);
+        assert_eq!(
+            report.section_pagination.len(),
+            report.sections.len(),
+            "every bundle section must have a pagination entry"
+        );
+        for page in &report.section_pagination {
+            assert_eq!(page.limit, DEFAULT_SECTION_LIMIT);
+            assert_eq!(page.offset, 0);
+            assert!(
+                page.returned <= DEFAULT_SECTION_LIMIT,
+                "bundle section returned more than the default cap"
+            );
+            assert!(page.total >= page.returned, "total must not undercount");
+        }
+        for section in &report.sections {
+            assert!(
+                section.items.len() <= DEFAULT_SECTION_LIMIT,
+                "bundle section `{}` exceeded the default cap",
+                section.name
+            );
+        }
+
+        // The scoped path still reports a single top-level pagination and no
+        // per-section pagination, so the new field only appears on the bundle.
+        let scoped = build_insights_report(&InsightsArgs {
+            section: Some("blindSpots".to_owned()),
+            explain: None,
+            limit: DEFAULT_SECTION_LIMIT,
+            offset: 0,
+            json_stream: false,
+            cursor: None,
+        })
+        .map_err(|error| error.to_string())?;
+        assert!(scoped.section_pagination.is_empty());
+        assert!(scoped.pagination.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn bundle_cap_truncates_oversized_section_and_preserves_total() {
+        // A section with far more than the default cap of items must be
+        // truncated to DEFAULT_SECTION_LIMIT while the true total is preserved,
+        // so the ~58MB unscoped bundle can never recur (GH#15).
+        let oversized = 45usize;
+        let items = (0..oversized)
+            .map(|index| serde_json::json!({ "rank": index + 1 }))
+            .collect::<Vec<_>>();
+        let section = InsightsSection {
+            name: "blindSpots",
+            title: "Blind Spots",
+            summary: "test",
+            why_it_matters: "test",
+            items,
+            next_commands: vec![],
+        };
+        assert!(section.items.len() > DEFAULT_SECTION_LIMIT);
+
+        let paginated = paginate_section(section, 0, DEFAULT_SECTION_LIMIT);
+        assert_eq!(paginated.section.items.len(), DEFAULT_SECTION_LIMIT);
+        assert_eq!(paginated.pagination.returned, DEFAULT_SECTION_LIMIT);
+        assert_eq!(paginated.pagination.total, oversized);
+        assert!(
+            paginated.pagination.total > paginated.pagination.returned,
+            "capped section must report total > returned"
+        );
     }
 
     #[test]
