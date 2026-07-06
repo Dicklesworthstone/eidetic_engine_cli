@@ -448,7 +448,11 @@ pub struct Cli {
     #[arg(long, global = true, action = ArgAction::SetTrue)]
     pub schema: bool,
 
-    /// Select the response envelope schema version for JSON renderers.
+    /// Select the JSON response *renderer generation* (not the wire schema id).
+    /// `v1` is the current renderer and emits the `ee.response.v2` envelope on
+    /// the wire; `v0` emits the legacy `ee.response.v0` compatibility shape
+    /// (`ok`/`result`). There is no `v2` renderer flag value — `ee.response.v2`
+    /// is what the default `v1` renderer already produces.
     #[arg(long, global = true, value_enum, default_value_t = SchemaVersion::V1)]
     pub schema_version: SchemaVersion,
 
@@ -12233,9 +12237,17 @@ impl OutputFormat {
     }
 }
 
+/// Response-envelope renderer generation selected by `--schema-version`.
+///
+/// These are renderer generations, not the wire `schema` id. The wire id is
+/// always `ee.response.v2` for the current renderer; the `V1`/`V0` names here
+/// only pick which renderer produces the bytes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum SchemaVersion {
+    /// Legacy renderer: emits the `ee.response.v0` compatibility envelope
+    /// (`ok`/`result` fields) for consumers pinned to the pre-v2 shape.
     V0,
+    /// Current renderer (default): emits the `ee.response.v2` wire envelope.
     #[default]
     V1,
 }
@@ -41423,15 +41435,26 @@ fn impact_surface_from_args(args: &ImpactArgs) -> Result<ImpactSurfaceQuery, Dom
 
 fn impact_error_to_domain(error: ImpactError) -> DomainError {
     match error {
-        ImpactError::InvalidSurface { kind } => DomainError::Usage {
-            message: format!(
-                "Surface value could not be normalized as a {} anchor.",
-                kind.as_str()
-            ),
-            repair: Some(
-                "Check the target spelling and use the flag matching the surface kind.".to_owned(),
-            ),
-        },
+        ImpactError::InvalidSurface { kind } => {
+            let repair = match kind {
+                MemoryAnchorKind::Path => {
+                    "A path surface must be a real workspace-relative file that exists on disk (e.g. `CLAUDE.md`, `src/cli/mod.rs`), or a repo-shaped path under src/, tests/, docs/, scripts/, benches/, examples/, fuzz/, .beads/. Absolute paths, `..` escapes, and URLs are rejected. Confirm the file exists in --workspace, or use the flag matching the surface kind."
+                }
+                MemoryAnchorKind::Symbol => {
+                    "A symbol surface must be a `::`-qualified identifier (e.g. `crate::module::func`). Use --symbol for symbols or the flag matching the surface kind."
+                }
+                _ => {
+                    "The value did not match the shape for this surface kind. Use the flag matching the surface kind (--symbol, --command, --env, --schema-id, --degraded-code, --dependency, --config-key) or a real workspace path."
+                }
+            };
+            DomainError::Usage {
+                message: format!(
+                    "Surface value could not be normalized as a {} anchor.",
+                    kind.as_str()
+                ),
+                repair: Some(repair.to_owned()),
+            }
+        }
         ImpactError::Storage(error) => DomainError::Storage {
             message: error.to_string(),
             repair: Some("ee init --workspace .".to_owned()),
