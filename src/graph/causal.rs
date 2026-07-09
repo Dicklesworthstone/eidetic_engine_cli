@@ -81,8 +81,8 @@ pub fn try_compute_causal_ancestry(
     compute_causal_ancestry_with_cx(&cx, graph, failure_id)
 }
 
-pub fn compute_causal_ancestry_with_cx(
-    cx: &Cx,
+pub fn compute_causal_ancestry_with_cx<Caps>(
+    cx: &Cx<Caps>,
     graph: &DiGraph,
     failure_id: &str,
 ) -> GraphResult<CausalAncestry> {
@@ -151,8 +151,8 @@ pub fn try_compute_min_cost_explanation(
     compute_min_cost_explanation_with_cx(&cx, graph, failure_id)
 }
 
-pub fn compute_min_cost_explanation_with_cx(
-    cx: &Cx,
+pub fn compute_min_cost_explanation_with_cx<Caps>(
+    cx: &Cx<Caps>,
     graph: &DiGraph,
     failure_id: &str,
 ) -> GraphResult<Option<MinCostExplanation>> {

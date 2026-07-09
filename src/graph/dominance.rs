@@ -150,8 +150,8 @@ pub fn compute_immediate_dominators(
     compute_immediate_dominators_with_cx(&cx, graph, start)
 }
 
-pub fn compute_immediate_dominators_with_cx(
-    cx: &Cx,
+pub fn compute_immediate_dominators_with_cx<Caps>(
+    cx: &Cx<Caps>,
     graph: &DiGraph,
     start: &str,
 ) -> GraphResult<ImmediateDominators> {
@@ -179,8 +179,8 @@ pub fn compute_dominance_frontiers(
     compute_dominance_frontiers_with_cx(&cx, graph, start)
 }
 
-pub fn compute_dominance_frontiers_with_cx(
-    cx: &Cx,
+pub fn compute_dominance_frontiers_with_cx<Caps>(
+    cx: &Cx<Caps>,
     graph: &DiGraph,
     start: &str,
 ) -> GraphResult<DominanceFrontiers> {
@@ -212,7 +212,10 @@ pub fn compute_all_pairs_lca(graph: &DiGraph) -> GraphResult<AllPairsLca> {
     compute_all_pairs_lca_with_cx(&cx, graph)
 }
 
-pub fn compute_all_pairs_lca_with_cx(cx: &Cx, graph: &DiGraph) -> GraphResult<AllPairsLca> {
+pub fn compute_all_pairs_lca_with_cx<Caps>(
+    cx: &Cx<Caps>,
+    graph: &DiGraph,
+) -> GraphResult<AllPairsLca> {
     let graph = graph.clone();
     run_with_budget(cx, "all_pairs_lca", DEFAULT_BACKGROUND_BUDGET, move || {
         let mut nodes: Vec<String> = graph
@@ -248,8 +251,8 @@ pub fn compute_memory_impact_analysis(
     compute_memory_impact_analysis_with_cx(&cx, graph, memory_id, snapshot_version)
 }
 
-pub fn compute_memory_impact_analysis_with_cx(
-    cx: &Cx,
+pub fn compute_memory_impact_analysis_with_cx<Caps>(
+    cx: &Cx<Caps>,
     graph: &DiGraph,
     memory_id: &str,
     snapshot_version: u64,
@@ -318,8 +321,8 @@ pub fn compute_workspace_revision_frontiers(
     compute_workspace_revision_frontiers_with_cx(&cx, graph, snapshot_version)
 }
 
-pub fn compute_workspace_revision_frontiers_with_cx(
-    cx: &Cx,
+pub fn compute_workspace_revision_frontiers_with_cx<Caps>(
+    cx: &Cx<Caps>,
     graph: &DiGraph,
     snapshot_version: u64,
 ) -> GraphResult<Vec<RevisionFrontierItem>> {

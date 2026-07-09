@@ -103,8 +103,8 @@ pub fn compute_hits(graph: &DiGraph) -> GraphResult<HitsScores> {
     compute_hits_result(graph).map(hits_scores_from_result)
 }
 
-pub(crate) fn compute_hits_with_budget(
-    cx: &Cx,
+pub(crate) fn compute_hits_with_budget<Caps>(
+    cx: &Cx<Caps>,
     graph: &DiGraph,
     budget: Duration,
 ) -> GraphResult<HitsScores> {
@@ -126,12 +126,15 @@ fn compute_hits_result(graph: &DiGraph) -> GraphResult<HitsCentralityResult> {
     compute_hits_result_with_cx(&cx, graph)
 }
 
-fn compute_hits_result_with_cx(cx: &Cx, graph: &DiGraph) -> GraphResult<HitsCentralityResult> {
+fn compute_hits_result_with_cx<Caps>(
+    cx: &Cx<Caps>,
+    graph: &DiGraph,
+) -> GraphResult<HitsCentralityResult> {
     compute_hits_result_with_budget(cx, graph, DEFAULT_BACKGROUND_BUDGET)
 }
 
-fn compute_hits_result_with_budget(
-    cx: &Cx,
+fn compute_hits_result_with_budget<Caps>(
+    cx: &Cx<Caps>,
     graph: &DiGraph,
     budget: Duration,
 ) -> GraphResult<HitsCentralityResult> {

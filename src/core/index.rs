@@ -1883,7 +1883,8 @@ fn apply_incremental_index_change_sync(
 
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime_result = crate::core::run_cli_future(async move {
-            let cx = asupersync::Cx::for_testing();
+            let cx = asupersync::Cx::current()
+                .expect("run_cli_future's block_on installs an ambient runtime Cx");
             let outcome = match apply_incremental_index_change(
                 &cx,
                 &index_dir_owned,
@@ -1951,7 +1952,8 @@ fn apply_incremental_index_batch_sync(
 
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime_result = crate::core::run_cli_future(async move {
-            let cx = asupersync::Cx::for_testing();
+            let cx = asupersync::Cx::current()
+                .expect("run_cli_future's block_on installs an ambient runtime Cx");
             let outcome = match apply_incremental_index_batch(
                 &cx,
                 &index_dir_owned,
@@ -2976,7 +2978,8 @@ fn build_index_sync(
 
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime_result = crate::core::run_cli_future(async move {
-            let cx = asupersync::Cx::for_testing();
+            let cx = asupersync::Cx::current()
+                .expect("run_cli_future's block_on installs an ambient runtime Cx");
             let builder = IndexBuilder::new(&index_dir_owned)
                 .with_embedder_stack(stack)
                 .add_documents(documents);

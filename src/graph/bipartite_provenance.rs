@@ -169,7 +169,10 @@ pub fn compute_bipartite_hits(graph: &Graph) -> GraphResult<BipartiteHits> {
     compute_bipartite_hits_with_cx(&cx, graph)
 }
 
-pub fn compute_bipartite_hits_with_cx(cx: &Cx, graph: &Graph) -> GraphResult<BipartiteHits> {
+pub fn compute_bipartite_hits_with_cx<Caps>(
+    cx: &Cx<Caps>,
+    graph: &Graph,
+) -> GraphResult<BipartiteHits> {
     let graph = graph.clone();
     run_with_budget(cx, "bipartite_hits", DEFAULT_BACKGROUND_BUDGET, move || {
         let result = hits_centrality(&graph);

@@ -140,8 +140,8 @@ pub fn compute_pack_dna(
     compute_pack_dna_with_cx(&cx, projection, input)
 }
 
-pub fn compute_pack_dna_with_cx(
-    cx: &Cx,
+pub fn compute_pack_dna_with_cx<Caps>(
+    cx: &Cx<Caps>,
     projection: &MemoryGraphProjection,
     input: &PackDnaInput,
 ) -> GraphResult<PackDna> {
@@ -161,8 +161,8 @@ pub fn compute_pack_dna_with_cx(
     })?
 }
 
-fn compute_pack_dna_unbudgeted(
-    cx: &Cx,
+fn compute_pack_dna_unbudgeted<Caps>(
+    cx: &Cx<Caps>,
     directed: &DiGraph,
     undirected: &Graph,
     input: &PackDnaInput,
@@ -247,8 +247,8 @@ fn require_pack_dna_partial<T>(slot: Option<T>, key: PackDnaPartialKey) -> Graph
     slot.ok_or_else(|| pack_dna_merge_error(format!("missing {} result", key.as_str())))
 }
 
-fn compute_pack_dna_partial_results(
-    cx: &Cx,
+fn compute_pack_dna_partial_results<Caps>(
+    cx: &Cx<Caps>,
     directed: &DiGraph,
     undirected: &Graph,
     input: &PackDnaInput,
@@ -532,8 +532,8 @@ fn pack_dna_ego_subgraph(
     }
 }
 
-fn pack_dna_ppr_neighbors(
-    cx: &Cx,
+fn pack_dna_ppr_neighbors<Caps>(
+    cx: &Cx<Caps>,
     graph: &DiGraph,
     query_seed_weights: &BTreeMap<MemoryId, f64>,
     limit: usize,

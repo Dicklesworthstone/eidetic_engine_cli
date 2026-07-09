@@ -85,7 +85,10 @@ pub fn build_gomory_hu_tree(graph: &Graph) -> GraphResult<GomoryHuTree> {
     build_gomory_hu_tree_with_cx(&cx, graph)
 }
 
-pub fn build_gomory_hu_tree_with_cx(cx: &Cx, graph: &Graph) -> GraphResult<GomoryHuTree> {
+pub fn build_gomory_hu_tree_with_cx<Caps>(
+    cx: &Cx<Caps>,
+    graph: &Graph,
+) -> GraphResult<GomoryHuTree> {
     let graph = graph.clone();
     run_with_budget(cx, "gomory_hu_tree", GOMORY_HU_BUILD_BUDGET, move || {
         let tree = fnx_algorithms::gomory_hu_tree(&graph, GOMORY_HU_WEIGHT_ATTR);

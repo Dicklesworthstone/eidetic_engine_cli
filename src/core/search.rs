@@ -7804,7 +7804,8 @@ fn diag_search_sync(
 
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime_result = crate::core::run_cli_future(async move {
-            let cx = asupersync::Cx::for_testing();
+            let cx = asupersync::Cx::current()
+                .expect("run_cli_future's block_on installs an ambient runtime Cx");
             let index = match TwoTierIndex::open(&index_dir_owned, config.clone()) {
                 Ok(idx) => Arc::new(idx),
                 Err(error) => {
@@ -8925,7 +8926,8 @@ fn search_sync_with_performance(
     let runtime_start = Instant::now();
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime_result = crate::core::run_cli_future(async move {
-            let cx = asupersync::Cx::for_testing();
+            let cx = asupersync::Cx::current()
+                .expect("run_cli_future's block_on installs an ambient runtime Cx");
             if source_mode == SearchSourceMode::LexicalOnly {
                 let lexical_open_start = Instant::now();
                 let lexical = match open_lexical_searcher(&index_dir_owned) {
@@ -15665,7 +15667,10 @@ mod tests {
                 metadata: None,
             })
             .collect();
-        let fusion_order: Vec<String> = candidates.iter().map(|hit| hit.doc_id.to_string()).collect();
+        let fusion_order: Vec<String> = candidates
+            .iter()
+            .map(|hit| hit.doc_id.to_string())
+            .collect();
         let candidate_count = candidates.len();
 
         let reranker: Arc<dyn Reranker> =
@@ -15684,7 +15689,10 @@ mod tests {
             )
             .await
             .map_err(|error| error.to_string())?;
-            let order: Vec<String> = candidates.iter().map(|hit| hit.doc_id.to_string()).collect();
+            let order: Vec<String> = candidates
+                .iter()
+                .map(|hit| hit.doc_id.to_string())
+                .collect();
             Ok::<(Vec<String>, Option<f32>), String>((order, candidates[0].rerank_score))
         })
         .map_err(|error| error.to_string())??;

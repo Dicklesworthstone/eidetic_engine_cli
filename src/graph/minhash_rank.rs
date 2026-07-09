@@ -106,8 +106,8 @@ pub fn compute_minhash_rank_with_policy(
     compute_minhash_rank_with_cx(&cx, graph, policy)
 }
 
-pub fn compute_minhash_rank_with_cx(
-    cx: &Cx,
+pub fn compute_minhash_rank_with_cx<Caps>(
+    cx: &Cx<Caps>,
     graph: &DiGraph,
     policy: MinHashRankPolicy,
 ) -> GraphResult<MinHashRankResult> {

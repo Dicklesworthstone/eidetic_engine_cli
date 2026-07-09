@@ -7,6 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use asupersync::Cx;
+use asupersync::cx::NoCaps;
 use chrono::{DateTime, Utc};
 use fnx_algorithms::{PageRankResult, pagerank_with_params};
 use fnx_classes::digraph::DiGraph;
@@ -114,12 +115,35 @@ fn graph_budget_worker_limiter() -> Arc<GraphBudgetWorkerLimiter> {
     }))
 }
 
+/// Returns a detached, capability-less [`Cx`] for driving the synchronous
+/// graph-budget algorithms outside a running Asupersync task.
+///
+/// These algorithms run on a dedicated OS thread (see
+/// [`run_with_budget_observed_with_limiter`]) and only ever consult the `Cx`
+/// for cancellation and budget state — never for spawn/timer/IO/entropy/remote
+/// capabilities. [`Cx::detached_cancel_context`] is Asupersync's sanctioned
+/// production constructor for exactly this "cancellation-aware primitives
+/// outside a running task" use case, and it returns a `Cx<NoCaps>` so it cannot
+/// leak ambient authority.
+///
+/// This deliberately does **not** fall back to `Cx::for_testing()`. As of
+/// asupersync 0.3.6 (br-asupersync-2x6hbi) `for_testing()` is gated behind
+/// `cfg(any(test, feature = "test-internals"))` precisely so external crates
+/// cannot mint a full-capability `Cx` in production; the graph budget helpers
+/// below are generic over the capability set, so a `Cx<NoCaps>` flows through
+/// them unchanged while test call sites that build a `Cx::for_testing()`
+/// (`Cx<All>`) still type-check.
 #[must_use]
-pub fn current_or_testing_cx() -> Cx {
-    Cx::current().unwrap_or_else(Cx::for_testing)
+pub fn current_or_testing_cx() -> Cx<NoCaps> {
+    Cx::detached_cancel_context()
 }
 
-pub fn run_with_budget<R, F>(cx: &Cx, name: &'static str, budget: Duration, f: F) -> GraphResult<R>
+pub fn run_with_budget<R, F, Caps>(
+    cx: &Cx<Caps>,
+    name: &'static str,
+    budget: Duration,
+    f: F,
+) -> GraphResult<R>
 where
     R: Send + 'static,
     F: FnOnce() -> R + Send + 'static,
@@ -199,8 +223,8 @@ impl<R> MemoryAdmitted<R> {
 /// the same cancellation / time-budget semantics as direct callers; the
 /// returned `combined_bytes` value lets the caller update its
 /// process-local active-resident counter.
-pub fn run_with_memory_admission<R, F>(
-    cx: &Cx,
+pub fn run_with_memory_admission<R, F, Caps>(
+    cx: &Cx<Caps>,
     name: &'static str,
     budget: Duration,
     policy: &MemoryBudgetPolicy,
@@ -224,8 +248,8 @@ where
     }
 }
 
-fn run_with_budget_observed<R, F>(
-    cx: &Cx,
+fn run_with_budget_observed<R, F, Caps>(
+    cx: &Cx<Caps>,
     name: &'static str,
     budget: Duration,
     telemetry: BudgetTelemetry<'_>,
@@ -245,8 +269,8 @@ where
     )
 }
 
-fn run_with_budget_observed_with_limiter<R, F>(
-    cx: &Cx,
+fn run_with_budget_observed_with_limiter<R, F, Caps>(
+    cx: &Cx<Caps>,
     name: &'static str,
     budget: Duration,
     telemetry: BudgetTelemetry<'_>,
@@ -377,8 +401,8 @@ fn emit_budget_failure_telemetry(
     }
 }
 
-pub fn run_with_cached_budget<R, F>(
-    cx: &Cx,
+pub fn run_with_cached_budget<R, F, Caps>(
+    cx: &Cx<Caps>,
     spec: &AlgorithmResultCacheSpec<'_>,
     name: &'static str,
     budget: Duration,
@@ -1288,7 +1312,7 @@ fn usize_to_u32_saturating(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-pub(crate) fn check_cancelled(cx: &Cx, name: &'static str) -> GraphResult<()> {
+pub(crate) fn check_cancelled<Caps>(cx: &Cx<Caps>, name: &'static str) -> GraphResult<()> {
     if cx.checkpoint().is_ok() && !cx.is_cancel_requested() {
         return Ok(());
     }

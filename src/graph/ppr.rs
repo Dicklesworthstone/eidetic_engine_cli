@@ -138,8 +138,8 @@ pub fn compute_personalized_pagerank_with_policy(
     compute_personalized_pagerank_with_cx(&cx, graph, seed_map, policy)
 }
 
-pub fn compute_personalized_pagerank_with_cx(
-    cx: &Cx,
+pub fn compute_personalized_pagerank_with_cx<Caps>(
+    cx: &Cx<Caps>,
     graph: &DiGraph,
     seed_map: &BTreeMap<MemoryId, f64>,
     policy: PersonalizedPageRankPolicy,
@@ -182,8 +182,8 @@ pub fn compute_personalized_pagerank_result_with_policy(
     compute_personalized_pagerank_result_with_cx(&cx, graph, seed_map, policy)
 }
 
-pub fn compute_personalized_pagerank_result_with_cx(
-    cx: &Cx,
+pub fn compute_personalized_pagerank_result_with_cx<Caps>(
+    cx: &Cx<Caps>,
     graph: &DiGraph,
     seed_map: &BTreeMap<String, f64>,
     policy: PersonalizedPageRankPolicy,
@@ -208,8 +208,8 @@ pub fn compute_personalized_pagerank_result_cached(
     compute_personalized_pagerank_result_cached_with_cx(&cx, spec, graph, seed_map, policy)
 }
 
-pub fn compute_personalized_pagerank_result_cached_with_cx(
-    cx: &Cx,
+pub fn compute_personalized_pagerank_result_cached_with_cx<Caps>(
+    cx: &Cx<Caps>,
     spec: &AlgorithmResultCacheSpec<'_>,
     graph: &DiGraph,
     seed_map: &BTreeMap<String, f64>,

@@ -53,8 +53,8 @@ struct TimedAlgorithmResult<T> {
     result: GraphResult<T>,
 }
 
-pub fn refresh_centrality_cooperative(
-    cx: &Cx,
+pub fn refresh_centrality_cooperative<Caps>(
+    cx: &Cx<Caps>,
     projection: &MemoryGraphProjection,
     total_start: Instant,
     budget: Duration,
@@ -72,8 +72,8 @@ pub fn refresh_centrality_cooperative(
     )
 }
 
-fn refresh_centrality_cooperative_with_budgets(
-    cx: &Cx,
+fn refresh_centrality_cooperative_with_budgets<Caps>(
+    cx: &Cx<Caps>,
     projection: &MemoryGraphProjection,
     total_start: Instant,
     pagerank_budget: Duration,
