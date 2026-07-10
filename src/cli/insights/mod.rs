@@ -598,47 +598,46 @@ fn build_malformed_cursor_report(
     available_sections: Vec<&'static str>,
     mode: InsightsMode,
 ) -> Result<InsightsReport, DomainError> {
-    let (selected_section, sections, pagination, section_pagination) = if let Some(section) =
-        args.section.as_deref()
-    {
-        let normalized = normalize_section_name(section);
-        let Some((_, display_name, builder)) = registry
-            .iter()
-            .find(|(lookup_name, _, _)| *lookup_name == normalized)
-        else {
-            let available = available_sections.join(", ");
-            return Err(DomainError::Usage {
-                message: format!(
-                    "Unknown insights section `{section}`. Available sections: {available}."
-                ),
-                repair: Some("ee insights --help".to_owned()),
-            });
+    let (selected_section, sections, pagination, section_pagination) =
+        if let Some(section) = args.section.as_deref() {
+            let normalized = normalize_section_name(section);
+            let Some((_, display_name, builder)) = registry
+                .iter()
+                .find(|(lookup_name, _, _)| *lookup_name == normalized)
+            else {
+                let available = available_sections.join(", ");
+                return Err(DomainError::Usage {
+                    message: format!(
+                        "Unknown insights section `{section}`. Available sections: {available}."
+                    ),
+                    repair: Some("ee insights --help".to_owned()),
+                });
+            };
+            let section = paginate_section(builder(), args.offset, args.limit);
+            (
+                Some((*display_name).to_owned()),
+                vec![section.section],
+                Some(section.pagination),
+                Vec::new(),
+            )
+        } else {
+            // GH#15: the malformed-cursor bundle path must be bounded too, so a bad
+            // cursor can't sidestep the per-section cap and re-open the 58MB hole.
+            let mut sections = Vec::new();
+            let mut section_pagination = Vec::new();
+            for (_, _, builder) in registry {
+                let paginated = paginate_section(builder(), 0, DEFAULT_SECTION_LIMIT);
+                section_pagination.push(SectionPagination {
+                    name: paginated.section.name,
+                    limit: paginated.pagination.limit,
+                    offset: paginated.pagination.offset,
+                    returned: paginated.pagination.returned,
+                    total: paginated.pagination.total,
+                });
+                sections.push(paginated.section);
+            }
+            (None, sections, None, section_pagination)
         };
-        let section = paginate_section(builder(), args.offset, args.limit);
-        (
-            Some((*display_name).to_owned()),
-            vec![section.section],
-            Some(section.pagination),
-            Vec::new(),
-        )
-    } else {
-        // GH#15: the malformed-cursor bundle path must be bounded too, so a bad
-        // cursor can't sidestep the per-section cap and re-open the 58MB hole.
-        let mut sections = Vec::new();
-        let mut section_pagination = Vec::new();
-        for (_, _, builder) in registry {
-            let paginated = paginate_section(builder(), 0, DEFAULT_SECTION_LIMIT);
-            section_pagination.push(SectionPagination {
-                name: paginated.section.name,
-                limit: paginated.pagination.limit,
-                offset: paginated.pagination.offset,
-                returned: paginated.pagination.returned,
-                total: paginated.pagination.total,
-            });
-            sections.push(paginated.section);
-        }
-        (None, sections, None, section_pagination)
-    };
 
     Ok(InsightsReport {
         schema: INSIGHTS_SCHEMA_V1,

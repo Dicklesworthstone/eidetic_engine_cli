@@ -236,8 +236,7 @@ impl CreateMemoryAnchorInput {
     ) -> Option<Self> {
         let normalized = normalize_anchor_value(anchor_kind, raw_value).or_else(|| {
             if anchor_kind == MemoryAnchorKind::Path {
-                workspace_root
-                    .and_then(|root| existing_workspace_file_path(root, raw_value))
+                workspace_root.and_then(|root| existing_workspace_file_path(root, raw_value))
             } else {
                 None
             }

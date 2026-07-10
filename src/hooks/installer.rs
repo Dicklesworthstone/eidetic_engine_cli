@@ -4829,13 +4829,15 @@ mod tests {
             eprintln!("python3 unavailable; skipping post_bash fail-open test");
             return;
         }
-        let string_input = r#"{"tool_name":"Bash","tool_input":"raw string","tool_response":{"exit_code":2}}"#;
+        let string_input =
+            r#"{"tool_name":"Bash","tool_input":"raw string","tool_response":{"exit_code":2}}"#;
         assert_eq!(
             run_python_snippet_exit_code(post_bash_failure_python(), string_input),
             Some(0),
             "post_bash hook must fail open on string tool_input"
         );
-        let string_response = r#"{"tool_name":"Bash","tool_input":{"command":"false"},"tool_response":"raw string"}"#;
+        let string_response =
+            r#"{"tool_name":"Bash","tool_input":{"command":"false"},"tool_response":"raw string"}"#;
         assert_eq!(
             run_python_snippet_exit_code(post_bash_failure_python(), string_response),
             Some(0),
