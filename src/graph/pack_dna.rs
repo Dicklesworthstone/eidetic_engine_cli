@@ -140,7 +140,7 @@ pub fn compute_pack_dna(
     compute_pack_dna_with_cx(&cx, projection, input)
 }
 
-pub fn compute_pack_dna_with_cx<Caps>(
+pub fn compute_pack_dna_with_cx<Caps: 'static>(
     cx: &Cx<Caps>,
     projection: &MemoryGraphProjection,
     input: &PackDnaInput,

@@ -227,6 +227,11 @@ pub struct CassConfig {
     pub enabled: Option<bool>,
     pub binary: Option<String>,
     pub since: Option<String>,
+    /// GH#21: wall-clock budget in seconds applied to every CASS subprocess
+    /// call (`cass sessions` discovery, `cass view` span capture, preflight
+    /// verbs). Large corpora need more headroom than the built-in 30s
+    /// default; `EE_CASS_TIMEOUT_SECS` overrides this per invocation.
+    pub subprocess_timeout_secs: Option<u64>,
 }
 
 impl CassConfig {
@@ -235,6 +240,7 @@ impl CassConfig {
             enabled: optional_bool(document, "cass", "enabled")?,
             binary: optional_string(document, "cass", "binary")?,
             since: optional_string(document, "cass", "since")?,
+            subprocess_timeout_secs: optional_u64(document, "cass", "subprocess_timeout_secs")?,
         })
     }
 }
@@ -2512,6 +2518,7 @@ max_inflight_bytes = 4194304
 enabled = true
 binary = "cass"
 since = "90d"
+subprocess_timeout_secs = 45
 
 [search]
 default_speed = "balanced"
@@ -2742,6 +2749,11 @@ prompt_injection_guard = true
             "write group commit max inflight bytes",
         )?;
         ensure_equal(&config.cass.binary.as_deref(), &Some("cass"), "cass binary")?;
+        ensure_equal(
+            &config.cass.subprocess_timeout_secs,
+            &Some(45),
+            "cass subprocess timeout secs",
+        )?;
         ensure_equal(
             &config.search.default_speed,
             &Some(SearchSpeed::Balanced),

@@ -969,11 +969,31 @@ fn build_model_lifecycle_report(
         },
         Some(connection),
     );
-    let index_metadata = index_status
+    let mut index_metadata = index_status
         .as_ref()
         .ok()
         .and_then(|status| read_model_lifecycle_index_metadata(&status.index_dir).ok())
         .unwrap_or_default();
+    // GH#19: indexes published before the metadata writer stamped the
+    // embedder fingerprint carry a bare `meta.json` with no `storedDimension`,
+    // which left semantic readiness permanently stuck at `unknown` even though
+    // the fast vector tier on disk records both the dimension and the embedder
+    // id that built it. Backfill the missing evidence from the FSVI header —
+    // but only when the on-disk embedder id matches the selected registry
+    // model, so a hash-fallback-built index can never masquerade as
+    // semantic-compatible.
+    if index_metadata.stored_dimension.is_none()
+        && let Some(selected) = selected_embedding_entry
+        && let Ok(status) = index_status.as_ref()
+        && let Some((dimension, embedder_id)) =
+            crate::core::index::read_fast_vector_index_fingerprint(&status.index_dir)
+        && selected.model_name == embedder_id
+    {
+        index_metadata.stored_dimension = Some(dimension);
+        if index_metadata.stored_model_id.is_none() {
+            index_metadata.stored_model_id = Some(embedder_id);
+        }
+    }
     let mut index_degraded = index_status
         .as_ref()
         .map_or_else(index_status_error_degradation, |status| {

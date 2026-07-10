@@ -50,6 +50,7 @@ pub const WRITE_MAX_INFLIGHT_BYTES_KEY: &str = "write.max_inflight_bytes";
 pub const CASS_ENABLED_KEY: &str = "cass.enabled";
 pub const CASS_BINARY_KEY: &str = "cass.binary";
 pub const CASS_SINCE_KEY: &str = "cass.since";
+pub const CASS_SUBPROCESS_TIMEOUT_SECS_KEY: &str = "cass.subprocess_timeout_secs";
 pub const SEARCH_DEFAULT_SPEED_KEY: &str = "search.default_speed";
 pub const SEARCH_LEXICAL_WEIGHT_KEY: &str = "search.lexical_weight";
 pub const SEARCH_SEMANTIC_WEIGHT_KEY: &str = "search.semantic_weight";
@@ -361,6 +362,13 @@ impl MergedConfig {
                 CASS_SINCE_KEY,
                 since.clone(),
                 self.source(CASS_SINCE_KEY),
+            ));
+        }
+        if let Some(timeout_secs) = self.values.cass.subprocess_timeout_secs {
+            entries.push(ConfigShowEntry::new(
+                CASS_SUBPROCESS_TIMEOUT_SECS_KEY,
+                timeout_secs.to_string(),
+                self.source(CASS_SUBPROCESS_TIMEOUT_SECS_KEY),
             ));
         }
 
@@ -1121,6 +1129,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             enabled: Some(true),
             binary: Some("cass".to_string()),
             since: Some("90d".to_string()),
+            subprocess_timeout_secs: Some(30),
         },
         search: SearchConfig {
             default_speed: Some(SearchSpeed::Balanced),
@@ -1355,7 +1364,10 @@ pub fn config_from_env(
                 EnvVar::WriteGroupCommitMaxInflightBytes.name(),
             )?,
         },
-        cass: CassConfig::default(),
+        cass: CassConfig {
+            subprocess_timeout_secs: optional_env_u64(env, EnvVar::CassTimeoutSecs.name())?,
+            ..CassConfig::default()
+        },
         search: SearchConfig {
             query_miss_retention_days: optional_env_u64(
                 env,
@@ -1701,6 +1713,15 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.cass.since,
                 &layers.user.cass.since,
                 &layers.defaults.cass.since,
+            ),
+            subprocess_timeout_secs: pick_field(
+                &mut sources,
+                CASS_SUBPROCESS_TIMEOUT_SECS_KEY,
+                &layers.cli.cass.subprocess_timeout_secs,
+                &layers.environment.cass.subprocess_timeout_secs,
+                &layers.project.cass.subprocess_timeout_secs,
+                &layers.user.cass.subprocess_timeout_secs,
+                &layers.defaults.cass.subprocess_timeout_secs,
             ),
         },
         search: SearchConfig {
@@ -2837,12 +2858,13 @@ mod tests {
     };
     use crate::config::file::TaskLensConfig;
     use crate::config::{
-        CacheConfig, ConfigFile, CurationConfig, GraphConfig, GraphCurateConfig,
-        GraphFeatureFlagsConfig, GraphGomoryHuConfig, GraphHealthConfig, GraphMemoryConfig,
-        GraphPprConfig, HandoffConfig, HandoffStaleThresholdConfig, LearnConfig, LearnDecayConfig,
-        MeshCommandMode, MeshConfig, PackConfig, PackL2CacheConfig, PathExpander, PolicyConfig,
-        ReadPoolConfig, SearchConfig, SearchLexicalRamTierConfig, SearchRerankMode, SearchSpeed,
-        SecretDetectorConfig, StorageConfig, SwarmAdaptiveConfig, SwarmConfig, WriteConfig,
+        CASS_SUBPROCESS_TIMEOUT_SECS_KEY, CacheConfig, CassConfig, ConfigFile, CurationConfig,
+        GraphConfig, GraphCurateConfig, GraphFeatureFlagsConfig, GraphGomoryHuConfig,
+        GraphHealthConfig, GraphMemoryConfig, GraphPprConfig, HandoffConfig,
+        HandoffStaleThresholdConfig, LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig,
+        PackConfig, PackL2CacheConfig, PathExpander, PolicyConfig, ReadPoolConfig, SearchConfig,
+        SearchLexicalRamTierConfig, SearchRerankMode, SearchSpeed, SecretDetectorConfig,
+        StorageConfig, SwarmAdaptiveConfig, SwarmConfig, WriteConfig,
     };
     use crate::models::{TaskLens, TaskLensInput, TaskLensOverlay};
 
@@ -3348,6 +3370,71 @@ mod tests {
             &parsed.search.lexical_ram_tier.populate_on_open,
             &None,
             "env lexical RAM tier populate omitted",
+        )
+    }
+
+    #[test]
+    fn environment_cass_timeout_secs_maps_into_cass_config() -> TestResult {
+        let mut env = BTreeMap::new();
+        env.insert("EE_CASS_TIMEOUT_SECS".to_string(), OsString::from("240"));
+
+        let parsed =
+            config_from_env(&env, &expander()).map_err(|error| format!("env failed: {error}"))?;
+
+        ensure_equal(
+            &parsed.cass.subprocess_timeout_secs,
+            &Some(240),
+            "EE_CASS_TIMEOUT_SECS must map into cass.subprocess_timeout_secs",
+        )
+    }
+
+    #[test]
+    fn merge_cass_subprocess_timeout_layers_env_over_project_over_defaults() -> TestResult {
+        let defaults =
+            built_in_config(&expander()).map_err(|error| format!("defaults failed: {error}"))?;
+        ensure_equal(
+            &defaults.cass.subprocess_timeout_secs,
+            &Some(30),
+            "built-in cass subprocess timeout default",
+        )?;
+
+        let project = ConfigFile {
+            cass: CassConfig {
+                subprocess_timeout_secs: Some(60),
+                ..CassConfig::default()
+            },
+            ..ConfigFile::default()
+        };
+        let mut layers = ConfigLayers::with_defaults(defaults);
+        layers.project = project;
+
+        let merged = merge_config(&layers);
+        ensure_equal(
+            &merged.values.cass.subprocess_timeout_secs,
+            &Some(60),
+            "project layer must override the built-in cass timeout",
+        )?;
+        ensure_equal(
+            &merged.source(CASS_SUBPROCESS_TIMEOUT_SECS_KEY),
+            &Some(ConfigValueSource::Project),
+            "project source attribution",
+        )?;
+
+        let mut env = BTreeMap::new();
+        env.insert("EE_CASS_TIMEOUT_SECS".to_string(), OsString::from("240"));
+        layers.environment =
+            config_from_env(&env, &expander()).map_err(|error| format!("env failed: {error}"))?;
+
+        let merged = merge_config(&layers);
+        ensure_equal(
+            &merged.values.cass.subprocess_timeout_secs,
+            &Some(240),
+            "environment layer must override the project cass timeout",
+        )?;
+        ensure_equal(
+            &merged.source(CASS_SUBPROCESS_TIMEOUT_SECS_KEY),
+            &Some(ConfigValueSource::Environment),
+            "environment source attribution",
         )
     }
 

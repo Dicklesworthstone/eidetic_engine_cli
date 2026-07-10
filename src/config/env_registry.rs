@@ -87,6 +87,8 @@ pub enum EnvVar {
     AuditLaneFlushMs,
     /// `EE_CASS_BINARY`
     CassBinary,
+    /// `EE_CASS_TIMEOUT_SECS`
+    CassTimeoutSecs,
     /// `EE_CURATION_AUTO_PROMOTE_CONFIDENCE_FLOOR`
     CurationAutoPromoteConfidenceFloor,
     /// `EE_CURATION_AUTO_PROMOTE_MAX_PER_RUN`
@@ -321,6 +323,7 @@ impl EnvVar {
             Self::AuditLaneCapacity,
             Self::AuditLaneFlushMs,
             Self::CassBinary,
+            Self::CassTimeoutSecs,
             Self::CurationAutoPromoteConfidenceFloor,
             Self::CurationAutoPromoteMaxPerRun,
             Self::CurationDerivedPreviewLimit,
@@ -447,6 +450,7 @@ impl EnvVar {
             Self::AuditLaneCapacity => "EE_AUDIT_LANE_CAPACITY",
             Self::AuditLaneFlushMs => "EE_AUDIT_LANE_FLUSH_MS",
             Self::CassBinary => "EE_CASS_BINARY",
+            Self::CassTimeoutSecs => "EE_CASS_TIMEOUT_SECS",
             Self::CurationAutoPromoteConfidenceFloor => "EE_CURATION_AUTO_PROMOTE_CONFIDENCE_FLOOR",
             Self::CurationAutoPromoteMaxPerRun => "EE_CURATION_AUTO_PROMOTE_MAX_PER_RUN",
             Self::CurationDerivedPreviewLimit => "EE_CURATION_DERIVED_PREVIEW_LIMIT",
@@ -604,6 +608,9 @@ impl EnvVar {
                 "Override the pending payload byte ceiling for group-commit intake."
             }
             Self::CassBinary => "Override the trusted cass import binary path.",
+            Self::CassTimeoutSecs => {
+                "Override the CASS subprocess timeout in seconds for import and discovery calls."
+            }
             Self::CurationAutoPromoteConfidenceFloor => {
                 "Override the minimum confidence required by curation auto-promotion."
             }
@@ -917,6 +924,7 @@ impl EnvVar {
             Self::DaemonEnableEcho => Some("false"),
             Self::DaemonMaxInflight => Some("32"),
             Self::DisableAdaptive => Some("false"),
+            Self::CassTimeoutSecs => Some("30"),
             _ => None,
         }
     }
@@ -937,7 +945,7 @@ impl EnvVar {
             Self::AmbientContext | Self::AmbientContextStateDir | Self::AmbientContextVerbosity => {
                 "hooks"
             }
-            Self::CassBinary => "integration",
+            Self::CassBinary | Self::CassTimeoutSecs => "integration",
             Self::CurationAutoPromoteConfidenceFloor
             | Self::CurationAutoPromoteMaxPerRun
             | Self::CurationDerivedPreviewLimit

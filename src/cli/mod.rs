@@ -20167,8 +20167,11 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
-    let cass_client = match args.subprocess_timeout_ms {
-        Some(timeout_ms) => cass_client.with_timeout(Duration::from_millis(timeout_ms.max(1))),
+    let cass_client = match resolve_cass_subprocess_timeout(
+        args.subprocess_timeout_ms,
+        &options.workspace_path,
+    ) {
+        Some(timeout) => cass_client.with_timeout(timeout),
         None => cass_client,
     };
 
@@ -20204,6 +20207,97 @@ where
             let domain_error = cass_import_domain_error(&error);
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
+    }
+}
+
+/// GH#21: resolve the wall-clock budget for CASS subprocess calls.
+///
+/// Precedence: the hidden `--subprocess-timeout-ms` diagnostic flag wins,
+/// then the merged config surface (`EE_CASS_TIMEOUT_SECS` env var >
+/// project `.ee/config.toml` `[cass] subprocess_timeout_secs` > the built-in
+/// 30s default). Returns `None` only when the config surface cannot be read
+/// at all, in which case the client keeps `DEFAULT_SUBPROCESS_TIMEOUT`.
+fn resolve_cass_subprocess_timeout(
+    cli_timeout_ms: Option<u64>,
+    workspace_path: &Path,
+) -> Option<Duration> {
+    if let Some(timeout_ms) = cli_timeout_ms {
+        return Some(Duration::from_millis(timeout_ms.max(1)));
+    }
+    match crate::core::config_surface::merged_workspace_config(workspace_path) {
+        Ok(merged) => merged
+            .values
+            .cass
+            .subprocess_timeout_secs
+            .map(|secs| Duration::from_secs(secs.max(1))),
+        Err(error) => {
+            tracing::warn!(
+                target: "ee::import::cass",
+                %error,
+                "failed to resolve cass subprocess timeout from config; using built-in default"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod cass_timeout_tests {
+    use std::time::Duration;
+
+    use super::resolve_cass_subprocess_timeout;
+
+    type TestResult = Result<(), String>;
+
+    fn ensure(condition: bool, message: &str) -> TestResult {
+        if condition {
+            Ok(())
+        } else {
+            Err(message.to_owned())
+        }
+    }
+
+    #[test]
+    fn cli_flag_wins_over_config_surface() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let resolved = resolve_cass_subprocess_timeout(Some(1500), workspace.path());
+        ensure(
+            resolved == Some(Duration::from_millis(1500)),
+            "--subprocess-timeout-ms must win over every config layer",
+        )
+    }
+
+    #[test]
+    fn project_config_key_overrides_built_in_default() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(workspace.path().join(".ee")).map_err(|e| e.to_string())?;
+        std::fs::write(
+            workspace.path().join(".ee").join("config.toml"),
+            "[cass]\nsubprocess_timeout_secs = 120\n",
+        )
+        .map_err(|e| e.to_string())?;
+
+        let resolved = resolve_cass_subprocess_timeout(None, workspace.path());
+        ensure(
+            resolved == Some(Duration::from_secs(120)),
+            "project [cass] subprocess_timeout_secs must override the built-in default",
+        )
+    }
+
+    #[test]
+    fn built_in_default_is_thirty_seconds() -> TestResult {
+        // GH#21 guard: no process env override, no project config — the
+        // layered default must match the historical 30s constant so behavior
+        // is unchanged for existing installs.
+        if std::env::var_os("EE_CASS_TIMEOUT_SECS").is_some() {
+            return Ok(());
+        }
+        let workspace = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let resolved = resolve_cass_subprocess_timeout(None, workspace.path());
+        ensure(
+            resolved == Some(crate::cass::client::DEFAULT_SUBPROCESS_TIMEOUT),
+            "layered default must equal DEFAULT_SUBPROCESS_TIMEOUT (30s)",
+        )
     }
 }
 

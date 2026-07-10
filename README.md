@@ -1302,6 +1302,8 @@ import_batch_size = 200
 enabled = true
 binary  = "cass"                    # path or PATH lookup
 since   = "90d"                     # CASS lookback for import planning and policies
+subprocess_timeout_secs = 30        # wall-clock budget per cass subprocess call
+                                    # (raise for large corpora; env override: EE_CASS_TIMEOUT_SECS)
 
 [search]
 default_speed   = "balanced"         # fast | balanced | thorough

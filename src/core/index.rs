@@ -16,8 +16,8 @@ use crate::db::{
 };
 use crate::models::MemoryId;
 use crate::models::model_registry::{
-    EmbeddingMetadataRecord, EmbeddingPooling, ModelDistanceMetric, ModelProvider,
-    ModelRegistryStatus,
+    EmbeddingMetadataRecord, EmbeddingPooling, EmbeddingVectorDtype, ModelDistanceMetric,
+    ModelProvider, ModelRegistryStatus,
 };
 use crate::models::{
     EMBEDDING_POSTURE_MODE_DETERMINISTIC_HASH, EMBEDDING_POSTURE_MODE_NEURAL_LOCAL,
@@ -918,7 +918,7 @@ pub fn rebuild_index(
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
 
     let db = DbConnection::open_file(&database_path)?;
-    let workspace_id = get_default_workspace_id(&db)?;
+    let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
     let (_, _, db_generation) = get_db_stats(&db)?;
     let source_generation = db
         .get_workspace_generation(&workspace_id)?
@@ -996,7 +996,13 @@ pub fn rebuild_index(
                 ensure_active_embedding_registry_record(&db, &workspace_id, &registry_stack)?;
                 let published_generation =
                     source_generation.unwrap_or_else(|| u64::from(documents_total));
-                write_index_metadata(&staging_dir, published_generation, documents_total)?;
+                let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&registry_stack);
+                write_index_metadata(
+                    &staging_dir,
+                    published_generation,
+                    documents_total,
+                    embedder_fingerprint.as_ref(),
+                )?;
                 publish_staged_index(&index_dir, &staging_dir)?;
 
                 Ok(IndexRebuildReport {
@@ -1044,7 +1050,7 @@ pub fn reembed_index(
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
 
     let db = DbConnection::open_file(&database_path)?;
-    let workspace_id = get_default_workspace_id(&db)?;
+    let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
     let (_, _, db_generation) = get_db_stats(&db)?;
     let source_generation = db
         .get_workspace_generation(&workspace_id)?
@@ -1162,8 +1168,14 @@ pub fn reembed_index(
                 db.update_search_index_job_progress(&job_id, documents_total)?;
                 let published_generation =
                     source_generation.unwrap_or_else(|| u64::from(documents_total));
-                write_index_metadata(&staging_dir, published_generation, documents_total)
-                    .and_then(|()| publish_staged_index(&index_dir, &staging_dir))?;
+                let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&registry_stack);
+                write_index_metadata(
+                    &staging_dir,
+                    published_generation,
+                    documents_total,
+                    embedder_fingerprint.as_ref(),
+                )
+                .and_then(|()| publish_staged_index(&index_dir, &staging_dir))?;
                 db.complete_search_index_job(&job_id, documents_total)?;
                 let published_coverage = EmbeddingVectorCoverage::new(
                     usize::try_from(documents_total).unwrap_or(usize::MAX),
@@ -1251,7 +1263,7 @@ pub fn process_index_jobs(
         runtime_profile.cap_index_job_limit(options.job_limit);
 
     let db = DbConnection::open_file(&database_path)?;
-    let workspace_id = get_default_workspace_id(&db)?;
+    let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
     let pending_jobs = db.list_pending_search_index_jobs(&workspace_id, effective_job_limit)?;
     let pending_count = u32::try_from(pending_jobs.len()).map_err(|_| {
         IndexRebuildError::Index("Pending search index job count exceeds u32".to_owned())
@@ -1469,13 +1481,18 @@ pub(crate) fn process_pending_index_jobs_coalesced(
                 recover_interrupted_publish(index_dir).map_err(|error| error.to_string())?;
             let staging_dir =
                 create_publish_staging_dir(index_dir).map_err(|error| error.to_string())?;
-            build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs).and_then(
-                |_stats| {
-                    write_index_metadata(&staging_dir, published_generation, documents_total)
-                        .and_then(|()| publish_staged_index(index_dir, &staging_dir))
-                        .map_err(|error| error.to_string())
-                },
-            )
+            let stack = default_embedder_stack();
+            let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
+            build_index_sync(&staging_dir, stack, indexable_docs).and_then(|_stats| {
+                write_index_metadata(
+                    &staging_dir,
+                    published_generation,
+                    documents_total,
+                    embedder_fingerprint.as_ref(),
+                )
+                .and_then(|()| publish_staged_index(index_dir, &staging_dir))
+                .map_err(|error| error.to_string())
+            })
         })()
     } else {
         Ok(())
@@ -1859,10 +1876,17 @@ fn publish_full_index_generation(
     documents_total: u32,
 ) -> Result<BuildStats, String> {
     let staging_dir = create_publish_staging_dir(index_dir).map_err(|error| error.to_string())?;
-    build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs).and_then(|stats| {
-        write_index_metadata(&staging_dir, generation, documents_total)
-            .and_then(|()| publish_staged_index(index_dir, &staging_dir))
-            .map_err(|error| error.to_string())?;
+    let stack = default_embedder_stack();
+    let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
+    build_index_sync(&staging_dir, stack, indexable_docs).and_then(|stats| {
+        write_index_metadata(
+            &staging_dir,
+            generation,
+            documents_total,
+            embedder_fingerprint.as_ref(),
+        )
+        .and_then(|()| publish_staged_index(index_dir, &staging_dir))
+        .map_err(|error| error.to_string())?;
         Ok(stats)
     })
 }
@@ -2017,10 +2041,17 @@ async fn apply_incremental_index_batch(
 ) -> Result<u32, IncrementalFallback> {
     let max_generation_lag = u64::try_from(documents.len()).unwrap_or(u64::MAX).max(1);
     validate_incremental_index_metadata(index_dir, generation, max_generation_lag)?;
+    let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
     for document in documents {
         upsert_incremental_document(cx, index_dir, stack.clone(), document).await?;
     }
-    write_index_metadata(index_dir, generation, documents_total).map_err(|error| {
+    write_index_metadata(
+        index_dir,
+        generation,
+        documents_total,
+        embedder_fingerprint.as_ref(),
+    )
+    .map_err(|error| {
         incremental_fallback(
             IncrementalFallbackReason::TierUnavailable,
             format!("failed to write incremental batch index metadata: {error}"),
@@ -2044,11 +2075,18 @@ async fn apply_incremental_index_change(
     documents_total: u32,
 ) -> Result<u32, IncrementalFallback> {
     validate_incremental_index_metadata(index_dir, generation, 1)?;
+    let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
 
     match document {
         Some(document) => {
             upsert_incremental_document(cx, index_dir, stack, &document).await?;
-            write_index_metadata(index_dir, generation, documents_total).map_err(|error| {
+            write_index_metadata(
+                index_dir,
+                generation,
+                documents_total,
+                embedder_fingerprint.as_ref(),
+            )
+            .map_err(|error| {
                 incremental_fallback(
                     IncrementalFallbackReason::TierUnavailable,
                     format!("failed to write incremental index metadata: {error}"),
@@ -2058,7 +2096,13 @@ async fn apply_incremental_index_change(
         }
         None => {
             delete_incremental_document(cx, index_dir, document_id).await?;
-            write_index_metadata(index_dir, generation, documents_total).map_err(|error| {
+            write_index_metadata(
+                index_dir,
+                generation,
+                documents_total,
+                embedder_fingerprint.as_ref(),
+            )
+            .map_err(|error| {
                 incremental_fallback(
                     IncrementalFallbackReason::TierUnavailable,
                     format!("failed to write incremental index metadata: {error}"),
@@ -2577,19 +2621,95 @@ fn publish_staged_index(index_dir: &Path, staging_dir: &Path) -> Result<(), Inde
     Ok(())
 }
 
+/// GH#19: the embedder fingerprint stamped into `.ee/index/meta.json` at
+/// publish time so the model-lifecycle readiness collector
+/// (`src/core/model.rs`) can prove "registry + asset + index agree".
+///
+/// Values mirror `active_embedding_registry_input` exactly: the registry row
+/// and the index metadata are written from the same resolved embedder, so the
+/// strict `exact_dimension_metric_dtype` readiness rule compares like with
+/// like.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IndexEmbedderFingerprint {
+    model_id: String,
+    model_revision: String,
+    model_hash: String,
+    dimension: u32,
+    distance_metric: &'static str,
+    vector_dtype: &'static str,
+}
+
+/// Derive the metadata fingerprint for the fast embedder that built the
+/// index. Returns `None` for non-semantic (hash fallback) or not-yet-loaded
+/// embedders, in which case `meta.json` keeps the fingerprint-less shape and
+/// readiness correctly stays lexical.
+fn embedder_fingerprint_for_index_metadata(
+    stack: &EmbedderStack,
+) -> Option<IndexEmbedderFingerprint> {
+    let fast_embedder = stack.fast();
+    if !fast_embedder.is_semantic() || !fast_embedder.is_ready() {
+        return None;
+    }
+    let dimension = u32::try_from(fast_embedder.dimension()).ok()?;
+    let provider = provider_for_embedder(fast_embedder);
+    let fingerprint = active_embedder_fingerprint(fast_embedder, provider);
+    Some(IndexEmbedderFingerprint {
+        model_id: fast_embedder.id().to_owned(),
+        model_revision: fingerprint.revision,
+        model_hash: fingerprint.content_hash,
+        dimension,
+        distance_metric: ModelDistanceMetric::Cosine.as_str(),
+        vector_dtype: EmbeddingVectorDtype::Float32.as_str(),
+    })
+}
+
 fn write_index_metadata(
     index_dir: &Path,
     generation: u64,
     documents_total: u32,
+    embedder_fingerprint: Option<&IndexEmbedderFingerprint>,
 ) -> Result<(), IndexRebuildError> {
     let timestamp = current_timestamp_rfc3339();
-    let metadata = serde_json::json!({
+    let mut metadata = serde_json::json!({
         "schema": "ee.index_metadata.v1",
         "generation": generation,
         "sourceGeneration": generation,
         "lastRebuildAt": timestamp,
         "documentCount": documents_total,
     });
+    if let Some(fingerprint) = embedder_fingerprint
+        && let Some(object) = metadata.as_object_mut()
+    {
+        // GH#19: stamp the active embedder fingerprint so the readiness
+        // collector's `ModelLifecycleIndexMetadata` reader finds the fields
+        // it already parses (`storedDimension` et al.). These are additive
+        // optional keys on `ee.index_metadata.v1`; every reader tolerates
+        // their absence.
+        object.insert(
+            "storedModelId".to_owned(),
+            serde_json::json!(fingerprint.model_id),
+        );
+        object.insert(
+            "storedModelRevision".to_owned(),
+            serde_json::json!(fingerprint.model_revision),
+        );
+        object.insert(
+            "storedModelHash".to_owned(),
+            serde_json::json!(fingerprint.model_hash),
+        );
+        object.insert(
+            "storedDimension".to_owned(),
+            serde_json::json!(fingerprint.dimension),
+        );
+        object.insert(
+            "storedDistanceMetric".to_owned(),
+            serde_json::json!(fingerprint.distance_metric),
+        );
+        object.insert(
+            "storedVectorDtype".to_owned(),
+            serde_json::json!(fingerprint.vector_dtype),
+        );
+    }
     let serialized = serde_json::to_vec_pretty(&metadata).map_err(|e| {
         IndexRebuildError::Index(format!("Failed to serialize index metadata: {e}"))
     })?;
@@ -2958,6 +3078,25 @@ fn get_default_workspace_id(db: &DbConnection) -> Result<String, IndexRebuildErr
     rows.first()
         .and_then(|row| row.get(0).and_then(|v| v.as_str().map(str::to_string)))
         .ok_or(IndexRebuildError::NoWorkspace)
+}
+
+/// GH#20: resolve the workspace row targeted by `--workspace` for the index
+/// entry points (`rebuild`, `reembed`, `process-jobs`).
+///
+/// Looks the requested path up by canonical root first and lexical key second
+/// (same contract as `workspace_id_for_index_status`). Only when the path is
+/// not registered at all does it fall back to the newest-created workspace
+/// row, which preserves the historical single-workspace behavior for
+/// databases whose lone workspace row was registered under a different path
+/// spelling.
+fn resolve_index_workspace_id(
+    db: &DbConnection,
+    workspace_path: &Path,
+) -> Result<String, IndexRebuildError> {
+    if let Some(workspace_id) = workspace_id_for_index_status(db, workspace_path)? {
+        return Ok(workspace_id);
+    }
+    get_default_workspace_id(db)
 }
 
 struct BuildStats {
@@ -3882,6 +4021,20 @@ fn read_fast_vector_record_count(index_dir: &Path) -> Option<usize> {
     open_fast_vector_index(index_dir)
         .ok()
         .map(|index| index.record_count())
+}
+
+/// GH#19: recover the vector dimension and embedder id recorded in the
+/// on-disk fast vector tier (FSVI header).
+///
+/// Indexes published before the metadata writer stamped the embedder
+/// fingerprint have a bare `meta.json` with no `storedDimension`, which left
+/// semantic readiness permanently stuck at `unknown`. The FSVI header has
+/// carried the true dimension and embedder id all along, so readers can
+/// backfill the missing evidence without forcing a rebuild.
+pub(crate) fn read_fast_vector_index_fingerprint(index_dir: &Path) -> Option<(u32, String)> {
+    let index = open_fast_vector_index(index_dir).ok()?;
+    let dimension = u32::try_from(index.dimension()).ok()?;
+    Some((dimension, index.embedder_id().to_owned()))
 }
 
 fn current_indexable_document_count(db: &DbConnection, workspace_id: &str) -> Result<u32, DbError> {
@@ -6196,7 +6349,7 @@ mod tests {
             live_docs.values().cloned().collect(),
         )?;
         let mut generation = 1u64;
-        write_index_metadata(&incremental_dir, generation, live_docs.len() as u32)
+        write_index_metadata(&incremental_dir, generation, live_docs.len() as u32, None)
             .map_err(|error| error.to_string())?;
 
         for op in ops {
@@ -6253,7 +6406,7 @@ mod tests {
             hash_fallback_embedder_stack(),
             live_docs.values().cloned().collect(),
         )?;
-        write_index_metadata(&full_dir, generation, live_docs.len() as u32)
+        write_index_metadata(&full_dir, generation, live_docs.len() as u32, None)
             .map_err(|error| error.to_string())?;
 
         ensure_search_results_match_full_rebuild(&incremental_dir, &full_dir)
@@ -6354,7 +6507,7 @@ mod tests {
             hash_fallback_embedder_stack(),
             vec![test_indexable_doc("doc-alpha", "alpha content")],
         )?;
-        write_index_metadata(&index_dir, 1, 1).map_err(|error| error.to_string())?;
+        write_index_metadata(&index_dir, 1, 1, None).map_err(|error| error.to_string())?;
 
         let outcome = apply_incremental_index_change_sync(
             &index_dir,
@@ -6389,7 +6542,7 @@ mod tests {
             hash_fallback_embedder_stack(),
             vec![test_indexable_doc("doc-alpha", "alpha content")],
         )?;
-        write_index_metadata(&index_dir, 1, 1).map_err(|error| error.to_string())?;
+        write_index_metadata(&index_dir, 1, 1, None).map_err(|error| error.to_string())?;
 
         let outcome = apply_incremental_index_batch_sync(
             &index_dir,
@@ -6693,7 +6846,7 @@ mod tests {
             hash_fallback_embedder_stack(),
             initial_docs.clone(),
         )?;
-        write_index_metadata(&incremental_dir, 1, 2).map_err(|error| error.to_string())?;
+        write_index_metadata(&incremental_dir, 1, 2, None).map_err(|error| error.to_string())?;
 
         let beta_outcome = apply_incremental_index_change_sync(
             &incremental_dir,
@@ -6750,7 +6903,7 @@ mod tests {
         )?;
 
         build_index_sync(&full_dir, hash_fallback_embedder_stack(), final_docs)?;
-        write_index_metadata(&full_dir, 4, 2).map_err(|error| error.to_string())?;
+        write_index_metadata(&full_dir, 4, 2, None).map_err(|error| error.to_string())?;
 
         ensure(
             vector_index_snapshot(&incremental_dir)? == vector_index_snapshot(&full_dir)?,
@@ -7537,7 +7690,7 @@ mod tests {
         let staging_dir = root.join(".index.publish-test");
         write_marker(&index_dir, "generation.txt", "old")?;
         write_marker(&staging_dir, "generation.txt", "new")?;
-        write_index_metadata(&staging_dir, 2, 1).map_err(|e| e.to_string())?;
+        write_index_metadata(&staging_dir, 2, 1, None).map_err(|e| e.to_string())?;
 
         publish_staged_index(&index_dir, &staging_dir).map_err(|e| e.to_string())?;
 
@@ -7664,7 +7817,7 @@ mod tests {
         let retained_link = root.join("index.previous");
         write_marker(&index_dir, "generation.txt", "old")?;
         write_marker(&staging_dir, "generation.txt", "new")?;
-        write_index_metadata(&staging_dir, 2, 1).map_err(|e| e.to_string())?;
+        write_index_metadata(&staging_dir, 2, 1, None).map_err(|e| e.to_string())?;
         symlink(root.join("missing-retained-target"), &retained_link)
             .map_err(|error| error.to_string())?;
 
@@ -7787,7 +7940,7 @@ mod tests {
         let index_dir = root.join("index");
         let staging_dir = root.join(".index.publish-20260501-000");
         write_marker(&staging_dir, "generation.txt", "new")?;
-        write_index_metadata(&staging_dir, 3, 1).map_err(|e| e.to_string())?;
+        write_index_metadata(&staging_dir, 3, 1, None).map_err(|e| e.to_string())?;
 
         let action = recover_interrupted_publish(&index_dir).map_err(|e| e.to_string())?;
 
@@ -7835,7 +7988,7 @@ mod tests {
         let index_dir = root.join("index");
         std::fs::create_dir_all(&index_dir).map_err(|e| e.to_string())?;
 
-        write_index_metadata(&index_dir, 42, 7).map_err(|e| e.to_string())?;
+        write_index_metadata(&index_dir, 42, 7, None).map_err(|e| e.to_string())?;
         let (generation, rebuilt_at, check_error) = read_index_metadata(&index_dir);
 
         ensure(
@@ -7867,7 +8020,7 @@ mod tests {
         let metadata_dir = index_dir.join(INDEX_METADATA_FILE);
         std::fs::create_dir_all(&metadata_dir).map_err(|error| error.to_string())?;
 
-        let error = write_index_metadata(&index_dir, 42, 7)
+        let error = write_index_metadata(&index_dir, 42, 7, None)
             .map(|()| "unexpected metadata write success".to_owned())
             .expect_err("metadata directory should reject before File::create");
 
@@ -7890,7 +8043,7 @@ mod tests {
         let temp_path = metadata_path.with_extension("json.tmp");
         std::fs::write(&temp_path, "stale metadata temp").map_err(|error| error.to_string())?;
 
-        write_index_metadata(&index_dir, 42, 7).map_err(|error| error.to_string())?;
+        write_index_metadata(&index_dir, 42, 7, None).map_err(|error| error.to_string())?;
         ensure(
             std::fs::read_to_string(&temp_path).map_err(|error| error.to_string())?
                 == "stale metadata temp",
@@ -8258,7 +8411,7 @@ mod tests {
             ),
             "test lock should be acquired",
         )?;
-        write_index_metadata(&index_dir, 0, 0).map_err(|error| error.to_string())?;
+        write_index_metadata(&index_dir, 0, 0, None).map_err(|error| error.to_string())?;
 
         let report = get_index_vacuum_report(&IndexVacuumOptions {
             workspace_path: root,
@@ -8344,7 +8497,7 @@ mod tests {
             ),
             "target lock should be acquired",
         )?;
-        write_index_metadata(&index_dir, 0, 0).map_err(|error| error.to_string())?;
+        write_index_metadata(&index_dir, 0, 0, None).map_err(|error| error.to_string())?;
 
         let report = get_index_vacuum_report(&IndexVacuumOptions {
             workspace_path: target_workspace,
@@ -8366,6 +8519,478 @@ mod tests {
         ensure(
             report.lock.holder_id.as_deref() == Some("target_holder"),
             "lock report should identify the target workspace holder",
+        )
+    }
+    // ------------------------------------------------------------------
+    // GH#19: index metadata embedder fingerprint (writer + FSVI backfill)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn write_index_metadata_stamps_semantic_embedder_fingerprint() -> TestResult {
+        let index_dir = unique_test_dir("meta-fingerprint-stamp");
+        std::fs::create_dir_all(&index_dir).map_err(|e| e.to_string())?;
+
+        let stack = EmbedderStack::from_parts(
+            Arc::new(TestSemanticEmbedder::new("fixture-semantic-model", 256))
+                as Arc<dyn crate::search::Embedder>,
+            None,
+        );
+        let fingerprint = embedder_fingerprint_for_index_metadata(&stack)
+            .ok_or_else(|| "ready semantic embedder must yield a fingerprint".to_owned())?;
+        ensure(
+            fingerprint.model_id == "fixture-semantic-model",
+            "fingerprint model id",
+        )?;
+        ensure(fingerprint.dimension == 256, "fingerprint dimension")?;
+        ensure(
+            fingerprint.distance_metric == "cosine",
+            "fingerprint distance metric",
+        )?;
+        ensure(
+            fingerprint.vector_dtype == "float32",
+            "fingerprint vector dtype",
+        )?;
+        ensure(
+            fingerprint.model_hash.starts_with("blake3:"),
+            "fingerprint content hash shape",
+        )?;
+
+        write_index_metadata(&index_dir, 7, 3, Some(&fingerprint))
+            .map_err(|error| error.to_string())?;
+        let raw = std::fs::read_to_string(index_dir.join(INDEX_METADATA_FILE))
+            .map_err(|e| e.to_string())?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+
+        ensure(
+            parsed["schema"] == "ee.index_metadata.v1",
+            "schema stays v1 with additive keys",
+        )?;
+        ensure(parsed["generation"] == 7, "generation")?;
+        ensure(parsed["documentCount"] == 3, "document count")?;
+        ensure(
+            parsed["storedModelId"] == "fixture-semantic-model",
+            format!("storedModelId must be stamped: {parsed}"),
+        )?;
+        ensure(
+            parsed["storedDimension"] == 256,
+            format!("storedDimension must be stamped: {parsed}"),
+        )?;
+        ensure(
+            parsed["storedDistanceMetric"] == "cosine",
+            "storedDistanceMetric must be stamped",
+        )?;
+        ensure(
+            parsed["storedVectorDtype"] == "float32",
+            "storedVectorDtype must be stamped",
+        )?;
+        ensure(
+            parsed["storedModelRevision"].is_string(),
+            "storedModelRevision must be stamped",
+        )?;
+        ensure(
+            parsed["storedModelHash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "storedModelHash must be stamped",
+        )
+    }
+
+    #[test]
+    fn embedder_fingerprint_absent_for_hash_fallback_and_unready_embedders() -> TestResult {
+        ensure(
+            embedder_fingerprint_for_index_metadata(&hash_fallback_embedder_stack()).is_none(),
+            "hash fallback stack must not produce a semantic fingerprint",
+        )?;
+        let not_ready = EmbedderStack::from_parts(
+            Arc::new(TestSemanticEmbedder::not_ready(
+                "fixture-semantic-model",
+                256,
+            )) as Arc<dyn crate::search::Embedder>,
+            None,
+        );
+        ensure(
+            embedder_fingerprint_for_index_metadata(&not_ready).is_none(),
+            "not-ready semantic embedder must not produce a fingerprint",
+        )
+    }
+
+    #[test]
+    fn write_index_metadata_without_fingerprint_keeps_legacy_shape() -> TestResult {
+        let index_dir = unique_test_dir("meta-fingerprint-absent");
+        std::fs::create_dir_all(&index_dir).map_err(|e| e.to_string())?;
+        write_index_metadata(&index_dir, 1, 1, None).map_err(|error| error.to_string())?;
+        let raw = std::fs::read_to_string(index_dir.join(INDEX_METADATA_FILE))
+            .map_err(|e| e.to_string())?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+        ensure(
+            parsed.get("storedDimension").is_none(),
+            "no fingerprint keys without an embedder fingerprint",
+        )?;
+        ensure(
+            parsed.get("storedModelId").is_none(),
+            "no model id without an embedder fingerprint",
+        )
+    }
+
+    #[test]
+    fn read_fast_vector_index_fingerprint_reports_dimension_and_embedder_id() -> TestResult {
+        let index_dir = unique_test_dir("fsvi-fingerprint-read");
+        let stack = hash_fallback_embedder_stack();
+        let expected_id = stack.fast().id().to_owned();
+        let expected_dimension = u32::try_from(stack.fast().dimension()).map_err(|_| "dim")?;
+        build_index_sync(
+            &index_dir,
+            stack,
+            vec![test_indexable_doc("doc-alpha", "alpha content")],
+        )?;
+
+        let (dimension, embedder_id) = read_fast_vector_index_fingerprint(&index_dir)
+            .ok_or_else(|| "fast vector fingerprint should be readable".to_owned())?;
+        ensure(
+            dimension == expected_dimension,
+            format!("FSVI dimension: expected {expected_dimension}, got {dimension}"),
+        )?;
+        ensure(
+            embedder_id == expected_id,
+            format!("FSVI embedder id: expected {expected_id}, got {embedder_id}"),
+        )
+    }
+
+    fn seed_lifecycle_backfill_workspace(
+        label: &str,
+        registry_model_name: &str,
+        registry_dimension: u32,
+    ) -> Result<(PathBuf, PathBuf), String> {
+        let root = unique_test_dir(label);
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|e| e.to_string())?;
+        let workspace = workspace.canonicalize().map_err(|e| e.to_string())?;
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+
+        let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_backfill00000000000000000",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("lifecycle-backfill".to_owned()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .insert_model_registry_entry(
+                "mdl_backfill00000000000000000",
+                &crate::db::CreateModelRegistryInput {
+                    workspace_id: "wsp_backfill00000000000000000".to_owned(),
+                    provider: ModelProvider::Hash,
+                    model_name: registry_model_name.to_owned(),
+                    purpose: crate::models::model_registry::ModelPurpose::Embedding,
+                    dimension: Some(registry_dimension),
+                    distance_metric: Some(ModelDistanceMetric::Cosine),
+                    status: ModelRegistryStatus::Available,
+                    version: Some("v1".to_owned()),
+                    source_uri: None,
+                    content_hash: None,
+                    metadata_json: None,
+                    last_checked_at: None,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection.close().map_err(|e| e.to_string())?;
+
+        // Publish a real fast vector tier plus a LEGACY meta.json (no
+        // storedDimension) — the exact on-disk state GH#19 reporters have.
+        build_index_sync(
+            &index_dir,
+            hash_fallback_embedder_stack(),
+            vec![test_indexable_doc("doc-alpha", "alpha content")],
+        )?;
+        write_index_metadata(&index_dir, 1, 1, None).map_err(|error| error.to_string())?;
+
+        Ok((workspace, database))
+    }
+
+    #[test]
+    fn legacy_meta_without_stored_dimension_backfills_from_fast_vector_header() -> TestResult {
+        let stack = hash_fallback_embedder_stack();
+        let fast_id = stack.fast().id().to_owned();
+        let fast_dimension = u32::try_from(stack.fast().dimension()).map_err(|_| "dim")?;
+        let (workspace, database) = seed_lifecycle_backfill_workspace(
+            "lifecycle-backfill-match",
+            &fast_id,
+            fast_dimension,
+        )?;
+
+        let report = crate::core::model::build_model_lifecycle_report_for_workspace(
+            &workspace,
+            Some(&database),
+            None,
+        )
+        .map_err(|error| format!("lifecycle report: {error:?}"))?;
+        let index_row = report
+            .indexes
+            .first()
+            .ok_or_else(|| "lifecycle report must include the index row".to_owned())?;
+
+        ensure(
+            index_row.stored_dimension == Some(fast_dimension),
+            format!(
+                "legacy index must backfill storedDimension from the FSVI header: {:?}",
+                index_row.stored_dimension
+            ),
+        )?;
+        ensure(
+            index_row.stored_model_id.as_deref() == Some(fast_id.as_str()),
+            "legacy index must backfill storedModelId from the FSVI header",
+        )?;
+        ensure(
+            index_row.dimension_compatibility.compatible == Some(true),
+            format!(
+                "backfilled dimension must satisfy the compatibility rule: {:?}",
+                index_row.dimension_compatibility
+            ),
+        )?;
+        ensure(
+            index_row
+                .dimension_compatibility
+                .mismatch_reason
+                .as_deref()
+                .is_none_or(|reason| !reason.contains("does not record a vector dimension")),
+            "the stuck 'no vector dimension' reason must be gone",
+        )
+    }
+
+    #[test]
+    fn legacy_meta_backfill_skipped_when_registry_model_differs_from_fsvi() -> TestResult {
+        let stack = hash_fallback_embedder_stack();
+        let fast_dimension = u32::try_from(stack.fast().dimension()).map_err(|_| "dim")?;
+        let (workspace, database) = seed_lifecycle_backfill_workspace(
+            "lifecycle-backfill-mismatch",
+            "some-other-semantic-model",
+            fast_dimension,
+        )?;
+
+        let report = crate::core::model::build_model_lifecycle_report_for_workspace(
+            &workspace,
+            Some(&database),
+            None,
+        )
+        .map_err(|error| format!("lifecycle report: {error:?}"))?;
+        let index_row = report
+            .indexes
+            .first()
+            .ok_or_else(|| "lifecycle report must include the index row".to_owned())?;
+
+        ensure(
+            index_row.stored_dimension.is_none(),
+            format!(
+                "an FSVI built by a different embedder must not backfill the registry model's dimension: {:?}",
+                index_row.stored_dimension
+            ),
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // GH#20: --workspace plumbing for rebuild / reembed / process-jobs
+    // ------------------------------------------------------------------
+
+    fn seed_two_workspace_database(root: &Path) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+        let workspace_a = root.join("workspace-a");
+        let workspace_b = root.join("workspace-b");
+        std::fs::create_dir_all(&workspace_a).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&workspace_b).map_err(|e| e.to_string())?;
+        let workspace_a = workspace_a.canonicalize().map_err(|e| e.to_string())?;
+        let workspace_b = workspace_b.canonicalize().map_err(|e| e.to_string())?;
+        let database = workspace_a.join(".ee").join("ee.db");
+        std::fs::create_dir_all(database.parent().ok_or("db parent")?)
+            .map_err(|e| e.to_string())?;
+
+        let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_multiA0000000000000000000",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace_a.to_string_lossy().into_owned(),
+                    name: Some("workspace-a".to_owned()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        // Guarantee a strictly newer created_at for workspace B so the
+        // legacy newest-row fallback would resolve to B, never A.
+        std::thread::sleep(Duration::from_millis(5));
+        connection
+            .insert_workspace(
+                "wsp_multiB0000000000000000000",
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace_b.to_string_lossy().into_owned(),
+                    name: Some("workspace-b".to_owned()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+
+        for (index, workspace_id) in [
+            "wsp_multiA0000000000000000000",
+            "wsp_multiA0000000000000000000",
+            "wsp_multiB0000000000000000000",
+        ]
+        .iter()
+        .enumerate()
+        {
+            connection
+                .insert_memory(
+                    &format!("mem_multi{index}00000000000000000000")[..30],
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: (*workspace_id).to_owned(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: format!("workspace-scoped memory {index}"),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        connection.close().map_err(|e| e.to_string())?;
+        Ok((workspace_a, workspace_b, database))
+    }
+
+    #[test]
+    fn resolve_index_workspace_id_prefers_requested_workspace_path() -> TestResult {
+        let root = unique_test_dir("resolve-workspace-id");
+        let (workspace_a, workspace_b, database) = seed_two_workspace_database(&root)?;
+        let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+
+        let resolved_a =
+            resolve_index_workspace_id(&connection, &workspace_a).map_err(|e| e.to_string())?;
+        ensure(
+            resolved_a == "wsp_multiA0000000000000000000",
+            format!("requested workspace A path must resolve to A: {resolved_a}"),
+        )?;
+
+        let resolved_b =
+            resolve_index_workspace_id(&connection, &workspace_b).map_err(|e| e.to_string())?;
+        ensure(
+            resolved_b == "wsp_multiB0000000000000000000",
+            format!("requested workspace B path must resolve to B: {resolved_b}"),
+        )?;
+
+        let unregistered = root.join("never-registered");
+        std::fs::create_dir_all(&unregistered).map_err(|e| e.to_string())?;
+        let fallback =
+            resolve_index_workspace_id(&connection, &unregistered).map_err(|e| e.to_string())?;
+        let newest = get_default_workspace_id(&connection).map_err(|e| e.to_string())?;
+        ensure(
+            fallback == newest,
+            "unregistered path must preserve the newest-row fallback",
+        )?;
+        connection.close().map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn index_rebuild_respects_requested_workspace_over_newest_row() -> TestResult {
+        let root = unique_test_dir("rebuild-workspace-scope");
+        let (workspace_a, _workspace_b, database) = seed_two_workspace_database(&root)?;
+        let index_dir = root.join("index-a");
+
+        let report = rebuild_index(&IndexRebuildOptions {
+            workspace_path: workspace_a,
+            database_path: Some(database),
+            index_dir: Some(index_dir),
+            dry_run: false,
+        })
+        .map_err(|e| e.to_string())?;
+
+        ensure(
+            report.status == IndexRebuildStatus::Success,
+            format!("rebuild status: {:?}", report.status),
+        )?;
+        ensure(
+            report.memories_indexed == 2,
+            format!(
+                "rebuild --workspace A must index A's 2 memories (newest-row B has 1): {}",
+                report.memories_indexed
+            ),
+        )
+    }
+
+    #[test]
+    fn index_reembed_respects_requested_workspace_over_newest_row() -> TestResult {
+        let root = unique_test_dir("reembed-workspace-scope");
+        let (workspace_a, _workspace_b, database) = seed_two_workspace_database(&root)?;
+        let index_dir = root.join("index-a");
+
+        let report = reembed_index(&IndexReembedOptions {
+            workspace_path: workspace_a,
+            database_path: Some(database),
+            index_dir: Some(index_dir),
+            dry_run: false,
+        })
+        .map_err(|e| e.to_string())?;
+
+        ensure(
+            report.status == IndexReembedStatus::Success,
+            format!("reembed status: {:?}", report.status),
+        )?;
+        ensure(
+            report.memories_indexed == 2,
+            format!(
+                "reembed --workspace A must embed A's 2 memories (newest-row B has 1): {}",
+                report.memories_indexed
+            ),
+        )
+    }
+
+    #[test]
+    fn process_index_jobs_respects_requested_workspace_over_newest_row() -> TestResult {
+        let root = unique_test_dir("process-jobs-workspace-scope");
+        let (workspace_a, _workspace_b, database) = seed_two_workspace_database(&root)?;
+        let index_dir = root.join("index-a");
+
+        let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
+        connection
+            .insert_search_index_job(
+                "sidx_workspaceA000000000000000",
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: "wsp_multiA0000000000000000000".to_owned(),
+                    job_type: SearchIndexJobType::FullRebuild,
+                    document_source: None,
+                    document_id: None,
+                    documents_total: 0,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        connection.close().map_err(|e| e.to_string())?;
+
+        let report = process_index_jobs(&IndexProcessingOptions {
+            workspace_path: workspace_a,
+            database_path: Some(database),
+            index_dir: Some(index_dir),
+            dry_run: false,
+            job_limit: None,
+        })
+        .map_err(|e| e.to_string())?;
+
+        ensure(
+            report.workspace_id == "wsp_multiA0000000000000000000",
+            format!(
+                "process-jobs --workspace A must resolve workspace A (was newest-row B before GH#20): {}",
+                report.workspace_id
+            ),
+        )?;
+        ensure(
+            report.processed_jobs == 1,
+            format!("workspace A's pending job must be processed: {report:?}"),
         )
     }
 }

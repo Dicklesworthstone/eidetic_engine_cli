@@ -231,6 +231,8 @@ dependencies = [
 [[package]]
 name = "asupersync"
 version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0350965ddf8c00001227d5e019613c1bbafe14d26b716f58d69a1c8204687dab"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -292,6 +294,8 @@ dependencies = [
 [[package]]
 name = "asupersync-macros"
 version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "223fae3572bf68e3c424c5c5b050086637708f8ba634f1e12c1228ae4782d7d3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1196,7 +1200,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1347,7 +1351,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1485,6 +1489,8 @@ dependencies = [
 [[package]]
 name = "franken-decision"
 version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb981475a72a66b0c948538e5924e4ad97642abc9781534d24570b8fdea4085"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -1494,6 +1500,8 @@ dependencies = [
 [[package]]
 name = "franken-evidence"
 version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b05716823d865d39eb48749341cd74163f3c8564220c0126878b50cf9f86879"
 dependencies = [
  "serde",
  "serde_json",
@@ -1502,6 +1510,8 @@ dependencies = [
 [[package]]
 name = "franken-kernel"
 version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cdb4d0fd4d8e0ff8f082692ea40ae1d06ae704d4894fd915458582f0df1cd320"
 dependencies = [
  "serde",
 ]
@@ -2525,7 +2535,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b305d85504de270ad3525d726a6b69cc59ee7b2269b014387651107ab9f0755b"
 dependencies = [
  "bstr",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -3619,7 +3629,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4096,7 +4106,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -4403,7 +4413,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5017,7 +5027,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5703,7 +5713,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6128,6 +6138,10 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "asupersync"
+version = "0.3.7"
 
 [[patch.unused]]
 name = "fnx-convert"
