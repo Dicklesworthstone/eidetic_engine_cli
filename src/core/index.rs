@@ -25,7 +25,8 @@ use crate::models::{
 };
 use crate::search::{
     CanonicalSearchDocument, EmbedderStack, HashEmbedder, IndexBuilder, artifact_to_document,
-    memory_to_document_with_context_anchors_and_typed_fields, session_to_document,
+    memory_to_document_with_context_anchors_and_typed_fields, rule_to_document,
+    session_to_document,
 };
 #[cfg(feature = "lexical-bm25")]
 use crate::search::{LexicalSearch, TantivyIndex};
@@ -933,9 +934,15 @@ pub fn rebuild_index(
         sessions.iter().map(session_to_document).collect();
     let artifact_docs: Vec<CanonicalSearchDocument> =
         artifacts.iter().map(artifact_to_document).collect();
+    let rule_docs = rule_documents(&db, &workspace_id)?;
 
-    let (memories_indexed, sessions_indexed, artifacts_indexed, documents_total) =
-        checked_document_counts(memory_docs.len(), session_docs.len(), artifact_docs.len())?;
+    let (memories_indexed, sessions_indexed, artifacts_indexed, _rules_indexed, documents_total) =
+        checked_document_counts(
+            memory_docs.len(),
+            session_docs.len(),
+            artifact_docs.len(),
+            rule_docs.len(),
+        )?;
 
     if options.dry_run {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -981,6 +988,7 @@ pub fn rebuild_index(
             .into_iter()
             .chain(session_docs)
             .chain(artifact_docs)
+            .chain(rule_docs)
             .map(|doc| doc.into_indexable())
             .collect();
 
@@ -1066,9 +1074,15 @@ pub fn reembed_index(
         sessions.iter().map(session_to_document).collect();
     let artifact_docs: Vec<CanonicalSearchDocument> =
         artifacts.iter().map(artifact_to_document).collect();
+    let rule_docs = rule_documents(&db, &workspace_id)?;
 
-    let (memories_indexed, sessions_indexed, artifacts_indexed, documents_total) =
-        checked_document_counts(memory_docs.len(), session_docs.len(), artifact_docs.len())?;
+    let (memories_indexed, sessions_indexed, artifacts_indexed, _rules_indexed, documents_total) =
+        checked_document_counts(
+            memory_docs.len(),
+            session_docs.len(),
+            artifact_docs.len(),
+            rule_docs.len(),
+        )?;
     let current_vector_coverage =
         embedding_vector_coverage(&index_dir, documents_total, read_fast_vector_record_count);
     let embedding = reembed_embedding_summary(&db, &workspace_id, &stack, current_vector_coverage)?;
@@ -2461,12 +2475,19 @@ fn collect_workspace_indexable_documents(
         sessions.iter().map(session_to_document).collect();
     let artifact_docs: Vec<CanonicalSearchDocument> =
         artifacts.iter().map(artifact_to_document).collect();
-    let (memories_indexed, sessions_indexed, _artifacts_indexed, documents_total) =
-        checked_document_counts(memory_docs.len(), session_docs.len(), artifact_docs.len())?;
+    let rule_docs = rule_documents(db, workspace_id)?;
+    let (memories_indexed, sessions_indexed, _artifacts_indexed, _rules_indexed, documents_total) =
+        checked_document_counts(
+            memory_docs.len(),
+            session_docs.len(),
+            artifact_docs.len(),
+            rule_docs.len(),
+        )?;
     let indexable_docs = memory_docs
         .into_iter()
         .chain(session_docs)
         .chain(artifact_docs)
+        .chain(rule_docs)
         .map(|doc| doc.into_indexable())
         .collect();
     Ok((
@@ -3041,7 +3062,8 @@ fn checked_document_counts(
     memory_count: usize,
     session_count: usize,
     artifact_count: usize,
-) -> Result<(u32, u32, u32, u32), IndexRebuildError> {
+    rule_count: usize,
+) -> Result<(u32, u32, u32, u32, u32), IndexRebuildError> {
     let memories_indexed = u32::try_from(memory_count).map_err(|_| {
         IndexRebuildError::Index(format!(
             "Memory document count {memory_count} exceeds the supported maximum."
@@ -3057,9 +3079,15 @@ fn checked_document_counts(
             "Artifact document count {artifact_count} exceeds the supported maximum."
         ))
     })?;
+    let rules_indexed = u32::try_from(rule_count).map_err(|_| {
+        IndexRebuildError::Index(format!(
+            "Rule document count {rule_count} exceeds the supported maximum."
+        ))
+    })?;
     let documents_total = memories_indexed
         .checked_add(sessions_indexed)
         .and_then(|count| count.checked_add(artifacts_indexed))
+        .and_then(|count| count.checked_add(rules_indexed))
         .ok_or_else(|| {
             IndexRebuildError::Index(
                 "Combined document count exceeds the supported maximum.".to_owned(),
@@ -3069,8 +3097,28 @@ fn checked_document_counts(
         memories_indexed,
         sessions_indexed,
         artifacts_indexed,
+        rules_indexed,
         documents_total,
     ))
+}
+
+/// Collect the indexable procedural-rule documents for a workspace.
+///
+/// Applied rules are part of the derived search corpus (bd-3h6bz): without
+/// them, `document_source=rule` index jobs point at documents that can
+/// never exist and the Learn -> Retrieve -> Pack loop dead-ends. Tombstoned
+/// rows are excluded by the query; superseded rules are filtered here so
+/// only the current head of a supersede chain is retrievable.
+fn rule_documents(
+    db: &DbConnection,
+    workspace_id: &str,
+) -> Result<Vec<CanonicalSearchDocument>, IndexRebuildError> {
+    let rules = db.list_procedural_rules(workspace_id, None, None, false)?;
+    Ok(rules
+        .iter()
+        .filter(|rule| rule.superseded_by.is_none())
+        .map(rule_to_document)
+        .collect())
 }
 
 fn get_default_workspace_id(db: &DbConnection) -> Result<String, IndexRebuildError> {
