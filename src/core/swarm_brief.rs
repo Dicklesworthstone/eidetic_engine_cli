@@ -14,7 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::core::agent_detect::{AgentInventoryStatus, AgentStatusOptions, gather_agent_status};
@@ -75,6 +75,10 @@ pub const MAX_SWARM_REPLAY_SUMMARY_BYTES: usize = 8192;
 /// adversarial path can demand. bd-1sdr5 / bd-1icct multi-pass-bug-
 /// hunting audit pass.
 pub const AGENT_MAIL_SNAPSHOT_MAX_BYTES: usize = 8 * 1024 * 1024;
+const AGENT_MAIL_SNAPSHOT_SCHEMA_V1: &str = "ee.agent_mail.snapshot.v1";
+const AGENT_MAIL_SNAPSHOT_V1_SOURCE_COUNT: usize = 6;
+const AGENT_MAIL_SNAPSHOT_STALE_AFTER_SECONDS: u64 = 5 * 60;
+const AGENT_MAIL_SNAPSHOT_MAX_FUTURE_SKEW_SECONDS: i64 = 60;
 
 const GIT_UNAVAILABLE_CODE: &str = "git_unavailable";
 const BEADS_UNAVAILABLE_CODE: &str = "beads_unavailable";
@@ -93,7 +97,8 @@ pub const AGENT_MAIL_SNAPSHOT_TEMPLATE_AGENT: &str = "<AGENT_NAME>";
 pub const AGENT_MAIL_SNAPSHOT_TEMPLATE_PATH: &str = "/private/tmp/ee-agent-mail-snapshot.json";
 pub const AGENT_MAIL_SNAPSHOT_PRODUCER_COMMAND: &str = "scripts/agent_mail_snapshot.sh --project . --agent <AGENT_NAME> --json --output /private/tmp/ee-agent-mail-snapshot.json";
 pub const DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS: u64 = 35_000;
-const MEMORY_DRIFT_UNAVAILABLE_CODE: &str = "memory_drift_source_unverifiable";
+const MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE: &str =
+    super::memory_drift::MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE;
 const RCH_UNAVAILABLE_CODE: &str = "rch_unavailable";
 const RCH_WORKER_TOPOLOGY_BLOCKED_CODE: &str = "rch_worker_topology_blocked";
 const RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE: &str = "rch_remote_required_fallback_prevented";
@@ -317,9 +322,20 @@ impl SwarmBriefReport {
         self.stalled_bead_liveness.sort();
         self.stalled_bead_liveness
             .dedup_by(|left, right| left.bead_id == right.bead_id);
-        self.agent_mail_agents.sort();
-        self.agent_mail_agents
-            .dedup_by(|left, right| left.name == right.name);
+        let mut agent_mail_agents = BTreeMap::<String, SwarmBriefAgentMailAgent>::new();
+        for agent in std::mem::take(&mut self.agent_mail_agents) {
+            match agent_mail_agents.entry(agent.name.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(agent);
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if agent.last_active_at > entry.get().last_active_at {
+                        entry.insert(agent);
+                    }
+                }
+            }
+        }
+        self.agent_mail_agents = agent_mail_agents.into_values().collect();
         self.inbox.sort();
         self.inbox.dedup();
         self.threads.sort();
@@ -519,6 +535,14 @@ impl SwarmBriefSourceSnapshot {
         self
     }
 
+    /// Attach evidence findings without demoting a collector that completed
+    /// authoritatively. The findings may still block the top-level claim gate;
+    /// they do not mean the source itself was unavailable or partial.
+    fn with_authoritative_findings(mut self, degraded: Vec<SwarmBriefDegradation>) -> Self {
+        self.degraded = degraded;
+        self
+    }
+
     fn with_freshness(mut self, freshness: SwarmBriefSourceFreshness) -> Self {
         if freshness.state != "current" && self.status == SwarmBriefSourceStatus::Ready {
             self.status = SwarmBriefSourceStatus::Degraded;
@@ -540,6 +564,22 @@ pub struct SwarmBriefDegradation {
 }
 
 impl SwarmBriefDegradation {
+    fn with_severity(
+        source: SwarmBriefSourceKind,
+        code: impl Into<String>,
+        severity: &'static str,
+        message: impl Into<String>,
+        repair: impl Into<Option<String>>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            source,
+            severity,
+            message: redact_brief_text(&message.into()),
+            repair: repair.into(),
+        }
+    }
+
     #[must_use]
     pub fn info(
         source: SwarmBriefSourceKind,
@@ -2015,25 +2055,57 @@ impl SwarmBriefSourceAdapter for AgentMailSnapshotFileAdapter {
 
         match read_agent_mail_snapshot_file(path) {
             Ok(contents) => match parse_agent_mail_snapshot_json(&contents) {
-                Ok(snapshot) => {
-                    let item_count = snapshot.file_reservations.len()
-                        + snapshot.agents.len()
-                        + snapshot.inbox.len()
-                        + snapshot.threads.len();
-                    let degraded = snapshot.degraded.clone();
-                    SwarmBriefSourceOutput {
-                        snapshot: SwarmBriefSourceSnapshot::ready(
-                            SwarmBriefSourceKind::AgentMail,
-                            provenance,
-                            item_count,
-                        )
-                        .with_degraded(degraded),
-                        contribution: SwarmBriefContribution::AgentMail {
-                            file_reservations: snapshot.file_reservations,
-                            agents: snapshot.agents,
-                            inbox: snapshot.inbox,
-                            threads: snapshot.threads,
-                        },
+                Ok(mut snapshot) => {
+                    let decision_now = Utc::now();
+                    match validate_agent_mail_snapshot_workspace_binding(
+                        &contents,
+                        &options.workspace,
+                    )
+                    .and_then(|()| {
+                        agent_mail_snapshot_freshness_assessment(&contents, decision_now)
+                    }) {
+                        Ok((freshness, freshness_degradation)) => {
+                            snapshot.file_reservations.retain(|reservation| {
+                                reservation_is_active(reservation, decision_now.timestamp())
+                            });
+                            let item_count = snapshot.file_reservations.len()
+                                + snapshot.agents.len()
+                                + snapshot.inbox.len()
+                                + snapshot.threads.len();
+                            let mut degraded = snapshot.degraded.clone();
+                            degraded.extend(freshness_degradation);
+                            SwarmBriefSourceOutput {
+                                snapshot: SwarmBriefSourceSnapshot::ready(
+                                    SwarmBriefSourceKind::AgentMail,
+                                    provenance,
+                                    item_count,
+                                )
+                                .with_degraded(degraded)
+                                .with_freshness(freshness),
+                                contribution: SwarmBriefContribution::AgentMail {
+                                    file_reservations: snapshot.file_reservations,
+                                    agents: snapshot.agents,
+                                    inbox: snapshot.inbox,
+                                    threads: snapshot.threads,
+                                },
+                            }
+                        }
+                        Err(message) => {
+                            let degradation = SwarmBriefDegradation::warning(
+                                SwarmBriefSourceKind::AgentMail,
+                                AGENT_MAIL_UNAVAILABLE_CODE,
+                                message,
+                                Some("Regenerate the redacted Agent Mail snapshot.".to_string()),
+                            );
+                            SwarmBriefSourceOutput {
+                                snapshot: SwarmBriefSourceSnapshot::unavailable(
+                                    SwarmBriefSourceKind::AgentMail,
+                                    provenance,
+                                    degradation,
+                                ),
+                                contribution: SwarmBriefContribution::None,
+                            }
+                        }
                     }
                 }
                 Err(message) => {
@@ -2459,7 +2531,7 @@ impl SwarmBriefSourceAdapter for MemoryDriftSourceAdapter {
             };
             let degradation = SwarmBriefDegradation::warning(
                 source,
-                MEMORY_DRIFT_UNAVAILABLE_CODE,
+                MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE,
                 memory_drift_unavailable_message(&error),
                 Some(repair.to_string()),
             );
@@ -2476,6 +2548,7 @@ impl SwarmBriefSourceAdapter for MemoryDriftSourceAdapter {
             memory_id: None,
             limit: MEMORY_DRIFT_SWARM_BRIEF_LIMIT,
             include_tombstoned: false,
+            as_of: None,
         };
         match super::memory_drift::build_memory_drift_report_read_only(&report_options) {
             Ok(report) => {
@@ -2484,14 +2557,14 @@ impl SwarmBriefSourceAdapter for MemoryDriftSourceAdapter {
                 let item_count = usize::try_from(summary.affected_count).unwrap_or(usize::MAX);
                 SwarmBriefSourceOutput {
                     snapshot: SwarmBriefSourceSnapshot::ready(source, provenance, item_count)
-                        .with_degraded(degraded),
+                        .with_authoritative_findings(degraded),
                     contribution: SwarmBriefContribution::MemoryDrift(summary),
                 }
             }
             Err(error) => {
-                // bd-1xpq9: lock contention means collection never reached
-                // evidence inspection — report it as its own code instead of
-                // the (too broad) unverifiable-evidence code.
+                // Pre-inspection collection failures are not unverifiable
+                // memory evidence. Preserve the dedicated contention code and
+                // use report-unavailable for every other collector failure.
                 let degradation =
                     if super::memory_drift::memory_drift_error_is_lock_contention(&error) {
                         SwarmBriefDegradation::warning(
@@ -2508,7 +2581,7 @@ impl SwarmBriefSourceAdapter for MemoryDriftSourceAdapter {
                     } else {
                         SwarmBriefDegradation::warning(
                             source,
-                            MEMORY_DRIFT_UNAVAILABLE_CODE,
+                            MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE,
                             format!(
                                 "Memory drift posture could not be collected read-only: {error}"
                             ),
@@ -2911,9 +2984,15 @@ fn memory_drift_degradations_from_summary(
         .degraded_codes
         .iter()
         .map(|code| {
-            SwarmBriefDegradation::warning(
+            let severity = match code.as_str() {
+                "memory_drift_source_missing" => "high",
+                "memory_drift_source_changed" | "memory_drift_source_unverifiable" => "medium",
+                _ => "warning",
+            };
+            SwarmBriefDegradation::with_severity(
                 SwarmBriefSourceKind::MemoryDrift,
                 code.clone(),
+                severity,
                 format!(
                     "Memory drift source reported {code}; affected recent pack item count is {}.",
                     summary.affected_count
@@ -3397,8 +3476,8 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
         "stalledBeadLivenessCount": report.stalled_bead_liveness.len(),
         "agentMailAgentCount": report.agent_mail_agents.len(),
         "inboxMailboxCount": report.inbox.len(),
-        "unreadCount": report.inbox.iter().map(|item| item.unread_count).sum::<u64>(),
-        "ackRequiredCount": report.inbox.iter().map(|item| item.ack_required_count).sum::<u64>(),
+        "unreadCount": report.inbox.iter().fold(0_u64, |total, item| total.saturating_add(item.unread_count)),
+        "ackRequiredCount": report.inbox.iter().fold(0_u64, |total, item| total.saturating_add(item.ack_required_count)),
         "threadCount": report.threads.len(),
         "resourcePressureHintCount": report.resource_pressure.len(),
         "memoryDriftAffectedCount": report.memory_drift.as_ref().map_or(0, |summary| summary.affected_count),
@@ -5890,7 +5969,7 @@ fn reservation_is_active(reservation: &SwarmBriefFileReservation, now_epoch_seco
         .expires_at
         .as_deref()
         .and_then(rfc3339_epoch_seconds)
-        .is_none_or(|expires_at| expires_at >= now_epoch_seconds)
+        .is_none_or(|expires_at| expires_at > now_epoch_seconds)
 }
 
 fn stalled_bead_suggested_commands(bead: &SwarmBriefBead, action: &str) -> Vec<String> {
@@ -7701,9 +7780,788 @@ fn parse_bv_pick(item: &Value) -> Option<SwarmBriefBvPick> {
     })
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentMailSnapshotV1Wire {
+    schema: String,
+    generated_at: String,
+    project_key: String,
+    agent_name: String,
+    redaction_status: String,
+    producer_status: String,
+    source_commands: Vec<String>,
+    command_statuses: Vec<AgentMailSnapshotV1CommandStatus>,
+    fallback_active: bool,
+    am_agents_list_ok: bool,
+    health_level: Option<String>,
+    semantic_readiness: Option<AgentMailSnapshotV1SemanticReadiness>,
+    durability_state: Option<String>,
+    recovery: Option<AgentMailSnapshotV1Recovery>,
+    summary: AgentMailSnapshotV1Summary,
+    degraded: Vec<AgentMailSnapshotV1Degradation>,
+    file_reservations: Vec<AgentMailSnapshotV1FileReservation>,
+    agents: Vec<AgentMailSnapshotV1Agent>,
+    inbox: Vec<AgentMailSnapshotV1Inbox>,
+    threads: Vec<AgentMailSnapshotV1Thread>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentMailSnapshotV1CommandStatus {
+    command: String,
+    ok: bool,
+    exit_code: Option<i64>,
+    timed_out: bool,
+    error_class: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentMailSnapshotV1SemanticReadiness {
+    status: String,
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentMailSnapshotV1Recovery {
+    mode: String,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentMailSnapshotV1Summary {
+    agent_count: u64,
+    file_reservation_count: u64,
+    inbox_mailbox_count: u64,
+    thread_count: u64,
+    source_command_count: u64,
+    degraded_count: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentMailSnapshotV1Degradation {
+    code: String,
+    severity: String,
+    source: String,
+    command: String,
+    error_class: Option<String>,
+    exit_code: Option<i64>,
+    timed_out: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentMailSnapshotV1FileReservation {
+    path_pattern: String,
+    holder: String,
+    exclusive: bool,
+    expires_ts: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentMailSnapshotV1Agent {
+    name: String,
+    last_active_ts: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentMailSnapshotV1Inbox {
+    mailbox: String,
+    unread_count: u64,
+    ack_required_count: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentMailSnapshotV1Thread {
+    thread_id: String,
+    message_count: u64,
+    subject: Option<String>,
+    last_activity_at: Option<String>,
+}
+
+fn agent_mail_snapshot_v1_require_fields(
+    value: &Value,
+    required: &[&str],
+    context: &str,
+) -> Result<(), String> {
+    let object = value.as_object().ok_or_else(|| {
+        format!("declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} {context} must be an object")
+    })?;
+    if let Some(missing) = required.iter().find(|field| !object.contains_key(**field)) {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} {context} is missing required field {missing}"
+        ));
+    }
+    Ok(())
+}
+
+fn agent_mail_snapshot_v1_reject_explicit_null(
+    value: &Value,
+    fields: &[&str],
+    context: &str,
+) -> Result<(), String> {
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    if let Some(field) = fields
+        .iter()
+        .find(|field| object.get(**field).is_some_and(Value::is_null))
+    {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} {context}.{field} cannot be null"
+        ));
+    }
+    Ok(())
+}
+
+fn agent_mail_snapshot_v1_nonempty(value: &str) -> bool {
+    !value.trim().is_empty()
+}
+
+fn agent_mail_snapshot_v1_timestamp_is_valid(value: &str) -> bool {
+    DateTime::parse_from_rfc3339(value).is_ok()
+}
+
+fn agent_mail_snapshot_project_key_is_valid(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn normalize_agent_mail_workspace_identity(value: &str, windows: bool) -> String {
+    if !windows {
+        return value.to_owned();
+    }
+
+    let mut normalized = value.replace('\\', "/");
+    let folded = normalized.to_ascii_uppercase();
+    if folded.starts_with("//?/UNC/") {
+        normalized = format!("//{}", &normalized[8..]);
+    } else if folded.starts_with("//?/") {
+        normalized = normalized[4..].to_owned();
+    }
+    if normalized.as_bytes().get(1) == Some(&b':')
+        && normalized
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
+    {
+        let drive_letter = normalized[0..1].to_ascii_lowercase();
+        normalized.replace_range(0..1, &drive_letter);
+    }
+    normalized
+}
+
+pub(crate) fn agent_mail_snapshot_project_key_for_workspace(
+    workspace: &Path,
+) -> Result<String, String> {
+    let canonical = fs::canonicalize(workspace).map_err(|error| {
+        format!(
+            "Agent Mail snapshot workspace binding could not canonicalize the requested workspace: {error}"
+        )
+    })?;
+    let canonical = canonical.to_str().ok_or_else(|| {
+        "Agent Mail snapshot workspace binding requires a valid UTF-8 canonical workspace path"
+            .to_owned()
+    })?;
+    let identity = normalize_agent_mail_workspace_identity(canonical, cfg!(windows));
+    let digest = crate::models::release::sha256_hex(identity.as_bytes());
+    Ok(format!("sha256:{digest}"))
+}
+
+fn validate_agent_mail_snapshot_workspace_binding(
+    input: &str,
+    workspace: &Path,
+) -> Result<(), String> {
+    let value = serde_json::from_str::<Value>(input)
+        .map_err(|error| format!("Agent Mail snapshot JSON could not be parsed: {error}"))?;
+    if value.get("schema").and_then(Value::as_str) != Some(AGENT_MAIL_SNAPSHOT_SCHEMA_V1) {
+        return Ok(());
+    }
+    let actual = value
+        .get("project_key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!("declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} project_key is missing")
+        })?;
+    let expected = agent_mail_snapshot_project_key_for_workspace(workspace)?;
+    if actual != expected {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} project_key does not match the requested workspace"
+        ));
+    }
+    Ok(())
+}
+
+fn agent_mail_snapshot_freshness_assessment(
+    input: &str,
+    now: DateTime<Utc>,
+) -> Result<(SwarmBriefSourceFreshness, Option<SwarmBriefDegradation>), String> {
+    let value = serde_json::from_str::<Value>(input)
+        .map_err(|error| format!("Agent Mail snapshot JSON could not be parsed: {error}"))?;
+    let declared_v1 =
+        value.get("schema").and_then(Value::as_str) == Some(AGENT_MAIL_SNAPSHOT_SCHEMA_V1);
+    if !declared_v1 {
+        return Ok((
+            SwarmBriefSourceFreshness::unknown(),
+            Some(SwarmBriefDegradation::warning(
+                SwarmBriefSourceKind::AgentMail,
+                AGENT_MAIL_UNAVAILABLE_CODE,
+                "Agent Mail snapshot does not declare ee.agent_mail.snapshot.v1 freshness evidence; legacy rows remain visible but are not authoritative for claims."
+                    .to_owned(),
+                Some("Regenerate the redacted Agent Mail snapshot with the shipped producer.".to_owned()),
+            )),
+        ));
+    }
+
+    let observed_raw = value
+        .get("generated_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!("declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} generated_at is missing")
+        })?;
+    let observed = DateTime::parse_from_rfc3339(observed_raw)
+        .map_err(|error| {
+            format!(
+                "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} generated_at is not RFC 3339: {error}"
+            )
+        })?
+        .with_timezone(&Utc);
+    let future_seconds = observed.signed_duration_since(now).num_seconds();
+    if future_seconds > AGENT_MAIL_SNAPSHOT_MAX_FUTURE_SKEW_SECONDS {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} generated_at is {future_seconds} seconds in the future"
+        ));
+    }
+    let age_seconds =
+        u64::try_from(now.signed_duration_since(observed).num_seconds().max(0)).unwrap_or(u64::MAX);
+    let stale = age_seconds > AGENT_MAIL_SNAPSHOT_STALE_AFTER_SECONDS;
+    let freshness = SwarmBriefSourceFreshness {
+        observed_at: Some(observed_raw.to_owned()),
+        age_seconds: Some(age_seconds),
+        stale_after_seconds: Some(AGENT_MAIL_SNAPSHOT_STALE_AFTER_SECONDS),
+        state: if stale { "stale" } else { "current" },
+    };
+    let degradation = stale.then(|| {
+        SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::AgentMail,
+            AGENT_MAIL_UNAVAILABLE_CODE,
+            format!(
+                "Agent Mail snapshot is stale: generated_at is {age_seconds} seconds old, beyond the {AGENT_MAIL_SNAPSHOT_STALE_AFTER_SECONDS}-second claim-evidence horizon."
+            ),
+            Some("Regenerate the redacted Agent Mail snapshot immediately before retrying the claim gate.".to_owned()),
+        )
+    });
+    Ok((freshness, degradation))
+}
+
+pub(crate) fn validate_current_agent_mail_snapshot_for_workspace(
+    input: &str,
+    workspace: &Path,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    validate_agent_mail_snapshot_workspace_binding(input, workspace)?;
+    let (freshness, degradation) = agent_mail_snapshot_freshness_assessment(input, now)?;
+    if let Some(degradation) = degradation {
+        return Err(degradation.message);
+    }
+    if freshness.state != "current" {
+        return Err("Agent Mail snapshot does not carry current claim evidence".to_owned());
+    }
+    Ok(())
+}
+
+fn agent_mail_snapshot_v1_shell_quote(value: &str) -> String {
+    let shell_safe = value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'_' | b'@' | b'%' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-'
+            )
+    });
+    if shell_safe {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+}
+
+fn agent_mail_snapshot_v1_cli_command_prefix<'a>(
+    index: usize,
+    command: &'a str,
+    agent_name: &str,
+) -> Option<&'a str> {
+    let quoted_agent = agent_mail_snapshot_v1_shell_quote(agent_name);
+    let static_suffix = match index {
+        0 => " agents list --project '<workspace>' --json".to_owned(),
+        1 => " robot reservations --project '<workspace>' --all --format json".to_owned(),
+        3 => format!(" status --project '<workspace>' --agent {quoted_agent} --json"),
+        _ => String::new(),
+    };
+    if index != 2 {
+        return command
+            .strip_suffix(&static_suffix)
+            .filter(|prefix| !prefix.is_empty());
+    }
+
+    let marker = format!(" mail inbox --project '<workspace>' --agent {quoted_agent} --limit ");
+    let (prefix, limit_and_suffix) = command.rsplit_once(&marker)?;
+    let limit = limit_and_suffix.strip_suffix(" --json")?;
+    (!prefix.is_empty() && !limit.is_empty() && limit.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(prefix)
+}
+
+fn validate_declared_agent_mail_snapshot_v1(value: &Value) -> Result<(), String> {
+    const ROOT_REQUIRED: &[&str] = &[
+        "schema",
+        "generated_at",
+        "project_key",
+        "agent_name",
+        "redaction_status",
+        "producer_status",
+        "source_commands",
+        "command_statuses",
+        "fallback_active",
+        "am_agents_list_ok",
+        "summary",
+        "degraded",
+        "file_reservations",
+        "agents",
+        "inbox",
+        "threads",
+    ];
+    const COMMAND_STATUS_REQUIRED: &[&str] =
+        &["command", "ok", "exit_code", "timed_out", "error_class"];
+    const SUMMARY_REQUIRED: &[&str] = &[
+        "agent_count",
+        "file_reservation_count",
+        "inbox_mailbox_count",
+        "thread_count",
+        "source_command_count",
+        "degraded_count",
+    ];
+    const DEGRADATION_REQUIRED: &[&str] = &[
+        "code",
+        "severity",
+        "source",
+        "command",
+        "error_class",
+        "exit_code",
+        "timed_out",
+    ];
+    const RESERVATION_REQUIRED: &[&str] = &["path_pattern", "holder", "exclusive"];
+    const AGENT_REQUIRED: &[&str] = &["name"];
+    const INBOX_REQUIRED: &[&str] = &["mailbox", "unread_count", "ack_required_count"];
+    const THREAD_REQUIRED: &[&str] = &["thread_id", "message_count"];
+
+    agent_mail_snapshot_v1_require_fields(value, ROOT_REQUIRED, "root")?;
+    agent_mail_snapshot_v1_reject_explicit_null(
+        value,
+        &[
+            "health_level",
+            "semantic_readiness",
+            "durability_state",
+            "recovery",
+        ],
+        "root",
+    )?;
+    for (field, required) in [
+        ("command_statuses", COMMAND_STATUS_REQUIRED),
+        ("degraded", DEGRADATION_REQUIRED),
+        ("file_reservations", RESERVATION_REQUIRED),
+        ("agents", AGENT_REQUIRED),
+        ("inbox", INBOX_REQUIRED),
+        ("threads", THREAD_REQUIRED),
+    ] {
+        let items = value.get(field).and_then(Value::as_array).ok_or_else(|| {
+            format!("declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} {field} must be an array")
+        })?;
+        for (index, item) in items.iter().enumerate() {
+            agent_mail_snapshot_v1_require_fields(item, required, &format!("{field}[{index}]"))?;
+            let optional_fields: &[&str] = match field {
+                "file_reservations" => &["expires_ts"],
+                "agents" => &["last_active_ts"],
+                "threads" => &["subject", "last_activity_at"],
+                _ => &[],
+            };
+            agent_mail_snapshot_v1_reject_explicit_null(
+                item,
+                optional_fields,
+                &format!("{field}[{index}]"),
+            )?;
+        }
+    }
+    agent_mail_snapshot_v1_require_fields(
+        value
+            .get("summary")
+            .ok_or_else(|| "Agent Mail snapshot summary disappeared".to_owned())?,
+        SUMMARY_REQUIRED,
+        "summary",
+    )?;
+    if let Some(recovery) = value.get("recovery") {
+        agent_mail_snapshot_v1_require_fields(recovery, &["mode", "reason"], "recovery")?;
+    }
+    if let Some(semantic) = value.get("semantic_readiness") {
+        agent_mail_snapshot_v1_reject_explicit_null(semantic, &["reason"], "semantic_readiness")?;
+    }
+
+    let wire: AgentMailSnapshotV1Wire = serde_json::from_value(value.clone()).map_err(|error| {
+        format!("declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} failed strict validation: {error}")
+    })?;
+    if wire.schema != AGENT_MAIL_SNAPSHOT_SCHEMA_V1 {
+        return Err(format!(
+            "declared Agent Mail snapshot schema changed during validation: {}",
+            wire.schema
+        ));
+    }
+    if !agent_mail_snapshot_v1_nonempty(&wire.generated_at)
+        || !agent_mail_snapshot_v1_nonempty(&wire.project_key)
+        || !agent_mail_snapshot_v1_nonempty(&wire.agent_name)
+        || wire.agent_name.contains('\n')
+        || wire.agent_name.contains('\r')
+    {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} identity fields must be non-empty"
+        ));
+    }
+    if !agent_mail_snapshot_project_key_is_valid(&wire.project_key) {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} project_key is not a canonical SHA-256 workspace binding"
+        ));
+    }
+    DateTime::parse_from_rfc3339(&wire.generated_at).map_err(|error| {
+        format!("declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} generated_at is not RFC 3339: {error}")
+    })?;
+    if wire.redaction_status != SWARM_BRIEF_REDACTION_STATUS {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} redaction_status is not authoritative"
+        ));
+    }
+    if wire.source_commands.len() != AGENT_MAIL_SNAPSHOT_V1_SOURCE_COUNT
+        || wire.command_statuses.len() != AGENT_MAIL_SNAPSHOT_V1_SOURCE_COUNT
+    {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} requires {AGENT_MAIL_SNAPSHOT_V1_SOURCE_COUNT} source commands and matching statuses"
+        ));
+    }
+    if wire.source_commands.iter().any(|command| {
+        !agent_mail_snapshot_v1_nonempty(command)
+            || command.contains('\n')
+            || command.contains('\r')
+    }) || wire.source_commands.iter().collect::<BTreeSet<_>>().len()
+        != wire.source_commands.len()
+    {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} source commands must be non-empty and unique"
+        ));
+    }
+    let cli_prefixes = wire
+        .source_commands
+        .iter()
+        .take(4)
+        .enumerate()
+        .map(|(index, command)| {
+            agent_mail_snapshot_v1_cli_command_prefix(index, command, &wire.agent_name)
+        })
+        .collect::<Option<Vec<_>>>();
+    let cli_prefixes_are_consistent = cli_prefixes.as_ref().is_some_and(|prefixes| {
+        prefixes.len() == 4 && prefixes.iter().all(|prefix| *prefix == prefixes[0])
+    });
+    if !cli_prefixes_are_consistent
+        || wire.source_commands[4] != "agent-mail-health http://127.0.0.1:8765/health"
+        || wire.source_commands[5] != "agent-mail-health http://127.0.0.1:8765/health/durability"
+    {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} source command identities or ordering drifted"
+        ));
+    }
+
+    let mut failed_commands = BTreeSet::new();
+    for (index, (command, status)) in wire
+        .source_commands
+        .iter()
+        .zip(wire.command_statuses.iter())
+        .enumerate()
+    {
+        if status.command != *command {
+            return Err(format!(
+                "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} command status order does not match source_commands"
+            ));
+        }
+        if !status.ok {
+            failed_commands.insert(status.command.as_str());
+        }
+        if status.ok && (status.timed_out || status.error_class.is_some()) {
+            return Err(format!(
+                "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} successful command status carries failure metadata"
+            ));
+        }
+        let expected_success_exit_code = if index < 4 { 0 } else { 200 };
+        if status.ok && status.exit_code != Some(expected_success_exit_code) {
+            return Err(format!(
+                "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} successful command status carries an impossible exit code"
+            ));
+        }
+        if !status.ok && !status.timed_out && status.error_class.is_none() {
+            return Err(format!(
+                "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} failed command status omitted failure metadata"
+            ));
+        }
+        if index == 4
+            && !status.ok
+            && (wire.health_level.is_some() || wire.semantic_readiness.is_some())
+        {
+            return Err(format!(
+                "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} failed readiness probe carries health output"
+            ));
+        }
+        if status
+            .error_class
+            .as_deref()
+            .is_some_and(|error_class| !agent_mail_snapshot_v1_nonempty(error_class))
+        {
+            return Err(format!(
+                "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} error_class must be null or non-empty"
+            ));
+        }
+        let _ = status.exit_code;
+    }
+    let health_requires_fallback = matches!(wire.health_level.as_deref(), Some("yellow" | "red"))
+        || wire
+            .semantic_readiness
+            .as_ref()
+            .is_some_and(|semantic| semantic.status != "pass")
+        || wire.recovery.is_some()
+        || wire
+            .durability_state
+            .as_deref()
+            .is_some_and(|state| state != "ok");
+    let expected_fallback = !failed_commands.is_empty() || health_requires_fallback;
+    if wire.fallback_active != expected_fallback
+        || wire.producer_status != if expected_fallback { "degraded" } else { "ok" }
+    {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} producer/fallback posture contradicts command statuses"
+        ));
+    }
+    if wire.am_agents_list_ok != wire.command_statuses[0].ok {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} am_agents_list_ok contradicts its command status"
+        ));
+    }
+    if (!wire.command_statuses[0].ok && !wire.agents.is_empty())
+        || (!wire.command_statuses[1].ok && !wire.file_reservations.is_empty())
+        || (!wire.command_statuses[2].ok && !wire.threads.is_empty())
+        || (!wire.command_statuses[3].ok && !wire.inbox.is_empty())
+    {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} failed source command carries normalized rows"
+        ));
+    }
+    if wire.command_statuses[3].ok
+        && (wire.inbox.len() != 1 || wire.inbox[0].mailbox != wire.agent_name)
+    {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} successful status probe must carry exactly its agent mailbox"
+        ));
+    }
+
+    let degraded_commands = wire
+        .degraded
+        .iter()
+        .map(|degradation| degradation.command.as_str())
+        .collect::<BTreeSet<_>>();
+    if degraded_commands != failed_commands || wire.degraded.len() != failed_commands.len() {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} degraded entries do not match failed command statuses"
+        ));
+    }
+    for degradation in &wire.degraded {
+        if !agent_mail_snapshot_v1_nonempty(&degradation.code)
+            || !agent_mail_snapshot_v1_nonempty(&degradation.source)
+            || !matches!(
+                degradation.severity.as_str(),
+                "info" | "low" | "warning" | "medium" | "high" | "critical"
+            )
+            || degradation
+                .error_class
+                .as_deref()
+                .is_some_and(|error_class| !agent_mail_snapshot_v1_nonempty(error_class))
+        {
+            return Err(format!(
+                "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} contains malformed degradation metadata"
+            ));
+        }
+        let status = wire
+            .command_statuses
+            .iter()
+            .find(|status| status.command == degradation.command)
+            .ok_or_else(|| {
+                format!(
+                    "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} degradation has no command status"
+                )
+            })?;
+        if status.ok
+            || status.exit_code != degradation.exit_code
+            || status.timed_out != degradation.timed_out
+            || status.error_class != degradation.error_class
+        {
+            return Err(format!(
+                "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} degradation contradicts its command status"
+            ));
+        }
+    }
+
+    let count = |value: usize, label: &str| {
+        u64::try_from(value).map_err(|_| {
+            format!("declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} {label} count overflowed u64")
+        })
+    };
+    if wire.summary.agent_count != count(wire.agents.len(), "agent")?
+        || wire.summary.file_reservation_count
+            != count(wire.file_reservations.len(), "reservation")?
+        || wire.summary.inbox_mailbox_count != count(wire.inbox.len(), "inbox")?
+        || wire.summary.thread_count != count(wire.threads.len(), "thread")?
+        || wire.summary.source_command_count != count(wire.source_commands.len(), "source command")?
+        || wire.summary.degraded_count != count(wire.degraded.len(), "degraded")?
+    {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} summary counts contradict normalized arrays"
+        ));
+    }
+
+    for reservation in &wire.file_reservations {
+        if !agent_mail_snapshot_v1_nonempty(&reservation.path_pattern)
+            || !agent_mail_snapshot_v1_nonempty(&reservation.holder)
+            || reservation
+                .expires_ts
+                .as_deref()
+                .is_some_and(|timestamp| !agent_mail_snapshot_v1_timestamp_is_valid(timestamp))
+        {
+            return Err(format!(
+                "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} contains malformed reservation metadata"
+            ));
+        }
+        let _ = reservation.exclusive;
+    }
+    let distinct_agent_names = wire
+        .agents
+        .iter()
+        .map(|agent| agent.name.as_str())
+        .collect::<BTreeSet<_>>();
+    if distinct_agent_names.len() != wire.agents.len()
+        || wire.agents.iter().any(|agent| {
+            !agent_mail_snapshot_v1_nonempty(&agent.name)
+                || agent
+                    .last_active_ts
+                    .as_deref()
+                    .is_some_and(|timestamp| !agent_mail_snapshot_v1_timestamp_is_valid(timestamp))
+        })
+        || wire.inbox.iter().any(|mailbox| {
+            let _ = (mailbox.unread_count, mailbox.ack_required_count);
+            !agent_mail_snapshot_v1_nonempty(&mailbox.mailbox)
+        })
+        || wire.threads.iter().any(|thread| {
+            let _ = thread.message_count;
+            !agent_mail_snapshot_v1_nonempty(&thread.thread_id)
+                || thread
+                    .subject
+                    .as_deref()
+                    .is_some_and(|subject| subject.contains('\n') || subject.contains('\r'))
+                || thread
+                    .last_activity_at
+                    .as_deref()
+                    .is_some_and(|timestamp| !agent_mail_snapshot_v1_timestamp_is_valid(timestamp))
+        })
+    {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} contains malformed coordination rows"
+        ));
+    }
+    if wire
+        .health_level
+        .as_deref()
+        .is_some_and(|level| !matches!(level, "green" | "yellow" | "red"))
+        || wire.semantic_readiness.as_ref().is_some_and(|semantic| {
+            !matches!(semantic.status.as_str(), "pass" | "fail" | "unknown")
+                || (semantic.status != "fail" && semantic.reason.is_some())
+                || (semantic.status == "fail" && semantic.reason.is_none())
+                || semantic.reason.as_deref().is_some_and(|reason| {
+                    !matches!(
+                        reason,
+                        "malformed_sqlite"
+                            | "archive_corruption"
+                            | "index_rebuild_required"
+                            | "permission_denied"
+                            | "unknown"
+                    )
+                })
+        })
+        || wire.durability_state.as_deref().is_some_and(|state| {
+            !matches!(
+                state,
+                "ok" | "corrupt" | "repair_required" | "unknown_recovery"
+            )
+        })
+        || wire.recovery.as_ref().is_some_and(|recovery| {
+            !matches!(
+                recovery.mode.as_str(),
+                "corrupt" | "repair_required" | "unknown_recovery"
+            ) || !matches!(
+                recovery.reason.as_str(),
+                "archive_corruption"
+                    | "storage_recovery_required"
+                    | "permission_denied"
+                    | "unknown"
+            )
+        })
+    {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} health posture is malformed"
+        ));
+    }
+    if wire.command_statuses[4].ok && wire.health_level.is_none() {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} successful readiness probe omitted health_level"
+        ));
+    }
+    if wire.command_statuses[5].ok && wire.durability_state.is_none() {
+        return Err(format!(
+            "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} successful durability probe omitted durability_state"
+        ));
+    }
+    match (wire.durability_state.as_deref(), wire.recovery.as_ref()) {
+        (Some("ok"), None) | (None, None) => {}
+        (Some(state), Some(recovery)) if state != "ok" && recovery.mode == state => {}
+        _ => {
+            return Err(format!(
+                "declared {AGENT_MAIL_SNAPSHOT_SCHEMA_V1} durability_state and recovery posture contradict"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 pub fn parse_agent_mail_snapshot_json(input: &str) -> Result<SwarmBriefAgentMailSnapshot, String> {
     let value = serde_json::from_str::<Value>(input)
         .map_err(|error| format!("Agent Mail snapshot JSON could not be parsed: {error}"))?;
+    if value.get("schema").and_then(Value::as_str) == Some(AGENT_MAIL_SNAPSHOT_SCHEMA_V1)
+        || value.get("producer_status").is_some()
+        || value.get("source_commands").is_some()
+        || value.get("command_statuses").is_some()
+    {
+        validate_declared_agent_mail_snapshot_v1(&value)?;
+    }
     let degraded = parse_agent_mail_health_degraded(&value);
     let reservations = value
         .get("file_reservations")
@@ -7751,13 +8609,24 @@ pub fn parse_agent_mail_snapshot_json(input: &str) -> Result<SwarmBriefAgentMail
         .unwrap_or_default();
 
     let mut reservations = reservations;
-    let mut agents = agents;
     let mut inbox = inbox;
     let mut threads = threads;
     reservations.sort();
     reservations.dedup();
-    agents.sort();
-    agents.dedup_by(|left, right| left.name == right.name);
+    let mut agents_by_name = BTreeMap::<String, SwarmBriefAgentMailAgent>::new();
+    for agent in agents {
+        match agents_by_name.entry(agent.name.clone()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(agent);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if agent.last_active_at > entry.get().last_active_at {
+                    entry.insert(agent);
+                }
+            }
+        }
+    }
+    let agents = agents_by_name.into_values().collect();
     inbox.sort();
     inbox.dedup();
     threads.sort();
@@ -11144,6 +12013,46 @@ mod tests {
     }
 
     #[test]
+    fn successful_memory_drift_findings_preserve_source_authority_and_top_level_blocker() {
+        let degradation = SwarmBriefDegradation::with_severity(
+            SwarmBriefSourceKind::MemoryDrift,
+            "memory_drift_source_unverifiable",
+            "medium",
+            "A recent pack selected a superseded memory revision.",
+            Some("ee memory drift --mode recent-pack-items --json".to_owned()),
+        );
+        let source = SwarmBriefSourceSnapshot::ready(
+            SwarmBriefSourceKind::MemoryDrift,
+            SwarmBriefSourceProvenance::local_probe(),
+            1,
+        )
+        .with_authoritative_findings(vec![degradation.clone()]);
+        assert_eq!(source.status, SwarmBriefSourceStatus::Ready);
+
+        let mut report = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        report.sources.push(source);
+        report.degraded.push(degradation);
+        report.finalize();
+
+        let memory_source = report
+            .sources
+            .iter()
+            .find(|source| source.source == SwarmBriefSourceKind::MemoryDrift)
+            .expect("memory-drift source remains present");
+        assert_eq!(memory_source.status, SwarmBriefSourceStatus::Ready);
+        assert!(
+            memory_source
+                .degraded
+                .iter()
+                .any(|item| { item.code == "memory_drift_source_unverifiable" })
+        );
+        assert!(report.degraded.iter().any(|item| {
+            item.source == SwarmBriefSourceKind::MemoryDrift
+                && item.code == "memory_drift_source_unverifiable"
+        }));
+    }
+
+    #[test]
     fn summary_and_handoff_text_surface_symbol_risk_without_raw_names() {
         let mut report = report_with_ready_sources();
         report.workspace_hygiene =
@@ -11234,7 +12143,7 @@ mod tests {
     }
 
     #[test]
-    fn advisor_reports_unavailable_memory_drift_source_as_unknown_evidence() {
+    fn advisor_reports_unavailable_memory_drift_report_as_unknown_evidence() {
         let mut report = report_with_ready_sources();
         let source = require_some(
             report
@@ -11246,7 +12155,7 @@ mod tests {
         source.status = SwarmBriefSourceStatus::Unavailable;
         source.degraded = vec![SwarmBriefDegradation::warning(
             SwarmBriefSourceKind::MemoryDrift,
-            "memory_drift_source_unverifiable",
+            MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE,
             "memory drift database missing",
             Some("ee init --workspace .".to_string()),
         )];
@@ -11255,7 +12164,7 @@ mod tests {
 
         let rec = recommendation(
             &report,
-            "rec.degraded.memory_drift.memory_drift_source_unverifiable",
+            "rec.degraded.memory_drift.memory_drift_report_unavailable",
         );
         assert_eq!(rec.kind, "degraded_capability");
         assert!(
@@ -11285,7 +12194,11 @@ mod tests {
                 .degraded
                 .first()
                 .map(|item| item.code.as_str()),
-            Some("memory_drift_source_unverifiable")
+            Some(MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE)
+        );
+        assert_eq!(
+            output.snapshot.degraded.first().map(|item| item.severity),
+            Some("warning")
         );
         assert_eq!(
             output
@@ -12012,6 +12925,344 @@ mod tests {
         assert!(!json.contains("SECRET_TOKEN"));
         assert!(!json.contains("body_md"));
         assert!(!json.contains("raw body"));
+    }
+
+    fn declared_agent_mail_snapshot_v1_example() -> Value {
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../docs/schemas/swarm/ee.agent_mail.snapshot.v1.json"
+        ))
+        .expect("Agent Mail snapshot schema remains valid JSON");
+        schema
+            .pointer("/examples/0")
+            .cloned()
+            .expect("Agent Mail snapshot schema keeps a declared-v1 example")
+    }
+
+    #[test]
+    fn agent_mail_declared_v1_schema_example_passes_strict_parser() {
+        let example = declared_agent_mail_snapshot_v1_example();
+        let encoded = serde_json::to_string(&example).expect("example serializes");
+        let snapshot = require_ok(
+            parse_agent_mail_snapshot_json(&encoded),
+            "strict declared-v1 Agent Mail snapshot",
+        );
+
+        assert_eq!(snapshot.agents.len(), 1);
+        assert_eq!(snapshot.file_reservations.len(), 1);
+        assert_eq!(snapshot.inbox.len(), 1);
+        assert_eq!(snapshot.threads.len(), 1);
+        assert!(snapshot.degraded.is_empty());
+    }
+
+    #[test]
+    fn agent_mail_workspace_identity_normalization_is_platform_stable() {
+        assert_eq!(
+            normalize_agent_mail_workspace_identity("/Users/Example/repo", false),
+            "/Users/Example/repo"
+        );
+        assert_eq!(
+            normalize_agent_mail_workspace_identity(r"\\?\C:\Users\Example\repo", true),
+            "c:/Users/Example/repo"
+        );
+        assert_eq!(
+            normalize_agent_mail_workspace_identity(r"\\?\UNC\server\share\repo", true),
+            "//server/share/repo"
+        );
+    }
+
+    #[test]
+    fn agent_mail_declared_v1_accepts_independent_ack_and_unread_counts() {
+        let mut example = declared_agent_mail_snapshot_v1_example();
+        example["inbox"][0]["unread_count"] = json!(0);
+        example["inbox"][0]["ack_required_count"] = json!(1);
+        let encoded = serde_json::to_string(&example).expect("count example serializes");
+
+        let snapshot = require_ok(
+            parse_agent_mail_snapshot_json(&encoded),
+            "independent Agent Mail status counts",
+        );
+
+        assert_eq!(snapshot.inbox[0].unread_count, 0);
+        assert_eq!(snapshot.inbox[0].ack_required_count, 1);
+    }
+
+    #[test]
+    fn agent_mail_declared_v1_health_posture_controls_fallback_consistently() {
+        let mut degraded = declared_agent_mail_snapshot_v1_example();
+        degraded["health_level"] = json!("yellow");
+        degraded["fallback_active"] = json!(true);
+        degraded["producer_status"] = json!("degraded");
+        let encoded = serde_json::to_string(&degraded).expect("degraded example serializes");
+        let parsed = require_ok(
+            parse_agent_mail_snapshot_json(&encoded),
+            "health-degraded Agent Mail snapshot",
+        );
+        assert!(
+            parsed
+                .degraded
+                .iter()
+                .any(|item| item.code == AGENT_MAIL_UNAVAILABLE_CODE)
+        );
+
+        let mut contradictory = declared_agent_mail_snapshot_v1_example();
+        contradictory["health_level"] = json!("red");
+        let encoded =
+            serde_json::to_string(&contradictory).expect("contradictory example serializes");
+        let error = parse_agent_mail_snapshot_json(&encoded)
+            .expect_err("red health with fallback=false must fail closed");
+        assert!(error.contains("producer/fallback posture contradicts"));
+    }
+
+    #[test]
+    fn agent_mail_declared_v1_rejects_incomplete_or_contradictory_evidence() {
+        let mut cases = Vec::new();
+
+        let mut missing_status = declared_agent_mail_snapshot_v1_example();
+        missing_status["command_statuses"]
+            .as_array_mut()
+            .expect("command statuses array")
+            .pop();
+        cases.push(("missing_command_status", missing_status));
+
+        let mut mismatched_command = declared_agent_mail_snapshot_v1_example();
+        mismatched_command["command_statuses"][0]["command"] =
+            json!("am agents list --project <different-workspace> --json");
+        cases.push(("mismatched_command_status", mismatched_command));
+
+        let mut wrong_source_identity = declared_agent_mail_snapshot_v1_example();
+        wrong_source_identity["source_commands"][0] =
+            json!("am status --project '<workspace>' --agent BeigeHollow --json");
+        let wrong_command = wrong_source_identity["source_commands"][0].clone();
+        wrong_source_identity["command_statuses"][0]["command"] = wrong_command;
+        cases.push(("wrong_source_identity", wrong_source_identity));
+
+        let mut false_success = declared_agent_mail_snapshot_v1_example();
+        false_success["command_statuses"][3]["ok"] = json!(false);
+        false_success["command_statuses"][3]["error_class"] = json!("invalid_response");
+        cases.push(("failed_status_without_degradation", false_success));
+
+        let mut impossible_success_exit = declared_agent_mail_snapshot_v1_example();
+        impossible_success_exit["command_statuses"][0]["exit_code"] = json!(1);
+        cases.push(("impossible_success_exit", impossible_success_exit));
+
+        let mut failure_without_metadata = declared_agent_mail_snapshot_v1_example();
+        failure_without_metadata["command_statuses"][0]["ok"] = json!(false);
+        cases.push(("failure_without_metadata", failure_without_metadata));
+
+        let mut failed_readiness_with_output = declared_agent_mail_snapshot_v1_example();
+        failed_readiness_with_output["command_statuses"][4]["ok"] = json!(false);
+        cases.push(("failed_readiness_with_output", failed_readiness_with_output));
+
+        let mut missing_health_level = declared_agent_mail_snapshot_v1_example();
+        missing_health_level
+            .as_object_mut()
+            .expect("snapshot object")
+            .remove("health_level");
+        cases.push(("successful_readiness_without_health", missing_health_level));
+
+        let mut missing_durability_state = declared_agent_mail_snapshot_v1_example();
+        missing_durability_state
+            .as_object_mut()
+            .expect("snapshot object")
+            .remove("durability_state");
+        cases.push((
+            "successful_durability_without_state",
+            missing_durability_state,
+        ));
+
+        let mut explicit_null_timestamp = declared_agent_mail_snapshot_v1_example();
+        explicit_null_timestamp["agents"][0]["last_active_ts"] = Value::Null;
+        cases.push(("explicit_null_timestamp", explicit_null_timestamp));
+
+        let mut pass_with_failure_reason = declared_agent_mail_snapshot_v1_example();
+        pass_with_failure_reason["semantic_readiness"]["reason"] = json!("unknown");
+        cases.push(("pass_with_failure_reason", pass_with_failure_reason));
+
+        let mut wrong_summary = declared_agent_mail_snapshot_v1_example();
+        wrong_summary["summary"]["source_command_count"] = json!(5);
+        cases.push(("wrong_source_count", wrong_summary));
+
+        let mut duplicate_agent = declared_agent_mail_snapshot_v1_example();
+        let duplicate = duplicate_agent["agents"][0].clone();
+        duplicate_agent["agents"]
+            .as_array_mut()
+            .expect("agents array")
+            .push(duplicate);
+        duplicate_agent["summary"]["agent_count"] = json!(2);
+        cases.push(("duplicate_agent_identity", duplicate_agent));
+
+        let mut mismatched_mailbox = declared_agent_mail_snapshot_v1_example();
+        mismatched_mailbox["inbox"][0]["mailbox"] = json!("OtherAgent");
+        cases.push(("status_mailbox_mismatch", mismatched_mailbox));
+
+        let mut mismatched_command_agent = declared_agent_mail_snapshot_v1_example();
+        mismatched_command_agent["source_commands"][2] =
+            json!("am mail inbox --project '<workspace>' --agent OtherAgent --limit 20 --json");
+        mismatched_command_agent["command_statuses"][2]["command"] =
+            mismatched_command_agent["source_commands"][2].clone();
+        cases.push(("source_command_agent_mismatch", mismatched_command_agent));
+
+        let mut mismatched_command_binary = declared_agent_mail_snapshot_v1_example();
+        mismatched_command_binary["source_commands"][3] =
+            json!("other-am status --project '<workspace>' --agent BeigeHollow --json");
+        mismatched_command_binary["command_statuses"][3]["command"] =
+            mismatched_command_binary["source_commands"][3].clone();
+        cases.push(("source_command_binary_mismatch", mismatched_command_binary));
+
+        let mut non_schema_agent = declared_agent_mail_snapshot_v1_example();
+        non_schema_agent["agents"][0]["lastActiveAt"] =
+            non_schema_agent["agents"][0]["last_active_ts"].clone();
+        cases.push(("non_schema_agent_alias", non_schema_agent));
+
+        for (name, value) in cases {
+            let encoded = serde_json::to_string(&value).expect("malformed case serializes");
+            let error = parse_agent_mail_snapshot_json(&encoded)
+                .expect_err("declared-v1 incomplete evidence must fail closed");
+            assert!(
+                error.contains(AGENT_MAIL_SNAPSHOT_SCHEMA_V1),
+                "{name}: error must identify the strict declared-v1 boundary: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_mail_declared_v1_freshness_boundary_and_future_skew_fail_closed() {
+        let now = DateTime::parse_from_rfc3339("2030-01-08T00:00:00Z")
+            .expect("fixed now parses")
+            .with_timezone(&Utc);
+        let cases = [
+            (
+                "2030-01-07T23:55:00Z",
+                "current",
+                AGENT_MAIL_SNAPSHOT_STALE_AFTER_SECONDS,
+            ),
+            (
+                "2030-01-07T23:54:59Z",
+                "stale",
+                AGENT_MAIL_SNAPSHOT_STALE_AFTER_SECONDS + 1,
+            ),
+        ];
+        for (generated_at, expected_state, expected_age) in cases {
+            let mut value = declared_agent_mail_snapshot_v1_example();
+            value["generated_at"] = json!(generated_at);
+            let encoded = serde_json::to_string(&value).expect("freshness case serializes");
+            let (freshness, degradation) = require_ok(
+                agent_mail_snapshot_freshness_assessment(&encoded, now),
+                "Agent Mail freshness assessment",
+            );
+            assert_eq!(freshness.state, expected_state);
+            assert_eq!(freshness.age_seconds, Some(expected_age));
+            assert_eq!(degradation.is_some(), expected_state == "stale");
+        }
+
+        let mut future = declared_agent_mail_snapshot_v1_example();
+        future["generated_at"] = json!("2030-01-08T00:01:01Z");
+        let encoded = serde_json::to_string(&future).expect("future case serializes");
+        let error = agent_mail_snapshot_freshness_assessment(&encoded, now)
+            .expect_err("future snapshot beyond skew budget must fail closed");
+        assert!(error.contains("61 seconds in the future"));
+    }
+
+    #[test]
+    fn agent_mail_snapshot_adapter_uses_generated_at_not_file_mtime() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let project_key = agent_mail_snapshot_project_key_for_workspace(tempdir.path())?;
+        let cases = [
+            ("fresh", Utc::now().to_rfc3339(), "current", false),
+            ("stale", "2000-01-01T00:00:00Z".to_owned(), "stale", true),
+        ];
+
+        for (name, generated_at, expected_freshness, expected_degraded) in cases {
+            let mut value = declared_agent_mail_snapshot_v1_example();
+            value["generated_at"] = json!(generated_at);
+            value["project_key"] = json!(&project_key);
+            let path = tempdir.path().join(format!("{name}-agent-mail.json"));
+            fs::write(
+                &path,
+                serde_json::to_vec(&value).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            let mut options = SwarmBriefCollectOptions::for_workspace(tempdir.path());
+            options.agent_mail_snapshot_path = Some(path);
+
+            let output = AgentMailSnapshotFileAdapter.collect(&options);
+
+            assert_eq!(output.snapshot.freshness.state, expected_freshness);
+            assert_eq!(
+                output.snapshot.status == SwarmBriefSourceStatus::Degraded,
+                expected_degraded
+            );
+            assert_eq!(
+                output
+                    .snapshot
+                    .degraded
+                    .iter()
+                    .any(|item| item.code == AGENT_MAIL_UNAVAILABLE_CODE),
+                expected_degraded
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn agent_mail_snapshot_adapter_drops_expired_reservations_before_surface_projection()
+    -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let project_key = agent_mail_snapshot_project_key_for_workspace(tempdir.path())?;
+        let mut value = declared_agent_mail_snapshot_v1_example();
+        value["generated_at"] = json!(Utc::now().to_rfc3339());
+        value["project_key"] = json!(project_key);
+        value["file_reservations"][0]["expires_ts"] = json!("2000-01-01T00:00:00Z");
+        let path = tempdir.path().join("expired-reservation-agent-mail.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&value).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let mut options = SwarmBriefCollectOptions::for_workspace(tempdir.path());
+        options.agent_mail_snapshot_path = Some(path);
+
+        let output = AgentMailSnapshotFileAdapter.collect(&options);
+
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Ready);
+        assert_eq!(output.snapshot.item_count, 3);
+        match output.contribution {
+            SwarmBriefContribution::AgentMail {
+                file_reservations, ..
+            } => assert!(
+                file_reservations.is_empty(),
+                "expired reservations must not become active surface risk"
+            ),
+            other => return Err(format!("expected Agent Mail contribution, got {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn agent_mail_snapshot_adapter_rejects_other_workspace_binding() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut value = declared_agent_mail_snapshot_v1_example();
+        value["generated_at"] = json!(Utc::now().to_rfc3339());
+        let path = tempdir.path().join("other-workspace-agent-mail.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&value).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let mut options = SwarmBriefCollectOptions::for_workspace(tempdir.path());
+        options.agent_mail_snapshot_path = Some(path);
+
+        let output = AgentMailSnapshotFileAdapter.collect(&options);
+
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Unavailable);
+        assert!(output.snapshot.degraded.iter().any(|item| {
+            item.code == AGENT_MAIL_UNAVAILABLE_CODE
+                && item
+                    .message
+                    .contains("does not match the requested workspace")
+        }));
+        assert!(matches!(output.contribution, SwarmBriefContribution::None));
+        Ok(())
     }
 
     #[test]

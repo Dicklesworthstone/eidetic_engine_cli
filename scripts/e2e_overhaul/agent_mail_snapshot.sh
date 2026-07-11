@@ -20,6 +20,8 @@ PROJECT="$TMP_ROOT/workspace"
 COMMAND_LOG="$TMP_ROOT/am-commands.log"
 SNAPSHOT_OK="$TMP_ROOT/snapshot-ok.json"
 SNAPSHOT_DEGRADED="$TMP_ROOT/snapshot-degraded.json"
+SNAPSHOT_INVALID_STATUS="$TMP_ROOT/snapshot-invalid-status.json"
+SNAPSHOT_INVALID_RESERVATIONS="$TMP_ROOT/snapshot-invalid-reservations.json"
 SNAPSHOT_STDOUT_OK="$TMP_ROOT/snapshot-stdout-ok.json"
 SNAPSHOT_STDOUT_STDERR="$TMP_ROOT/snapshot-stdout.stderr"
 SNAPSHOT_DUAL_FILE="$TMP_ROOT/snapshot-dual-file.json"
@@ -101,6 +103,11 @@ jq -e '
   and .["$id"] == "https://eidetic-engine/schemas/swarm/ee.agent_mail.snapshot.v1.json"
   and .title == "ee.agent_mail.snapshot.v1"
   and .properties.schema.const == "ee.agent_mail.snapshot.v1"
+  and .properties.source_commands.minItems == 6
+  and .properties.source_commands.maxItems == 6
+  and .properties.command_statuses.minItems == 6
+  and .properties.command_statuses.maxItems == 6
+  and .["$defs"].summary.properties.source_command_count.const == 6
   and (.required | index("schema") and index("summary") and index("file_reservations") and index("agents") and index("inbox") and index("threads"))
   and .["x-ee-status"].tracking_bead == "bd-1ur7d.1"
   and .["x-ee-status"].shipped == true
@@ -148,12 +155,15 @@ assert_snapshot_contract() {
     jq -e '
       .schema == "ee.agent_mail.snapshot.v1"
       and (.generated_at | type == "string")
-      and .project_key == "<workspace>"
+      and (.project_key | type == "string" and test("^sha256:[0-9a-f]{64}$"))
       and (.agent_name | type == "string" and length > 0)
       and .redaction_status == "paths_counts_subjects_only_no_content"
       and (.producer_status == "ok" or .producer_status == "degraded")
+      and (.producer_status == (if .fallback_active then "degraded" else "ok" end))
       and (.source_commands | type == "array")
       and (.command_statuses | type == "array")
+      and ((.source_commands | length) == 6)
+      and ((.source_commands | length) == (.command_statuses | length))
       and (.fallback_active | type == "boolean")
       and (.am_agents_list_ok | type == "boolean")
       and (.summary.agent_count == (.agents | length))
@@ -162,6 +172,7 @@ assert_snapshot_contract() {
       and (.summary.thread_count == (.threads | length))
       and (.summary.source_command_count == (.source_commands | length))
       and (.summary.degraded_count == (.degraded | length))
+      and (.summary.degraded_count == ([.command_statuses[] | select(.ok == false)] | length))
       and (.degraded | all(
         (.code | type == "string" and length > 0)
         and (.severity | type == "string")
@@ -176,6 +187,10 @@ assert_snapshot_contract() {
 
 sha256_file() {
     shasum -a 256 "$1" | awk '{print "sha256:" $1}'
+}
+
+sha256_text() {
+    printf '%s' "$1" | shasum -a 256 | awk '{print "sha256:" $1}'
 }
 
 now_ms() {
@@ -244,30 +259,44 @@ run_claim_gate_fixture_e2e() {
     cat > "$CLAIM_GATE_WORKSPACE/.beads/issues.jsonl" <<'JSONL'
 {"id":"bd-fixture-policy","title":"Policy redaction collision proof","status":"open","priority":1,"issue_type":"test","created_at":"2026-06-06T00:00:00Z","updated_at":"2026-06-06T00:00:00Z"}
 JSONL
-    cat > "$CLAIM_GATE_SNAPSHOT" <<'JSON'
+    snapshot_generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    snapshot_project_key="$(sha256_text "$CLAIM_GATE_WORKSPACE")"
+    cat > "$CLAIM_GATE_SNAPSHOT" <<JSON
 {
   "schema": "ee.agent_mail.snapshot.v1",
-  "generated_at": "2026-06-06T00:00:00Z",
-  "project_key": "<workspace>",
+  "generated_at": "$snapshot_generated_at",
+  "project_key": "$snapshot_project_key",
   "agent_name": "BlueLake",
   "redaction_status": "paths_counts_subjects_only_no_content",
   "producer_status": "ok",
   "fallback_active": false,
   "am_agents_list_ok": true,
+  "health_level": "green",
+  "durability_state": "ok",
   "summary": {
     "agent_count": 1,
     "degraded_count": 0,
     "file_reservation_count": 1,
     "inbox_mailbox_count": 1,
-    "source_command_count": 3,
+    "source_command_count": 6,
     "thread_count": 1
   },
   "source_commands": [
-    "am agents list --project <workspace> --json",
-    "am robot reservations --project <workspace> --all --format json",
-    "am mail inbox --project <workspace> --agent BlueLake --limit 5 --json"
+    "am agents list --project '<workspace>' --json",
+    "am robot reservations --project '<workspace>' --all --format json",
+    "am mail inbox --project '<workspace>' --agent BlueLake --limit 5 --json",
+    "am status --project '<workspace>' --agent BlueLake --json",
+    "agent-mail-health http://127.0.0.1:8765/health",
+    "agent-mail-health http://127.0.0.1:8765/health/durability"
   ],
-  "command_statuses": [],
+  "command_statuses": [
+    {"command": "am agents list --project '<workspace>' --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am robot reservations --project '<workspace>' --all --format json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am mail inbox --project '<workspace>' --agent BlueLake --limit 5 --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am status --project '<workspace>' --agent BlueLake --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "agent-mail-health http://127.0.0.1:8765/health", "ok": true, "exit_code": 200, "timed_out": false, "error_class": null},
+    {"command": "agent-mail-health http://127.0.0.1:8765/health/durability", "ok": true, "exit_code": 200, "timed_out": false, "error_class": null}
+  ],
   "degraded": [],
   "agents": [
     {"name": "BlueLake", "last_active_ts": "2026-06-06T00:00:00Z"}
@@ -283,31 +312,44 @@ JSONL
   ]
 }
 JSON
+    assert_snapshot_contract "$CLAIM_GATE_SNAPSHOT"
     CLAIM_GATE_SNAPSHOT_HASH="$(sha256_file "$CLAIM_GATE_SNAPSHOT")"
-    cat > "$CLAIM_GATE_CLEAN_SNAPSHOT" <<'JSON'
+    cat > "$CLAIM_GATE_CLEAN_SNAPSHOT" <<JSON
 {
   "schema": "ee.agent_mail.snapshot.v1",
-  "generated_at": "2026-06-06T00:00:00Z",
-  "project_key": "<workspace>",
+  "generated_at": "$snapshot_generated_at",
+  "project_key": "$snapshot_project_key",
   "agent_name": "GreenLake",
   "redaction_status": "paths_counts_subjects_only_no_content",
   "producer_status": "ok",
   "fallback_active": false,
   "am_agents_list_ok": true,
+  "health_level": "green",
+  "durability_state": "ok",
   "summary": {
     "agent_count": 1,
     "degraded_count": 0,
     "file_reservation_count": 1,
     "inbox_mailbox_count": 1,
-    "source_command_count": 3,
+    "source_command_count": 6,
     "thread_count": 1
   },
   "source_commands": [
-    "am agents list --project <workspace> --json",
-    "am robot reservations --project <workspace> --all --format json",
-    "am mail inbox --project <workspace> --agent GreenLake --limit 5 --json"
+    "am agents list --project '<workspace>' --json",
+    "am robot reservations --project '<workspace>' --all --format json",
+    "am mail inbox --project '<workspace>' --agent GreenLake --limit 5 --json",
+    "am status --project '<workspace>' --agent GreenLake --json",
+    "agent-mail-health http://127.0.0.1:8765/health",
+    "agent-mail-health http://127.0.0.1:8765/health/durability"
   ],
-  "command_statuses": [],
+  "command_statuses": [
+    {"command": "am agents list --project '<workspace>' --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am robot reservations --project '<workspace>' --all --format json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am mail inbox --project '<workspace>' --agent GreenLake --limit 5 --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am status --project '<workspace>' --agent GreenLake --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "agent-mail-health http://127.0.0.1:8765/health", "ok": true, "exit_code": 200, "timed_out": false, "error_class": null},
+    {"command": "agent-mail-health http://127.0.0.1:8765/health/durability", "ok": true, "exit_code": 200, "timed_out": false, "error_class": null}
+  ],
   "degraded": [],
   "agents": [
     {"name": "GreenLake", "last_active_ts": "2026-06-06T00:00:00Z"}
@@ -323,6 +365,7 @@ JSON
   ]
 }
 JSON
+    assert_snapshot_contract "$CLAIM_GATE_CLEAN_SNAPSHOT"
     CLAIM_GATE_CLEAN_SNAPSHOT_HASH="$(sha256_file "$CLAIM_GATE_CLEAN_SNAPSHOT")"
 
     set +e
@@ -485,6 +528,11 @@ capture_live_state() {
         "$phase_dir/inbox.stderr" \
         "$LIVE_AM_BIN" mail inbox --project "$LIVE_PROJECT" --agent "$LIVE_AGENT" --limit "$LIVE_INBOX_LIMIT" --json || return 1
     run_live_json_capture \
+        "status_${phase}" \
+        "$phase_dir/status.json" \
+        "$phase_dir/status.stderr" \
+        "$LIVE_AM_BIN" status --project "$LIVE_PROJECT" --agent "$LIVE_AGENT" --json || return 1
+    run_live_json_capture \
         "beads_${phase}" \
         "$phase_dir/beads-doctor.json" \
         "$phase_dir/beads-doctor.stderr" \
@@ -508,6 +556,7 @@ capture_live_state() {
       --slurpfile agents "$phase_dir/agents.json" \
       --slurpfile reservations "$phase_dir/reservations.json" \
       --slurpfile inbox "$phase_dir/inbox.json" \
+      --slurpfile status "$phase_dir/status.json" \
       --slurpfile beads "$phase_dir/beads-doctor-redacted.json" \
       '{
         agents: (
@@ -541,6 +590,10 @@ capture_live_state() {
               | sort_by(.id, .thread_id, .ack_required)
             else [] end
         ),
+        inbox_counts: {
+          unread: $status[0].unread,
+          ack_required: $status[0].ack_required
+        },
         beads: $beads[0]
       }' > "$output"
 }
@@ -643,6 +696,21 @@ JSON
 fi
 
 if [ "$1" = "robot" ] && [ "$2" = "reservations" ]; then
+if [ "${AM_FAKE_MODE:-ok}" = "malformed_reservations" ]; then
+cat <<JSON
+{
+  "all_active": [],
+  "reservations": [
+    {
+      "agent": "OtherAgent",
+      "path": "$AM_FAKE_PROJECT/scripts/agent_mail_snapshot.sh",
+      "exclusive": true
+    }
+  ]
+}
+JSON
+  exit 0
+fi
 cat <<JSON
 {
   "_meta": {"command": "robot reservations"},
@@ -689,6 +757,15 @@ cat <<'JSON'
   }
 ]
 JSON
+  exit 0
+fi
+
+if [ "$1" = "status" ]; then
+  if [ "${AM_FAKE_MODE:-ok}" = "malformed_status" ]; then
+    printf '%s\n' '{"health":"ok","unread":true,"ack_required":0}'
+  else
+    printf '%s\n' '{"health":"ok","unread":0,"ack_required":0}'
+  fi
   exit 0
 fi
 
@@ -739,6 +816,13 @@ fi
 jq -e '
   .producer_status == "ok"
   and .fallback_active == false
+  and .durability_state == "ok"
+  and (.summary.source_command_count == 6)
+  and any(.source_commands[]; contains("am status --project") and contains("--agent BeigeHollow --json"))
+  and any(.source_commands[]; contains("http://127.0.0.1:8765/health"))
+  and any(.source_commands[]; contains("http://127.0.0.1:8765/health/durability"))
+  and (.inbox[0].unread_count == 0)
+  and (.inbox[0].ack_required_count == 0)
   and any(.threads[]; .thread_id == "bd-6qcwh.2" and .message_count == 2)
 ' "$SNAPSHOT_STDOUT_OK" >/dev/null
 assert_snapshot_contract "$SNAPSHOT_STDOUT_OK"
@@ -785,14 +869,15 @@ jq -e '
   and .producer_status == "ok"
   and .fallback_active == false
   and .summary.file_reservation_count == 2
+  and .summary.source_command_count == 6
   and .summary.degraded_count == 0
   and (.file_reservations | length) == 2
   and any(.file_reservations[]; .path_pattern == "scripts/agent_mail_snapshot.sh" and .holder == "BeigeHollow" and .exclusive == true)
   and any(.file_reservations[]; .path_pattern == "[REDACTED:absolute_path]")
   and (.agents | length) == 2
   and (.inbox[0].mailbox == "BeigeHollow")
-  and (.inbox[0].unread_count == 2)
-  and (.inbox[0].ack_required_count == 1)
+  and (.inbox[0].unread_count == 0)
+  and (.inbox[0].ack_required_count == 0)
   and any(.threads[]; .thread_id == "bd-6qcwh.2" and .message_count == 2)
   and (.source_commands | all(contains("--include-bodies") | not))
 ' "$SNAPSHOT_OK" >/dev/null
@@ -843,7 +928,7 @@ jq -e '
     and any(.entries[];
       .kind == "agent_mail_inbox"
       and .id == "BeigeHollow"
-      and .status == "ack_required"
+      and .status == "ready"
     )
   )
   and any(.sources[];
@@ -856,6 +941,7 @@ jq -e '
   and any(.sources[];
     .source_id == "agent_mail_snapshot_health"
     and .status == "fresh"
+    and .entries[0].severity == "info"
   )
 ' "$COORDINATION_OK" >/dev/null
 
@@ -863,6 +949,59 @@ if grep -E 'mail send|mail ack|mail read|file_reservations reserve|file_reservat
     printf 'agent_mail_snapshot: producer invoked a forbidden mutating Agent Mail command\n' >&2
     exit 1
 fi
+
+PATH="$FAKE_BIN:$PATH" \
+AM_FAKE_COMMAND_LOG="$COMMAND_LOG" \
+AM_FAKE_PROJECT="$PROJECT" \
+AM_FAKE_MODE=malformed_status \
+"$PRODUCER" \
+  --project "$PROJECT" \
+  --agent BeigeHollow \
+  --output "$SNAPSHOT_INVALID_STATUS"
+
+jq -e '
+  .producer_status == "degraded"
+  and .fallback_active == true
+  and .inbox == []
+  and any(.threads[]; .thread_id == "bd-6qcwh.2" and .message_count == 2)
+  and .summary.degraded_count == 1
+  and any(.command_statuses[];
+    (.command | contains("am status --project"))
+    and .ok == false
+    and .error_class == "invalid_response"
+  )
+  and any(.degraded[];
+    (.command | contains("am status --project"))
+    and .error_class == "invalid_response"
+  )
+' "$SNAPSHOT_INVALID_STATUS" >/dev/null
+assert_snapshot_contract "$SNAPSHOT_INVALID_STATUS"
+
+PATH="$FAKE_BIN:$PATH" \
+AM_FAKE_COMMAND_LOG="$COMMAND_LOG" \
+AM_FAKE_PROJECT="$PROJECT" \
+AM_FAKE_MODE=malformed_reservations \
+"$PRODUCER" \
+  --project "$PROJECT" \
+  --agent BeigeHollow \
+  --output "$SNAPSHOT_INVALID_RESERVATIONS"
+
+jq -e '
+  .producer_status == "degraded"
+  and .fallback_active == true
+  and .file_reservations == []
+  and .summary.degraded_count == 1
+  and any(.command_statuses[];
+    (.command | contains("am robot reservations --project"))
+    and .ok == false
+    and .error_class == "invalid_response"
+  )
+  and any(.degraded[];
+    (.command | contains("am robot reservations --project"))
+    and .error_class == "invalid_response"
+  )
+' "$SNAPSHOT_INVALID_RESERVATIONS" >/dev/null
+assert_snapshot_contract "$SNAPSHOT_INVALID_RESERVATIONS"
 
 PATH="$FAKE_BIN:$PATH" \
 AM_FAKE_COMMAND_LOG="$COMMAND_LOG" \
@@ -897,11 +1036,12 @@ jq -e '
   and any(.sources[];
     .source_id == "agent_mail_snapshot_health"
     and .status == "degraded"
+    and .entries[0].severity == "warning"
     and any(.degraded[]; .code == "agent_mail_snapshot_source_unavailable")
   )
 ' "$COORDINATION_DEGRADED" >/dev/null
 
-for snapshot in "$SNAPSHOT_OK" "$SNAPSHOT_DEGRADED" "$SNAPSHOT_STDOUT_OK" "$SNAPSHOT_DUAL_FILE" "$SNAPSHOT_DUAL_STDOUT" "$COORDINATION_OK" "$COORDINATION_DEGRADED"; do
+for snapshot in "$SNAPSHOT_OK" "$SNAPSHOT_DEGRADED" "$SNAPSHOT_INVALID_STATUS" "$SNAPSHOT_INVALID_RESERVATIONS" "$SNAPSHOT_STDOUT_OK" "$SNAPSHOT_DUAL_FILE" "$SNAPSHOT_DUAL_STDOUT" "$COORDINATION_OK" "$COORDINATION_DEGRADED"; do
     if grep -E 'ghp_|raw body|body_md|SECRET_TOKEN|agent list unavailable|/Users/|/Volumes/|/data/|/tmp/|/private/|/var/folders/' "$snapshot" >/dev/null; then
         printf 'agent_mail_snapshot: redaction leak in %s\n' "$snapshot" >&2
         exit 1

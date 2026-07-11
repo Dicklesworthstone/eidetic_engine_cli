@@ -36,6 +36,7 @@ use crate::core::hygiene_coordination::{
 use crate::core::swarm_brief::{
     AGENT_MAIL_SNAPSHOT_MAX_BYTES, SystemSwarmBriefCommandRunner, WorkspaceGitSnapshot,
     WorkspaceGitSnapshotOptions, collect_workspace_git_snapshot, parse_agent_mail_snapshot_json,
+    validate_current_agent_mail_snapshot_for_workspace,
 };
 use crate::core::symbol_graph::SymbolGraphExtractor;
 use crate::db::{
@@ -685,9 +686,12 @@ pub fn build_workspace_hygiene_report(
     )
     .ok();
     let beads_metadata_signal = detect_beads_metadata_signal(&options.workspace_path);
-    let agent_mail_input =
-        load_agent_mail_coordination_input(options.agent_mail_snapshot_path.as_deref());
     let now = Utc::now();
+    let agent_mail_input = load_agent_mail_coordination_input(
+        options.agent_mail_snapshot_path.as_deref(),
+        &options.workspace_path,
+        now,
+    );
     let beads_reservations = beads_reservations_from_agent_mail_input(&agent_mail_input, now);
 
     let mut report = build_workspace_hygiene_report_from_inputs(WorkspaceHygieneReportInputs {
@@ -1257,7 +1261,11 @@ fn redaction_hash(label: &str, value: &str) -> String {
     format!("blake3:{}", hasher.finalize().to_hex())
 }
 
-fn load_agent_mail_coordination_input(path: Option<&Path>) -> AgentMailCoordinationInput {
+fn load_agent_mail_coordination_input(
+    path: Option<&Path>,
+    workspace: &Path,
+    now: DateTime<Utc>,
+) -> AgentMailCoordinationInput {
     let Some(path) = path else {
         return AgentMailCoordinationInput::Unavailable;
     };
@@ -1267,12 +1275,13 @@ fn load_agent_mail_coordination_input(path: Option<&Path>) -> AgentMailCoordinat
     if agent_mail_snapshot_status_is_timeout(&contents) {
         return AgentMailCoordinationInput::TimedOut;
     }
+    if validate_current_agent_mail_snapshot_for_workspace(&contents, workspace, now).is_err() {
+        return AgentMailCoordinationInput::Unavailable;
+    }
     let Ok(snapshot) = parse_agent_mail_snapshot_json(&contents) else {
         return AgentMailCoordinationInput::Unavailable;
     };
-    if snapshot.degraded.iter().any(|entry| {
-        entry.code == "agent_mail_unavailable" && snapshot.file_reservations.is_empty()
-    }) {
+    if !snapshot.degraded.is_empty() {
         return AgentMailCoordinationInput::Unavailable;
     }
     let reservations = snapshot
@@ -1290,7 +1299,21 @@ fn load_agent_mail_coordination_input(path: Option<&Path>) -> AgentMailCoordinat
             },
         )
         .collect();
-    let active_agents = parse_active_agents_from_snapshot(&contents);
+    let mut active_agents = snapshot
+        .agents
+        .into_iter()
+        .map(|agent| crate::core::hygiene_coordination::ActiveAgent {
+            name: agent.name,
+            last_active_at: agent.last_active_at,
+        })
+        .collect::<Vec<_>>();
+    active_agents.extend(parse_active_agents_from_snapshot(&contents));
+    active_agents.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| right.last_active_at.cmp(&left.last_active_at))
+    });
+    active_agents.dedup_by(|left, right| left.name == right.name);
     AgentMailCoordinationInput::Available {
         reservations,
         active_agents,
@@ -2662,6 +2685,7 @@ mod tests {
     use crate::core::hygiene_coordination::{ActiveAgent, AgentMailReservation};
     use crate::core::swarm_brief::{
         WorkspaceGitOperationState, WorkspaceGitPathMetadata, WorkspaceGitStatusEntry,
+        agent_mail_snapshot_project_key_for_workspace,
     };
 
     type TestResult = Result<(), String>;
@@ -2678,6 +2702,21 @@ mod tests {
         let root = unique_dir(prefix)?;
         fs::create_dir_all(root.join(WORKSPACE_MARKER)).map_err(|error| error.to_string())?;
         Ok(root)
+    }
+
+    fn declared_agent_mail_snapshot(workspace: &Path) -> Result<Value, String> {
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../docs/schemas/swarm/ee.agent_mail.snapshot.v1.json"
+        ))
+        .map_err(|error| error.to_string())?;
+        let mut snapshot = schema
+            .pointer("/examples/0")
+            .cloned()
+            .ok_or_else(|| "Agent Mail schema example is missing".to_owned())?;
+        snapshot["generated_at"] = serde_json::json!(Utc::now().to_rfc3339());
+        snapshot["project_key"] =
+            serde_json::json!(agent_mail_snapshot_project_key_for_workspace(workspace)?);
+        Ok(snapshot)
     }
 
     fn status_entry(path: &str, staged: &str, unstaged: &str) -> WorkspaceGitStatusEntry {
@@ -2840,27 +2879,16 @@ mod tests {
     #[test]
     fn loads_agent_mail_snapshot_as_coordination_input() -> TestResult {
         let workspace = unique_dir("ee-agent-mail-snapshot")?;
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
         let snapshot_path = workspace.join("agent-mail.json");
-        write_file(
-            &snapshot_path,
-            r#"{
-              "file_reservations": [
-                {
-                  "path_pattern": "src/core/workspace.rs",
-                  "holder": "OtherAgent",
-                  "exclusive": true,
-                  "expires_at": "2026-05-18T09:00:00Z"
-                }
-              ],
-              "active_agents": [
-                {"name": "OtherAgent", "last_active_at": "2026-05-18T08:45:00Z"}
-              ],
-              "inbox": [],
-              "threads": []
-            }"#,
-        )?;
+        let mut snapshot = declared_agent_mail_snapshot(&workspace)?;
+        snapshot["file_reservations"][0]["path_pattern"] =
+            serde_json::json!("src/core/workspace.rs");
+        snapshot["file_reservations"][0]["holder"] = serde_json::json!("OtherAgent");
+        write_file(&snapshot_path, &snapshot.to_string())?;
 
-        let input = load_agent_mail_coordination_input(Some(&snapshot_path));
+        let input =
+            load_agent_mail_coordination_input(Some(&snapshot_path), &workspace, Utc::now());
         let AgentMailCoordinationInput::Available {
             reservations,
             active_agents,
@@ -2872,7 +2900,59 @@ mod tests {
         assert_eq!(reservations[0].path_pattern, "src/core/workspace.rs");
         assert_eq!(reservations[0].holder_agent, "OtherAgent");
         assert_eq!(active_agents.len(), 1);
-        assert_eq!(active_agents[0].name, "OtherAgent");
+        assert_eq!(active_agents[0].name, "BeigeHollow");
+        Ok(())
+    }
+
+    #[test]
+    fn agent_mail_snapshot_authority_rejects_stale_or_other_workspace() -> TestResult {
+        let workspace = unique_dir("ee-agent-mail-snapshot-authority")?;
+        let other_workspace = unique_dir("ee-agent-mail-snapshot-other-workspace")?;
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&other_workspace).map_err(|error| error.to_string())?;
+
+        let cases = [
+            ("stale", "2000-01-01T00:00:00Z".to_owned(), None),
+            (
+                "other-workspace",
+                Utc::now().to_rfc3339(),
+                Some(agent_mail_snapshot_project_key_for_workspace(
+                    &other_workspace,
+                )?),
+            ),
+        ];
+        for (name, generated_at, project_key) in cases {
+            let mut snapshot = declared_agent_mail_snapshot(&workspace)?;
+            snapshot["generated_at"] = serde_json::json!(generated_at);
+            if let Some(project_key) = project_key {
+                snapshot["project_key"] = serde_json::json!(project_key);
+            }
+            let path = workspace.join(format!("{name}.json"));
+            write_file(&path, &snapshot.to_string())?;
+
+            let input = load_agent_mail_coordination_input(Some(&path), &workspace, Utc::now());
+            assert!(
+                matches!(input, AgentMailCoordinationInput::Unavailable),
+                "{name} declared-v1 evidence must be unavailable"
+            );
+        }
+
+        let mut corrupt = declared_agent_mail_snapshot(&workspace)?;
+        corrupt["producer_status"] = serde_json::json!("degraded");
+        corrupt["fallback_active"] = serde_json::json!(true);
+        corrupt["durability_state"] = serde_json::json!("corrupt");
+        corrupt["recovery"] = serde_json::json!({
+            "mode": "corrupt",
+            "reason": "archive_corruption"
+        });
+        let corrupt_path = workspace.join("corrupt.json");
+        write_file(&corrupt_path, &corrupt.to_string())?;
+        let corrupt_input =
+            load_agent_mail_coordination_input(Some(&corrupt_path), &workspace, Utc::now());
+        assert!(
+            matches!(corrupt_input, AgentMailCoordinationInput::Unavailable),
+            "recovery-corrupt declared-v1 evidence must be unavailable"
+        );
         Ok(())
     }
 
@@ -2922,7 +3002,8 @@ mod tests {
         // The coordination loader must propagate the refusal as
         // Unavailable (not panic, not surface a giant body, not
         // silently fall back to an empty snapshot).
-        let input = load_agent_mail_coordination_input(Some(&snapshot_path));
+        let input =
+            load_agent_mail_coordination_input(Some(&snapshot_path), &workspace, Utc::now());
         assert!(
             matches!(input, AgentMailCoordinationInput::Unavailable),
             "oversized snapshot must surface as Unavailable at the coordination layer; got {input:?}",

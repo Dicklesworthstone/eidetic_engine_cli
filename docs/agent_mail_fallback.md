@@ -105,6 +105,67 @@ producer actually checked, and carries schema `ee.agent_mail.snapshot.v1`. The
 producer never sends mail, acknowledges messages, marks read state, creates or
 releases reservations, mutates Beads, or runs the health smoke-test script.
 
+The producer uses six bounded read-only sources: agent inventory, active
+reservations, body-free inbox rows, `am status`, `/health`, and
+`/health/durability`. `am status` is the sole authority for unread and
+acknowledgement counts; inbox rows only shape `threads[]`. This avoids treating
+already-read messages returned for thread context as unread. Both health
+endpoints are required because `/health` intentionally reports readiness with
+`durability_state=not_probed`, while `/health/durability` reports the durable
+read/write posture.
+
+Status counts must be genuine integers in the unsigned 64-bit wire range.
+Boolean, negative, string, missing, and oversized values fail closed instead
+of being normalized to zero by a downstream consumer.
+
+### Structural and semantic validation
+
+Passing `docs/schemas/swarm/ee.agent_mail.snapshot.v1.json` is necessary
+structural validation, but it is not sufficient authority for a claim or
+coordination decision. Likewise, piping producer output through `jq .` only
+proves that it is parseable JSON. Authoritative consumers **MUST** also run the
+strict declared-v1 semantic validator. The shipped `ee swarm brief`,
+`ee swarm work-packet`, and `ee workspace hygiene` snapshot paths do this
+automatically before they trust reservation or inbox evidence.
+
+The semantic pass verifies cross-field invariants that draft-07 JSON Schema
+cannot fully express:
+
+- the six source commands have the required order and identities, the first
+  four share one redacted Agent Mail executable prefix, and the inbox/status
+  commands bind to the top-level `agent_name`;
+- each `command_statuses[]` entry repeats the corresponding
+  `source_commands[]` value, successful commands carry the expected CLI or
+  HTTP status, and failed commands carry bounded failure metadata;
+- `am_agents_list_ok`, `fallback_active`, `producer_status`, readiness,
+  recovery, and durability agree with the command results;
+- `summary` counts equal the normalized array lengths, every failed command
+  has exactly one matching `degraded[]` entry, and failed sources contribute no
+  normalized rows; and
+- a successful status probe contributes exactly the mailbox named by
+  `agent_name`.
+
+Workspace binding and snapshot freshness are additional authority checks, not
+substitutes for the semantic pass. If any structural, semantic, binding, or
+freshness check fails, treat Agent Mail as unavailable or degraded; never
+interpret empty arrays from that snapshot as proof that no reservation or
+unread mail exists.
+
+Agent, reservation, and inbox responses must expose one unambiguous recognized
+collection shape, and every returned row must carry consistent required
+identity fields. The producer rejects conflicting aliases and entire partially
+malformed collections instead of silently dropping a row that might represent
+an exclusive reservation or active thread.
+
+The dedicated durability response must include a non-empty state and actual
+boolean `allows_reads`/`allows_writes` values. Missing or malformed fields fail
+closed. When readiness and durability disagree, the stricter bounded posture
+wins; a healthy durability response cannot erase a corrupt readiness/recovery
+signal. Conversely, readiness `not_probed` plus a valid healthy durability
+response is healthy. `fallback_active` and `producer_status` reflect this
+combined posture, while `degraded[]` remains limited to source command failures
+and invalid command responses.
+
 The companion coordination file is the pack-compatible
 `ee.coordination_snapshot.v1` projection over the same redacted Agent Mail
 evidence. Use it only with `--coordination-snapshot`; swarm brief and workspace
@@ -148,6 +209,10 @@ permission to claim by itself: `safeToClaim=true`, `verdict=safe_to_claim`, and
 a non-null `claimCommandAction` must still be present. If `unsafeReasons` still
 name active reservations, stale tracker state, BV disagreement, or RCH proof
 blockers, coordinate through Agent Mail or Beads comments instead of claiming.
+If the snapshot has `fallback_active=true`, do not infer authority from empty
+arrays or a transport-green `/health` response. Inspect the bounded recovery or
+durability fields and the command statuses, repair the failing source, then
+regenerate the snapshot.
 
 Useful full-snapshot environment overrides:
 

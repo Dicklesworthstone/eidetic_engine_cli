@@ -416,11 +416,48 @@ HEALTH_AGENT_MAIL_SNAPSHOT="$ARTIFACT_DIR/agent-mail-health-degraded.json"
 CI_STALE_PROOF_SNAPSHOT="$REPO_ROOT/tests/fixtures/ci_proof_lane/artifact_stale.json"
 CI_CANCELLED_PROOF_SNAPSHOT="$REPO_ROOT/tests/fixtures/ci_proof_lane/cancelled_before_artifact.json"
 LOCAL_CARGO_PROCESS_SCAN="$ARTIFACT_DIR/local-cargo-bypass-scan.json"
+FULL_AGENT_MAIL_GENERATED_AT="$(now_iso)"
+WORKSPACE_CANONICAL="$(cd "$WORKSPACE" && pwd -P)"
+WORKSPACE_PROJECT_KEY="sha256:$(printf '%s' "$WORKSPACE_CANONICAL" | shasum -a 256 | awk '{print $1}')"
 
-cat >"$FULL_AGENT_MAIL_SNAPSHOT" <<'JSON'
+cat >"$FULL_AGENT_MAIL_SNAPSHOT" <<JSON
 {
   "schema": "ee.agent_mail.snapshot.v1",
-  "captured_at": "2026-06-05T08:00:00Z",
+  "generated_at": "$FULL_AGENT_MAIL_GENERATED_AT",
+  "project_key": "$WORKSPACE_PROJECT_KEY",
+  "agent_name": "RubyElk",
+  "redaction_status": "paths_counts_subjects_only_no_content",
+  "producer_status": "ok",
+  "source_commands": [
+    "am agents list --project '<workspace>' --json",
+    "am robot reservations --project '<workspace>' --all --format json",
+    "am mail inbox --project '<workspace>' --agent RubyElk --limit 20 --json",
+    "am status --project '<workspace>' --agent RubyElk --json",
+    "agent-mail-health http://127.0.0.1:8765/health",
+    "agent-mail-health http://127.0.0.1:8765/health/durability"
+  ],
+  "command_statuses": [
+    {"command": "am agents list --project '<workspace>' --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am robot reservations --project '<workspace>' --all --format json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am mail inbox --project '<workspace>' --agent RubyElk --limit 20 --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am status --project '<workspace>' --agent RubyElk --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "agent-mail-health http://127.0.0.1:8765/health", "ok": true, "exit_code": 200, "timed_out": false, "error_class": null},
+    {"command": "agent-mail-health http://127.0.0.1:8765/health/durability", "ok": true, "exit_code": 200, "timed_out": false, "error_class": null}
+  ],
+  "fallback_active": false,
+  "am_agents_list_ok": true,
+  "health_level": "green",
+  "semantic_readiness": {"status": "pass"},
+  "durability_state": "ok",
+  "summary": {
+    "agent_count": 2,
+    "file_reservation_count": 1,
+    "inbox_mailbox_count": 1,
+    "thread_count": 1,
+    "source_command_count": 6,
+    "degraded_count": 0
+  },
+  "degraded": [],
   "agents": [
     {"name": "RubyElk", "last_active_ts": "2026-06-05T08:00:00Z"},
     {"name": "TurquoiseTern", "last_active_ts": "2026-06-05T08:00:00Z"}
@@ -429,8 +466,7 @@ cat >"$FULL_AGENT_MAIL_SNAPSHOT" <<'JSON'
     {
       "path_pattern": "src/core/*.rs",
       "holder": "TurquoiseTern",
-      "exclusive": true,
-      "expires_ts": "2026-06-05T09:00:00Z"
+      "exclusive": true
     }
   ],
   "inbox": [

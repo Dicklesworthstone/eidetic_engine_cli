@@ -57,34 +57,55 @@ Required top-level metadata:
 | --- | --- |
 | `schema` | Must be `ee.agent_mail.snapshot.v1` for the shipped producer. |
 | `generated_at` | RFC 3339 production timestamp. |
-| `project_key` | Redacted or workspace-relative project identifier. |
+| `project_key` | `sha256:<64 lowercase hex>` binding to the physical canonical UTF-8 workspace identity. It is redaction-safe and lets consumers reject a snapshot produced for another workspace. The producer recovers macOS filesystem casing so `/users/...` aliases bind identically to Rust `realpath`; Windows identities use `/`, omit the extended-length prefix, and lowercase the drive letter. Non-UTF-8 canonical paths fail closed. |
 | `agent_name` | Agent mailbox used for inbox and thread summaries. |
 | `summary` | Counts for agents, reservations, inbox mailboxes, threads, commands, and degraded records. |
-| `source_commands` | Redacted list of read-only commands/resources used, including the local Agent Mail `/health` resource when available. |
+| `source_commands` | Redacted list of read-only commands/resources used, including `am status` plus the local Agent Mail `/health` and `/health/durability` resources. |
 | `redaction_status` | Producer redaction posture, for example `paths_counts_subjects_only_no_content`. |
-| `fallback_active` | Agent Mail fallback state from the health probe. |
+| `fallback_active` | Combined fail-closed posture across command validity, readiness, recovery, and durability. |
 | `producer_status` | `ok` or `degraded`. |
 | `command_statuses` | Redacted status for each read-only Agent Mail command. |
-| `degraded` | Source degradation records when a class could not be checked. |
+| `degraded` | Source-command failures and invalid command responses; reported health posture alone does not manufacture entries. |
 
-Optional legacy metadata still tolerated by consumers:
+A declared v1 snapshot always records exactly six ordered sources: agents,
+reservations, body-free inbox rows, `am status`, `/health`, and
+`/health/durability`. `command_statuses` has the same length and each status
+repeats the command at the same index. Summary counts must match the normalized
+arrays, and `degraded[]` must correspond one-for-one with failed statuses.
+
+Optional bounded health metadata:
 
 | Field | Purpose |
 | --- | --- |
-| `semantic_readiness` | Object or string describing semantic-readiness status. |
-| `healthLevel` | Health classification used in semantic-readiness diagnostics. |
+| `semantic_readiness` | Object describing semantic-readiness status. |
+| `health_level` | Health classification used in semantic-readiness diagnostics. |
 | `recovery` | Bounded recovery posture. Non-ok modes such as `corrupt` make reservation and inbox evidence non-authoritative. |
 | `durability_state` | Bounded durability posture. `corrupt` is equivalent to recovery corruption and must not leak raw storage details. |
 
 Authority precedence:
 
-1. A failed Agent Mail source command makes that source unavailable.
+1. A failed Agent Mail source command, malformed response, or invalid count
+   makes that source unavailable. Counts must fit the unsigned 64-bit wire
+   range; booleans, negative values, and oversized integers are not accepted.
+   Agent, reservation, and inbox inventories must also use one unambiguous
+   recognized list shape, and every returned row must carry consistent required
+   identity fields. Conflicting aliases or a partially malformed reservation
+   list fail the whole source closed rather than silently dropping or
+   downgrading a possible exclusive reservation.
 2. `semantic_readiness.status=fail` makes reservation and inbox reads
    non-authoritative even when health is green.
 3. `recovery.mode=corrupt`, non-ok `recovery.status`, or
    `durability_state=corrupt` also makes reservation and inbox reads
    non-authoritative, including when `semantic_readiness.status=ok`.
-4. Green transport health is only a transport signal; it does not override
+4. The `/health` readiness response and `/health/durability` response are
+   independent. The dedicated durability response must contain a non-empty
+   `durability_state` plus boolean `allows_reads` and `allows_writes`. The
+   stricter bounded posture wins when they disagree. The readiness endpoint's
+   intentional `durability_state=not_probed` is neutral only when the dedicated
+   durability probe is valid. The readiness response must still contain a valid
+   service `status` or health-level signal; semantic-readiness, recovery, and
+   durability fields may refine or worsen that signal but cannot establish it.
+5. Green transport health is only a transport signal; it does not override
    semantic, recovery, durability, or read-API evidence.
 
 Recovery and durability snapshots must emit only bounded reason classes such as
@@ -92,9 +113,10 @@ Recovery and durability snapshots must emit only bounded reason classes such as
 database paths, SQLite filenames, B-tree/page offsets, recovery bundle paths,
 raw next-action text, mail bodies, or stack traces.
 
-Unknown metadata is tolerated by current consumers for compatibility with older
-snapshots, but the shipped producer emits the versioned schema and required
-metadata above.
+Unknown metadata is tolerated only on legacy, schema-less snapshots for
+compatibility with older producers. A snapshot that declares
+`ee.agent_mail.snapshot.v1` is validated strictly: unknown or contradictory
+fields make its reservation and inbox evidence unavailable for claim decisions.
 
 ## Agent Mail Snapshot Fields
 
@@ -106,6 +128,11 @@ metadata above.
 | `holder` | `agent_name`, `agent`, `owner` | Agent identity only; no message body. |
 | `exclusive` | none | Boolean. |
 | `expires_ts` | `expires_at` | RFC 3339 timestamp when available. |
+
+The strict snapshot summary counts the producer's captured reservation rows,
+but claim/surface projection re-evaluates `expires_ts` at the consumer decision
+clock. Rows whose expiry is less than or equal to that clock remain auditable in
+the snapshot and are excluded from active collision risk.
 
 `agents[]` entries:
 
@@ -119,8 +146,8 @@ metadata above.
 | Field | Aliases | Redaction rule |
 | --- | --- | --- |
 | `mailbox` | `agent_name`, `agent` | Mailbox or agent identity only. |
-| `unread_count` | `unread` | Count only; no subjects or bodies. |
-| `ack_required_count` | `ackRequired` | Count only. |
+| `unread_count` | `unread` | Authoritative non-negative count from `am status`; no subjects or bodies. |
+| `ack_required_count` | `ackRequired` | Authoritative non-negative count from `am status`. |
 
 `threads[]` entries:
 
@@ -150,16 +177,20 @@ degraded note through the health or semantic-readiness fields.
 ## Mutation Boundary
 
 Snapshot collection must be read-only. Allowed sources include read-only Agent
-Mail inventory, reservation, inbox-count, and thread-summary calls. Inbox calls
-must be body-free, must not pass `--include-bodies`, and must not mark messages
-read.
+Mail inventory, reservation, status-count, inbox-thread, and health calls.
+`am status` is the authority for unread and acknowledgement counts. Inbox rows
+shape thread summaries only; their presence and `ack_required` flags are not
+count evidence. Inbox calls must be body-free, must not pass `--include-bodies`,
+and must not mark messages read.
 
 ```bash
 am agents list --project "$PWD" --json
 am file_reservations list "$PWD" --active-only
 am robot reservations --project "$PWD" --all --format json
-am robot status --project "$PWD" --format json
+am status --project "$PWD" --agent "$AGENT_NAME" --json
 am mail inbox --project "$PWD" --agent "$AGENT_NAME" --limit 20 --json
+curl -fsS http://127.0.0.1:8765/health
+curl -fsS http://127.0.0.1:8765/health/durability
 ```
 
 `scripts/swarm_coordination_health.sh` is not a full snapshot producer because
@@ -212,7 +243,7 @@ Useful producer options:
 | `--project <path>` | Agent Mail project/workspace path. Defaults to `AGENT_MAIL_PROJECT` or the current directory. |
 | `--agent <name>` | Mailbox used for inbox/thread summaries. Defaults to `AGENT_MAIL_AGENT` or `AGENT_NAME`. |
 | `--am-bin <path>` | Agent Mail CLI binary. Defaults to `AGENT_MAIL_AM_BIN` or `am`. |
-| `--inbox-limit <n>` | Maximum inbox rows to read for count and thread projection. |
+| `--inbox-limit <n>` | Maximum body-free inbox rows to read for thread projection; it does not cap or define status counts. |
 | `--thread-limit <n>` | Maximum thread summaries emitted. |
 | `--timeout-sec <n>` | Per-command timeout; failures are emitted as degraded source entries. |
 | `--json` | Emit full `ee.agent_mail.snapshot.v1` JSON to stdout. |
@@ -226,7 +257,18 @@ The producer currently calls only read-only Agent Mail commands:
 am agents list --project <workspace> --json
 am robot reservations --project <workspace> --all --format json
 am mail inbox --project <workspace> --agent <agent> --limit <n> --json
+am status --project <workspace> --agent <agent> --json
+GET http://127.0.0.1:8765/health
+GET http://127.0.0.1:8765/health/durability
 ```
+
+The readiness endpoint may correctly report `durability_state=not_probed`.
+That value is completed by the dedicated durability endpoint; it is not itself
+proof of degradation. Missing or malformed dedicated durability fields fail
+closed. A reported corrupt, repair-required, or read/write-disabled posture
+also activates fallback without manufacturing a `degraded[]` command failure.
+`degraded[]` remains a record of failed source commands or invalid command
+responses.
 
 It intentionally does not call `scripts/swarm_coordination_health.sh`, because
 that script can run send smoke checks. Health events remain useful as degraded
@@ -281,24 +323,39 @@ Healthy full snapshot:
 {
   "schema": "ee.agent_mail.snapshot.v1",
   "generated_at": "2026-06-04T18:20:00Z",
-  "project_key": "<workspace>",
+  "project_key": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
   "agent_name": "BeigeHollow",
   "redaction_status": "paths_counts_subjects_only_no_content",
   "source_commands": [
     "am agents list --project '<workspace>' --json",
     "am robot reservations --project '<workspace>' --all --format json",
-    "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json"
+    "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json",
+    "am status --project '<workspace>' --agent BeigeHollow --json",
+    "agent-mail-health http://127.0.0.1:8765/health",
+    "agent-mail-health http://127.0.0.1:8765/health/durability"
+  ],
+  "command_statuses": [
+    {"command": "am agents list --project '<workspace>' --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am robot reservations --project '<workspace>' --all --format json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am status --project '<workspace>' --agent BeigeHollow --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "agent-mail-health http://127.0.0.1:8765/health", "ok": true, "exit_code": 200, "timed_out": false, "error_class": null},
+    {"command": "agent-mail-health http://127.0.0.1:8765/health/durability", "ok": true, "exit_code": 200, "timed_out": false, "error_class": null}
   ],
   "producer_status": "ok",
   "fallback_active": false,
+  "am_agents_list_ok": true,
+  "health_level": "green",
+  "durability_state": "ok",
   "summary": {
     "agent_count": 1,
     "file_reservation_count": 1,
     "inbox_mailbox_count": 1,
     "thread_count": 1,
-    "source_command_count": 3,
+    "source_command_count": 6,
     "degraded_count": 0
   },
+  "degraded": [],
   "file_reservations": [
     {
       "path_pattern": "docs/swarm/coordination_snapshot.md",
@@ -355,20 +412,36 @@ Stale snapshot:
 {
   "schema": "ee.agent_mail.snapshot.v1",
   "generated_at": "2026-06-04T12:00:00Z",
-  "project_key": "<workspace>",
+  "project_key": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
   "agent_name": "BeigeHollow",
   "redaction_status": "paths_counts_subjects_only_no_content",
   "producer_status": "ok",
-  "source_commands": [],
-  "command_statuses": [],
+  "source_commands": [
+    "am agents list --project '<workspace>' --json",
+    "am robot reservations --project '<workspace>' --all --format json",
+    "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json",
+    "am status --project '<workspace>' --agent BeigeHollow --json",
+    "agent-mail-health http://127.0.0.1:8765/health",
+    "agent-mail-health http://127.0.0.1:8765/health/durability"
+  ],
+  "command_statuses": [
+    {"command": "am agents list --project '<workspace>' --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am robot reservations --project '<workspace>' --all --format json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am status --project '<workspace>' --agent BeigeHollow --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "agent-mail-health http://127.0.0.1:8765/health", "ok": true, "exit_code": 200, "timed_out": false, "error_class": null},
+    {"command": "agent-mail-health http://127.0.0.1:8765/health/durability", "ok": true, "exit_code": 200, "timed_out": false, "error_class": null}
+  ],
   "fallback_active": false,
   "am_agents_list_ok": true,
+  "health_level": "green",
+  "durability_state": "ok",
   "summary": {
     "agent_count": 0,
     "file_reservation_count": 0,
     "inbox_mailbox_count": 0,
     "thread_count": 0,
-    "source_command_count": 0,
+    "source_command_count": 6,
     "degraded_count": 0
   },
   "degraded": [],
@@ -389,20 +462,36 @@ Reservation conflict:
 {
   "schema": "ee.agent_mail.snapshot.v1",
   "generated_at": "2026-06-04T18:25:00Z",
-  "project_key": "<workspace>",
+  "project_key": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
   "agent_name": "BeigeHollow",
   "redaction_status": "paths_counts_subjects_only_no_content",
   "producer_status": "ok",
-  "source_commands": [],
-  "command_statuses": [],
+  "source_commands": [
+    "am agents list --project '<workspace>' --json",
+    "am robot reservations --project '<workspace>' --all --format json",
+    "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json",
+    "am status --project '<workspace>' --agent BeigeHollow --json",
+    "agent-mail-health http://127.0.0.1:8765/health",
+    "agent-mail-health http://127.0.0.1:8765/health/durability"
+  ],
+  "command_statuses": [
+    {"command": "am agents list --project '<workspace>' --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am robot reservations --project '<workspace>' --all --format json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am status --project '<workspace>' --agent BeigeHollow --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "agent-mail-health http://127.0.0.1:8765/health", "ok": true, "exit_code": 200, "timed_out": false, "error_class": null},
+    {"command": "agent-mail-health http://127.0.0.1:8765/health/durability", "ok": true, "exit_code": 200, "timed_out": false, "error_class": null}
+  ],
   "fallback_active": false,
   "am_agents_list_ok": true,
+  "health_level": "green",
+  "durability_state": "ok",
   "summary": {
     "agent_count": 0,
     "file_reservation_count": 1,
     "inbox_mailbox_count": 0,
     "thread_count": 0,
-    "source_command_count": 0,
+    "source_command_count": 6,
     "degraded_count": 0
   },
   "degraded": [],
@@ -420,26 +509,42 @@ Reservation conflict:
 }
 ```
 
-Inbox unavailable:
+Inbox counts unavailable:
 
 ```json
 {
   "schema": "ee.agent_mail.snapshot.v1",
   "generated_at": "2026-06-04T18:26:00Z",
-  "project_key": "<workspace>",
+  "project_key": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
   "agent_name": "BeigeHollow",
   "redaction_status": "paths_counts_subjects_only_no_content",
   "producer_status": "degraded",
-  "source_commands": [],
-  "command_statuses": [],
+  "source_commands": [
+    "am agents list --project '<workspace>' --json",
+    "am robot reservations --project '<workspace>' --all --format json",
+    "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json",
+    "am status --project '<workspace>' --agent BeigeHollow --json",
+    "agent-mail-health http://127.0.0.1:8765/health",
+    "agent-mail-health http://127.0.0.1:8765/health/durability"
+  ],
+  "command_statuses": [
+    {"command": "am agents list --project '<workspace>' --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am robot reservations --project '<workspace>' --all --format json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json", "ok": true, "exit_code": 0, "timed_out": false, "error_class": null},
+    {"command": "am status --project '<workspace>' --agent BeigeHollow --json", "ok": false, "exit_code": 0, "timed_out": false, "error_class": "invalid_response"},
+    {"command": "agent-mail-health http://127.0.0.1:8765/health", "ok": true, "exit_code": 200, "timed_out": false, "error_class": null},
+    {"command": "agent-mail-health http://127.0.0.1:8765/health/durability", "ok": true, "exit_code": 200, "timed_out": false, "error_class": null}
+  ],
   "fallback_active": true,
   "am_agents_list_ok": true,
+  "health_level": "green",
+  "durability_state": "ok",
   "summary": {
     "agent_count": 1,
     "file_reservation_count": 0,
     "inbox_mailbox_count": 0,
     "thread_count": 0,
-    "source_command_count": 0,
+    "source_command_count": 6,
     "degraded_count": 1
   },
   "degraded": [
@@ -447,17 +552,17 @@ Inbox unavailable:
       "code": "agent_mail_snapshot_source_unavailable",
       "severity": "warning",
       "source": "agent_mail",
-      "command": "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json",
-      "error_class": "timeout",
-      "exit_code": null,
-      "timed_out": true
+      "command": "am status --project '<workspace>' --agent BeigeHollow --json",
+      "error_class": "invalid_response",
+      "exit_code": 0,
+      "timed_out": false
     }
   ],
   "file_reservations": [],
   "agents": [
     {
       "name": "GoldenGate",
-      "lastActiveAt": "2026-06-04T18:20:00Z"
+      "last_active_ts": "2026-06-04T18:20:00Z"
     }
   ],
   "inbox": [],
@@ -466,7 +571,9 @@ Inbox unavailable:
 ```
 
 The empty `inbox` array is not proof of zero unread messages when
-`fallback_active` is true; it means inbox freshness is degraded.
+`fallback_active` is true; it means the authoritative `am status` counts were
+unavailable. Body-free inbox rows may still produce `threads[]`, but they never
+substitute for the missing counts.
 
 Semantic readiness failed:
 
@@ -517,6 +624,11 @@ Implementation beads for the producer and parser must include fixtures for:
 - stale snapshot;
 - exclusive reservation conflict;
 - inbox unavailable while fallback is active;
+- inbox rows that look unread while authoritative `am status` reports zero;
+- malformed, contradictory, or partially malformed agent, reservation, and inbox collections;
+- missing, boolean, negative, oversized, and non-integer status counts;
+- split readiness/durability health, including `not_probed` plus healthy,
+  contradictory postures, missing durability fields, and disabled reads;
 - semantic-readiness failure;
 - malformed JSON, oversized file, and symlinked snapshot paths;
 - redaction of bodies, attachments, secrets, absolute archive paths, and raw

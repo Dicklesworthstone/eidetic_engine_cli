@@ -2,7 +2,8 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://eidetic-engine/schemas/swarm/ee.agent_mail.snapshot.v1.json",
   "title": "ee.agent_mail.snapshot.v1",
-  "description": "Redaction-safe full Agent Mail snapshot produced outside ee for swarm brief, workspace hygiene, and claim-gate evidence refresh.",
+  "description": "Redaction-safe full Agent Mail snapshot produced outside ee for swarm brief, workspace hygiene, and claim-gate evidence refresh. Inbox counts come from am status; inbox rows are used only for thread projection. Readiness and durability are checked independently and the stricter posture wins. Conformance to this JSON Schema is necessary structural validation, but it is not sufficient to authorize coordination or claims; authoritative consumers must also run the strict declared-v1 semantic validator.",
+  "$comment": "Draft-07 cannot express every required cross-field invariant. Before treating a snapshot as authoritative, consumers MUST also verify the six ordered source-command identities, shared CLI executable prefix, inbox/status agent binding to agent_name, command_status/source_commands equality by index, summary counts against their arrays, am_agents_list_ok against the first status, failed-status metadata, one-for-one failed-status/degraded correspondence, and absence of normalized rows from failed sources. The shipped ee consumers perform this strict semantic validation in addition to schema, workspace-binding, and freshness checks.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -26,7 +27,11 @@
   "properties": {
     "schema": { "type": "string", "const": "ee.agent_mail.snapshot.v1" },
     "generated_at": { "type": "string", "format": "date-time" },
-    "project_key": { "type": "string" },
+    "project_key": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Redaction-safe SHA-256 binding to the producer's physical canonical UTF-8 workspace identity. On macOS, the producer recovers the filesystem's canonical path spelling so case aliases hash identically to Rust realpath. Windows identities use forward slashes, omit the extended-length prefix, and lowercase the drive letter. Consumers recompute it for the workspace being gated; non-UTF-8 canonical paths fail closed."
+    },
     "agent_name": { "type": "string", "minLength": 1 },
     "redaction_status": {
       "type": "string",
@@ -35,11 +40,33 @@
     "producer_status": { "type": "string", "enum": ["ok", "degraded"] },
     "source_commands": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "minItems": 6,
+      "maxItems": 6,
+      "uniqueItems": true,
+      "additionalItems": false,
+      "items": [
+        { "type": "string", "minLength": 1 },
+        { "type": "string", "minLength": 1 },
+        { "type": "string", "minLength": 1 },
+        { "type": "string", "minLength": 1 },
+        { "const": "agent-mail-health http://127.0.0.1:8765/health" },
+        { "const": "agent-mail-health http://127.0.0.1:8765/health/durability" }
+      ],
+      "description": "Exactly six ordered, redacted read-only sources. The schema fixes the two health resources; the strict semantic validator additionally verifies the four CLI command identities, their shared executable prefix, and agent_name binding."
     },
     "command_statuses": {
       "type": "array",
-      "items": { "$ref": "#/$defs/commandStatus" }
+      "minItems": 6,
+      "maxItems": 6,
+      "additionalItems": false,
+      "items": [
+        { "$ref": "#/$defs/commandStatusCli" },
+        { "$ref": "#/$defs/commandStatusCli" },
+        { "$ref": "#/$defs/commandStatusCli" },
+        { "$ref": "#/$defs/commandStatusCli" },
+        { "$ref": "#/$defs/commandStatusHttp" },
+        { "$ref": "#/$defs/commandStatusHttp" }
+      ]
     },
     "fallback_active": { "type": "boolean" },
     "am_agents_list_ok": { "type": "boolean" },
@@ -72,6 +99,195 @@
       "items": { "$ref": "#/$defs/thread" }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "fallback_active": { "const": false } },
+        "required": ["fallback_active"]
+      },
+      "then": {
+        "properties": {
+          "producer_status": { "const": "ok" },
+          "command_statuses": {
+            "not": {
+              "contains": {
+                "type": "object",
+                "properties": { "ok": { "const": false } },
+                "required": ["ok"]
+              }
+            }
+          },
+          "health_level": { "const": "green" },
+          "semantic_readiness": {
+            "type": "object",
+            "properties": { "status": { "const": "pass" } }
+          },
+          "durability_state": { "const": "ok" }
+        },
+        "not": { "required": ["recovery"] }
+      }
+    },
+    {
+      "if": {
+        "properties": { "fallback_active": { "const": true } },
+        "required": ["fallback_active"]
+      },
+      "then": {
+        "properties": { "producer_status": { "const": "degraded" } },
+        "anyOf": [
+          {
+            "properties": {
+              "command_statuses": {
+                "contains": {
+                  "type": "object",
+                  "properties": { "ok": { "const": false } },
+                  "required": ["ok"]
+                }
+              }
+            }
+          },
+          {
+            "properties": { "health_level": { "enum": ["yellow", "red"] } },
+            "required": ["health_level"]
+          },
+          {
+            "properties": {
+              "semantic_readiness": {
+                "type": "object",
+                "properties": { "status": { "enum": ["fail", "unknown"] } },
+                "required": ["status"]
+              }
+            },
+            "required": ["semantic_readiness"]
+          },
+          {
+            "properties": {
+              "durability_state": {
+                "enum": ["corrupt", "repair_required", "unknown_recovery"]
+              }
+            },
+            "required": ["durability_state"]
+          },
+          { "required": ["recovery"] }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command_statuses": {
+            "items": [
+              {},
+              {},
+              {},
+              {},
+              {
+                "type": "object",
+                "properties": { "ok": { "const": true } },
+                "required": ["ok"]
+              }
+            ]
+          }
+        }
+      },
+      "then": { "required": ["health_level"] }
+    },
+    {
+      "if": {
+        "properties": {
+          "command_statuses": {
+            "items": [
+              {},
+              {},
+              {},
+              {},
+              {
+                "type": "object",
+                "properties": { "ok": { "const": false } },
+                "required": ["ok"]
+              }
+            ]
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            { "required": ["health_level"] },
+            { "required": ["semantic_readiness"] }
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command_statuses": {
+            "items": [
+              {},
+              {},
+              {},
+              {},
+              {},
+              {
+                "type": "object",
+                "properties": { "ok": { "const": true } },
+                "required": ["ok"]
+              }
+            ]
+          }
+        }
+      },
+      "then": { "required": ["durability_state"] }
+    },
+    {
+      "oneOf": [
+        {
+          "properties": { "durability_state": { "const": "ok" } },
+          "required": ["durability_state"],
+          "not": { "required": ["recovery"] }
+        },
+        {
+          "properties": {
+            "durability_state": { "const": "corrupt" },
+            "recovery": {
+              "type": "object",
+              "properties": { "mode": { "const": "corrupt" } }
+            }
+          },
+          "required": ["durability_state", "recovery"]
+        },
+        {
+          "properties": {
+            "durability_state": { "const": "repair_required" },
+            "recovery": {
+              "type": "object",
+              "properties": { "mode": { "const": "repair_required" } }
+            }
+          },
+          "required": ["durability_state", "recovery"]
+        },
+        {
+          "properties": {
+            "durability_state": { "const": "unknown_recovery" },
+            "recovery": {
+              "type": "object",
+              "properties": { "mode": { "const": "unknown_recovery" } }
+            }
+          },
+          "required": ["durability_state", "recovery"]
+        },
+        {
+          "not": {
+            "anyOf": [
+              { "required": ["durability_state"] },
+              { "required": ["recovery"] }
+            ]
+          }
+        }
+      ]
+    }
+  ],
   "$defs": {
     "summary": {
       "type": "object",
@@ -89,7 +305,7 @@
         "file_reservation_count": { "type": "integer", "minimum": 0 },
         "inbox_mailbox_count": { "type": "integer", "minimum": 0 },
         "thread_count": { "type": "integer", "minimum": 0 },
-        "source_command_count": { "type": "integer", "minimum": 0 },
+        "source_command_count": { "type": "integer", "const": 6 },
         "degraded_count": { "type": "integer", "minimum": 0 }
       }
     },
@@ -102,8 +318,71 @@
         "ok": { "type": "boolean" },
         "exit_code": { "type": ["integer", "null"] },
         "timed_out": { "type": "boolean" },
-        "error_class": { "type": ["string", "null"] }
-      }
+        "error_class": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "null" }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "ok": { "const": false } },
+            "required": ["ok"]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": { "timed_out": { "const": true } },
+                "required": ["timed_out"]
+              },
+              {
+                "properties": {
+                  "error_class": { "type": "string", "minLength": 1 }
+                },
+                "required": ["error_class"]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "commandStatusCli": {
+      "allOf": [
+        { "$ref": "#/$defs/commandStatus" },
+        {
+          "if": {
+            "properties": { "ok": { "const": true } },
+            "required": ["ok"]
+          },
+          "then": {
+            "properties": {
+              "exit_code": { "const": 0 },
+              "timed_out": { "const": false },
+              "error_class": { "const": null }
+            }
+          }
+        }
+      ]
+    },
+    "commandStatusHttp": {
+      "allOf": [
+        { "$ref": "#/$defs/commandStatus" },
+        {
+          "if": {
+            "properties": { "ok": { "const": true } },
+            "required": ["ok"]
+          },
+          "then": {
+            "properties": {
+              "exit_code": { "const": 200 },
+              "timed_out": { "const": false },
+              "error_class": { "const": null }
+            }
+          }
+        }
+      ]
     },
     "degradation": {
       "type": "object",
@@ -125,7 +404,12 @@
         },
         "source": { "type": "string", "minLength": 1 },
         "command": { "type": "string", "minLength": 1 },
-        "error_class": { "type": ["string", "null"] },
+        "error_class": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "null" }
+          ]
+        },
         "exit_code": { "type": ["integer", "null"] },
         "timed_out": { "type": "boolean" }
       }
@@ -146,7 +430,17 @@
             "unknown"
           ]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "fail" } },
+            "required": ["status"]
+          },
+          "then": { "required": ["reason"] },
+          "else": { "not": { "required": ["reason"] } }
+        }
+      ]
     },
     "recovery": {
       "type": "object",
@@ -171,7 +465,7 @@
         "path_pattern": { "type": "string", "minLength": 1 },
         "holder": { "type": "string", "minLength": 1 },
         "exclusive": { "type": "boolean" },
-        "expires_ts": { "type": "string" }
+        "expires_ts": { "type": "string", "format": "date-time" }
       }
     },
     "agent": {
@@ -180,7 +474,7 @@
       "required": ["name"],
       "properties": {
         "name": { "type": "string", "minLength": 1 },
-        "last_active_ts": { "type": "string" }
+        "last_active_ts": { "type": "string", "format": "date-time" }
       }
     },
     "inbox": {
@@ -189,8 +483,8 @@
       "required": ["mailbox", "unread_count", "ack_required_count"],
       "properties": {
         "mailbox": { "type": "string", "minLength": 1 },
-        "unread_count": { "type": "integer", "minimum": 0 },
-        "ack_required_count": { "type": "integer", "minimum": 0 }
+        "unread_count": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "ack_required_count": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
       }
     },
     "thread": {
@@ -201,7 +495,7 @@
         "thread_id": { "type": "string", "minLength": 1 },
         "message_count": { "type": "integer", "minimum": 0 },
         "subject": { "type": "string" },
-        "last_activity_at": { "type": "string" }
+        "last_activity_at": { "type": "string", "format": "date-time" }
       }
     }
   },
@@ -209,7 +503,7 @@
     {
       "schema": "ee.agent_mail.snapshot.v1",
       "generated_at": "2026-06-05T18:56:00Z",
-      "project_key": "<workspace>",
+      "project_key": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
       "agent_name": "BeigeHollow",
       "redaction_status": "paths_counts_subjects_only_no_content",
       "producer_status": "ok",
@@ -217,13 +511,50 @@
         "am agents list --project '<workspace>' --json",
         "am robot reservations --project '<workspace>' --all --format json",
         "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json",
-        "agent-mail-health http://127.0.0.1:8765/health"
+        "am status --project '<workspace>' --agent BeigeHollow --json",
+        "agent-mail-health http://127.0.0.1:8765/health",
+        "agent-mail-health http://127.0.0.1:8765/health/durability"
       ],
       "command_statuses": [
         {
           "command": "am agents list --project '<workspace>' --json",
           "ok": true,
           "exit_code": 0,
+          "timed_out": false,
+          "error_class": null
+        },
+        {
+          "command": "am robot reservations --project '<workspace>' --all --format json",
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "error_class": null
+        },
+        {
+          "command": "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json",
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "error_class": null
+        },
+        {
+          "command": "am status --project '<workspace>' --agent BeigeHollow --json",
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "error_class": null
+        },
+        {
+          "command": "agent-mail-health http://127.0.0.1:8765/health",
+          "ok": true,
+          "exit_code": 200,
+          "timed_out": false,
+          "error_class": null
+        },
+        {
+          "command": "agent-mail-health http://127.0.0.1:8765/health/durability",
+          "ok": true,
+          "exit_code": 200,
           "timed_out": false,
           "error_class": null
         }
@@ -234,12 +565,13 @@
       "semantic_readiness": {
         "status": "pass"
       },
+      "durability_state": "ok",
       "summary": {
         "agent_count": 1,
         "file_reservation_count": 1,
         "inbox_mailbox_count": 1,
         "thread_count": 1,
-        "source_command_count": 4,
+        "source_command_count": 6,
         "degraded_count": 0
       },
       "degraded": [],
@@ -280,6 +612,20 @@
     "available_in_build": true,
     "feature_flag": null,
     "expected_version": "0.3.0"
+  },
+  "x-ee-semantic-validation": {
+    "required_for_authority": true,
+    "schema_role": "necessary_structural_validation",
+    "consumer_role": "strict_declared_v1_semantic_validation",
+    "invariants": [
+      "ordered_source_command_identity_and_shared_cli_prefix",
+      "root_agent_binding_for_inbox_and_status_commands",
+      "command_status_matches_source_command_by_index",
+      "summary_counts_match_normalized_arrays",
+      "failed_status_has_failure_metadata_and_matching_degradation",
+      "failed_source_has_no_normalized_rows",
+      "fallback_health_recovery_and_durability_postures_are_consistent"
+    ]
   },
   "x-ee-doc": "docs/swarm/coordination_snapshot.md"
 }
