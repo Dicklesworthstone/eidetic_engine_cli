@@ -177,3 +177,60 @@ require_contains_text "$(cat "$trace_log")" "validation_passes_delta" \
     "validation bump trace carries pass delta"
 require_contains_text "$(cat "$trace_log")" "validation_contradictions_delta" \
     "validation bump trace carries contradiction delta"
+
+# --- bd-3h6bz: Learn -> Retrieve -> Pack loop ------------------------------
+# An applied rule must be retrievable by its OWN content via `ee search`
+# (rules are first-class source=rule documents in the derived corpus) and
+# must hydrate into the pack through its rule_source_memories linkage. The
+# source memory content deliberately shares NO tokens with the query, so the
+# only way the source memory can appear in the pack for this query is
+# through rule-hit hydration — making the rule-attribution assertion
+# deterministic instead of racing a direct memory match.
+log_step "bd-3h6bz: applied rule is indexed, searchable, and pack-hydratable"
+memory_out="$(ee_workspace remember \
+    "Incident 2026-Q2 postmortem: a stale formatting baseline shipped." \
+    --level semantic --kind fact --json)"
+require_jq_value "$memory_out" '.success' "true" \
+    "learn-loop source memory remember succeeds"
+source_memory_id="$(printf '%s' "$memory_out" | jq -r '.data.memory_id // .data.memoryId // empty')"
+if [ -n "$source_memory_id" ]; then
+    record_pass "learn_loop_source_memory_id_present"
+else
+    record_failure "learn_loop_source_memory_id_present" "remember returned no memory id"
+    exit 1
+fi
+
+learn_rule_out="$(ee_workspace rule add \
+    --maturity candidate \
+    --scope workspace \
+    --tag release \
+    --source-memory "$source_memory_id" \
+    --actor e2e-rule-validation-counter \
+    "Always run the zephyr frobnicator fmt gate before tagging a release." \
+    --json)"
+require_jq_value "$learn_rule_out" '.success' "true" "learn-loop rule add succeeds"
+learn_rule_id="$(printf '%s' "$learn_rule_out" | jq -r '.data.ruleId // empty')"
+if [ -n "$learn_rule_id" ]; then
+    record_pass "learn_loop_rule_id_present"
+else
+    record_failure "learn_loop_rule_id_present" "learn-loop rule add returned no ruleId"
+    exit 1
+fi
+
+rebuild_out="$(ee_workspace index rebuild --json)"
+require_jq_value "$rebuild_out" '.success' "true" "learn-loop index rebuild succeeds"
+
+search_out="$(ee_workspace search "zephyr frobnicator fmt gate" --limit 20 --json)"
+require_jq_value "$search_out" '.success' "true" "learn-loop search succeeds"
+require_jq_value "$search_out" \
+    "any(.data.results[]?; ((.docId // .memoryId // \"\") == \"$learn_rule_id\") or ((.content // .contentPreview // \"\") | contains(\"zephyr frobnicator fmt gate\")))" \
+    "true" "search returns the applied rule by its own content"
+
+pack_out="$(ee_workspace pack "zephyr frobnicator fmt gate" --max-tokens 2000 --json)"
+require_jq_value "$pack_out" '.success' "true" "learn-loop pack succeeds"
+require_jq_value "$pack_out" \
+    "any(.data.pack.items[]?; .memoryId == \"$source_memory_id\")" \
+    "true" "pack hydrates the rule hit through its source memory"
+require_jq_value "$pack_out" \
+    "any(.data.pack.items[]?; .memoryId == \"$source_memory_id\" and ((.why // \"\") | contains(\"$learn_rule_id\")))" \
+    "true" "hydrated pack item attributes the applied procedural rule"
