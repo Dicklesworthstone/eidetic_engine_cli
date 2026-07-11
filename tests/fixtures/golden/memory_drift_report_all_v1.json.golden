@@ -51,7 +51,7 @@
       "topReason": "provenance_not_yet_verified",
       "evidenceCount": 0,
       "revalidationCommand": "ee memory drift mem_unverified --json",
-      "degradedCode": "memory_drift_source_unverifiable",
+      "degradedCode": null,
       "severity": "medium",
       "staleAnchor": false,
       "capturedAtCommit": null,

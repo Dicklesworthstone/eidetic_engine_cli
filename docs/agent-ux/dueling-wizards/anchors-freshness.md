@@ -193,6 +193,29 @@ steward job that recomputes drift over git-changed files, the live ranking
 penalty, and the per-pack `symbol_drift` facet build on the primitives above and
 are tracked under `bd-1n0np.3.7`/`bd-1n0np.3.8`.
 
+For claim-gate use, `--mode recent-pack-items` scans a bounded pack-record and
+integrity-ledger selection window and fails closed if that authoritative scan truncates. It validates each
+pack's replay-ledger hash/status and requires the ledger's integrity-bound
+`createdAt` to match the record before applying a fixed seven-day horizon. A
+selection exactly seven days old is still in scope; only strictly older,
+integrity-valid selections are ignored for claim authorization. Malformed,
+future, missing-ledger, or mismatched timestamps fail closed. The report emits
+its decision clock as `generatedAt` so the boundary is reproducible. Pack
+identities are admitted first and capped ledger bodies are loaded one at a time;
+oversized compressed or uncompressed declarations fail before decompression.
+
+Within the bound database snapshot, the collector uses the integrity-validated
+ledger `createdAt` to decide which selection is newer, with database-local
+admission order only as a deterministic tie-break. It does not claim hidden
+SQLite `rowid` is a durable export/import sequence. It also resolves every selected
+memory through its `logical_id` revision chain: exactly one live,
+non-tombstoned revision must exist. A recent pack that selected a superseded
+revision stays blocking until a later pack selects the live revision. Routine
+new-memory `unverified` provenance remains visible but advisory; structural
+pack or lineage uncertainty emits `memory_drift_source_unverifiable`. Ordinary
+`ee search`, `ee why`, and historical replay still expose older evidence for
+diagnosis.
+
 ## Determinism & graceful degradation
 
 - Same DB + indexes + query → byte-identical `ee impact` JSON (modulo

@@ -18,11 +18,13 @@
       "const": "ee.memory_drift.report.v1"
     },
     "mode": {
+      "description": "Report scope. recent_pack_items validates integrity-bound pack-ledger timestamps, includes the exact seven-day boundary, and fails closed on scan truncation, malformed/future timestamps, or ambiguous revision lineage.",
       "type": "string",
       "enum": ["all_memories", "one_memory", "recent_pack_items"]
     },
     "generatedAt": {
-      "type": ["string", "null"]
+      "type": ["string", "null"],
+      "format": "date-time"
     },
     "summary": {
       "type": "object",
@@ -68,6 +70,7 @@
       }
     },
     "items": {
+      "description": "Revision-chain-deduplicated findings for recent_pack_items mode; a newer selection of the unique live revision supersedes an older selection of a historical revision.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/selectionHint"
@@ -97,7 +100,14 @@
         "evidenceCount",
         "revalidationCommand",
         "degradedCode",
-        "severity"
+        "severity",
+        "freshness",
+        "staleAnchor",
+        "capturedAtCommit",
+        "currentCommit",
+        "commitDistance",
+        "changedRegions",
+        "anchors"
       ],
       "properties": {
         "memoryId": {
@@ -133,7 +143,56 @@
         "severity": {
           "type": "string",
           "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "freshness": {
+          "type": "string",
+          "minLength": 1
+        },
+        "staleAnchor": {
+          "type": "boolean"
+        },
+        "capturedAtCommit": {
+          "type": ["string", "null"]
+        },
+        "currentCommit": {
+          "type": ["string", "null"]
+        },
+        "commitDistance": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "changedRegions": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "anchors": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/codeAnchor" }
         }
+      }
+    },
+    "codeAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "anchorKind",
+        "anchorValueHash",
+        "redactedAnchorValue",
+        "capturedSpanHash",
+        "freshnessState",
+        "freshness",
+        "generation",
+        "staleAnchor"
+      ],
+      "properties": {
+        "anchorKind": { "type": "string", "minLength": 1 },
+        "anchorValueHash": { "type": "string", "minLength": 1 },
+        "redactedAnchorValue": { "type": "string" },
+        "capturedSpanHash": { "type": "string", "minLength": 1 },
+        "freshnessState": { "type": "string", "minLength": 1 },
+        "freshness": { "type": "string", "minLength": 1 },
+        "generation": { "type": "integer" },
+        "staleAnchor": { "type": "boolean" }
       }
     },
     "recoveryAction": {

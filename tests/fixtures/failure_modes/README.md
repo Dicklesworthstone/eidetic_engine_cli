@@ -53,9 +53,11 @@ in the same commit, keeping the catalog complete by construction.
 | `context_delta_prior_unknown` | context | low | bd-muovx.5 (M) |
 | `context_delta_format_unsupported` | context | info | bd-muovx.6 (M) |
 | `context_delta_larger_than_full` | context | info | bd-muovx |
+| `memory_drift_lock_contention` | ee swarm brief, ee swarm work-packet, support bundles / handoff capsules, unsafe-claim planner | warning | bd-1xpq9 |
+| `memory_drift_report_unavailable` | ee swarm brief, ee swarm work-packet, support bundles / handoff capsules, unsafe-claim planner | warning | bd-1xpq9 |
 | `memory_drift_source_changed` | search, context | medium | bd-1z1fd.3 |
 | `memory_drift_source_missing` | search, context | high | bd-1z1fd.3 |
-| `memory_drift_source_unverifiable` | search, context | medium | bd-1z1fd.3 |
+| `memory_drift_source_unverifiable` | search, context, swarm brief, swarm work-packet claim gate | medium | bd-1z1fd.3 |
 | `source_unparsable` | symbol snapshot, context, why | medium | bd-2xuu7.6 |
 | `symbol_index_stale` | symbol snapshot, context, why | warning | bd-2xuu7.6 |
 | `ambiguous_containing_symbols` | symbol evidence links, context, why | warning | bd-2xuu7.6 |

@@ -26,13 +26,23 @@ raw queries or memory content.
 Memory drift posture appears under `memoryDrift` with recent-pack counts,
 affected memory IDs, source-kind counts, and degraded codes only. It does not
 include source snippets, command output bodies, or full file listings.
-When read-only memory-drift collection is blocked by the workspace write lock,
-the support-bundle summary uses `status=lock_contention` and carries an
-`evidenceInspection` block with `memoryEvidenceInspected=false`,
-`sourceFreshness=not_inspected`, `lockAcquisitionClass=workspace_write_lock`,
-the workspace-relative lock path, and non-mutating recovery suggestions. This
-means the collector stopped before inspecting memory evidence; it is not the
-same as stale or unverifiable selected memories.
+When read-only memory-drift collection is blocked by database open or
+read-snapshot contention, the support-bundle summary uses
+`status=lock_contention` and carries an `evidenceInspection` block with
+`memoryEvidenceInspected=false`, `sourceFreshness=not_inspected`,
+`lockAcquisitionClass=database_read_snapshot`, and non-mutating retry/database
+health suggestions. The read-only collector does not acquire the workspace
+write-owner flock, so merely holding `.ee/ee.write.lock` does not trigger this
+posture. Lock contention means the collector stopped before inspecting memory
+evidence; it is not the same as stale or unverifiable selected memories.
+Other pre-inspection failures, including a missing or unsafe database path and
+generic non-contention report-build errors, use
+`memory_drift_report_unavailable`. Their `evidenceInspection` block carries
+`status=not_inspected`, `memoryEvidenceInspected=false`, and
+`sourceFreshness=not_inspected`, with `ee init` for a missing database or
+`ee doctor --json` for other read-only collection failures.
+`memory_drift_source_unverifiable` is reserved for evidence that was inspected
+or structurally parsed but could not be verified.
 RCH worker pressure appears under `rchWorkerPressure`; when no RCH capability
 snapshot is present, its status is `not_collected`. Otherwise it uses the
 redaction-safe `ee.rch.worker_pressure.v1` shape to distinguish
@@ -68,10 +78,10 @@ schema version and a migration note. Additive counts may remain in
 ignore them.
 
 Redaction rules: counts, severity labels, risk codes, hashed reservation holder
-labels, Bead IDs, affected memory IDs, drift status codes, the relative
-`.ee/ee.write.lock` path for lock-contention posture, path hashes, command
+labels, Bead IDs, affected memory IDs, drift status codes, path hashes, command
 hashes, single-flight key hashes, surface names, and generation counters are
-allowed. Raw reservation holder labels, raw paths in the top-risk summary, raw
+allowed. Database and lock paths are not included in memory-drift contention
+posture. Raw reservation holder labels, raw paths in the top-risk summary, raw
 commands, mail bodies, raw logs, raw memory content, raw source snippets, raw
 query text, raw symbol names, env dumps, file contents, and secret-like tokens
 are not allowed.

@@ -307,7 +307,7 @@ when the applied candidate, audit row, and derived memory agree, `curate apply`
 returns the existing applied result. Missing, duplicate, or mismatched replay
 evidence is classified under the `create_derived_replay_*` conflict codes above.
 
-#### Search and pack quality (59)
+#### Search and pack quality (60)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
 | `adaptive_backoff_applied` | low | bd-16pwc.2 (SRR5) |
@@ -340,6 +340,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `memory_drift_source_missing` | high | bd-1z1fd.3 |
 | `memory_drift_source_unverifiable` | medium | bd-1z1fd.3 |
 | `memory_drift_lock_contention` | warning | bd-1xpq9 (DRIFT) |
+| `memory_drift_report_unavailable` | warning | bd-1xpq9 (DRIFT) |
 | `memory_debt_audit_window_partial` | info | bd-3ap2m.2 - `ee curate doctor` scanned a bounded audit window and older read evidence may be outside the inspected rows |
 | `mesh_peer_human_explicit_filtered` | medium | bd-29ulx (SRR6.5) |
 | `mi_dedup_candidate_proposed` | info | bd-17c65.14.14 (N14) |

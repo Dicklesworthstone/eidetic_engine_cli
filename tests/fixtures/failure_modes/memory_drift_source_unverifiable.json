@@ -7,12 +7,14 @@
   },
   "surfaces": [
     "search",
-    "context"
+    "context",
+    "swarm brief",
+    "swarm work-packet claim gate"
   ],
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "Search or context selects a memory whose provenance verification was skipped or could not be inspected, so the agent cannot treat the selected evidence as freshly verified.",
+    "description": "Search or context selects evidence that cannot be freshly verified, or the bounded recent-pack claim collector finds a malformed/future selection timestamp, ambiguous live revision head, or newest selection of a superseded revision.",
     "setup_commands": [
       "ee init --workspace . --json",
       "ee remember 'Skipped provenance marker.' --workspace . --level procedural --kind rule --json",

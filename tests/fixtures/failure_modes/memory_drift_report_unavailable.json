@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "memory_drift_report_unavailable",
+  "introduced_by": {
+    "bead": "bd-1xpq9",
+    "epic_letter": "DRIFT"
+  },
+  "surfaces": [
+    "ee swarm brief (memory-drift source adapter)",
+    "ee swarm work-packet (drift posture consumed via the brief collector)",
+    "support bundles / handoff capsules (drift posture summaries)",
+    "unsafe-claim planner (classified as resource_admission, not memory_source_drift)"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Memory-drift collection fails before inspecting evidence for a non-contention reason, such as a missing or unsafe database path or a generic read-only report-build failure. This code is distinct from memory_drift_lock_contention and from memory_drift_source_unverifiable, which is reserved for inspected or structurally parsed evidence that cannot be verified.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "inject a non-contention read-only memory-drift report failure before evidence inspection"
+    ],
+    "invocation": "ee swarm brief --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "memory_drift_report_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "could not be collected read-only"
+    ],
+    "repair_contains": "ee doctor --json"
+  }
+}

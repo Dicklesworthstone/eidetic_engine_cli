@@ -23,7 +23,7 @@
           "topReason": "provenance_chain_mismatch",
           "evidenceCount": 1,
           "degradedCode": "memory_drift_source_changed",
-          "severity": "high",
+          "severity": "medium",
           "revalidationCommand": "ee memory drift mem_changed --json"
         },
         {
@@ -62,9 +62,11 @@
         "hasDriftHint": true,
         "driftHint": {
           "driftStatus": "changed",
+          "freshness": "drifted",
           "topReason": "provenance_chain_mismatch",
           "evidenceCount": 1,
-          "revalidationCommand": "ee memory drift mem_changed --json"
+          "revalidationCommand": "ee memory drift mem_changed --json",
+          "staleAnchor": false
         }
       },
       {
@@ -75,7 +77,8 @@
       }
     ],
     "degradedCodes": [
-      "memory_drift_source_changed"
+      "memory_drift_source_changed",
+      "search_index_stale"
     ]
   }
 }

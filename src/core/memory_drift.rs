@@ -5,11 +5,14 @@ use std::fs;
 use std::path::{Component, Path};
 use std::process::Command;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::workspace::stable_workspace_id;
-use crate::db::{DbConnection, DbError, StoredMemory};
+use crate::db::{
+    DbConnection, DbError, PackLedgerStatus, StoredMemory, StoredPackRecord,
+    parse_stored_pack_ledger,
+};
 use crate::models::memory_anchor::MemoryAnchorFreshnessTransition;
 use crate::models::{
     DomainError, MemoryAnchorFreshnessState, MemoryAnchorKind, MemoryAnchorSource,
@@ -23,6 +26,15 @@ pub const MEMORY_DRIFT_SUPPORT_SUMMARY_SCHEMA_V1: &str =
     "ee.support_bundle.memory_drift_summary.v1";
 pub const DEFAULT_MEMORY_DRIFT_SOURCE_WINDOW_BYTES: usize = 4096;
 pub const MAX_MEMORY_DRIFT_SUPPORT_SUMMARY_ITEMS: usize = 8;
+/// Fixed claim-authority horizon for persisted pack selections.
+///
+/// A selection exactly seven days old remains in scope. Only selections
+/// strictly older than this horizon are excluded from claim authority.
+pub const RECENT_PACK_MEMORY_DRIFT_HORIZON_DAYS: i64 = 7;
+/// Maximum pack-record/ledger selection units inspected for one claim-authority report.
+/// Reaching this cap emits an unverifiable finding instead of silently
+/// treating an incomplete scan as authoritative.
+pub const RECENT_PACK_MEMORY_DRIFT_SCAN_CAP: u32 = 10_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -793,8 +805,11 @@ impl MemoryDriftSelectionHint {
         })
     }
 
-    fn sort_key(&self) -> (std::cmp::Reverse<u8>, String) {
+    fn sort_key(&self) -> (std::cmp::Reverse<u8>, std::cmp::Reverse<u8>, String) {
         (
+            std::cmp::Reverse(u8::from(
+                self.degraded_code.as_deref() == Some("memory_drift_source_unverifiable"),
+            )),
             std::cmp::Reverse(self.drift_status.severity_rank()),
             self.memory_id.clone(),
         )
@@ -910,17 +925,47 @@ fn memory_drift_recovery_actions(
     mode: MemoryDriftReportMode,
     items: &[MemoryDriftSelectionHint],
 ) -> Vec<MemoryDriftRecoveryAction> {
-    let report_command = match mode {
-        MemoryDriftReportMode::AllMemories => {
-            "ee memory drift --mode all-memories --json".to_owned()
+    let superseded_pack_selection = items
+        .iter()
+        .any(|item| item.top_reason == "pack_item_superseded_since_selection");
+    let pack_integrity_failure = items.iter().any(|item| {
+        item.top_reason.starts_with("pack_item_")
+            && item.top_reason != "pack_item_superseded_since_selection"
+    });
+    let report_command = if pack_integrity_failure {
+        "ee doctor --json".to_owned()
+    } else if superseded_pack_selection {
+        "ee pack \"<TASK>\" --workspace . --json".to_owned()
+    } else {
+        match mode {
+            MemoryDriftReportMode::AllMemories => {
+                "ee memory drift --mode all-memories --json".to_owned()
+            }
+            MemoryDriftReportMode::RecentPackItems => {
+                "ee memory drift --mode recent-pack-items --json".to_owned()
+            }
+            MemoryDriftReportMode::OneMemory => items
+                .first()
+                .map(|item| format!("ee memory drift {} --json", item.memory_id))
+                .unwrap_or_else(|| "ee memory drift <MEMORY_ID> --json".to_owned()),
         }
-        MemoryDriftReportMode::RecentPackItems => {
-            "ee memory drift --mode recent-pack-items --json".to_owned()
-        }
-        MemoryDriftReportMode::OneMemory => items
-            .first()
-            .map(|item| format!("ee memory drift {} --json", item.memory_id))
-            .unwrap_or_else(|| "ee memory drift <MEMORY_ID> --json".to_owned()),
+    };
+
+    let rerun_description = if pack_integrity_failure {
+        "Inspect pack-record, revision-lineage, and database integrity before retrying; rerunning drift alone cannot repair malformed or incomplete authority evidence."
+    } else if superseded_pack_selection {
+        "Run a fresh pack for the same task so persisted evidence selects the unique live revision, then rerun the read-only drift report; rerunning drift alone cannot rewrite an old pack selection."
+    } else {
+        "Rerun the read-only drift report before reusing affected memories."
+    };
+    let revise_command = superseded_pack_selection.then(|| {
+        "ee memory revise <CURRENT_MEMORY_ID> --provenance-uri <URI> --reason correction --json"
+            .to_owned()
+    });
+    let revise_description = if superseded_pack_selection {
+        "If the live revision itself has stale source evidence, revise that current ID immutably first; after the revision succeeds, run a fresh pack so the new live ID replaces historical pack evidence."
+    } else {
+        "Revise or re-remember affected memories after updating their source evidence."
     };
 
     vec![
@@ -928,14 +973,9 @@ fn memory_drift_recovery_actions(
             1,
             "rerun_source_validation",
             Some(report_command),
-            "Rerun the read-only drift report before reusing affected memories.",
+            rerun_description,
         ),
-        MemoryDriftRecoveryAction::new(
-            2,
-            "revise_memory",
-            None,
-            "Revise or re-remember affected memories after updating their source evidence.",
-        ),
+        MemoryDriftRecoveryAction::new(2, "revise_memory", revise_command, revise_description),
         MemoryDriftRecoveryAction::new(
             3,
             "mark_source_unavailable",
@@ -1013,7 +1053,9 @@ pub fn memory_drift_support_summary_unavailable(
     degraded_code: &str,
     message: &str,
 ) -> serde_json::Value {
-    let severity = if degraded_code == MEMORY_DRIFT_LOCK_CONTENTION_CODE {
+    let severity = if degraded_code == MEMORY_DRIFT_LOCK_CONTENTION_CODE
+        || degraded_code == MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE
+    {
         "warning"
     } else {
         "medium"
@@ -1064,16 +1106,32 @@ fn memory_drift_support_unavailable_evidence_inspection(degraded_code: &str) -> 
             "status": "not_inspected",
             "memoryEvidenceInspected": false,
             "sourceFreshness": "not_inspected",
-            "degradationClass": "workspace_write_lock_contention",
+            "degradationClass": "database_read_snapshot_contention",
             "lockAcquisitionClass": MEMORY_DRIFT_READ_ONLY_COLLECTOR_LOCK_CLASS,
-            "lockPath": ".ee/ee.write.lock",
             "supportBundleMeaning": "collector_blocked_before_evidence",
             "advisoryOnly": true,
             "mutatesState": false,
             "recoverySuggestions": [
-                "rerun_after_write_owner_releases_lock",
-                "inspect_advisory_lock_read_only",
+                "retry_read_only_drift_report",
+                "inspect_database_health_read_only",
                 "use_source_authority_snapshot",
+                "continue_plan_space",
+            ],
+        });
+    }
+
+    if degraded_code == MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE {
+        return serde_json::json!({
+            "status": "not_inspected",
+            "memoryEvidenceInspected": false,
+            "sourceFreshness": "not_inspected",
+            "degradationClass": "memory_drift_report_unavailable",
+            "supportBundleMeaning": "collector_failed_before_evidence",
+            "advisoryOnly": true,
+            "mutatesState": false,
+            "recoverySuggestions": [
+                "retry_read_only_drift_report",
+                "inspect_database_health_read_only",
                 "continue_plan_space",
             ],
         });
@@ -1101,12 +1159,17 @@ pub struct MemoryDriftReportOptions<'a> {
     pub memory_id: Option<&'a str>,
     pub limit: u32,
     pub include_tombstoned: bool,
+    /// Injected collector clock for deterministic horizon checks. Public CLI
+    /// callers leave this unset and use one captured `Utc::now()` value.
+    pub as_of: Option<DateTime<Utc>>,
 }
 
-/// Current swarm memory-drift collector strategy until bd-3sh42 lands a
-/// genuinely read-only fsqlite/sqlmodel open path.
-pub const MEMORY_DRIFT_READ_ONLY_COLLECTOR_STRATEGY_NAME: &str = "bounded_write_lock_probe";
-pub const MEMORY_DRIFT_READ_ONLY_COLLECTOR_LOCK_CLASS: &str = "workspace_write_lock";
+/// Current swarm memory-drift collector strategy after bd-3sh42 landed a
+/// genuinely read-only fsqlite/sqlmodel open path. Workspace write-owner
+/// flocks no longer block collection; the database read snapshot supplies
+/// cross-query consistency without joining the write-owner gate.
+pub const MEMORY_DRIFT_READ_ONLY_COLLECTOR_STRATEGY_NAME: &str = "true_read_only_snapshot";
+pub const MEMORY_DRIFT_READ_ONLY_COLLECTOR_LOCK_CLASS: &str = "database_read_snapshot";
 pub const MEMORY_DRIFT_TRUE_READ_ONLY_DATABASE_OPEN_BEAD: &str = "bd-3sh42";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1136,29 +1199,39 @@ pub fn build_memory_drift_report(
     build_memory_drift_report_with_connection(&connection, options)
 }
 
+/// Degraded code for a non-contention memory-drift collection failure before
+/// any evidence was inspected. Missing/unsafe database paths and generic
+/// read-only report failures use this code; structurally inspected evidence
+/// that cannot be verified uses `memory_drift_source_unverifiable` instead.
+pub const MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE: &str = "memory_drift_report_unavailable";
+
 /// bd-1xpq9: degraded code for memory-drift COLLECTION being blocked by
-/// workspace write-lock contention. Distinct from
-/// `memory_drift_source_unverifiable`: that code means evidence was
-/// inspected and could not be verified; this one means the collector
-/// never reached evidence inspection at all.
+/// database open or read-snapshot contention. Distinct from both
+/// `memory_drift_report_unavailable` (non-contention failure before inspection)
+/// and `memory_drift_source_unverifiable` (inspected evidence that could not be
+/// verified).
 pub const MEMORY_DRIFT_LOCK_CONTENTION_CODE: &str = "memory_drift_lock_contention";
 
 /// Detail schema for lock-contention emissions (bd-1xpq9).
 pub const MEMORY_DRIFT_LOCK_CONTENTION_SCHEMA: &str = "ee.memory_drift.lock_contention.v1";
 
-/// True when a memory-drift collection error is workspace write-lock
-/// contention. Matches the stable lock-acquisition error texts from the
-/// DB layer ("could not open/acquire database write lock"); those
-/// strings are part of the storage error contract.
+/// True when a memory-drift collection error is database open or read-snapshot
+/// contention. The genuinely read-only collector does not acquire the
+/// workspace write-owner flock, so write-lock acquisition errors deliberately
+/// do not match this classifier.
 #[must_use]
 pub fn memory_drift_error_is_lock_contention(error: &DomainError) -> bool {
     memory_drift_error_text_is_lock_contention(&error.message())
 }
 
 fn memory_drift_error_text_is_lock_contention(text: &str) -> bool {
-    text.contains("could not acquire database write lock")
-        || text.contains("could not open database write lock")
-        || text.contains("workspace write-lock contention")
+    let text = text.to_ascii_lowercase();
+    text.contains("database is busy")
+        || text.contains("database is locked")
+        || text.contains("database table is locked")
+        || text.contains("snapshot conflict")
+        || text.contains("database read-snapshot contention")
+        || text.contains("database read snapshot contention")
 }
 
 /// Redaction-safe structured details for a lock-contention emission:
@@ -1171,8 +1244,7 @@ pub fn memory_drift_lock_contention_details(collector_surface: &str) -> serde_js
     serde_json::json!({
         "schema": MEMORY_DRIFT_LOCK_CONTENTION_SCHEMA,
         "collectorSurface": collector_surface,
-        "lockAcquisitionClass": "workspace_write_lock",
-        "lockPath": ".ee/ee.write.lock",
+        "lockAcquisitionClass": MEMORY_DRIFT_READ_ONLY_COLLECTOR_LOCK_CLASS,
         "sourceFreshness": "not_inspected",
         "memoryEvidenceInspected": false,
     })
@@ -1182,14 +1254,14 @@ pub fn memory_drift_lock_contention_details(collector_surface: &str) -> serde_js
 #[must_use]
 pub fn memory_drift_lock_contention_message(collector_surface: &str) -> String {
     format!(
-        "Memory drift collection on {collector_surface} was blocked by workspace write-lock \
+        "Memory drift collection on {collector_surface} was blocked by database read-snapshot \
          contention before any evidence inspection; memory evidence was NOT inspected and this \
          does not indicate stale provenance."
     )
 }
 
 /// Canonical non-mutating repair guidance for the lock-contention code.
-pub const MEMORY_DRIFT_LOCK_CONTENTION_REPAIR: &str = "Retry after the current lock holder finishes, or inspect holders read-only with `ee diag advisory-lock --workspace . --resource-type workspace --json`.";
+pub const MEMORY_DRIFT_LOCK_CONTENTION_REPAIR: &str = "Retry the read-only drift report; if contention persists, inspect database health with `ee doctor --json`.";
 
 pub fn build_memory_drift_report_read_only(
     options: &MemoryDriftReportOptions<'_>,
@@ -1214,8 +1286,8 @@ fn memory_drift_read_only_open_error(error: DbError) -> DomainError {
     if memory_drift_error_text_is_lock_contention(&error_text) {
         return DomainError::Storage {
             message: format!(
-                "Memory drift read-only collector strategy `{}` was blocked by workspace \
-                 write-lock contention before any evidence inspection.",
+                "Memory drift read-only collector strategy `{}` was blocked by database \
+                 read-snapshot contention before any evidence inspection.",
                 MEMORY_DRIFT_READ_ONLY_COLLECTOR_STRATEGY_NAME
             ),
             repair: Some(MEMORY_DRIFT_LOCK_CONTENTION_REPAIR.to_owned()),
@@ -1232,6 +1304,49 @@ fn build_memory_drift_report_with_connection(
     connection: &DbConnection,
     options: &MemoryDriftReportOptions<'_>,
 ) -> Result<MemoryDriftReport, DomainError> {
+    connection
+        .begin_read_snapshot()
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to begin memory drift read snapshot: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    let result = build_memory_drift_report_in_snapshot(connection, options);
+    match result {
+        Ok(report) => {
+            if let Err(commit_error) = connection.commit_read_snapshot() {
+                let rollback_detail = connection
+                    .rollback_read_snapshot()
+                    .err()
+                    .map(|error| format!("; rollback error: {error}"))
+                    .unwrap_or_default();
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Failed to commit memory drift read snapshot: {commit_error}{rollback_detail}"
+                    ),
+                    repair: Some("ee doctor --json".to_owned()),
+                });
+            }
+            Ok(report)
+        }
+        Err(error) => {
+            if let Err(rollback_error) = connection.rollback_read_snapshot() {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Memory drift collection failed and its read snapshot could not be rolled back: {}; rollback error: {rollback_error}",
+                        error.message()
+                    ),
+                    repair: Some("ee doctor --json".to_owned()),
+                });
+            }
+            Err(error)
+        }
+    }
+}
+
+fn build_memory_drift_report_in_snapshot(
+    connection: &DbConnection,
+    options: &MemoryDriftReportOptions<'_>,
+) -> Result<MemoryDriftReport, DomainError> {
     let workspace_path = options
         .workspace_path
         .canonicalize()
@@ -1239,35 +1354,46 @@ fn build_memory_drift_report_with_connection(
     let workspace_id = stable_workspace_id(&workspace_path);
     let limit = options.limit.max(1);
 
-    let items = match options.mode {
-        MemoryDriftReportMode::AllMemories => memory_drift_report_all_memories(
-            connection,
-            &workspace_path,
-            &workspace_id,
-            limit,
-            options.include_tombstoned,
-        )?,
+    let (items, generated_at) = match options.mode {
+        MemoryDriftReportMode::AllMemories => (
+            memory_drift_report_all_memories(
+                connection,
+                &workspace_path,
+                &workspace_id,
+                limit,
+                options.include_tombstoned,
+            )?,
+            None,
+        ),
         MemoryDriftReportMode::OneMemory => {
             let memory_id = options.memory_id.ok_or_else(|| DomainError::Usage {
                 message: "memory drift --mode one requires MEMORY_ID".to_owned(),
                 repair: Some("ee memory drift --help".to_owned()),
             })?;
-            vec![memory_drift_report_one_memory(
-                connection,
-                &workspace_path,
-                memory_id,
-                options.include_tombstoned,
-            )?]
+            (
+                vec![memory_drift_report_one_memory(
+                    connection,
+                    &workspace_path,
+                    memory_id,
+                    options.include_tombstoned,
+                )?],
+                None,
+            )
         }
         MemoryDriftReportMode::RecentPackItems => memory_drift_report_recent_pack_items(
             connection,
             &workspace_path,
             &workspace_id,
             limit,
+            options.as_of,
         )?,
     };
 
-    Ok(MemoryDriftReport::new(options.mode, None, items))
+    Ok(MemoryDriftReport::new(
+        options.mode,
+        generated_at.as_deref(),
+        items,
+    ))
 }
 
 fn open_memory_drift_database(database_path: &Path) -> Result<DbConnection, DomainError> {
@@ -1335,43 +1461,486 @@ fn memory_drift_report_recent_pack_items(
     workspace_path: &Path,
     workspace_id: &str,
     limit: u32,
-) -> Result<Vec<MemoryDriftSelectionHint>, DomainError> {
-    let pack_items = connection
-        .list_recent_pack_items_for_workspace(workspace_id, limit)
+    requested_as_of: Option<DateTime<Utc>>,
+) -> Result<(Vec<MemoryDriftSelectionHint>, Option<String>), DomainError> {
+    memory_drift_report_recent_pack_items_with_scan_cap(
+        connection,
+        workspace_path,
+        workspace_id,
+        limit,
+        requested_as_of,
+        RECENT_PACK_MEMORY_DRIFT_SCAN_CAP,
+    )
+}
+
+fn memory_drift_report_recent_pack_items_with_scan_cap(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    workspace_id: &str,
+    limit: u32,
+    requested_as_of: Option<DateTime<Utc>>,
+    scan_cap: u32,
+) -> Result<(Vec<MemoryDriftSelectionHint>, Option<String>), DomainError> {
+    let scan_cap = scan_cap.max(1);
+    let scan_limit = scan_cap.saturating_add(1);
+    let mut pack_record_ids = connection
+        .list_pack_record_ids_for_memory_drift(workspace_id, scan_limit)
         .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list recent pack items for drift report: {error}"),
+            message: format!("Failed to list recent pack identities for drift report: {error}"),
             repair: Some("ee doctor --json".to_owned()),
         })?;
-    let mut seen = BTreeSet::new();
-    let mut hints = Vec::new();
-    for (_record, item) in pack_items {
-        if !seen.insert(item.memory_id.clone()) {
+
+    // The first SELECT above binds the deferred read transaction. Capture the
+    // decision clock only after that bind so a concurrent pack cannot appear
+    // in this snapshot with a timestamp later than a pre-query wall clock.
+    let as_of = requested_as_of.unwrap_or_else(Utc::now);
+    let horizon_start = as_of
+        .checked_sub_signed(ChronoDuration::days(RECENT_PACK_MEMORY_DRIFT_HORIZON_DAYS))
+        .ok_or_else(|| DomainError::Usage {
+            message: "Memory drift decision clock cannot represent the seven-day horizon"
+                .to_owned(),
+            repair: Some(
+                "Use an RFC 3339 --as-of value within Chrono's supported range.".to_owned(),
+            ),
+        })?;
+    let records_truncated = pack_record_ids.len() > scan_cap as usize;
+    let mut scan_truncated = records_truncated;
+    pack_record_ids.truncate(scan_cap as usize);
+    let mut findings_by_chain = BTreeMap::<String, MemoryDriftSelectionHint>::new();
+    let mut selections_by_chain = BTreeMap::<String, Vec<RecentPackRevisionSelection>>::new();
+    let mut admitted_items = Vec::<RecentPackLedgerSelection>::new();
+    let mut scanned_units = 0_u32;
+
+    for (selection_order, record_id) in pack_record_ids {
+        if scanned_units >= scan_cap {
+            scan_truncated = true;
+            break;
+        }
+        let record = connection
+            .get_pack_record_for_memory_drift(&record_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to load recent pack record {record_id} for drift report: {error}"
+                ),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        let Some(record) = record else {
+            findings_by_chain.insert(
+                format!("pack:{record_id}"),
+                recent_pack_integrity_finding(&record_id, "pack_record_missing", 1),
+            );
+            scanned_units = scanned_units.saturating_add(1);
+            continue;
+        };
+        let validated = match validated_recent_pack_record(&record) {
+            Ok(validated) => validated,
+            Err((reason, finding_id)) => {
+                let finding_id = finding_id.as_deref().unwrap_or(&record.id);
+                findings_by_chain
+                    .entry(format!("pack:{}", record.id))
+                    .or_insert_with(|| {
+                        recent_pack_integrity_finding(finding_id, reason, record.item_count.max(1))
+                    });
+                scanned_units = scanned_units.saturating_add(1);
+                continue;
+            }
+        };
+        let pack_units = u32::try_from(validated.memory_ids.len())
+            .unwrap_or(u32::MAX)
+            .max(1);
+        let remaining = scan_cap.saturating_sub(scanned_units);
+        let admitted_count = pack_units.min(remaining);
+        scanned_units = scanned_units.saturating_add(admitted_count);
+        let pack_overflowed = pack_units > remaining;
+        if pack_overflowed {
+            scan_truncated = true;
+        }
+
+        let finding_id = validated
+            .memory_ids
+            .first()
+            .map(String::as_str)
+            .unwrap_or(record.id.as_str());
+        if validated.selected_at > as_of {
+            findings_by_chain
+                .entry(format!("pack:{}", record.id))
+                .or_insert_with(|| {
+                    recent_pack_integrity_finding(
+                        finding_id,
+                        "pack_item_selected_at_future",
+                        pack_units,
+                    )
+                });
             continue;
         }
-        match connection.get_memory(&item.memory_id) {
-            Ok(Some(memory)) => hints.push(memory_drift_report_hint_from_memory(
-                connection,
-                workspace_path,
-                &memory,
-            )?),
-            Ok(None) => hints.push(MemoryDriftSelectionHint::new(
-                &item.memory_id,
-                MemoryDriftStatus::MissingSource,
-                "pack_item_memory_row_missing",
-                1,
-            )),
-            Err(error) => {
-                return Err(DomainError::Storage {
-                    message: format!(
-                        "Failed to query selected pack memory {} for drift report: {error}",
-                        item.memory_id
-                    ),
-                    repair: Some("ee doctor --json".to_owned()),
-                });
-            }
+
+        // The boundary is intentionally inclusive: exactly seven days old is
+        // still recent enough to affect a claim. Only strictly older rows are
+        // historical diagnostics rather than claim authority.
+        if validated.selected_at < horizon_start {
+            continue;
+        }
+
+        admitted_items.extend(
+            validated
+                .memory_ids
+                .into_iter()
+                .take(admitted_count as usize)
+                .map(|memory_id| RecentPackLedgerSelection {
+                    selection_order,
+                    selected_at: validated.selected_at,
+                    memory_id,
+                }),
+        );
+        if pack_overflowed {
+            break;
         }
     }
-    Ok(hints)
+
+    if scan_truncated {
+        findings_by_chain.insert(
+            "scan:truncated".to_owned(),
+            recent_pack_integrity_finding(
+                "recent-pack-authority-scan",
+                "pack_item_authority_scan_truncated",
+                scan_cap,
+            ),
+        );
+    }
+
+    for admitted in admitted_items {
+        let memory_id = admitted.memory_id;
+        let selected_memory =
+            connection
+                .get_memory(&memory_id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!(
+                        "Failed to query selected pack memory {} for drift report: {error}",
+                        memory_id
+                    ),
+                    repair: Some("ee doctor --json".to_owned()),
+                })?;
+        let Some(selected_memory) = selected_memory else {
+            findings_by_chain
+                .entry(format!("missing:{memory_id}"))
+                .or_insert_with(|| {
+                    recent_pack_integrity_finding(&memory_id, "pack_item_memory_row_missing", 1)
+                });
+            continue;
+        };
+        if selected_memory.workspace_id != workspace_id {
+            findings_by_chain
+                .entry(format!("workspace_mismatch:{memory_id}"))
+                .or_insert_with(|| {
+                    recent_pack_integrity_finding(
+                        &memory_id,
+                        "pack_item_memory_workspace_mismatch",
+                        1,
+                    )
+                });
+            continue;
+        }
+
+        let logical_id = connection
+            .get_memory_logical_id(&memory_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to query revision lineage for selected pack memory {}: {error}",
+                    memory_id
+                ),
+                repair: Some("ee doctor --json".to_owned()),
+            })?
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let Some(logical_id) = logical_id else {
+            findings_by_chain
+                .entry(format!("lineage_missing:{memory_id}"))
+                .or_insert_with(|| {
+                    recent_pack_integrity_finding(
+                        &memory_id,
+                        "pack_item_revision_lineage_missing",
+                        1,
+                    )
+                });
+            continue;
+        };
+
+        let live_revisions = connection
+            .list_live_memory_revisions_for_logical_id(workspace_id, &logical_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to resolve live revision for selected pack memory {}: {error}",
+                    memory_id
+                ),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        let [live_memory] = live_revisions.as_slice() else {
+            let reason = if live_revisions.is_empty() {
+                "pack_item_live_revision_missing"
+            } else {
+                "pack_item_live_revision_ambiguous"
+            };
+            findings_by_chain.entry(logical_id).or_insert_with(|| {
+                recent_pack_integrity_finding(
+                    &memory_id,
+                    reason,
+                    u32::try_from(live_revisions.len()).unwrap_or(u32::MAX),
+                )
+            });
+            continue;
+        };
+
+        selections_by_chain
+            .entry(logical_id.clone())
+            .or_default()
+            .push(RecentPackRevisionSelection {
+                selected_memory_id: memory_id,
+                selected_at: admitted.selected_at,
+                selection_order: admitted.selection_order,
+                live_memory: live_memory.clone(),
+            });
+    }
+
+    for (logical_id, selections) in selections_by_chain {
+        if findings_by_chain.contains_key(&logical_id) {
+            continue;
+        }
+        let Some(latest_selection) = selections
+            .iter()
+            .map(|selection| (selection.selected_at, selection.selection_order))
+            .max()
+        else {
+            continue;
+        };
+        let latest_selected_ids = selections
+            .iter()
+            .filter(|selection| {
+                (selection.selected_at, selection.selection_order) == latest_selection
+            })
+            .map(|selection| selection.selected_memory_id.clone())
+            .collect::<BTreeSet<_>>();
+        let live_ids = selections
+            .iter()
+            .map(|selection| selection.live_memory.id.clone())
+            .collect::<BTreeSet<_>>();
+
+        if live_ids.len() != 1 || latest_selected_ids.len() != 1 {
+            let memory_id = latest_selected_ids
+                .iter()
+                .next()
+                .or_else(|| live_ids.iter().next())
+                .cloned()
+                .unwrap_or_else(|| logical_id.clone());
+            findings_by_chain.insert(
+                logical_id,
+                recent_pack_integrity_finding(
+                    &memory_id,
+                    "pack_item_revision_selection_ambiguous",
+                    u32::try_from(latest_selected_ids.len()).unwrap_or(u32::MAX),
+                ),
+            );
+            continue;
+        }
+
+        let Some(live_memory) = selections.first().map(|selection| &selection.live_memory) else {
+            continue;
+        };
+        let Some(latest_selected_id) = latest_selected_ids.iter().next() else {
+            continue;
+        };
+        if latest_selected_id != &live_memory.id {
+            findings_by_chain.insert(
+                logical_id,
+                MemoryDriftSelectionHint::new(
+                    latest_selected_id,
+                    MemoryDriftStatus::Unverifiable,
+                    "pack_item_superseded_since_selection",
+                    1,
+                ),
+            );
+            continue;
+        }
+
+        findings_by_chain.insert(
+            logical_id,
+            memory_drift_report_hint_from_memory(connection, workspace_path, live_memory)?,
+        );
+    }
+
+    let mut hints = findings_by_chain.into_values().collect::<Vec<_>>();
+    hints.sort_by_key(MemoryDriftSelectionHint::sort_key);
+    hints.truncate(limit as usize);
+    Ok((hints, Some(as_of.to_rfc3339())))
+}
+
+#[derive(Clone, Debug)]
+struct RecentPackRevisionSelection {
+    selected_memory_id: String,
+    selected_at: DateTime<Utc>,
+    selection_order: i64,
+    live_memory: StoredMemory,
+}
+
+#[derive(Clone, Debug)]
+struct RecentPackLedgerSelection {
+    selection_order: i64,
+    selected_at: DateTime<Utc>,
+    memory_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct ValidatedRecentPackRecord {
+    selected_at: DateTime<Utc>,
+    memory_ids: Vec<String>,
+}
+
+fn validated_recent_pack_record(
+    record: &StoredPackRecord,
+) -> Result<ValidatedRecentPackRecord, (&'static str, Option<String>)> {
+    let parsed = parse_stored_pack_ledger(record);
+    let reason = match parsed.status {
+        PackLedgerStatus::Available => None,
+        PackLedgerStatus::Missing => Some("pack_item_ledger_missing"),
+        PackLedgerStatus::Malformed => Some("pack_item_ledger_malformed"),
+        PackLedgerStatus::HashMismatch => Some("pack_item_ledger_hash_mismatch"),
+    };
+    if let Some(reason) = reason {
+        return Err((reason, None));
+    }
+    let ledger = parsed
+        .ledger
+        .as_ref()
+        .ok_or(("pack_item_ledger_missing", None))?;
+    if ledger.get("packId").and_then(serde_json::Value::as_str) != Some(record.id.as_str())
+        || ledger
+            .get("workspaceId")
+            .and_then(serde_json::Value::as_str)
+            != Some(record.workspace_id.as_str())
+    {
+        return Err(("pack_item_ledger_identity_mismatch", None));
+    }
+    if ledger.get("packHash").and_then(serde_json::Value::as_str) != Some(record.pack_hash.as_str())
+    {
+        return Err(("pack_item_ledger_record_mismatch", None));
+    }
+    let selected_items = ledger
+        .get("selectedItems")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(("pack_item_ledger_selected_items_missing", None))?;
+    let finding_id = selected_items
+        .first()
+        .and_then(|item| item.get("memoryId"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|memory_id| !memory_id.trim().is_empty())
+        .map(str::to_owned);
+    let ledger_created_at = ledger
+        .get("createdAt")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ("pack_item_ledger_timestamp_missing", finding_id.clone()))?;
+    if ledger_created_at != record.created_at {
+        return Err(("pack_item_ledger_timestamp_mismatch", finding_id.clone()));
+    }
+    let selected_at = parse_recent_pack_selection_time(ledger_created_at)
+        .map_err(|()| ("pack_item_selected_at_malformed", finding_id.clone()))?;
+    let omitted_items = ledger
+        .get("omittedItems")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| ("pack_item_ledger_omitted_items_missing", finding_id.clone()))?;
+    let candidate_counts = ledger
+        .get("candidateCounts")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            (
+                "pack_item_ledger_candidate_counts_missing",
+                finding_id.clone(),
+            )
+        })?;
+    if selected_items.len() != record.item_count as usize
+        || omitted_items.len() != record.omitted_count as usize
+        || candidate_counts
+            .get("selected")
+            .and_then(serde_json::Value::as_u64)
+            != Some(u64::from(record.item_count))
+        || candidate_counts
+            .get("omitted")
+            .and_then(serde_json::Value::as_u64)
+            != Some(u64::from(record.omitted_count))
+        || candidate_counts
+            .get("candidatePool")
+            .and_then(serde_json::Value::as_u64)
+            != Some(u64::from(record.item_count) + u64::from(record.omitted_count))
+    {
+        return Err(("pack_item_ledger_count_mismatch", finding_id.clone()));
+    }
+
+    let mut ranked_ids = Vec::with_capacity(selected_items.len());
+    for item in selected_items {
+        let memory_id = item
+            .get("memoryId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|memory_id| !memory_id.trim().is_empty())
+            .ok_or_else(|| {
+                (
+                    "pack_item_ledger_selected_item_malformed",
+                    finding_id.clone(),
+                )
+            })?;
+        let rank = item
+            .get("rank")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|rank| u32::try_from(rank).ok())
+            .ok_or_else(|| {
+                (
+                    "pack_item_ledger_selected_item_malformed",
+                    finding_id.clone(),
+                )
+            })?;
+        ranked_ids.push((rank, memory_id.to_owned()));
+    }
+    ranked_ids.sort();
+    let distinct_ranks = ranked_ids
+        .iter()
+        .map(|(rank, _)| *rank)
+        .collect::<BTreeSet<_>>();
+    let distinct_ids = ranked_ids
+        .iter()
+        .map(|(_, memory_id)| memory_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if distinct_ranks.len() != ranked_ids.len() || distinct_ids.len() != ranked_ids.len() {
+        return Err(("pack_item_ledger_selected_item_ambiguous", finding_id));
+    }
+
+    Ok(ValidatedRecentPackRecord {
+        selected_at,
+        memory_ids: ranked_ids
+            .into_iter()
+            .map(|(_, memory_id)| memory_id)
+            .collect(),
+    })
+}
+
+fn recent_pack_integrity_finding(
+    memory_id: &str,
+    reason: &str,
+    evidence_count: u32,
+) -> MemoryDriftSelectionHint {
+    let mut finding = MemoryDriftSelectionHint::new(
+        memory_id,
+        MemoryDriftStatus::Unverifiable,
+        reason,
+        evidence_count,
+    );
+    finding.revalidation_command = "ee doctor --json".to_owned();
+    finding
+}
+
+fn parse_recent_pack_selection_time(raw: &str) -> Result<DateTime<Utc>, ()> {
+    if raw.is_empty() || raw != raw.trim() {
+        return Err(());
+    }
+    DateTime::parse_from_rfc3339(raw)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .map_err(|_| ())
 }
 
 pub fn memory_drift_selection_hint_for_memory(
@@ -1435,8 +2004,11 @@ fn memory_drift_report_hint_from_memory_and_anchors(
     let anchor_status = live_resolution
         .status
         .or_else(|| memory_drift_status_from_stored_anchors(&anchors));
+    let routine_unverified_is_advisory =
+        hint.top_reason == "provenance_not_yet_verified" && hint.degraded_code.is_none();
     if let Some((status, reason)) = anchor_status
-        && status.severity_rank() > hint.drift_status.severity_rank()
+        && (status.severity_rank() > hint.drift_status.severity_rank()
+            || routine_unverified_is_advisory)
     {
         hint = MemoryDriftSelectionHint::new(&memory.id, status, reason, 0);
     }
@@ -1959,7 +2531,14 @@ pub fn memory_drift_report_hint_from_provenance_status(
             .map(str::trim)
             .is_some_and(|hash| !hash.is_empty()),
     );
-    MemoryDriftSelectionHint::new(memory_id, status, reason, evidence_count)
+    let mut hint = MemoryDriftSelectionHint::new(memory_id, status, reason, evidence_count);
+    // `unverified` is the normal initial state for every freshly remembered or
+    // revised memory. Keep it visible in drift reports, but do not conflate it
+    // with structural pack/lineage corruption that must block claim authority.
+    if matches!(provenance_verification_status.trim(), "unverified" | "") {
+        hint.degraded_code = None;
+    }
+    hint
 }
 
 #[must_use]
@@ -2383,7 +2962,9 @@ fn blake3_prefix(bytes: &[u8], chars: usize) -> String {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::db::{CreateMemoryInput, CreateWorkspaceInput};
+    use crate::db::{
+        CreateMemoryInput, CreatePackItemInput, CreatePackRecordInput, CreateWorkspaceInput,
+    };
 
     fn sample_snapshot(anchors: Vec<MemoryDriftAnchor>) -> MemoryDriftSnapshot {
         MemoryDriftSnapshot::new(
@@ -2393,6 +2974,660 @@ mod tests {
             16,
             anchors,
         )
+    }
+
+    fn recent_pack_test_connection(
+        workspace_path: &Path,
+    ) -> Result<(DbConnection, String), String> {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = stable_workspace_id(workspace_path);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("recent pack drift test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok((connection, workspace_id))
+    }
+
+    fn recent_pack_test_memory_input(workspace_id: &str, content: &str) -> CreateMemoryInput {
+        CreateMemoryInput {
+            workspace_id: workspace_id.to_owned(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: content.to_owned(),
+            workflow_id: None,
+            confidence: 0.9,
+            utility: 0.8,
+            importance: 0.7,
+            provenance_uri: None,
+            trust_class: "agent_assertion".to_owned(),
+            trust_subclass: None,
+            tags: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
+    fn insert_recent_pack_test_memory(
+        connection: &DbConnection,
+        workspace_id: &str,
+        memory_id: &str,
+        verified: bool,
+    ) -> Result<(), String> {
+        connection
+            .insert_memory(
+                memory_id,
+                &recent_pack_test_memory_input(workspace_id, "Bounded recent-pack drift rule."),
+            )
+            .map_err(|error| error.to_string())?;
+        if verified {
+            connection
+                .execute_raw(&format!(
+                    "UPDATE memories SET provenance_verification_status = 'verified', provenance_chain_hash = 'blake3:verified' WHERE id = '{memory_id}'"
+                ))
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn insert_recent_pack_test_record(
+        connection: &DbConnection,
+        workspace_id: &str,
+        pack_seed: &str,
+        memory_id: &str,
+        selected_at: &str,
+    ) -> Result<(), String> {
+        let pack_seed_hash = blake3::hash(pack_seed.as_bytes()).to_hex().to_string();
+        let pack_id = format!("pack_{}", &pack_seed_hash[..26]);
+        let persisted_at = if DateTime::parse_from_rfc3339(selected_at).is_ok() {
+            selected_at
+        } else {
+            "2030-01-07T00:00:00Z"
+        };
+        connection
+            .insert_pack_record_at(
+                &pack_id,
+                &CreatePackRecordInput {
+                    workspace_id: workspace_id.to_owned(),
+                    query: "recent pack drift test".to_owned(),
+                    profile: "balanced".to_owned(),
+                    max_tokens: 512,
+                    used_tokens: 32,
+                    item_count: 1,
+                    omitted_count: 0,
+                    pack_hash: format!("blake3:{pack_seed_hash}"),
+                    degraded_json: None,
+                    created_by: Some("memory-drift-test".to_owned()),
+                },
+                &[CreatePackItemInput {
+                    pack_id: pack_id.clone(),
+                    memory_id: memory_id.to_owned(),
+                    rank: 1,
+                    section: "procedural_rules".to_owned(),
+                    estimated_tokens: 32,
+                    relevance: 0.8,
+                    utility: 0.7,
+                    why: "test selection".to_owned(),
+                    diversity_key: None,
+                    provenance_json: "{}".to_owned(),
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                }],
+                &[],
+                persisted_at,
+            )
+            .map_err(|error| error.to_string())?;
+        if persisted_at != selected_at {
+            connection
+                .execute_raw(&format!(
+                    "UPDATE pack_records SET created_at = '{selected_at}' WHERE id = '{pack_id}'"
+                ))
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn recent_pack_test_report(
+        connection: &DbConnection,
+        workspace_path: &Path,
+        workspace_id: &str,
+        as_of: &str,
+    ) -> Result<Vec<MemoryDriftSelectionHint>, String> {
+        let as_of = DateTime::parse_from_rfc3339(as_of)
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+        memory_drift_report_recent_pack_items(
+            connection,
+            workspace_path,
+            workspace_id,
+            50,
+            Some(as_of),
+        )
+        .map(|(items, _)| items)
+        .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn recent_pack_horizon_includes_exact_boundary_and_excludes_strictly_older_rows()
+    -> Result<(), String> {
+        let workspace_path = Path::new("/tmp/ee-memory-drift-horizon");
+        let (connection, workspace_id) = recent_pack_test_connection(workspace_path)?;
+        let boundary_id = crate::testing::mem("driftboundary");
+        let older_id = crate::testing::mem("driftolder");
+        insert_recent_pack_test_memory(&connection, &workspace_id, &boundary_id, false)?;
+        insert_recent_pack_test_memory(&connection, &workspace_id, &older_id, false)?;
+        insert_recent_pack_test_record(
+            &connection,
+            &workspace_id,
+            "pack_drift_boundary",
+            &boundary_id,
+            "2030-01-01T00:00:00Z",
+        )?;
+        insert_recent_pack_test_record(
+            &connection,
+            &workspace_id,
+            "pack_drift_older",
+            &older_id,
+            "2029-12-31T23:59:59Z",
+        )?;
+
+        let report = recent_pack_test_report(
+            &connection,
+            workspace_path,
+            &workspace_id,
+            "2030-01-08T00:00:00Z",
+        )?;
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].memory_id, boundary_id);
+        assert_eq!(report[0].drift_status, MemoryDriftStatus::Unverifiable);
+        assert!(report.iter().all(|item| item.memory_id != older_id));
+        Ok(())
+    }
+
+    #[test]
+    fn recent_pack_old_only_affected_selection_yields_empty_claim_window() -> Result<(), String> {
+        let workspace_path = Path::new("/tmp/ee-memory-drift-old-only");
+        let (connection, workspace_id) = recent_pack_test_connection(workspace_path)?;
+        let old_id = crate::testing::mem("driftoldonly");
+        insert_recent_pack_test_memory(&connection, &workspace_id, &old_id, false)?;
+        insert_recent_pack_test_record(
+            &connection,
+            &workspace_id,
+            "pack_drift_old_only",
+            &old_id,
+            "2029-12-31T23:59:59Z",
+        )?;
+
+        let report = recent_pack_test_report(
+            &connection,
+            workspace_path,
+            &workspace_id,
+            "2030-01-08T00:00:00Z",
+        )?;
+        assert!(
+            report.is_empty(),
+            "strictly pre-horizon drift must not retain claim authority: {report:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recent_pack_dangling_memory_row_fails_closed_as_unverifiable() -> Result<(), String> {
+        let workspace_path = Path::new("/tmp/ee-memory-drift-dangling-pack-item");
+        let (connection, workspace_id) = recent_pack_test_connection(workspace_path)?;
+        let memory_id = crate::testing::mem("driftdanglingselection");
+        let pack_seed = "pack_drift_dangling_selection";
+        let pack_seed_hash = blake3::hash(pack_seed.as_bytes()).to_hex().to_string();
+        let pack_id = format!("pack_{}", &pack_seed_hash[..26]);
+        insert_recent_pack_test_memory(&connection, &workspace_id, &memory_id, true)?;
+        insert_recent_pack_test_record(
+            &connection,
+            &workspace_id,
+            pack_seed,
+            &memory_id,
+            "2030-01-07T00:00:00Z",
+        )?;
+
+        // A normal delete cascades to pack_items. Disable FK enforcement only
+        // long enough to simulate an imported/corrupt database whose persisted
+        // pack selection points at a memory row that cannot be resolved.
+        connection
+            .execute_raw("PRAGMA foreign_keys = OFF")
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(&format!("DELETE FROM memories WHERE id = '{memory_id}'"))
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw("PRAGMA foreign_keys = ON")
+            .map_err(|error| error.to_string())?;
+
+        let persisted_items = connection
+            .list_pack_items_for_memory_drift(&workspace_id, 50)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            persisted_items.len(),
+            1,
+            "dangling selection fixture must persist"
+        );
+
+        // The integrity-bound ledger, not the denormalized pack_items table,
+        // is the authoritative selection source. Simulate a normal cascade or
+        // partial import that removes the projection row while retaining the
+        // pack record and prove the missing memory still cannot false-clear.
+        connection
+            .execute_raw(&format!(
+                "DELETE FROM pack_items WHERE pack_id = '{pack_id}'"
+            ))
+            .map_err(|error| error.to_string())?;
+        let projected_items = connection
+            .list_pack_items_for_memory_drift(&workspace_id, 50)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            projected_items.is_empty(),
+            "test must remove the denormalized pack-item projection"
+        );
+
+        let report = recent_pack_test_report(
+            &connection,
+            workspace_path,
+            &workspace_id,
+            "2030-01-08T00:00:00Z",
+        )?;
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].memory_id, memory_id);
+        assert_eq!(report[0].top_reason, "pack_item_memory_row_missing");
+        assert_eq!(report[0].drift_status, MemoryDriftStatus::Unverifiable);
+        assert_eq!(
+            report[0].degraded_code.as_deref(),
+            Some("memory_drift_source_unverifiable")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recent_pack_malformed_and_future_timestamps_fail_closed() -> Result<(), String> {
+        let workspace_path = Path::new("/tmp/ee-memory-drift-timestamps");
+        let (connection, workspace_id) = recent_pack_test_connection(workspace_path)?;
+        let malformed_id = crate::testing::mem("driftmalformed");
+        let future_id = crate::testing::mem("driftfuture");
+        insert_recent_pack_test_memory(&connection, &workspace_id, &malformed_id, true)?;
+        insert_recent_pack_test_memory(&connection, &workspace_id, &future_id, true)?;
+        insert_recent_pack_test_record(
+            &connection,
+            &workspace_id,
+            "pack_drift_malformed",
+            &malformed_id,
+            "not-a-timestamp",
+        )?;
+        insert_recent_pack_test_record(
+            &connection,
+            &workspace_id,
+            "pack_drift_future",
+            &future_id,
+            "2030-01-08T00:00:01Z",
+        )?;
+
+        let report = recent_pack_test_report(
+            &connection,
+            workspace_path,
+            &workspace_id,
+            "2030-01-08T00:00:00Z",
+        )?;
+        let reasons = report
+            .iter()
+            .map(|item| item.top_reason.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(reasons.contains("pack_item_ledger_timestamp_mismatch"));
+        assert!(reasons.contains("pack_item_selected_at_future"));
+        assert!(report.iter().all(|item| {
+            item.drift_status == MemoryDriftStatus::Unverifiable
+                && item.degraded_code.as_deref() == Some("memory_drift_source_unverifiable")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn recent_pack_insertion_admission_cannot_hide_low_sorting_malformed_timestamp()
+    -> Result<(), String> {
+        let workspace_path = Path::new("/tmp/ee-memory-drift-malformed-admission");
+        let (connection, workspace_id) = recent_pack_test_connection(workspace_path)?;
+        for index in 0..50 {
+            let memory_id = crate::testing::mem(&format!("driftvalid{index:02}"));
+            let pack_id = format!("pack_drift_valid_{index:02}");
+            insert_recent_pack_test_memory(&connection, &workspace_id, &memory_id, true)?;
+            insert_recent_pack_test_record(
+                &connection,
+                &workspace_id,
+                &pack_id,
+                &memory_id,
+                "2030-01-07T00:00:00Z",
+            )?;
+        }
+        let malformed_id = crate::testing::mem("driftlowsortmalformed");
+        insert_recent_pack_test_memory(&connection, &workspace_id, &malformed_id, true)?;
+        insert_recent_pack_test_record(
+            &connection,
+            &workspace_id,
+            "pack_drift_low_sort_malformed",
+            &malformed_id,
+            "!",
+        )?;
+
+        let report = recent_pack_test_report(
+            &connection,
+            workspace_path,
+            &workspace_id,
+            "2030-01-08T00:00:00Z",
+        )?;
+        let malformed = report
+            .iter()
+            .find(|item| item.memory_id == malformed_id)
+            .ok_or_else(|| {
+                "newest inserted malformed timestamp was hidden by bounded admission".to_owned()
+            })?;
+        assert_eq!(malformed.top_reason, "pack_item_ledger_timestamp_mismatch");
+        assert_eq!(
+            malformed.degraded_code.as_deref(),
+            Some("memory_drift_source_unverifiable")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recent_pack_output_limit_does_not_hide_later_ranked_drift() -> Result<(), String> {
+        let workspace_path = Path::new("/tmp/ee-memory-drift-pack-output-limit");
+        let (connection, workspace_id) = recent_pack_test_connection(workspace_path)?;
+        let pack_id = "pack_01j00000000000000000000000";
+        let mut items = Vec::new();
+        let mut drifted_id = String::new();
+        for rank in 1..=17_u32 {
+            let memory_id = crate::testing::mem(&format!("driftpackrank{rank:02}"));
+            insert_recent_pack_test_memory(&connection, &workspace_id, &memory_id, true)?;
+            if rank == 17 {
+                connection
+                    .execute_raw(&format!(
+                        "UPDATE memories SET provenance_verification_status = 'mismatch' WHERE id = '{memory_id}'"
+                    ))
+                    .map_err(|error| error.to_string())?;
+                drifted_id = memory_id.clone();
+            }
+            items.push(CreatePackItemInput {
+                pack_id: pack_id.to_owned(),
+                memory_id,
+                rank,
+                section: "procedural_rules".to_owned(),
+                estimated_tokens: 16,
+                relevance: 0.8,
+                utility: 0.7,
+                why: "output limit regression".to_owned(),
+                diversity_key: None,
+                provenance_json: "{}".to_owned(),
+                trust_class: "agent_assertion".to_owned(),
+                trust_subclass: None,
+            });
+        }
+        connection
+            .insert_pack_record_at(
+                pack_id,
+                &CreatePackRecordInput {
+                    workspace_id: workspace_id.clone(),
+                    query: "output limit regression".to_owned(),
+                    profile: "balanced".to_owned(),
+                    max_tokens: 1024,
+                    used_tokens: 272,
+                    item_count: 17,
+                    omitted_count: 0,
+                    pack_hash: "blake3:output-limit-regression".to_owned(),
+                    degraded_json: None,
+                    created_by: Some("memory-drift-test".to_owned()),
+                },
+                &items,
+                &[],
+                "2030-01-07T00:00:00Z",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let (report, generated_at) = memory_drift_report_recent_pack_items(
+            &connection,
+            workspace_path,
+            &workspace_id,
+            16,
+            Some(
+                DateTime::parse_from_rfc3339("2030-01-08T00:00:00Z")
+                    .map_err(|error| error.to_string())?
+                    .with_timezone(&Utc),
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(generated_at.as_deref(), Some("2030-01-08T00:00:00+00:00"));
+        assert!(report.iter().any(|item| {
+            item.memory_id == drifted_id
+                && item.degraded_code.as_deref() == Some("memory_drift_source_changed")
+        }));
+
+        let (truncated, _) = memory_drift_report_recent_pack_items_with_scan_cap(
+            &connection,
+            workspace_path,
+            &workspace_id,
+            16,
+            Some(
+                DateTime::parse_from_rfc3339("2030-01-08T00:00:00Z")
+                    .map_err(|error| error.to_string())?
+                    .with_timezone(&Utc),
+            ),
+            16,
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(truncated.iter().any(|item| {
+            item.top_reason == "pack_item_authority_scan_truncated"
+                && item.degraded_code.as_deref() == Some("memory_drift_source_unverifiable")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn recent_pack_minimum_clock_returns_error_instead_of_panicking() -> Result<(), String> {
+        let workspace_path = Path::new("/tmp/ee-memory-drift-minimum-clock");
+        let (connection, workspace_id) = recent_pack_test_connection(workspace_path)?;
+        let error = memory_drift_report_recent_pack_items(
+            &connection,
+            workspace_path,
+            &workspace_id,
+            16,
+            Some(DateTime::<Utc>::MIN_UTC),
+        )
+        .expect_err("minimum clock cannot represent the seven-day horizon");
+        assert!(error.message().contains("seven-day horizon"));
+        Ok(())
+    }
+
+    #[test]
+    fn recent_pack_newest_revision_selection_controls_chain_authority() -> Result<(), String> {
+        let workspace_path = Path::new("/tmp/ee-memory-drift-revisions");
+        let (connection, workspace_id) = recent_pack_test_connection(workspace_path)?;
+
+        let blocked_old = crate::testing::mem("driftblockedold");
+        let blocked_live = crate::testing::mem("driftblockedlive");
+        insert_recent_pack_test_memory(&connection, &workspace_id, &blocked_old, true)?;
+        connection
+            .expire_memory_valid_to(&blocked_old, "2030-01-07T00:00:00Z")
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory_revision(
+                &blocked_live,
+                &blocked_old,
+                &recent_pack_test_memory_input(&workspace_id, "Current blocked-chain revision."),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET provenance_verification_status = 'verified', provenance_chain_hash = 'blake3:verified' WHERE id = '{blocked_live}'"
+            ))
+            .map_err(|error| error.to_string())?;
+        insert_recent_pack_test_record(
+            &connection,
+            &workspace_id,
+            "pack_drift_blocked_old",
+            &blocked_old,
+            "2030-01-07T12:00:00Z",
+        )?;
+
+        let cleared_old = crate::testing::mem("driftclearedold");
+        let cleared_live = crate::testing::mem("driftclearedlive");
+        insert_recent_pack_test_memory(&connection, &workspace_id, &cleared_old, true)?;
+        connection
+            .expire_memory_valid_to(&cleared_old, "2030-01-06T00:00:00Z")
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory_revision(
+                &cleared_live,
+                &cleared_old,
+                &recent_pack_test_memory_input(&workspace_id, "Current cleared-chain revision."),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(&format!(
+                "UPDATE memories SET provenance_verification_status = 'verified', provenance_chain_hash = 'blake3:verified' WHERE id = '{cleared_live}'"
+            ))
+            .map_err(|error| error.to_string())?;
+        insert_recent_pack_test_record(
+            &connection,
+            &workspace_id,
+            "pack_drift_cleared_old",
+            &cleared_old,
+            "2030-01-06T12:00:00Z",
+        )?;
+        insert_recent_pack_test_record(
+            &connection,
+            &workspace_id,
+            "pack_drift_cleared_live",
+            &cleared_live,
+            "2030-01-07T12:00:01Z",
+        )?;
+
+        let report = recent_pack_test_report(
+            &connection,
+            workspace_path,
+            &workspace_id,
+            "2030-01-08T00:00:00Z",
+        )?;
+        let blocked = report
+            .iter()
+            .find(|item| item.memory_id == blocked_old)
+            .ok_or_else(|| "superseded newest selection must remain in report".to_owned())?;
+        assert_eq!(blocked.top_reason, "pack_item_superseded_since_selection");
+        assert_eq!(blocked.drift_status, MemoryDriftStatus::Unverifiable);
+        assert!(report.iter().any(|item| {
+            item.memory_id == cleared_live && item.drift_status == MemoryDriftStatus::Current
+        }));
+        assert!(report.iter().all(|item| item.memory_id != cleared_old));
+
+        let recovery = MemoryDriftReport::new(MemoryDriftReportMode::RecentPackItems, None, report)
+            .recovery_actions;
+        assert!(recovery.iter().any(|action| {
+            action.kind == "rerun_source_validation"
+                && action.command.as_deref() == Some("ee pack \"<TASK>\" --workspace . --json")
+                && action
+                    .description
+                    .contains("cannot rewrite an old pack selection")
+        }));
+        assert!(recovery.iter().any(|action| {
+            action.kind == "revise_memory"
+                && action.command.as_deref()
+                    == Some("ee memory revise <CURRENT_MEMORY_ID> --provenance-uri <URI> --reason correction --json")
+                && action.description.contains("run a fresh pack")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn recent_pack_requires_exactly_one_live_revision_head() -> Result<(), String> {
+        let workspace_path = Path::new("/tmp/ee-memory-drift-live-heads");
+        let (connection, workspace_id) = recent_pack_test_connection(workspace_path)?;
+
+        let missing_head = crate::testing::mem("driftmissinghead");
+        insert_recent_pack_test_memory(&connection, &workspace_id, &missing_head, true)?;
+        insert_recent_pack_test_record(
+            &connection,
+            &workspace_id,
+            "pack_drift_missing_head",
+            &missing_head,
+            "2030-01-07T00:00:00Z",
+        )?;
+        connection
+            .expire_memory_valid_to(&missing_head, "2030-01-07T00:00:01Z")
+            .map_err(|error| error.to_string())?;
+
+        let ambiguous_first = crate::testing::mem("driftambiguousfirst");
+        let ambiguous_second = crate::testing::mem("driftambiguousecond");
+        insert_recent_pack_test_memory(&connection, &workspace_id, &ambiguous_first, true)?;
+        connection
+            .insert_memory_revision(
+                &ambiguous_second,
+                &ambiguous_first,
+                &recent_pack_test_memory_input(&workspace_id, "Second live head."),
+            )
+            .map_err(|error| error.to_string())?;
+        insert_recent_pack_test_record(
+            &connection,
+            &workspace_id,
+            "pack_drift_ambiguous_head",
+            &ambiguous_first,
+            "2030-01-07T00:00:02Z",
+        )?;
+
+        let report = recent_pack_test_report(
+            &connection,
+            workspace_path,
+            &workspace_id,
+            "2030-01-08T00:00:00Z",
+        )?;
+        let reasons = report
+            .iter()
+            .map(|item| item.top_reason.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(reasons.contains("pack_item_live_revision_missing"));
+        assert!(reasons.contains("pack_item_live_revision_ambiguous"));
+
+        assert!(
+            connection
+                .list_live_memory_revisions_for_logical_id(&workspace_id, &missing_head)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        assert_eq!(
+            connection
+                .list_live_memory_revisions_for_logical_id(&workspace_id, &ambiguous_first)
+                .map_err(|error| error.to_string())?
+                .len(),
+            2
+        );
+        assert!(
+            connection
+                .list_live_memory_revisions_for_logical_id("wsp_other", &ambiguous_first)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+
+        let tombstoned = crate::testing::mem("drifttombstonedhead");
+        insert_recent_pack_test_memory(&connection, &workspace_id, &tombstoned, true)?;
+        assert!(
+            connection
+                .tombstone_memory(&tombstoned)
+                .map_err(|error| error.to_string())?
+        );
+        assert!(
+            connection
+                .list_live_memory_revisions_for_logical_id(&workspace_id, &tombstoned)
+                .map_err(|error| error.to_string())?
+                .is_empty()
+        );
+        Ok(())
     }
 
     #[test]
@@ -2987,8 +4222,7 @@ mod tests {
     }
 
     #[test]
-    fn code_anchor_report_marks_newer_mtime_suspect_without_commit_baseline() -> Result<(), String>
-    {
+    fn code_anchor_report_outranks_routine_unverified_provenance() -> Result<(), String> {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace = tempdir.path();
         std::fs::create_dir_all(workspace.join("src")).map_err(|error| error.to_string())?;
@@ -3026,9 +4260,9 @@ mod tests {
             provenance_uri: None,
             trust_class: "agent_assertion".to_owned(),
             trust_subclass: None,
-            provenance_chain_hash: Some("blake3:verified".to_owned()),
+            provenance_chain_hash: None,
             provenance_chain_hash_version: "v1".to_owned(),
-            provenance_verification_status: "verified".to_owned(),
+            provenance_verification_status: "unverified".to_owned(),
             provenance_verified_at: None,
             provenance_verification_note: None,
             created_at: "1970-01-01T00:00:00Z".to_owned(),
@@ -3043,6 +4277,10 @@ mod tests {
         assert_eq!(hint.drift_status, MemoryDriftStatus::Unverifiable);
         assert_eq!(hint.top_reason, "code_anchor_mtime_newer_than_anchor");
         assert_eq!(hint.freshness, "unknown");
+        assert_eq!(
+            hint.degraded_code.as_deref(),
+            Some("memory_drift_source_unverifiable")
+        );
         assert!(hint.stale_anchor);
         assert_eq!(hint.anchors.len(), 1);
         assert_eq!(hint.anchors[0].freshness_state, "suspect");
@@ -3197,10 +4435,10 @@ mod tests {
     }
 
     #[test]
-    fn support_summary_unavailable_is_explicit_and_redaction_safe() {
+    fn support_summary_report_unavailable_is_explicit_and_redaction_safe() {
         let summary = memory_drift_support_summary_unavailable(
             "database_unavailable",
-            "memory_drift_source_unverifiable",
+            MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE,
             "Database was unavailable at /Users/example/private/path",
         );
         let encoded = serde_json::to_string(&summary).expect("support summary serializes");
@@ -3209,7 +4447,25 @@ mod tests {
             summary.get("status").and_then(serde_json::Value::as_str),
             Some("database_unavailable")
         );
-        assert!(encoded.contains("memory_drift_source_unverifiable"));
+        assert!(encoded.contains(MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE));
+        assert_eq!(
+            summary
+                .pointer("/evidenceInspection/memoryEvidenceInspected")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            summary
+                .pointer("/evidenceInspection/sourceFreshness")
+                .and_then(serde_json::Value::as_str),
+            Some("not_inspected")
+        );
+        assert_eq!(
+            summary
+                .pointer("/degraded/0/severity")
+                .and_then(serde_json::Value::as_str),
+            Some("warning")
+        );
         assert!(encoded.contains("\"rawSnippetsIncluded\":false"));
         assert!(!encoded.contains("/Users"));
         assert!(!encoded.contains('$'));
@@ -3264,11 +4520,12 @@ mod tests {
                 .pointer("/evidenceInspection/recoverySuggestions")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|actions| {
-                    actions.iter().any(|action| {
-                        action.as_str() == Some("rerun_after_write_owner_releases_lock")
-                    }) && actions
+                    actions
                         .iter()
-                        .any(|action| action.as_str() == Some("use_source_authority_snapshot"))
+                        .any(|action| action.as_str() == Some("retry_read_only_drift_report"))
+                        && actions
+                            .iter()
+                            .any(|action| action.as_str() == Some("use_source_authority_snapshot"))
                 })
         );
         assert!(encoded.contains(MEMORY_DRIFT_LOCK_CONTENTION_CODE));
@@ -3304,8 +4561,8 @@ mod tests {
     fn read_only_collector_lock_contention_error_is_bounded_and_redaction_safe() {
         let db_error = DbError::InvalidPath {
             operation: crate::db::DbOperation::BeginTransaction,
-            path: std::path::PathBuf::from("/Users/example/private/.ee/ee.write.lock"),
-            message: "could not acquire database write lock: contention timeout".to_owned(),
+            path: std::path::PathBuf::from("/Users/example/private/ee.sqlite3"),
+            message: "database is busy (snapshot conflict)".to_owned(),
         };
 
         let error = memory_drift_read_only_open_error(db_error);
@@ -3426,6 +4683,7 @@ mod tests {
             memory_id: None,
             limit: 10,
             include_tombstoned: false,
+            as_of: None,
         };
         let report = build_memory_drift_report_with_connection(&connection, &options)
             .map_err(|error| error.to_string())?;
@@ -3517,6 +4775,7 @@ mod tests {
             memory_id: None,
             limit: 10,
             include_tombstoned: false,
+            as_of: None,
         };
 
         let report =
@@ -3626,22 +4885,30 @@ mod tests {
         assert!(transition.is_degradation());
         assert_eq!(transition.anchor_value_hash, anchor.anchor_value_hash);
     }
-    /// bd-1xpq9: lock-contention classification matches the stable DB lock
-    /// error texts and nothing else.
+    /// bd-1xpq9: lock-contention classification matches database
+    /// read-snapshot errors, but never the workspace write-owner flock.
     #[test]
     fn lock_contention_classification_matches_stable_lock_errors() {
         let contended = DomainError::Storage {
-            message: "Failed to open database read-only for memory drift report: could not \
-                      acquire database write lock: contention timeout"
+            message: "Failed to begin memory drift read snapshot: database is busy \
+                      (snapshot conflict on pages: 4)"
                 .to_owned(),
             repair: None,
         };
         assert!(memory_drift_error_is_lock_contention(&contended));
-        let open_failed = DomainError::Storage {
-            message: "could not open database write lock: permission denied".to_owned(),
+        let workspace_write_lock = DomainError::Storage {
+            message: "could not acquire database write lock: contention timeout".to_owned(),
             repair: None,
         };
-        assert!(memory_drift_error_is_lock_contention(&open_failed));
+        assert!(!memory_drift_error_is_lock_contention(
+            &workspace_write_lock
+        ));
+        let open_failed = DomainError::Storage {
+            message: "Failed to open database read-only for memory drift report: permission denied"
+                .to_owned(),
+            repair: None,
+        };
+        assert!(!memory_drift_error_is_lock_contention(&open_failed));
         let unrelated = DomainError::Storage {
             message: "Failed to open database read-only for memory drift report: disk I/O error"
                 .to_owned(),
@@ -3665,8 +4932,9 @@ mod tests {
         );
         assert_eq!(
             details["lockAcquisitionClass"],
-            serde_json::json!("workspace_write_lock")
+            serde_json::json!(MEMORY_DRIFT_READ_ONLY_COLLECTOR_LOCK_CLASS)
         );
+        assert!(details.get("lockPath").is_none());
         assert_eq!(details["memoryEvidenceInspected"], serde_json::json!(false));
         assert_eq!(
             details["sourceFreshness"],
@@ -3677,9 +4945,14 @@ mod tests {
             !rendered.contains("/Users") && !rendered.contains("/private"),
             "details must not leak host-private absolute paths"
         );
+        let message = memory_drift_lock_contention_message("swarm_brief");
         assert!(
-            memory_drift_lock_contention_message("swarm_brief").contains("NOT inspected"),
-            "the message must state evidence was not inspected"
+            message.contains("database read-snapshot contention")
+                && message.contains("NOT inspected"),
+            "the message must identify database snapshot contention and state evidence was not inspected"
         );
+        assert!(!message.contains("workspace write-lock"));
+        assert!(MEMORY_DRIFT_LOCK_CONTENTION_REPAIR.contains("ee doctor --json"));
+        assert!(!MEMORY_DRIFT_LOCK_CONTENTION_REPAIR.contains("advisory-lock"));
     }
 }

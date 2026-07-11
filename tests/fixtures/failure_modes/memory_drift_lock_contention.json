@@ -14,10 +14,10 @@
   "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "Read-only memory-drift collection needs the workspace database, and opening it contends on the workspace write lock at .ee/ee.write.lock (another process holds it, e.g. a long batch ingest or index publish). Collection is blocked BEFORE any evidence inspection. Previously this surfaced as memory_drift_source_unverifiable, which wrongly suggested stale memory evidence; the dedicated code states that memory evidence was NOT inspected (details.memoryEvidenceInspected=false, details.sourceFreshness=not_inspected, details.lockAcquisitionClass=workspace_write_lock). memory_drift_source_unverifiable keeps its narrower meaning: evidence WAS inspected and could not be verified. Details are redaction-safe: no lock-holder internals, no stack traces, only the workspace-relative lock path.",
+    "description": "A database-level open or read-snapshot contention failure blocks memory-drift collection before evidence inspection. Since bd-3sh42, the genuine read-only collector does not join the application workspace write-owner flock, so merely holding .ee/ee.write.lock must not trigger this code. The defensive classification remains for lower-layer database contention errors and imported source-authority snapshots. It stays distinct from memory_drift_source_unverifiable, which means evidence was inspected but could not be verified.",
     "setup_commands": [
       "ee init --workspace .",
-      "hold the workspace write lock from another process (e.g. a long-running ee remember --batch)"
+      "inject or reproduce a lower-layer database open/read-snapshot contention error; a workspace write-owner flock alone is insufficient after bd-3sh42"
     ],
     "invocation": "ee swarm brief --workspace . --json"
   },
@@ -25,7 +25,7 @@
     "code": "memory_drift_lock_contention",
     "severity": "warning",
     "message_contains": [
-      "blocked by workspace write-lock contention",
+      "blocked by database read-snapshot contention",
       "NOT inspected"
     ]
   }

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use ee::db::{DbConnection, StoredMemory};
+use ee::db::{CreatePackItemInput, CreatePackRecordInput, DbConnection, StoredMemory};
 use ee::models::DomainError;
 use ee::output::error_response_json;
 use ee::policy::redact_secret_like_content;
@@ -211,7 +211,20 @@ fn run_ee(
     args: &[&str],
 ) -> Result<CommandOutput, String> {
     let started = Instant::now();
+    let embed_model_dir = artifact_dir.join("empty-embed-model");
+    fs::create_dir_all(&embed_model_dir).map_err(|error| {
+        format!(
+            "failed to create isolated empty embedding model dir {}: {error}",
+            embed_model_dir.display()
+        )
+    })?;
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env("EE_EMBED_MODEL_DIR", &embed_model_dir)
+        .env_remove("EE_EMBED_MODEL_PATH")
+        .env_remove("EE_EMBED_DEDUP_ENABLED")
+        .env_remove("EE_EMBED_DEDUP_HAMMING_K")
+        .env_remove("EE_EMBED_DEDUP_COSINE_FLOOR")
         .args(args)
         .current_dir(workspace)
         .output()
@@ -752,6 +765,140 @@ fn assert_required_events(log_path: &Path) -> TestResult {
 }
 
 #[test]
+fn recent_pack_old_only_archived_source_drift_does_not_block_current_claim_window() -> TestResult {
+    let log_dir = unique_log_dir()?;
+    let artifact_dir = log_dir.join("old-only-artifacts");
+    fs::create_dir_all(&artifact_dir)
+        .map_err(|error| format!("create old-only artifact dir: {error}"))?;
+    let workspace_temp = tempfile::Builder::new()
+        .prefix("ee-memory-drift-old-only-no-mock-")
+        .tempdir()
+        .map_err(|error| format!("create old-only workspace: {error}"))?;
+    let workspace = workspace_temp.path();
+    let workspace_arg = workspace.display().to_string();
+    let database_path = workspace.join(".ee").join("ee.db");
+
+    let init = run_ee(
+        workspace,
+        &artifact_dir,
+        "old_only_01_init",
+        &["--workspace", &workspace_arg, "--json", "init"],
+    )?;
+    ensure_equal(init.exit_code, 0, "old-only init exit")?;
+    let remembered = run_ee(
+        workspace,
+        &artifact_dir,
+        "old_only_02_remember",
+        &[
+            "--workspace",
+            &workspace_arg,
+            "--json",
+            "remember",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "Archived close-the-gap plan evidence moved to docs/archive.",
+        ],
+    )?;
+    let memory_id = string_at(&remembered.json, "/data/memory_id", "old-only remember")?;
+    update_provenance_status(
+        &database_path,
+        &memory_id,
+        "missing",
+        "historical CLOSE_THE_GAP_PLAN.md provenance moved to docs/archive/close_the_gap_2026-05.md",
+    )?;
+
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open old-only db: {error}"))?;
+    let stored = connection
+        .get_memory(&memory_id)
+        .map_err(|error| format!("read old-only memory: {error}"))?
+        .ok_or_else(|| "old-only memory disappeared".to_owned())?;
+    let pack_id_hash = blake3::hash(b"old archived plan pack").to_hex().to_string();
+    let pack_id = format!("pack_{}", &pack_id_hash[..26]);
+    connection
+        .insert_pack_record_at(
+            &pack_id,
+            &CreatePackRecordInput {
+                workspace_id: stored.workspace_id,
+                query: "coordination snapshot path smoke".to_owned(),
+                profile: "balanced".to_owned(),
+                max_tokens: 512,
+                used_tokens: 32,
+                item_count: 1,
+                omitted_count: 0,
+                pack_hash: format!("blake3:{pack_id_hash}"),
+                degraded_json: None,
+                created_by: Some("no-mock-regression".to_owned()),
+            },
+            &[CreatePackItemInput {
+                pack_id: pack_id.clone(),
+                memory_id: memory_id.clone(),
+                rank: 1,
+                section: "procedural_rules".to_owned(),
+                estimated_tokens: 32,
+                relevance: 0.03,
+                utility: 0.5,
+                why: "historical archived-plan selection".to_owned(),
+                diversity_key: None,
+                provenance_json: "{}".to_owned(),
+                trust_class: "agent_assertion".to_owned(),
+                trust_subclass: None,
+            }],
+            &[],
+            "2000-01-01T00:00:00Z",
+        )
+        .map_err(|error| format!("insert old-only pack: {error}"))?;
+    connection
+        .close()
+        .map_err(|error| format!("close old-only db: {error}"))?;
+
+    let report = run_ee(
+        workspace,
+        &artifact_dir,
+        "old_only_03_recent_pack_drift",
+        &[
+            "--workspace",
+            &workspace_arg,
+            "--json",
+            "memory",
+            "drift",
+            "--mode",
+            "recent-pack-items",
+        ],
+    )?;
+    ensure_equal(report.exit_code, 0, "old-only drift report exit")?;
+    ensure_equal(
+        report
+            .json
+            .pointer("/data/summary/totalMemories")
+            .and_then(Value::as_u64),
+        Some(0),
+        "strictly historical pack selection count",
+    )?;
+    ensure_equal(
+        report
+            .json
+            .pointer("/data/items")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(0),
+        "strictly historical pack selection items",
+    )?;
+    ensure(
+        !memory_drift_codes(&report.json)
+            .iter()
+            .any(|code| code == "memory_drift_source_unverifiable"),
+        format!(
+            "old archived pack must not retain claim-authority degradation: {}",
+            report.stdout
+        ),
+    )?;
+    Ok(())
+}
+
+#[test]
 fn memory_drift_no_mock_replay_surfaces_changed_source_without_mutation() -> TestResult {
     let log_dir = unique_log_dir()?;
     let artifact_dir = log_dir.join("artifacts");
@@ -857,18 +1004,6 @@ fn memory_drift_no_mock_replay_surfaces_changed_source_without_mutation() -> Tes
     )?;
     let stable_id = string_at(&stable_memory.json, "/data/memory_id", "stable remember")?;
 
-    let index = run_ee(
-        &workspace,
-        &artifact_dir,
-        "04_index_rebuild",
-        &["--workspace", &workspace_arg, "--json", "index", "rebuild"],
-    )?;
-    ensure_equal(
-        index.json.get("schema").and_then(Value::as_str),
-        Some("ee.response.v2"),
-        "index schema",
-    )?;
-
     let changed_before_hash = hash_file(&changed_source)?;
     let stable_hash = hash_file(&stable_source)?;
     update_provenance_status(
@@ -882,6 +1017,18 @@ fn memory_drift_no_mock_replay_surfaces_changed_source_without_mutation() -> Tes
         &stable_id,
         "verified",
         &format!("no-mock baseline source hash {stable_hash}"),
+    )?;
+
+    let index = run_ee(
+        &workspace,
+        &artifact_dir,
+        "04_index_rebuild",
+        &["--workspace", &workspace_arg, "--json", "index", "rebuild"],
+    )?;
+    ensure_equal(
+        index.json.get("schema").and_then(Value::as_str),
+        Some("ee.response.v2"),
+        "index schema",
     )?;
 
     let baseline_report = run_ee(
@@ -1176,32 +1323,21 @@ fn memory_drift_no_mock_replay_surfaces_changed_source_without_mutation() -> Tes
 }
 
 // ===========================================================================
-// bd-koag5: memory-drift lock-contention conformance (no-mock).
+// bd-3sh42: true read-only memory-drift collection under a held writer flock.
 //
-// Conformance matrix, mapping every MUST/SHOULD from the bd-1xpq9 response
-// contract and the bd-14cue collector strategy to assertions below:
+// The old bounded-probe collector intentionally emitted
+// `memory_drift_lock_contention` while `.ee/ee.write.lock` was held. bd-3sh42
+// replaced that interim strategy with a genuine read-only database open. The
+// tests below pin the replacement contract:
 //
 // | Req | Clause (source) | Covered by |
 // | --- | --- | --- |
-// | LC-MUST-1 | Held lock emits `memory_drift_lock_contention`, severity warning (bd-1xpq9) | matrix test, held-lock phase |
-// | LC-MUST-2 | Message states collection was blocked by workspace write-lock contention AND that memory evidence was NOT inspected (bd-1xpq9 pinned substrings) | matrix test, held-lock phase |
-// | LC-MUST-3 | Repair guidance is non-mutating and names the read-only advisory-lock diagnosis surface (bd-1xpq9) | matrix test, held-lock phase |
-// | LC-MUST-4 | No-lock collection never emits the contention code (bd-14cue) | matrix test, control + recovery phases |
-// | LC-MUST-5 | The read-only command must not mutate workspace state under contention (bd-14cue) | matrix test, fingerprint guard |
-// | LC-MUST-6 | Emission is redaction-safe: no raw absolute workspace path (bd-1xpq9) | matrix test, redaction check |
-// | LC-MUST-7 | Claim-gate consumers see lock contention as a degraded source reason and never receive a claim command action (bd-1xpq9 / bd-koag5) | claim-gate projection test + golden |
-// | LC-SHOULD-1 | Diagnostics are JSON-line events sufficient to identify the selected branch (bd-koag5) | both tests emit ee.test_event.v1 lines |
-//
-// The catalog fixture for the code itself lives at
-// tests/fixtures/failure_modes/memory_drift_lock_contention.json (bd-1xpq9).
-// The lock holder here is a REAL second open file description holding an
-// exclusive flock on .ee/ee.write.lock - the same primitive the DB layer
-// uses - so the contention path is exercised without mocks.
+// | RO-MUST-1 | A held workspace write-owner flock does not block a read-only drift collector | matrix test, held-lock phase |
+// | RO-MUST-2 | The held-lock read remains non-mutating | matrix test, fingerprint guard |
+// | RO-MUST-3 | Claim-gate collection does not resurrect the obsolete lock degradation | claim-gate test |
 // ===========================================================================
 
 const LOCK_CONTENTION_CODE: &str = "memory_drift_lock_contention";
-const LOCK_PROJECTION_GOLDEN: &str =
-    include_str!("fixtures/memory_drift_lock/claim_gate_lock_contention_projection.golden.json");
 
 fn hold_workspace_write_lock(workspace: &Path) -> Result<fs::File, String> {
     let lock_path = workspace.join(".ee").join("ee.write.lock");
@@ -1302,18 +1438,8 @@ fn degraded_entry_with_code<'a>(value: &'a Value, code: &str) -> Option<&'a Valu
         .find(|entry| entry.get("code").and_then(Value::as_str) == Some(code))
 }
 
-fn find_first_key<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
-    match value {
-        Value::Object(map) => map
-            .get(key)
-            .or_else(|| map.values().find_map(|child| find_first_key(child, key))),
-        Value::Array(items) => items.iter().find_map(|child| find_first_key(child, key)),
-        _ => None,
-    }
-}
-
 #[test]
-fn memory_drift_lock_contention_no_mock_matrix_and_no_mutation() -> TestResult {
+fn memory_drift_true_read_only_collection_ignores_writer_flock_without_mutation() -> TestResult {
     let log_dir = unique_log_dir()?;
     let artifact_dir = log_dir.join("lock-contention-artifacts");
     fs::create_dir_all(&artifact_dir)
@@ -1395,66 +1521,39 @@ fn memory_drift_lock_contention_no_mock_matrix_and_no_mutation() -> TestResult {
     // a second open file description with an exclusive non-blocking flock.
     let lock_file = hold_workspace_write_lock(&workspace)?;
 
-    let contended = run_ee_swarm(
+    let under_writer_lock = run_ee_swarm(
         &workspace,
         &artifact_dir,
         "lc04_brief_contended",
         &["--workspace", &workspace_arg, "--json", "swarm", "brief"],
     )?;
-    let entry = degraded_entry_with_code(&contended.json, LOCK_CONTENTION_CODE)
-        .ok_or("held lock must surface memory_drift_lock_contention in degraded[] (LC-MUST-1)")?;
-    ensure_equal(
-        entry.get("severity").and_then(Value::as_str),
-        Some("warning"),
-        "lock-contention severity (LC-MUST-1)",
-    )?;
-    let message = entry
-        .get("message")
-        .and_then(Value::as_str)
-        .ok_or("lock-contention entry must carry a message")?;
     ensure(
-        message.contains("blocked by workspace write-lock contention"),
-        format!("message must name write-lock contention (LC-MUST-2), got: {message}"),
-    )?;
-    ensure(
-        message.contains("NOT inspected"),
-        format!("message must state evidence was NOT inspected (LC-MUST-2), got: {message}"),
-    )?;
-    let repair = entry
-        .get("repair")
-        .and_then(Value::as_str)
-        .ok_or("lock-contention entry must carry repair guidance (LC-MUST-3)")?;
-    ensure(
-        repair.contains("ee diag advisory-lock"),
-        format!(
-            "repair must point at the read-only advisory-lock surface (LC-MUST-3), got: {repair}"
-        ),
-    )?;
-    assert_no_raw_workspace_path(
-        entry,
-        &workspace,
-        "lock-contention degraded entry (LC-MUST-6)",
+        degraded_entry_with_code(&under_writer_lock.json, LOCK_CONTENTION_CODE).is_none(),
+        "true read-only collection must not join the workspace write-owner flock",
     )?;
     emit_event(
         &events_path,
         &workspace,
         "drift_report",
-        contended.elapsed_ms,
-        map_of(&[("brief_contended", hash_text(&contended.stdout))]),
+        under_writer_lock.elapsed_ms,
+        map_of(&[(
+            "brief_under_writer_lock",
+            hash_text(&under_writer_lock.stdout),
+        )]),
         BTreeMap::new(),
-        degraded_codes(&contended.json),
+        degraded_codes(&under_writer_lock.json),
         "validated",
         None,
-        json!({"branch": "lc_held_lock_contention"}),
+        json!({"branch": "ro_held_writer_lock_read_succeeds"}),
     )?;
 
-    // LC-MUST-5: the contended read-only command mutated nothing while the
+    // RO-MUST-2: the concurrent read-only command mutated nothing while the
     // lock stayed held the whole time.
     let post_state = ee_state_fingerprint(&workspace)?;
     ensure_equal(
         &post_state,
         &pre_state,
-        "workspace .ee state under contention (LC-MUST-5 no-mutation proof)",
+        "workspace .ee state under a held writer flock (RO-MUST-2 no-mutation proof)",
     )?;
     emit_event(
         &events_path,
@@ -1472,7 +1571,7 @@ fn memory_drift_lock_contention_no_mock_matrix_and_no_mutation() -> TestResult {
         json!({"branch": "lc_no_mutation_guard", "fileCount": post_state.len()}),
     )?;
 
-    // LC-MUST-4 recovery: releasing the lock clears the code again.
+    // Releasing the lock leaves the same read-only posture.
     drop(lock_file);
     let recovered = run_ee_swarm(
         &workspace,
@@ -1507,7 +1606,7 @@ fn memory_drift_lock_contention_no_mock_matrix_and_no_mutation() -> TestResult {
         Vec::new(),
         "validated",
         None,
-        json!({"branch": "lc_matrix_complete", "matrix": ["LC-MUST-1", "LC-MUST-2", "LC-MUST-3", "LC-MUST-4", "LC-MUST-5", "LC-MUST-6", "LC-SHOULD-1"]}),
+        json!({"branch": "ro_matrix_complete", "matrix": ["RO-MUST-1", "RO-MUST-2"]}),
     )?;
     emit_event(
         &events_path,
@@ -1526,7 +1625,7 @@ fn memory_drift_lock_contention_no_mock_matrix_and_no_mutation() -> TestResult {
 }
 
 #[test]
-fn memory_drift_lock_contention_claim_gate_projection_never_emits_claim_action() -> TestResult {
+fn memory_drift_claim_gate_read_collection_ignores_writer_flock() -> TestResult {
     let log_dir = unique_log_dir()?;
     let artifact_dir = log_dir.join("lock-gate-artifacts");
     fs::create_dir_all(&artifact_dir)
@@ -1563,42 +1662,12 @@ fn memory_drift_lock_contention_claim_gate_projection_never_emits_claim_action()
         ],
     )?;
 
-    // LC-MUST-7: lock contention is a degraded source reason on the gate
-    // surface and the gate never hands out a claim command action.
-    let entry = degraded_entry_with_code(&gate.json, LOCK_CONTENTION_CODE).ok_or(
-        "claim-gate run under a held lock must surface memory_drift_lock_contention (LC-MUST-7)",
-    )?;
-    let message = entry.get("message").and_then(Value::as_str).unwrap_or("");
-    let repair = entry.get("repair").and_then(Value::as_str).unwrap_or("");
-    let claim_action = find_first_key(&gate.json, "claimCommandAction");
+    // RO-MUST-3: source authority may still block for unrelated missing
+    // inputs, but the true read-only collector cannot report the obsolete
+    // workspace-flock degradation.
     ensure(
-        claim_action.is_none_or(Value::is_null),
-        format!(
-            "claimCommandAction must be null/absent under lock contention, got: {claim_action:?}"
-        ),
+        degraded_entry_with_code(&gate.json, LOCK_CONTENTION_CODE).is_none(),
+        "claim-gate memory-drift collection must ignore the workspace write-owner flock",
     )?;
-    assert_no_raw_workspace_path(entry, &workspace, "claim-gate lock-contention entry")?;
-
-    let projection = json!({
-        "schema": "ee.memory_drift.lock_contention.claim_gate_projection.v1",
-        "claimCommandAction": Value::Null,
-        "memoryDrift": {
-            "code": entry.get("code").cloned().unwrap_or(Value::Null),
-            "severity": entry.get("severity").cloned().unwrap_or(Value::Null),
-            "messageContainsBlockedByLock": message
-                .contains("blocked by workspace write-lock contention"),
-            "messageContainsNotInspected": message.contains("NOT inspected"),
-            "repairMentionsAdvisoryLockDiag": repair.contains("ee diag advisory-lock"),
-        },
-    });
-    write_text(
-        &artifact_dir.join("claim_gate_projection.json"),
-        &serde_json::to_string_pretty(&projection)
-            .map_err(|error| format!("projection serialization: {error}"))?,
-    )?;
-    compare_golden(
-        &projection,
-        LOCK_PROJECTION_GOLDEN,
-        "claim-gate lock-contention projection golden (LC-MUST-7)",
-    )
+    Ok(())
 }
