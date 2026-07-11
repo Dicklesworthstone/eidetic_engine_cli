@@ -539,6 +539,34 @@ pub fn minimize_pack(options: &MinimizeOptions) -> Result<MinimizeReport, Domain
     let required_members = required_pack_member_paths(&expected_artifacts);
     let pack_members = collect_pack_member_files(&options.pack_path)?;
 
+    // Required members that exist must resolve to regular files. Collection
+    // recurses directories, so a directory sitting at a required member path
+    // would otherwise be treated as an (empty) subdirectory instead of being
+    // rejected the way symlinked members are. Members that are absent keep
+    // the existing tolerant minimize behavior; replay/verify owns strict
+    // missing-artifact reporting. See bd-1p5os.
+    for member_path in &required_members {
+        if pack_members.contains_key(member_path) {
+            continue;
+        }
+        let Ok(resolved) = resolve_pack_file_path_no_symlinks(&options.pack_path, member_path)
+        else {
+            continue;
+        };
+        match fs::symlink_metadata(&resolved) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "pack_artifact_metadata_unavailable: {}: not a regular file",
+                        resolved.display()
+                    ),
+                    repair: Some("Use regular repro pack member files".to_string()),
+                });
+            }
+            _ => {}
+        }
+    }
+
     let mut report = MinimizeReport::new(options.pack_path.clone(), options.output_dir.clone());
     report.dry_run = options.dry_run;
 
@@ -1670,11 +1698,27 @@ mod tests {
 
     #[cfg(unix)]
     fn temp_root(prefix: &str) -> Result<PathBuf, String> {
-        tempfile::Builder::new()
+        let root = tempfile::Builder::new()
             .prefix(prefix)
             .tempdir()
             .map(tempfile::TempDir::keep)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        // Resolve symlinked ancestors (macOS /tmp, RCH worker TMPDIR shims)
+        // so pack-path symlink guards exercise the member handling under
+        // test instead of refusing the host tempdir itself. See bd-1p5os.
+        fs::canonicalize(&root).map_err(|e| e.to_string())
+    }
+
+    #[cfg(unix)]
+    fn write_minimal_manifest(pack: &Path) -> Result<(), String> {
+        fs::write(
+            pack.join("manifest.json"),
+            concat!(
+                r#"{"artifacts":[{"path":"env.json","required":true,"#,
+                r#""hash":"blake3:0000000000000000000000000000000000000000000000000000000000000000"}]}"#,
+            ),
+        )
+        .map_err(|e| e.to_string())
     }
 
     #[cfg(unix)]
@@ -1757,6 +1801,10 @@ mod tests {
         let workspace = temp_root("ee_repro_minimize_symlink_member_")?;
         let pack = workspace.join("pack");
         fs::create_dir_all(&pack).map_err(|e| e.to_string())?;
+        // A parseable manifest is required so minimize reaches member
+        // processing; without it the manifest read fails first and the
+        // symlinked member is never inspected. See bd-1p5os.
+        write_minimal_manifest(&pack)?;
         let external_env = workspace.join("external-env.json");
         fs::write(&external_env, "{}\n").map_err(|e| e.to_string())?;
         std::os::unix::fs::symlink(&external_env, pack.join("env.json"))
@@ -1771,7 +1819,14 @@ mod tests {
         .expect_err("symlinked required pack member must be rejected");
 
         assert_eq!(error.code(), "storage");
-        assert!(error.message().contains("symlink"));
+        // The tempdir prefix embeds "symlink" into error paths, so a bare
+        // contains("symlink") check can pass vacuously; assert the stable
+        // refusal code instead.
+        assert!(
+            error.message().contains("pack_symlink_refused"),
+            "expected member symlink refusal, got: {}",
+            error.message()
+        );
         Ok(())
     }
 
@@ -1809,6 +1864,10 @@ mod tests {
         let workspace = temp_root("ee_repro_minimize_non_regular_member_")?;
         let pack = workspace.join("pack");
         fs::create_dir_all(pack.join("env.json")).map_err(|e| e.to_string())?;
+        // A parseable manifest is required so minimize reaches member
+        // processing; required-ness comes from the manifest plus the static
+        // required-file list. See bd-1p5os.
+        write_minimal_manifest(&pack)?;
 
         let error = minimize_pack(&MinimizeOptions {
             pack_path: pack.clone(),
