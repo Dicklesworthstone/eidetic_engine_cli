@@ -2012,6 +2012,123 @@ fn memory_drift_lock_contention_conformance_matrix_matches_contract() -> TestRes
 }
 
 #[test]
+fn successful_unverifiable_memory_drift_is_authoritative_but_still_blocks_claim() -> TestResult {
+    let fixture = memory_drift_lock_fixture("conformance_matrix.json")?;
+    let mut case = fixture
+        .pointer("/cases")
+        .and_then(Value::as_array)
+        .and_then(|cases| {
+            cases.iter().find(|case| {
+                case.pointer("/name").and_then(Value::as_str) == Some("inspected_but_unverifiable")
+            })
+        })
+        .cloned()
+        .ok_or_else(|| "inspected-unverifiable case missing from fixture".to_owned())?;
+    case["memoryDriftSource"]["status"] = json!("ready");
+
+    let candidate_id = string_at(
+        &case,
+        "/candidateId",
+        "successful memory-drift authority case",
+    )?;
+    let (packet, gate) =
+        memory_drift_packet_and_gate_from_case(&case, "successful memory-drift authority case")?;
+    let authority = packet.source_authority_snapshot(Some(candidate_id));
+    let memory_source = authority
+        .sources
+        .iter()
+        .find(|source| source.source_kind == "memory_drift")
+        .ok_or_else(|| "source-authority snapshot missing memory_drift".to_owned())?;
+    if memory_source.state != "ready" || !memory_source.authoritative {
+        return Err(format!(
+            "successful collector must stay authoritative despite its finding: {memory_source:?}"
+        ));
+    }
+    if gate.safe_to_claim || gate.claim_command_action.is_some() {
+        return Err("unverifiable recent-pack evidence must suppress claim action".to_owned());
+    }
+    if !gate
+        .degraded_codes
+        .iter()
+        .any(|code| code == "memory_drift_source_unverifiable")
+        || !gate
+            .unsafe_reasons
+            .iter()
+            .any(|reason| reason == "memory_drift_source_unverifiable")
+    {
+        return Err(format!(
+            "top-level gate lost authoritative memory finding: codes={:?} reasons={:?}",
+            gate.degraded_codes, gate.unsafe_reasons
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn successful_missing_provenance_memory_drift_remains_advisory() -> TestResult {
+    let fixture = memory_drift_lock_fixture("conformance_matrix.json")?;
+    let mut case = fixture
+        .pointer("/cases")
+        .and_then(Value::as_array)
+        .and_then(|cases| {
+            cases.iter().find(|case| {
+                case.pointer("/name").and_then(Value::as_str) == Some("inspected_but_unverifiable")
+            })
+        })
+        .cloned()
+        .ok_or_else(|| "inspected-unverifiable case missing from fixture".to_owned())?;
+    case["memoryDriftSource"]["status"] = json!("ready");
+    case["memoryDriftSource"]["degradedCode"] = json!("memory_drift_source_missing");
+    case["memoryDriftSource"]["message"] =
+        json!("Memory provenance was missing after otherwise successful inspection.");
+    case["memoryDriftSource"]["summary"]["missingSourceCount"] = json!(1);
+    case["memoryDriftSource"]["summary"]["unverifiableCount"] = json!(0);
+    case["memoryDriftSource"]["summary"]["degradedCodes"] = json!(["memory_drift_source_missing"]);
+
+    let candidate_id = string_at(
+        &case,
+        "/candidateId",
+        "successful missing-provenance authority case",
+    )?;
+    let (packet, gate) = memory_drift_packet_and_gate_from_case(
+        &case,
+        "successful missing-provenance authority case",
+    )?;
+    let authority = packet.source_authority_snapshot(Some(candidate_id));
+    let memory_source = authority
+        .sources
+        .iter()
+        .find(|source| source.source_kind == "memory_drift")
+        .ok_or_else(|| "source-authority snapshot missing memory_drift".to_owned())?;
+    if memory_source.state != "ready" || !memory_source.authoritative {
+        return Err(format!(
+            "missing provenance finding must not erase successful collector authority: {memory_source:?}"
+        ));
+    }
+    if !gate.safe_to_claim || gate.claim_command_action.is_none() {
+        return Err(format!(
+            "ordinary missing provenance must remain advisory, got verdict={} reasons={:?}",
+            gate.verdict, gate.unsafe_reasons
+        ));
+    }
+    if !gate
+        .degraded_codes
+        .iter()
+        .any(|code| code == "memory_drift_source_missing")
+        || gate
+            .unsafe_reasons
+            .iter()
+            .any(|reason| reason == "memory_drift_source_missing")
+    {
+        return Err(format!(
+            "missing provenance advisory projection drifted: codes={:?} reasons={:?}",
+            gate.degraded_codes, gate.unsafe_reasons
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn memory_drift_lock_contention_details_and_golden_projection_are_stable() -> TestResult {
     let fixture = memory_drift_lock_fixture("conformance_matrix.json")?;
     let case = fixture
@@ -2048,6 +2165,28 @@ fn memory_drift_lock_contention_details_and_golden_projection_are_stable() -> Te
         }
     }
     assert_no_forbidden_markers(&details, context)?;
+    if details.get("lockPath").is_some() {
+        return Err(format!(
+            "{context}: database read-snapshot contention must not claim a workspace lock path"
+        ));
+    }
+    if details
+        .pointer("/lockAcquisitionClass")
+        .and_then(Value::as_str)
+        != Some(memory_drift::MEMORY_DRIFT_READ_ONLY_COLLECTOR_LOCK_CLASS)
+    {
+        return Err(format!(
+            "{context}: lockAcquisitionClass must identify the database read snapshot"
+        ));
+    }
+    if message.contains("workspace write-lock")
+        || memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_REPAIR.contains("advisory-lock")
+        || !memory_drift::MEMORY_DRIFT_LOCK_CONTENTION_REPAIR.contains("ee doctor --json")
+    {
+        return Err(format!(
+            "{context}: message/repair revived obsolete workspace write-lock semantics"
+        ));
+    }
 
     let (packet, gate) = memory_drift_packet_and_gate_from_case(case, context)?;
     let projection = lock_contention_claim_gate_projection(&packet, &gate);

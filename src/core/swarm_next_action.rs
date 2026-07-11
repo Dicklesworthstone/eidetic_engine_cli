@@ -5447,6 +5447,7 @@ fn is_coordination_degradation_code(code: &str) -> bool {
             | "bv_unavailable"
             | "bv_recommendation_stale"
             | "memory_drift_lock_contention"
+            | "memory_drift_report_unavailable"
             | "memory_drift_source_unverifiable"
     )
 }
@@ -9055,12 +9056,12 @@ fn coordination_summary(brief: &SwarmBriefReport) -> SwarmNextActionCoordination
     SwarmNextActionCoordinationSummary {
         active_reservation_count: brief.file_reservations.len(),
         reservation_holders: holders,
-        unread_inbox_count: brief.inbox.iter().map(|entry| entry.unread_count).sum(),
-        ack_required_count: brief
-            .inbox
-            .iter()
-            .map(|entry| entry.ack_required_count)
-            .sum(),
+        unread_inbox_count: brief.inbox.iter().fold(0_u64, |total, entry| {
+            total.saturating_add(entry.unread_count)
+        }),
+        ack_required_count: brief.inbox.iter().fold(0_u64, |total, entry| {
+            total.saturating_add(entry.ack_required_count)
+        }),
     }
 }
 
@@ -13086,6 +13087,25 @@ mod tests {
                 .stop_condition_refs
                 .contains(&"no_source_verdict_without_rch_cargo")
         );
+    }
+
+    #[test]
+    fn memory_drift_claim_blocker_allowlist_covers_findings_and_collection_failures() {
+        assert!(is_coordination_degradation_code(
+            "memory_drift_source_unverifiable"
+        ));
+        assert!(is_coordination_degradation_code(
+            "memory_drift_lock_contention"
+        ));
+        assert!(is_coordination_degradation_code(
+            "memory_drift_report_unavailable"
+        ));
+        assert!(!is_coordination_degradation_code(
+            "memory_drift_source_changed"
+        ));
+        assert!(!is_coordination_degradation_code(
+            "memory_drift_source_missing"
+        ));
     }
 
     #[test]

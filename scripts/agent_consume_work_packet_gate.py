@@ -57,6 +57,10 @@ CLAIM_GATE_REQUIRED_FIELDS = [
     ("recommendedAction", "missing_claim_gate_recommended_action"),
     ("recommendedSafeToClaim", "missing_claim_gate_recommended_safe_to_claim"),
     ("sourceAuthority", "missing_claim_gate_source_authority"),
+    (
+        "sourceAuthoritySnapshot",
+        "missing_claim_gate_source_authority_snapshot",
+    ),
     ("actionableQueue", "missing_claim_gate_actionable_queue"),
     ("resourceAdmission", "missing_claim_gate_resource_admission"),
     ("unsafeReasons", "missing_claim_gate_unsafe_reasons"),
@@ -99,6 +103,110 @@ CLAIM_GATE_SOURCE_AUTHORITY_REQUIRED_FIELDS = [
     ("installFreshnessRepair", "missing_claim_gate_install_freshness_repair"),
     ("sourceCount", "missing_claim_gate_source_count"),
 ]
+SOURCE_AUTHORITY_SNAPSHOT_REQUIRED_FIELDS = [
+    ("schema", "schema"),
+    ("snapshotId", "snapshot_id"),
+    ("provenanceHash", "provenance_hash"),
+    ("redactionStatus", "redaction_status"),
+    ("overall", "overall"),
+    ("candidateEvidence", "candidate_evidence"),
+    ("sourceStates", "source_states"),
+    ("degradedCodes", "degraded_codes"),
+    ("repairGuidance", "repair_guidance"),
+]
+SOURCE_AUTHORITY_OVERALL_REQUIRED_FIELDS = [
+    ("verdict", "verdict"),
+    ("failClosed", "fail_closed"),
+    ("authoritativeSourceCount", "authoritative_source_count"),
+    ("degradedSourceCount", "degraded_source_count"),
+    ("unavailableSourceCount", "unavailable_source_count"),
+]
+SOURCE_AUTHORITY_CANDIDATE_REQUIRED_FIELDS = [
+    ("candidateId", "candidate_id"),
+    ("lookupOutcome", "lookup_outcome"),
+    ("staleFallbackPresent", "stale_fallback_present"),
+]
+SOURCE_AUTHORITY_STATE_REQUIRED_FIELDS = [
+    ("sourceKind", "source_kind"),
+    ("state", "state"),
+    ("authoritative", "authoritative"),
+    ("freshnessState", "freshness_state"),
+    ("timedOut", "timed_out"),
+    ("exitClass", "exit_class"),
+]
+SOURCE_AUTHORITY_REPAIR_REQUIRED_FIELDS = [
+    ("sourceKind", "source_kind"),
+    ("state", "state"),
+    ("guidance", "guidance"),
+    ("command", "command"),
+    ("safety", "safety"),
+]
+SOURCE_AUTHORITY_SOURCE_KINDS = {
+    "actionable_queue",
+    "agent_mail",
+    "beads",
+    "bv",
+    "git",
+    "host_profile",
+    "installed_binary",
+    "memory_drift",
+    "rch",
+    "support_bundle",
+    "toolchain",
+    "workspace_hygiene",
+}
+SOURCE_AUTHORITY_SOURCE_STATES = {
+    "ready",
+    "degraded_read_only",
+    "stale_fallback",
+    "timed_out",
+    "unavailable",
+    "corrupt_recovery",
+    "contradicted",
+}
+SOURCE_AUTHORITY_DEGRADED_STATES = {
+    "degraded_read_only",
+    "stale_fallback",
+    "corrupt_recovery",
+    "contradicted",
+}
+SOURCE_AUTHORITY_UNAVAILABLE_STATES = {"unavailable", "timed_out"}
+SOURCE_AUTHORITY_OVERALL_VERDICTS = {
+    "all_sources_authoritative",
+    "degraded_but_decidable",
+    "fail_closed_contradiction",
+    "fail_closed_timeout",
+    "fail_closed_insufficient_authority",
+    "fail_closed_proof_unavailable",
+}
+SOURCE_AUTHORITY_SAFE_OVERALL_VERDICTS = {
+    "all_sources_authoritative",
+    "degraded_but_decidable",
+}
+SOURCE_AUTHORITY_CANDIDATE_OUTCOMES = {
+    "candidate_present",
+    "candidate_absent_confirmed",
+    "candidate_lookup_timed_out",
+    "candidate_lookup_unavailable",
+    "candidate_stale_fallback_only",
+    "candidate_contradicted",
+}
+SOURCE_AUTHORITY_FRESHNESS_STATES = {"fresh", "stale", "unknown"}
+SOURCE_AUTHORITY_REPAIR_SAFETY_VALUES = {
+    "read_only_probe",
+    "unavailable_or_manual_only",
+}
+SOURCE_AUTHORITY_REQUIRED_SAFE_SOURCES = {
+    "actionable_queue",
+    "agent_mail",
+    "beads",
+    "git",
+    "installed_binary",
+    "rch",
+    "toolchain",
+}
+SOURCE_AUTHORITY_SNAPSHOT_ID_PATTERN = re.compile(r"^sas-[A-Za-z0-9._-]+$")
+SOURCE_AUTHORITY_PROVENANCE_HASH_PATTERN = re.compile(r"^blake3:[A-Za-z0-9]+$")
 CLAIM_GATE_ACTIONABLE_QUEUE_REQUIRED_FIELDS = [
     ("commandId", "command_id"),
     ("displayCommand", "display_command"),
@@ -425,6 +533,338 @@ def malformed_claim_gate_authority_reasons(gate):
     return reasons
 
 
+def object_shape_reasons(value, required_fields, reason_prefix):
+    if not isinstance(value, dict):
+        return [f"malformed_{reason_prefix}"]
+
+    reasons = []
+    expected = {field for field, _suffix in required_fields}
+    for field, suffix in required_fields:
+        if field not in value:
+            reasons.append(f"missing_{reason_prefix}_{suffix}")
+    if set(value) - expected:
+        reasons.append(f"malformed_{reason_prefix}_additional_fields")
+    return reasons
+
+
+def safe_snapshot_string(value, max_length=None):
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and (max_length is None or len(value) <= max_length)
+        and not text_requires_redaction(value)
+    )
+
+
+def source_authority_repair_command_is_mutating(command):
+    if command is None:
+        return False
+    if not safe_snapshot_string(command, 240):
+        return True
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return True
+    return not argv or action_looks_like_beads_mutation({"argv": argv})
+
+
+def malformed_source_authority_snapshot_reasons(gate):
+    snapshot = gate.get("sourceAuthoritySnapshot")
+    reasons = object_shape_reasons(
+        snapshot,
+        SOURCE_AUTHORITY_SNAPSHOT_REQUIRED_FIELDS,
+        "claim_gate_source_authority_snapshot",
+    )
+    if not isinstance(snapshot, dict):
+        return reasons
+
+    if snapshot.get("schema") != "ee.source_authority.snapshot.v1":
+        reasons.append("malformed_claim_gate_source_authority_snapshot_schema")
+    snapshot_id = snapshot.get("snapshotId")
+    if not isinstance(snapshot_id, str) or not SOURCE_AUTHORITY_SNAPSHOT_ID_PATTERN.fullmatch(
+        snapshot_id
+    ):
+        reasons.append("malformed_claim_gate_source_authority_snapshot_snapshot_id")
+    provenance_hash = snapshot.get("provenanceHash")
+    if not isinstance(
+        provenance_hash, str
+    ) or not SOURCE_AUTHORITY_PROVENANCE_HASH_PATTERN.fullmatch(provenance_hash):
+        reasons.append("malformed_claim_gate_source_authority_snapshot_provenance_hash")
+    if snapshot.get("redactionStatus") != "paths_counts_subjects_only_no_content":
+        reasons.append("malformed_claim_gate_source_authority_snapshot_redaction_status")
+
+    overall = snapshot.get("overall")
+    reasons.extend(
+        object_shape_reasons(
+            overall,
+            SOURCE_AUTHORITY_OVERALL_REQUIRED_FIELDS,
+            "claim_gate_source_authority_snapshot_overall",
+        )
+    )
+    if isinstance(overall, dict):
+        verdict = overall.get("verdict")
+        if verdict not in SOURCE_AUTHORITY_OVERALL_VERDICTS:
+            reasons.append("malformed_claim_gate_source_authority_snapshot_overall_verdict")
+        fail_closed = overall.get("failClosed")
+        if not isinstance(fail_closed, bool):
+            reasons.append("malformed_claim_gate_source_authority_snapshot_overall_fail_closed")
+        elif isinstance(verdict, str) and fail_closed != verdict.startswith("fail_closed"):
+            reasons.append("contradictory_claim_gate_source_authority_snapshot_fail_closed")
+        for field, suffix in SOURCE_AUTHORITY_OVERALL_REQUIRED_FIELDS[2:]:
+            if nonnegative_int_or_none(overall.get(field)) is None:
+                reasons.append(
+                    f"malformed_claim_gate_source_authority_snapshot_overall_{suffix}"
+                )
+
+    candidate = snapshot.get("candidateEvidence")
+    if candidate is not None:
+        reasons.extend(
+            object_shape_reasons(
+                candidate,
+                SOURCE_AUTHORITY_CANDIDATE_REQUIRED_FIELDS,
+                "claim_gate_source_authority_snapshot_candidate_evidence",
+            )
+        )
+        if isinstance(candidate, dict):
+            candidate_id = candidate.get("candidateId")
+            if not safe_snapshot_string(candidate_id, 120):
+                reasons.append(
+                    "malformed_claim_gate_source_authority_snapshot_candidate_id"
+                )
+            if candidate.get("lookupOutcome") not in SOURCE_AUTHORITY_CANDIDATE_OUTCOMES:
+                reasons.append(
+                    "malformed_claim_gate_source_authority_snapshot_lookup_outcome"
+                )
+            stale_fallback = candidate.get("staleFallbackPresent")
+            if stale_fallback is not None and not isinstance(stale_fallback, bool):
+                reasons.append(
+                    "malformed_claim_gate_source_authority_snapshot_stale_fallback_present"
+                )
+
+    source_states = snapshot.get("sourceStates")
+    if not isinstance(source_states, list) or len(source_states) > 16:
+        reasons.append("malformed_claim_gate_source_authority_snapshot_source_states")
+        source_states = []
+
+    source_kinds = []
+    for source in source_states:
+        reasons.extend(
+            object_shape_reasons(
+                source,
+                SOURCE_AUTHORITY_STATE_REQUIRED_FIELDS,
+                "claim_gate_source_authority_snapshot_source_state",
+            )
+        )
+        if not isinstance(source, dict):
+            continue
+        source_kind = source.get("sourceKind")
+        state = source.get("state")
+        freshness = source.get("freshnessState")
+        authoritative = source.get("authoritative")
+        timed_out = source.get("timedOut")
+        exit_class = source.get("exitClass")
+        if source_kind not in SOURCE_AUTHORITY_SOURCE_KINDS:
+            reasons.append(
+                "malformed_claim_gate_source_authority_snapshot_source_kind"
+            )
+        else:
+            source_kinds.append(source_kind)
+        if state not in SOURCE_AUTHORITY_SOURCE_STATES:
+            reasons.append("malformed_claim_gate_source_authority_snapshot_source_state_state")
+        if not isinstance(authoritative, bool):
+            reasons.append(
+                "malformed_claim_gate_source_authority_snapshot_source_state_authoritative"
+            )
+        if freshness not in SOURCE_AUTHORITY_FRESHNESS_STATES:
+            reasons.append(
+                "malformed_claim_gate_source_authority_snapshot_source_state_freshness"
+            )
+        if not isinstance(timed_out, bool):
+            reasons.append(
+                "malformed_claim_gate_source_authority_snapshot_source_state_timed_out"
+            )
+        elif isinstance(state, str) and timed_out != (state == "timed_out"):
+            reasons.append(
+                "contradictory_claim_gate_source_authority_snapshot_timed_out"
+            )
+        if not safe_snapshot_string(exit_class):
+            reasons.append(
+                "malformed_claim_gate_source_authority_snapshot_source_state_exit_class"
+            )
+        if authoritative is True and (
+            state != "ready"
+            or freshness != "fresh"
+            or timed_out is not False
+            or exit_class != "ok"
+        ):
+            reasons.append(
+                "contradictory_claim_gate_source_authority_snapshot_authoritative_state"
+            )
+
+    if source_kinds != sorted(source_kinds):
+        reasons.append("unsorted_claim_gate_source_authority_snapshot_source_states")
+    if len(source_kinds) != len(set(source_kinds)):
+        reasons.append("duplicate_claim_gate_source_authority_snapshot_source_states")
+
+    if isinstance(overall, dict) and isinstance(source_states, list):
+        expected_counts = {
+            "authoritativeSourceCount": sum(
+                source.get("authoritative") is True
+                for source in source_states
+                if isinstance(source, dict)
+            ),
+            "degradedSourceCount": sum(
+                source.get("state") in SOURCE_AUTHORITY_DEGRADED_STATES
+                for source in source_states
+                if isinstance(source, dict)
+            ),
+            "unavailableSourceCount": sum(
+                source.get("state") in SOURCE_AUTHORITY_UNAVAILABLE_STATES
+                for source in source_states
+                if isinstance(source, dict)
+            ),
+        }
+        for field, expected in expected_counts.items():
+            if overall.get(field) != expected:
+                reasons.append(
+                    "contradictory_claim_gate_source_authority_snapshot_"
+                    f"{re.sub(r'(?<!^)(?=[A-Z])', '_', field).lower()}"
+                )
+        verdict = overall.get("verdict")
+        degraded_count = expected_counts["degradedSourceCount"]
+        unavailable_count = expected_counts["unavailableSourceCount"]
+        timed_out_present = any(
+            isinstance(source, dict) and source.get("state") == "timed_out"
+            for source in source_states
+        )
+        if verdict == "all_sources_authoritative" and (
+            degraded_count > 0 or unavailable_count > 0
+        ):
+            reasons.append(
+                "contradictory_claim_gate_source_authority_snapshot_overall_verdict"
+            )
+        if verdict == "degraded_but_decidable" and (
+            degraded_count == 0 and unavailable_count == 0
+        ):
+            reasons.append(
+                "contradictory_claim_gate_source_authority_snapshot_overall_verdict"
+            )
+        if timed_out_present and verdict != "fail_closed_timeout":
+            reasons.append(
+                "contradictory_claim_gate_source_authority_snapshot_timeout_verdict"
+            )
+
+    degraded_codes = snapshot.get("degradedCodes")
+    if not isinstance(degraded_codes, list) or any(
+        not safe_snapshot_string(code) for code in list_items(degraded_codes)
+    ):
+        reasons.append("malformed_claim_gate_source_authority_snapshot_degraded_codes")
+
+    repair_guidance = snapshot.get("repairGuidance")
+    if not isinstance(repair_guidance, list) or len(repair_guidance) > 16:
+        reasons.append("malformed_claim_gate_source_authority_snapshot_repair_guidance")
+        repair_guidance = []
+    for repair in repair_guidance:
+        reasons.extend(
+            object_shape_reasons(
+                repair,
+                SOURCE_AUTHORITY_REPAIR_REQUIRED_FIELDS,
+                "claim_gate_source_authority_snapshot_repair",
+            )
+        )
+        if not isinstance(repair, dict):
+            continue
+        if repair.get("sourceKind") not in SOURCE_AUTHORITY_SOURCE_KINDS:
+            reasons.append(
+                "malformed_claim_gate_source_authority_snapshot_repair_source_kind"
+            )
+        if repair.get("state") not in SOURCE_AUTHORITY_SOURCE_STATES:
+            reasons.append("malformed_claim_gate_source_authority_snapshot_repair_state")
+        for field in ("guidance", "command"):
+            value = repair.get(field)
+            if value is not None and not safe_snapshot_string(value, 240):
+                reasons.append(
+                    f"malformed_claim_gate_source_authority_snapshot_repair_{field}"
+                )
+        if repair.get("safety") not in SOURCE_AUTHORITY_REPAIR_SAFETY_VALUES:
+            reasons.append("malformed_claim_gate_source_authority_snapshot_repair_safety")
+        if source_authority_repair_command_is_mutating(repair.get("command")):
+            reasons.append("mutating_claim_gate_source_authority_snapshot_repair")
+
+    return reasons
+
+
+def source_authority_snapshot_consistency_reasons(gate):
+    snapshot = gate.get("sourceAuthoritySnapshot")
+    if not isinstance(snapshot, dict):
+        return []
+
+    reasons = []
+    overall = snapshot.get("overall")
+    if isinstance(overall, dict):
+        if overall.get("failClosed") is not False:
+            reasons.append("claim_gate_source_authority_snapshot_fail_closed")
+        if overall.get("verdict") not in SOURCE_AUTHORITY_SAFE_OVERALL_VERDICTS:
+            reasons.append(
+                "claim_gate_source_authority_snapshot_verdict:"
+                f"{redact_text(overall.get('verdict') or 'unknown', 64)}"
+            )
+
+    candidate = snapshot.get("candidateEvidence")
+    if not isinstance(candidate, dict):
+        reasons.append("claim_gate_source_authority_snapshot_candidate_missing")
+    else:
+        expected_candidate_ids = [gate.get("requestedCandidateId")]
+        selected = gate.get("selectedCandidate")
+        if isinstance(selected, dict):
+            expected_candidate_ids.append(selected.get("id"))
+        claim_candidate_id = claim_action_candidate_id(gate.get("claimCommandAction"))
+        expected_candidate_ids.append(claim_candidate_id)
+        candidate_id = candidate.get("candidateId")
+        if any(
+            isinstance(expected, str) and expected != candidate_id
+            for expected in expected_candidate_ids
+        ):
+            reasons.append("claim_gate_source_authority_snapshot_candidate_id_mismatch")
+        if candidate.get("lookupOutcome") != "candidate_present":
+            reasons.append(
+                "claim_gate_source_authority_snapshot_candidate_outcome:"
+                f"{redact_text(candidate.get('lookupOutcome') or 'unknown', 64)}"
+            )
+        if candidate.get("staleFallbackPresent") is not False:
+            reasons.append("claim_gate_source_authority_snapshot_candidate_stale")
+
+    source_states = snapshot.get("sourceStates")
+    source_by_kind = {
+        source.get("sourceKind"): source
+        for source in list_items(source_states)
+        if isinstance(source, dict) and isinstance(source.get("sourceKind"), str)
+    }
+    for source_kind in sorted(SOURCE_AUTHORITY_REQUIRED_SAFE_SOURCES):
+        source = source_by_kind.get(source_kind)
+        if not isinstance(source, dict):
+            reasons.append(
+                f"claim_gate_source_authority_snapshot_missing_required_source:{source_kind}"
+            )
+            continue
+        if (
+            source.get("state") != "ready"
+            or source.get("authoritative") is not True
+            or source.get("freshnessState") != "fresh"
+            or source.get("timedOut") is not False
+            or source.get("exitClass") != "ok"
+        ):
+            reasons.append(
+                f"claim_gate_source_authority_snapshot_required_source_not_ready:{source_kind}"
+            )
+
+    for code in list_items(snapshot.get("degradedCodes")):
+        if code in AUTHORITY_DEGRADED_BLOCKER_CODES:
+            reasons.append(f"claim_gate_source_authority_snapshot_blocker:{code}")
+
+    return reasons
+
+
 def malformed_actionable_queue_reasons(gate):
     queue = gate.get("actionableQueue")
     if not isinstance(queue, dict):
@@ -706,6 +1146,7 @@ def malformed_claim_gate_reasons(gate):
     if "actionableQueue" in gate and not isinstance(gate.get("actionableQueue"), dict):
         reasons.append("malformed_claim_gate_actionable_queue")
     reasons.extend(malformed_actionable_queue_reasons(gate))
+    reasons.extend(malformed_source_authority_snapshot_reasons(gate))
 
     next_actions = gate.get("nextCommandActions")
     if isinstance(next_actions, list):
@@ -897,6 +1338,8 @@ def authority_degraded_blocker_codes(payload, envelope_degraded=None):
 
     source_authority = dict_or_empty(payload.get("sourceAuthority"))
     add_degraded_codes(source_authority, "degradedCodes", "blockerCodes")
+    source_authority_snapshot = dict_or_empty(payload.get("sourceAuthoritySnapshot"))
+    add_degraded_codes(source_authority_snapshot, "degradedCodes")
     tracker = dict_or_empty(payload.get("trackerIntegrity"))
     add_degraded_codes(tracker, "degradedCodes", "blockerCodes")
     coordination = dict_or_empty(payload.get("coordination"))
@@ -1363,6 +1806,7 @@ def claim_gate_consistency_reasons(gate, envelope_degraded=None):
             gate, "claim_gate_degraded_authority", envelope_degraded
         )
     )
+    reasons.extend(source_authority_snapshot_consistency_reasons(gate))
     requested_candidate_id = gate.get("requestedCandidateId")
     if gate.get("safeToClaim") is not True:
         reasons.append("claim_gate_safe_flag_not_true")

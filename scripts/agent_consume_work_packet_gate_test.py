@@ -123,6 +123,124 @@ def safe_gate():
             "installFreshnessRepair": None,
             "sourceCount": 4,
         },
+        "sourceAuthoritySnapshot": {
+            "schema": "ee.source_authority.snapshot.v1",
+            "snapshotId": "sas-1111111111111111",
+            "provenanceHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+            "redactionStatus": "paths_counts_subjects_only_no_content",
+            "overall": {
+                "verdict": "all_sources_authoritative",
+                "failClosed": False,
+                "authoritativeSourceCount": 11,
+                "degradedSourceCount": 0,
+                "unavailableSourceCount": 0,
+            },
+            "candidateEvidence": {
+                "candidateId": "bd-safe.1",
+                "lookupOutcome": "candidate_present",
+                "staleFallbackPresent": False,
+            },
+            "sourceStates": [
+                {
+                    "sourceKind": "actionable_queue",
+                    "state": "ready",
+                    "authoritative": True,
+                    "freshnessState": "fresh",
+                    "timedOut": False,
+                    "exitClass": "ok",
+                },
+                {
+                    "sourceKind": "agent_mail",
+                    "state": "ready",
+                    "authoritative": True,
+                    "freshnessState": "fresh",
+                    "timedOut": False,
+                    "exitClass": "ok",
+                },
+                {
+                    "sourceKind": "beads",
+                    "state": "ready",
+                    "authoritative": True,
+                    "freshnessState": "fresh",
+                    "timedOut": False,
+                    "exitClass": "ok",
+                },
+                {
+                    "sourceKind": "bv",
+                    "state": "ready",
+                    "authoritative": False,
+                    "freshnessState": "fresh",
+                    "timedOut": False,
+                    "exitClass": "ok",
+                },
+                {
+                    "sourceKind": "git",
+                    "state": "ready",
+                    "authoritative": True,
+                    "freshnessState": "fresh",
+                    "timedOut": False,
+                    "exitClass": "ok",
+                },
+                {
+                    "sourceKind": "host_profile",
+                    "state": "ready",
+                    "authoritative": True,
+                    "freshnessState": "fresh",
+                    "timedOut": False,
+                    "exitClass": "ok",
+                },
+                {
+                    "sourceKind": "installed_binary",
+                    "state": "ready",
+                    "authoritative": True,
+                    "freshnessState": "fresh",
+                    "timedOut": False,
+                    "exitClass": "ok",
+                },
+                {
+                    "sourceKind": "memory_drift",
+                    "state": "ready",
+                    "authoritative": True,
+                    "freshnessState": "fresh",
+                    "timedOut": False,
+                    "exitClass": "ok",
+                },
+                {
+                    "sourceKind": "rch",
+                    "state": "ready",
+                    "authoritative": True,
+                    "freshnessState": "fresh",
+                    "timedOut": False,
+                    "exitClass": "ok",
+                },
+                {
+                    "sourceKind": "support_bundle",
+                    "state": "ready",
+                    "authoritative": True,
+                    "freshnessState": "fresh",
+                    "timedOut": False,
+                    "exitClass": "ok",
+                },
+                {
+                    "sourceKind": "toolchain",
+                    "state": "ready",
+                    "authoritative": True,
+                    "freshnessState": "fresh",
+                    "timedOut": False,
+                    "exitClass": "ok",
+                },
+                {
+                    "sourceKind": "workspace_hygiene",
+                    "state": "ready",
+                    "authoritative": True,
+                    "freshnessState": "fresh",
+                    "timedOut": False,
+                    "exitClass": "ok",
+                },
+            ],
+            "degradedCodes": [],
+            "repairGuidance": [],
+        },
         "actionableQueue": safe_actionable_queue(),
         "resourceAdmission": {
             "schema": "ee.resource_admission.v1",
@@ -448,6 +566,265 @@ class ClaimGateConsumer(unittest.TestCase):
                     if action["actionKind"] == "claim"
                 ][0]
                 self.assertFalse(claim["runnable"])
+
+    def test_source_authority_snapshot_must_be_a_declared_v1_object(self):
+        for value in (None, [], "ee.source_authority.snapshot.v1"):
+            with self.subTest(value=value):
+                gate = safe_gate()
+                gate["sourceAuthoritySnapshot"] = value
+
+                decision = consumer.consume(envelope(gate))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertIn(
+                    "malformed_claim_gate_source_authority_snapshot",
+                    decision["whyNotSafe"],
+                )
+                self.assertFalse(
+                    any(
+                        action["runnable"] and action["mutatesState"]
+                        for action in decision["argvActions"]
+                    )
+                )
+
+    def test_source_authority_snapshot_required_and_exact_fields_fail_closed(self):
+        for field, suffix in consumer.SOURCE_AUTHORITY_SNAPSHOT_REQUIRED_FIELDS:
+            with self.subTest(field=field):
+                gate = safe_gate()
+                gate["sourceAuthoritySnapshot"].pop(field)
+
+                decision = consumer.consume(envelope(gate))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertIn(
+                    f"missing_claim_gate_source_authority_snapshot_{suffix}",
+                    decision["whyNotSafe"],
+                )
+
+        gate = safe_gate()
+        gate["sourceAuthoritySnapshot"]["rawSourceOutput"] = "trusted"
+        decision = consumer.consume(envelope(gate))
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "malformed_claim_gate_source_authority_snapshot_additional_fields",
+            decision["whyNotSafe"],
+        )
+
+    def test_source_authority_snapshot_scalar_and_count_drift_fails_closed(self):
+        mutations = [
+            ("schema", "ee.source_authority.snapshot.v0"),
+            ("snapshotId", "snapshot-unsafe"),
+            ("provenanceHash", "sha256:unsafe"),
+            ("redactionStatus", "raw"),
+        ]
+        for field, value in mutations:
+            with self.subTest(field=field):
+                gate = safe_gate()
+                gate["sourceAuthoritySnapshot"][field] = value
+
+                decision = consumer.consume(envelope(gate))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertFalse(
+                    any(
+                        action["runnable"] and action["mutatesState"]
+                        for action in decision["argvActions"]
+                    )
+                )
+
+        for field, value in (
+            ("authoritativeSourceCount", True),
+            ("degradedSourceCount", -1),
+            ("unavailableSourceCount", 1),
+        ):
+            with self.subTest(count=field):
+                gate = safe_gate()
+                gate["sourceAuthoritySnapshot"]["overall"][field] = value
+
+                decision = consumer.consume(envelope(gate))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertFalse(
+                    any(
+                        action["runnable"] and action["mutatesState"]
+                        for action in decision["argvActions"]
+                    )
+                )
+
+    def test_source_authority_snapshot_candidate_evidence_must_confirm_claim(self):
+        gate = safe_gate()
+        gate["sourceAuthoritySnapshot"]["candidateEvidence"] = None
+        decision = consumer.consume(envelope(gate))
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_source_authority_snapshot_candidate_missing",
+            decision["whyNotSafe"],
+        )
+
+        gate = safe_gate()
+        gate["sourceAuthoritySnapshot"]["candidateEvidence"]["candidateId"] = (
+            "bd-other.1"
+        )
+        decision = consumer.consume(envelope(gate))
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_source_authority_snapshot_candidate_id_mismatch",
+            decision["whyNotSafe"],
+        )
+
+        for outcome in sorted(
+            consumer.SOURCE_AUTHORITY_CANDIDATE_OUTCOMES - {"candidate_present"}
+        ):
+            with self.subTest(outcome=outcome):
+                gate = safe_gate()
+                gate["sourceAuthoritySnapshot"]["candidateEvidence"][
+                    "lookupOutcome"
+                ] = outcome
+
+                decision = consumer.consume(envelope(gate))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertIn(
+                    f"claim_gate_source_authority_snapshot_candidate_outcome:{outcome}",
+                    decision["whyNotSafe"],
+                )
+
+        gate = safe_gate()
+        gate["sourceAuthoritySnapshot"]["candidateEvidence"][
+            "staleFallbackPresent"
+        ] = True
+        decision = consumer.consume(envelope(gate))
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_source_authority_snapshot_candidate_stale",
+            decision["whyNotSafe"],
+        )
+
+    def test_source_authority_snapshot_source_vector_fails_closed_on_drift(self):
+        gate = safe_gate()
+        gate["sourceAuthoritySnapshot"]["sourceStates"].reverse()
+        decision = consumer.consume(envelope(gate))
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "unsorted_claim_gate_source_authority_snapshot_source_states",
+            decision["whyNotSafe"],
+        )
+
+        gate = safe_gate()
+        duplicate = copy.deepcopy(
+            gate["sourceAuthoritySnapshot"]["sourceStates"][0]
+        )
+        gate["sourceAuthoritySnapshot"]["sourceStates"].insert(1, duplicate)
+        gate["sourceAuthoritySnapshot"]["overall"][
+            "authoritativeSourceCount"
+        ] += 1
+        decision = consumer.consume(envelope(gate))
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "duplicate_claim_gate_source_authority_snapshot_source_states",
+            decision["whyNotSafe"],
+        )
+
+        gate = safe_gate()
+        gate["sourceAuthoritySnapshot"]["sourceStates"] = [
+            source
+            for source in gate["sourceAuthoritySnapshot"]["sourceStates"]
+            if source["sourceKind"] != "git"
+        ]
+        gate["sourceAuthoritySnapshot"]["overall"][
+            "authoritativeSourceCount"
+        ] -= 1
+        decision = consumer.consume(envelope(gate))
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_source_authority_snapshot_missing_required_source:git",
+            decision["whyNotSafe"],
+        )
+
+        gate = safe_gate()
+        rch = next(
+            source
+            for source in gate["sourceAuthoritySnapshot"]["sourceStates"]
+            if source["sourceKind"] == "rch"
+        )
+        rch.update({"state": "timed_out", "authoritative": False, "timedOut": True})
+        gate["sourceAuthoritySnapshot"]["overall"].update(
+            {
+                "verdict": "fail_closed_timeout",
+                "failClosed": True,
+                "authoritativeSourceCount": 10,
+                "unavailableSourceCount": 1,
+            }
+        )
+        decision = consumer.consume(envelope(gate))
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_source_authority_snapshot_required_source_not_ready:rch",
+            decision["whyNotSafe"],
+        )
+
+        gate = safe_gate()
+        toolchain = next(
+            source
+            for source in gate["sourceAuthoritySnapshot"]["sourceStates"]
+            if source["sourceKind"] == "toolchain"
+        )
+        toolchain.update(
+            {
+                "state": "degraded_read_only",
+                "authoritative": False,
+                "freshnessState": "unknown",
+                "exitClass": "stale_binary",
+            }
+        )
+        gate["sourceAuthoritySnapshot"]["overall"].update(
+            {
+                "authoritativeSourceCount": 10,
+                "degradedSourceCount": 1,
+            }
+        )
+        decision = consumer.consume(envelope(gate))
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_source_authority_snapshot_required_source_not_ready:toolchain",
+            decision["whyNotSafe"],
+        )
+        self.assertIn(
+            "contradictory_claim_gate_source_authority_snapshot_overall_verdict",
+            decision["whyNotSafe"],
+        )
+        self.assertFalse(
+            any(
+                action["runnable"] and action["mutatesState"]
+                for action in decision["argvActions"]
+            )
+        )
+
+    def test_source_authority_snapshot_repair_guidance_must_be_read_only(self):
+        gate = safe_gate()
+        gate["sourceAuthoritySnapshot"]["repairGuidance"] = [
+            {
+                "sourceKind": "beads",
+                "state": "degraded_read_only",
+                "guidance": "Repair tracker state.",
+                "command": "br update bd-safe.1 --status in_progress --json",
+                "safety": "read_only_probe",
+            }
+        ]
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "mutating_claim_gate_source_authority_snapshot_repair",
+            decision["whyNotSafe"],
+        )
+        self.assertFalse(
+            any(
+                action["runnable"] and action["mutatesState"]
+                for action in decision["argvActions"]
+            )
+        )
 
     def test_malformed_source_authority_scalars_fail_closed_and_emit_schema_types(self):
         gate = safe_gate()
@@ -3833,6 +4210,23 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
             set(source_authority["properties"]),
         )
         self.assertFalse(source_authority["additionalProperties"])
+        source_authority_snapshot = schema["definitions"]["sourceAuthoritySnapshot"]
+        self.assertEqual(
+            [
+                field
+                for field, _suffix in consumer.SOURCE_AUTHORITY_SNAPSHOT_REQUIRED_FIELDS
+            ],
+            source_authority_snapshot["required"],
+        )
+        self.assertFalse(source_authority_snapshot["additionalProperties"])
+        self.assertEqual(
+            consumer.SOURCE_AUTHORITY_SOURCE_KINDS,
+            set(schema["definitions"]["sourceAuthoritySourceKind"]["enum"]),
+        )
+        self.assertEqual(
+            consumer.SOURCE_AUTHORITY_SOURCE_STATES,
+            set(schema["definitions"]["sourceAuthoritySourceState"]["enum"]),
+        )
         self.assertEqual(
             [
                 field

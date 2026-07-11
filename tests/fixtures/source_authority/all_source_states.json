@@ -347,6 +347,30 @@
       "statusDetail": "skipped_by_flag: no embedded bundle evidence requested"
     },
     {
+      "sourceKind": "toolchain",
+      "state": "ready",
+      "authoritative": true,
+      "freshness": {
+        "capturedAt": "2026-06-10T14:59:56Z",
+        "ageMs": 4000,
+        "staleAfterMs": 600000,
+        "freshnessState": "fresh"
+      },
+      "budget": {
+        "commandBudgetMs": 1000,
+        "elapsedMs": 140,
+        "timedOut": false,
+        "retriesUsed": 0,
+        "retryBudget": 0
+      },
+      "exit": { "exitClass": "ok", "exitCode": 0 },
+      "partialData": { "available": true, "droppedSections": [], "reason": null },
+      "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
+      "repair": { "guidance": null, "command": null, "safety": "read_only_probe" },
+      "evidenceId": "sre-toolchain-0010",
+      "statusDetail": "required toolchain probes answered with redacted version and path-hash evidence"
+    },
+    {
       "sourceKind": "workspace_hygiene",
       "state": "ready",
       "authoritative": true,
@@ -367,7 +391,7 @@
       "partialData": { "available": true, "droppedSections": [], "reason": null },
       "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
       "repair": { "guidance": null, "command": null, "safety": "read_only_probe" },
-      "evidenceId": "sre-hygiene-0010",
+      "evidenceId": "sre-hygiene-0011",
       "statusDetail": "11 dirty paths classified; no secret-risk buckets"
     }
   ],
@@ -385,7 +409,7 @@
   "overall": {
     "verdict": "fail_closed_insufficient_authority",
     "failClosed": true,
-    "authoritativeSourceCount": 4,
+    "authoritativeSourceCount": 5,
     "degradedSourceCount": 4,
     "unavailableSourceCount": 3
   },

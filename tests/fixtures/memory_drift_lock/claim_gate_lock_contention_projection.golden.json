@@ -4,8 +4,8 @@
   "memoryDrift": {
     "code": "memory_drift_lock_contention",
     "severity": "warning",
-    "messageContainsBlockedByLock": true,
+    "messageContainsDatabaseReadSnapshotContention": true,
     "messageContainsNotInspected": true,
-    "repairMentionsAdvisoryLockDiag": true
+    "repairMentionsDoctor": true
   }
 }

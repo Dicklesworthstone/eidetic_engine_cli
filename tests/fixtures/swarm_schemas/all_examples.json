@@ -114,64 +114,6 @@
           "statusDetail": "live br ready timed out; stale-safe snapshot from 182s ago answered"
         },
         {
-          "sourceKind": "bv",
-          "state": "timed_out",
-          "authoritative": false,
-          "freshness": {
-            "capturedAt": null,
-            "ageMs": null,
-            "staleAfterMs": 300000,
-            "freshnessState": "unknown"
-          },
-          "budget": {
-            "commandBudgetMs": 30000,
-            "elapsedMs": 30000,
-            "timedOut": true,
-            "retriesUsed": 0,
-            "retryBudget": 0
-          },
-          "exit": {
-            "exitClass": "timeout",
-            "exitCode": 124
-          },
-          "partialData": {
-            "available": true,
-            "droppedSections": [
-              "cycles",
-              "robot_next",
-              "claim_command"
-            ],
-            "reason": "bv --robot-next timed out after partial graph analysis"
-          },
-          "fallback": {
-            "active": false,
-            "fallbackKind": null,
-            "fallbackAgeMs": null
-          },
-          "repair": {
-            "guidance": "Retry BV with a bounded robot-insights probe or fall back to the safe Beads actionable queue.",
-            "command": "bv --robot-insights --format json",
-            "safety": "read_only_probe"
-          },
-          "evidenceId": "sre-bv-9e27a6b3",
-          "statusDetail": "bv robot-next timed out; no claim command is available",
-          "bvRobotNext": {
-            "commandId": "bv_robot_next",
-            "commandName": "bv --robot-next",
-            "commandTemplate": "bv --robot-next --format json",
-            "graphNodeCount": 4079,
-            "graphEdgeCount": 6120,
-            "skippedPhases": [
-              "cycles",
-              "robot_next",
-              "claim_command"
-            ],
-            "recommendationState": "timed_out",
-            "claimCommandSuppressed": true,
-            "fallbackCommand": "bv --robot-insights --format json"
-          }
-        },
-        {
           "sourceKind": "rch",
           "state": "ready",
           "authoritative": true,
@@ -462,7 +404,7 @@
     "ee.agent_mail.snapshot.v1": {
       "schema": "ee.agent_mail.snapshot.v1",
       "generated_at": "2026-06-05T18:56:00Z",
-      "project_key": "<workspace>",
+      "project_key": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
       "agent_name": "BeigeHollow",
       "redaction_status": "paths_counts_subjects_only_no_content",
       "producer_status": "ok",
@@ -470,13 +412,50 @@
         "am agents list --project '<workspace>' --json",
         "am robot reservations --project '<workspace>' --all --format json",
         "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json",
-        "agent-mail-health http://127.0.0.1:8765/health"
+        "am status --project '<workspace>' --agent BeigeHollow --json",
+        "agent-mail-health http://127.0.0.1:8765/health",
+        "agent-mail-health http://127.0.0.1:8765/health/durability"
       ],
       "command_statuses": [
         {
           "command": "am agents list --project '<workspace>' --json",
           "ok": true,
           "exit_code": 0,
+          "timed_out": false,
+          "error_class": null
+        },
+        {
+          "command": "am robot reservations --project '<workspace>' --all --format json",
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "error_class": null
+        },
+        {
+          "command": "am mail inbox --project '<workspace>' --agent BeigeHollow --limit 20 --json",
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "error_class": null
+        },
+        {
+          "command": "am status --project '<workspace>' --agent BeigeHollow --json",
+          "ok": true,
+          "exit_code": 0,
+          "timed_out": false,
+          "error_class": null
+        },
+        {
+          "command": "agent-mail-health http://127.0.0.1:8765/health",
+          "ok": true,
+          "exit_code": 200,
+          "timed_out": false,
+          "error_class": null
+        },
+        {
+          "command": "agent-mail-health http://127.0.0.1:8765/health/durability",
+          "ok": true,
+          "exit_code": 200,
           "timed_out": false,
           "error_class": null
         }
@@ -487,12 +466,13 @@
       "semantic_readiness": {
         "status": "pass"
       },
+      "durability_state": "ok",
       "summary": {
         "agent_count": 1,
         "file_reservation_count": 1,
         "inbox_mailbox_count": 1,
         "thread_count": 1,
-        "source_command_count": 4,
+        "source_command_count": 6,
         "degraded_count": 0
       },
       "degraded": [],
@@ -1369,7 +1349,7 @@
         "overall": {
           "verdict": "all_sources_authoritative",
           "failClosed": false,
-          "authoritativeSourceCount": 2,
+          "authoritativeSourceCount": 11,
           "degradedSourceCount": 0,
           "unavailableSourceCount": 0
         },
@@ -1388,7 +1368,87 @@
             "exitClass": "ok"
           },
           {
+            "sourceKind": "agent_mail",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
             "sourceKind": "beads",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "bv",
+            "state": "ready",
+            "authoritative": false,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "git",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "host_profile",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "installed_binary",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "memory_drift",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "rch",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "support_bundle",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "toolchain",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "workspace_hygiene",
             "state": "ready",
             "authoritative": true,
             "freshnessState": "fresh",

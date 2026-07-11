@@ -897,6 +897,7 @@ fn source_authority_snapshot_contract_covers_source_state_taxonomy() -> TestResu
         "memory_drift",
         "rch",
         "support_bundle",
+        "toolchain",
         "workspace_hygiene",
     ]
     .into_iter()
@@ -1002,6 +1003,7 @@ fn source_authority_fixtures_cover_taxonomy_and_redaction() -> TestResult {
         "memory_drift",
         "rch",
         "support_bundle",
+        "toolchain",
         "workspace_hygiene",
     ]
     .into_iter()
@@ -1649,11 +1651,11 @@ fn source_authority_replay_fixtures_pin_claim_gate_projections() -> TestResult {
         return Err("Agent Mail corrupt replay must preserve agent_mail_unavailable".into());
     }
 
-    let memory_drift = replay_case(&cases_by_id, "memory_drift_write_lock_contention")?;
+    let memory_drift = replay_case(&cases_by_id, "memory_drift_read_snapshot_contention")?;
     if source_state_for_case(
         memory_drift,
         "memory_drift",
-        "memory_drift_write_lock_contention",
+        "memory_drift_read_snapshot_contention",
     )? != "degraded_read_only"
     {
         return Err("memory-drift lock replay must stay degraded_read_only".into());
@@ -1661,7 +1663,7 @@ fn source_authority_replay_fixtures_pin_claim_gate_projections() -> TestResult {
     if string_field(
         memory_drift,
         "/claimGateProjection/verdict",
-        "memory_drift_write_lock_contention",
+        "memory_drift_read_snapshot_contention",
     )? != "external_state_required"
     {
         return Err("memory-drift lock replay must fail as external_state_required".into());
@@ -1669,7 +1671,7 @@ fn source_authority_replay_fixtures_pin_claim_gate_projections() -> TestResult {
     let drift_codes = string_array_at(
         memory_drift,
         "/claimGateProjection/degradedCodes",
-        "memory_drift_write_lock_contention",
+        "memory_drift_read_snapshot_contention",
     )?;
     if !drift_codes.contains(&"memory_drift_lock_contention".to_owned()) {
         return Err("memory-drift lock replay must preserve the lock-contention code".into());

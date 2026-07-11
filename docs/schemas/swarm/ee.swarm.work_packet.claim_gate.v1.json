@@ -564,6 +564,7 @@
         "memory_drift",
         "rch",
         "support_bundle",
+        "toolchain",
         "workspace_hygiene"
       ]
     },
@@ -836,7 +837,7 @@
         "overall": {
           "verdict": "all_sources_authoritative",
           "failClosed": false,
-          "authoritativeSourceCount": 2,
+          "authoritativeSourceCount": 11,
           "degradedSourceCount": 0,
           "unavailableSourceCount": 0
         },
@@ -855,7 +856,87 @@
             "exitClass": "ok"
           },
           {
+            "sourceKind": "agent_mail",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
             "sourceKind": "beads",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "bv",
+            "state": "ready",
+            "authoritative": false,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "git",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "host_profile",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "installed_binary",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "memory_drift",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "rch",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "support_bundle",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "toolchain",
+            "state": "ready",
+            "authoritative": true,
+            "freshnessState": "fresh",
+            "timedOut": false,
+            "exitClass": "ok"
+          },
+          {
+            "sourceKind": "workspace_hygiene",
             "state": "ready",
             "authoritative": true,
             "freshnessState": "fresh",

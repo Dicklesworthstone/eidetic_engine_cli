@@ -284,9 +284,11 @@ pub fn categorize_unsafe_claim_reason(reason: &str) -> UnsafeClaimReasonCategory
         | "stale_claim_gate_binary"
         | "unsupported_claim_gate_binary"
         | "missing_required_surface" => UnsafeClaimReasonCategory::InstalledBinaryFreshness,
-        // bd-1xpq9: lock contention blocked collection BEFORE evidence
-        // inspection — a contended local resource, not drift evidence.
-        "memory_drift_lock_contention" => UnsafeClaimReasonCategory::ResourceAdmission,
+        // Pre-inspection memory-drift failures are local resource/admission
+        // gaps, not evidence that was inspected and found stale or invalid.
+        "memory_drift_lock_contention" | "memory_drift_report_unavailable" => {
+            UnsafeClaimReasonCategory::ResourceAdmission
+        }
         "dirty_compile_health_blocks_rch"
         | "active_project_exclusion"
         | "all_workers_preflight_failed"
@@ -360,6 +362,11 @@ fn source_authority_reason_category(head: &str) -> Option<UnsafeClaimReasonCateg
         Some(UnsafeClaimReasonCategory::RchProofAdmission)
     } else if tail.starts_with("installed_binary_") {
         Some(UnsafeClaimReasonCategory::InstalledBinaryFreshness)
+    } else if matches!(
+        tail,
+        "memory_drift_lock_contention" | "memory_drift_report_unavailable"
+    ) {
+        Some(UnsafeClaimReasonCategory::ResourceAdmission)
     } else if tail.starts_with("memory_drift_") {
         Some(UnsafeClaimReasonCategory::MemorySourceDrift)
     } else if tail.starts_with("host_profile_") || tail.starts_with("support_bundle_") {
@@ -2124,13 +2131,19 @@ mod tests {
     }
 
     #[test]
-    fn lock_contention_stays_resource_admission_without_hiding_memory_drift() -> TestResult {
+    fn preinspection_failures_stay_resource_admission_without_hiding_memory_drift() -> TestResult {
         let classification = classify_unsafe_claim_evidence(
             &strings(&[
                 "memory_drift_lock_contention",
+                "memory_drift_report_unavailable",
                 "memory_drift_source_unverifiable",
+                "source_authority_memory_drift_lock_contention",
+                "source_authority_memory_drift_report_unavailable",
             ]),
-            &strings(&["memory_drift_lock_contention"]),
+            &strings(&[
+                "memory_drift_lock_contention",
+                "memory_drift_report_unavailable",
+            ]),
         );
 
         let resource_group = classification
@@ -2147,6 +2160,35 @@ mod tests {
                 == 2,
             format!(
                 "resource_admission must preserve raw lock-contention reason and degraded code, got {:?}",
+                resource_group.reason_codes
+            ),
+        )?;
+        ensure(
+            [
+                "source_authority_memory_drift_lock_contention",
+                "source_authority_memory_drift_report_unavailable",
+            ]
+            .iter()
+            .all(|expected| {
+                resource_group
+                    .reason_codes
+                    .iter()
+                    .any(|code| code.as_str() == *expected)
+            }),
+            format!(
+                "source-authority pre-inspection failures must remain resource admission, got {:?}",
+                resource_group.reason_codes
+            ),
+        )?;
+        ensure(
+            resource_group
+                .reason_codes
+                .iter()
+                .filter(|code| code.as_str() == "memory_drift_report_unavailable")
+                .count()
+                == 2,
+            format!(
+                "resource_admission must preserve raw report-unavailable reason and degraded code, got {:?}",
                 resource_group.reason_codes
             ),
         )?;
@@ -2172,14 +2214,14 @@ mod tests {
                 UnsafeClaimActionKind::WaitOrCoordinate,
                 UnsafeClaimReasonCategory::ResourceAdmission.as_str(),
             ),
-            "resource-admission lock contention must recommend wait_or_coordinate",
+            "pre-inspection resource-admission failures must recommend wait_or_coordinate",
         )?;
         ensure(
             classification
                 .planner_actions
                 .iter()
                 .all(|action| action.advisory_only && !action.mutates_state),
-            "lock-contention planner actions must stay advisory-only",
+            "pre-inspection memory-drift planner actions must stay advisory-only",
         )
     }
 

@@ -101,6 +101,30 @@ is represented as unavailable when not supplied. Per-source command budget,
 timeout, fallback, and repair fields are data in the snapshot, not reasons to
 drop the source record.
 
+### Memory-drift authority versus findings
+
+`sourceKind=memory_drift` separates collector authority from the evidence
+verdict. A completed bounded read is `state=ready` and remains authoritative
+even when it reports an evidence degradation. A claim-authority finding such
+as `memory_drift_source_unverifiable` still vetoes `safeToClaim` at the
+top-level gate; demoting the source to `degraded_read_only` would incorrectly
+conflate "authoritative bad news" with "the collector could not answer."
+Changed or missing provenance remains visible under its existing advisory
+policy. Open/read/lock/query failures remain unavailable or timed out and
+non-authoritative.
+
+Recent-pack authority scans a bounded pack-record and integrity-ledger selection window and emits
+`memory_drift_source_unverifiable` if the scan truncates. Replay-ledger
+integrity and the ledger/record `createdAt` match are checked before the fixed
+seven-day horizon is applied, including the exact boundary. Malformed, future,
+missing-ledger, or mismatched timestamps, missing or ambiguous live revision
+heads, and a newest in-window selection of a superseded revision fail closed.
+Revision chains are deduplicated by `logical_id`; a later integrity-validated
+ledger `createdAt` selection of the unique live revision supersedes an older
+selection of the historical row, with database-local admission order used only
+as a deterministic timestamp tie-break. Fresh memories in the normal `unverified` provenance state stay
+visible as advisory findings and do not masquerade as structural corruption.
+
 ## Support-Bundle And Agent Mail Summaries
 
 Tracking bead: `bd-3w4pv.5`. Support bundles, handoff capsules, and Agent

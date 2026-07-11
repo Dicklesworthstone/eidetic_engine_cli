@@ -308,8 +308,8 @@
       }
     },
     {
-      "id": "memory_drift_write_lock_contention",
-      "description": "Memory-drift read-only collection can hit ee.write.lock; the projection keeps it as source authority unavailable without claiming.",
+      "id": "memory_drift_read_snapshot_contention",
+      "description": "Memory-drift read-only collection can encounter database read-snapshot contention; the projection keeps it as source authority unavailable without claiming. An ordinary workspace write-owner flock does not block this collector.",
       "sourceAuthoritySnapshot": {
         "schema": "ee.source_authority.snapshot.v1",
         "snapshotId": "sas-replay-memory-drift-lock-0001",
@@ -370,16 +370,16 @@
             "partialData": {
               "available": false,
               "droppedSections": ["memory_drift_snapshot"],
-              "reason": "ee.write.lock was held by another process"
+              "reason": "database read snapshot was contended"
             },
             "fallback": { "active": false, "fallbackKind": null, "fallbackAgeMs": null },
             "repair": {
-              "guidance": "Retry read-only memory drift collection after the writer releases ee.write.lock.",
-              "command": "ee memory drift queue --json",
+              "guidance": "Retry read-only memory drift collection; if contention persists, inspect database health.",
+              "command": "ee doctor --json",
               "safety": "read_only_probe"
             },
             "evidenceId": "sre-memory-drift-0002",
-            "statusDetail": "read-only memory drift collector refused to infer freshness while ee.write.lock was held"
+            "statusDetail": "read-only memory drift collector refused to infer freshness while its database read snapshot was contended"
           }
         ],
         "candidateEvidence": {
@@ -389,7 +389,7 @@
           "absentFrom": [],
           "unavailableIn": ["memory_drift"],
           "staleFallbackPresence": { "present": false, "sourceKind": null, "fallbackAgeMs": null },
-          "explanation": "Candidate identity is known, but memory-drift source authority was not available because the write lock was held."
+          "explanation": "Candidate identity is known, but memory-drift source authority was not available because the database read snapshot was contended."
         },
         "contradictions": [],
         "overall": {
@@ -403,8 +403,8 @@
           {
             "code": "source_authority_memory_drift_lock_contention",
             "severity": "warning",
-            "message": "Memory-drift source authority could not be collected because ee.write.lock was held.",
-            "repair": "ee memory drift queue --json",
+            "message": "Memory-drift source authority could not be collected because database read-snapshot contention blocked evidence inspection.",
+            "repair": "ee doctor --json",
             "sourceKind": "memory_drift"
           }
         ],
@@ -431,7 +431,7 @@
           "authoritative": true
         },
         "unsafeReasons": [
-          "memory_drift_source_unverifiable",
+          "memory_drift_lock_contention",
           "packet_recommendation_not_claim_safe:coordinate_before_claim"
         ],
         "degradedCodes": ["memory_drift_lock_contention"],
