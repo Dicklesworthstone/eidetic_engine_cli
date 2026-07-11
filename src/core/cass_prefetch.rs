@@ -1341,6 +1341,231 @@ impl CassPrefetchWorkspaceMetrics {
     }
 }
 
+/// Outcome of one completed speculative warm-fetch, reported back to the
+/// coordinator by the daemon slice for hit/miss accounting (bd-16pwc.4).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WarmFetchOutcome {
+    /// A later real context request used the pre-staged evidence.
+    Hit,
+    /// The pre-staged evidence expired or was never requested.
+    Miss,
+}
+
+/// Daemon-facing coordinator for speculative CASS prefetch (bd-16pwc.4,
+/// increment 1c). Composes the shipped pieces — the per-(agent, workspace)
+/// [`CassPrefetchHistoryStore`], a [`SpeculativePrefetch`] predictor behind
+/// the revision-aware gate, per-workspace [`CassPrefetchWorkspaceMetrics`],
+/// and an explicit per-slot budget — into the observe/schedule/account loop
+/// the daemon dispatch slice (increment 2) drives:
+///
+///   1. [`observe`](Self::observe) after each successful context execution.
+///   2. [`schedule`](Self::schedule) during an idle slot to get gated,
+///      top-k-capped warm-fetch candidates. Every refusal (oversized
+///      history, stale generation, stale corpus revision, too little
+///      signal) is rolled into the workspace's metrics bucket, so the
+///      flight recorder can tell "stuck on a stale generation" apart from
+///      "has not seen enough queries yet."
+///   3. [`record_warm_fetch`](Self::record_warm_fetch) after each
+///      speculative fetch completes, with the observed cost. A fetch that
+///      blew its slot budget counts as `budget_exceeded` — never as a hit
+///      or a miss — and the returned degraded code lets the daemon surface
+///      [`CASS_PREFETCH_BUDGET_EXCEEDED_CODE`] without reaching into the
+///      counters.
+///
+/// Determinism contract: the coordinator reads no clock, no env, and does
+/// no I/O. Time only enters through the `spent` argument the daemon
+/// measured, so the same call sequence always produces the same metrics
+/// and the same candidate lists (the store and metrics maps are
+/// `BTreeMap`-backed, and the predictor is pure).
+#[derive(Clone, Debug)]
+pub struct CassPrefetchCoordinator<P: SpeculativePrefetch> {
+    predictor: P,
+    histories: CassPrefetchHistoryStore,
+    metrics: CassPrefetchWorkspaceMetrics,
+    top_k: usize,
+    budget_per_slot: Duration,
+}
+
+impl Default for CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CassPrefetchCoordinator<RecencyWeightedFrequencyPredictor> {
+    /// Coordinator with the default recency-weighted-frequency predictor,
+    /// the canonical rolling window, `top-3` fan-out, and the ~50ms slot
+    /// budget the bead specifies.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_predictor(RecencyWeightedFrequencyPredictor::new())
+    }
+}
+
+impl<P: SpeculativePrefetch> CassPrefetchCoordinator<P> {
+    /// Coordinator with a caller-supplied predictor and default window,
+    /// fan-out, and budget.
+    #[must_use]
+    pub fn with_predictor(predictor: P) -> Self {
+        Self {
+            predictor,
+            histories: CassPrefetchHistoryStore::new(DEFAULT_PREFETCH_HISTORY_WINDOW),
+            metrics: CassPrefetchWorkspaceMetrics::new(),
+            top_k: DEFAULT_PREFETCH_TOP_K,
+            budget_per_slot: DEFAULT_PREFETCH_BUDGET,
+        }
+    }
+
+    /// Cap the number of candidates one [`schedule`](Self::schedule) call
+    /// may emit. Clamped to `[1, MAX_PREFETCH_HISTORY]`: zero would make
+    /// every schedule a silent no-op and anything past the admission bound
+    /// is wasted fan-out.
+    #[must_use]
+    pub fn with_top_k(mut self, top_k: usize) -> Self {
+        self.top_k = top_k.clamp(1, MAX_PREFETCH_HISTORY);
+        self
+    }
+
+    /// Set the per-slot soft budget used by
+    /// [`record_warm_fetch`](Self::record_warm_fetch).
+    #[must_use]
+    pub const fn with_budget_per_slot(mut self, budget: Duration) -> Self {
+        self.budget_per_slot = budget;
+        self
+    }
+
+    /// Replace the rolling-history window. Rebuilds the (empty) store, so
+    /// configure this before the first [`observe`](Self::observe); calling
+    /// it later discards accumulated histories by design rather than mixing
+    /// windows within one store.
+    #[must_use]
+    pub fn with_history_window(mut self, window: usize) -> Self {
+        self.histories = CassPrefetchHistoryStore::new(window);
+        self
+    }
+
+    /// Record one observed context-request `topic` for
+    /// `(agent_scope, workspace)` after a successful context execution,
+    /// stamped with the generation and corpus revision it was measured
+    /// against. Pure delegation to [`CassPrefetchHistoryStore::observe`];
+    /// scope/workspace isolation (bd-298n0) and topic redaction (bd-3aczq)
+    /// hold by construction.
+    pub fn observe(
+        &mut self,
+        agent_scope: impl Into<AgentScope>,
+        workspace: impl Into<String>,
+        topic: impl Into<String>,
+        generation: PrefetchGeneration,
+        corpus_revision: &CorpusRevision,
+    ) {
+        self.histories
+            .observe(agent_scope, workspace, topic, generation, corpus_revision);
+    }
+
+    /// Produce gated, top-k-capped warm-fetch candidates for
+    /// `(agent_scope, workspace)` against the live generation and corpus
+    /// revision, rolling every outcome into the workspace's metrics bucket:
+    ///
+    ///   - no history yet, or too little signal → `history_too_short`
+    ///   - oversized history (bd-1suaa) → `history_oversized`
+    ///   - stale generation (bd-qud3c) → `stale_generation_drop`
+    ///   - stale corpus revision (bd-1eh60) → `stale_corpus_revision_drop`
+    ///   - coherent prediction → one `candidates_emitted` per candidate and
+    ///     the bucket's `measured_against_revision` stamped to the live
+    ///     revision
+    ///
+    /// The returned [`GatedPrediction`] carries the same degraded code the
+    /// metrics recorded (or `None`), so the daemon can emit it on the
+    /// `--explain` surface without re-deriving the refusal reason.
+    pub fn schedule(
+        &mut self,
+        agent_scope: &AgentScope,
+        workspace: &str,
+        current_generation: PrefetchGeneration,
+        current_corpus_revision: &CorpusRevision,
+    ) -> GatedPrediction {
+        let metrics = self.metrics.for_workspace_mut(workspace);
+        let Some(history) = self.histories.history_for(agent_scope, workspace) else {
+            metrics.record_history_too_short();
+            return GatedPrediction::default();
+        };
+        let prediction = self.predictor.predict_next_n_gated_for_revision(
+            history,
+            current_generation,
+            current_corpus_revision,
+            self.top_k,
+        );
+        match prediction.degraded {
+            Some(CASS_PREFETCH_HISTORY_OVERSIZED_CODE) => metrics.record_history_oversized(),
+            Some(CASS_PREFETCH_STALE_GENERATION_CODE) => metrics.record_stale_generation_drop(),
+            Some(CASS_PREFETCH_STALE_CORPUS_REVISION_CODE) => {
+                metrics.record_stale_corpus_revision_drop();
+            }
+            // Future gate codes still return to the caller; they simply have
+            // no dedicated counter yet.
+            Some(_) => {}
+            None if prediction.candidates.is_empty() => metrics.record_history_too_short(),
+            None => {
+                for _ in &prediction.candidates {
+                    metrics.record_candidate();
+                }
+                metrics.set_measured_against_revision(current_corpus_revision.clone());
+            }
+        }
+        prediction
+    }
+
+    /// Account one completed speculative warm-fetch against the per-slot
+    /// budget. A fetch whose observed `spent` exceeded the budget records
+    /// `budget_exceeded` — it is neither a hit nor a miss, because
+    /// over-budget speculative work is cancelled without changing retrieval
+    /// results (bd-16pwc.2) — and returns
+    /// [`CASS_PREFETCH_BUDGET_EXCEEDED_CODE`] for the daemon's degraded
+    /// surface. Within budget, the reported [`WarmFetchOutcome`] increments
+    /// the workspace's hit or miss counter and `None` is returned.
+    pub fn record_warm_fetch(
+        &mut self,
+        workspace: &str,
+        spent: Duration,
+        outcome: WarmFetchOutcome,
+    ) -> Option<&'static str> {
+        let metrics = self.metrics.for_workspace_mut(workspace);
+        if spent > self.budget_per_slot {
+            metrics.record_budget_exceeded();
+            return Some(CASS_PREFETCH_BUDGET_EXCEEDED_CODE);
+        }
+        match outcome {
+            WarmFetchOutcome::Hit => metrics.record_hit(),
+            WarmFetchOutcome::Miss => metrics.record_miss(),
+        }
+        None
+    }
+
+    /// Metrics bucket for `workspace`, when it has been observed.
+    #[must_use]
+    pub fn metrics_for(&self, workspace: &str) -> Option<&CassPrefetchMetrics> {
+        self.metrics.for_workspace(workspace)
+    }
+
+    /// Deterministic per-workspace metrics rollup for the swarm-brief /
+    /// flight-recorder surfaces.
+    #[must_use]
+    pub const fn metrics(&self) -> &CassPrefetchWorkspaceMetrics {
+        &self.metrics
+    }
+
+    /// Borrow the rolling history for `(agent_scope, workspace)`, when one
+    /// has accumulated.
+    #[must_use]
+    pub fn history_for(
+        &self,
+        agent_scope: &AgentScope,
+        workspace: &str,
+    ) -> Option<&CassPrefetchHistory> {
+        self.histories.history_for(agent_scope, workspace)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1769,6 +1994,169 @@ mod tests {
         let store = CassPrefetchHistoryStore::new(DEFAULT_PREFETCH_HISTORY_WINDOW);
         assert!(store.is_empty());
         assert!(store.history_for(&test_agent_scope(), "nope").is_none());
+    }
+
+    #[test]
+    fn coordinator_schedule_emits_gated_candidates_bd_16pwc_4() {
+        let mut coordinator = CassPrefetchCoordinator::new();
+        let scope = test_agent_scope();
+        let rev = CorpusRevision::from("corpus:v1");
+        let generation = PrefetchGeneration::new(2, 5);
+        // Most-recent topic ("alpha") is excluded as a candidate by the
+        // predictor, so "beta" is the expected warm-fetch target.
+        for topic in ["beta", "alpha"] {
+            coordinator.observe(scope.clone(), "ws", topic, generation, &rev);
+        }
+        let prediction = coordinator.schedule(&scope, "ws", generation, &rev);
+        assert_eq!(prediction.degraded, None);
+        let topics: Vec<&str> = prediction
+            .candidates
+            .iter()
+            .map(|c| c.topic_id.as_str())
+            .collect();
+        assert_eq!(topics, vec!["beta"]);
+        let metrics = coordinator.metrics_for("ws").expect("metrics bucket");
+        assert_eq!(metrics.candidates_emitted, 1);
+        assert_eq!(metrics.history_too_short, 0);
+        assert_eq!(metrics.measured_against_revision, rev);
+        // Scheduling is read-only over the history: an identical second
+        // call emits the identical candidate list (determinism contract).
+        let again = coordinator.schedule(&scope, "ws", generation, &rev);
+        assert_eq!(again.candidates, prediction.candidates);
+    }
+
+    #[test]
+    fn coordinator_schedule_records_stale_generation_drop_bd_16pwc_4() {
+        let mut coordinator = CassPrefetchCoordinator::new();
+        let scope = test_agent_scope();
+        let rev = CorpusRevision::from("corpus:v1");
+        coordinator.observe(
+            scope.clone(),
+            "ws",
+            "topic",
+            PrefetchGeneration::new(1, 1),
+            &rev,
+        );
+        // A reindex bumped the live index generation: the schedule must be
+        // dropped before any predictor work (bd-qud3c).
+        let prediction = coordinator.schedule(&scope, "ws", PrefetchGeneration::new(1, 2), &rev);
+        assert!(prediction.candidates.is_empty());
+        assert_eq!(
+            prediction.degraded,
+            Some(CASS_PREFETCH_STALE_GENERATION_CODE)
+        );
+        let metrics = coordinator.metrics_for("ws").expect("metrics bucket");
+        assert_eq!(metrics.stale_generation_drop, 1);
+        assert_eq!(metrics.candidates_emitted, 0);
+    }
+
+    #[test]
+    fn coordinator_schedule_records_stale_corpus_revision_drop_bd_16pwc_4() {
+        let mut coordinator = CassPrefetchCoordinator::new();
+        let scope = test_agent_scope();
+        let generation = PrefetchGeneration::new(1, 1);
+        coordinator.observe(
+            scope.clone(),
+            "ws",
+            "topic",
+            generation,
+            &CorpusRevision::from("corpus:v1"),
+        );
+        // Generation is coherent but the corpus revision moved (bd-1eh60):
+        // the revision gate must drop the schedule and the incr-1a counter
+        // must record it.
+        let prediction =
+            coordinator.schedule(&scope, "ws", generation, &CorpusRevision::from("corpus:v2"));
+        assert!(prediction.candidates.is_empty());
+        assert_eq!(
+            prediction.degraded,
+            Some(CASS_PREFETCH_STALE_CORPUS_REVISION_CODE)
+        );
+        let metrics = coordinator.metrics_for("ws").expect("metrics bucket");
+        assert_eq!(metrics.stale_corpus_revision_drop, 1);
+        assert_eq!(metrics.stale_generation_drop, 0);
+    }
+
+    #[test]
+    fn coordinator_schedule_caps_candidates_at_top_k_bd_16pwc_4() {
+        let mut coordinator = CassPrefetchCoordinator::new().with_top_k(2);
+        let scope = test_agent_scope();
+        let rev = CorpusRevision::from("corpus:v1");
+        let generation = PrefetchGeneration::new(1, 1);
+        // Five candidate topics behind the most-recent one; each carries
+        // enough normalized weight to clear the admission threshold, so
+        // only the top-k cap bounds the fan-out.
+        for topic in ["t1", "t2", "t3", "t4", "t5", "current"] {
+            coordinator.observe(scope.clone(), "ws", topic, generation, &rev);
+        }
+        let prediction = coordinator.schedule(&scope, "ws", generation, &rev);
+        assert_eq!(prediction.degraded, None);
+        assert!(prediction.candidates.len() <= 2);
+        assert!(!prediction.candidates.is_empty());
+        let metrics = coordinator.metrics_for("ws").expect("metrics bucket");
+        assert_eq!(
+            metrics.candidates_emitted,
+            prediction.candidates.len() as u64
+        );
+    }
+
+    #[test]
+    fn coordinator_schedule_without_history_records_history_too_short_bd_16pwc_4() {
+        let mut coordinator = CassPrefetchCoordinator::new();
+        let scope = test_agent_scope();
+        let rev = CorpusRevision::from("corpus:v1");
+        let prediction = coordinator.schedule(&scope, "ws", PrefetchGeneration::new(1, 1), &rev);
+        assert!(prediction.candidates.is_empty());
+        assert_eq!(prediction.degraded, None);
+        let metrics = coordinator.metrics_for("ws").expect("metrics bucket");
+        assert_eq!(metrics.history_too_short, 1);
+        assert_eq!(metrics.candidates_emitted, 0);
+    }
+
+    #[test]
+    fn coordinator_budget_accounting_bd_16pwc_4() {
+        let mut coordinator =
+            CassPrefetchCoordinator::new().with_budget_per_slot(Duration::from_millis(50));
+        // Over budget: cancelled speculative work is neither a hit nor a
+        // miss (bd-16pwc.2); the degraded code is returned for the daemon.
+        let over =
+            coordinator.record_warm_fetch("ws", Duration::from_millis(60), WarmFetchOutcome::Hit);
+        assert_eq!(over, Some(CASS_PREFETCH_BUDGET_EXCEEDED_CODE));
+        // Within budget: hit and miss counters advance and no code is
+        // returned.
+        assert_eq!(
+            coordinator.record_warm_fetch("ws", Duration::from_millis(10), WarmFetchOutcome::Hit),
+            None
+        );
+        assert_eq!(
+            coordinator.record_warm_fetch("ws", Duration::from_millis(50), WarmFetchOutcome::Miss),
+            None
+        );
+        let metrics = coordinator.metrics_for("ws").expect("metrics bucket");
+        assert_eq!(metrics.budget_exceeded, 1);
+        assert_eq!(metrics.hits, 1);
+        assert_eq!(metrics.misses, 1);
+        assert!((metrics.hit_rate() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn coordinator_metrics_isolated_per_workspace_bd_16pwc_4() {
+        let mut coordinator = CassPrefetchCoordinator::new();
+        let scope = test_agent_scope();
+        let rev = CorpusRevision::from("corpus:v1");
+        let generation = PrefetchGeneration::new(1, 1);
+        for topic in ["beta", "alpha"] {
+            coordinator.observe(scope.clone(), "ws-a", topic, generation, &rev);
+        }
+        let _ = coordinator.schedule(&scope, "ws-a", generation, &rev);
+        let _ = coordinator.schedule(&scope, "ws-b", generation, &rev);
+        let ws_a = coordinator.metrics_for("ws-a").expect("ws-a bucket");
+        assert_eq!(ws_a.candidates_emitted, 1);
+        assert_eq!(ws_a.history_too_short, 0);
+        let ws_b = coordinator.metrics_for("ws-b").expect("ws-b bucket");
+        assert_eq!(ws_b.candidates_emitted, 0);
+        assert_eq!(ws_b.history_too_short, 1);
+        assert_eq!(coordinator.metrics().len(), 2);
     }
 
     #[test]
