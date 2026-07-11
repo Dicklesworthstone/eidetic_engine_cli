@@ -677,6 +677,49 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
 
     assert_rule_index_job_queued(&database, &workspace_id, &rule_id)?;
 
+    // bd-3h6bz: behavioral proof beyond the queued job — a pending
+    // document_source=rule job used to point at a document the corpus could
+    // never contain, so asserting the job alone gave false confidence
+    // (bd-lpb5). Rebuild the derived index through the public CLI and assert
+    // the applied rule is retrievable by its own content.
+    let rebuild = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "rebuild"])?;
+    ensure_equal(
+        &rebuild.pointer("/success").and_then(JsonValue::as_bool),
+        &Some(true),
+        "index rebuild after curate apply",
+    )?;
+    let rule_show = run_ee_json(&["--workspace", &ws_arg, "--json", "rule", "show", &rule_id])?;
+    let rule_content = rule_show
+        .pointer("/data/rule/content")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| "rule show missing content".to_owned())?
+        .to_owned();
+    let search = run_ee_json(&[
+        "--workspace",
+        &ws_arg,
+        "--json",
+        "search",
+        &rule_content,
+        "--limit",
+        "20",
+    ])?;
+    let results = search
+        .pointer("/data/results")
+        .and_then(JsonValue::as_array)
+        .cloned()
+        .unwrap_or_default();
+    ensure(
+        results.iter().any(|hit| {
+            hit.get("docId").and_then(JsonValue::as_str) == Some(rule_id.as_str())
+                || hit.get("memoryId").and_then(JsonValue::as_str) == Some(rule_id.as_str())
+                || hit
+                    .get("content")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|content| content.contains(rule_content.as_str()))
+        }),
+        format!("search should return applied rule {rule_id} by its own content: {results:?}"),
+    )?;
+
     let memory = run_ee_json(&[
         "--workspace",
         &ws_arg,
