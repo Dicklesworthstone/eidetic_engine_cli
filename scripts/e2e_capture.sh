@@ -211,6 +211,34 @@ assert_zero "$after_import_memories" \
 assert_zero "$before_import_memories" \
     "capture workspace starts without memories"
 
+# bd-16imy: the primary README promise — a phrase from an imported transcript
+# must be discoverable through ee search once the derived index includes the
+# imported evidence spans, and a pack for that phrase must either hydrate the
+# evidence with honest attribution or degrade with the documented
+# context_evidence_hit_unhydrated code (spans here are undistilled, so the
+# degradation arm is the expected deterministic outcome).
+step "bd-16imy: imported transcript phrase is searchable and pack-honest"
+rebuild_out="$(ee_json --workspace "$WS" index rebuild --json)"
+assert_jq "$rebuild_out" '.schema == "ee.response.v2" and .success == true' \
+    "index rebuild after cass import succeeds"
+evidence_search_out="$(ee_json --workspace "$WS" search \
+    "ambient capture must dedupe accepted suggestions" --limit 20 --json)"
+assert_jq "$evidence_search_out" '.schema == "ee.response.v2" and .success == true' \
+    "search for imported transcript phrase succeeds"
+assert_jq "$evidence_search_out" '
+    any(.data.results[]?;
+        ((.docId // .memoryId // "") | startswith("ev_"))
+        or ((.content // .contentPreview // "") | test("dedupe accepted suggestions"; "i")))
+' "imported evidence excerpt is retrievable by its own phrase"
+evidence_pack_out="$(ee_json --workspace "$WS" pack \
+    "ambient capture must dedupe accepted suggestions" --max-tokens 2000 --json)"
+assert_jq "$evidence_pack_out" '.schema == "ee.response.v2" and .success == true' \
+    "pack for imported transcript phrase succeeds"
+assert_jq "$evidence_pack_out" '
+    any((.degraded // [])[]?; .code == "context_evidence_hit_unhydrated")
+    or any(.data.pack.items[]?; ((.why // "") | contains("via imported evidence")))
+' "evidence hit hydrates with attribution or degrades honestly"
+
 step "ambient capture suggest is read-only and proposes one explicit capture"
 if capture_suggest_available; then
     before_suggest_candidates="$(candidate_count "$WS")"
