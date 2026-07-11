@@ -13842,6 +13842,27 @@ impl DbConnection {
         }
     }
 
+    /// List at most two live heads in one workspace-local revision chain.
+    ///
+    /// A valid immutable chain has exactly one non-tombstoned row whose
+    /// `valid_to` is NULL. Returning at most two is sufficient for bounded
+    /// callers to distinguish missing, unique, and ambiguous live-head state.
+    pub fn list_live_memory_revisions_for_logical_id(
+        &self,
+        workspace_id: &str,
+        logical_id: &str,
+    ) -> Result<Vec<StoredMemory>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND logical_id = ?2 AND tombstoned_at IS NULL AND valid_to IS NULL ORDER BY COALESCE(valid_from, created_at) DESC, created_at DESC, id DESC LIMIT 2",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::Text(logical_id.to_string()),
+            ],
+        )?;
+        rows.iter().map(stored_memory_from_row).collect()
+    }
+
     /// List memories in a workspace, optionally filtering by level and/or tombstone status.
     pub fn list_memories(
         &self,
@@ -18525,10 +18546,10 @@ pub struct StoredOutcomeEvidence {
     pub created_at: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackSelectionLedgerCore {
-    schema: &'static str,
+    schema: String,
     pack_id: String,
     pack_hash: String,
     workspace_id: String,
@@ -18546,7 +18567,7 @@ struct PackSelectionLedgerCore {
     degraded: Vec<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackSelectionLedger {
     #[serde(flatten)]
@@ -18572,7 +18593,13 @@ struct PackSelectionLedgerCompression {
     uncompressed_hash: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
+struct DecodedPackLedger {
+    ledger: serde_json::Value,
+    compressed_envelope_ledger_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerRequest {
     query: PackLedgerTextRecord,
@@ -18580,7 +18607,7 @@ struct PackLedgerRequest {
     max_tokens: u32,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerTaskLens {
     id: String,
@@ -18588,7 +18615,7 @@ struct PackLedgerTaskLens {
     lens_hash: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerTextRecord {
     hash: String,
@@ -18598,28 +18625,28 @@ struct PackLedgerTextRecord {
     redacted_text: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerDatabase {
     schema_version: u32,
     generation: u32,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerDerivedAssets {
     search_index: PackLedgerDerivedAsset,
     graph_snapshot: PackLedgerDerivedAsset,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerDerivedAsset {
-    status: &'static str,
+    status: String,
     manifest_hash: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerCandidateCounts {
     selected: u32,
@@ -18627,7 +18654,7 @@ struct PackLedgerCandidateCounts {
     candidate_pool: u32,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerSelectedItem {
     memory_id: String,
@@ -18641,17 +18668,17 @@ struct PackLedgerSelectedItem {
     trust_subclass: Option<String>,
     provenance: PackLedgerProvenanceSummary,
     redaction_classes: Vec<String>,
-    freshness: &'static str,
+    freshness: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerScoreComponents {
     relevance: f32,
     utility: f32,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerProvenanceSummary {
     hash: String,
@@ -18659,7 +18686,7 @@ struct PackLedgerProvenanceSummary {
     redaction_reasons: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerOmittedItem {
     memory_id: String,
@@ -18682,6 +18709,13 @@ const OUTCOME_EVIDENCE_INSERT_BATCH_ROWS: usize =
     PACK_INSERT_MAX_BIND_PARAMS / OUTCOME_EVIDENCE_INSERT_VALUE_COUNT;
 const PACK_REPLAY_LEDGER_COMPRESSION_LEVEL: i32 = 3;
 const PACK_REPLAY_LEDGER_COMPRESSION_MIN_BYTES: usize = 4 * 1024;
+const PACK_REPLAY_LEDGER_MAX_COMPRESSED_BYTES: u64 = 2 * 1024 * 1024;
+const PACK_REPLAY_LEDGER_MAX_UNCOMPRESSED_BYTES: u64 = 8 * 1024 * 1024;
+const PACK_REPLAY_LEDGER_MAX_STORED_BYTES: u64 = 3 * 1024 * 1024;
+const PACK_REPLAY_LEDGER_MAX_BASE64_BYTES: u64 =
+    ((PACK_REPLAY_LEDGER_MAX_COMPRESSED_BYTES + 2) / 3) * 4;
+const PACK_REPLAY_LEDGER_OVERSIZED_SENTINEL: &str =
+    r#"{"schema":"ee.pack_replay_ledger.oversized.v1"}"#;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PackRecordInsertTimings {
@@ -18707,6 +18741,26 @@ impl DbConnection {
             .map(|_| ())
     }
 
+    /// Insert a pack record at an explicit integrity-bound RFC 3339 time.
+    ///
+    /// This is used by bounded historical import and deterministic tests; the
+    /// normal pack path should use [`Self::insert_pack_record`].
+    pub fn insert_pack_record_at(
+        &self,
+        id: &str,
+        input: &CreatePackRecordInput,
+        items: &[CreatePackItemInput],
+        omissions: &[CreatePackOmissionInput],
+        created_at: &str,
+    ) -> Result<()> {
+        DateTime::parse_from_rfc3339(created_at).map_err(|error| DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: format!("pack record created_at must be RFC 3339: {error}"),
+        })?;
+        self.insert_pack_record_with_timings_at(id, input, items, omissions, created_at, None)
+            .map(|_| ())
+    }
+
     /// Insert a pack record with its items and omissions, returning diagnostic timings.
     pub fn insert_pack_record_with_timings(
         &self,
@@ -18727,11 +18781,23 @@ impl DbConnection {
         omissions: &[CreatePackOmissionInput],
         task_lens: Option<&CreatePackTaskLensInput>,
     ) -> Result<PackRecordInsertTimings> {
-        let mut timings = PackRecordInsertTimings::default();
         let now = Utc::now().to_rfc3339();
+        self.insert_pack_record_with_timings_at(id, input, items, omissions, &now, task_lens)
+    }
+
+    fn insert_pack_record_with_timings_at(
+        &self,
+        id: &str,
+        input: &CreatePackRecordInput,
+        items: &[CreatePackItemInput],
+        omissions: &[CreatePackOmissionInput],
+        created_at: &str,
+        task_lens: Option<&CreatePackTaskLensInput>,
+    ) -> Result<PackRecordInsertTimings> {
+        let mut timings = PackRecordInsertTimings::default();
         let ledger_start = Instant::now();
         let (ledger_json, ledger_hash) =
-            build_pack_selection_ledger(id, input, items, omissions, &now, task_lens)?;
+            build_pack_selection_ledger(id, input, items, omissions, created_at, task_lens)?;
         timings.ledger_serialization = ledger_start.elapsed();
         timings.item_write_batches =
             pack_insert_batch_count(items.len(), PACK_ITEM_INSERT_BATCH_ROWS);
@@ -18741,7 +18807,7 @@ impl DbConnection {
         let transaction_start = Instant::now();
         self.with_transaction(|| {
             let record_start = Instant::now();
-            self.insert_pack_record_row(id, input, &now, &ledger_json, &ledger_hash)?;
+            self.insert_pack_record_row(id, input, created_at, &ledger_json, &ledger_hash)?;
             timings.record_write = record_start.elapsed();
 
             let item_start = Instant::now();
@@ -18756,7 +18822,7 @@ impl DbConnection {
             // (ADR 0055, bd-1n0np.2.2). This rides the same persistence
             // chokepoint as the pack record, so it inherits read-only /
             // no-persist gating for free.
-            let impressions = build_impression_inputs(id, input, items, omissions, &now);
+            let impressions = build_impression_inputs(id, input, items, omissions, created_at);
             self.insert_impressions(&impressions)
         })?;
         timings.transaction = transaction_start.elapsed();
@@ -19253,6 +19319,84 @@ impl DbConnection {
             })
             .collect()
     }
+
+    /// Bounded pack-item admission for the memory-drift claim collector.
+    ///
+    /// The returned database-local `rowid` is an ordering cursor only. The
+    /// collector validates the integrity-bound replay-ledger timestamp before
+    /// applying its horizon and fails closed if this bounded scan truncates.
+    pub fn list_pack_items_for_memory_drift(
+        &self,
+        workspace_id: &str,
+        limit: u32,
+    ) -> Result<Vec<(i64, StoredPackRecord, StoredPackItem)>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT pr.id, pr.workspace_id, pr.query, pr.profile, pr.max_tokens, pr.used_tokens, pr.item_count, pr.omitted_count, pr.pack_hash, pr.degraded_json, pr.ledger_json, pr.ledger_hash, pr.created_at, pr.created_by, pi.pack_id, pi.memory_id, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pi.diversity_key, pi.provenance_json, pi.trust_class, pi.trust_subclass, pr.rowid FROM pack_items pi JOIN pack_records pr ON pi.pack_id = pr.id WHERE pr.workspace_id = ?1 ORDER BY pr.rowid DESC, pi.rank ASC, pi.memory_id ASC LIMIT ?2",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?;
+
+        rows.iter()
+            .map(|row| {
+                let record = stored_pack_record_from_row(row)?;
+                let item = stored_pack_item_from_joined_row(row, 14)?;
+                let admission_order = required_i64(row, 26, DbOperation::Query, "rowid")?;
+                Ok((admission_order, record, item))
+            })
+            .collect()
+    }
+
+    /// List pack-record identities for ledger-driven memory-drift authority scanning.
+    ///
+    /// Returning only identities keeps the bounded admission set small. The
+    /// collector loads, validates, and drops one capped ledger at a time, so a
+    /// corrupt workspace cannot force thousands of ledger bodies resident at
+    /// once. The database-local `rowid` is only a deterministic admission and
+    /// timestamp tie-break cursor.
+    pub fn list_pack_record_ids_for_memory_drift(
+        &self,
+        workspace_id: &str,
+        limit: u32,
+    ) -> Result<Vec<(i64, String)>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT rowid, id FROM pack_records WHERE workspace_id = ?1 ORDER BY rowid DESC LIMIT ?2",
+            &[
+                Value::Text(workspace_id.to_string()),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?;
+
+        rows.iter()
+            .map(|row| {
+                let admission_order = required_i64(row, 0, DbOperation::Query, "rowid")?;
+                let id = required_text(row, 1, DbOperation::Query, "id")?.to_owned();
+                Ok((admission_order, id))
+            })
+            .collect()
+    }
+
+    /// Load one pack record for memory-drift validation with a hard stored-body cap.
+    ///
+    /// Oversized corrupt ledger bodies are replaced in-query by a small invalid
+    /// schema sentinel. The normal parser therefore emits a fail-closed
+    /// malformed-ledger finding without transferring or allocating the blob.
+    pub fn get_pack_record_for_memory_drift(&self, id: &str) -> Result<Option<StoredPackRecord>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, CASE WHEN ledger_json IS NULL OR length(CAST(ledger_json AS BLOB)) <= ?2 THEN ledger_json ELSE ?3 END, ledger_hash, created_at, created_by FROM pack_records WHERE id = ?1",
+            &[
+                Value::Text(id.to_string()),
+                Value::BigInt(PACK_REPLAY_LEDGER_MAX_STORED_BYTES as i64),
+                Value::Text(PACK_REPLAY_LEDGER_OVERSIZED_SENTINEL.to_owned()),
+            ],
+        )?;
+
+        rows.first().map(stored_pack_record_from_row).transpose()
+    }
 }
 
 /// Deterministic query-join hash for an impression (ADR 0055). Matches an
@@ -19445,7 +19589,7 @@ fn build_uncompressed_pack_selection_ledger(
     });
 
     let core = PackSelectionLedgerCore {
-        schema: PACK_REPLAY_LEDGER_SCHEMA_V1,
+        schema: PACK_REPLAY_LEDGER_SCHEMA_V1.to_owned(),
         pack_id: id.to_string(),
         pack_hash: input.pack_hash.clone(),
         workspace_id: input.workspace_id.clone(),
@@ -19471,11 +19615,11 @@ fn build_uncompressed_pack_selection_ledger(
         },
         derived_assets: PackLedgerDerivedAssets {
             search_index: PackLedgerDerivedAsset {
-                status: "not_recorded",
+                status: "not_recorded".to_owned(),
                 manifest_hash: None,
             },
             graph_snapshot: PackLedgerDerivedAsset {
-                status: "not_recorded",
+                status: "not_recorded".to_owned(),
                 manifest_hash: None,
             },
         },
@@ -19500,6 +19644,20 @@ fn build_uncompressed_pack_selection_ledger(
 }
 
 fn store_pack_selection_ledger_json(ledger_json: &str, ledger_hash: &str) -> Result<String> {
+    let uncompressed_byte_len =
+        u64::try_from(ledger_json.len()).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack selection ledger length does not fit u64".to_owned(),
+        })?;
+    if uncompressed_byte_len > PACK_REPLAY_LEDGER_MAX_UNCOMPRESSED_BYTES {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: format!(
+                "pack selection ledger exceeds the {}-byte uncompressed limit",
+                PACK_REPLAY_LEDGER_MAX_UNCOMPRESSED_BYTES
+            ),
+        });
+    }
     if ledger_json.len() < PACK_REPLAY_LEDGER_COMPRESSION_MIN_BYTES {
         return Ok(ledger_json.to_string());
     }
@@ -19511,6 +19669,15 @@ fn store_pack_selection_ledger_json(ledger_json: &str, ledger_hash: &str) -> Res
                 message: format!("pack selection ledger compression failed: {source}"),
             })?;
     let compressed_byte_len = compressed.len() as u64;
+    if compressed_byte_len > PACK_REPLAY_LEDGER_MAX_COMPRESSED_BYTES {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: format!(
+                "compressed pack selection ledger exceeds the {}-byte limit",
+                PACK_REPLAY_LEDGER_MAX_COMPRESSED_BYTES
+            ),
+        });
+    }
     let envelope = CompressedPackSelectionLedger {
         schema: PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1.to_string(),
         ledger_hash: ledger_hash.to_string(),
@@ -19518,11 +19685,20 @@ fn store_pack_selection_ledger_json(ledger_json: &str, ledger_hash: &str) -> Res
             algorithm: PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1.to_string(),
             compressed_payload_base64: BASE64_STANDARD.encode(&compressed),
             compressed_byte_len,
-            uncompressed_byte_len: ledger_json.len() as u64,
+            uncompressed_byte_len,
             uncompressed_hash: blake3_text_hash(ledger_json),
         },
     };
     let compressed_json = pack_ledger_json(&envelope, "compressed pack selection ledger")?;
+    if compressed_json.len() as u64 > PACK_REPLAY_LEDGER_MAX_STORED_BYTES {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: format!(
+                "stored pack selection ledger exceeds the {}-byte limit",
+                PACK_REPLAY_LEDGER_MAX_STORED_BYTES
+            ),
+        });
+    }
 
     if compressed_json.len() < ledger_json.len() {
         Ok(compressed_json)
@@ -19560,7 +19736,7 @@ fn pack_ledger_selected_item(item: &CreatePackItemInput) -> PackLedgerSelectedIt
         trust_subclass: item.trust_subclass.clone(),
         provenance,
         redaction_classes: redaction_classes.into_iter().collect(),
-        freshness: "unavailable",
+        freshness: "unavailable".to_owned(),
     }
 }
 
@@ -19658,8 +19834,11 @@ pub fn parse_pack_ledger_fields(
         };
     };
 
-    let parsed = match decode_pack_ledger_value(pack_id, raw_ledger) {
-        Ok(value) => value,
+    let DecodedPackLedger {
+        ledger: parsed,
+        compressed_envelope_ledger_hash,
+    } = match decode_pack_ledger_value(pack_id, raw_ledger) {
+        Ok(decoded) => decoded,
         Err(degraded) => {
             return ParsedPackLedger {
                 status: PackLedgerStatus::Malformed,
@@ -19669,11 +19848,104 @@ pub fn parse_pack_ledger_fields(
         }
     };
 
-    let actual_hash = parsed
-        .get("ledgerHash")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    if expected_hash.is_some() && actual_hash.as_deref() != expected_hash {
+    let typed = match serde_json::from_value::<PackSelectionLedger>(parsed.clone()) {
+        Ok(typed) if typed.core.schema == PACK_REPLAY_LEDGER_SCHEMA_V1 => typed,
+        Ok(typed) => {
+            return ParsedPackLedger {
+                status: PackLedgerStatus::Malformed,
+                ledger: Some(parsed),
+                degraded: vec![malformed_pack_ledger_degradation(
+                    pack_id,
+                    serde_json::json!({
+                        "packId": pack_id,
+                        "schema": typed.core.schema,
+                        "expectedSchema": PACK_REPLAY_LEDGER_SCHEMA_V1,
+                    }),
+                )],
+            };
+        }
+        Err(error) => {
+            return ParsedPackLedger {
+                status: PackLedgerStatus::Malformed,
+                ledger: Some(parsed),
+                degraded: vec![malformed_pack_ledger_degradation(
+                    pack_id,
+                    serde_json::json!({
+                        "packId": pack_id,
+                        "shapeError": error.to_string(),
+                    }),
+                )],
+            };
+        }
+    };
+    let canonical_ledger = match serde_json::to_value(&typed) {
+        Ok(canonical_ledger) => canonical_ledger,
+        Err(error) => {
+            return ParsedPackLedger {
+                status: PackLedgerStatus::Malformed,
+                ledger: Some(parsed),
+                degraded: vec![malformed_pack_ledger_degradation(
+                    pack_id,
+                    serde_json::json!({
+                        "packId": pack_id,
+                        "canonicalizationError": error.to_string(),
+                    }),
+                )],
+            };
+        }
+    };
+    // Serde intentionally tolerates unknown fields by default. Availability is
+    // stricter: every replay-visible field must survive the typed round trip so
+    // no unhashed side channel can shadow the integrity-bound v1 core.
+    if parsed != canonical_ledger {
+        return ParsedPackLedger {
+            status: PackLedgerStatus::Malformed,
+            ledger: Some(parsed),
+            degraded: vec![malformed_pack_ledger_degradation(
+                pack_id,
+                serde_json::json!({
+                    "packId": pack_id,
+                    "canonicalShapeMismatch": true,
+                }),
+            )],
+        };
+    }
+    let core_json = match pack_ledger_json(&typed.core, "parsed pack selection ledger core") {
+        Ok(core_json) => core_json,
+        Err(error) => {
+            return ParsedPackLedger {
+                status: PackLedgerStatus::Malformed,
+                ledger: Some(parsed),
+                degraded: vec![malformed_pack_ledger_degradation(
+                    pack_id,
+                    serde_json::json!({
+                        "packId": pack_id,
+                        "canonicalizationError": error.to_string(),
+                    }),
+                )],
+            };
+        }
+    };
+    let recomputed_hash = blake3_text_hash(&core_json);
+    let embedded_hash = typed.ledger_hash;
+    let compressed_envelope_hash_mismatch = compressed_envelope_ledger_hash
+        .as_deref()
+        .is_some_and(|hash| hash != recomputed_hash);
+    if expected_hash.is_none()
+        || embedded_hash != recomputed_hash
+        || expected_hash != Some(recomputed_hash.as_str())
+        || compressed_envelope_hash_mismatch
+    {
+        let mut details = serde_json::json!({
+            "packId": pack_id,
+            "recordLedgerHash": expected_hash,
+            "embeddedLedgerHash": embedded_hash,
+            "recomputedLedgerHash": recomputed_hash,
+        });
+        if let Some(compressed_envelope_ledger_hash) = compressed_envelope_ledger_hash {
+            details["compressedEnvelopeLedgerHash"] =
+                serde_json::Value::String(compressed_envelope_ledger_hash);
+        }
         return ParsedPackLedger {
             status: PackLedgerStatus::HashMismatch,
             ledger: Some(parsed),
@@ -19682,18 +19954,14 @@ pub fn parse_pack_ledger_fields(
                 "Pack selection ledger hash does not match the pack record.",
                 "high",
                 Some("Treat this replay as diagnostic only and inspect the database."),
-                serde_json::json!({
-                    "packId": pack_id,
-                    "recordLedgerHash": expected_hash,
-                    "ledgerHash": actual_hash,
-                }),
+                details,
             )],
         };
     }
 
     ParsedPackLedger {
         status: PackLedgerStatus::Available,
-        ledger: Some(parsed),
+        ledger: Some(canonical_ledger),
         degraded: Vec::new(),
     }
 }
@@ -19750,7 +20018,7 @@ pub fn pack_ledger_storage_summary(raw_ledger: Option<&str>) -> serde_json::Valu
 fn decode_pack_ledger_value(
     pack_id: &str,
     raw_ledger: &str,
-) -> std::result::Result<serde_json::Value, serde_json::Value> {
+) -> std::result::Result<DecodedPackLedger, serde_json::Value> {
     let parsed = serde_json::from_str::<serde_json::Value>(raw_ledger).map_err(|error| {
         malformed_pack_ledger_degradation(
             pack_id,
@@ -19763,7 +20031,10 @@ fn decode_pack_ledger_value(
     if parsed.get("schema").and_then(serde_json::Value::as_str)
         != Some(PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1)
     {
-        return Ok(parsed);
+        return Ok(DecodedPackLedger {
+            ledger: parsed,
+            compressed_envelope_ledger_hash: None,
+        });
     }
 
     decode_compressed_pack_ledger_value(pack_id, parsed)
@@ -19772,8 +20043,8 @@ fn decode_pack_ledger_value(
 fn decode_compressed_pack_ledger_value(
     pack_id: &str,
     envelope_value: serde_json::Value,
-) -> std::result::Result<serde_json::Value, serde_json::Value> {
-    let envelope = serde_json::from_value::<CompressedPackSelectionLedger>(envelope_value)
+) -> std::result::Result<DecodedPackLedger, serde_json::Value> {
+    let envelope = serde_json::from_value::<CompressedPackSelectionLedger>(envelope_value.clone())
         .map_err(|error| {
             compressed_pack_ledger_degradation(
                 pack_id,
@@ -19781,6 +20052,23 @@ fn decode_compressed_pack_ledger_value(
                 format!("compressed ledger envelope is malformed: {error}"),
             )
         })?;
+    let canonical_envelope = serde_json::to_value(&envelope).map_err(|error| {
+        compressed_pack_ledger_degradation(
+            pack_id,
+            "compressedEnvelopeCanonicalization",
+            format!("compressed ledger envelope could not be canonicalized: {error}"),
+        )
+    })?;
+    // Compression metadata participates in the stored replay contract too;
+    // reject unknown envelope fields before trusting or allocating its payload.
+    if envelope_value != canonical_envelope {
+        return Err(compressed_pack_ledger_degradation(
+            pack_id,
+            "compressedEnvelopeShape",
+            "compressed ledger envelope contains fields outside its canonical shape".to_string(),
+        ));
+    }
+    let compressed_envelope_ledger_hash = envelope.ledger_hash.clone();
     if envelope.compression.algorithm != PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1 {
         return Err(compressed_pack_ledger_degradation(
             pack_id,
@@ -19788,6 +20076,39 @@ fn decode_compressed_pack_ledger_value(
             format!(
                 "unsupported compression algorithm {}",
                 envelope.compression.algorithm
+            ),
+        ));
+    }
+    if envelope.compression.compressed_byte_len > PACK_REPLAY_LEDGER_MAX_COMPRESSED_BYTES {
+        return Err(compressed_pack_ledger_degradation(
+            pack_id,
+            "compressedByteLen",
+            format!(
+                "compressed byte length exceeds the {}-byte limit: {}",
+                PACK_REPLAY_LEDGER_MAX_COMPRESSED_BYTES, envelope.compression.compressed_byte_len
+            ),
+        ));
+    }
+    if envelope.compression.uncompressed_byte_len > PACK_REPLAY_LEDGER_MAX_UNCOMPRESSED_BYTES {
+        return Err(compressed_pack_ledger_degradation(
+            pack_id,
+            "uncompressedByteLen",
+            format!(
+                "uncompressed byte length exceeds the {}-byte limit: {}",
+                PACK_REPLAY_LEDGER_MAX_UNCOMPRESSED_BYTES,
+                envelope.compression.uncompressed_byte_len
+            ),
+        ));
+    }
+    if envelope.compression.compressed_payload_base64.len() as u64
+        > PACK_REPLAY_LEDGER_MAX_BASE64_BYTES
+    {
+        return Err(compressed_pack_ledger_degradation(
+            pack_id,
+            "base64",
+            format!(
+                "base64 payload exceeds the {}-byte encoded limit",
+                PACK_REPLAY_LEDGER_MAX_BASE64_BYTES
             ),
         ));
     }
@@ -19857,19 +20178,24 @@ fn decode_compressed_pack_ledger_value(
             format!("uncompressed ledger is not valid UTF-8: {error}"),
         )
     })?;
-    serde_json::from_str::<serde_json::Value>(&uncompressed_json).map_err(|error| {
-        malformed_pack_ledger_degradation(
-            pack_id,
-            serde_json::json!({
-                "packId": pack_id,
-                "compression": {
-                    "schema": PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1,
-                    "algorithm": PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1,
-                    "stage": "uncompressedJson",
-                    "error": error.to_string(),
-                },
-            }),
-        )
+    let ledger =
+        serde_json::from_str::<serde_json::Value>(&uncompressed_json).map_err(|error| {
+            malformed_pack_ledger_degradation(
+                pack_id,
+                serde_json::json!({
+                    "packId": pack_id,
+                    "compression": {
+                        "schema": PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1,
+                        "algorithm": PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1,
+                        "stage": "uncompressedJson",
+                        "error": error.to_string(),
+                    },
+                }),
+            )
+        })?;
+    Ok(DecodedPackLedger {
+        ledger,
+        compressed_envelope_ledger_hash: Some(compressed_envelope_ledger_hash),
     })
 }
 
@@ -19913,10 +20239,9 @@ pub fn pack_ledger_core_value<'a>(
     ledger: &'a serde_json::Value,
     field: &str,
 ) -> Option<&'a serde_json::Value> {
-    ledger
-        .get("core")
-        .and_then(|core| core.get(field))
-        .or_else(|| ledger.get(field))
+    // Canonical v1 ledgers are flat. Retained malformed JSON is diagnostic
+    // only, so nested `core` content must never become replay evidence.
+    ledger.get(field)
 }
 
 pub fn pack_ledger_core_array<'a>(
@@ -19927,6 +20252,9 @@ pub fn pack_ledger_core_array<'a>(
 }
 
 pub fn stored_pack_ledger_degraded_values(parsed: &ParsedPackLedger) -> Vec<serde_json::Value> {
+    if parsed.status != PackLedgerStatus::Available {
+        return Vec::new();
+    }
     parsed
         .ledger
         .as_ref()
@@ -35838,6 +36166,115 @@ mod tests {
             "malformed ledger code",
         )?;
 
+        let mut core_tampered = record.clone();
+        let mut core_tampered_value: serde_json::Value = serde_json::from_str(
+            core_tampered
+                .ledger_json
+                .as_deref()
+                .ok_or_else(|| TestFailure::new("available record missing ledger JSON"))?,
+        )
+        .map_err(|error| TestFailure::new(format!("ledger json malformed: {error}")))?;
+        core_tampered_value["createdAt"] = serde_json::json!("2000-01-01T00:00:00Z");
+        core_tampered.ledger_json = Some(serde_json::to_string(&core_tampered_value).map_err(
+            |error| TestFailure::new(format!("tampered ledger failed to encode: {error}")),
+        )?);
+        let core_tampered = super::parse_stored_pack_ledger(&core_tampered);
+        ensure_equal(
+            &core_tampered.status,
+            &super::PackLedgerStatus::HashMismatch,
+            "core mutation with copied hashes must be rejected",
+        )?;
+
+        let mut injected_core = record.clone();
+        let mut injected_core_value: serde_json::Value = serde_json::from_str(
+            injected_core
+                .ledger_json
+                .as_deref()
+                .ok_or_else(|| TestFailure::new("available record missing ledger JSON"))?,
+        )
+        .map_err(|error| TestFailure::new(format!("ledger json malformed: {error}")))?;
+        injected_core_value["core"] = serde_json::json!({
+            "selectedItems": [],
+            "degraded": [{
+                "code": "unhashed_override",
+                "severity": "critical",
+                "message": "This injected field is not integrity-bound."
+            }]
+        });
+        injected_core.ledger_json = Some(serde_json::to_string(&injected_core_value).map_err(
+            |error| TestFailure::new(format!("injected ledger failed to encode: {error}")),
+        )?);
+        let injected_core = super::parse_stored_pack_ledger(&injected_core);
+        ensure_equal(
+            &injected_core.status,
+            &super::PackLedgerStatus::Malformed,
+            "unhashed core override must not become available",
+        )?;
+        ensure_equal(
+            &injected_core.degraded[0]["details"]["canonicalShapeMismatch"],
+            &serde_json::json!(true),
+            "unhashed core override rejected by canonical shape",
+        )?;
+        let retained_injected_ledger = injected_core
+            .ledger
+            .as_ref()
+            .ok_or_else(|| TestFailure::new("malformed injected ledger was not retained"))?;
+        ensure_equal(
+            &super::pack_ledger_core_array(retained_injected_ledger, "selectedItems").map(Vec::len),
+            &Some(1),
+            "top-level integrity-bound items take precedence over injected core",
+        )?;
+        ensure(
+            super::stored_pack_ledger_degraded_values(&injected_core).is_empty(),
+            "injected core degradations must not override top-level degradations",
+        )?;
+        ensure(
+            super::pack_ledger_core_array(
+                &serde_json::json!({"core": {"selectedItems": []}}),
+                "selectedItems",
+            )
+            .is_none(),
+            "nested core fields must never be exposed as canonical replay evidence",
+        )?;
+        let untrusted_top_level_degraded = super::ParsedPackLedger {
+            status: super::PackLedgerStatus::HashMismatch,
+            ledger: Some(serde_json::json!({
+                "degraded": [{"code": "forged_top_level_degradation"}]
+            })),
+            degraded: Vec::new(),
+        };
+        ensure(
+            super::stored_pack_ledger_degraded_values(&untrusted_top_level_degraded).is_empty(),
+            "hash-mismatched top-level degradations must not become replay evidence",
+        )?;
+
+        let mut injected_nested_field = record.clone();
+        let mut injected_nested_value: serde_json::Value = serde_json::from_str(
+            injected_nested_field
+                .ledger_json
+                .as_deref()
+                .ok_or_else(|| TestFailure::new("available record missing ledger JSON"))?,
+        )
+        .map_err(|error| TestFailure::new(format!("ledger json malformed: {error}")))?;
+        injected_nested_value["selectedItems"][0]["unhashedOverride"] =
+            serde_json::json!({"rank": 0});
+        injected_nested_field.ledger_json = Some(
+            serde_json::to_string(&injected_nested_value).map_err(|error| {
+                TestFailure::new(format!("nested injection failed to encode: {error}"))
+            })?,
+        );
+        let injected_nested_field = super::parse_stored_pack_ledger(&injected_nested_field);
+        ensure_equal(
+            &injected_nested_field.status,
+            &super::PackLedgerStatus::Malformed,
+            "unhashed nested field must not become available",
+        )?;
+        ensure_equal(
+            &injected_nested_field.degraded[0]["details"]["canonicalShapeMismatch"],
+            &serde_json::json!(true),
+            "unhashed nested field rejected by canonical shape",
+        )?;
+
         let mut hash_mismatch = record;
         hash_mismatch.ledger_hash = Some("blake3:not-the-stored-ledger-hash".to_string());
         let hash_mismatch = super::parse_stored_pack_ledger(&hash_mismatch);
@@ -35948,6 +36385,75 @@ mod tests {
                 .unwrap_or(serde_json::Value::Null),
             &serde_json::json!(ledger_hash),
             "parsed compressed ledger hash",
+        )?;
+
+        let mut injected_envelope = serde_json::to_value(&envelope).map_err(|error| {
+            TestFailure::new(format!("compressed envelope failed to encode: {error}"))
+        })?;
+        injected_envelope["core"] = serde_json::json!({
+            "selectedItems": [],
+            "degraded": [{"code": "unhashed_override"}]
+        });
+        let injected_envelope_json =
+            serde_json::to_string(&injected_envelope).map_err(|error| {
+                TestFailure::new(format!(
+                    "injected compressed envelope failed to encode: {error}"
+                ))
+            })?;
+        let injected_envelope = super::parse_pack_ledger_fields(
+            pack_id,
+            Some(&injected_envelope_json),
+            Some(&ledger_hash),
+        );
+        ensure_equal(
+            &injected_envelope.status,
+            &super::PackLedgerStatus::Malformed,
+            "unhashed compressed envelope field must not become available",
+        )?;
+        ensure_equal(
+            &injected_envelope.degraded[0]["details"]["compression"]["stage"],
+            &serde_json::json!("compressedEnvelopeShape"),
+            "compressed envelope rejected by canonical shape",
+        )?;
+
+        let mut mismatched_envelope_hash = envelope.clone();
+        mismatched_envelope_hash.ledger_hash = "blake3:unbound-envelope-hash".to_string();
+        let mismatched_envelope_hash_json = super::pack_ledger_json(
+            &mismatched_envelope_hash,
+            "mismatched compressed envelope ledger hash",
+        )?;
+        let mismatched_envelope_hash = super::parse_pack_ledger_fields(
+            pack_id,
+            Some(&mismatched_envelope_hash_json),
+            Some(&ledger_hash),
+        );
+        ensure_equal(
+            &mismatched_envelope_hash.status,
+            &super::PackLedgerStatus::HashMismatch,
+            "compressed envelope ledger hash must bind to canonical core",
+        )?;
+        ensure_equal(
+            &mismatched_envelope_hash.degraded[0]["details"]["compressedEnvelopeLedgerHash"],
+            &serde_json::json!("blake3:unbound-envelope-hash"),
+            "compressed envelope hash mismatch is reported",
+        )?;
+
+        let mut oversized = envelope;
+        oversized.compression.uncompressed_byte_len =
+            super::PACK_REPLAY_LEDGER_MAX_UNCOMPRESSED_BYTES + 1;
+        let oversized_json =
+            super::pack_ledger_json(&oversized, "oversized compressed ledger envelope")?;
+        let oversized =
+            super::parse_pack_ledger_fields(pack_id, Some(&oversized_json), Some(&ledger_hash));
+        ensure_equal(
+            &oversized.status,
+            &super::PackLedgerStatus::Malformed,
+            "oversized compressed ledger status",
+        )?;
+        ensure_equal(
+            &oversized.degraded[0]["details"]["compression"]["stage"],
+            &serde_json::json!("uncompressedByteLen"),
+            "oversized compressed ledger rejected before allocation",
         )
     }
 

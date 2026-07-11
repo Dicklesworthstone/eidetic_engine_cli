@@ -30,7 +30,7 @@ use crate::core::qos::{
     QosBackgroundThrottleDecision, QosBackgroundThrottleInput, QosLane, QosLaneSummary,
     QosThrottleCheckpoint, decide_background_throttle,
 };
-use crate::db::{DbConnection, StoredAuditEntry, audit_actions};
+use crate::db::{DbConnection, PackLedgerStatus, StoredAuditEntry, audit_actions};
 use crate::models::install::{InstallCheckReport, InstallVersionEvidence};
 use crate::models::regression_causality::{
     REGRESSION_CAUSALITY_SCHEMA_V1, RegressionEvidenceInput, RegressionEvidenceKind,
@@ -5057,21 +5057,13 @@ fn summarize_pack_replay_ledger(raw_ledger: Option<&str>, expected_hash: Option<
         expected_hash,
     );
     let storage = crate::db::pack_ledger_storage_summary(raw_ledger);
+    // A malformed or hash-mismatched ledger may retain raw JSON for diagnosis.
+    // Never project that unverified content into support-bundle evidence.
+    if parsed.status != PackLedgerStatus::Available {
+        return untrusted_pack_replay_ledger_summary(parsed.status, storage);
+    }
     let Some(ledger) = parsed.ledger.as_ref() else {
-        return json!({
-            "status": parsed.status.as_str(),
-            "hashVerified": false,
-            "schema": null,
-            "storage": storage,
-            "selectedItemCount": 0,
-            "omittedItemCount": 0,
-            "freshnessStates": {},
-            "redactionClasses": [],
-            "degradationCodes": [],
-            "derivedAssets": {},
-            "database": {},
-            "candidateCounts": {},
-        });
+        return untrusted_pack_replay_ledger_summary(PackLedgerStatus::Malformed, storage);
     };
 
     let actual_hash = ledger.get("ledgerHash").and_then(Value::as_str);
@@ -5095,11 +5087,27 @@ fn summarize_pack_replay_ledger(raw_ledger: Option<&str>, expected_hash: Option<
     })
 }
 
+fn untrusted_pack_replay_ledger_summary(status: PackLedgerStatus, storage: Value) -> Value {
+    json!({
+        "status": status.as_str(),
+        "hashVerified": false,
+        "schema": null,
+        "storage": storage,
+        "selectedItemCount": 0,
+        "omittedItemCount": 0,
+        "freshnessStates": {},
+        "redactionClasses": [],
+        "degradationCodes": [],
+        "derivedAssets": {},
+        "database": {},
+        "candidateCounts": {},
+    })
+}
+
 fn support_ledger_core_value<'a>(ledger: &'a Value, field: &str) -> Option<&'a Value> {
-    ledger
-        .get("core")
-        .and_then(|core| core.get(field))
-        .or_else(|| ledger.get(field))
+    // Canonical replay-ledger v1 fields are flat. Retained malformed JSON is
+    // diagnostic only and nested `core` content is never evidence.
+    ledger.get(field)
 }
 
 fn support_ledger_core_array<'a>(ledger: &'a Value, field: &str) -> Option<&'a Vec<Value>> {
@@ -5949,7 +5957,7 @@ fn collect_memory_drift_support_summary(workspace: &Path, limit: u32) -> Value {
     if !support_bundle_database_path_is_regular(&database_path) {
         return super::memory_drift::memory_drift_support_summary_unavailable(
             "database_unavailable",
-            "memory_drift_source_unverifiable",
+            super::memory_drift::MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE,
             "Memory drift summary is unavailable because the workspace database is missing or unsafe to read.",
         );
     }
@@ -5961,6 +5969,7 @@ fn collect_memory_drift_support_summary(workspace: &Path, limit: u32) -> Value {
         memory_id: None,
         limit,
         include_tombstoned: false,
+        as_of: None,
     };
 
     match super::memory_drift::build_memory_drift_report_read_only(&options) {
@@ -5980,7 +5989,7 @@ fn memory_drift_support_summary_unavailable_from_report_error(error: &DomainErro
 
     super::memory_drift::memory_drift_support_summary_unavailable(
         "report_unavailable",
-        "memory_drift_source_unverifiable",
+        super::memory_drift::MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE,
         "Memory drift summary is unavailable because the read-only report could not be built.",
     )
 }
@@ -9041,7 +9050,6 @@ mod tests {
         fs::write(
             &snapshot_path,
             serde_json::json!({
-                "schema": "ee.agent_mail.snapshot.v1",
                 "durability_state": "corrupt",
                 "degraded": [{"code": "database_corrupt"}]
             })
@@ -9168,6 +9176,55 @@ mod tests {
             "symlinked database should not be reported as present"
         );
         Ok(())
+    }
+
+    #[test]
+    fn pack_replay_summary_does_not_project_unverified_ledger_content() {
+        let copied_hash = "blake3:copied-but-unverified";
+        let injected_ledger = json!({
+            "schema": crate::db::PACK_REPLAY_LEDGER_SCHEMA_V1,
+            "ledgerHash": copied_hash,
+            "core": {
+                "schema": crate::db::PACK_REPLAY_LEDGER_SCHEMA_V1,
+                "selectedItems": [{
+                    "memoryId": "forged-memory-evidence",
+                    "freshness": "forged-freshness",
+                    "redactionClasses": ["forged-redaction"]
+                }],
+                "omittedItems": [{"memoryId": "forged-omission"}],
+                "degraded": [{"code": "forged-degradation"}],
+                "derivedAssets": {"searchIndex": {"status": "forged-ready"}},
+                "database": {"schemaVersion": 999},
+                "candidateCounts": {"selected": 999}
+            }
+        })
+        .to_string();
+
+        let summary = summarize_pack_replay_ledger(Some(&injected_ledger), Some(copied_hash));
+
+        assert_eq!(summary.pointer("/status"), Some(&json!("malformed")));
+        assert_eq!(summary.pointer("/hashVerified"), Some(&json!(false)));
+        assert_eq!(summary.pointer("/schema"), Some(&Value::Null));
+        assert_eq!(summary.pointer("/selectedItemCount"), Some(&json!(0)));
+        assert_eq!(summary.pointer("/omittedItemCount"), Some(&json!(0)));
+        assert_eq!(summary.pointer("/freshnessStates"), Some(&json!({})));
+        assert_eq!(summary.pointer("/redactionClasses"), Some(&json!([])));
+        assert_eq!(summary.pointer("/degradationCodes"), Some(&json!([])));
+        assert_eq!(summary.pointer("/derivedAssets"), Some(&json!({})));
+        assert_eq!(summary.pointer("/database"), Some(&json!({})));
+        assert_eq!(summary.pointer("/candidateCounts"), Some(&json!({})));
+        assert!(
+            !summary.to_string().contains("forged-"),
+            "unverified raw ledger content must not enter support-bundle evidence: {summary}"
+        );
+        assert!(
+            support_ledger_core_value(
+                &json!({"core": {"selectedItems": ["forged-nested-item"]}}),
+                "selectedItems",
+            )
+            .is_none(),
+            "nested core fallback must not expose malformed diagnostic JSON as evidence"
+        );
     }
 
     #[cfg(unix)]
@@ -10904,8 +10961,16 @@ mod tests {
             "missing database must be explicit: {encoded}"
         );
         assert!(
-            encoded.contains("memory_drift_source_unverifiable"),
-            "missing database must carry a drift degraded code: {encoded}"
+            encoded.contains(super::super::memory_drift::MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE),
+            "missing database must carry a report-unavailable degraded code: {encoded}"
+        );
+        assert_eq!(
+            summary.pointer("/evidenceInspection/memoryEvidenceInspected"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            summary.pointer("/evidenceInspection/sourceFreshness"),
+            Some(&json!("not_inspected"))
         );
         assert!(
             encoded.contains("\"rawSnippetsIncluded\":false"),
@@ -10918,9 +10983,42 @@ mod tests {
     }
 
     #[test]
+    fn memory_drift_support_summary_marks_non_lock_failure_not_inspected() {
+        let error = DomainError::Storage {
+            message: "Failed to open database read-only for memory drift report: disk I/O error"
+                .to_owned(),
+            repair: Some("ee doctor --json".to_owned()),
+        };
+        let summary = memory_drift_support_summary_unavailable_from_report_error(&error);
+
+        assert_eq!(
+            summary.pointer("/status"),
+            Some(&json!("report_unavailable"))
+        );
+        assert_eq!(
+            summary.pointer("/degradedCodes/0"),
+            Some(&json!(
+                super::super::memory_drift::MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE
+            ))
+        );
+        assert_eq!(
+            summary.pointer("/degraded/0/severity"),
+            Some(&json!("warning"))
+        );
+        assert_eq!(
+            summary.pointer("/evidenceInspection/memoryEvidenceInspected"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            summary.pointer("/evidenceInspection/sourceFreshness"),
+            Some(&json!("not_inspected"))
+        );
+    }
+
+    #[test]
     fn memory_drift_support_summary_preserves_lock_contention_code() {
         let error = DomainError::Storage {
-            message: "Failed to open database read-only for memory drift report: could not acquire database write lock: busy".to_owned(),
+            message: "Failed to open database read-only for memory drift report: database read-snapshot contention".to_owned(),
             repair: None,
         };
         let summary = memory_drift_support_summary_unavailable_from_report_error(&error);

@@ -11728,7 +11728,7 @@ pub struct MemoryReviseArgs {
     #[arg(long, value_name = "ACTOR")]
     pub actor: Option<String>,
 
-    /// Preview the revision without writing. Required until revision storage is implemented.
+    /// Preview the immutable revision and audit effects without writing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
 
@@ -33652,6 +33652,7 @@ where
         memory_id: args.memory_id.as_deref(),
         limit: args.limit,
         include_tombstoned: args.include_tombstoned,
+        as_of: None,
     };
     let report = match crate::core::memory_drift::build_memory_drift_report_read_only(&options) {
         Ok(report) => report,
@@ -39557,6 +39558,13 @@ fn ledger_degraded_values(parsed: &ParsedPackLedger) -> Vec<serde_json::Value> {
     crate::db::stored_pack_ledger_degraded_values(parsed)
 }
 
+fn available_pack_ledger(parsed: &ParsedPackLedger) -> Option<&serde_json::Value> {
+    if parsed.status != PackLedgerStatus::Available {
+        return None;
+    }
+    parsed.ledger.as_ref()
+}
+
 fn canonical_json(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
@@ -39630,7 +39638,7 @@ fn diff_items_for_pack(
     parsed: &ParsedPackLedger,
     stored_items: &[crate::db::StoredPackItem],
 ) -> BTreeMap<String, PackDiffItem> {
-    if let Some(ledger) = parsed.ledger.as_ref()
+    if let Some(ledger) = available_pack_ledger(parsed)
         && let Some(items) = ledger_core_array(ledger, "selectedItems")
     {
         return items
@@ -39675,26 +39683,14 @@ fn score_delta_changed(delta: Option<f64>) -> bool {
 }
 
 fn pack_record_request_value(ledger: &ParsedPackLedger, field: &str) -> Option<serde_json::Value> {
-    ledger
-        .ledger
-        .as_ref()
-        .and_then(|value| {
-            value
-                .pointer(&format!("/core/request/{field}"))
-                .or_else(|| value.pointer(&format!("/request/{field}")))
-        })
+    available_pack_ledger(ledger)
+        .and_then(|value| value.pointer(&format!("/request/{field}")))
         .cloned()
 }
 
 fn pack_record_derived_asset(ledger: &ParsedPackLedger, field: &str) -> Option<serde_json::Value> {
-    ledger
-        .ledger
-        .as_ref()
-        .and_then(|value| {
-            value
-                .pointer(&format!("/core/derivedAssets/{field}"))
-                .or_else(|| value.pointer(&format!("/derivedAssets/{field}")))
-        })
+    available_pack_ledger(ledger)
+        .and_then(|value| value.pointer(&format!("/derivedAssets/{field}")))
         .cloned()
 }
 
@@ -39858,7 +39854,8 @@ fn collect_pack_diff(
             "queryMatch": record_a.query == record_b.query,
             "profileMatch": record_a.profile == record_b.profile,
             "tokenDelta": i64::from(record_b.used_tokens) - i64::from(record_a.used_tokens),
-            "replayable": ledger_a.ledger.is_some() && ledger_b.ledger.is_some(),
+            "replayable": available_pack_ledger(ledger_a).is_some()
+                && available_pack_ledger(ledger_b).is_some(),
         },
         "added": added,
         "removed": removed,
@@ -39896,7 +39893,7 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let ledger = parse_pack_ledger(&record);
-    let ledger_value = ledger.ledger.clone();
+    let ledger_value = available_pack_ledger(&ledger).cloned();
     let selected_items = ledger_value
         .as_ref()
         .and_then(|value| ledger_core_array(value, "selectedItems"))
@@ -78589,6 +78586,48 @@ demos:
         assert!(value.get("groupCommit").is_some());
         assert!(value.get("singleflight").is_some());
         assert!(value.get("overallPosture").is_some());
+    }
+
+    #[test]
+    fn untrusted_pack_ledger_projections_fall_back_to_stored_items() {
+        let parsed = crate::db::ParsedPackLedger {
+            status: crate::db::PackLedgerStatus::HashMismatch,
+            ledger: Some(serde_json::json!({
+                "selectedItems": [{"memoryId": "forged-ledger-item", "rank": 99}],
+                "omittedItems": [{"memoryId": "forged-ledger-omission"}],
+                "request": {"maxTokens": 999_999},
+                "derivedAssets": {"searchIndex": {"status": "forged-ready"}},
+                "degraded": [{"code": "forged-ledger-degradation"}],
+                "core": {
+                    "selectedItems": [{"memoryId": "forged-nested-item"}],
+                    "request": {"maxTokens": 888_888}
+                }
+            })),
+            degraded: Vec::new(),
+        };
+        let stored_items = vec![crate::db::StoredPackItem {
+            pack_id: "pack_000000000000000000000safe1".to_owned(),
+            memory_id: "mem_000000000000000000000safe1".to_owned(),
+            rank: 1,
+            section: "procedural_rules".to_owned(),
+            estimated_tokens: 12,
+            relevance: 0.9,
+            utility: 0.8,
+            why: "Integrity-bound stored item fallback.".to_owned(),
+            diversity_key: Some("safe".to_owned()),
+            provenance_json: "{}".to_owned(),
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: Some("test".to_owned()),
+        }];
+
+        let comparable = super::diff_items_for_pack(&parsed, &stored_items);
+        assert_eq!(comparable.len(), 1);
+        assert!(comparable.contains_key("mem_000000000000000000000safe1"));
+        assert!(!comparable.contains_key("forged-ledger-item"));
+        assert!(super::available_pack_ledger(&parsed).is_none());
+        assert!(super::pack_record_request_value(&parsed, "maxTokens").is_none());
+        assert!(super::pack_record_derived_asset(&parsed, "searchIndex").is_none());
+        assert!(super::ledger_degraded_values(&parsed).is_empty());
     }
 
     #[test]

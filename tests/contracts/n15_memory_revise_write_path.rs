@@ -25,6 +25,8 @@
 
 use std::path::{Path, PathBuf};
 
+use clap::CommandFactory;
+use ee::cli::Cli;
 use ee::core::effect::{EffectClass, EffectManifest};
 use ee::core::memory::{
     RememberMemoryOptions, ReviseMemoryOptions, ReviseReason, remember_memory, revise_memory,
@@ -33,6 +35,29 @@ use ee::db::DbConnection;
 use tempfile::TempDir;
 
 type TestResult = Result<(), String>;
+
+#[test]
+fn memory_revise_help_describes_dry_run_as_optional_preview() -> TestResult {
+    let mut command = Cli::command();
+    let memory = command
+        .find_subcommand_mut("memory")
+        .ok_or_else(|| "memory subcommand missing".to_owned())?;
+    let revise = memory
+        .find_subcommand_mut("revise")
+        .ok_or_else(|| "memory revise subcommand missing".to_owned())?;
+    let help = revise.render_long_help().to_string();
+    if help.contains("Required until revision storage is implemented") {
+        return Err(format!(
+            "memory revise help retains stale preview-only claim:\n{help}"
+        ));
+    }
+    if !help.contains("Preview the immutable revision") || !help.contains("without writing") {
+        return Err(format!(
+            "memory revise help must describe optional mutation-free preview:\n{help}"
+        ));
+    }
+    Ok(())
+}
 
 struct SeededWorkspace {
     _dir: TempDir,
