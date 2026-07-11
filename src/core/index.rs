@@ -25,8 +25,8 @@ use crate::models::{
 };
 use crate::search::{
     CanonicalSearchDocument, EmbedderStack, HashEmbedder, IndexBuilder, artifact_to_document,
-    memory_to_document_with_context_anchors_and_typed_fields, rule_to_document,
-    session_to_document,
+    evidence_span_to_document, memory_to_document_with_context_anchors_and_typed_fields,
+    rule_to_document, session_to_document,
 };
 #[cfg(feature = "lexical-bm25")]
 use crate::search::{LexicalSearch, TantivyIndex};
@@ -935,14 +935,22 @@ pub fn rebuild_index(
     let artifact_docs: Vec<CanonicalSearchDocument> =
         artifacts.iter().map(artifact_to_document).collect();
     let rule_docs = rule_documents(&db, &workspace_id)?;
+    let evidence_docs = evidence_documents(&db, &workspace_id)?;
 
-    let (memories_indexed, sessions_indexed, artifacts_indexed, _rules_indexed, documents_total) =
-        checked_document_counts(
-            memory_docs.len(),
-            session_docs.len(),
-            artifact_docs.len(),
-            rule_docs.len(),
-        )?;
+    let (
+        memories_indexed,
+        sessions_indexed,
+        artifacts_indexed,
+        _rules_indexed,
+        _evidence_indexed,
+        documents_total,
+    ) = checked_document_counts(
+        memory_docs.len(),
+        session_docs.len(),
+        artifact_docs.len(),
+        rule_docs.len(),
+        evidence_docs.len(),
+    )?;
 
     if options.dry_run {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -989,6 +997,7 @@ pub fn rebuild_index(
             .chain(session_docs)
             .chain(artifact_docs)
             .chain(rule_docs)
+            .chain(evidence_docs)
             .map(|doc| doc.into_indexable())
             .collect();
 
@@ -1075,14 +1084,22 @@ pub fn reembed_index(
     let artifact_docs: Vec<CanonicalSearchDocument> =
         artifacts.iter().map(artifact_to_document).collect();
     let rule_docs = rule_documents(&db, &workspace_id)?;
+    let evidence_docs = evidence_documents(&db, &workspace_id)?;
 
-    let (memories_indexed, sessions_indexed, artifacts_indexed, _rules_indexed, documents_total) =
-        checked_document_counts(
-            memory_docs.len(),
-            session_docs.len(),
-            artifact_docs.len(),
-            rule_docs.len(),
-        )?;
+    let (
+        memories_indexed,
+        sessions_indexed,
+        artifacts_indexed,
+        _rules_indexed,
+        _evidence_indexed,
+        documents_total,
+    ) = checked_document_counts(
+        memory_docs.len(),
+        session_docs.len(),
+        artifact_docs.len(),
+        rule_docs.len(),
+        evidence_docs.len(),
+    )?;
     let current_vector_coverage =
         embedding_vector_coverage(&index_dir, documents_total, read_fast_vector_record_count);
     let embedding = reembed_embedding_summary(&db, &workspace_id, &stack, current_vector_coverage)?;
@@ -2476,18 +2493,27 @@ fn collect_workspace_indexable_documents(
     let artifact_docs: Vec<CanonicalSearchDocument> =
         artifacts.iter().map(artifact_to_document).collect();
     let rule_docs = rule_documents(db, workspace_id)?;
-    let (memories_indexed, sessions_indexed, _artifacts_indexed, _rules_indexed, documents_total) =
-        checked_document_counts(
-            memory_docs.len(),
-            session_docs.len(),
-            artifact_docs.len(),
-            rule_docs.len(),
-        )?;
+    let evidence_docs = evidence_documents(db, workspace_id)?;
+    let (
+        memories_indexed,
+        sessions_indexed,
+        _artifacts_indexed,
+        _rules_indexed,
+        _evidence_indexed,
+        documents_total,
+    ) = checked_document_counts(
+        memory_docs.len(),
+        session_docs.len(),
+        artifact_docs.len(),
+        rule_docs.len(),
+        evidence_docs.len(),
+    )?;
     let indexable_docs = memory_docs
         .into_iter()
         .chain(session_docs)
         .chain(artifact_docs)
         .chain(rule_docs)
+        .chain(evidence_docs)
         .map(|doc| doc.into_indexable())
         .collect();
     Ok((
@@ -3063,7 +3089,8 @@ fn checked_document_counts(
     session_count: usize,
     artifact_count: usize,
     rule_count: usize,
-) -> Result<(u32, u32, u32, u32, u32), IndexRebuildError> {
+    evidence_count: usize,
+) -> Result<(u32, u32, u32, u32, u32, u32), IndexRebuildError> {
     let memories_indexed = u32::try_from(memory_count).map_err(|_| {
         IndexRebuildError::Index(format!(
             "Memory document count {memory_count} exceeds the supported maximum."
@@ -3084,10 +3111,16 @@ fn checked_document_counts(
             "Rule document count {rule_count} exceeds the supported maximum."
         ))
     })?;
+    let evidence_indexed = u32::try_from(evidence_count).map_err(|_| {
+        IndexRebuildError::Index(format!(
+            "Evidence document count {evidence_count} exceeds the supported maximum."
+        ))
+    })?;
     let documents_total = memories_indexed
         .checked_add(sessions_indexed)
         .and_then(|count| count.checked_add(artifacts_indexed))
         .and_then(|count| count.checked_add(rules_indexed))
+        .and_then(|count| count.checked_add(evidence_indexed))
         .ok_or_else(|| {
             IndexRebuildError::Index(
                 "Combined document count exceeds the supported maximum.".to_owned(),
@@ -3098,6 +3131,7 @@ fn checked_document_counts(
         sessions_indexed,
         artifacts_indexed,
         rules_indexed,
+        evidence_indexed,
         documents_total,
     ))
 }
@@ -3119,6 +3153,23 @@ fn rule_documents(
         .filter(|rule| rule.superseded_by.is_none())
         .map(rule_to_document)
         .collect())
+}
+
+/// Collect the indexable imported-evidence documents for a workspace.
+///
+/// `ee import cass` persists transcript excerpts as `evidence_spans`, but
+/// the corpus previously carried only session METADATA documents, so a
+/// unique phrase from an imported transcript was undiscoverable by
+/// `ee search` (bd-16imy). Excerpts are secret-redacted at import time, so
+/// projecting them into the derived index preserves the storage redaction
+/// posture. The listing query orders deterministically by
+/// `(session_id, start_line, end_line, id)`.
+fn evidence_documents(
+    db: &DbConnection,
+    workspace_id: &str,
+) -> Result<Vec<CanonicalSearchDocument>, IndexRebuildError> {
+    let spans = db.list_evidence_spans_for_workspace(workspace_id)?;
+    Ok(spans.iter().map(evidence_span_to_document).collect())
 }
 
 fn get_default_workspace_id(db: &DbConnection) -> Result<String, IndexRebuildError> {

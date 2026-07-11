@@ -697,6 +697,43 @@ pub fn rule_to_document(rule: &crate::db::StoredProceduralRule) -> CanonicalSear
     doc
 }
 
+/// Convert a stored imported evidence span to a canonical search document.
+///
+/// `ee import cass` persists transcript excerpts as `evidence_spans`, but
+/// the derived corpus previously carried only session METADATA documents —
+/// a unique phrase from an imported transcript was undiscoverable by
+/// `ee search` and could never reach a pack (bd-16imy). The excerpt stored
+/// in the row is already secret-redacted at import time
+/// (`policy::redact_secret_like_content` in `cass::import`), so indexing it
+/// preserves the exact redaction posture memory content already has.
+/// Line-range and session provenance ride in metadata so a hit points back
+/// at the exact imported lines.
+#[must_use]
+pub fn evidence_span_to_document(span: &crate::db::StoredEvidenceSpan) -> CanonicalSearchDocument {
+    let mut doc =
+        CanonicalSearchDocument::new(&span.id, span.excerpt.clone(), DocumentSource::Import)
+            .with_title(format!(
+                "Imported evidence {} (session {}, lines {}-{})",
+                span.id, span.session_id, span.start_line, span.end_line
+            ))
+            .with_kind("evidence_span")
+            .with_created_at(&span.created_at)
+            .with_metadata_entry("workspace_id", &span.workspace_id)
+            .with_metadata_entry("session_id", &span.session_id)
+            .with_metadata_entry("cass_span_id", &span.cass_span_id)
+            .with_metadata_entry("span_kind", &span.span_kind)
+            .with_metadata_entry("start_line", span.start_line.to_string())
+            .with_metadata_entry("end_line", span.end_line.to_string())
+            .with_metadata_entry("content_hash", &span.content_hash);
+    if let Some(memory_id) = span.memory_id.as_deref() {
+        doc = doc.with_metadata_entry("memory_id", memory_id);
+    }
+    if let Some(role) = span.role.as_deref() {
+        doc = doc.with_metadata_entry("role", role);
+    }
+    doc
+}
+
 /// Builder for converting registered coding artifacts to canonical documents.
 ///
 /// Artifact rows are the source of truth; the search document is a derived,
