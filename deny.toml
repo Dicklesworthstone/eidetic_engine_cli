@@ -71,4 +71,12 @@ ignore = [
     # stack. Ignored to unblock the v0.4.0 release; revisit when tokenizers
     # drops its paste dependency.
     "RUSTSEC-2024-0436",
+    # RUSTSEC-2025-0134: `rustls-pemfile` is unmaintained (a maintenance
+    # advisory, not a vulnerability; RustSec reports "no safe upgrade
+    # available"). It is pulled into cargo-deny's all-features graph solely
+    # by asupersync's optional `tls` feature; ee's default feature set does
+    # not enable that feature. Time-boxed exception for v0.13.0: revisit by
+    # 2026-08-10 or sooner when asupersync migrates to rustls-pki-types::pem
+    # (tracked in GH#22).
+    "RUSTSEC-2025-0134",
 ]
