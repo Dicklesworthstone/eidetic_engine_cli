@@ -662,6 +662,41 @@ pub fn session_to_document_with_context(
     builder.build(session)
 }
 
+/// Convert a stored procedural rule to a canonical search document.
+///
+/// Rules are the procedural memory tier: `ee rule add` and `curate apply`
+/// enqueue `document_source=rule` index jobs, so the derived corpus must
+/// contain a deterministic projection of the rule row or the
+/// Learn -> Retrieve -> Pack loop dead-ends with rules that can never be
+/// found by `ee search` or hydrated into packs (bd-3h6bz). Tombstoned and
+/// superseded rules are excluded at the collection site, not here, so the
+/// builder stays a pure row projection.
+#[must_use]
+pub fn rule_to_document(rule: &crate::db::StoredProceduralRule) -> CanonicalSearchDocument {
+    let mut doc = CanonicalSearchDocument::new(&rule.id, rule.content.clone(), DocumentSource::Rule)
+            .with_title(format!("Procedural rule {}", rule.id))
+            .with_level("procedural")
+            .with_kind("rule")
+            .with_created_at(&rule.created_at)
+            .with_metadata_entry("workspace_id", &rule.workspace_id)
+            .with_metadata_entry("maturity", &rule.maturity)
+            .with_metadata_entry("scope", &rule.scope)
+            .with_metadata_entry("trust_class", &rule.trust_class)
+            // Fixed-precision formatting keeps the derived document (and
+            // therefore index bytes and pack hashes) byte-stable across
+            // rebuilds of the same row.
+            .with_metadata_entry("confidence", format!("{:.2}", rule.confidence))
+            .with_metadata_entry("utility", format!("{:.2}", rule.utility))
+            .with_metadata_entry("protected", if rule.protected { "true" } else { "false" });
+    if let Some(pattern) = rule.scope_pattern.as_deref() {
+        doc = doc.with_metadata_entry("scope_pattern", pattern);
+    }
+    if let Some(superseded_by) = rule.superseded_by.as_deref() {
+        doc = doc.with_metadata_entry("superseded_by", superseded_by);
+    }
+    doc
+}
+
 /// Builder for converting registered coding artifacts to canonical documents.
 ///
 /// Artifact rows are the source of truth; the search document is a derived,
