@@ -7804,6 +7804,8 @@ fn diag_search_sync(
 
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime_result = crate::core::run_cli_future(async move {
+            // Invariant: run_cli_future's block_on installs an ambient runtime Cx.
+            #[allow(clippy::expect_used)]
             let cx = asupersync::Cx::current()
                 .expect("run_cli_future's block_on installs an ambient runtime Cx");
             let index = match TwoTierIndex::open(&index_dir_owned, config.clone()) {
@@ -8926,6 +8928,8 @@ fn search_sync_with_performance(
     let runtime_start = Instant::now();
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime_result = crate::core::run_cli_future(async move {
+            // Invariant: run_cli_future's block_on installs an ambient runtime Cx.
+            #[allow(clippy::expect_used)]
             let cx = asupersync::Cx::current()
                 .expect("run_cli_future's block_on installs an ambient runtime Cx");
             if source_mode == SearchSourceMode::LexicalOnly {
@@ -11229,7 +11233,7 @@ mod tests {
         .to_string();
         connection
             .insert_feedback_event(
-                &format!("fb_cache_{index:022}"),
+                &format!("fb_cache_{index:020}"),
                 &CreateFeedbackEventInput {
                     workspace_id: workspace_id.to_owned(),
                     target_type: "candidate".to_owned(),

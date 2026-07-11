@@ -2631,6 +2631,8 @@ fn download_embedding_manifest(
     let manifest = manifest.clone();
     let destination = destination.to_path_buf();
     crate::core::run_cli_future(async move {
+        // Invariant: run_cli_future's block_on installs an ambient runtime Cx.
+        #[allow(clippy::expect_used)]
         let cx = asupersync::Cx::current()
             .expect("run_cli_future's block_on installs an ambient runtime Cx");
         let downloader = ModelDownloader::with_defaults();

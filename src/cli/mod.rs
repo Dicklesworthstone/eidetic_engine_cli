@@ -16073,6 +16073,8 @@ fn build_eval_search_index_from_memories(
 
     let index_dir = index_dir.to_path_buf();
     crate::core::run_cli_future(async move {
+        // Invariant: run_cli_future's block_on installs an ambient runtime Cx.
+        #[allow(clippy::expect_used)]
         let cx = asupersync::Cx::current()
             .expect("run_cli_future's block_on installs an ambient runtime Cx");
         IndexBuilder::new(&index_dir)

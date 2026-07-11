@@ -1907,6 +1907,8 @@ fn apply_incremental_index_change_sync(
 
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime_result = crate::core::run_cli_future(async move {
+            // Invariant: run_cli_future's block_on installs an ambient runtime Cx.
+            #[allow(clippy::expect_used)]
             let cx = asupersync::Cx::current()
                 .expect("run_cli_future's block_on installs an ambient runtime Cx");
             let outcome = match apply_incremental_index_change(
@@ -1976,6 +1978,8 @@ fn apply_incremental_index_batch_sync(
 
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime_result = crate::core::run_cli_future(async move {
+            // Invariant: run_cli_future's block_on installs an ambient runtime Cx.
+            #[allow(clippy::expect_used)]
             let cx = asupersync::Cx::current()
                 .expect("run_cli_future's block_on installs an ambient runtime Cx");
             let outcome = match apply_incremental_index_batch(
@@ -3117,6 +3121,8 @@ fn build_index_sync(
 
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime_result = crate::core::run_cli_future(async move {
+            // Invariant: run_cli_future's block_on installs an ambient runtime Cx.
+            #[allow(clippy::expect_used)]
             let cx = asupersync::Cx::current()
                 .expect("run_cli_future's block_on installs an ambient runtime Cx");
             let builder = IndexBuilder::new(&index_dir_owned)
@@ -8672,7 +8678,7 @@ mod tests {
         connection.migrate().map_err(|e| e.to_string())?;
         connection
             .insert_workspace(
-                "wsp_backfill00000000000000000",
+                "wsp_backfill000000000000000000",
                 &crate::db::CreateWorkspaceInput {
                     path: workspace.to_string_lossy().into_owned(),
                     name: Some("lifecycle-backfill".to_owned()),
@@ -8681,9 +8687,9 @@ mod tests {
             .map_err(|e| e.to_string())?;
         connection
             .insert_model_registry_entry(
-                "mdl_backfill00000000000000000",
+                "mdl_backfill000000000000000000",
                 &crate::db::CreateModelRegistryInput {
-                    workspace_id: "wsp_backfill00000000000000000".to_owned(),
+                    workspace_id: "wsp_backfill000000000000000000".to_owned(),
                     provider: ModelProvider::Hash,
                     model_name: registry_model_name.to_owned(),
                     purpose: crate::models::model_registry::ModelPurpose::Embedding,
@@ -8811,7 +8817,7 @@ mod tests {
         connection.migrate().map_err(|e| e.to_string())?;
         connection
             .insert_workspace(
-                "wsp_multiA0000000000000000000",
+                "wsp_multia0000000000000000000a",
                 &crate::db::CreateWorkspaceInput {
                     path: workspace_a.to_string_lossy().into_owned(),
                     name: Some("workspace-a".to_owned()),
@@ -8823,7 +8829,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         connection
             .insert_workspace(
-                "wsp_multiB0000000000000000000",
+                "wsp_multib0000000000000000000b",
                 &crate::db::CreateWorkspaceInput {
                     path: workspace_b.to_string_lossy().into_owned(),
                     name: Some("workspace-b".to_owned()),
@@ -8832,9 +8838,9 @@ mod tests {
             .map_err(|e| e.to_string())?;
 
         for (index, workspace_id) in [
-            "wsp_multiA0000000000000000000",
-            "wsp_multiA0000000000000000000",
-            "wsp_multiB0000000000000000000",
+            "wsp_multia0000000000000000000a",
+            "wsp_multia0000000000000000000a",
+            "wsp_multib0000000000000000000b",
         ]
         .iter()
         .enumerate()
@@ -8874,14 +8880,14 @@ mod tests {
         let resolved_a =
             resolve_index_workspace_id(&connection, &workspace_a).map_err(|e| e.to_string())?;
         ensure(
-            resolved_a == "wsp_multiA0000000000000000000",
+            resolved_a == "wsp_multia0000000000000000000a",
             format!("requested workspace A path must resolve to A: {resolved_a}"),
         )?;
 
         let resolved_b =
             resolve_index_workspace_id(&connection, &workspace_b).map_err(|e| e.to_string())?;
         ensure(
-            resolved_b == "wsp_multiB0000000000000000000",
+            resolved_b == "wsp_multib0000000000000000000b",
             format!("requested workspace B path must resolve to B: {resolved_b}"),
         )?;
 
@@ -8960,9 +8966,9 @@ mod tests {
         let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
         connection
             .insert_search_index_job(
-                "sidx_workspaceA000000000000000",
+                "sidx_workspacea000000000000000a",
                 &crate::db::CreateSearchIndexJobInput {
-                    workspace_id: "wsp_multiA0000000000000000000".to_owned(),
+                    workspace_id: "wsp_multia0000000000000000000a".to_owned(),
                     job_type: SearchIndexJobType::FullRebuild,
                     document_source: None,
                     document_id: None,
@@ -8982,7 +8988,7 @@ mod tests {
         .map_err(|e| e.to_string())?;
 
         ensure(
-            report.workspace_id == "wsp_multiA0000000000000000000",
+            report.workspace_id == "wsp_multia0000000000000000000a",
             format!(
                 "process-jobs --workspace A must resolve workspace A (was newest-row B before GH#20): {}",
                 report.workspace_id
