@@ -293,7 +293,7 @@ pub struct MeshDisableArgs {
     pub dry_run: bool,
 
     /// Record all-workspaces containment intent without mutating every workspace config.
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with = "peer")]
     pub all_workspaces: bool,
 
     /// Narrow containment to one mesh peer.
@@ -1040,6 +1040,23 @@ fn mesh_emergency_domain_error(
                 ),
             }
         }
+        crate::mesh::emergency_disable::MeshEmergencyError::PeerScopeNotDurable { peer_id } => {
+            DomainError::Usage {
+                message,
+                repair: Some(format!(
+                    "Use `ee mesh peer revoke {peer_id} --json` for durable per-peer containment, or `ee mesh disable --json` (without --peer) for workspace-wide containment."
+                )),
+            }
+        }
+        crate::mesh::emergency_disable::MeshEmergencyError::PeerScopeConflictsAllWorkspaces {
+            ..
+        } => DomainError::Usage {
+            message,
+            repair: Some(
+                "Pass exactly one containment scope: `--peer <id>` or `--all-workspaces`."
+                    .to_owned(),
+            ),
+        },
     }
 }
 
