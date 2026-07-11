@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "context_rule_hit_unhydrated",
+  "introduced_by": {
+    "bead": "bd-3h6bz",
+    "epic_letter": "RC"
+  },
+  "surfaces": [
+    "ee pack (procedural-rule search-hit hydration)",
+    "ee context (soft-deprecated alias, same hydration lane)"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "A procedural-rule document (source=rule) matched the retrieval query, but the hit could not hydrate into a pack candidate: the rule row could not be loaded, its rule_source_memories linkage could not be read, every linked source-memory id was invalid, or the rule has no source memories at all. Pack candidates are memory-centric, so a rule hit hydrates through a deterministic (lexicographically smallest) source memory; when none is hydratable the pack degrades honestly instead of silently dropping the matched rule. The rule itself remains retrievable via ee search.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee rule add \"Run cargo fmt --check before release.\" --workspace . --json   # no --source-memory",
+      "ee index rebuild --workspace ."
+    ],
+    "invocation": "ee pack \"format before release\" --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "context_rule_hit_unhydrated",
+    "severity": "low",
+    "message_contains": [
+      "matched search but has no source memories"
+    ]
+  }
+}

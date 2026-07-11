@@ -6487,6 +6487,10 @@ fn candidates_from_search_with_metrics(
             Err(_) => {
                 metrics.artifact_link_lookups = metrics.artifact_link_lookups.saturating_add(1);
                 artifact_linked_memory_id(connection, hit, degraded)
+                    // Procedural-rule hits hydrate through their source
+                    // memories the same way artifact hits hydrate through
+                    // their memory links (bd-3h6bz).
+                    .or_else(|| rule_linked_memory_id(connection, hit, degraded))
             }
         };
         if resolution.is_some() {
@@ -9753,8 +9757,14 @@ fn candidate_selection_why(
     let base = format!(
         "matched '{display_query}' via {search_source} (relevance {search_score:.4}, utility {memory_utility:.4})",
     );
-    if let Some(artifact_id) = artifact_id {
-        format!("{base}; via registered artifact {artifact_id}")
+    // The linked-document slot carries either a registered artifact id or an
+    // applied procedural rule id (bd-3h6bz); label the attribution honestly.
+    if let Some(linked_id) = artifact_id {
+        if linked_id.starts_with("rule_") {
+            format!("{base}; via applied procedural rule {linked_id}")
+        } else {
+            format!("{base}; via registered artifact {linked_id}")
+        }
     } else {
         base
     }
@@ -9820,6 +9830,100 @@ fn artifact_linked_memory_id(
             hit.doc_id
         ),
         Some("ee artifact register <path> --link-memory <memory-id> --json".to_string()),
+    );
+    None
+}
+
+/// Resolve a procedural-rule search hit to one of its source memories so the
+/// hit can hydrate into the pack's `procedural_rules` section (bd-3h6bz).
+///
+/// Rules are indexed as first-class `source=rule` documents, but the pack
+/// candidate model is memory-centric, so a rule hit hydrates through its
+/// `rule_source_memories` linkage — mirroring how artifact hits hydrate
+/// through their memory links. The source-memory pick is deterministic
+/// (lexicographically smallest id). The rule id rides along as the linked
+/// document so the candidate's `why` names the applied rule. A matched rule
+/// with no hydratable source memory degrades honestly instead of being
+/// silently dropped: the rule stays retrievable via `ee search`.
+fn rule_linked_memory_id(
+    connection: &DbConnection,
+    hit: &crate::core::search::SearchHit,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Option<(MemoryId, Option<String>)> {
+    let has_rule_metadata = hit
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("source"))
+        .and_then(serde_json::Value::as_str)
+        == Some("rule");
+    if !has_rule_metadata && !hit.doc_id.starts_with("rule_") {
+        return None;
+    }
+
+    match connection.get_procedural_rule(&hit.doc_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return None,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_rule_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Rule {} matched search but could not be loaded for context packing: {error}",
+                    hit.doc_id
+                ),
+                Some(format!("ee rule show {} --json", hit.doc_id)),
+            );
+            return None;
+        }
+    }
+
+    let mut source_memory_ids = match connection.get_rule_source_memory_ids(&hit.doc_id) {
+        Ok(ids) => ids,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_rule_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Source memories for rule {} could not be loaded for context packing: {error}",
+                    hit.doc_id
+                ),
+                Some(format!("ee rule show {} --json", hit.doc_id)),
+            );
+            return None;
+        }
+    };
+    source_memory_ids.sort();
+
+    for source_memory_id in &source_memory_ids {
+        match MemoryId::from_str(source_memory_id) {
+            Ok(memory_id) => return Some((memory_id, Some(hit.doc_id.clone()))),
+            Err(error) => push_degradation(
+                degraded,
+                "context_rule_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Rule {} references invalid source memory id `{source_memory_id}`: {error}",
+                    hit.doc_id
+                ),
+                Some(format!("ee rule show {} --json", hit.doc_id)),
+            ),
+        }
+    }
+
+    push_degradation(
+        degraded,
+        "context_rule_hit_unhydrated",
+        ContextResponseSeverity::Low,
+        format!(
+            "Rule {} matched search but has no source memories to hydrate into the pack; the rule remains retrievable via ee search.",
+            hit.doc_id
+        ),
+        Some(format!(
+            "ee rule update {} --source-memory <memory-id> --json",
+            hit.doc_id
+        )),
     );
     None
 }
@@ -15637,6 +15741,23 @@ pub fn unrelated_context() -> u64 {{
         assert_eq!(
             why,
             "matched 'prepare release' via hybrid (relevance 0.9123, utility 0.5568); via registered artifact art_0123456789abcdef01234567"
+        );
+    }
+
+    #[test]
+    fn candidate_selection_why_labels_rule_provenance_bd_3h6bz() {
+        // A rule hit hydrates through a source memory; the why line must
+        // attribute the applied rule, not mislabel it as an artifact.
+        let why = candidate_selection_why(
+            "prepare release",
+            "hybrid",
+            0.912_34,
+            0.556_78,
+            Some("rule_0123456789abcdef01234567"),
+        );
+        assert_eq!(
+            why,
+            "matched 'prepare release' via hybrid (relevance 0.9123, utility 0.5568); via applied procedural rule rule_0123456789abcdef01234567"
         );
     }
 
