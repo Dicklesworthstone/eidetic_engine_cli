@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "context_evidence_hit_unhydrated",
+  "introduced_by": {
+    "bead": "bd-16imy",
+    "epic_letter": "RC"
+  },
+  "surfaces": [
+    "ee pack (imported evidence-span search-hit hydration)",
+    "ee context (soft-deprecated alias, same hydration lane)"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "An imported evidence-span document (source=import) matched the retrieval query, but the span has not been distilled into a memory (memory_id is unset — the common state for a fresh `ee import cass`), or its recorded memory linkage was invalid. Pack candidates are memory-centric, so an undistilled span cannot hydrate into a pack item; the response degrades honestly with the distillation path as the repair instead of silently dropping the matched evidence. The excerpt remains retrievable via ee search.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee import cass --workspace . --limit 1   # spans persist with memory_id unset",
+      "ee index rebuild --workspace ."
+    ],
+    "invocation": "ee pack \"<unique transcript phrase from the imported session>\" --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "context_evidence_hit_unhydrated",
+    "severity": "low",
+    "message_contains": [
+      "has not been distilled into a memory"
+    ]
+  }
+}

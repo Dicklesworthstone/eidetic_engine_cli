@@ -6491,6 +6491,9 @@ fn candidates_from_search_with_metrics(
                     // memories the same way artifact hits hydrate through
                     // their memory links (bd-3h6bz).
                     .or_else(|| rule_linked_memory_id(connection, hit, degraded))
+                    // Imported evidence hits hydrate through the memory the
+                    // span was distilled into, when one exists (bd-16imy).
+                    .or_else(|| evidence_linked_memory_id(hit, degraded))
             }
         };
         if resolution.is_some() {
@@ -9757,11 +9760,14 @@ fn candidate_selection_why(
     let base = format!(
         "matched '{display_query}' via {search_source} (relevance {search_score:.4}, utility {memory_utility:.4})",
     );
-    // The linked-document slot carries either a registered artifact id or an
-    // applied procedural rule id (bd-3h6bz); label the attribution honestly.
+    // The linked-document slot carries a registered artifact id, an applied
+    // procedural rule id (bd-3h6bz), or an imported evidence span id
+    // (bd-16imy); label the attribution honestly.
     if let Some(linked_id) = artifact_id {
         if linked_id.starts_with("rule_") {
             format!("{base}; via applied procedural rule {linked_id}")
+        } else if linked_id.starts_with("ev_") {
+            format!("{base}; via imported evidence {linked_id}")
         } else {
             format!("{base}; via registered artifact {linked_id}")
         }
@@ -9924,6 +9930,71 @@ fn rule_linked_memory_id(
             "ee rule update {} --source-memory <memory-id> --json",
             hit.doc_id
         )),
+    );
+    None
+}
+
+/// Resolve an imported-evidence search hit to the memory its span was
+/// distilled into so the hit can hydrate into the pack (bd-16imy).
+///
+/// Evidence spans are indexed as first-class `source=import` documents with
+/// their `memory_id` linkage carried in document metadata, so this needs no
+/// database lookup. A span that was never distilled into a memory
+/// (`memory_id=None` — the common state for a fresh import) cannot become a
+/// memory-centric pack candidate; it degrades honestly with the distill
+/// path as the repair instead of being silently dropped. The excerpt stays
+/// retrievable via `ee search` either way.
+fn evidence_linked_memory_id(
+    hit: &crate::core::search::SearchHit,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> Option<(MemoryId, Option<String>)> {
+    let has_import_metadata = hit
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("source"))
+        .and_then(serde_json::Value::as_str)
+        == Some("import");
+    if !has_import_metadata && !hit.doc_id.starts_with("ev_") {
+        return None;
+    }
+
+    let linked_memory_id = hit
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("memory_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    if let Some(linked_memory_id) = linked_memory_id {
+        match MemoryId::from_str(&linked_memory_id) {
+            Ok(memory_id) => return Some((memory_id, Some(hit.doc_id.clone()))),
+            Err(error) => push_degradation(
+                degraded,
+                "context_evidence_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Imported evidence {} links to invalid memory id `{linked_memory_id}`: {error}",
+                    hit.doc_id
+                ),
+                None,
+            ),
+        }
+    }
+
+    let session_repair = hit
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("session_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(|session_id| format!("ee review session {session_id} --propose --dry-run --json"));
+    push_degradation(
+        degraded,
+        "context_evidence_hit_unhydrated",
+        ContextResponseSeverity::Low,
+        format!(
+            "Imported evidence {} matched search but has not been distilled into a memory, so it cannot hydrate into the pack; the excerpt remains retrievable via ee search.",
+            hit.doc_id
+        ),
+        session_repair,
     );
     None
 }
@@ -15758,6 +15829,23 @@ pub fn unrelated_context() -> u64 {{
         assert_eq!(
             why,
             "matched 'prepare release' via hybrid (relevance 0.9123, utility 0.5568); via applied procedural rule rule_0123456789abcdef01234567"
+        );
+    }
+
+    #[test]
+    fn candidate_selection_why_labels_evidence_provenance_bd_16imy() {
+        // An imported-evidence hit hydrates through its distilled memory;
+        // the why line must attribute the evidence span, not an artifact.
+        let why = candidate_selection_why(
+            "prepare release",
+            "hybrid",
+            0.912_34,
+            0.556_78,
+            Some("ev_01234567890123456789012345"),
+        );
+        assert_eq!(
+            why,
+            "matched 'prepare release' via hybrid (relevance 0.9123, utility 0.5568); via imported evidence ev_01234567890123456789012345"
         );
     }
 
