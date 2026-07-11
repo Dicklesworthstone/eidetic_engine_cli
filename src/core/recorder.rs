@@ -2397,7 +2397,12 @@ pub fn finish_and_persist_recording(
             chain = i64::from(chain_complete),
             run = options.run_id,
         );
-        conn.execute_raw(&sql)
+        // Route the durable UPDATE through `with_transaction` so it holds
+        // the cross-process write-owner flock, retries transient contention,
+        // and runs under the storage panic guard like every other production
+        // write in this file; a bare `execute_raw` has none of those
+        // (bd-d67os.27).
+        conn.with_transaction(|| conn.execute_raw(&sql))
             .map_err(|error| crate::models::DomainError::Storage {
                 message: format!("Failed to mark recorder run finished: {error}"),
                 repair: Some("ee status --json".to_owned()),

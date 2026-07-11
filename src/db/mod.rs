@@ -1039,7 +1039,28 @@ impl DbConnection {
                 let mut last_retryable_error = None;
 
                 for attempt in 0..MAX_ATTEMPTS {
-                    let write_owner = lock_file_write_owner_gate(&self.location)?;
+                    // The flock gate itself surfaces cross-process swarm
+                    // contention as a transient `InvalidPath` error
+                    // (bd-d67os.26). Retry it on the same schedule as BEGIN
+                    // contention instead of propagating it out of the loop
+                    // with `?` — otherwise every `with_transaction` write
+                    // fast-fails after the gate's ~113ms internal budget
+                    // while sibling single-shot `execute_for` writes retry
+                    // (bd-d67os.27).
+                    let write_owner = match lock_file_write_owner_gate(&self.location) {
+                        Ok(guard) => guard,
+                        Err(error) if db_error_is_transient_sqlite_contention(&error) => {
+                            last_retryable_error = Some(error);
+                            if attempt + 1 < MAX_ATTEMPTS {
+                                sleep_retry_delay_or_cancel(
+                                    DbOperation::BeginTransaction,
+                                    advisory_lock_retry_delay(attempt),
+                                )?;
+                            }
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
                     match self.begin_transaction(IsolationLevel::RepeatableRead) {
                         Ok(()) => return Ok(Some(write_owner)),
                         Err(error) if db_error_is_transient_sqlite_contention(&error) => {
@@ -1907,13 +1928,29 @@ fn retry_file_database_open_with_cx<T>(
 }
 
 fn database_open_error_is_retryable(error: &DbError) -> bool {
+    // The open-time write-owner flock gate (`open_once` takes it before
+    // configuring durability pragmas on a read-write file open) surfaces
+    // cross-process contention as `DbError::InvalidPath` "could not acquire
+    // database write lock: ...". Mirror the bd-d67os.26 transient
+    // classification so a contended open retries through
+    // `retry_file_database_open` instead of failing the whole command
+    // (bd-d67os.27 item 3).
+    if let DbError::InvalidPath { message, .. } = error {
+        return write_owner_flock_contention_message_is_retryable(message);
+    }
+
     let DbError::SqlModel { operation, source } = error else {
         return false;
     };
 
+    // `OpenReadOnly` belongs here too: `open_once` maps a read-only file
+    // open to the same schema-only connection call as `OpenSchemaOnly`, so
+    // a busy/recovery-in-progress open error is equally transient for the
+    // read-pool acquire path (bd-d67os.27).
     if !matches!(
         operation,
         DbOperation::OpenReadWrite
+            | DbOperation::OpenReadOnly
             | DbOperation::OpenSchemaOnly
             | DbOperation::ConfigureBusyTimeout
             | DbOperation::ConfigureDurabilityPragmas
@@ -20673,6 +20710,16 @@ fn advisory_lock_is_expired(expires_at: &str, now: &str) -> bool {
 }
 
 fn advisory_lock_error_is_retryable(error: &DbError) -> bool {
+    // Advisory-lock writes route through the gated write path, which can
+    // exhaust its own flock retries under heavy swarm contention and
+    // surface the write-owner flock error (`DbError::InvalidPath`,
+    // bd-d67os.26). Classify it retryable here too so the advisory-lock
+    // acquire loop keeps its own backoff schedule instead of giving up on
+    // the first blocked flock (bd-d67os.27).
+    if let DbError::InvalidPath { message, .. } = error {
+        return write_owner_flock_contention_message_is_retryable(message);
+    }
+
     let DbError::SqlModel { source, .. } = error else {
         return false;
     };
@@ -25191,6 +25238,78 @@ mod tests {
         ensure(
             !super::database_open_error_is_retryable(&constraint),
             "constraint errors are not open contention",
+        )
+    }
+
+    #[test]
+    fn open_retry_predicate_covers_flock_gate_and_read_only_open_bd_d67os_27() -> TestResult {
+        // Open-time write-owner flock contention (`open_once` takes the gate
+        // on a read-write file open) must retry through
+        // `retry_file_database_open` instead of failing the command's open
+        // (bd-d67os.27 item 3).
+        let lock_path = std::path::PathBuf::from("/tmp/ee.db.write.lock");
+        let flock_contention = DbError::InvalidPath {
+            operation: DbOperation::BeginTransaction,
+            path: lock_path.clone(),
+            message: "could not acquire database write lock: contention timeout".to_string(),
+        };
+        ensure(
+            super::database_open_error_is_retryable(&flock_contention),
+            "open-time flock contention should retry",
+        )?;
+
+        // A genuine flock OPEN failure (path/permission) stays non-retryable.
+        let open_failure = DbError::InvalidPath {
+            operation: DbOperation::BeginTransaction,
+            path: lock_path,
+            message: "could not open database write lock: permission denied".to_string(),
+        };
+        ensure(
+            !super::database_open_error_is_retryable(&open_failure),
+            "flock open failures must not retry",
+        )?;
+
+        // Read-only file opens share the schema-only connection call, so a
+        // busy/recovery open error is equally transient for the read-pool
+        // acquire path (bd-d67os.27).
+        let read_only_busy = DbError::sqlmodel(
+            DbOperation::OpenReadOnly,
+            sqlmodel_connection_error(
+                sqlmodel_core::error::ConnectionErrorKind::Connect,
+                "database is busy (recovery in progress)",
+            ),
+        );
+        ensure(
+            super::database_open_error_is_retryable(&read_only_busy),
+            "read-only open should retry transient busy",
+        )
+    }
+
+    #[test]
+    fn advisory_lock_retry_predicate_covers_flock_gate_bd_d67os_27() -> TestResult {
+        // The gated write path can exhaust its internal flock retries under
+        // heavy swarm contention and surface the write-owner flock error;
+        // the advisory-lock acquire loop must keep its own backoff schedule
+        // instead of giving up on the first blocked flock (bd-d67os.27).
+        let flock_contention = DbError::InvalidPath {
+            operation: DbOperation::BeginTransaction,
+            path: std::path::PathBuf::from("/tmp/ee.db.write.lock"),
+            message: "could not acquire database write lock: Resource temporarily unavailable"
+                .to_string(),
+        };
+        ensure(
+            super::advisory_lock_error_is_retryable(&flock_contention),
+            "advisory-lock acquire should retry write-owner flock contention",
+        )?;
+
+        let open_failure = DbError::InvalidPath {
+            operation: DbOperation::BeginTransaction,
+            path: std::path::PathBuf::from("/tmp/ee.db.write.lock"),
+            message: "could not open database write lock: permission denied".to_string(),
+        };
+        ensure(
+            !super::advisory_lock_error_is_retryable(&open_failure),
+            "advisory-lock acquire must not retry flock open failures",
         )
     }
 
