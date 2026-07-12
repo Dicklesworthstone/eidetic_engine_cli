@@ -140,12 +140,8 @@ fn normalize_named_golden(category: &str, name: &str, text: &str) -> String {
             normalize_doctor_degradation_json_for_golden(text)
         }
         ("doctor", "doctor_toon") => normalize_doctor_toon_for_golden(text),
-        ("capabilities", "capabilities_json") => {
-            normalize_capabilities_json_for_golden(text)
-        }
-        ("capabilities", "capabilities_toon") => {
-            normalize_capabilities_toon_for_golden(text)
-        }
+        ("capabilities", "capabilities_json") => normalize_capabilities_json_for_golden(text),
+        ("capabilities", "capabilities_toon") => normalize_capabilities_toon_for_golden(text),
         ("version", "version") => normalize_version_json_for_golden(text),
         _ => normalize_json_for_golden(text),
     }
@@ -349,9 +345,7 @@ fn normalize_capabilities_toon_for_golden(text: &str) -> String {
             skipped_block_indent = Some(indent);
         } else if indent == 4 && trimmed.starts_with("cass,") {
             let description = trimmed.splitn(3, ',').nth(2).unwrap_or_default();
-            output.push(format!(
-                "    cass,<scrubbed:cassStatus>,{description}"
-            ));
+            output.push(format!("    cass,<scrubbed:cassStatus>,{description}"));
         } else if trimmed.starts_with("readySubsystems:") {
             output.push(format!(
                 "{}readySubsystems: <scrubbed:readySubsystems>",
