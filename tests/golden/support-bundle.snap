@@ -5,7 +5,7 @@ schema:
   bundle: ee.support_bundle.v1
   manifest: ee.support_bundle.manifest.v1
   inspect: ee.support_bundle.inspect.v1
-  pack_replay_summary: ee.support_bundle.pack_replay_summary.v1
+  pack_replay_summary: ee.support_bundle.pack_replay_summary.v2
   regression_causality_summary: ee.support_bundle.regression_causality_summary.v1
   swarm_incident_summary: ee.support_bundle.swarm_incident_summary.v1
 contracts:

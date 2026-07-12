@@ -99,6 +99,8 @@ pub const AGENT_MAIL_SNAPSHOT_PRODUCER_COMMAND: &str = "scripts/agent_mail_snaps
 pub const DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS: u64 = 35_000;
 const MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE: &str =
     super::memory_drift::MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE;
+const MEMORY_DRIFT_REPORT_UNAVAILABLE_MESSAGE_PREFIX: &str =
+    "Memory drift report could not be collected read-only before evidence inspection";
 const RCH_UNAVAILABLE_CODE: &str = "rch_unavailable";
 const RCH_WORKER_TOPOLOGY_BLOCKED_CODE: &str = "rch_worker_topology_blocked";
 const RCH_REMOTE_REQUIRED_FALLBACK_PREVENTED_CODE: &str = "rch_remote_required_fallback_prevented";
@@ -2524,16 +2526,11 @@ impl SwarmBriefSourceAdapter for MemoryDriftSourceAdapter {
         let provenance = SwarmBriefSourceProvenance::local_probe();
         let database_path = memory_drift_database_path(&options.workspace);
         if let Err(error) = validate_memory_drift_database_path(&database_path) {
-            let repair = if error.kind() == io::ErrorKind::NotFound {
-                "ee init --workspace ."
-            } else {
-                default_source_repair(source)
-            };
             let degradation = SwarmBriefDegradation::warning(
                 source,
                 MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE,
                 memory_drift_unavailable_message(&error),
-                Some(repair.to_string()),
+                Some("ee doctor --json".to_string()),
             );
             return SwarmBriefSourceOutput {
                 snapshot: SwarmBriefSourceSnapshot::unavailable(source, provenance, degradation),
@@ -2582,9 +2579,9 @@ impl SwarmBriefSourceAdapter for MemoryDriftSourceAdapter {
                         SwarmBriefDegradation::warning(
                             source,
                             MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE,
-                            format!(
-                                "Memory drift posture could not be collected read-only: {error}"
-                            ),
+                            memory_drift_report_unavailable_message(&format!(
+                                "report build failed: {error}"
+                            )),
                             Some("ee doctor --json".to_string()),
                         )
                     };
@@ -2876,15 +2873,24 @@ fn validate_memory_drift_database_path(database_path: &Path) -> io::Result<()> {
 }
 
 fn memory_drift_unavailable_message(error: &io::Error) -> String {
-    match error.kind() {
+    let reason = match error.kind() {
         io::ErrorKind::NotFound => {
-            "Memory drift database is missing, so recent pack memory drift posture is unknown."
-                .to_string()
+            "database is missing, so recent pack memory drift posture is unknown".to_string()
         }
-        io::ErrorKind::PermissionDenied => error.to_string(),
-        io::ErrorKind::InvalidInput => error.to_string(),
-        _ => format!("Memory drift database could not be inspected: {error}"),
-    }
+        io::ErrorKind::PermissionDenied => {
+            format!("database path is unsafe or unreadable: {error}")
+        }
+        io::ErrorKind::InvalidInput => format!("database path is invalid: {error}"),
+        _ => format!("database could not be inspected: {error}"),
+    };
+    memory_drift_report_unavailable_message(&reason)
+}
+
+fn memory_drift_report_unavailable_message(reason: &str) -> String {
+    format!(
+        "{MEMORY_DRIFT_REPORT_UNAVAILABLE_MESSAGE_PREFIX}: {}",
+        redact_brief_text(reason)
+    )
 }
 
 fn swarm_brief_memory_drift_summary_from_report(
@@ -12156,8 +12162,8 @@ mod tests {
         source.degraded = vec![SwarmBriefDegradation::warning(
             SwarmBriefSourceKind::MemoryDrift,
             MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE,
-            "memory drift database missing",
-            Some("ee init --workspace .".to_string()),
+            memory_drift_report_unavailable_message("database is missing"),
+            Some("ee doctor --json".to_string()),
         )];
 
         apply_swarm_brief_advice(&mut report);
@@ -12200,13 +12206,17 @@ mod tests {
             output.snapshot.degraded.first().map(|item| item.severity),
             Some("warning")
         );
+        assert!(output.snapshot.degraded.first().is_some_and(|item| {
+            item.message
+                .starts_with(MEMORY_DRIFT_REPORT_UNAVAILABLE_MESSAGE_PREFIX)
+        }));
         assert_eq!(
             output
                 .snapshot
                 .degraded
                 .first()
                 .and_then(|item| item.repair.as_deref()),
-            Some("ee init --workspace .")
+            Some("ee doctor --json")
         );
         assert!(matches!(output.contribution, SwarmBriefContribution::None));
         let rendered = stable_summary_json(

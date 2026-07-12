@@ -800,6 +800,46 @@ class ClaimGateConsumer(unittest.TestCase):
             )
         )
 
+    def test_source_authority_snapshot_report_unavailable_blocks_otherwise_safe_gate(self):
+        gate = safe_gate()
+        memory_drift = next(
+            source
+            for source in gate["sourceAuthoritySnapshot"]["sourceStates"]
+            if source["sourceKind"] == "memory_drift"
+        )
+        memory_drift.update(
+            {
+                "state": "degraded_read_only",
+                "authoritative": False,
+                "freshnessState": "unknown",
+                "exitClass": "report_unavailable",
+            }
+        )
+        gate["sourceAuthoritySnapshot"]["overall"].update(
+            {
+                "verdict": "degraded_but_decidable",
+                "authoritativeSourceCount": 10,
+                "degradedSourceCount": 1,
+            }
+        )
+        gate["sourceAuthoritySnapshot"]["degradedCodes"] = [
+            "memory_drift_report_unavailable"
+        ]
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_source_authority_snapshot_blocker:memory_drift_report_unavailable",
+            decision["whyNotSafe"],
+        )
+        self.assertFalse(
+            any(
+                action["runnable"] and action["mutatesState"]
+                for action in decision["argvActions"]
+            )
+        )
+
     def test_source_authority_snapshot_repair_guidance_must_be_read_only(self):
         gate = safe_gate()
         gate["sourceAuthoritySnapshot"]["repairGuidance"] = [

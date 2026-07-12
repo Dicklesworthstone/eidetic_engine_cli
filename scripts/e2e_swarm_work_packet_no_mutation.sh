@@ -626,6 +626,22 @@ env["PYTHONDONTWRITEBYTECODE"] = "1"
 rows = []
 
 for fixture, fixture_kind in fixtures:
+    fixture_document = json.loads(fixture.read_text(encoding="utf-8"))
+    outer_schema = fixture_document.get("schema") if isinstance(fixture_document, dict) else None
+    payload = (
+        fixture_document.get("data")
+        if outer_schema == "ee.response.v2" and isinstance(fixture_document.get("data"), dict)
+        else fixture_document
+    )
+    payload_schema = payload.get("schema") if isinstance(payload, dict) else None
+    supported_payload_schemas = {
+        "ee.swarm.work_packet.claim_gate.v1",
+        "ee.swarm.work_packet.v1",
+        "ee.install.check.v1",
+    }
+    expects_consumer_error = (
+        outer_schema == "ee.error.v2" or payload_schema not in supported_payload_schemas
+    )
     fixture_key = "".join(
         char if char.isalnum() or char in "-_" else "_"
         for char in f"{fixture_kind}_{fixture.name}"
@@ -655,7 +671,7 @@ for fixture, fixture_kind in fixtures:
         )
 
     expected_safe = fixture_kind == "swarm" and fixture.name == "healthy_small.json"
-    expected_exit = 0 if expected_safe else 3
+    expected_exit = 0 if expected_safe else (2 if expects_consumer_error else 3)
     safe_to_claim = decision.get("safeToClaim")
     argv_actions = decision.get("argvActions")
     why_not_safe = decision.get("whyNotSafe")

@@ -39,8 +39,9 @@ Other pre-inspection failures, including a missing or unsafe database path and
 generic non-contention report-build errors, use
 `memory_drift_report_unavailable`. Their `evidenceInspection` block carries
 `status=not_inspected`, `memoryEvidenceInspected=false`, and
-`sourceFreshness=not_inspected`, with `ee init` for a missing database or
-`ee doctor --json` for other read-only collection failures.
+`sourceFreshness=not_inspected`. Every branch uses the common read-only repair
+`ee doctor --json`; doctor can then prescribe `ee init --workspace .` when the
+database is missing.
 `memory_drift_source_unverifiable` is reserved for evidence that was inspected
 or structurally parsed but could not be verified.
 RCH worker pressure appears under `rchWorkerPressure`; when no RCH capability
