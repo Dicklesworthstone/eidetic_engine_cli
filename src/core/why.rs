@@ -1289,7 +1289,8 @@ fn explain_memory_inner(
     let counterfactual_influence =
         why_counterfactual_influence(memory_id, selection_score, why_influence_candidates(&links));
 
-    let latest_pack_selection = match latest_pack_selection(&conn, memory_id) {
+    let latest_pack_selection = match latest_pack_selection(&conn, &memory.workspace_id, memory_id)
+    {
         Ok(selection) => selection,
         Err(message) => {
             let report = build_report(
@@ -1330,7 +1331,7 @@ fn explain_memory_inner(
                 code: "why_pack_selection_unavailable",
                 severity: "low",
                 message,
-                repair: Some("ee migrate run --workspace . --json".to_string()),
+                repair: Some("ee doctor --json".to_string()),
             });
         }
     };
@@ -2561,56 +2562,118 @@ fn agent_context_profile_agent_hash(agent_name: &str) -> String {
 
 fn latest_pack_selection(
     conn: &DbConnection,
+    workspace_id: &str,
     memory_id: &str,
 ) -> Result<Option<PackSelectionExplanation>, String> {
-    let rows = conn
-        .query(
-            "SELECT pi.pack_id, pr.query, pr.profile, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pr.pack_hash, pr.created_at, pr.ledger_json, pr.ledger_hash \
-             FROM pack_items pi \
-             JOIN pack_records pr ON pr.id = pi.pack_id \
-             WHERE pi.memory_id = ?1 \
-             ORDER BY pr.created_at DESC, pi.pack_id DESC, pi.rank ASC \
-             LIMIT 1",
-            &[Value::Text(memory_id.to_string())],
+    const RECORD_SCAN_LIMIT: u32 = 128;
+    let pack_ids = conn
+        .list_recent_pack_record_ids_for_workspace(
+            workspace_id,
+            RECORD_SCAN_LIMIT.saturating_add(1),
         )
         .map_err(|error| format!("Failed to query pack selection: {error}"))?;
 
-    rows.first().map(pack_selection_from_row).transpose()
+    let scan_truncated = pack_ids.len() > RECORD_SCAN_LIMIT as usize;
+    for pack_id in pack_ids.into_iter().take(RECORD_SCAN_LIMIT as usize) {
+        let Some(record) = conn
+            .get_pack_record(&pack_id)
+            .map_err(|error| format!("Failed to load pack record: {error}"))?
+        else {
+            return Err("Pack history changed during selection inspection.".to_owned());
+        };
+        if record.workspace_id != workspace_id {
+            return Err("Pack history changed workspace during selection inspection.".to_owned());
+        }
+        let parsed_ledger = crate::db::parse_stored_pack_ledger(&record);
+        let Some(ledger) = parsed_ledger.available_ledger() else {
+            return Err(format!(
+                "Pack selection evidence is unavailable (status {}).",
+                parsed_ledger.status.as_str()
+            ));
+        };
+        let Some(item) = crate::db::pack_ledger_core_array(ledger, "selectedItems")
+            .into_iter()
+            .flatten()
+            .find(|item| item.get("memoryId").and_then(JsonValue::as_str) == Some(memory_id))
+        else {
+            continue;
+        };
+        return pack_selection_from_ledger(record, ledger, item).map(Some);
+    }
+    if scan_truncated {
+        return Err("Pack selection history exceeded the bounded integrity scan.".to_owned());
+    }
+    Ok(None)
 }
 
-fn pack_selection_from_row(row: &Row) -> Result<PackSelectionExplanation, String> {
-    let pack_id = required_text(row, 0, "pack_id")?;
-    let ledger_json = row
-        .get(11)
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    let ledger_hash = row
-        .get(12)
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    let parsed_ledger = crate::db::parse_pack_ledger_fields(
-        &pack_id,
-        ledger_json.as_deref(),
-        ledger_hash.as_deref(),
-    );
-    let ledger_storage = crate::db::pack_ledger_storage_summary(ledger_json.as_deref());
+fn pack_selection_from_ledger(
+    record: crate::db::StoredPackRecord,
+    ledger: &JsonValue,
+    item: &JsonValue,
+) -> Result<PackSelectionExplanation, String> {
+    let ledger_storage = crate::db::pack_ledger_storage_summary(record.ledger_json.as_deref());
+    let query = ledger
+        .pointer("/request/query")
+        .and_then(pack_ledger_safe_text)
+        .ok_or_else(|| "Integrity-verified pack query projection was unavailable.".to_owned())?;
+    let profile = ledger
+        .pointer("/request/profile")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| "Integrity-verified pack profile was unavailable.".to_owned())?;
+    let why = item
+        .get("why")
+        .and_then(pack_ledger_safe_text)
+        .ok_or_else(|| "Integrity-verified selection explanation was unavailable.".to_owned())?;
 
     Ok(PackSelectionExplanation {
-        pack_id,
-        query: required_text(row, 1, "query")?,
-        profile: required_text(row, 2, "profile")?,
-        rank: required_u32(row, 3, "rank")?,
-        section: required_text(row, 4, "section")?,
-        estimated_tokens: required_u32(row, 5, "estimated_tokens")?,
-        relevance: required_f32(row, 6, "relevance")?,
-        utility: required_f32(row, 7, "utility")?,
-        why: required_text(row, 8, "why")?,
-        pack_hash: required_text(row, 9, "pack_hash")?,
-        ledger_hash,
-        ledger_status: parsed_ledger.status.as_str().to_string(),
+        pack_id: crate::models::public_pack_id(&record.id),
+        query,
+        profile: profile.to_owned(),
+        rank: pack_ledger_u32(item, "rank")?,
+        section: pack_ledger_text(item, "section")?.to_owned(),
+        estimated_tokens: pack_ledger_u32(item, "estimatedTokens")?,
+        relevance: pack_ledger_score(item, "/scores/relevance")?,
+        utility: pack_ledger_score(item, "/scores/utility")?,
+        why,
+        pack_hash: record.pack_hash,
+        ledger_hash: record.ledger_hash,
+        ledger_status: crate::db::PackLedgerStatus::Available.as_str().to_owned(),
         ledger_storage,
-        selected_at: required_text(row, 10, "created_at")?,
+        selected_at: record.created_at,
     })
+}
+
+fn pack_ledger_safe_text(value: &JsonValue) -> Option<String> {
+    let source = match value.get("redacted").and_then(JsonValue::as_bool) {
+        Some(true) => value.get("redactedText").and_then(JsonValue::as_str),
+        Some(false) => value.get("text").and_then(JsonValue::as_str),
+        None => return None,
+    }?;
+    Some(crate::policy::redact_public_replay_text(source).content)
+}
+
+fn pack_ledger_text<'a>(value: &'a JsonValue, field: &str) -> Result<&'a str, String> {
+    value
+        .get(field)
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| format!("Integrity-verified selection field {field} was unavailable."))
+}
+
+fn pack_ledger_u32(value: &JsonValue, field: &str) -> Result<u32, String> {
+    value
+        .get(field)
+        .and_then(JsonValue::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| format!("Integrity-verified selection field {field} was unavailable."))
+}
+
+fn pack_ledger_score(value: &JsonValue, pointer: &str) -> Result<f32, String> {
+    value
+        .pointer(pointer)
+        .and_then(JsonValue::as_f64)
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "Integrity-verified selection score was unavailable.".to_owned())
 }
 
 fn required_text(row: &Row, index: usize, column: &str) -> Result<String, String> {
@@ -2618,22 +2681,6 @@ fn required_text(row: &Row, index: usize, column: &str) -> Result<String, String
         .and_then(|value| value.as_str())
         .map(str::to_string)
         .ok_or_else(|| format!("Pack selection column {column} was missing or not text"))
-}
-
-fn required_u32(row: &Row, index: usize, column: &str) -> Result<u32, String> {
-    let raw = row
-        .get(index)
-        .and_then(|value| value.as_i64())
-        .ok_or_else(|| format!("Pack selection column {column} was missing or not integer"))?;
-    u32::try_from(raw)
-        .map_err(|_| format!("Pack selection column {column} was out of range: {raw}"))
-}
-
-fn required_f32(row: &Row, index: usize, column: &str) -> Result<f32, String> {
-    row.get(index)
-        .and_then(|value| value.as_f64())
-        .map(|value| value as f32)
-        .ok_or_else(|| format!("Pack selection column {column} was missing or not numeric"))
 }
 
 struct WhyEvidenceFetch<T> {

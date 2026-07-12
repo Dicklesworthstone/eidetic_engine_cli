@@ -3,15 +3,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
+use chrono::{DateTime, Utc};
+use serde_json::{Value as JsonValue, json};
 
 use crate::core::bayes::FeedbackSignal;
-use crate::db::{DbConnection, DbError, StoredFeedbackEvent, StoredMemory};
+use crate::db::{
+    DbConnection, DbError, DbOperation, StoredFeedbackEvent, StoredMemory, pack_ledger_core_array,
+    parse_stored_pack_ledger,
+};
 use crate::models::TRUST_REPORT_SCHEMA_V1;
 
 const DEFAULT_BUCKET_COUNT: usize = 5;
 const DEFAULT_LEADERBOARD_LIMIT: usize = 10;
 const DEFAULT_PACK_ITEM_LIMIT: u32 = 10_000;
+const MAX_PACK_RECORD_SCAN: u32 = 512;
 
 /// Options for the read-only trust calibration report.
 #[derive(Clone, Debug)]
@@ -292,11 +297,12 @@ pub fn generate_trust_report(options: TrustReportOptions) -> Result<TrustReport,
     let workspace_id = resolve_workspace_id(&connection, &workspace_root)?;
     let memories = connection.list_memories(&workspace_id, None, false)?;
     let feedback_events = connection.list_feedback_events(&workspace_id)?;
-    let packed_memory_ids = connection
-        .list_recent_pack_items_for_workspace(&workspace_id, options.pack_item_limit)?
-        .into_iter()
-        .map(|(_, item)| item.memory_id)
-        .collect::<BTreeSet<_>>();
+    let packed_memory_ids = verified_packed_memory_ids(
+        &connection,
+        &workspace_id,
+        options.pack_item_limit,
+        Utc::now(),
+    )?;
 
     Ok(build_trust_report(
         workspace_id,
@@ -312,6 +318,97 @@ pub fn generate_trust_report(options: TrustReportOptions) -> Result<TrustReport,
         options.bucket_count,
         options.leaderboard_limit,
     ))
+}
+
+fn verified_packed_memory_ids(
+    connection: &DbConnection,
+    workspace_id: &str,
+    item_limit: u32,
+    now: DateTime<Utc>,
+) -> Result<BTreeSet<String>, TrustReportError> {
+    let pack_ids = connection.list_recent_pack_record_ids_for_workspace(
+        workspace_id,
+        MAX_PACK_RECORD_SCAN.saturating_add(1),
+    )?;
+    let mut packed_memory_ids = BTreeSet::new();
+    let item_limit = usize::try_from(item_limit).unwrap_or(usize::MAX);
+    let mut admitted_items = 0_usize;
+    let record_cap_exhausted = pack_ids.len() > MAX_PACK_RECORD_SCAN as usize;
+    for pack_id in pack_ids.into_iter().take(MAX_PACK_RECORD_SCAN as usize) {
+        if admitted_items >= item_limit {
+            break;
+        }
+        let record = connection.get_pack_record(&pack_id)?.ok_or_else(|| {
+            TrustReportError::Storage(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "pack history changed during trust report generation".to_owned(),
+            })
+        })?;
+        if record.workspace_id != workspace_id {
+            return Err(TrustReportError::Storage(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "pack history changed workspace during trust report generation".to_owned(),
+            }));
+        }
+        let parsed = parse_stored_pack_ledger(&record);
+        let ledger = parsed.available_ledger().ok_or_else(|| {
+            TrustReportError::Storage(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: format!(
+                    "pack selection evidence is unavailable for trust reporting (status {})",
+                    parsed.status.as_str()
+                ),
+            })
+        })?;
+        let created_at = ledger
+            .get("createdAt")
+            .and_then(JsonValue::as_str)
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc))
+            .ok_or_else(|| {
+                TrustReportError::Storage(DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "verified pack selection evidence contained an invalid timestamp"
+                        .to_owned(),
+                })
+            })?;
+        if created_at > now {
+            return Err(TrustReportError::Storage(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "verified pack selection evidence is later than the report clock"
+                    .to_owned(),
+            }));
+        }
+        let items = pack_ledger_core_array(ledger, "selectedItems").ok_or_else(|| {
+            TrustReportError::Storage(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "verified pack selection evidence omitted selectedItems".to_owned(),
+            })
+        })?;
+        for item in items {
+            if admitted_items >= item_limit {
+                break;
+            }
+            let memory_id = item
+                .get("memoryId")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| {
+                    TrustReportError::Storage(DbError::MalformedRow {
+                        operation: DbOperation::Query,
+                        message: "verified pack selection evidence omitted a memory id".to_owned(),
+                    })
+                })?;
+            admitted_items = admitted_items.saturating_add(1);
+            packed_memory_ids.insert(memory_id.to_owned());
+        }
+    }
+    if admitted_items < item_limit && record_cap_exhausted {
+        return Err(TrustReportError::Storage(DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "pack history exceeded the bounded trust-report window".to_owned(),
+        }));
+    }
+    Ok(packed_memory_ids)
 }
 
 fn build_trust_report(

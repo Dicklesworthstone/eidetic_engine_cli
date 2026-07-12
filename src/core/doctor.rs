@@ -5331,41 +5331,23 @@ mod tests {
 
         let pack_id = "pack_00000000000000000000000121";
         connection
-            .insert_pack_record(
+            .inject_pack_reference_issue_fixture(
                 pack_id,
                 &crate::db::CreatePackRecordInput {
                     workspace_id: TEST_WORKSPACE_ID.to_string(),
                     query: "reference integrity test".to_string(),
                     profile: "compact".to_string(),
                     max_tokens: 512,
-                    used_tokens: 128,
-                    item_count: 2,
+                    used_tokens: 0,
+                    item_count: 1,
                     omitted_count: 0,
-                    pack_hash: "blake3:ref-integrity-test".to_string(),
+                    pack_hash: format!(
+                        "blake3:{}",
+                        blake3::hash(b"doctor reference integrity fixture").to_hex()
+                    ),
                     degraded_json: None,
                     created_by: Some("agent:test".to_string()),
                 },
-                &[crate::db::CreatePackItemInput {
-                    pack_id: pack_id.to_string(),
-                    memory_id: "mem_00000000000000000000000122".to_string(),
-                    rank: 1,
-                    section: "evidence".to_string(),
-                    estimated_tokens: 64,
-                    relevance: 0.8,
-                    utility: 0.6,
-                    why: "cross-workspace item".to_string(),
-                    diversity_key: None,
-                    provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[]}"#
-                        .to_string(),
-                    trust_class: "agent_assertion".to_string(),
-                    trust_subclass: None,
-                }],
-                &[crate::db::CreatePackOmissionInput {
-                    pack_id: pack_id.to_string(),
-                    memory_id: "mem_00000000000000000000000122".to_string(),
-                    estimated_tokens: 64,
-                    reason: "token_budget_exceeded".to_string(),
-                }],
             )
             .map_err(|error| error.to_string())?;
         connection.close().map_err(|error| error.to_string())?;

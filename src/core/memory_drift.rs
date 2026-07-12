@@ -1060,7 +1060,7 @@ pub fn memory_drift_support_summary_unavailable(
     } else {
         "medium"
     };
-    serde_json::json!({
+    let mut summary = serde_json::json!({
         "schema": MEMORY_DRIFT_SUPPORT_SUMMARY_SCHEMA_V1,
         "sourceSchema": MEMORY_DRIFT_REPORT_SCHEMA_V1,
         "source": "memory_drift_recent_pack_items_report",
@@ -1097,7 +1097,13 @@ pub fn memory_drift_support_summary_unavailable(
             "fullListingsIncluded": false,
             "revalidationCommandIncluded": false,
         },
-    })
+    });
+    if degraded_code == MEMORY_DRIFT_REPORT_UNAVAILABLE_CODE
+        || degraded_code == MEMORY_DRIFT_LOCK_CONTENTION_CODE
+    {
+        summary["degraded"][0]["repair"] = serde_json::json!("ee doctor --json");
+    }
+    summary
 }
 
 fn memory_drift_support_unavailable_evidence_inspection(degraded_code: &str) -> serde_json::Value {
@@ -1520,7 +1526,8 @@ fn memory_drift_report_recent_pack_items_with_scan_cap(
             .get_pack_record_for_memory_drift(&record_id)
             .map_err(|error| DomainError::Storage {
                 message: format!(
-                    "Failed to load recent pack record {record_id} for drift report: {error}"
+                    "Failed to load recent pack record {} for drift report: {error}",
+                    crate::models::public_pack_id(&record_id)
                 ),
                 repair: Some("ee doctor --json".to_owned()),
             })?;
@@ -1532,6 +1539,18 @@ fn memory_drift_report_recent_pack_items_with_scan_cap(
             scanned_units = scanned_units.saturating_add(1);
             continue;
         };
+        if record.workspace_id != workspace_id {
+            findings_by_chain.insert(
+                format!("pack:{record_id}"),
+                recent_pack_integrity_finding(
+                    &record_id,
+                    "pack_record_workspace_mismatch",
+                    record.item_count.max(1),
+                ),
+            );
+            scanned_units = scanned_units.saturating_add(1);
+            continue;
+        }
         let validated = match validated_recent_pack_record(&record) {
             Ok(validated) => validated,
             Err((reason, finding_id)) => {
@@ -1808,8 +1827,7 @@ fn validated_recent_pack_record(
         return Err((reason, None));
     }
     let ledger = parsed
-        .ledger
-        .as_ref()
+        .available_ledger()
         .ok_or(("pack_item_ledger_missing", None))?;
     if ledger.get("packId").and_then(serde_json::Value::as_str) != Some(record.id.as_str())
         || ledger
@@ -1924,8 +1942,9 @@ fn recent_pack_integrity_finding(
     reason: &str,
     evidence_count: u32,
 ) -> MemoryDriftSelectionHint {
+    let public_memory_id = crate::models::public_memory_id(memory_id);
     let mut finding = MemoryDriftSelectionHint::new(
-        memory_id,
+        &public_memory_id,
         MemoryDriftStatus::Unverifiable,
         reason,
         evidence_count,
@@ -3382,7 +3401,10 @@ mod tests {
                     used_tokens: 272,
                     item_count: 17,
                     omitted_count: 0,
-                    pack_hash: "blake3:output-limit-regression".to_owned(),
+                    pack_hash: format!(
+                        "blake3:{}",
+                        blake3::hash(b"output-limit-regression").to_hex()
+                    ),
                     degraded_json: None,
                     created_by: Some("memory-drift-test".to_owned()),
                 },
@@ -4466,6 +4488,12 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("warning")
         );
+        assert_eq!(
+            summary
+                .pointer("/degraded/0/repair")
+                .and_then(serde_json::Value::as_str),
+            Some("ee doctor --json")
+        );
         assert!(encoded.contains("\"rawSnippetsIncluded\":false"));
         assert!(!encoded.contains("/Users"));
         assert!(!encoded.contains('$'));
@@ -4502,6 +4530,12 @@ mod tests {
                 .pointer("/evidenceInspection/lockAcquisitionClass")
                 .and_then(serde_json::Value::as_str),
             Some(MEMORY_DRIFT_READ_ONLY_COLLECTOR_LOCK_CLASS)
+        );
+        assert_eq!(
+            summary
+                .pointer("/degraded/0/repair")
+                .and_then(serde_json::Value::as_str),
+            Some("ee doctor --json")
         );
         assert_eq!(
             summary
@@ -4954,5 +4988,20 @@ mod tests {
         assert!(!message.contains("workspace write-lock"));
         assert!(MEMORY_DRIFT_LOCK_CONTENTION_REPAIR.contains("ee doctor --json"));
         assert!(!MEMORY_DRIFT_LOCK_CONTENTION_REPAIR.contains("advisory-lock"));
+    }
+
+    #[test]
+    fn recent_pack_integrity_finding_projects_secret_shaped_memory_id() {
+        const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+        let hostile_id = format!("mem_{SECRET}000000");
+        let finding = recent_pack_integrity_finding(&hostile_id, "pack_item_memory_row_missing", 1);
+
+        assert_eq!(
+            finding.memory_id,
+            crate::models::public_memory_id(&hostile_id)
+        );
+        let rendered = serde_json::to_string(&finding).expect("serialize public drift finding");
+        assert!(!rendered.contains(SECRET));
+        assert!(!rendered.contains(&hostile_id));
     }
 }

@@ -1366,7 +1366,6 @@ impl EffectManifest {
                 "Inspect model-registry diagnostics",
             ),
             CommandEffect::read_only_db("diag pack-latest", "Inspect latest pack diagnostics"),
-            CommandEffect::read_only_db("diag pack-record", "Inspect pack-record diagnostics"),
             CommandEffect::read_only(
                 "diag resource-admission",
                 "Preview a resource admission decision from explicit inputs",
@@ -1996,7 +1995,14 @@ impl EffectManifest {
     }
 
     fn append_only_write_commands() -> Vec<CommandEffect> {
+        let diag_pack_record = CommandEffect::append_only_write(
+            "diag pack-record",
+            vec!["pack_records", "audit_log"],
+            "pack id",
+            "Append one audited diagnostic pack record without overwriting an existing ID",
+        );
         vec![
+            diag_pack_record,
             CommandEffect::append_only_write(
                 "db check-integrity",
                 vec!["audit_log"],

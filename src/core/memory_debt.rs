@@ -16,6 +16,7 @@ use crate::core::workspace;
 use crate::db::{
     CreateDebtSnapshotInput, DbConnection, MemoryLinkRelation, StoredAuditEntry,
     StoredDebtSnapshot, StoredFeedbackEvent, StoredMemory, StoredMemoryLink,
+    pack_ledger_core_array, parse_stored_pack_ledger,
 };
 use crate::models::{DomainError, StoredMemoryAnchor};
 use crate::policy::{
@@ -33,7 +34,8 @@ pub const MEMORY_DEBT_AUDIT_WINDOW_PARTIAL_CODE: &str = "memory_debt_audit_windo
 const DEFAULT_LIMIT: u32 = 50;
 const MAX_LIMIT: u32 = 500;
 const DEFAULT_AUDIT_SCAN_LIMIT: u32 = 2_048;
-const RECENT_PACK_ITEM_LIMIT: u32 = 5_000;
+const RECENT_PACK_RECORD_LIMIT: u32 = 512;
+const RECENT_PACK_ITEM_LIMIT: usize = 5_000;
 const TREND_LIMIT: u32 = 30;
 const NEVER_RETRIEVED_WINDOW_DAYS: i64 = 60;
 const CONTRADICTION_WINDOW_DAYS: i64 = 14;
@@ -568,7 +570,7 @@ fn build_memory_debt_report(
 
     ingest_links(connection, &memories, &mut signals)?;
     ingest_feedback(connection, &prepared.workspace_id, &mut signals)?;
-    ingest_pack_reads(connection, &prepared.workspace_id, &mut signals)?;
+    ingest_pack_reads(connection, &prepared.workspace_id, now, &mut signals)?;
     let audit_partial = ingest_audit_reads(
         connection,
         &prepared.workspace_id,
@@ -741,25 +743,109 @@ fn apply_feedback_signal(
 fn ingest_pack_reads(
     connection: &DbConnection,
     workspace_id: &str,
+    now: DateTime<Utc>,
     signals: &mut BTreeMap<String, MemoryDebtSignals>,
 ) -> Result<(), DomainError> {
-    let rows = connection
-        .list_recent_pack_items_for_workspace(workspace_id, RECENT_PACK_ITEM_LIMIT)
+    let pack_ids = connection
+        .list_recent_pack_record_ids_for_workspace(
+            workspace_id,
+            RECENT_PACK_RECORD_LIMIT.saturating_add(1),
+        )
         .map_err(|error| DomainError::Storage {
-            message: format!("Failed to list pack item history for memory debt doctor: {error}"),
+            message: format!("Failed to list pack history for memory debt doctor: {error}"),
             repair: Some("ee doctor --json".to_owned()),
         })?;
-    for (record, item) in rows {
-        let Some(signal) = signals.get_mut(&item.memory_id) else {
-            continue;
-        };
-        signal.best_pack_rank = match signal.best_pack_rank {
-            Some(rank) => Some(rank.min(item.rank)),
-            None => Some(item.rank),
-        };
-        if let Some(read_at) = parse_rfc3339(&record.created_at) {
+    let mut admitted_items = 0_usize;
+    let record_cap_exhausted = pack_ids.len() > RECENT_PACK_RECORD_LIMIT as usize;
+    for pack_id in pack_ids.into_iter().take(RECENT_PACK_RECORD_LIMIT as usize) {
+        if admitted_items >= RECENT_PACK_ITEM_LIMIT {
+            break;
+        }
+        let record = connection
+            .get_pack_record(&pack_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to load pack history for memory debt doctor: {error}"),
+                repair: Some("ee doctor --json".to_owned()),
+            })?
+            .ok_or_else(|| DomainError::Storage {
+                message: "Pack history changed during memory debt inspection.".to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        if record.workspace_id != workspace_id {
+            return Err(DomainError::Storage {
+                message: "Pack history changed workspace during memory debt inspection.".to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            });
+        }
+        let parsed = parse_stored_pack_ledger(&record);
+        let ledger = parsed.available_ledger().ok_or_else(|| DomainError::Storage {
+            message: format!(
+                "Pack selection evidence is unavailable for memory debt inspection (status {}).",
+                parsed.status.as_str()
+            ),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+        let read_at = ledger
+            .get("createdAt")
+            .and_then(JsonValue::as_str)
+            .and_then(parse_rfc3339)
+            .ok_or_else(|| DomainError::Storage {
+                message: "Verified pack selection evidence contained an invalid timestamp."
+                    .to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            })?;
+        if read_at > now {
+            return Err(DomainError::Storage {
+                message: "Verified pack selection evidence is later than the report clock."
+                    .to_owned(),
+                repair: Some("Check the system clock, then run `ee doctor --json`.".to_owned()),
+            });
+        }
+        let items = pack_ledger_core_array(ledger, "selectedItems").ok_or_else(|| {
+            DomainError::Storage {
+                message: "Verified pack selection evidence omitted selectedItems.".to_owned(),
+                repair: Some("ee doctor --json".to_owned()),
+            }
+        })?;
+        for item in items {
+            if admitted_items >= RECENT_PACK_ITEM_LIMIT {
+                break;
+            }
+            admitted_items = admitted_items.saturating_add(1);
+            let Some(memory_id) = item.get("memoryId").and_then(JsonValue::as_str) else {
+                return Err(DomainError::Storage {
+                    message: "Verified pack selection evidence omitted a memory id.".to_owned(),
+                    repair: Some("ee doctor --json".to_owned()),
+                });
+            };
+            let Some(rank) = item
+                .get("rank")
+                .and_then(JsonValue::as_u64)
+                .and_then(|rank| u32::try_from(rank).ok())
+            else {
+                return Err(DomainError::Storage {
+                    message: "Verified pack selection evidence contained an invalid rank."
+                        .to_owned(),
+                    repair: Some("ee doctor --json".to_owned()),
+                });
+            };
+            let Some(signal) = signals.get_mut(memory_id) else {
+                continue;
+            };
+            signal.best_pack_rank = match signal.best_pack_rank {
+                Some(existing) => Some(existing.min(rank)),
+                None => Some(rank),
+            };
             signal.last_read_at = newer_time(signal.last_read_at, read_at);
         }
+    }
+    if admitted_items < RECENT_PACK_ITEM_LIMIT && record_cap_exhausted {
+        return Err(DomainError::Storage {
+            message: "Pack history exceeded the bounded memory debt inspection window.".to_owned(),
+            repair: Some(
+                "Narrow the workspace or inspect pack history before retrying.".to_owned(),
+            ),
+        });
     }
     Ok(())
 }
