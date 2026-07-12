@@ -103,15 +103,19 @@ There are two valid outcomes:
   the prior hash is unknown, the requested format does not support deltas, the
   delta would be larger than the full pack, the envelope is oversized, or a
   compute budget is exceeded.
-- Delta pack: an `ee.context.delta.v1` envelope with `items.added`,
+- Delta pack: an `ee.context.delta.v2` envelope with `items.added`,
   `items.removed`, `items.modified`, and `tokenSavings`.
+
+`serverDecision.computedFromServerVerifiedPackRecord` is `true` only when the
+CLI resolved the prior hash through an Available, centrally verified persisted
+ledger. Public API snapshots created directly by callers emit `false`.
 
 No-op deltas use empty arrays. There is no separate `noChange` response shape.
 That keeps agents on a two-shape contract: full pack or delta.
 
 ## Format Support
 
-Delta v1 supports JSON envelopes and markdown delta documents. Use JSON when a
+Delta v2 supports JSON envelopes and markdown delta documents. Use JSON when a
 consumer needs `items.added`, `items.removed`, `items.modified`, and
 `tokenSavings` as structured fields. Use markdown when the delta is being
 appended directly to an agent prompt. TOON, Mermaid, handoff capsules, backup
@@ -122,7 +126,7 @@ renderer output with `context_delta_format_unsupported`.
 ## No Apply Command
 
 `ee` should not add `ee pack apply-delta --base <hash> --delta-stdin` for
-v1. Sending the base and delta back to the server defeats the byte-saving goal
+v2. Sending the base and delta back to the server defeats the byte-saving goal
 and creates a second state-management surface. Agents can always re-run
 `ee pack "<task>" --json` without `--since` to recover the canonical full
 pack.

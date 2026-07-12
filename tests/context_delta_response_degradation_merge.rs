@@ -16,7 +16,7 @@
 use serde_json::Value;
 
 use ee::core::context_delta::{
-    CONTEXT_DELTA_SCHEMA_V1, ContextDeltaItemSnapshot, ContextDeltaOptions,
+    CONTEXT_DELTA_SCHEMA_V2, ContextDeltaItemSnapshot, ContextDeltaOptions,
     ContextDeltaPackSnapshot, compute_context_delta,
 };
 
@@ -148,7 +148,7 @@ fn merged_degradations_serialize_as_top_level_degraded_array_per_schema() -> Tes
         serde_json::to_value(&envelope).map_err(|error| format!("serialize envelope: {error}"))?;
     assert_eq!(
         rendered["schema"].as_str(),
-        Some(CONTEXT_DELTA_SCHEMA_V1),
+        Some(CONTEXT_DELTA_SCHEMA_V2),
         "schema field unchanged by merge",
     );
     let degraded = rendered["degraded"]

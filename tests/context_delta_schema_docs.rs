@@ -1,4 +1,4 @@
-//! Static contract tests for the first context-delta documentation slice.
+//! Static contract tests for the context-delta v2 documentation slice.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -51,21 +51,16 @@ fn ensure_contains(haystack: &str, needle: &str, context: &str) -> TestResult {
 
 #[test]
 fn context_delta_schema_pins_item_diff_and_token_budget_contract() -> TestResult {
-    let schema_text = read_repo_file("docs/schemas/ee.context.delta.v1.json")?;
+    let schema_text = read_repo_file("docs/schemas/ee.context.delta.v2.json")?;
     let schema: Value =
         serde_json::from_str(&schema_text).map_err(|error| format!("schema parse: {error}"))?;
 
-    if string_at(&schema, "/properties/schema/const")? != "ee.context.delta.v1" {
-        return Err("schema const must be ee.context.delta.v1".to_owned());
+    if string_at(&schema, "/properties/schema/const")? != "ee.context.delta.v2" {
+        return Err("schema const must be ee.context.delta.v2".to_owned());
     }
 
     let description = string_at(&schema, "/description")?;
-    for needle in [
-        "server verifies",
-        "v1 changes are additive only",
-        "ee.context.delta.v2",
-        "rather than RFC 6902 JSON Patch",
-    ] {
+    for needle in ["V2", "authority marker"] {
         ensure_contains(description, needle, "schema description")?;
     }
 
@@ -312,14 +307,14 @@ fn json_type_name(value: &Value) -> &'static str {
 }
 
 /// Builds a representative envelope using only the public compute API,
-/// then asserts every serialized key matches the v1 schema's closed
+/// then asserts every serialized key matches the v2 schema's closed
 /// property set. This is the contract test the original review finding
 /// said was missing: it would have caught the prior `{schema, …}` flat
 /// envelope, the missing `serverDecision`, and the `{old, new}` object
 /// field-change shape immediately.
 #[test]
 fn context_delta_rust_envelope_matches_schema_property_set() -> TestResult {
-    let schema_text = read_repo_file("docs/schemas/ee.context.delta.v1.json")?;
+    let schema_text = read_repo_file("docs/schemas/ee.context.delta.v2.json")?;
     let schema: Value =
         serde_json::from_str(&schema_text).map_err(|error| format!("schema parse: {error}"))?;
 
@@ -348,7 +343,7 @@ fn context_delta_rust_envelope_matches_schema_property_set() -> TestResult {
     for key in &envelope_keys {
         if !allowed_envelope.iter().any(|allowed| allowed == key) {
             return Err(format!(
-                "envelope key `{key}` is not in the v1 schema property set ({allowed_envelope:?})"
+                "envelope key `{key}` is not in the v2 schema property set ({allowed_envelope:?})"
             ));
         }
     }
@@ -370,7 +365,7 @@ fn context_delta_rust_envelope_matches_schema_property_set() -> TestResult {
     for key in &data_keys {
         if !allowed_data.iter().any(|allowed| allowed == key) {
             return Err(format!(
-                "data key `{key}` is not in the v1 contextDelta property set ({allowed_data:?})"
+                "data key `{key}` is not in the v2 contextDelta property set ({allowed_data:?})"
             ));
         }
     }
@@ -401,7 +396,7 @@ fn context_delta_rust_envelope_matches_schema_property_set() -> TestResult {
     for key in &server_keys {
         if !allowed_server.iter().any(|allowed| allowed == key) {
             return Err(format!(
-                "serverDecision key `{key}` is not in the v1 schema property set ({allowed_server:?})"
+                "serverDecision key `{key}` is not in the v2 schema property set ({allowed_server:?})"
             ));
         }
     }
@@ -447,9 +442,9 @@ fn context_delta_apply_guide_covers_agent_safety_rules() -> TestResult {
         "The server never chains deltas",
         "data.tokenSavings.netPackTokens",
         "No-op deltas use empty arrays",
-        "Delta v1 supports JSON envelopes and markdown delta documents",
+        "Delta v2 supports JSON envelopes and markdown delta documents",
         "context_delta_format_unsupported",
-        "should not add `ee context apply-delta",
+        "should not add `ee pack apply-delta",
         "context_delta_prior_unknown",
     ] {
         ensure_contains(&guide, needle, "context delta apply guide")?;

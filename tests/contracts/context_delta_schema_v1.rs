@@ -1,15 +1,15 @@
 //! bd-1rwxf: contract test that validates a real emitted
-//! [`ContextDeltaEnvelope`] against `docs/schemas/ee.context.delta.v1.json`.
+//! [`ContextDeltaEnvelope`] against `docs/schemas/ee.context.delta.v2.json`.
 //!
 //! The original review finding (bd-1h96m) was that
 //! `tests/context_delta_schema_docs.rs` only inspected the *schema file*
 //! and the Rust envelope's *key names*, never the full schema-vs-emission
 //! join. This contract test closes that gap: it computes a real envelope
-//! via the public API, serializes it, and walks the v1 JSON Schema with
+//! via the public API, serializes it, and walks the v2 JSON Schema with
 //! a self-contained subset validator that handles `$ref`, `oneOf`,
 //! `const`, `enum`, `type`, `required`, `additionalProperties`, `items`,
 //! `prefixItems`, `minItems`/`maxItems`, and `minimum` — every keyword
-//! the v1 schema uses.
+//! the v2 schema uses.
 //!
 //! The validator is intentionally embedded (rather than extracted to
 //! `tests/support/`) so this contract is self-contained: a future
@@ -31,7 +31,7 @@ fn repo_root() -> PathBuf {
 }
 
 fn read_schema() -> Result<Value, String> {
-    let text = fs::read_to_string(repo_root().join("docs/schemas/ee.context.delta.v1.json"))
+    let text = fs::read_to_string(repo_root().join("docs/schemas/ee.context.delta.v2.json"))
         .map_err(|error| format!("read schema: {error}"))?;
     serde_json::from_str(&text).map_err(|error| format!("parse schema: {error}"))
 }
@@ -73,21 +73,21 @@ fn oversized_envelope_value() -> Result<Value, String> {
 }
 
 #[test]
-fn context_delta_v1_envelope_validates_against_published_schema() -> TestResult {
+fn context_delta_v2_envelope_validates_against_published_schema() -> TestResult {
     let schema = read_schema()?;
     let envelope = diverse_envelope_value()?;
     validate_json_schema(&envelope, &schema, &schema, "$")
 }
 
 #[test]
-fn context_delta_v1_fallback_envelope_validates_against_published_schema() -> TestResult {
+fn context_delta_v2_fallback_envelope_validates_against_published_schema() -> TestResult {
     let schema = read_schema()?;
     let envelope = oversized_envelope_value()?;
     validate_json_schema(&envelope, &schema, &schema, "$")
 }
 
 #[test]
-fn context_delta_v1_validator_rejects_legacy_object_field_change() -> TestResult {
+fn context_delta_v2_validator_rejects_legacy_object_field_change() -> TestResult {
     // Sanity-pin the validator: feeding it a payload shaped like the
     // pre-bd-1h96m drift (`fieldChanges.<name>` as `{old, new}` object
     // instead of the schema's `[old, new]` array) must fail validation.

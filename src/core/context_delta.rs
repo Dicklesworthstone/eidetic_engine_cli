@@ -4,7 +4,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-pub const CONTEXT_DELTA_SCHEMA_V1: &str = "ee.context.delta.v1";
+pub const CONTEXT_DELTA_SCHEMA_V2: &str = "ee.context.delta.v2";
 pub const CONTEXT_DELTA_PRIOR_UNKNOWN_CODE: &str = "context_delta_prior_unknown";
 pub const CONTEXT_DELTA_OVERSIZED_CODE: &str = "context_delta_larger_than_full";
 pub const CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE: &str = "context_delta_format_unsupported";
@@ -34,6 +34,8 @@ pub struct ContextDeltaPackSnapshot {
     pub full_bytes: u64,
     pub net_pack_tokens: u32,
     pub items: Vec<ContextDeltaItemSnapshot>,
+    #[serde(default, skip)]
+    server_verified_pack_record: bool,
 }
 
 impl ContextDeltaPackSnapshot {
@@ -51,7 +53,16 @@ impl ContextDeltaPackSnapshot {
             full_bytes,
             net_pack_tokens,
             items,
+            server_verified_pack_record: false,
         }
+    }
+
+    /// Mark a snapshot as derived from a centrally validated persisted ledger.
+    /// Kept crate-private so arbitrary API callers cannot self-assert authority.
+    #[must_use]
+    pub(crate) fn with_server_verified_pack_record(mut self) -> Self {
+        self.server_verified_pack_record = true;
+        self
     }
 }
 
@@ -90,8 +101,8 @@ impl ContextDeltaOptions {
     }
 }
 
-/// Top-level envelope matching `ee.context.delta.v1` (see
-/// `docs/schemas/ee.context.delta.v1.json`). Always serializes as
+/// Top-level envelope matching `ee.context.delta.v2` (see
+/// `docs/schemas/ee.context.delta.v2.json`). Always serializes as
 /// `{schema, success, data, degraded}`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -289,9 +300,9 @@ fn measured_total(serialized_len: u64, transport_overhead_bytes: u64) -> u64 {
     serialized_len.saturating_add(transport_overhead_bytes)
 }
 
-/// The `data` payload of `ee.context.delta.v1`. Field set is closed
+/// The `data` payload of `ee.context.delta.v2`. Field set is closed
 /// (`additionalProperties: false`); add new fields only after bumping
-/// the schema to v2.
+/// the schema to v3.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextDeltaPayload {
@@ -324,7 +335,7 @@ pub struct ContextDeltaServerDecision {
     pub fallback_reason: Option<ContextDeltaFallbackReason>,
 }
 
-/// Closed enum mirroring `serverDecision.fallbackReason` in the v1
+/// Closed enum mirroring `serverDecision.fallbackReason` in the v2
 /// schema. Wire form is snake_case strings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -367,7 +378,7 @@ pub struct ContextDeltaModifiedItem {
 }
 
 /// Field-level change shape. Matches the `fieldChange` `oneOf` in
-/// the v1 schema: ordinary changes serialize as a two-element
+/// the v2 schema: ordinary changes serialize as a two-element
 /// `[old, new]` array; redaction-safe changes serialize as a struct
 /// with `newValue`, `oldValueOmitted`, and `reason`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -449,7 +460,7 @@ pub fn compute_context_delta(
 ) -> Result<ContextDeltaEnvelope, ContextDeltaError> {
     let items = diff_items(&prior.items, &new.items);
     let mut envelope = ContextDeltaEnvelope {
-        schema: CONTEXT_DELTA_SCHEMA_V1,
+        schema: CONTEXT_DELTA_SCHEMA_V2,
         success: true,
         data: ContextDeltaPayload {
             prior_pack_hash: prior.pack_hash.clone(),
@@ -462,7 +473,7 @@ pub fn compute_context_delta(
             items,
             token_savings: token_savings(new.full_bytes, 0, new.net_pack_tokens),
             server_decision: ContextDeltaServerDecision {
-                computed_from_server_verified_pack_record: true,
+                computed_from_server_verified_pack_record: prior.server_verified_pack_record,
                 delta_chained: false,
                 format: CONTEXT_DELTA_FORMAT_JSON,
                 fallback_reason: None,
@@ -701,7 +712,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        CONTEXT_DELTA_FORMAT_JSON, CONTEXT_DELTA_OVERSIZED_CODE, CONTEXT_DELTA_SCHEMA_V1,
+        CONTEXT_DELTA_FORMAT_JSON, CONTEXT_DELTA_OVERSIZED_CODE, CONTEXT_DELTA_SCHEMA_V2,
         ContextDeltaDegradation, ContextDeltaEnvelope, ContextDeltaFallbackReason,
         ContextDeltaFieldChange, ContextDeltaFieldChangeRedaction, ContextDeltaItemSnapshot,
         ContextDeltaItems, ContextDeltaModifiedItem, ContextDeltaOptions, ContextDeltaPackSnapshot,
@@ -735,7 +746,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
 
         assert!(delta.emits_delta());
-        assert_eq!(delta.schema, CONTEXT_DELTA_SCHEMA_V1);
+        assert_eq!(delta.schema, CONTEXT_DELTA_SCHEMA_V2);
         assert!(delta.success);
         assert!(delta.degraded.is_empty());
         assert!(delta.data.items.added.is_empty());
@@ -952,7 +963,7 @@ mod tests {
         let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
         keys.sort_unstable();
         assert_eq!(keys, vec!["data", "degraded", "schema", "success"]);
-        assert_eq!(object["schema"], json!(CONTEXT_DELTA_SCHEMA_V1));
+        assert_eq!(object["schema"], json!(CONTEXT_DELTA_SCHEMA_V2));
         assert_eq!(object["success"], json!(true));
         Ok(())
     }
@@ -971,7 +982,7 @@ mod tests {
             .ok_or_else(|| "serverDecision missing".to_string())?
             .as_object()
             .ok_or_else(|| "serverDecision must be an object".to_string())?;
-        assert_eq!(server["computedFromServerVerifiedPackRecord"], json!(true));
+        assert_eq!(server["computedFromServerVerifiedPackRecord"], json!(false));
         assert_eq!(server["deltaChained"], json!(false));
         assert_eq!(server["format"], json!("json"));
         Ok(())
@@ -1012,7 +1023,7 @@ mod tests {
     #[test]
     fn markdown_delta_rendering_matches_golden() -> TestResult {
         let envelope = ContextDeltaEnvelope {
-            schema: CONTEXT_DELTA_SCHEMA_V1,
+            schema: CONTEXT_DELTA_SCHEMA_V2,
             success: true,
             data: ContextDeltaPayload {
                 prior_pack_hash: "blake3:prior0000".to_string(),
@@ -1081,7 +1092,7 @@ mod tests {
     #[test]
     fn markdown_finalize_accounts_for_rendered_transport_bytes() -> TestResult {
         let mut envelope = ContextDeltaEnvelope {
-            schema: CONTEXT_DELTA_SCHEMA_V1,
+            schema: CONTEXT_DELTA_SCHEMA_V2,
             success: true,
             data: ContextDeltaPayload {
                 prior_pack_hash: "blake3:prior0000".to_string(),
@@ -1129,7 +1140,7 @@ mod tests {
     #[test]
     fn markdown_finalize_falls_back_when_rendered_transport_exceeds_budget() -> TestResult {
         let mut envelope = ContextDeltaEnvelope {
-            schema: CONTEXT_DELTA_SCHEMA_V1,
+            schema: CONTEXT_DELTA_SCHEMA_V2,
             success: true,
             data: ContextDeltaPayload {
                 prior_pack_hash: "blake3:prior0000".to_string(),
