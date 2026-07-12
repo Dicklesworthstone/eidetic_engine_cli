@@ -251,6 +251,8 @@ fn schema_cases() -> Result<Vec<SchemaCase>, String> {
                 "docId": "mem_schema_contract",
                 "memoryId": "mem_schema_contract",
                 "score": 0.91,
+                "relevanceScore": 0.91,
+                "scoreKind": "rrf_fused",
                 "scoreInterval": [0.72, 0.97],
                 "coverageGuarantee": 0.95,
                 "calibrated": true,

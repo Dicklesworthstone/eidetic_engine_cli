@@ -4236,7 +4236,13 @@ fn toolchain_provenance_json(workspace: &Path) -> String {
     let report = collect_toolchain_provenance(&ToolchainProvenanceOptions::for_workspace(
         workspace.to_path_buf(),
     ));
-    output::render_toolchain_provenance_json(&report)
+    let value = serde_json::to_value(&report).unwrap_or_else(|error| {
+        json!({
+            "schema": "ee.support_bundle.serialization_error.v1",
+            "message": error.to_string(),
+        })
+    });
+    stable_json(&value)
 }
 
 fn install_freshness_summary_json() -> String {

@@ -1,1 +1,310 @@
-{"schema":"ee.response.v2","success":true,"data":{"command":"why","version":"0.1.0","memoryId":"mem_00000000000000000000000001","found":true,"storage":{"origin":"Explicitly remembered via `ee remember`","trustClass":"human_explicit","trustSubclass":"project-rule","provenanceUri":"file://AGENTS.md#L164-173","workflowId":null,"createdAt":"2026-04-29T12:00:00+00:00","validFrom":null,"validTo":null,"validityStatus":"unknown","validityWindowKind":"unbounded"},"retrieval":{"confidence":0.92,"utility":0.8,"importance":0.7,"tags":["cargo","formatting"],"level":"procedural","kind":"rule"},"graphRetrievalFeatures":{"status":"scores_unavailable","source":{"kind":"graph_snapshot","workspaceId":"wsp_searchjson0000000000000001","graphType":"memory_links","snapshot":null},"centralityScore":0.0,"authorityScore":0.0,"hubScore":0.0,"communityId":null,"distanceToQuerySeed":null,"sameClusterAsTopResult":null,"evidenceSupportCount":0,"contradictionCount":0,"orphanPenalty":1.0,"staleBridgePenalty":0.0,"pagerank":{"raw":0.0,"normalized":0.0,"rank":null,"weight":0.0,"contribution":0.0,"formula":"metric unavailable"},"betweenness":{"raw":0.0,"normalized":0.0,"rank":null,"weight":0.0,"contribution":0.0,"formula":"metric unavailable"},"labels":[],"reasons":[],"centralityFormula":"centrality_score = 0.6 * pagerank.normalized + 0.4 * betweenness.normalized","orphanPenaltyFormula":"orphan_penalty = 1.0 when no incident memory_links exist, else 0.0","staleBridgePenaltyFormula":"stale_bridge_penalty = betweenness.normalized when validity_status is expired, else 0.0","degraded":[{"code":"graph_snapshot_missing","severity":"medium","message":"No persisted graph snapshot exists for feature enrichment.","repair":"ee graph centrality-refresh"},{"code":"graph_query_relative_features_unavailable","severity":"low","message":"Community and query-seed graph features are present as stable fields but unavailable without community detection and query-seed expansion.","repair":"ee graph communities && ee search --explain"}]},"selection":{"selectionScore":0.84,"aboveConfidenceThreshold":true,"isActive":true,"scoreBreakdown":"selection_score = 0.5 * confidence(0.92) + 0.3 * utility(0.80) + 0.2 * importance(0.70) = 0.84","latestPackSelection":{"packId":"pack_00000000000000000000000001","query":"format before release","profile":"compact","rank":1,"section":"procedural_rules","estimatedTokens":8,"relevance":0.91,"utility":0.8,"why":"Selected because the memory matches release-formatting work.","packHash":"blake3:test-pack-hash","ledgerHash":null,"ledgerStatus":"missing","ledgerStorage":{"mode":"missing","schema":null,"algorithm":null,"compressedBytes":null,"uncompressedBytes":null,"payloadIncluded":false},"selectedAt":"2026-04-29T12:01:00+00:00"}},"contradictions":[],"links":[],"degraded":[]}}
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "command": "why",
+    "version": "0.13.0",
+    "memoryId": "mem_00000000000000000000000001",
+    "found": true,
+    "content": "Run cargo fmt --check before release.",
+    "storage": {
+      "origin": "Explicitly remembered via `ee remember`",
+      "trustClass": "human_explicit",
+      "trustSubclass": "project-rule",
+      "provenanceUri": "[REDACTED_PATH]#L164-173",
+      "workflowId": null,
+      "createdAt": "2026-04-29T12:00:00+00:00",
+      "validFrom": "2026-04-29T12:00:00+00:00",
+      "validTo": null,
+      "validityStatus": "current",
+      "validityWindowKind": "starts_at"
+    },
+    "retrieval": {
+      "confidence": 0.92,
+      "utility": 0.8,
+      "importance": 0.7,
+      "tags": [
+        "cargo",
+        "formatting"
+      ],
+      "level": "procedural",
+      "kind": "rule"
+    },
+    "graphRetrievalFeatures": {
+      "status": "scores_unavailable",
+      "source": {
+        "kind": "graph_snapshot",
+        "workspaceId": "wsp_searchjson0000000000000001",
+        "graphType": "memory_links",
+        "snapshot": null
+      },
+      "centralityScore": 0.0,
+      "authorityScore": 0.0,
+      "hubScore": 0.0,
+      "hits": null,
+      "communityId": null,
+      "distanceToQuerySeed": null,
+      "sameClusterAsTopResult": null,
+      "evidenceSupportCount": 0,
+      "contradictionCount": 0,
+      "orphanPenalty": 1.0,
+      "staleBridgePenalty": 0.0,
+      "pagerank": {
+        "raw": 0.0,
+        "normalized": 0.0,
+        "rank": null,
+        "weight": 0.0,
+        "contribution": 0.0,
+        "formula": "metric unavailable"
+      },
+      "betweenness": {
+        "raw": 0.0,
+        "normalized": 0.0,
+        "rank": null,
+        "weight": 0.0,
+        "contribution": 0.0,
+        "formula": "metric unavailable"
+      },
+      "labels": [],
+      "reasons": [],
+      "centralityFormula": "centrality_score = 0.6 * pagerank.normalized + 0.4 * betweenness.normalized",
+      "orphanPenaltyFormula": "orphan_penalty = 1.0 when no incident memory_links exist, else 0.0",
+      "staleBridgePenaltyFormula": "stale_bridge_penalty = betweenness.normalized when validity_status is expired, else 0.0",
+      "degraded": [
+        {
+          "code": "graph_snapshot_missing",
+          "severity": "medium",
+          "message": "No persisted graph snapshot exists for feature enrichment.",
+          "repair": "ee graph centrality-refresh",
+          "sources": [
+            "why_graph_retrieval"
+          ]
+        },
+        {
+          "code": "graph_query_relative_features_unavailable",
+          "severity": "low",
+          "message": "Community and query-seed graph features are present as stable fields but unavailable without community detection and query-seed expansion.",
+          "repair": "ee graph communities && ee search --explain",
+          "sources": [
+            "why_graph_retrieval"
+          ]
+        }
+      ]
+    },
+    "selection": {
+      "selectionScore": 0.84,
+      "aboveConfidenceThreshold": true,
+      "isActive": true,
+      "scoreBreakdown": "selection_score = 0.5 * confidence(0.92) + 0.3 * utility(0.80) + 0.2 * importance(0.70) = 0.84",
+      "latestPackSelection": {
+        "packId": "pack_00000000000000000000000001",
+        "query": "format before release",
+        "profile": "compact",
+        "rank": 1,
+        "section": "procedural_rules",
+        "estimatedTokens": 8,
+        "relevance": 0.91,
+        "utility": 0.8,
+        "why": "Selected because the memory matches release-formatting work.",
+        "packHash": "blake3:1b56a8dedc62dabb0004ad59e5652008bdf40a2bc5cb60ce7eced9c33aad2c07",
+        "ledgerHash": "blake3:cefb3d39f985a501910a6f6831970891a8be8911ef173545c92ea8674f150632",
+        "ledgerStatus": "available",
+        "ledgerStorage": {
+          "mode": "uncompressed_in_row",
+          "schema": "ee.pack_replay_ledger.v1",
+          "algorithm": null,
+          "compressedBytes": null,
+          "uncompressedBytes": 1574,
+          "payloadIncluded": false
+        },
+        "selectedAt": "2026-04-29T12:01:00+00:00"
+      }
+    },
+    "agentProfile": null,
+    "bayesPosterior": {
+      "schema": "ee.bayes.posterior.v1",
+      "alpha": 0.5,
+      "beta": 0.5,
+      "mean": 0.5,
+      "effectiveSampleSize": 1.0,
+      "credibleInterval90": {
+        "lower": 0.006156,
+        "upper": 0.993844,
+        "level": 0.9
+      },
+      "credibleInterval50": {
+        "lower": 0.146447,
+        "upper": 0.853553,
+        "level": 0.5
+      }
+    },
+    "lifecycle": {
+      "status": "active",
+      "tombstoned_at": null,
+      "tombstoned_reason": null
+    },
+    "contradictions": [],
+    "links": [],
+    "history": {
+      "entries": [],
+      "totalCount": 0,
+      "truncated": false
+    },
+    "verificationEvidence": [],
+    "coordinationFallbackEvidence": [],
+    "attestationBundle": {
+      "schema": "ee.attestation.surface_manifest.v1",
+      "status": "available",
+      "sourceSchema": "ee.attestation.bundle.v1",
+      "bundleHash": "blake3:0000000000000000000000000000000000000000000000000000000000000002",
+      "subject": {
+        "kind": "memory",
+        "id": "mem_00000000000000000000000001",
+        "contentHashCount": 3,
+        "contentHashLabels": [
+          "memory.provenance_chain",
+          "memory.redacted_content",
+          "memory.trust_validity"
+        ]
+      },
+      "evidenceManifest": {
+        "entryCount": 1,
+        "kinds": {
+          "memory": 1
+        },
+        "schemas": [
+          "ee.memory.v1"
+        ],
+        "contentHashes": [
+          "blake3:d0e594644dd37e216ed775789552daaad067af4d5b3911fd916e832e987525e6"
+        ],
+        "chainHashes": [
+          "blake3:0000000000000000000000000000000000000000000000000000000000000001"
+        ],
+        "provenanceUriIncluded": false
+      },
+      "redactionManifest": {
+        "policy": "ee.policy.secret_redaction.v1",
+        "entryCount": 2,
+        "fields": [
+          "memory.content",
+          "memory.provenanceUri"
+        ],
+        "classes": [
+          "memory_content",
+          "provenance_uri"
+        ],
+        "replacementHashes": [
+          "blake3:cdf57bdb2f4353b61ba01f40ee74b1c0b04cfea468144e0a398fd23a0a243dbc",
+          "blake3:d0e594644dd37e216ed775789552daaad067af4d5b3911fd916e832e987525e6"
+        ]
+      },
+      "hashManifest": {
+        "entryCount": 6,
+        "labels": [
+          "memory.anchors",
+          "memory.audit",
+          "memory.links",
+          "memory.provenance_chain",
+          "memory.redacted_content",
+          "memory.trust_validity"
+        ],
+        "hashes": [
+          "blake3:0000000000000000000000000000000000000000000000000000000000000001",
+          "blake3:b9f504df15fdcaaeab5bc79e9847b4565b02cce904fc3eb1df5a499b09c4d93d",
+          "blake3:d0e594644dd37e216ed775789552daaad067af4d5b3911fd916e832e987525e6",
+          "blake3:d53d18c23212ea7b6300594bb89bce60218f6eff2b9d628b8cc42d3e79bbd5ab"
+        ]
+      },
+      "omissions": {
+        "count": 5,
+        "fields": [
+          "audit.details",
+          "memory.content",
+          "memory.provenanceVerificationNote",
+          "memoryLinks[].metadataJson",
+          "publicProjection.provenanceUri"
+        ]
+      },
+      "trustStatement": {
+        "scope": "local_ee_custody"
+      }
+    },
+    "degraded": [
+      {
+        "code": "why_evidence_freshness_missing_source",
+        "severity": "low",
+        "message": "Memory mem_00000000000000000000000001 evidence freshness is missing_source: Referenced provenance file [REDACTED_PATH] is missing.",
+        "repair": "Restore the file or revise the memory provenance URI; rebuild the index if the memory content changes.",
+        "sources": [
+          "why"
+        ]
+      },
+      {
+        "code": "why_provenance_freshness_missing",
+        "severity": "low",
+        "message": "Memory mem_00000000000000000000000001 provenance health is missing: File provenance source [REDACTED_PATH] is missing.",
+        "repair": "Run `ee diag provenance --json` and revise or re-remember affected memories.",
+        "sources": [
+          "why"
+        ]
+      }
+    ],
+    "revisionLineage": {
+      "sourceSchema": "ee.memory.impact_analysis.v1",
+      "memoryId": "mem_00000000000000000000000001",
+      "snapshotVersion": 0,
+      "rootMemoryId": null,
+      "immediateDominator": null,
+      "dominanceFrontier": [],
+      "ancestorsAtDepth": {},
+      "validationStatus": "disabled",
+      "degraded": [
+        {
+          "code": "graph_feature_disabled",
+          "severity": "medium",
+          "message": "Revision dominance is disabled by graph.feature.revision_dominance.enabled.",
+          "repair": "ee config set graph.feature.revision_dominance.enabled true",
+          "sources": [
+            "why_revision_lineage"
+          ]
+        }
+      ]
+    },
+    "confidenceIntervals": {
+      "schema": "ee.why.conformal_prediction_set.v1",
+      "method": "split_conformal_nonconformity",
+      "coverageGuarantee": 0.95,
+      "alpha": 0.05,
+      "targetMemoryId": "mem_00000000000000000000000001",
+      "scoreInterval": [
+        0.0,
+        1.0
+      ],
+      "nonconformityQuantile": 1.0,
+      "calibrationSampleCount": 0,
+      "calibrationStatus": "conservative_insufficient_calibration",
+      "predictionSet": [
+        {
+          "memoryId": "mem_00000000000000000000000001",
+          "rank": 1,
+          "source": "target",
+          "score": 0.84,
+          "nonconformityScore": 0.16,
+          "included": true
+        }
+      ]
+    },
+    "counterfactualInfluence": {
+      "schema": "ee.why.influence.v1",
+      "method": "deterministic_link_leave_one_out",
+      "targetMemoryId": "mem_00000000000000000000000001",
+      "baselineTopScore": 0.84,
+      "approximationErrorRatio": 0.0,
+      "totalAbsoluteInfluence": -0.0,
+      "topPositive": [],
+      "topNegative": [],
+      "entries": []
+    }
+  }
+}

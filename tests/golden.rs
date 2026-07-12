@@ -137,7 +137,6 @@ mod tests {
         AuditVerifyReport, LinkedSnapshot, TimelinePagination, VerificationIssue,
     };
     use ee::core::curate::{CurateReviewAction, CurateReviewOptions, review_curation_candidate};
-    use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
     use ee::core::swarm_brief::{
         SWARM_BRIEF_REDACTION_STATUS, SWARM_BRIEF_SCHEMA_V1, SwarmBriefAgentInventorySummary,
         SwarmBriefBead, SwarmBriefBeadsDependencyCycleSummary, SwarmBriefBvPick,
@@ -1292,7 +1291,7 @@ mod tests {
                     provenance_uri: Some("file://AGENTS.md#L164-173".to_string()),
                     trust_class: "human_explicit".to_string(),
                     trust_subclass: Some("project-rule".to_string()),
-                    valid_from: None,
+                    valid_from: Some("2026-04-29T12:00:00+00:00".to_string()),
                     valid_to: None,
                     tags: vec!["cargo".to_string(), "formatting".to_string()],
                 },
@@ -1342,7 +1341,7 @@ mod tests {
                     provenance_uri: Some("file://docs/query-schema.md#L221".to_string()),
                     trust_class: "agent_validated".to_string(),
                     trust_subclass: Some("golden-fixture".to_string()),
-                    valid_from: None,
+                    valid_from: Some("2026-05-08T12:00:00+00:00".to_string()),
                     valid_to: None,
                     tags: vec!["graph".to_string(), "release".to_string()],
                 },
@@ -1363,7 +1362,7 @@ mod tests {
                     provenance_uri: Some("file://docs/query-schema.md#L230".to_string()),
                     trust_class: "agent_validated".to_string(),
                     trust_subclass: Some("golden-fixture".to_string()),
-                    valid_from: None,
+                    valid_from: Some("2026-05-08T12:00:00+00:00".to_string()),
                     valid_to: None,
                     tags: vec!["graph".to_string(), "release".to_string()],
                 },
@@ -1924,22 +1923,34 @@ mod tests {
         index_dir: &Path,
         expected_documents: u32,
     ) -> TestResult {
-        let report = rebuild_index(&IndexRebuildOptions {
-            workspace_path: workspace.to_path_buf(),
-            database_path: Some(database.to_path_buf()),
-            index_dir: Some(index_dir.to_path_buf()),
-            dry_run: false,
-        })
-        .map_err(|error| error.to_string())?;
-
-        ensure_equal(
-            &report.status,
-            &IndexRebuildStatus::Success,
-            "index rebuild status",
+        let output = Command::new(ee_binary_path()?)
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .arg("--json")
+            .arg("--workspace")
+            .arg(workspace)
+            .arg("index")
+            .arg("rebuild")
+            .arg("--database")
+            .arg(database)
+            .arg("--index-dir")
+            .arg(index_dir)
+            .output()
+            .map_err(|error| format!("failed to run offline index rebuild: {error}"))?;
+        let stderr = String::from_utf8(output.stderr)
+            .map_err(|error| format!("index rebuild stderr was not UTF-8: {error}"))?;
+        ensure(
+            output.status.success(),
+            format!("offline index rebuild should succeed; stderr: {stderr}"),
         )?;
+        ensure(
+            stderr.is_empty(),
+            format!("offline index rebuild stderr must be empty, got: {stderr:?}"),
+        )?;
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("offline index rebuild stdout was not JSON: {error}"))?;
         ensure_equal(
-            &report.documents_total,
-            &expected_documents,
+            &report["data"]["memories_indexed"],
+            &serde_json::json!(expected_documents),
             "indexed document count",
         )
     }
@@ -2639,6 +2650,7 @@ mod tests {
         .map_err(|error| error.to_string())?;
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .env("EE_EMBED_DOWNLOAD", "off")
             .arg("--workspace")
             .arg(&workspace)
             .arg("pack")
@@ -2708,6 +2720,7 @@ mod tests {
 
         let legacy_output = Command::new(env!("CARGO_BIN_EXE_ee"))
             .env("EE_LEGACY_SELECTION_CERTIFICATE", "1")
+            .env("EE_EMBED_DOWNLOAD", "off")
             .arg("--workspace")
             .arg(&workspace)
             .arg("pack")
@@ -2796,6 +2809,7 @@ mod tests {
         .map_err(|error| error.to_string())?;
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .env("EE_EMBED_DOWNLOAD", "off")
             .arg("--workspace")
             .arg(&workspace)
             .arg("pack")
@@ -3735,6 +3749,9 @@ mod tests {
                 if pack.get("elapsedMs").is_some() {
                     pack["elapsedMs"] = serde_json::json!(0.0);
                 }
+                if let Some(elapsed_ms) = pack.pointer_mut("/slo/actuals/elapsedMs") {
+                    *elapsed_ms = serde_json::json!(0);
+                }
                 if pack.get("hash").is_some() {
                     pack["hash"] = serde_json::json!("blake3:normalized-context-pack-hash");
                 }
@@ -3767,6 +3784,36 @@ mod tests {
     fn normalize_context_pack_text(text: &str) -> String {
         let mut normalized = normalize_context_pack_artifact_paths(text);
         normalized = normalize_context_pack_hash_comments(&normalized);
+        normalized = normalize_context_pack_workspace_ids(&normalized);
+        normalized
+    }
+
+    fn normalize_context_pack_workspace_ids(text: &str) -> String {
+        const PREFIX: &str = "wsp_";
+        const ULID_LEN: usize = 26;
+
+        let mut normalized = String::with_capacity(text.len());
+        let mut remaining = text;
+        while let Some(offset) = remaining.find(PREFIX) {
+            normalized.push_str(&remaining[..offset]);
+            let candidate_start = offset + PREFIX.len();
+            let candidate_end = candidate_start + ULID_LEN;
+            let Some(candidate) = remaining.get(candidate_start..candidate_end) else {
+                normalized.push_str(&remaining[offset..]);
+                return normalized;
+            };
+            if candidate
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+            {
+                normalized.push_str("<ee-golden-pack-workspace-id>");
+                remaining = &remaining[candidate_end..];
+            } else {
+                normalized.push_str(PREFIX);
+                remaining = &remaining[candidate_start..];
+            }
+        }
+        normalized.push_str(remaining);
         normalized
     }
 
@@ -3798,6 +3845,65 @@ mod tests {
             );
         }
         normalized
+    }
+
+    fn normalize_why_json_for_golden(json: &str) -> Result<String, String> {
+        const AUDIT_CHAIN_HASH: &str =
+            "blake3:0000000000000000000000000000000000000000000000000000000000000001";
+        const ATTESTATION_BUNDLE_HASH: &str =
+            "blake3:0000000000000000000000000000000000000000000000000000000000000002";
+
+        let mut value: serde_json::Value =
+            serde_json::from_str(json).map_err(|error| error.to_string())?;
+        let audit_chain_hashes = value
+            .pointer("/data/attestationBundle/evidenceManifest/chainHashes")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+
+        normalize_why_audit_chain_hashes(&mut value, &audit_chain_hashes, AUDIT_CHAIN_HASH);
+        if let Some(bundle_hash) = value.pointer_mut("/data/attestationBundle/bundleHash") {
+            *bundle_hash = serde_json::Value::String(ATTESTATION_BUNDLE_HASH.to_owned());
+        }
+        if let Some(hashes) = value
+            .pointer_mut("/data/attestationBundle/hashManifest/hashes")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            hashes.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+        }
+
+        serde_json::to_string_pretty(&value)
+            .map(|normalized| normalized + "\n")
+            .map_err(|error| error.to_string())
+    }
+
+    fn normalize_why_audit_chain_hashes(
+        value: &mut serde_json::Value,
+        audit_chain_hashes: &[String],
+        replacement: &str,
+    ) {
+        match value {
+            serde_json::Value::String(text) => {
+                if audit_chain_hashes.iter().any(|hash| hash == text) {
+                    *text = replacement.to_owned();
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    normalize_why_audit_chain_hashes(item, audit_chain_hashes, replacement);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for item in fields.values_mut() {
+                    normalize_why_audit_chain_hashes(item, audit_chain_hashes, replacement);
+                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
+        }
     }
 
     #[test]
@@ -3877,7 +3983,8 @@ mod tests {
             "why latest pack rank",
         )?;
 
-        assert_golden("agent", "why_selected.json", &stdout)
+        let normalized = normalize_why_json_for_golden(&stdout)?;
+        assert_golden("agent", "why_selected.json", &normalized)
     }
 
     #[test]
