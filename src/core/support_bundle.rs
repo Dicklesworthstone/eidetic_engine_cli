@@ -9453,7 +9453,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
         connection
             .execute_raw(&format!(
-                "UPDATE pack_records SET ledger_json = 'not-json' WHERE id = '{pack_id}'"
+                "UPDATE pack_records SET ledger_json = '{{}}' WHERE id = '{pack_id}'"
             ))
             .map_err(|error| error.to_string())?;
 
