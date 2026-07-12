@@ -197,6 +197,14 @@ mod tests {
             .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
     }
 
+    fn run_ee_offline(args: &[&str]) -> Result<Output, String> {
+        Command::new(ee_binary_path()?)
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .args(args)
+            .output()
+            .map_err(|error| format!("failed to run offline ee {}: {error}", args.join(" ")))
+    }
+
     fn unique_artifact_dir(prefix: &str) -> Result<PathBuf, String> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -267,11 +275,19 @@ mod tests {
                     "hostCalibration",
                     "qos",
                     "rchWorkerPressure",
+                    "search",
+                    "shardFanout",
                     "sizeDiagnostics",
+                    "verificationLedger",
+                    "verificationPosture",
+                    "workspace",
                 ] {
                     if let Some(entry) = map.get_mut(key) {
                         *entry = serde_json::Value::String(format!("<scrubbed:{key}>"));
                     }
+                }
+                if let Some(generated_at) = map.get_mut("generatedAt") {
+                    *generated_at = serde_json::Value::String("<scrubbed:generatedAt>".to_owned());
                 }
                 if let Some(summary) = map
                     .get_mut("agentInventory")
@@ -320,14 +336,68 @@ mod tests {
 
     fn assert_status_json_golden(category: &str, name: &str, actual: &str) -> TestResult {
         let test = GoldenTest::new(category, name);
+        let actual_normalized = normalize_status_json_for_golden(actual);
         if env::var("UPDATE_GOLDEN").is_ok() {
-            test.update_golden(actual)?;
+            test.update_golden(&format!("{actual_normalized}\n"))?;
             return Ok(());
         }
 
         let expected = test.load_golden()?;
         let expected_normalized = normalize_status_json_for_golden(&expected);
-        let actual_normalized = normalize_status_json_for_golden(actual);
+        if expected_normalized == actual_normalized {
+            Ok(())
+        } else {
+            Err(test.format_diff(&expected_normalized, &actual_normalized))
+        }
+    }
+
+    fn normalize_doctor_json_for_golden(text: &str) -> String {
+        let trimmed = text.trim();
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            return trimmed.to_owned();
+        };
+
+        if let Some(version) = value.pointer_mut("/data/version") {
+            *version = serde_json::Value::String("<scrubbed:eeVersion>".to_owned());
+        }
+        if let Some(qos) = value.pointer_mut("/data/qos") {
+            *qos = serde_json::Value::String("<scrubbed:qos>".to_owned());
+        }
+        if let Some(checks) = value
+            .pointer_mut("/data/checks")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for check in checks {
+                let Some(check) = check.as_object_mut() else {
+                    continue;
+                };
+                let advisory =
+                    check.get("tier").and_then(serde_json::Value::as_str) == Some("advisory");
+                if advisory {
+                    if let Some(severity) = check.get_mut("severity") {
+                        *severity =
+                            serde_json::Value::String("<scrubbed:advisorySeverity>".to_owned());
+                    }
+                }
+                if let Some(message) = check.get_mut("message") {
+                    *message = serde_json::Value::String("<scrubbed:message>".to_owned());
+                }
+            }
+        }
+
+        serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned())
+    }
+
+    fn assert_doctor_json_golden(category: &str, name: &str, actual: &str) -> TestResult {
+        let test = GoldenTest::new(category, name);
+        let actual_normalized = normalize_doctor_json_for_golden(actual);
+        if env::var("UPDATE_GOLDEN").is_ok() {
+            test.update_golden(&format!("{actual_normalized}\n"))?;
+            return Ok(());
+        }
+
+        let expected = test.load_golden()?;
+        let expected_normalized = normalize_doctor_json_for_golden(&expected);
         if expected_normalized == actual_normalized {
             Ok(())
         } else {
@@ -537,11 +607,13 @@ mod tests {
                 1,
             ),
             swarm_source_ready(SwarmBriefSourceKind::HostProfile, None, 1),
+            swarm_source_ready(SwarmBriefSourceKind::MemoryDrift, None, 1),
             swarm_source_ready(
                 SwarmBriefSourceKind::Rch,
                 Some(("rch", &["status", "--json"])),
                 1,
             ),
+            swarm_source_ready(SwarmBriefSourceKind::Toolchain, None, 1),
         ];
         report.host_profile = Some(SwarmBriefHostProfileSummary {
             recommended_profile: "workstation".to_string(),
@@ -1219,13 +1291,29 @@ mod tests {
 
         if name == "status.json" {
             assert_status_json_golden("status", "status_json", &stdout)
+        } else if name == "doctor.json" {
+            assert_doctor_json_golden("agent", "doctor.json", &stdout)
         } else {
             assert_golden("agent", name, &stdout)
         }
     }
 
     fn run_json_stdout(args: &[&str], expect_success: bool) -> Result<serde_json::Value, String> {
-        let output = run_ee(args)?;
+        parse_json_stdout(args, run_ee(args)?, expect_success)
+    }
+
+    fn run_json_stdout_offline(
+        args: &[&str],
+        expect_success: bool,
+    ) -> Result<serde_json::Value, String> {
+        parse_json_stdout(args, run_ee_offline(args)?, expect_success)
+    }
+
+    fn parse_json_stdout(
+        args: &[&str],
+        output: Output,
+        expect_success: bool,
+    ) -> Result<serde_json::Value, String> {
         let stdout = String::from_utf8(output.stdout)
             .map_err(|error| format!("stdout was not UTF-8 for ee {}: {error}", args.join(" ")))?;
         let stderr = String::from_utf8(output.stderr)
@@ -1256,6 +1344,21 @@ mod tests {
             .map_err(|error| format!("ee {} stdout must be JSON: {error}", args.join(" ")))
     }
 
+    fn write_deterministic_retrieval_config(workspace: &Path) -> TestResult {
+        let config_dir = workspace.join(".ee");
+        fs::create_dir_all(&config_dir).map_err(|error| {
+            format!(
+                "failed to create config directory {}: {error}",
+                config_dir.display()
+            )
+        })?;
+        fs::write(
+            config_dir.join("config.toml"),
+            "[profile]\nselected = \"workstation\"\n\n[search]\nrerank = \"off\"\n\n[cache.pack_l2]\nenabled = false\n",
+        )
+        .map_err(|error| format!("failed to write deterministic retrieval config: {error}"))
+    }
+
     fn seed_search_workspace(workspace: &Path, database: &Path) -> TestResult {
         if let Some(parent) = database.parent() {
             fs::create_dir_all(parent).map_err(|error| {
@@ -1265,6 +1368,7 @@ mod tests {
                 )
             })?;
         }
+        write_deterministic_retrieval_config(workspace)?;
 
         let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
@@ -1315,6 +1419,7 @@ mod tests {
                 )
             })?;
         }
+        write_deterministic_retrieval_config(workspace)?;
 
         let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
@@ -2179,6 +2284,7 @@ mod tests {
         })?;
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .env("EE_EMBED_DOWNLOAD", "off")
             .arg("--json")
             .arg("--workspace")
             .arg(&workspace)
@@ -2399,6 +2505,8 @@ mod tests {
         build_search_index(&workspace, &database, &index_dir)?;
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .env("EE_L2_PACK_CACHE_DISABLE", "1")
             .arg("--json")
             .arg("--workspace")
             .arg(&workspace)
@@ -2523,6 +2631,8 @@ mod tests {
         build_search_index(&workspace, &database, &index_dir)?;
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .env("EE_L2_PACK_CACHE_DISABLE", "1")
             .arg("--json")
             .arg("--workspace")
             .arg(&workspace)
@@ -2898,6 +3008,8 @@ mod tests {
         build_search_index(&workspace, &database, &index_dir)?;
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .env("EE_EMBED_DOWNLOAD", "off")
+            .env("EE_L2_PACK_CACHE_DISABLE", "1")
             .arg("--format")
             .arg("markdown")
             .arg("--workspace")
@@ -3407,7 +3519,7 @@ mod tests {
         })?;
 
         let workspace_id = compute_stable_workspace_id(&workspace);
-        let memory_id = "mem_00000000000000curatereason1";
+        let memory_id = "mem_00000000000000000000004201";
         let accept_id = "curate_00000000000000000reason01";
         let reject_id = "curate_00000000000000000reason02";
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
@@ -4164,7 +4276,7 @@ mod tests {
 
         run_json_stdout(&["--json", "--workspace", &workspace_arg, "init"], true)?;
 
-        let remember = run_json_stdout(
+        let remember = run_json_stdout_offline(
             &[
                 "--json",
                 "--workspace",
