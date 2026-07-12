@@ -76,6 +76,8 @@
 //! ```
 
 use asupersync::lab::{LabConfig, LabRuntime};
+use regex_lite::Regex;
+use serde_json::Value;
 
 /// Default seed for deterministic tests.
 ///
@@ -119,6 +121,267 @@ pub const TEST_DEGRADATION_CODE: &str = "test_degraded";
 /// Using `Result<(), String>` allows tests to use `?` for early returns
 /// and provides descriptive error messages on failure.
 pub type TestResult = Result<(), String>;
+
+/// Validate a JSON value against the bounded Draft 2020-12 keyword subset used
+/// by ee's checked-in public schemas.
+///
+/// This intentionally rejects unsupported external references and supports the
+/// scalar, object, collection, composition, local-reference, and RFC 3339
+/// constraints exercised by the repository's contract schemas.
+pub fn validate_json_schema_instance(value: &Value, schema: &Value) -> TestResult {
+    validate_json_schema_value(value, schema, schema, "$")
+}
+
+fn validate_json_schema_value(
+    value: &Value,
+    schema: &Value,
+    root_schema: &Value,
+    path: &str,
+) -> TestResult {
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let pointer = reference
+            .strip_prefix('#')
+            .ok_or_else(|| format!("unsupported non-local $ref {reference}"))?;
+        let target = root_schema
+            .pointer(pointer)
+            .ok_or_else(|| format!("unresolved $ref {reference}"))?;
+        return validate_json_schema_value(value, target, root_schema, path);
+    }
+
+    if let Some(options) = schema.get("oneOf").and_then(Value::as_array) {
+        let matches = options
+            .iter()
+            .filter(|candidate| {
+                validate_json_schema_value(value, candidate, root_schema, path).is_ok()
+            })
+            .count();
+        if matches != 1 {
+            return Err(format!(
+                "{path} matched {matches} oneOf branches instead of exactly one"
+            ));
+        }
+    }
+    if let Some(options) = schema.get("anyOf").and_then(Value::as_array)
+        && !options.iter().any(|candidate| {
+            validate_json_schema_value(value, candidate, root_schema, path).is_ok()
+        })
+    {
+        return Err(format!("{path} did not match any anyOf branch"));
+    }
+    if let Some(all_of) = schema.get("allOf").and_then(Value::as_array) {
+        for candidate in all_of {
+            validate_json_schema_value(value, candidate, root_schema, path)?;
+        }
+    }
+
+    if let Some(expected) = schema.get("const")
+        && value != expected
+    {
+        return Err(format!("{path} expected const {expected}, got {value}"));
+    }
+    if let Some(enum_values) = schema.get("enum").and_then(Value::as_array)
+        && !enum_values.iter().any(|candidate| candidate == value)
+    {
+        return Err(format!(
+            "{path} value {value} is not in enum {enum_values:?}"
+        ));
+    }
+
+    if let Some(expected_types) = json_schema_types(schema)
+        && !expected_types
+            .iter()
+            .any(|expected_type| json_schema_type_matches(value, expected_type))
+    {
+        return Err(format!(
+            "{path} expected type {expected_types:?}, got {}",
+            json_schema_type_name(value)
+        ));
+    }
+
+    if let Some(string) = value.as_str() {
+        let length = string.chars().count();
+        if let Some(min_length) = schema.get("minLength").and_then(Value::as_u64)
+            && length < min_length as usize
+        {
+            return Err(format!("{path} has fewer than {min_length} characters"));
+        }
+        if let Some(max_length) = schema.get("maxLength").and_then(Value::as_u64)
+            && length > max_length as usize
+        {
+            return Err(format!("{path} has more than {max_length} characters"));
+        }
+        if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
+            let regex = Regex::new(pattern).map_err(|error| {
+                format!("{path} schema has invalid pattern {pattern:?}: {error}")
+            })?;
+            if !regex.is_match(string) {
+                return Err(format!(
+                    "{path} value {string:?} does not match {pattern:?}"
+                ));
+            }
+        }
+        if schema.get("format").and_then(Value::as_str) == Some("date-time")
+            && chrono::DateTime::parse_from_rfc3339(string).is_err()
+        {
+            return Err(format!(
+                "{path} value {string:?} is not an RFC 3339 date-time"
+            ));
+        }
+    }
+
+    if let Some(number) = value.as_f64() {
+        if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64)
+            && number < minimum
+        {
+            return Err(format!("{path} value {number} is below minimum {minimum}"));
+        }
+        if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64)
+            && number > maximum
+        {
+            return Err(format!("{path} value {number} is above maximum {maximum}"));
+        }
+        if let Some(minimum) = schema.get("exclusiveMinimum").and_then(Value::as_f64)
+            && number <= minimum
+        {
+            return Err(format!(
+                "{path} value {number} is not above exclusive minimum {minimum}"
+            ));
+        }
+        if let Some(maximum) = schema.get("exclusiveMaximum").and_then(Value::as_f64)
+            && number >= maximum
+        {
+            return Err(format!(
+                "{path} value {number} is not below exclusive maximum {maximum}"
+            ));
+        }
+    }
+
+    if let Some(object) = value.as_object() {
+        if let Some(min_properties) = schema.get("minProperties").and_then(Value::as_u64)
+            && object.len() < min_properties as usize
+        {
+            return Err(format!("{path} has fewer than {min_properties} properties"));
+        }
+        if let Some(max_properties) = schema.get("maxProperties").and_then(Value::as_u64)
+            && object.len() > max_properties as usize
+        {
+            return Err(format!("{path} has more than {max_properties} properties"));
+        }
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            for field in required {
+                let field = field
+                    .as_str()
+                    .ok_or_else(|| format!("{path} schema required entry is not a string"))?;
+                if !object.contains_key(field) {
+                    return Err(format!("{path} missing required field {field}"));
+                }
+            }
+        }
+
+        let properties = schema.get("properties").and_then(Value::as_object);
+        for (key, child) in object {
+            let child_path = format!("{path}.{key}");
+            if let Some(property_schema) = properties.and_then(|entries| entries.get(key)) {
+                validate_json_schema_value(child, property_schema, root_schema, &child_path)?;
+                continue;
+            }
+            match schema.get("additionalProperties") {
+                Some(Value::Bool(false)) => {
+                    return Err(format!("{path} contains unexpected field {key}"));
+                }
+                Some(Value::Object(property_schema)) => validate_json_schema_value(
+                    child,
+                    &Value::Object(property_schema.clone()),
+                    root_schema,
+                    &child_path,
+                )?,
+                Some(Value::Bool(true)) | None => {}
+                Some(other) => {
+                    return Err(format!(
+                        "{path} has unsupported additionalProperties schema {other}"
+                    ));
+                }
+            }
+        }
+    }
+
+    if let Some(array) = value.as_array() {
+        if let Some(min_items) = schema.get("minItems").and_then(Value::as_u64)
+            && array.len() < min_items as usize
+        {
+            return Err(format!("{path} has fewer than {min_items} items"));
+        }
+        if let Some(max_items) = schema.get("maxItems").and_then(Value::as_u64)
+            && array.len() > max_items as usize
+        {
+            return Err(format!("{path} has more than {max_items} items"));
+        }
+        if schema.get("uniqueItems").and_then(Value::as_bool) == Some(true) {
+            for (index, item) in array.iter().enumerate() {
+                if array[..index].iter().any(|existing| existing == item) {
+                    return Err(format!("{path}[{index}] duplicates an earlier item"));
+                }
+            }
+        }
+        if let Some(prefix_items) = schema.get("prefixItems").and_then(Value::as_array) {
+            for (index, item_schema) in prefix_items.iter().enumerate() {
+                if let Some(item) = array.get(index) {
+                    validate_json_schema_value(
+                        item,
+                        item_schema,
+                        root_schema,
+                        &format!("{path}[{index}]"),
+                    )?;
+                }
+            }
+        }
+        if let Some(item_schema) = schema.get("items") {
+            for (index, item) in array.iter().enumerate() {
+                validate_json_schema_value(
+                    item,
+                    item_schema,
+                    root_schema,
+                    &format!("{path}[{index}]"),
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn json_schema_types(schema: &Value) -> Option<Vec<&str>> {
+    match schema.get("type")? {
+        Value::String(single) => Some(vec![single.as_str()]),
+        Value::Array(values) => Some(values.iter().filter_map(Value::as_str).collect()),
+        _ => None,
+    }
+}
+
+fn json_schema_type_matches(value: &Value, expected: &str) -> bool {
+    match expected {
+        "null" => value.is_null(),
+        "boolean" => value.is_boolean(),
+        "number" => value.is_number(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "string" => value.is_string(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        _ => false,
+    }
+}
+
+fn json_schema_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
 
 /// Assert that two values are equal, with context on failure.
 ///

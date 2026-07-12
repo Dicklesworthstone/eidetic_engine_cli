@@ -1,0 +1,503 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.pack.diff.v2.json",
+  "title": "ee.pack.diff.v2",
+  "description": "Authority-preserving comparison of two persisted pack-selection ledgers. V2 emits comparable item and derived-asset data only when both records pass central ledger integrity and record-binding verification; otherwise all comparison collections are empty and the summary is explicitly non-replayable.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "ee.pack.diff.v2"},
+    "success": {"const": true},
+    "data": {
+      "type": "object",
+      "required": ["command", "packA", "packB", "diff", "degraded"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {"const": "pack diff"},
+        "packA": {"$ref": "#/$defs/packRecord"},
+        "packB": {"$ref": "#/$defs/packRecord"},
+        "diff": {
+          "oneOf": [
+            {"$ref": "#/$defs/replayableDiff"},
+            {"$ref": "#/$defs/unreplayableDiff"}
+          ]
+        },
+        "degraded": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/degradation"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "packId": {
+      "type": "string",
+      "pattern": "^pack_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "workspaceId": {
+      "type": "string",
+      "pattern": "^wsp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "memoryId": {
+      "type": "string",
+      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "profile": {
+      "type": "string",
+      "enum": ["compact", "balanced", "grounding", "orientation", "thorough", "submodular"]
+    },
+    "nullableBlake3Hash": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/blake3Hash"}
+      ]
+    },
+    "packRecord": {
+      "oneOf": [
+        {"$ref": "#/$defs/verifiedPackRecord"},
+        {"$ref": "#/$defs/untrustedPackRecord"}
+      ]
+    },
+    "verifiedPackRecord": {
+      "type": "object",
+      "required": [
+        "id",
+        "workspaceId",
+        "query",
+        "profile",
+        "maxTokens",
+        "usedTokens",
+        "itemCount",
+        "omittedCount",
+        "packHash",
+        "createdAt",
+        "createdByHash",
+        "commandSurfaceHash",
+        "ledgerHash",
+        "ledgerHashPresent",
+        "recordMetadataVerified",
+        "ledgerStatus"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/packId"},
+        "workspaceId": {"$ref": "#/$defs/workspaceId"},
+        "query": {"$ref": "#/$defs/textRecord"},
+        "profile": {"$ref": "#/$defs/profile"},
+        "maxTokens": {"type": "integer", "minimum": 1},
+        "usedTokens": {"type": "integer", "minimum": 0},
+        "itemCount": {"type": "integer", "minimum": 0},
+        "omittedCount": {"type": "integer", "minimum": 0},
+        "packHash": {"$ref": "#/$defs/blake3Hash"},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "createdByHash": {"$ref": "#/$defs/nullableBlake3Hash"},
+        "commandSurfaceHash": {"$ref": "#/$defs/blake3Hash"},
+        "ledgerHash": {"$ref": "#/$defs/blake3Hash"},
+        "ledgerHashPresent": {"const": true},
+        "recordMetadataVerified": {"const": true},
+        "ledgerStatus": {"const": "available"}
+      }
+    },
+    "untrustedPackRecord": {
+      "type": "object",
+      "required": [
+        "id",
+        "workspaceId",
+        "query",
+        "profile",
+        "maxTokens",
+        "usedTokens",
+        "itemCount",
+        "omittedCount",
+        "packHash",
+        "createdAt",
+        "createdByHash",
+        "commandSurfaceHash",
+        "ledgerHash",
+        "ledgerHashPresent",
+        "recordMetadataVerified",
+        "ledgerStatus"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/packId"},
+        "workspaceId": {"type": "null"},
+        "query": {"type": "null"},
+        "profile": {"type": "null"},
+        "maxTokens": {"type": "null"},
+        "usedTokens": {"type": "null"},
+        "itemCount": {"type": "null"},
+        "omittedCount": {"type": "null"},
+        "packHash": {"type": "null"},
+        "createdAt": {"type": "null"},
+        "createdByHash": {"type": "null"},
+        "commandSurfaceHash": {"type": "null"},
+        "ledgerHash": {"type": "null"},
+        "ledgerHashPresent": {"type": "boolean"},
+        "recordMetadataVerified": {"const": false},
+        "ledgerStatus": {
+          "type": "string",
+          "enum": ["missing", "malformed", "hash_mismatch"]
+        }
+      }
+    },
+    "textRecord": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["hash", "redacted", "redactionReasons", "text", "redactedText"],
+          "additionalProperties": false,
+          "properties": {
+            "hash": {"$ref": "#/$defs/blake3Hash"},
+            "redacted": {"const": false},
+            "redactionReasons": {"type": "array", "maxItems": 0},
+            "text": {"type": "string", "minLength": 1},
+            "redactedText": {"type": "null"}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["hash", "redacted", "redactionReasons", "redactedText"],
+          "additionalProperties": false,
+          "properties": {
+            "hash": {"$ref": "#/$defs/blake3Hash"},
+            "redacted": {"const": true},
+            "redactionReasons": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "text": {"type": "null"},
+            "redactedText": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "replayableDiff": {
+      "type": "object",
+      "required": [
+        "summary",
+        "added",
+        "removed",
+        "changed",
+        "redactionChanges",
+        "degradationChanges",
+        "derivedAssetChanges",
+        "likelyCauses"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "summary": {"$ref": "#/$defs/replayableSummary"},
+        "added": {"type": "array", "items": {"$ref": "#/$defs/diffItem"}},
+        "removed": {"type": "array", "items": {"$ref": "#/$defs/diffItem"}},
+        "changed": {"type": "array", "items": {"$ref": "#/$defs/changedItem"}},
+        "redactionChanges": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/redactionChange"}
+        },
+        "degradationChanges": {"$ref": "#/$defs/degradationChanges"},
+        "derivedAssetChanges": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/derivedAssetChange"}
+        },
+        "likelyCauses": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/likelyCause"}
+        }
+      }
+    },
+    "unreplayableDiff": {
+      "type": "object",
+      "required": [
+        "summary",
+        "added",
+        "removed",
+        "changed",
+        "redactionChanges",
+        "degradationChanges",
+        "derivedAssetChanges",
+        "likelyCauses"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "summary": {"$ref": "#/$defs/unreplayableSummary"},
+        "added": {"type": "array", "maxItems": 0},
+        "removed": {"type": "array", "maxItems": 0},
+        "changed": {"type": "array", "maxItems": 0},
+        "redactionChanges": {"type": "array", "maxItems": 0},
+        "degradationChanges": {
+          "type": "object",
+          "required": ["added", "removed"],
+          "additionalProperties": false,
+          "properties": {
+            "added": {"type": "array", "maxItems": 0},
+            "removed": {"type": "array", "maxItems": 0}
+          }
+        },
+        "derivedAssetChanges": {"type": "array", "maxItems": 0},
+        "likelyCauses": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "prefixItems": [{"const": "ledger_unavailable_or_untrusted"}],
+          "items": false
+        }
+      }
+    },
+    "replayableSummary": {
+      "type": "object",
+      "required": [
+        "addedCount",
+        "removedCount",
+        "changedCount",
+        "redactionChangeCount",
+        "degradationAddedCount",
+        "degradationRemovedCount",
+        "derivedAssetChangeCount",
+        "hashMatch",
+        "queryMatch",
+        "profileMatch",
+        "tokenDelta",
+        "replayable"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "addedCount": {"type": "integer", "minimum": 0},
+        "removedCount": {"type": "integer", "minimum": 0},
+        "changedCount": {"type": "integer", "minimum": 0},
+        "redactionChangeCount": {"type": "integer", "minimum": 0},
+        "degradationAddedCount": {"type": "integer", "minimum": 0},
+        "degradationRemovedCount": {"type": "integer", "minimum": 0},
+        "derivedAssetChangeCount": {"type": "integer", "minimum": 0},
+        "hashMatch": {"type": "boolean"},
+        "queryMatch": {"type": "boolean"},
+        "profileMatch": {"type": "boolean"},
+        "tokenDelta": {"type": "integer"},
+        "replayable": {"const": true}
+      }
+    },
+    "unreplayableSummary": {
+      "type": "object",
+      "required": [
+        "addedCount",
+        "removedCount",
+        "changedCount",
+        "redactionChangeCount",
+        "degradationAddedCount",
+        "degradationRemovedCount",
+        "derivedAssetChangeCount",
+        "hashMatch",
+        "queryMatch",
+        "profileMatch",
+        "tokenDelta",
+        "replayable"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "addedCount": {"const": 0},
+        "removedCount": {"const": 0},
+        "changedCount": {"const": 0},
+        "redactionChangeCount": {"const": 0},
+        "degradationAddedCount": {"const": 0},
+        "degradationRemovedCount": {"const": 0},
+        "derivedAssetChangeCount": {"const": 0},
+        "hashMatch": {"type": "null"},
+        "queryMatch": {"type": "null"},
+        "profileMatch": {"type": "null"},
+        "tokenDelta": {"type": "null"},
+        "replayable": {"const": false}
+      }
+    },
+    "diffItem": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "rank",
+        "section",
+        "scores",
+        "redactionClasses",
+        "trustClass",
+        "trustSubclass",
+        "whyHash"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {"$ref": "#/$defs/memoryId"},
+        "rank": {"type": "integer", "minimum": 1},
+        "section": {
+          "type": "string",
+          "enum": ["procedural_rules", "decisions", "failures", "evidence", "artifacts"]
+        },
+        "scores": {
+          "type": "object",
+          "required": ["relevance", "utility"],
+          "additionalProperties": false,
+          "properties": {
+            "relevance": {"type": "number", "minimum": 0, "maximum": 1},
+            "utility": {"type": "number", "minimum": 0, "maximum": 1}
+          }
+        },
+        "redactionClasses": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "trustClass": {
+          "type": "string",
+          "enum": ["human_explicit", "agent_validated", "agent_assertion", "cass_evidence", "legacy_import"]
+        },
+        "trustSubclass": {"type": ["string", "null"]},
+        "whyHash": {"$ref": "#/$defs/blake3Hash"}
+      }
+    },
+    "changedItem": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "old",
+        "new",
+        "rankDelta",
+        "scoreDelta",
+        "sectionChanged",
+        "trustChanged",
+        "whyChanged",
+        "redactionChanged"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {"$ref": "#/$defs/memoryId"},
+        "old": {"$ref": "#/$defs/diffItem"},
+        "new": {"$ref": "#/$defs/diffItem"},
+        "rankDelta": {"type": "integer"},
+        "scoreDelta": {
+          "type": "object",
+          "required": ["relevance", "utility"],
+          "additionalProperties": false,
+          "properties": {
+            "relevance": {"type": "number"},
+            "utility": {"type": "number"}
+          }
+        },
+        "sectionChanged": {"type": "boolean"},
+        "trustChanged": {"type": "boolean"},
+        "whyChanged": {"type": "boolean"},
+        "redactionChanged": {"type": "boolean"}
+      }
+    },
+    "redactionChange": {
+      "type": "object",
+      "required": ["memoryId", "oldClasses", "newClasses"],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {"$ref": "#/$defs/memoryId"},
+        "oldClasses": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "newClasses": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "degradationChanges": {
+      "type": "object",
+      "required": ["added", "removed"],
+      "additionalProperties": false,
+      "properties": {
+        "added": {"type": "array", "items": {"$ref": "#/$defs/degradation"}},
+        "removed": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
+      }
+    },
+    "derivedAssetChange": {
+      "type": "object",
+      "required": ["asset", "old", "new"],
+      "additionalProperties": false,
+      "properties": {
+        "asset": {"type": "string", "enum": ["searchIndex", "graphSnapshot"]},
+        "old": {"$ref": "#/$defs/derivedAsset"},
+        "new": {"$ref": "#/$defs/derivedAsset"}
+      }
+    },
+    "derivedAsset": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["status", "manifestHash"],
+          "additionalProperties": false,
+          "properties": {
+            "status": {"const": "not_recorded"},
+            "manifestHash": {"type": "null"}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["status", "manifestHash"],
+          "additionalProperties": false,
+          "properties": {
+            "status": {"type": "string", "enum": ["available", "stale"]},
+            "manifestHash": {"$ref": "#/$defs/blake3Hash"}
+          }
+        }
+      ]
+    },
+    "likelyCause": {
+      "type": "string",
+      "enum": [
+        "ledger_unavailable_or_untrusted",
+        "query_changed",
+        "profile_changed",
+        "budget_changed",
+        "derived_asset_changed",
+        "degradation_changed",
+        "redaction_changed",
+        "selection_changed",
+        "no_change",
+        "memory_or_index_state_changed"
+      ]
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "message", "severity"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "repair": {"type": ["string", "null"]},
+        "details": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+            }
+          ]
+        }
+      },
+      "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

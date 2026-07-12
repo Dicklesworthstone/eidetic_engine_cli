@@ -1,0 +1,622 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.pack.replay.v2.json",
+  "title": "ee.pack.replay.v2",
+  "description": "Redaction-safe replay of an integrity-verified persisted pack-selection ledger. V2 exposes only centrally verified record metadata, a public ledger projection with actor and diversity identifiers hashed, and a bounded attestation surface manifest. Unavailable or untrusted ledgers fail closed with null metadata and empty item arrays.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "ee.pack.replay.v2"},
+    "success": {"const": true},
+    "data": {
+      "type": "object",
+      "required": ["command", "pack", "replay", "attestationBundle", "degraded"],
+      "additionalProperties": false,
+      "properties": {
+        "command": {"const": "pack replay"},
+        "pack": {"$ref": "#/$defs/packRecord"},
+        "replay": {"$ref": "#/$defs/replay"},
+        "attestationBundle": {"$ref": "#/$defs/attestationSurfaceManifest"},
+        "degraded": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/degradation"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "packId": {
+      "type": "string",
+      "pattern": "^pack_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "workspaceId": {
+      "type": "string",
+      "pattern": "^wsp_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "memoryId": {
+      "type": "string",
+      "pattern": "^mem_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "profile": {
+      "type": "string",
+      "enum": ["compact", "balanced", "grounding", "orientation", "thorough", "submodular"]
+    },
+    "nullableBlake3Hash": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/blake3Hash"}
+      ]
+    },
+    "packRecord": {
+      "oneOf": [
+        {"$ref": "#/$defs/verifiedPackRecord"},
+        {"$ref": "#/$defs/untrustedPackRecord"}
+      ]
+    },
+    "verifiedPackRecord": {
+      "type": "object",
+      "required": [
+        "id",
+        "workspaceId",
+        "query",
+        "profile",
+        "maxTokens",
+        "usedTokens",
+        "itemCount",
+        "omittedCount",
+        "packHash",
+        "createdAt",
+        "createdByHash",
+        "commandSurfaceHash",
+        "ledgerHash",
+        "ledgerHashPresent",
+        "recordMetadataVerified",
+        "ledgerStatus"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/packId"},
+        "workspaceId": {"$ref": "#/$defs/workspaceId"},
+        "query": {"$ref": "#/$defs/textRecord"},
+        "profile": {"$ref": "#/$defs/profile"},
+        "maxTokens": {"type": "integer", "minimum": 1},
+        "usedTokens": {"type": "integer", "minimum": 0},
+        "itemCount": {"type": "integer", "minimum": 0},
+        "omittedCount": {"type": "integer", "minimum": 0},
+        "packHash": {"$ref": "#/$defs/blake3Hash"},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "createdByHash": {"$ref": "#/$defs/nullableBlake3Hash"},
+        "commandSurfaceHash": {"$ref": "#/$defs/blake3Hash"},
+        "ledgerHash": {"$ref": "#/$defs/blake3Hash"},
+        "ledgerHashPresent": {"const": true},
+        "recordMetadataVerified": {"const": true},
+        "ledgerStatus": {"const": "available"}
+      }
+    },
+    "untrustedPackRecord": {
+      "type": "object",
+      "required": [
+        "id",
+        "workspaceId",
+        "query",
+        "profile",
+        "maxTokens",
+        "usedTokens",
+        "itemCount",
+        "omittedCount",
+        "packHash",
+        "createdAt",
+        "createdByHash",
+        "commandSurfaceHash",
+        "ledgerHash",
+        "ledgerHashPresent",
+        "recordMetadataVerified",
+        "ledgerStatus"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/packId"},
+        "workspaceId": {"type": "null"},
+        "query": {"type": "null"},
+        "profile": {"type": "null"},
+        "maxTokens": {"type": "null"},
+        "usedTokens": {"type": "null"},
+        "itemCount": {"type": "null"},
+        "omittedCount": {"type": "null"},
+        "packHash": {"type": "null"},
+        "createdAt": {"type": "null"},
+        "createdByHash": {"type": "null"},
+        "commandSurfaceHash": {"type": "null"},
+        "ledgerHash": {"type": "null"},
+        "ledgerHashPresent": {"type": "boolean"},
+        "recordMetadataVerified": {"const": false},
+        "ledgerStatus": {
+          "type": "string",
+          "enum": ["missing", "malformed", "hash_mismatch"]
+        }
+      }
+    },
+    "replay": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["status", "ledger", "selectedItems", "omittedItems", "degraded"],
+          "additionalProperties": false,
+          "properties": {
+            "status": {"const": "available"},
+            "ledger": {"$ref": "#/$defs/publicLedgerProjection"},
+            "selectedItems": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/selectedItem"}
+            },
+            "omittedItems": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/omittedItem"}
+            },
+            "degraded": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/degradation"}
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["status", "ledger", "selectedItems", "omittedItems", "degraded"],
+          "additionalProperties": false,
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["missing", "malformed", "hash_mismatch"]
+            },
+            "ledger": {"type": "null"},
+            "selectedItems": {"type": "array", "maxItems": 0},
+            "omittedItems": {"type": "array", "maxItems": 0},
+            "degraded": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/degradation"}
+            }
+          }
+        }
+      ]
+    },
+    "publicLedgerProjection": {
+      "type": "object",
+      "required": [
+        "schema",
+        "packId",
+        "packHash",
+        "workspaceId",
+        "createdAt",
+        "commandSurfaceHash",
+        "request",
+        "database",
+        "derivedAssets",
+        "candidateCounts",
+        "selectedItems",
+        "omittedItems",
+        "degraded",
+        "sourceLedgerHash",
+        "projectionSchema",
+        "projectionRedacted"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "ee.pack_replay_ledger.v1"},
+        "packId": {"$ref": "#/$defs/packId"},
+        "packHash": {"$ref": "#/$defs/blake3Hash"},
+        "workspaceId": {"$ref": "#/$defs/workspaceId"},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "createdByHash": {"$ref": "#/$defs/blake3Hash"},
+        "commandSurfaceHash": {"$ref": "#/$defs/blake3Hash"},
+        "taskLens": {"$ref": "#/$defs/taskLens"},
+        "request": {"$ref": "#/$defs/request"},
+        "database": {"$ref": "#/$defs/database"},
+        "derivedAssets": {"$ref": "#/$defs/derivedAssets"},
+        "candidateCounts": {"$ref": "#/$defs/candidateCounts"},
+        "selectedItems": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/selectedItem"}
+        },
+        "omittedItems": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/omittedItem"}
+        },
+        "degraded": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/degradation"}
+        },
+        "sourceLedgerHash": {"$ref": "#/$defs/blake3Hash"},
+        "projectionSchema": {"const": "ee.pack_replay_ledger_projection.v1"},
+        "projectionRedacted": {"const": true}
+      }
+    },
+    "taskLens": {
+      "type": "object",
+      "required": ["id", "version", "lensHash"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "integer", "minimum": 1},
+        "lensHash": {"$ref": "#/$defs/blake3Hash"}
+      }
+    },
+    "request": {
+      "type": "object",
+      "required": ["query", "profile", "maxTokens"],
+      "additionalProperties": false,
+      "properties": {
+        "query": {"$ref": "#/$defs/textRecord"},
+        "profile": {"$ref": "#/$defs/profile"},
+        "maxTokens": {"type": "integer", "minimum": 1}
+      }
+    },
+    "textRecord": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["hash", "redacted", "redactionReasons", "text", "redactedText"],
+          "additionalProperties": false,
+          "properties": {
+            "hash": {"$ref": "#/$defs/blake3Hash"},
+            "redacted": {"const": false},
+            "redactionReasons": {"type": "array", "maxItems": 0},
+            "text": {"type": "string", "minLength": 1},
+            "redactedText": {"type": "null"}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["hash", "redacted", "redactionReasons", "redactedText"],
+          "additionalProperties": false,
+          "properties": {
+            "hash": {"$ref": "#/$defs/blake3Hash"},
+            "redacted": {"const": true},
+            "redactionReasons": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "text": {"type": "null"},
+            "redactedText": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "database": {
+      "type": "object",
+      "required": ["schemaVersion", "generation"],
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {"type": "integer", "minimum": 0},
+        "generation": {"type": "integer", "minimum": 0}
+      }
+    },
+    "derivedAssets": {
+      "type": "object",
+      "required": ["searchIndex", "graphSnapshot"],
+      "additionalProperties": false,
+      "properties": {
+        "searchIndex": {"$ref": "#/$defs/derivedAsset"},
+        "graphSnapshot": {"$ref": "#/$defs/derivedAsset"}
+      }
+    },
+    "derivedAsset": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["status", "manifestHash"],
+          "additionalProperties": false,
+          "properties": {
+            "status": {"const": "not_recorded"},
+            "manifestHash": {"type": "null"}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["status", "manifestHash"],
+          "additionalProperties": false,
+          "properties": {
+            "status": {"type": "string", "enum": ["available", "stale"]},
+            "manifestHash": {"$ref": "#/$defs/blake3Hash"}
+          }
+        }
+      ]
+    },
+    "candidateCounts": {
+      "type": "object",
+      "required": ["selected", "omitted", "candidatePool"],
+      "additionalProperties": false,
+      "properties": {
+        "selected": {"type": "integer", "minimum": 0},
+        "omitted": {"type": "integer", "minimum": 0},
+        "candidatePool": {"type": "integer", "minimum": 0}
+      }
+    },
+    "selectedItem": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "rank",
+        "section",
+        "estimatedTokens",
+        "scores",
+        "why",
+        "trustClass",
+        "trustSubclass",
+        "provenance",
+        "redactionClasses",
+        "freshness"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {"$ref": "#/$defs/memoryId"},
+        "rank": {"type": "integer", "minimum": 1},
+        "section": {
+          "type": "string",
+          "enum": ["procedural_rules", "decisions", "failures", "evidence", "artifacts"]
+        },
+        "estimatedTokens": {"type": "integer", "minimum": 1},
+        "scores": {"$ref": "#/$defs/scores"},
+        "why": {"$ref": "#/$defs/textRecord"},
+        "diversityKeyHash": {"$ref": "#/$defs/blake3Hash"},
+        "trustClass": {
+          "type": "string",
+          "enum": ["human_explicit", "agent_validated", "agent_assertion", "cass_evidence", "legacy_import"]
+        },
+        "trustSubclass": {"type": ["string", "null"]},
+        "provenance": {"$ref": "#/$defs/provenance"},
+        "redactionClasses": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "freshness": {"const": "unavailable"}
+      }
+    },
+    "scores": {
+      "type": "object",
+      "required": ["relevance", "utility"],
+      "additionalProperties": false,
+      "properties": {
+        "relevance": {"type": "number", "minimum": 0, "maximum": 1},
+        "utility": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "provenance": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["hash", "redacted", "redactionReasons"],
+          "additionalProperties": false,
+          "properties": {
+            "hash": {"$ref": "#/$defs/blake3Hash"},
+            "redacted": {"const": false},
+            "redactionReasons": {"type": "array", "maxItems": 0}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["hash", "redacted", "redactionReasons"],
+          "additionalProperties": false,
+          "properties": {
+            "hash": {"$ref": "#/$defs/blake3Hash"},
+            "redacted": {"const": true},
+            "redactionReasons": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      ]
+    },
+    "omittedItem": {
+      "type": "object",
+      "required": ["memoryId", "estimatedTokens", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {"$ref": "#/$defs/memoryId"},
+        "estimatedTokens": {"type": "integer", "minimum": 1},
+        "reason": {
+          "type": "string",
+          "enum": [
+            "token_budget_exceeded",
+            "redundant_candidate",
+            "below_relevance_floor",
+            "excluded_by_policy",
+            "excluded_by_filter",
+            "contradiction_suppressed"
+          ]
+        }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "message", "severity"],
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "message": {"type": "string", "minLength": 1},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "repair": {"type": ["string", "null"]},
+        "details": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+            }
+          ]
+        }
+      },
+      "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+    },
+    "attestationSurfaceManifest": {
+      "oneOf": [
+        {"$ref": "#/$defs/availableAttestationSurfaceManifest"},
+        {"$ref": "#/$defs/unavailableAttestationSurfaceManifest"}
+      ]
+    },
+    "availableAttestationSurfaceManifest": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "sourceSchema",
+        "bundleHash",
+        "subject",
+        "evidenceManifest",
+        "redactionManifest",
+        "hashManifest",
+        "omissions",
+        "trustStatement"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "ee.attestation.surface_manifest.v1"},
+        "status": {"const": "available"},
+        "sourceSchema": {"const": "ee.attestation.bundle.v1"},
+        "bundleHash": {"$ref": "#/$defs/blake3Hash"},
+        "subject": {
+          "type": "object",
+          "required": ["kind", "id", "contentHashCount", "contentHashLabels"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {"const": "pack"},
+            "id": {"$ref": "#/$defs/packId"},
+            "contentHashCount": {"type": "integer", "minimum": 0},
+            "contentHashLabels": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "evidenceManifest": {
+          "type": "object",
+          "required": ["entryCount", "kinds", "schemas", "contentHashes", "chainHashes", "provenanceUriIncluded"],
+          "additionalProperties": false,
+          "properties": {
+            "entryCount": {"type": "integer", "minimum": 0},
+            "kinds": {
+              "type": "object",
+              "additionalProperties": {"type": "integer", "minimum": 0}
+            },
+            "schemas": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "contentHashes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/blake3Hash"}
+            },
+            "chainHashes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/blake3Hash"}
+            },
+            "provenanceUriIncluded": {"type": "boolean"}
+          }
+        },
+        "redactionManifest": {
+          "type": "object",
+          "required": ["policy", "entryCount", "fields", "classes", "replacementHashes"],
+          "additionalProperties": false,
+          "properties": {
+            "policy": {"const": "ee.policy.secret_redaction.v1"},
+            "entryCount": {"type": "integer", "minimum": 0},
+            "fields": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "classes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "replacementHashes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/blake3Hash"}
+            }
+          }
+        },
+        "hashManifest": {
+          "type": "object",
+          "required": ["entryCount", "labels", "hashes"],
+          "additionalProperties": false,
+          "properties": {
+            "entryCount": {"type": "integer", "minimum": 0},
+            "labels": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "hashes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/blake3Hash"}
+            }
+          }
+        },
+        "omissions": {
+          "type": "object",
+          "required": ["count", "fields"],
+          "additionalProperties": false,
+          "properties": {
+            "count": {"type": "integer", "minimum": 0},
+            "fields": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "trustStatement": {
+          "type": "object",
+          "required": ["scope"],
+          "additionalProperties": false,
+          "properties": {
+            "scope": {"const": "local_ee_custody"}
+          }
+        }
+      }
+    },
+    "unavailableAttestationSurfaceManifest": {
+      "type": "object",
+      "required": ["schema", "status", "reason", "bundleHash"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "ee.attestation.surface_manifest.v1"},
+        "status": {"const": "unavailable"},
+        "reason": {
+          "type": "string",
+          "enum": ["ledger_unavailable_or_untrusted", "pack_not_found", "attestation_query_failed"]
+        },
+        "bundleHash": {"type": "null"}
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

@@ -1,0 +1,749 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.support_bundle.pack_replay_summary.v2.json",
+  "title": "ee.support_bundle.pack_replay_summary.v2",
+  "description": "Bounded, redaction-safe support-bundle summary of workspace pack records. V2 emits IDs, canonical hashes, counts, codes, derived-asset metadata, and compact attestation manifests only after central replay-ledger verification; unavailable records and untrusted ledgers project no record metadata or ledger content.",
+  "type": "object",
+  "required": [
+    "schema",
+    "sourceSchema",
+    "source",
+    "status",
+    "redactionStatus",
+    "limits",
+    "database",
+    "packs",
+    "summaryHash"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "ee.support_bundle.pack_replay_summary.v2"},
+    "sourceSchema": {"const": "ee.pack_replay_ledger.v1"},
+    "source": {"const": "workspace_pack_records"},
+    "status": {
+      "type": "string",
+      "enum": [
+        "available",
+        "partial",
+        "database_missing",
+        "database_unreadable",
+        "workspace_missing",
+        "query_failed"
+      ]
+    },
+    "redactionStatus": {
+      "const": "ids_hashes_counts_codes_only_no_query_text_no_memory_content"
+    },
+    "limits": {
+      "type": "object",
+      "required": ["maxPacks"],
+      "additionalProperties": false,
+      "properties": {
+        "maxPacks": {"const": 16}
+      }
+    },
+    "database": {"$ref": "#/$defs/databaseSummary"},
+    "packs": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"$ref": "#/$defs/packSummary"}
+    },
+    "summaryHash": {"$ref": "#/$defs/blake3Hash"}
+  },
+  "$defs": {
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "packId": {
+      "type": "string",
+      "pattern": "^pack_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "safePackId": {
+      "$ref": "#/$defs/packId"
+    },
+    "profile": {
+      "type": "string",
+      "enum": ["compact", "balanced", "grounding", "orientation", "thorough", "submodular"]
+    },
+    "databaseSummary": {
+      "type": "object",
+      "required": [
+        "present",
+        "readable",
+        "workspaceRowPresent",
+        "schemaVersion",
+        "packRecordCount",
+        "summarizedPackCount",
+        "ledgerAvailableCount",
+        "ledgerMissingCount",
+        "ledgerMalformedCount",
+        "ledgerHashMismatchCount",
+        "recordUnavailableCount",
+        "summaryTruncated",
+        "unsummarizedPackCount"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "present": {"type": "boolean"},
+        "readable": {"type": "boolean"},
+        "workspaceRowPresent": {"type": "boolean"},
+        "schemaVersion": {"type": ["integer", "null"], "minimum": 0},
+        "packRecordCount": {"type": "integer", "minimum": 0},
+        "summarizedPackCount": {"type": "integer", "minimum": 0, "maximum": 16},
+        "ledgerAvailableCount": {"type": "integer", "minimum": 0, "maximum": 16},
+        "ledgerMissingCount": {"type": "integer", "minimum": 0, "maximum": 16},
+        "ledgerMalformedCount": {"type": "integer", "minimum": 0, "maximum": 16},
+        "ledgerHashMismatchCount": {"type": "integer", "minimum": 0, "maximum": 16},
+        "recordUnavailableCount": {"type": "integer", "minimum": 0, "maximum": 16},
+        "summaryTruncated": {"type": "boolean"},
+        "unsummarizedPackCount": {"type": "integer", "minimum": 0}
+      }
+    },
+    "packSummary": {
+      "oneOf": [
+        {"$ref": "#/$defs/verifiedPackSummary"},
+        {"$ref": "#/$defs/untrustedPackSummary"},
+        {"$ref": "#/$defs/unavailablePackSummary"}
+      ]
+    },
+    "verifiedPackSummary": {
+      "type": "object",
+      "required": [
+        "packId",
+        "packHash",
+        "ledgerHash",
+        "ledgerHashPresent",
+        "recordMetadataVerified",
+        "createdAt",
+        "createdByHash",
+        "profile",
+        "maxTokens",
+        "usedTokens",
+        "itemCount",
+        "omittedCount",
+        "queryTextIncluded",
+        "queryHash",
+        "attestationBundle",
+        "ledger"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "packId": {"$ref": "#/$defs/packId"},
+        "packHash": {"$ref": "#/$defs/blake3Hash"},
+        "ledgerHash": {"$ref": "#/$defs/blake3Hash"},
+        "ledgerHashPresent": {"const": true},
+        "recordMetadataVerified": {"const": true},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "createdByHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/blake3Hash"}
+          ]
+        },
+        "profile": {"$ref": "#/$defs/profile"},
+        "maxTokens": {"type": "integer", "minimum": 1},
+        "usedTokens": {"type": "integer", "minimum": 0},
+        "itemCount": {"type": "integer", "minimum": 0},
+        "omittedCount": {"type": "integer", "minimum": 0},
+        "queryTextIncluded": {"const": false},
+        "queryHash": {"$ref": "#/$defs/blake3Hash"},
+        "attestationBundle": {"$ref": "#/$defs/attestationSurfaceManifest"},
+        "ledger": {"$ref": "#/$defs/availableLedgerSummary"}
+      }
+    },
+    "untrustedPackSummary": {
+      "type": "object",
+      "required": [
+        "packId",
+        "packHash",
+        "ledgerHash",
+        "ledgerHashPresent",
+        "recordMetadataVerified",
+        "createdAt",
+        "createdByHash",
+        "profile",
+        "maxTokens",
+        "usedTokens",
+        "itemCount",
+        "omittedCount",
+        "queryTextIncluded",
+        "queryHash",
+        "attestationBundle",
+        "ledger"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "packId": {"$ref": "#/$defs/safePackId"},
+        "packHash": {"type": "null"},
+        "ledgerHash": {"type": "null"},
+        "ledgerHashPresent": {"type": "boolean"},
+        "recordMetadataVerified": {"const": false},
+        "createdAt": {"type": "null"},
+        "createdByHash": {"type": "null"},
+        "profile": {"type": "null"},
+        "maxTokens": {"type": "null"},
+        "usedTokens": {"type": "null"},
+        "itemCount": {"type": "null"},
+        "omittedCount": {"type": "null"},
+        "queryTextIncluded": {"const": false},
+        "queryHash": {"type": "null"},
+        "attestationBundle": {
+          "allOf": [
+            {"$ref": "#/$defs/unavailableAttestationSurfaceManifest"},
+            {
+              "type": "object",
+              "properties": {
+                "reason": {"const": "ledger_unavailable_or_untrusted"}
+              }
+            }
+          ]
+        },
+        "ledger": {"$ref": "#/$defs/untrustedLedgerSummary"}
+      }
+    },
+    "unavailablePackSummary": {
+      "type": "object",
+      "required": [
+        "packId",
+        "packHash",
+        "ledgerHash",
+        "ledgerHashPresent",
+        "recordMetadataVerified",
+        "createdAt",
+        "createdByHash",
+        "profile",
+        "maxTokens",
+        "usedTokens",
+        "itemCount",
+        "omittedCount",
+        "queryTextIncluded",
+        "queryHash",
+        "attestationBundle",
+        "ledger"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "packId": {"$ref": "#/$defs/safePackId"},
+        "packHash": {"type": "null"},
+        "ledgerHash": {"type": "null"},
+        "ledgerHashPresent": {"const": false},
+        "recordMetadataVerified": {"const": false},
+        "createdAt": {"type": "null"},
+        "createdByHash": {"type": "null"},
+        "profile": {"type": "null"},
+        "maxTokens": {"type": "null"},
+        "usedTokens": {"type": "null"},
+        "itemCount": {"type": "null"},
+        "omittedCount": {"type": "null"},
+        "queryTextIncluded": {"const": false},
+        "queryHash": {"type": "null"},
+        "attestationBundle": {
+          "oneOf": [
+            {
+              "allOf": [
+                {"$ref": "#/$defs/unavailableAttestationSurfaceManifest"},
+                {"type": "object", "properties": {"reason": {"const": "pack_record_missing"}}}
+              ]
+            },
+            {
+              "allOf": [
+                {"$ref": "#/$defs/unavailableAttestationSurfaceManifest"},
+                {"type": "object", "properties": {"reason": {"const": "pack_record_query_failed"}}}
+              ]
+            },
+            {
+              "allOf": [
+                {"$ref": "#/$defs/unavailableAttestationSurfaceManifest"},
+                {"type": "object", "properties": {"reason": {"const": "pack_record_workspace_mismatch"}}}
+              ]
+            }
+          ]
+        },
+        "ledger": {"$ref": "#/$defs/recordUnavailableLedgerSummary"}
+      }
+    },
+    "availableLedgerSummary": {
+      "type": "object",
+      "required": [
+        "status",
+        "hashVerified",
+        "schema",
+        "storage",
+        "selectedItemCount",
+        "omittedItemCount",
+        "freshnessStates",
+        "redactionClasses",
+        "degradationCodes",
+        "derivedAssets",
+        "database",
+        "candidateCounts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"const": "available"},
+        "hashVerified": {"const": true},
+        "schema": {"const": "ee.pack_replay_ledger.v1"},
+        "storage": {"$ref": "#/$defs/verifiedStorageSummary"},
+        "selectedItemCount": {"type": "integer", "minimum": 0},
+        "omittedItemCount": {"type": "integer", "minimum": 0},
+        "freshnessStates": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "unavailable": {"type": "integer", "minimum": 1}
+          }
+        },
+        "redactionClasses": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "degradationCodes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "derivedAssets": {"$ref": "#/$defs/derivedAssets"},
+        "database": {"$ref": "#/$defs/ledgerDatabase"},
+        "candidateCounts": {"$ref": "#/$defs/candidateCounts"}
+      }
+    },
+    "untrustedLedgerSummary": {
+      "type": "object",
+      "required": [
+        "status",
+        "hashVerified",
+        "schema",
+        "storage",
+        "selectedItemCount",
+        "omittedItemCount",
+        "freshnessStates",
+        "redactionClasses",
+        "degradationCodes",
+        "derivedAssets",
+        "database",
+        "candidateCounts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"type": "string", "enum": ["missing", "malformed", "hash_mismatch"]},
+        "hashVerified": {"const": false},
+        "schema": {"type": "null"},
+        "storage": {"$ref": "#/$defs/storageSummary"},
+        "selectedItemCount": {"const": 0},
+        "omittedItemCount": {"const": 0},
+        "freshnessStates": {"$ref": "#/$defs/emptyObject"},
+        "redactionClasses": {"type": "array", "maxItems": 0},
+        "degradationCodes": {"type": "array", "maxItems": 0},
+        "derivedAssets": {"$ref": "#/$defs/emptyObject"},
+        "database": {"$ref": "#/$defs/emptyObject"},
+        "candidateCounts": {"$ref": "#/$defs/emptyObject"}
+      }
+    },
+    "recordUnavailableLedgerSummary": {
+      "type": "object",
+      "required": [
+        "status",
+        "reason",
+        "hashVerified",
+        "schema",
+        "storage",
+        "selectedItemCount",
+        "omittedItemCount",
+        "freshnessStates",
+        "redactionClasses",
+        "degradationCodes",
+        "derivedAssets",
+        "database",
+        "candidateCounts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"const": "record_unavailable"},
+        "reason": {
+          "type": "string",
+          "enum": [
+            "pack_record_missing",
+            "pack_record_query_failed",
+            "pack_record_workspace_mismatch"
+          ]
+        },
+        "hashVerified": {"const": false},
+        "schema": {"type": "null"},
+        "storage": {
+          "allOf": [
+            {"$ref": "#/$defs/storageSummary"},
+            {"type": "object", "properties": {"mode": {"const": "missing"}}}
+          ]
+        },
+        "selectedItemCount": {"const": 0},
+        "omittedItemCount": {"const": 0},
+        "freshnessStates": {"$ref": "#/$defs/emptyObject"},
+        "redactionClasses": {"type": "array", "maxItems": 0},
+        "degradationCodes": {"type": "array", "maxItems": 0},
+        "derivedAssets": {"$ref": "#/$defs/emptyObject"},
+        "database": {"$ref": "#/$defs/emptyObject"},
+        "candidateCounts": {"$ref": "#/$defs/emptyObject"}
+      }
+    },
+    "emptyObject": {
+      "type": "object",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "storageSummary": {
+      "oneOf": [
+        {"$ref": "#/$defs/missingStorageSummary"},
+        {"$ref": "#/$defs/oversizedStorageSummary"},
+        {"$ref": "#/$defs/malformedStorageSummary"},
+        {"$ref": "#/$defs/compressedStorageSummary"},
+        {"$ref": "#/$defs/uncompressedStorageSummary"},
+        {"$ref": "#/$defs/unrecognizedStorageSummary"}
+      ]
+    },
+    "verifiedStorageSummary": {
+      "oneOf": [
+        {"$ref": "#/$defs/uncompressedStorageSummary"},
+        {"$ref": "#/$defs/verifiedCompressedStorageSummary"}
+      ]
+    },
+    "missingStorageSummary": {
+      "type": "object",
+      "required": ["mode", "schema", "algorithm", "compressedBytes", "uncompressedBytes", "payloadIncluded"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"const": "missing"},
+        "schema": {"type": "null"},
+        "algorithm": {"type": "null"},
+        "compressedBytes": {"type": "null"},
+        "uncompressedBytes": {"type": "null"},
+        "payloadIncluded": {"const": false}
+      }
+    },
+    "oversizedStorageSummary": {
+      "type": "object",
+      "required": [
+        "mode",
+        "schema",
+        "algorithm",
+        "compressedBytes",
+        "uncompressedBytes",
+        "storedBytes",
+        "maxStoredBytes",
+        "payloadIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"const": "oversized"},
+        "schema": {"const": "ee.pack_replay_ledger.oversized.v1"},
+        "algorithm": {"type": "null"},
+        "compressedBytes": {"type": "null"},
+        "uncompressedBytes": {"type": "null"},
+        "storedBytes": {"type": ["integer", "null"], "minimum": 0},
+        "maxStoredBytes": {"const": 3145728},
+        "payloadIncluded": {"const": false}
+      }
+    },
+    "malformedStorageSummary": {
+      "type": "object",
+      "required": ["mode", "schema", "algorithm", "compressedBytes", "uncompressedBytes", "payloadIncluded"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"const": "malformed"},
+        "schema": {"type": "null"},
+        "algorithm": {"type": "null"},
+        "compressedBytes": {"type": "null"},
+        "uncompressedBytes": {"type": "integer", "minimum": 0},
+        "payloadIncluded": {"const": false}
+      }
+    },
+    "compressedStorageSummary": {
+      "type": "object",
+      "required": [
+        "mode",
+        "schema",
+        "algorithm",
+        "algorithmRecognized",
+        "compressedBytes",
+        "uncompressedBytes",
+        "payloadIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"const": "compressed_in_row"},
+        "schema": {"const": "ee.pack_replay_ledger.compressed.v1"},
+        "algorithm": {
+          "type": ["string", "null"],
+          "enum": ["zstd_frame_v1", null]
+        },
+        "algorithmRecognized": {"type": "boolean"},
+        "compressedBytes": {"type": ["integer", "null"], "minimum": 0},
+        "uncompressedBytes": {"type": ["integer", "null"], "minimum": 0},
+        "payloadIncluded": {"const": false}
+      }
+    },
+    "verifiedCompressedStorageSummary": {
+      "type": "object",
+      "required": [
+        "mode",
+        "schema",
+        "algorithm",
+        "algorithmRecognized",
+        "compressedBytes",
+        "uncompressedBytes",
+        "payloadIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"const": "compressed_in_row"},
+        "schema": {"const": "ee.pack_replay_ledger.compressed.v1"},
+        "algorithm": {"const": "zstd_frame_v1"},
+        "algorithmRecognized": {"const": true},
+        "compressedBytes": {"type": "integer", "minimum": 0, "maximum": 2097152},
+        "uncompressedBytes": {"type": "integer", "minimum": 0, "maximum": 8388608},
+        "payloadIncluded": {"const": false}
+      }
+    },
+    "uncompressedStorageSummary": {
+      "type": "object",
+      "required": ["mode", "schema", "algorithm", "compressedBytes", "uncompressedBytes", "payloadIncluded"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"const": "uncompressed_in_row"},
+        "schema": {"const": "ee.pack_replay_ledger.v1"},
+        "algorithm": {"type": "null"},
+        "compressedBytes": {"type": "null"},
+        "uncompressedBytes": {"type": "integer", "minimum": 0},
+        "payloadIncluded": {"const": false}
+      }
+    },
+    "unrecognizedStorageSummary": {
+      "type": "object",
+      "required": [
+        "mode",
+        "schema",
+        "schemaRecognized",
+        "algorithm",
+        "compressedBytes",
+        "uncompressedBytes",
+        "payloadIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"const": "unrecognized"},
+        "schema": {"type": "null"},
+        "schemaRecognized": {"const": false},
+        "algorithm": {"type": "null"},
+        "compressedBytes": {"type": "null"},
+        "uncompressedBytes": {"type": "integer", "minimum": 0},
+        "payloadIncluded": {"const": false}
+      }
+    },
+    "derivedAssets": {
+      "type": "object",
+      "required": ["searchIndex", "graphSnapshot"],
+      "additionalProperties": false,
+      "properties": {
+        "searchIndex": {"$ref": "#/$defs/derivedAsset"},
+        "graphSnapshot": {"$ref": "#/$defs/derivedAsset"}
+      }
+    },
+    "derivedAsset": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["status", "manifestHash"],
+          "additionalProperties": false,
+          "properties": {
+            "status": {"const": "not_recorded"},
+            "manifestHash": {"type": "null"}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["status", "manifestHash"],
+          "additionalProperties": false,
+          "properties": {
+            "status": {"type": "string", "enum": ["available", "stale"]},
+            "manifestHash": {"$ref": "#/$defs/blake3Hash"}
+          }
+        }
+      ]
+    },
+    "ledgerDatabase": {
+      "type": "object",
+      "required": ["schemaVersion", "generation"],
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {"type": "integer", "minimum": 0},
+        "generation": {"type": "integer", "minimum": 0}
+      }
+    },
+    "candidateCounts": {
+      "type": "object",
+      "required": ["selected", "omitted", "candidatePool"],
+      "additionalProperties": false,
+      "properties": {
+        "selected": {"type": "integer", "minimum": 0},
+        "omitted": {"type": "integer", "minimum": 0},
+        "candidatePool": {"type": "integer", "minimum": 0}
+      }
+    },
+    "attestationSurfaceManifest": {
+      "oneOf": [
+        {"$ref": "#/$defs/availableAttestationSurfaceManifest"},
+        {"$ref": "#/$defs/unavailableAttestationSurfaceManifest"}
+      ]
+    },
+    "availableAttestationSurfaceManifest": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "sourceSchema",
+        "bundleHash",
+        "subject",
+        "evidenceManifest",
+        "redactionManifest",
+        "hashManifest",
+        "omissions",
+        "trustStatement"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "ee.attestation.surface_manifest.v1"},
+        "status": {"const": "available"},
+        "sourceSchema": {"const": "ee.attestation.bundle.v1"},
+        "bundleHash": {"$ref": "#/$defs/blake3Hash"},
+        "subject": {
+          "type": "object",
+          "required": ["kind", "id", "contentHashCount", "contentHashLabels"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {"const": "pack"},
+            "id": {"$ref": "#/$defs/packId"},
+            "contentHashCount": {"type": "integer", "minimum": 0},
+            "contentHashLabels": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "evidenceManifest": {
+          "type": "object",
+          "required": ["entryCount", "kinds", "schemas", "contentHashes", "chainHashes", "provenanceUriIncluded"],
+          "additionalProperties": false,
+          "properties": {
+            "entryCount": {"type": "integer", "minimum": 0},
+            "kinds": {
+              "type": "object",
+              "additionalProperties": {"type": "integer", "minimum": 0}
+            },
+            "schemas": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "contentHashes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/blake3Hash"}
+            },
+            "chainHashes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/blake3Hash"}
+            },
+            "provenanceUriIncluded": {"type": "boolean"}
+          }
+        },
+        "redactionManifest": {
+          "type": "object",
+          "required": ["policy", "entryCount", "fields", "classes", "replacementHashes"],
+          "additionalProperties": false,
+          "properties": {
+            "policy": {"const": "ee.policy.secret_redaction.v1"},
+            "entryCount": {"type": "integer", "minimum": 0},
+            "fields": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "classes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "replacementHashes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/blake3Hash"}
+            }
+          }
+        },
+        "hashManifest": {
+          "type": "object",
+          "required": ["entryCount", "labels", "hashes"],
+          "additionalProperties": false,
+          "properties": {
+            "entryCount": {"type": "integer", "minimum": 0},
+            "labels": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            },
+            "hashes": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"$ref": "#/$defs/blake3Hash"}
+            }
+          }
+        },
+        "omissions": {
+          "type": "object",
+          "required": ["count", "fields"],
+          "additionalProperties": false,
+          "properties": {
+            "count": {"type": "integer", "minimum": 0},
+            "fields": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "trustStatement": {
+          "type": "object",
+          "required": ["scope"],
+          "additionalProperties": false,
+          "properties": {
+            "scope": {"const": "local_ee_custody"}
+          }
+        }
+      }
+    },
+    "unavailableAttestationSurfaceManifest": {
+      "type": "object",
+      "required": ["schema", "status", "reason", "bundleHash"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "ee.attestation.surface_manifest.v1"},
+        "status": {"const": "unavailable"},
+        "reason": {
+          "type": "string",
+          "enum": [
+            "ledger_unavailable_or_untrusted",
+            "pack_not_found",
+            "attestation_query_failed",
+            "pack_record_missing",
+            "pack_record_query_failed",
+            "pack_record_workspace_mismatch"
+          ]
+        },
+        "bundleHash": {"type": "null"}
+      }
+    }
+  }
+}

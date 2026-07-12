@@ -9664,6 +9664,34 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: pack_response_schema_definition,
         },
         SchemaEntry {
+            id: "ee.pack.replay.v2",
+            version: "2",
+            description: "Redaction-safe replay of an integrity-verified persisted pack ledger",
+            category: "context",
+            definition: pack_replay_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.pack.diff.v2",
+            version: "2",
+            description: "Authority-preserving comparison of two persisted pack ledgers",
+            category: "context",
+            definition: pack_diff_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.context.delta.v2",
+            version: "2",
+            description: "Context delta envelope with centrally verified persisted-pack authority",
+            category: "context",
+            definition: context_delta_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.support_bundle.pack_replay_summary.v2",
+            version: "2",
+            description: "Bounded redaction-safe pack replay summary for support bundles",
+            category: "support",
+            definition: support_bundle_pack_replay_summary_schema_definition,
+        },
+        SchemaEntry {
             id: crate::models::REGRESSION_CAUSALITY_SCHEMA_V1,
             version: "1",
             description: "Redaction-safe regression causality capsule for failed gates",
@@ -11086,6 +11114,22 @@ fn error_schema_definition() -> String {
 
 fn pack_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.pack.v2.json").to_string()
+}
+
+fn pack_replay_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.pack.replay.v2.json").to_string()
+}
+
+fn pack_diff_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.pack.diff.v2.json").to_string()
+}
+
+fn context_delta_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.context.delta.v2.json").to_string()
+}
+
+fn support_bundle_pack_replay_summary_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.support_bundle.pack_replay_summary.v2.json").to_string()
 }
 
 fn regression_causality_schema_definition() -> String {
@@ -22855,7 +22899,7 @@ mod tests {
             "schema": "ee.support_bundle.swarm_replay_summary.v1",
         }));
         preview.pack_replay_summary = Some(serde_json::json!({
-            "schema": "ee.support_bundle.pack_replay_summary.v1",
+            "schema": "ee.support_bundle.pack_replay_summary.v2",
         }));
         preview.environment_attestation_summary = Some(serde_json::json!({
             "schema": "ee.support_bundle.environment_attestation_summary.v1",
@@ -22890,7 +22934,7 @@ mod tests {
             "schema": "ee.support_bundle.swarm_replay_summary.v1",
         }));
         create.pack_replay_summary = Some(serde_json::json!({
-            "schema": "ee.support_bundle.pack_replay_summary.v1",
+            "schema": "ee.support_bundle.pack_replay_summary.v2",
         }));
         create.environment_attestation_summary = Some(serde_json::json!({
             "schema": "ee.support_bundle.environment_attestation_summary.v1",
@@ -22928,7 +22972,7 @@ mod tests {
             &preview_json
                 .pointer("/pack_replay_summary/schema")
                 .and_then(serde_json::Value::as_str),
-            &Some("ee.support_bundle.pack_replay_summary.v1"),
+            &Some("ee.support_bundle.pack_replay_summary.v2"),
             "handoff preview JSON includes pack replay summary",
         )?;
         ensure_equal(
@@ -22974,7 +23018,7 @@ mod tests {
             &create_json
                 .pointer("/pack_replay_summary/schema")
                 .and_then(serde_json::Value::as_str),
-            &Some("ee.support_bundle.pack_replay_summary.v1"),
+            &Some("ee.support_bundle.pack_replay_summary.v2"),
             "handoff create JSON includes pack replay summary",
         )?;
         ensure_equal(
@@ -23019,7 +23063,7 @@ mod tests {
             "schema": "ee.support_bundle.swarm_replay_summary.v1",
         }));
         resume.pack_replay_summary = Some(serde_json::json!({
-            "schema": "ee.support_bundle.pack_replay_summary.v1",
+            "schema": "ee.support_bundle.pack_replay_summary.v2",
         }));
         resume.environment_attestation_summary = Some(serde_json::json!({
             "schema": "ee.support_bundle.environment_attestation_summary.v1",
@@ -23048,7 +23092,7 @@ mod tests {
             &resume_json
                 .pointer("/pack_replay_summary/schema")
                 .and_then(serde_json::Value::as_str),
-            &Some("ee.support_bundle.pack_replay_summary.v1"),
+            &Some("ee.support_bundle.pack_replay_summary.v2"),
             "handoff resume JSON includes pack replay summary",
         )?;
         ensure_equal(
