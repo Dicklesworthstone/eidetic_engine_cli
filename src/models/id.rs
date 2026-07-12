@@ -475,6 +475,52 @@ impl<K: IdKind> FromStr for Id<K> {
     }
 }
 
+fn public_id_or_alias<K: IdKind>(value: &str) -> String {
+    if let Ok(parsed) = value.parse::<Id<K>>() {
+        return parsed.to_string();
+    }
+
+    // Public projections must not echo an arbitrary database string merely
+    // because it has an ID-looking prefix and length. Domain-separate the
+    // digest by prefix and force the leading Crockford digit to zero so the
+    // 26-character payload is both deterministic and accepted by Id<K>.
+    let digest = blake3::hash(format!("{}:{value}", K::PREFIX).as_bytes())
+        .to_hex()
+        .to_string()
+        .to_ascii_uppercase();
+    format!("{}_0{}", K::PREFIX, &digest[..25])
+}
+
+/// Preserve a typed pack ID or return a deterministic, same-prefix public alias.
+#[must_use]
+pub fn public_pack_id(value: &str) -> String {
+    public_id_or_alias::<PackKind>(value)
+}
+
+/// Preserve a typed workspace ID or return a deterministic, same-prefix public alias.
+#[must_use]
+pub fn public_workspace_id(value: &str) -> String {
+    public_id_or_alias::<WorkspaceKind>(value)
+}
+
+/// Preserve a typed memory ID or return a deterministic, same-prefix public alias.
+#[must_use]
+pub fn public_memory_id(value: &str) -> String {
+    public_id_or_alias::<MemoryKind>(value)
+}
+
+/// Preserve a typed memory-link ID or return a deterministic public alias.
+#[must_use]
+pub fn public_memory_link_id(value: &str) -> String {
+    public_id_or_alias::<MemoryLinkKind>(value)
+}
+
+/// Preserve a typed audit ID or return a deterministic public alias.
+#[must_use]
+pub fn public_audit_id(value: &str) -> String {
+    public_id_or_alias::<AuditKind>(value)
+}
+
 /// Errors produced by [`Id::from_str`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParseIdError {
@@ -746,7 +792,8 @@ mod tests {
         BackupId, ClaimId, DemoId, ENCODED_LEN, EXECUTABLE_ID_SCHEMA_V1, EvidenceId,
         ExecutableIdKind, Id, IdKind, MemoryId, ModelId, PackId, ParseExecutableIdKindError,
         ParseIdError, PolicyId, RuleId, SessionId, TraceId, WorkspaceId, encode_crockford,
-        executable_id_schema_catalog_json, executable_id_schemas,
+        executable_id_schema_catalog_json, executable_id_schemas, public_memory_id, public_pack_id,
+        public_workspace_id,
     };
 
     const EXECUTABLE_ID_SCHEMA_GOLDEN: &str =
@@ -830,6 +877,28 @@ mod tests {
         assert_eq!(trace.into_uuid(), uuid_with_seed(11));
         assert_eq!(demo.into_uuid(), uuid_with_seed(12));
         Ok(())
+    }
+
+    #[test]
+    fn public_id_projection_preserves_typed_ids_and_aliases_id_shaped_secrets() {
+        let valid_pack = PackId::from_uuid(uuid_with_seed(41)).to_string();
+        let valid_workspace = WorkspaceId::from_uuid(uuid_with_seed(42)).to_string();
+        let valid_memory = MemoryId::from_uuid(uuid_with_seed(43)).to_string();
+        assert_eq!(public_pack_id(&valid_pack), valid_pack);
+        assert_eq!(public_workspace_id(&valid_workspace), valid_workspace);
+        assert_eq!(public_memory_id(&valid_memory), valid_memory);
+
+        let secret_shaped = "mem_AKIAIOSFODNN7EXAMPLE000000";
+        assert_eq!(secret_shaped.len(), 30);
+        assert!(MemoryId::from_str(secret_shaped).is_err());
+        let alias = public_memory_id(secret_shaped);
+        assert_ne!(alias, secret_shaped);
+        assert!(!alias.contains("AKIA"));
+        assert_eq!(public_memory_id(secret_shaped), alias, "alias is stable");
+        assert!(
+            MemoryId::from_str(&alias).is_ok(),
+            "alias is a typed memory ID"
+        );
     }
 
     #[test]
