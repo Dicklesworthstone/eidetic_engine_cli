@@ -276,8 +276,7 @@ use crate::core::task_frame::{
     add_task_subgoal, close_task_frame, create_task_frame, show_task_frame, update_task_frame,
 };
 use crate::core::tripwire::{
-    CheckOptions as TripwireCheckOptions, CheckReport as TripwireCheckReport,
-    ListOptions as TripwireListOptions, ListReport as TripwireListReport, TripwireEventPayload,
+    CheckOptions as TripwireCheckOptions, ListOptions as TripwireListOptions, TripwireEventPayload,
     check_tripwire, list_tripwires,
 };
 use crate::core::trust_report::{TrustReportOptions, generate_trust_report};
@@ -60978,21 +60977,18 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
-    let report = if !database_path.exists() {
-        TripwireListReport::new()
-    } else {
-        match list_tripwires(&TripwireListOptions {
-            workspace,
-            database_path: Some(database_path),
-            state,
-            preflight_run_id: args.preflight_run_id.clone(),
-            tripwire_type,
-            limit: args.limit,
-            include_disarmed: args.include_disarmed,
-        }) {
-            Ok(report) => report,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        }
+    let database_path = database_path.exists().then_some(database_path);
+    let report = match list_tripwires(&TripwireListOptions {
+        workspace,
+        database_path,
+        state,
+        preflight_run_id: args.preflight_run_id.clone(),
+        tripwire_type,
+        limit: args.limit,
+        include_disarmed: args.include_disarmed,
+    }) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
     match cli.renderer() {
@@ -61034,21 +61030,18 @@ where
         .clone()
         .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
 
-    let report = if !database_path.exists() {
-        TripwireCheckReport::new(&args.tripwire_id)
-    } else {
-        match check_tripwire(&TripwireCheckOptions {
-            workspace,
-            database_path: Some(database_path),
-            tripwire_id: args.tripwire_id.clone(),
-            event_payload,
-            update_timestamp: args.update_timestamp,
-            task_outcome,
-            dry_run: args.dry_run,
-        }) {
-            Ok(report) => report,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        }
+    let database_path = database_path.exists().then_some(database_path);
+    let report = match check_tripwire(&TripwireCheckOptions {
+        workspace,
+        database_path,
+        tripwire_id: args.tripwire_id.clone(),
+        event_payload,
+        update_timestamp: args.update_timestamp,
+        task_outcome,
+        dry_run: args.dry_run,
+    }) {
+        Ok(report) => report,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
     match cli.renderer() {

@@ -162,6 +162,7 @@ mod tests {
 
     type TestResult = Result<(), String>;
     const DOCTOR_GOLDEN_WORKSPACE: &str = "tests/fixtures";
+    const MISSING_GOLDEN_WORKSPACE: &str = "tests/fixtures/missing-ee-workspace";
 
     fn ee_binary_path() -> Result<PathBuf, String> {
         let cargo_path = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
@@ -2159,7 +2160,11 @@ mod tests {
 
     #[test]
     fn agent_health_unavailable_json_matches_golden() -> TestResult {
-        assert_agent_stdout_golden(&["--json", "health"], "health_unavailable.json", true)
+        assert_agent_stdout_golden(
+            &["--json", "--workspace", MISSING_GOLDEN_WORKSPACE, "health"],
+            "health_unavailable.json",
+            true,
+        )
     }
 
     #[test]
@@ -2303,6 +2308,8 @@ mod tests {
         let value = run_json_stdout(
             &[
                 "--json",
+                "--workspace",
+                MISSING_GOLDEN_WORKSPACE,
                 "tripwire",
                 "list",
                 "--state",
@@ -2333,6 +2340,8 @@ mod tests {
         let value = run_json_stdout(
             &[
                 "--json",
+                "--workspace",
+                MISSING_GOLDEN_WORKSPACE,
                 "tripwire",
                 "check",
                 "tw_004",
@@ -2356,6 +2365,20 @@ mod tests {
             &value["degraded"][0]["code"],
             &serde_json::json!("tripwire_inputs_incomplete"),
             "tripwire check degraded code",
+        )?;
+        ensure_equal(
+            &value["dry_run"],
+            &serde_json::json!(true),
+            "tripwire check preserves dry-run intent",
+        )?;
+        ensure(
+            value["details"].is_string(),
+            "tripwire check reports why persisted inputs are unavailable",
+        )?;
+        ensure_equal(
+            &value["mutation_posture"],
+            &serde_json::json!("no_persisted_tripwire"),
+            "tripwire check mutation posture",
         )
     }
 
