@@ -67,6 +67,12 @@ issues_json="$(br list --all --limit 0 --json)"
 
 surfaces_json="$(
   printf '%s\n' "$issues_json" | jq --arg prefix "$prefix" '
+    def issues:
+      if type == "array" then .
+      elif type == "object" and (.issues | type == "array") then .issues
+      else error("br list JSON must be an issue array or an object with issues[]")
+      end;
+
     def trim:
       gsub("^[[:space:]]+"; "") | gsub("[[:space:]]+$"; "");
 
@@ -82,7 +88,7 @@ surfaces_json="$(
       | map(trim)
       | map(select(length > 0));
 
-    reduce .[] as $issue ({};
+    reduce issues[] as $issue ({};
       if ($issue.id | startswith($prefix)) then
         (split_surface_paths($issue.description)) as $paths
         | if ($paths | length) > 0 then
@@ -100,8 +106,14 @@ surfaces_json="$(
 if [ "$strict" = true ]; then
   missing_json="$(
     printf '%s\n' "$issues_json" | jq --arg prefix "$prefix" --argjson surfaces "$surfaces_json" '
+      def issues:
+        if type == "array" then .
+        elif type == "object" and (.issues | type == "array") then .issues
+        else error("br list JSON must be an issue array or an object with issues[]")
+        end;
+
       [
-        .[]
+        issues[]
         | select(.id | startswith($prefix))
         | select(((.labels // []) | any(startswith("implements-surface:"))))
         | select(($surfaces[.id] // []) | length == 0)

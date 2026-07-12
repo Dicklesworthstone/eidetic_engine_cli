@@ -553,19 +553,19 @@ scenario_baseline() {
     run_ee_case baseline_agent_docs "baseline-infrastructure" \
         "help/version/introspect/schema/model/agent-docs row" \
         "README agent command discovery" "boundary.empty_workspace.v1" \
-        "class=read_only" "read_only" "ee.response.v1" "0" \
+        "class=read_only" "read_only" "ee.response.v2" "0" \
         "tests/fixtures/golden/agent_docs/agent_docs_json.golden" \
         agent-docs --json
 
     run_ee_case baseline_status_empty "baseline-infrastructure" \
         "capabilities/check/health/status row" \
         "README status workflow" "boundary.empty_workspace.v1" \
-        "class=read_only" "read_only" "ee.response.v1" "0" "none" \
+        "class=read_only" "read_only" "ee.response.v2" "0" "none" \
         status --workspace "${WORKSPACE}" --json
 
     run_ee_case baseline_diag_dependencies "diagnostics-eval-ops" \
         "diag/doctor row" "README diagnostics workflow" "boundary.empty_workspace.v1" \
-        "class=read_only" "read_only" "ee.response.v1" "0" "none" \
+        "class=read_only" "read_only" "ee.response.v2" "0" "none" \
         diag dependencies --json
 }
 
@@ -601,7 +601,7 @@ scenario_redaction() {
     run_ee_case redacted_status_env "privacy-trust" \
         "privacy/trust/redacted support and handoff rows" \
         "README privacy and trust workflow" "boundary.redacted_secret_placeholder.v1" \
-        "class=read_only" "read_only" "ee.response.v1" "0" "none" \
+        "class=read_only" "read_only" "ee.response.v2" "0" "none" \
         status --workspace "${WORKSPACE}" --json
 
     if [[ "${had_openai_key}" -eq 1 ]]; then

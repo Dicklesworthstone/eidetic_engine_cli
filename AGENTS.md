@@ -638,6 +638,10 @@ When `ee` emits a new degraded code, the implementing PR must land both the sour
 | Response envelope (success) | `ee.response.v2` |
 | Response envelope (error) | `ee.error.v2` |
 | Context pack | `ee.pack.v2` |
+| Pack replay | `ee.pack.replay.v2` |
+| Pack diff | `ee.pack.diff.v2` |
+| Context delta | `ee.context.delta.v2` |
+| Support-bundle pack replay summary | `ee.support_bundle.pack_replay_summary.v2` |
 | Search result | `ee.search.document.v1` |
 | Failure-mode fixture | `ee.failure_mode_fixture.v1` |
 | Test event log line | `ee.test_event.v1` |
@@ -671,7 +675,7 @@ Same DB + indexes + config + query → byte-identical JSON output. Same workspac
 
 #### When the contract drifts
 
-- Schema field rename / addition → bump the schema version AND update `docs/migration_v0.1_to_v0.2.md` (or the next migration file).
+- Schema field rename / addition → bump the schema version AND update `docs/migration_v0_1_to_v0_2.md` (or the next migration file).
 - New degraded code → land a fixture at `tests/fixtures/failure_modes/<code>.json` in the same commit; classify it in `docs/degraded_code_taxonomy.md`.
 - New env var → register in `src/config/env_registry.rs` + document in `docs/env_vars.md`.
 - New CLI subcommand → add a Most-used-commands or category entry to the `ee --help` prelude (F3).

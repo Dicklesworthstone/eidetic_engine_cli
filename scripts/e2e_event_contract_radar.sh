@@ -494,21 +494,21 @@ for rel in "${SCRIPT_PATHS[@]}"; do
   matrix="$(printf '%s' "$matrix" | jq --argjson row "$row" '. + [$row]')"
 done
 
-summary="$(jq -cn --argjson matrix "$matrix" '{
-  scriptCount: ($matrix | length),
-  passCount: ($matrix | map(select(.status == "pass")) | length),
-  advisoryGapCount: ($matrix | map(select(.status == "advisory_gap")) | length),
-  knownGapCount: ($matrix | map(select(.status == "known_gap")) | length),
-  failCount: ($matrix | map(select(.status == "fail")) | length),
-  notApplicableCount: ($matrix | map(select(.status == "not_applicable")) | length),
-  failurePathCount: ($matrix | map(.failurePaths | length) | add // 0),
+summary="$(printf '%s' "$matrix" | jq -c '. as $matrix | {
+  scriptCount: length,
+  passCount: (map(select(.status == "pass")) | length),
+  advisoryGapCount: (map(select(.status == "advisory_gap")) | length),
+  knownGapCount: (map(select(.status == "known_gap")) | length),
+  failCount: (map(select(.status == "fail")) | length),
+  notApplicableCount: (map(select(.status == "not_applicable")) | length),
+  failurePathCount: (map(.failurePaths | length) | add // 0),
   missingFailureVerdictCount: (
-    $matrix
+    .
     | map(.failurePaths[]? | select(.assertFailOrResult == "missing"))
     | length
   ),
   allowlistedGapCount: (
-    $matrix
+    .
     | map(select(.allowlist.status == "active"))
     | length
   )
@@ -552,15 +552,20 @@ requirements='[
   }
 ]'
 
-report="$(jq -cn \
+report="$({
+  printf '%s\n' "$summary"
+  printf '%s\n' "$requirements"
+  printf '%s\n' "$matrix"
+  printf '%s\n' "$degraded"
+} | jq -cn \
   --arg generatedAt "$GENERATED_AT" \
   --arg mode "$MODE" \
   --arg verdict "$overall" \
-  --argjson summary "$summary" \
-  --argjson requirements "$requirements" \
-  --argjson matrix "$matrix" \
-  --argjson degraded "$degraded" \
-  '{
+  '(input) as $summary
+  | (input) as $requirements
+  | (input) as $matrix
+  | (input) as $degraded
+  | {
     schema: "ee.e2e_event_contract_radar.v1",
     generatedAt: $generatedAt,
     mode: $mode,

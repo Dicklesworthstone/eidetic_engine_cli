@@ -158,8 +158,27 @@ build_report_json() {
   '
 }
 
+extract_claim_rows() {
+  local surfaces_json="$1"
+  jq -r --argjson surfaces "$surfaces_json" '
+    def issues:
+      if type == "array" then .
+      elif type == "object" and (.issues | type == "array") then .issues
+      else error("br list JSON must be an issue array or an object with issues[]")
+      end;
+
+    issues[]
+    | select(.status == "open" or .status == "in_progress" or .status == "closed")
+    | .id as $id
+    | .status as $status
+    | ($surfaces[$id] // [])[]?
+    | [$id, $status, .]
+    | @tsv
+  '
+}
+
 run_self_test() {
-  local claim_rows status_rows match_rows report_json
+  local claim_rows status_rows match_rows report_json surfaces_json bare_rows envelope_rows
   claim_rows="$(
     cat <<'EOF'
 bd-rust	open	src/**/*.rs
@@ -191,6 +210,20 @@ EOF
     and ((.items[] | select(.path == "README.md") | .warning) == "untracked_work_orphan")
     and ((.items[] | select(.path == "tmp/old.md") | .warning) == "untracked_work_orphan")
   ' >/dev/null
+
+  surfaces_json='{"bd-rust":["src/**/*.rs"]}'
+  bare_rows="$(
+    printf '%s\n' '[{"id":"bd-rust","status":"open"}]' \
+      | extract_claim_rows "$surfaces_json"
+  )"
+  envelope_rows="$(
+    printf '%s\n' '{"issues":[{"id":"bd-rust","status":"open"}],"total":1}' \
+      | extract_claim_rows "$surfaces_json"
+  )"
+  if [ "$bare_rows" != "$envelope_rows" ] || [ "$bare_rows" != $'bd-rust\topen\tsrc/**/*.rs' ]; then
+    echo "untracked-work-audit: br list JSON shape normalization failed" >&2
+    return 1
+  fi
 
   echo "untracked-work-audit: self-test passed"
 }
@@ -248,15 +281,7 @@ cd "$REPO_ROOT"
 
 surfaces_json="$("$SURFACE_EXTRACTOR" --prefix bd-)"
 issues_json="$(br list --all --limit 0 --json)"
-claim_rows="$(printf '%s\n' "$issues_json" | jq -r --argjson surfaces "$surfaces_json" '
-  .[]
-  | select(.status == "open" or .status == "in_progress" or .status == "closed")
-  | .id as $id
-  | .status as $status
-  | ($surfaces[$id] // [])[]?
-  | [$id, $status, .]
-  | @tsv
-')"
+claim_rows="$(printf '%s\n' "$issues_json" | extract_claim_rows "$surfaces_json")"
 
 status_rows="$(git status --porcelain=v1 | awk '
   {

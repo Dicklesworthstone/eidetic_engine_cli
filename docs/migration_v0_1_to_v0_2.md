@@ -27,6 +27,10 @@ corresponding v1 surface fails CI, and adding a new v1 string to
 | Response envelope (success path) | `ee.response.v1` | `ee.response.v2` | **Breaking for strict parsers.** Success envelopes now include the v2 schema marker, explicit `success: true`, and response-scoped `degraded[]` semantics. |
 | Error envelope | `ee.error.v1` | `ee.error.v2` | **Breaking.** `error.details.recovery[]` added as structured array (F1); `error.nonRecoverable?: bool` added. See [A10](#a10--error-envelope-v1--v2). |
 | Pack object inside response | `ee.pack.v1` | `ee.pack.v2` | **Breaking.** See [A1 phase 2](#a1-phase-2--collapse-selectioncertificate--provenancefooter-into-items). |
+| Pack replay response | `ee.pack.replay.v1` | `ee.pack.replay.v2` | **Breaking for strict parsers.** Unverified record metadata and denormalized `storedItems` are no longer replay evidence; creator and command fields are hashed in a redaction-safe ledger projection. |
+| Pack diff response | `ee.pack.diff.v1` | `ee.pack.diff.v2` | **Breaking for strict parsers.** Comparisons require two integrity-verified ledgers and redact replay-visible strings under the current policy. |
+| Support-bundle pack replay summary | `ee.support_bundle.pack_replay_summary.v1` | `ee.support_bundle.pack_replay_summary.v2` | **Breaking for strict parsers.** Unverified metadata becomes `null`, truncation is explicit, and every pack carries an attestation manifest. |
+| Context delta response | `ee.context.delta.v1` | `ee.context.delta.v2` | **Breaking for authority-sensitive consumers.** The server-verification marker is now false for caller-created snapshots and true only after central persisted-ledger validation. |
 | Model status data object | `ee.model.status.v1` | `ee.model.status.v2` | **Breaking for strict parsers.** `data.reranker` was added and active embedder selection is now explicitly embedding-purpose only. See [N8](#n8--model-status-reranker-posture). |
 | Hook contract | `ee.hook.context_pack.v1` | `ee.hook.context_pack.v1` | **Unchanged.** E2's filter applies; no field shape changes. |
 | Other envelopes (`ee.memory.list.v1`, `ee.rule.list.v1`, `ee.search.v1`, `ee.handoff.capsule.v1`, …) | v1 | v1 | **Unchanged at envelope level.** Some field-level renames; see per-surface sections. |
@@ -34,6 +38,94 @@ corresponding v1 surface fails CI, and adding a new v1 string to
 The v2 response marker makes response-scoped degradation explicit. Agents should
 key success parsing on `schema == "ee.response.v2"` and treat `degraded[]` as
 runtime evidence that affected the emitted response.
+
+### Replay, diff, support-summary, and context-delta authority hardening
+
+These four nested surfaces moved to v2 together because their v1 shapes could
+promote denormalized or caller-asserted metadata beyond its authority. They
+keep their existing envelope families: replay, diff, and context delta use a
+`{schema, success, data, ...}` command response, while the support summary is a
+standalone artifact. In every case the top-level `schema` is the
+surface-specific value listed below rather than `ee.response.v2`.
+
+#### Pack replay
+
+**Before.** `ee.pack.replay.v1` repeated raw `query` and `createdBy` values,
+returned the canonical ledger as though it were an export projection, and
+included `storedItems` loaded from denormalized `pack_items` rows even when the
+ledger was missing or invalid.
+
+**After.** `ee.pack.replay.v2` exposes record metadata only when the stored
+ledger passes hash, shape, invariant, and record-binding checks. Its
+`data.pack.query` is a redaction record rather than a string; creator and
+command surfaces are `createdByHash` and `commandSurfaceHash`; and
+`recordMetadataVerified` states whether the remaining fields are authoritative.
+The value at `data.replay.ledger` is explicitly a public projection with
+`projectionSchema`, `projectionRedacted`, and `sourceLedgerHash`. There is no
+`storedItems` fallback. Missing, malformed, oversized, or hash-mismatched
+ledgers emit empty selected/omitted arrays plus the corresponding stable
+`pack_replay_ledger_*` degradation.
+
+```python
+replay = response["data"]
+if not replay["pack"]["recordMetadataVerified"]:
+    treat_as_diagnostic_only(replay["pack"]["ledgerStatus"])
+else:
+    query = replay["pack"]["query"].get("redactedText") \
+        or replay["pack"]["query"].get("text")
+    selected = replay["replay"]["selectedItems"]
+```
+
+#### Pack diff
+
+**Before.** `ee.pack.diff.v1` could compare raw record fields or replay-item
+strings even when one side lacked a trustworthy ledger.
+
+**After.** `ee.pack.diff.v2` produces item, degradation, and derived-asset
+changes only when both ledgers are Available. Otherwise `replayable` is false,
+comparison scalars are `null`, collections are empty, and
+`likelyCauses` contains `ledger_unavailable_or_untrusted`. Treat
+`data.diff.summary.replayable` as the admission gate before consuming any
+comparison.
+
+#### Support-bundle replay summary
+
+**Before.** `ee.support_bundle.pack_replay_summary.v1` could repeat record
+metadata without proving its ledger binding and did not distinguish a complete
+16-row result from a truncated workspace.
+
+**After.** `ee.support_bundle.pack_replay_summary.v2` loads and validates one
+bounded record at a time. Unverified record fields are `null`,
+`recordMetadataVerified` is false, and `database.recordUnavailableCount`,
+`database.summaryTruncated`, and `database.unsummarizedPackCount` make partial
+coverage explicit. Every `packs[]` entry includes an `attestationBundle`
+manifest; consumers compare its `bundleHash` and status, never raw evidence.
+
+#### Context delta
+
+**Before.** public callers could construct an `ee.context.delta.v1` snapshot
+whose `computedFromServerVerifiedPackRecord` field claimed server authority.
+
+**After.** `ee.context.delta.v2` makes that marker false for ordinary public
+snapshots. It becomes true only inside the CLI after an exact workspace/hash
+candidate is loaded and its persisted selection ledger passes central
+validation. Consumers that require an authoritative base must check the marker
+before applying `items.added`, `items.removed`, or `items.modified`.
+
+**Migration tool.** The response changes are read-side only. Existing databases
+also need the compiled V084 migration so `pack_records.profile` accepts all six
+canonical profiles and `pack_omissions.reason` accepts
+`contradiction_suppressed`. V084 rebuilds the parent and its four inbound-FK
+tables transactionally while preserving parent insertion order; run
+`ee migrate run --workspace .` before expecting grounding, orientation, or
+submodular packs to persist.
+
+**Verification.** Replay/diff goldens and focused CLI tests pin the v2 public
+projections; context-delta schema tests validate real emitted envelopes; the
+V084 populated-V083 upgrade regression in `src/db/mod.rs` proves child rows,
+indexes, foreign keys, row ordering, and profile/omission domains survive the
+forward migration. `scripts/e2e_boundary_migration.sh` covers the agent-facing
+wire boundary; it is not a substitute for the populated-database regression.
 
 ---
 
@@ -510,6 +602,10 @@ Already covered as part of [A10](#a10--error-envelope-v1--v2). The recovery stru
 | `ee.response.v1` | `ee.response.v2` | success envelope contract |
 | `ee.error.v1` | `ee.error.v2` | A10 |
 | `ee.pack.v1` (inside data.pack) | `ee.pack.v2` | A1 phase 2, A4 |
+| `ee.pack.replay.v1` | `ee.pack.replay.v2` | replay authority and redaction projection |
+| `ee.pack.diff.v1` | `ee.pack.diff.v2` | integrity-gated comparison |
+| `ee.support_bundle.pack_replay_summary.v1` | `ee.support_bundle.pack_replay_summary.v2` | bounded verified summaries and attestation manifests |
+| `ee.context.delta.v1` | `ee.context.delta.v2` | truthful persisted-record authority marker |
 | `ee.hook.context_pack.v1` | `ee.hook.context_pack.v1` (unchanged) | — |
 
 ---
@@ -537,6 +633,11 @@ Already covered as part of [A10](#a10--error-envelope-v1--v2). The recovery stru
 - [`tests/diagnostics_banner_categorization_unit.rs`](../tests/diagnostics_banner_categorization_unit.rs), [`tests/diagnostics_banner_emission_unit.rs`](../tests/diagnostics_banner_emission_unit.rs), [`tests/diagnostics_banner_aliasing_unit.rs`](../tests/diagnostics_banner_aliasing_unit.rs) — E2.
 - [`tests/contracts/schema_canonical_fields.rs`](../tests/contracts/schema_canonical_fields.rs) — D4 schema-drift gate.
 - [`tests/contracts/retrieval_field_naming.rs`](../tests/contracts/retrieval_field_naming.rs) — retrieval JSON style.
+- [`tests/contracts/schema_drift.rs`](../tests/contracts/schema_drift.rs) and the
+  v2 files under [`docs/schemas/`](./schemas/) — public replay, diff, support-summary,
+  and context-delta registration/export closure.
+- `src/db/mod.rs::v084_pack_profile_rebuild_preserves_parent_children_indexes_and_order`
+  — populated V083 database preservation through the V084 parent/FK rebuild.
 
 ---
 

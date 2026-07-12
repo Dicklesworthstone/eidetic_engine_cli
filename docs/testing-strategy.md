@@ -591,7 +591,7 @@ section. That artifact records pack IDs, pack hashes, ledger hashes, freshness
 state counts, degradation codes, redaction classes, and derived-asset metadata,
 but it deliberately hashes query text and omits raw memory content, `why` text,
 and full ledger payloads. Tests must keep that summary parseable as
-`ee.support_bundle.pack_replay_summary.v1` and prove secret-like query or
+`ee.support_bundle.pack_replay_summary.v2` and prove secret-like query or
 provenance text does not appear in the bundle.
 
 Support-bundle regression-causality evidence is covered by
@@ -643,7 +643,8 @@ Ledger tests must verify:
 - Redacted items have redaction classes in ledger
 - Deterministic tie ordering under identical scores
 - Ledger hash matches normalized payload hash
-- Old pack records without ledgers report `ledger_unavailable`
+- Old pack records without ledgers report `pack_replay_ledger_missing`; malformed
+  and integrity-mismatched ledgers report their distinct catalogued codes
 
 ### Freshness Contract Tests
 

@@ -737,7 +737,10 @@ for snapshot lifecycle rules.
 
 Use `ee pack replay <pack-id> --json` when you need to explain what a historical
 pack actually selected from its persisted ledger. Replay is forensic: it reads
-the stored non-secret ledger and does not claim that a fresh search would make
+the stored ledger only after its hash, shape, invariants, and containing-record
+bindings pass, then emits a current-policy-redacted public projection. Missing
+or untrusted ledgers produce empty replay selections rather than falling back
+to denormalized item rows. Replay does not claim that a fresh search would make
 the same choices today. Use a new `ee pack` run when you want
 live re-retrieval against current memories, indexes, graph snapshots, and trust
 state.
@@ -752,8 +755,10 @@ For bug reports and handoffs, attach
 `ee support bundle --out <dir> --json`. The bundle includes
 `pack_replay_summary.json`, which keeps pack IDs, pack hashes, ledger hashes,
 freshness counts, degradation codes, redaction classes, and derived-asset
-metadata, while hashing query text and omitting raw memory content, `why` text,
-provenance text, and full ledger payloads.
+metadata, plus a compact attestation status and bundle hash for every summarized
+pack. It hashes query and actor text, nulls record metadata that was not
+integrity-verified, reports truncation explicitly, and omits raw memory content,
+`why` text, provenance text, and full ledger payloads.
 
 Bundles also include `swarm_brief_summary.json`, a compact coordination posture
 snapshot for support and handoff triage. It keeps source statuses, ready/blocked

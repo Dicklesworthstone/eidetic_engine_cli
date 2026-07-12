@@ -118,7 +118,7 @@ fi
 
 step "pack replay shows recorded task lens id/version/hash"
 replay_out="$(run_json pack_replay --workspace "$WS" pack replay "$pack_id" --json)"
-assert_jq "$replay_out" '.schema == "ee.pack.replay.v1" and .success == true' \
+assert_jq "$replay_out" '.schema == "ee.pack.replay.v2" and .success == true' \
     "pack replay succeeds"
 assert_jq "$replay_out" '.data.replay.status == "available"' \
     "pack replay ledger is available"

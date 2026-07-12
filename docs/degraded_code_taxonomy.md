@@ -844,7 +844,7 @@ the closed daemon hot-mode surface.
 #### Coordination / external tools (32)
 | Code | Severity | Bead |
 |------|----------|------|
-| `agent_mail_unavailable` | medium | bd-2nkbn (Agent Mail resilience) |
+| `agent_mail_unavailable` | warning | bd-2nkbn (Agent Mail resilience) |
 | `agent_mail_archive_degraded` | warning | bd-1zb7k.11 (P) |
 | `agent_mail_semantic_readiness_failed` | warning | bd-2s48u |
 | `agent_status_unavailable` | low | (TBD) |

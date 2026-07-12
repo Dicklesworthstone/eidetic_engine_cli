@@ -81,7 +81,7 @@ artifact is `pack_replay_summary.json`:
 
 ```json
 {
-  "schema": "ee.support_bundle.pack_replay_summary.v1",
+  "schema": "ee.support_bundle.pack_replay_summary.v2",
   "status": "available",
   "redactionStatus": "ids_hashes_counts_codes_only_no_query_text_no_memory_content",
   "database": { ... },
@@ -95,7 +95,7 @@ artifact is `pack_replay_summary.json`:
         "schema": "ee.pack_replay_ledger.v1",
         "selectedItemCount": 5,
         "omittedItemCount": 2,
-        "freshnessStates": { "fresh": 4, "changed_source": 1 },
+        "freshnessStates": { "unavailable": 5 },
         "redactionClasses": [],
         "degradationCodes": [],
         "derivedAssets": { ... },
@@ -111,7 +111,8 @@ artifact is `pack_replay_summary.json`:
 - Pack IDs and hashes (identifiers, not content)
 - Ledger status and integrity (hash verified, schema version)
 - Aggregate counts (items, omissions, candidates)
-- Freshness state distribution (no raw provenance text)
+- Ledger freshness-state distribution. Ledger v1 records `unavailable`; richer
+  source-freshness states require a future ledger schema
 - Redaction class presence (no raw secret content)
 - Degradation codes (stable machine codes)
 - Derived asset references (generations, not full indexes)
@@ -134,7 +135,12 @@ ee pack replay <pack-id> --json
 ```
 
 Reconstructs the selection explanation from the stored ledger. Reports
-`ledger_unavailable` as a degradation if the pack predates ledger storage.
+`pack_replay_ledger_missing`, `pack_replay_ledger_malformed`, or
+`pack_replay_ledger_hash_mismatch` for the corresponding unavailable-ledger
+state. Missing, malformed (including oversized), or hash-mismatched ledgers
+fail closed: replay selection arrays stay empty, `storedItems` is omitted
+entirely from the v2 response, and no denormalized `pack_items` row is promoted
+into historical replay evidence.
 
 ### Pack diff
 
@@ -143,20 +149,28 @@ ee pack diff <old-pack-id> <new-pack-id> --json
 ```
 
 Compares two ledgers and reports:
-- Added, removed, changed, and unchanged items
+
+- Added, removed, and changed items
 - Score deltas
 - Degradation deltas
 - Redaction deltas
-- Freshness deltas
-- Likely owner hints (`request`, `retrieval`, `packing`, `trust`, `redaction`,
-  `freshness`, `profile`, `unknown`)
+- Derived-asset changes
+- Likely causes (`query_changed`, `profile_changed`, `budget_changed`,
+  `derived_asset_changed`, `degradation_changed`, `redaction_changed`,
+  `selection_changed`, `memory_or_index_state_changed`, `no_change`, or
+  `ledger_unavailable_or_untrusted`)
 
-Owner hints are explanations, not automatic assignments.
+If either ledger is unavailable or untrusted, `replayable=false` and every
+ledger-derived added, removed, changed, degradation, redaction, and
+derived-asset collection is empty. The command does not fabricate a diff from
+denormalized `pack_items` rows.
+
+Likely causes are explanations, not automatic assignments.
 
 ### Support bundle creation
 
 ```bash
-ee support bundle --output <path>
+ee support bundle --out <path>
 ```
 
 Creates a redaction-safe bundle including `pack_replay_summary.json`.
@@ -317,9 +331,9 @@ rch exec -- cargo test --test freshness_contracts
 | Schema | Purpose |
 |--------|---------|
 | `ee.pack_replay_ledger.v1` | Full selection ledger stored with pack_records |
-| `ee.pack_replay.v1` | Replay command stdout contract |
-| `ee.pack_diff.v1` | Diff command stdout contract |
-| `ee.support_bundle.pack_replay_summary.v1` | Support bundle artifact |
+| [`ee.pack.replay.v2`](schemas/ee.pack.replay.v2.json) | Replay command stdout contract |
+| [`ee.pack.diff.v2`](schemas/ee.pack.diff.v2.json) | Diff command stdout contract |
+| [`ee.support_bundle.pack_replay_summary.v2`](schemas/ee.support_bundle.pack_replay_summary.v2.json) | Support bundle artifact |
 | `ee.regression_causality.v1` | Cross-artifact capsule for pack omission and stale-derived-asset triage |
 | `ee.pack.compression_manifest.v1` | Optional compressed pack or ledger sidecar manifest; preserves uncompressed pack and ledger hashes |
 

@@ -7,7 +7,7 @@
 #   * A persisted pack records this agent's baseline automatically
 #     (EE_AGENT_NAME identity).
 #   * After one remember (added) and one memory expire (removed),
-#     `--since last --json` emits an ee.context.delta.v1 envelope whose
+#     `--since last --json` emits an ee.context.delta.v2 envelope whose
 #     priorPackHash is exactly the recorded baseline, with the new
 #     memory in items.added and the expired one in items.removed.
 #   * `--since last --format markdown` emits the delta document:
@@ -84,8 +84,10 @@ step "--since last --json emits the delta against the recorded baseline"
 t1="$(now_ms)"
 delta_json="$(EE_AGENT_NAME=AgentOne ee_json --workspace "$WS" pack "$QUERY" --max-tokens 2000 --since last --read-only --json)"
 delta_ms=$(( $(now_ms) - t1 ))
-assert_jq "$delta_json" '.schema == "ee.context.delta.v1"' \
-    "since-last response is an ee.context.delta.v1 envelope"
+assert_jq "$delta_json" '.schema == "ee.context.delta.v2"' \
+    "since-last response is an ee.context.delta.v2 envelope"
+assert_jq "$delta_json" '.data.serverDecision.computedFromServerVerifiedPackRecord == true' \
+    "real CLI delta marks its centrally verified persisted prior"
 assert_json "$delta_json" '.data.priorPackHash' "$pack1_hash" \
     "delta priorPackHash equals the recorded baseline hash"
 assert_jq "$delta_json" '(.data.items.added | length) >= 1' \
@@ -129,7 +131,7 @@ log_event "pack_delta_anon" step anon cmd "pack --since last (no identity)" exit
 
 step "--no-baseline-write persists the pack but never touches the ledger"
 nbw="$(EE_AGENT_NAME=AgentOne ee_json --workspace "$WS" pack "$QUERY" --max-tokens 2000 --no-baseline-write --json)"
-assert_jq "$nbw" '.success == true or .schema == "ee.context.delta.v1"' "no-baseline-write pack succeeds"
+assert_jq "$nbw" '.success == true or .schema == "ee.context.delta.v2"' "no-baseline-write pack succeeds"
 after="$(EE_AGENT_NAME=AgentOne ee_json --workspace "$WS" pack "$QUERY" --max-tokens 2000 --since last --read-only --json)"
 after_prior="$(printf '%s' "$after" | jq -r '.data.priorPackHash // empty')"
 assert_eq "$after_prior" "$pack1_hash" \

@@ -346,8 +346,9 @@ seed_j6_pack_reference_issue() {
         --used-tokens 32 \
         --item-count 1 \
         --omitted-count 0 \
-        --pack-hash blake3:j6-reference-issue \
+        --pack-hash blake3:1868993cb5e39ac83588dbfdecc3ca1554b89f372d32135ebbfad37c06e99c8c \
         --created-by bd-17c65.10.6 \
+        --inject-reference-issue-fixture \
         --json >/dev/null 2>&1
 }
 
@@ -2378,12 +2379,12 @@ run_fixture_scenario() {
                 --json 2>/dev/null || true)
             ;;
         why_pack_selection_unavailable)
-            local why_skew_workspace why_memory_json why_memory_id
-            why_skew_workspace="$EPIC_WORKSPACE/j6-why-pack-selection-unavailable"
-            ee_global init --workspace "$why_skew_workspace" --json >/dev/null
+            local why_workspace why_memory_json why_memory_id
+            why_workspace="$EPIC_WORKSPACE/j6-why-pack-selection-unavailable"
+            ee_global init --workspace "$why_workspace" --json >/dev/null
             why_memory_json=$(ee_global remember \
                 "J6 why pack selection fixture memory." \
-                --workspace "$why_skew_workspace" \
+                --workspace "$why_workspace" \
                 --level semantic \
                 --kind fact \
                 --no-auto-link \
@@ -2395,14 +2396,14 @@ run_fixture_scenario() {
                     "Failed to create memory for why pack-selection fixture."
                 return 1
             fi
-            ee_global diag database-skew \
-                --workspace "$why_skew_workspace" \
-                --output-database "$why_skew_workspace/.ee/ee-skew.db" \
-                --skew pack-items-table-unavailable \
+            ee_global diag pack-record \
+                --workspace "$why_workspace" \
+                --pack-id pack_j6whyselectionmissing00000 \
+                --item-count 1 \
+                --inject-reference-issue-fixture \
                 --json >/dev/null 2>&1 || return 1
             SCENARIO_OUTPUT=$(ee_global why "$why_memory_id" \
-                --workspace "$why_skew_workspace" \
-                --database "$why_skew_workspace/.ee/ee-skew.db" \
+                --workspace "$why_workspace" \
                 --json 2>/dev/null || true)
             ;;
         write_owner_busy)

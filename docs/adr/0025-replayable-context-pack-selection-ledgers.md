@@ -79,9 +79,10 @@ such as Markdown and TOON are adapters over the same canonical ledger data; they
 must not change selection, redaction, freshness, or degradation decisions.
 
 Old pack records that lack a ledger stay readable. Replay commands report
-`ledger_unavailable` as a stable degradation or error depending on the requested
-mode. They must not fabricate a ledger by re-running live retrieval and calling
-it historical replay.
+`pack_replay_ledger_missing` as a stable degradation; malformed and
+integrity-mismatched ledgers use `pack_replay_ledger_malformed` and
+`pack_replay_ledger_hash_mismatch`. They must not fabricate a ledger by
+re-running live retrieval and calling it historical replay.
 
 ### Replay And Diff Surfaces
 
@@ -105,8 +106,8 @@ fixed:
 - JSON stdout is the public contract. Human repair text and progress belong on
   stderr.
 
-The replay JSON schema is `ee.pack_replay.v1`. The diff JSON schema is
-`ee.pack_diff.v1`.
+The replay JSON schema is `ee.pack.replay.v2`. The diff JSON schema is
+`ee.pack.diff.v2`.
 
 ### Evidence Freshness
 
@@ -187,7 +188,7 @@ the following:
    tests for empty packs, lexical-only degradation, graph-unavailable
    degradation, redacted items, and deterministic tie ordering.
 3. `eidetic_engine_cli-v454` exposes read-only replay and diff CLI surfaces with
-   stable `ee.pack_replay.v1` and `ee.pack_diff.v1` JSON stdout, stderr-only
+   stable `ee.pack.replay.v2` and `ee.pack.diff.v2` JSON stdout, stderr-only
    diagnostics, missing-ledger degradation, and golden fixtures for no-change,
    ranking-change, redaction-change, and derived-asset-degraded cases.
 4. `eidetic_engine_cli-aft1` threads evidence freshness into context and why

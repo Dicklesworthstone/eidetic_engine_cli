@@ -3457,7 +3457,7 @@ ee --fields full status --workspace <workspace-with-ttl-policy-skew> --json
 
 **Expected emission.** Message contains: `Curation TTL policy rows ... could not be read`
 
-**Repair hint.** `ee migrate run`
+**Repair hint.** `ee migrate run --workspace . --json`
 
 **Fixture.** [`tests/fixtures/failure_modes/curation_ttl_policy_unavailable.json`](../tests/fixtures/failure_modes/curation_ttl_policy_unavailable.json)
 
@@ -7073,7 +7073,7 @@ ee diag integrity --database ./integrity-reference-skew.db --workspace . --json
 
 ```bash
 ee init --workspace .
-ee diag pack-record --workspace . --pack-id pack_j6referenceissues000000000 --query 'j6 reference issue' --item-count 1 --omitted-count 0 --json
+ee diag pack-record --workspace . --pack-id pack_j6referenceissues000000000 --query 'j6 reference issue' --item-count 1 --omitted-count 0 --inject-reference-issue-fixture --json
 ```
 
 **Invocation.**
@@ -8443,7 +8443,7 @@ inject a non-contention read-only memory-drift report failure before evidence in
 ee swarm brief --workspace . --json
 ```
 
-**Expected emission.** Message contains: `could not be collected read-only`
+**Expected emission.** Message contains: `Memory drift report could not be collected read-only before evidence inspection`
 
 **Repair hint.** `ee doctor --json`
 
@@ -14600,18 +14600,18 @@ ee search 'connection' --workspace . --relevance-floor 0.02 --json
 ```bash
 ee init --workspace .
 ee remember 'J6 why pack selection fixture memory.' --level semantic --kind fact --no-auto-link --no-propose-candidates --workspace . --json
-ee diag database-skew --workspace . --output-database .ee/ee-skew.db --skew pack-items-table-unavailable --json
+ee diag pack-record --workspace . --pack-id pack_j6whyselectionmissing00000 --item-count 1 --inject-reference-issue-fixture --json
 ```
 
 **Invocation.**
 
 ```bash
-ee why <memory-id> --workspace . --database .ee/ee-skew.db --json
+ee why <memory-id> --workspace . --json
 ```
 
 **Expected emission.** Message contains: `pack ... selection`
 
-**Repair hint.** `ee migrate run`
+**Repair hint.** `ee doctor --json`
 
 **Fixture.** [`tests/fixtures/failure_modes/why_pack_selection_unavailable.json`](../tests/fixtures/failure_modes/why_pack_selection_unavailable.json)
 
