@@ -1,91 +1,91 @@
 {
+  "schema": "ee.curate.review_reason_golden.v1",
   "accept": {
-    "audit": {
-      "action": "curation_candidate.accept",
-      "actor": "agent-1",
-      "details": {
-        "action": "accept",
-        "candidateId": "curate_00000000000000000reason01",
-        "decision": "accept",
-        "fromReviewState": "new",
-        "fromStatus": "pending",
-        "reason": "human validated",
-        "toReviewState": "accepted",
-        "toStatus": "approved"
-      },
-      "targetId": "curate_00000000000000000reason01",
-      "targetType": "curation_candidate"
-    },
     "response": {
+      "schema": "ee.response.v2",
+      "success": true,
       "data": {
-        "candidateId": "curate_00000000000000000reason01",
+        "schema": "ee.curate.review.v1",
         "command": "curate accept",
+        "candidateId": "curate_00000000000000000000000001",
         "dryRun": false,
         "durableMutation": true,
-        "mutation": {
-          "auditIdPresent": true,
-          "fromReviewState": "new",
-          "fromStatus": "pending",
-          "persisted": true,
-          "reviewedAtPresent": true,
-          "reviewedBy": "agent-1",
-          "toReviewState": "accepted",
-          "toStatus": "approved"
-        },
         "review": {
-          "action": "accept",
+          "status": "ready",
           "decision": "accept",
-          "status": "ready"
+          "action": "accept"
         },
-        "schema": "ee.curate.review.v1"
-      },
-      "schema": "ee.response.v2",
-      "success": true
+        "mutation": {
+          "fromStatus": "pending",
+          "toStatus": "approved",
+          "fromReviewState": "new",
+          "toReviewState": "accepted",
+          "persisted": true,
+          "reviewedBy": "agent-1",
+          "reviewedAtPresent": true,
+          "auditIdPresent": true
+        }
+      }
+    },
+    "audit": {
+      "actor": "agent-1",
+      "action": "curation_candidate.accept",
+      "targetType": "curation_candidate",
+      "targetId": "curate_00000000000000000000000001",
+      "details": {
+        "candidateId": "curate_00000000000000000000000001",
+        "action": "accept",
+        "fromStatus": "pending",
+        "toStatus": "approved",
+        "fromReviewState": "new",
+        "toReviewState": "accepted",
+        "decision": "accept",
+        "reason": "human validated"
+      }
     }
   },
   "reject": {
-    "audit": {
-      "action": "curation_candidate.reject",
-      "actor": "agent-1",
-      "details": {
-        "action": "reject",
-        "candidateId": "curate_00000000000000000reason02",
-        "decision": "reject",
-        "fromReviewState": "new",
-        "fromStatus": "pending",
-        "reason": "duplicate of accepted rule",
-        "toReviewState": "rejected",
-        "toStatus": "rejected"
-      },
-      "targetId": "curate_00000000000000000reason02",
-      "targetType": "curation_candidate"
-    },
     "response": {
+      "schema": "ee.response.v2",
+      "success": true,
       "data": {
-        "candidateId": "curate_00000000000000000reason02",
+        "schema": "ee.curate.review.v1",
         "command": "curate reject",
+        "candidateId": "curate_00000000000000000000000002",
         "dryRun": false,
         "durableMutation": true,
-        "mutation": {
-          "auditIdPresent": true,
-          "fromReviewState": "new",
-          "fromStatus": "pending",
-          "persisted": true,
-          "reviewedAtPresent": true,
-          "reviewedBy": "agent-1",
-          "toReviewState": "rejected",
-          "toStatus": "rejected"
-        },
         "review": {
-          "action": "reject",
+          "status": "ready",
           "decision": "reject",
-          "status": "ready"
+          "action": "reject"
         },
-        "schema": "ee.curate.review.v1"
-      },
-      "schema": "ee.response.v2",
-      "success": true
+        "mutation": {
+          "fromStatus": "pending",
+          "toStatus": "rejected",
+          "fromReviewState": "new",
+          "toReviewState": "rejected",
+          "persisted": true,
+          "reviewedBy": "agent-1",
+          "reviewedAtPresent": true,
+          "auditIdPresent": true
+        }
+      }
+    },
+    "audit": {
+      "actor": "agent-1",
+      "action": "curation_candidate.reject",
+      "targetType": "curation_candidate",
+      "targetId": "curate_00000000000000000000000002",
+      "details": {
+        "candidateId": "curate_00000000000000000000000002",
+        "action": "reject",
+        "fromStatus": "pending",
+        "toStatus": "rejected",
+        "fromReviewState": "new",
+        "toReviewState": "rejected",
+        "decision": "reject",
+        "reason": "duplicate of accepted rule"
+      }
     }
-  },
-  "schema": "ee.curate.review_reason_golden.v1"
+  }
 }

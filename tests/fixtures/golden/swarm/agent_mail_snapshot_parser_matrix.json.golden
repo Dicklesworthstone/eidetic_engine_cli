@@ -99,7 +99,7 @@
           "code": "agent_mail_unavailable",
           "source": "agent_mail",
           "severity": "warning",
-          "message": "Agent Mail recovery posture is degraded with healthLevel=green (mode=corrupt, reason=archive_corruption); reservation and inbox reads are not authoritative.",
+          "message": "Agent Mail recovery posture is degraded with healthLevel=green (mode=corrupt, reason=archive_corruption, semanticStatus=pass); reservation and inbox reads are not authoritative.",
           "repair": "Repair Agent Mail storage and provide a current redacted Agent Mail snapshot after recovery completes."
         }
       ]

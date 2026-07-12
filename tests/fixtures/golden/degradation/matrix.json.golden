@@ -1,6 +1,6 @@
 {
   "schema": "ee.degradation_matrix.v1",
-  "count": 22,
+  "count": 27,
   "codes": [
     {
       "id": "D001",
@@ -66,6 +66,42 @@
       "repair": "ee doctor --fix-plan --json"
     },
     {
+      "id": "D103",
+      "subsystem": "storage",
+      "severity": "warning",
+      "description": "Advisory lock acquisition exceeded its retry budget",
+      "behavior_change": "Concurrent write operation could not prove exclusive ownership",
+      "auto_recoverable": true,
+      "repair": "ee diag advisory-lock --workspace . --resource-type workspace --release --json"
+    },
+    {
+      "id": "D104",
+      "subsystem": "storage",
+      "severity": "warning",
+      "description": "Read snapshot pin exceeded its configured lifetime",
+      "behavior_change": "The stale read snapshot is poisoned so later reads fail cleanly",
+      "auto_recoverable": true,
+      "repair": "ee config set storage.read_pool.max_pin_duration_seconds 1"
+    },
+    {
+      "id": "D105",
+      "subsystem": "storage",
+      "severity": "warning",
+      "description": "Read snapshot release failed",
+      "behavior_change": "The affected pooled connection is abandoned instead of returned to the idle pool",
+      "auto_recoverable": true,
+      "repair": "ee doctor --workspace . --json"
+    },
+    {
+      "id": "D106",
+      "subsystem": "storage",
+      "severity": "warning",
+      "description": "Read snapshot pin was force-released during workspace close",
+      "behavior_change": "The remaining pinned reader is poisoned so shutdown can complete without leaking WAL frames",
+      "auto_recoverable": true,
+      "repair": "ee status --workspace . --json"
+    },
+    {
       "id": "D200",
       "subsystem": "cass",
       "severity": "warning",
@@ -125,6 +161,15 @@
       "severity": "advisory",
       "description": "MMR diversity selection disabled",
       "behavior_change": "Pack may contain redundant memories",
+      "auto_recoverable": true,
+      "repair": null
+    },
+    {
+      "id": "D402",
+      "subsystem": "pack",
+      "severity": "warning",
+      "description": "Pack budget too small",
+      "behavior_change": "Context pack has matching candidates but cannot fit any candidate within the requested token budget",
       "auto_recoverable": true,
       "repair": null
     },
