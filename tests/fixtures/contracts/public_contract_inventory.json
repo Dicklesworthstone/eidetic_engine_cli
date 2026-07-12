@@ -66,6 +66,79 @@
       "forbiddenCurrentClaims": []
     },
     {
+      "schemaId": "ee.pack.replay.v2",
+      "status": "current",
+      "surface": "pack_replay_response",
+      "owner": "src/cli/mod.rs::handle_pack_replay",
+      "schemaFile": "docs/schemas/ee.pack.replay.v2.json",
+      "canonicalDocs": [
+        "docs/pack-replay.md",
+        "docs/migration_v0_1_to_v0_2.md"
+      ],
+      "currentFacingContexts": [
+        "docs/pack-replay.md",
+        "docs/schemas/ee.pack.replay.v2.json",
+        "docs/migration_v0_1_to_v0_2.md"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.pack.diff.v2",
+      "status": "current",
+      "surface": "pack_diff_response",
+      "owner": "src/cli/mod.rs::handle_pack_diff",
+      "schemaFile": "docs/schemas/ee.pack.diff.v2.json",
+      "canonicalDocs": [
+        "docs/pack-replay.md",
+        "docs/migration_v0_1_to_v0_2.md"
+      ],
+      "currentFacingContexts": [
+        "docs/pack-replay.md",
+        "docs/schemas/ee.pack.diff.v2.json",
+        "docs/migration_v0_1_to_v0_2.md"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.support_bundle.pack_replay_summary.v2",
+      "status": "current",
+      "surface": "support_bundle_pack_replay_summary",
+      "owner": "src/core/support_bundle.rs::collect_pack_replay_summary",
+      "schemaFile": "docs/schemas/ee.support_bundle.pack_replay_summary.v2.json",
+      "canonicalDocs": [
+        "docs/pack-replay.md",
+        "docs/testing-strategy.md"
+      ],
+      "currentFacingContexts": [
+        "docs/pack-replay.md",
+        "docs/testing-strategy.md",
+        "docs/schemas/ee.support_bundle.pack_replay_summary.v2.json",
+        "docs/migration_v0_1_to_v0_2.md"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.context.delta.v2",
+      "status": "current",
+      "surface": "context_delta_response",
+      "owner": "src/core/context_delta.rs::ContextDeltaEnvelope",
+      "schemaFile": "docs/schemas/ee.context.delta.v2.json",
+      "canonicalDocs": [
+        "docs/agent-ux/context-delta-apply.md",
+        "docs/migration_v0_1_to_v0_2.md"
+      ],
+      "currentFacingContexts": [
+        "docs/agent-ux/context-delta-apply.md",
+        "docs/schemas/ee.context.delta.v2.json",
+        "docs/migration_v0_1_to_v0_2.md"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
       "schemaId": "ee.regression_causality.v1",
       "status": "current",
       "surface": "regression_causality_capsule",

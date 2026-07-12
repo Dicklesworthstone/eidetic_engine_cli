@@ -15,9 +15,9 @@
     "setup_commands": [
       "ee init --workspace .",
       "ee remember 'J6 why pack selection fixture memory.' --level semantic --kind fact --no-auto-link --no-propose-candidates --workspace . --json",
-      "ee diag database-skew --workspace . --output-database .ee/ee-skew.db --skew pack-items-table-unavailable --json"
+      "ee diag pack-record --workspace . --pack-id pack_j6whyselectionmissing00000 --item-count 1 --inject-reference-issue-fixture --json"
     ],
-    "invocation": "ee why <memory-id> --workspace . --database .ee/ee-skew.db --json"
+    "invocation": "ee why <memory-id> --workspace . --json"
   },
   "expected_emission": {
     "code": "why_pack_selection_unavailable",
@@ -26,8 +26,8 @@
       "pack",
       "selection"
     ],
-    "repair_contains": "ee migrate run",
-    "repair_string": "ee migrate run --workspace . --json",
+    "repair_contains": "ee doctor --json",
+    "repair_string": "ee doctor --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

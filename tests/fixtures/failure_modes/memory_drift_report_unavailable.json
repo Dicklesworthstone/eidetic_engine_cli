@@ -25,7 +25,7 @@
     "code": "memory_drift_report_unavailable",
     "severity": "warning",
     "message_contains": [
-      "could not be collected read-only"
+      "Memory drift report could not be collected read-only before evidence inspection"
     ],
     "repair_contains": "ee doctor --json"
   }

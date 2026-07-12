@@ -165,7 +165,10 @@ fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
                 used_tokens: 8,
                 item_count: 1,
                 omitted_count: 0,
-                pack_hash: "blake3:fixture-pack-hash".to_string(),
+                pack_hash: format!(
+                    "blake3:{}",
+                    blake3::hash(b"JSON contract snapshot fixture pack").to_hex()
+                ),
                 degraded_json: None,
                 created_by: Some("golden-test".to_string()),
             },

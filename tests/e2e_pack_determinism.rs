@@ -162,7 +162,7 @@ fn assert_pack_ledger_persisted(
         .list_pack_records_for_memory(anchor_memory_id, 10)
         .map_err(|error| format!("list persisted pack records: {error}"))?;
 
-    let (record, _item) = history
+    let (record_metadata, _item) = history
         .iter()
         .find(|(record, _item)| record.query == query && record.pack_hash == pack_hash)
         .ok_or_else(|| {
@@ -170,6 +170,10 @@ fn assert_pack_ledger_persisted(
                 "no persisted pack record for query {query:?}, hash {pack_hash:?}, anchor {anchor_memory_id}"
             )
         })?;
+    let record = connection
+        .get_pack_record(&record_metadata.id)
+        .map_err(|error| format!("load pack record {}: {error}", record_metadata.id))?
+        .ok_or_else(|| format!("pack record {} disappeared", record_metadata.id))?;
     let ledger_hash = record
         .ledger_hash
         .as_ref()
@@ -178,8 +182,19 @@ fn assert_pack_ledger_persisted(
         .ledger_json
         .as_ref()
         .ok_or_else(|| format!("pack record {} missing ledger_json", record.id))?;
-    let parsed_ledger = parse_stored_pack_ledger(record);
-    let ledger = parsed_ledger.ledger.as_ref().ok_or_else(|| {
+    let parsed_ledger = parse_stored_pack_ledger(&record);
+    ensure(
+        parsed_ledger.status == ee::db::PackLedgerStatus::Available,
+        format!(
+            "pack ledger authority status was {:?}",
+            parsed_ledger.status
+        ),
+    )?;
+    ensure(
+        parsed_ledger.degraded.is_empty(),
+        "available pack ledger must not be degraded",
+    )?;
+    let ledger = parsed_ledger.available_ledger().ok_or_else(|| {
         format!(
             "pack ledger could not be replayed: {:?}",
             parsed_ledger.degraded
@@ -555,7 +570,7 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
     ensure_stderr_empty(&replay, "pack replay")?;
     let replay_json = stdout_json(&replay)?;
     ensure(
-        replay_json.pointer("/schema") == Some(&serde_json::json!("ee.pack.replay.v1")),
+        replay_json.pointer("/schema") == Some(&serde_json::json!("ee.pack.replay.v2")),
         "pack replay schema mismatch",
     )?;
     ensure(
@@ -639,7 +654,7 @@ fn pack_replay_and_diff_work_for_real_pack_records() -> TestResult {
     ensure_stderr_empty(&diff, "pack diff")?;
     let diff_json = stdout_json(&diff)?;
     ensure(
-        diff_json.pointer("/schema") == Some(&serde_json::json!("ee.pack.diff.v1")),
+        diff_json.pointer("/schema") == Some(&serde_json::json!("ee.pack.diff.v2")),
         "pack diff schema mismatch",
     )?;
     ensure(

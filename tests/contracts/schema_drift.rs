@@ -147,6 +147,11 @@ pub const HANDOFF_SCHEMAS: &[SchemaEntry] = &[
         "ee.completion_audit.report.v2",
         SchemaCategory::Handoff,
     ),
+    SchemaEntry::new(
+        "support_bundle_pack_replay_summary",
+        "ee.support_bundle.pack_replay_summary.v2",
+        SchemaCategory::Handoff,
+    ),
 ];
 
 /// Context and search schemas.
@@ -183,8 +188,13 @@ pub const CONTEXT_SCHEMAS: &[SchemaEntry] = &[
         "ee.pack_replay_ledger.v1",
         SchemaCategory::Context,
     ),
-    SchemaEntry::new("pack_replay", "ee.pack.replay.v1", SchemaCategory::Context),
-    SchemaEntry::new("pack_diff", "ee.pack.diff.v1", SchemaCategory::Context),
+    SchemaEntry::new("pack_replay", "ee.pack.replay.v2", SchemaCategory::Context),
+    SchemaEntry::new("pack_diff", "ee.pack.diff.v2", SchemaCategory::Context),
+    SchemaEntry::new(
+        "context_delta",
+        "ee.context.delta.v2",
+        SchemaCategory::Context,
+    ),
     SchemaEntry::new("query", "ee.query.v1", SchemaCategory::Context),
     SchemaEntry::new(
         "search_results",
@@ -3202,7 +3212,94 @@ mod tests {
         ensure(
             versions.contains(&"ee.completion_audit.report.v2"),
             "handoff schemas must include completion audit report",
+        )?;
+        ensure(
+            versions.contains(&"ee.support_bundle.pack_replay_summary.v2"),
+            "handoff schemas must include the verified pack replay summary",
         )
+    }
+
+    #[test]
+    fn support_bundle_pack_replay_summary_schema_covers_record_unavailable_reasons() -> TestResult {
+        let schema_path = repo_path("docs/schemas/ee.support_bundle.pack_replay_summary.v2.json");
+        let documented: JsonValue =
+            serde_json::from_str(&fs::read_to_string(&schema_path).map_err(|error| {
+                format!(
+                    "read support-bundle pack replay summary schema {}: {error}",
+                    schema_path.display()
+                )
+            })?)
+            .map_err(|error| {
+                format!(
+                    "parse support-bundle pack replay summary schema {}: {error}",
+                    schema_path.display()
+                )
+            })?;
+        let exported: JsonValue = serde_json::from_str(&ee::output::render_schema_export_json(
+            Some("ee.support_bundle.pack_replay_summary.v2"),
+        ))
+        .map_err(|error| {
+            format!("schema export ee.support_bundle.pack_replay_summary.v2: {error}")
+        })?;
+        ensure_equal(
+            &exported,
+            &documented,
+            "support-bundle pack replay summary export must match docs schema",
+        )?;
+
+        let expected_record_reasons = [
+            "pack_record_missing",
+            "pack_record_query_failed",
+            "pack_record_workspace_mismatch",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+
+        let ledger_reasons = documented
+            .pointer("/$defs/recordUnavailableLedgerSummary/properties/reason/enum")
+            .and_then(JsonValue::as_array)
+            .ok_or("recordUnavailableLedgerSummary reason enum must be an array")?
+            .iter()
+            .filter_map(JsonValue::as_str)
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        ensure_equal(
+            &ledger_reasons,
+            &expected_record_reasons,
+            "record-unavailable ledger reason enum",
+        )?;
+
+        let pack_attestation_reasons = documented
+            .pointer("/$defs/unavailablePackSummary/properties/attestationBundle/oneOf")
+            .and_then(JsonValue::as_array)
+            .ok_or("unavailablePackSummary attestationBundle oneOf must be an array")?
+            .iter()
+            .filter_map(|branch| {
+                branch
+                    .pointer("/allOf/1/properties/reason/const")
+                    .and_then(JsonValue::as_str)
+            })
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        ensure_equal(
+            &pack_attestation_reasons,
+            &expected_record_reasons,
+            "unavailable pack attestation reason branches",
+        )?;
+
+        let attestation_reasons = documented
+            .pointer("/$defs/unavailableAttestationSurfaceManifest/properties/reason/enum")
+            .and_then(JsonValue::as_array)
+            .ok_or("unavailableAttestationSurfaceManifest reason enum must be an array")?;
+        for reason in expected_record_reasons {
+            ensure(
+                attestation_reasons.contains(&JsonValue::String(reason.clone())),
+                format!("unavailable attestation reason enum missing {reason}"),
+            )?;
+        }
+
+        Ok(())
     }
 
     #[test]

@@ -92,10 +92,10 @@ fn seed_pack_record(
         query: "baseline ledger seed".to_string(),
         profile: "balanced".to_string(),
         max_tokens: 1000,
-        used_tokens: 10,
+        used_tokens: 0,
         item_count: 0,
         omitted_count: 0,
-        pack_hash: pack_hash.to_string(),
+        pack_hash: format!("blake3:{}", blake3::hash(pack_hash.as_bytes()).to_hex()),
         degraded_json: None,
         created_by: Some("baseline-test".to_string()),
     };

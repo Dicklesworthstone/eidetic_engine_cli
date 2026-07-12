@@ -73,6 +73,23 @@ fn golden_path(name: &str) -> PathBuf {
 
 fn assert_json_golden(name: &str, actual: serde_json::Value) -> TestResult {
     let path = golden_path(name);
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "failed to create golden directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+        let mut actual_text =
+            serde_json::to_string_pretty(&actual).map_err(|error| error.to_string())?;
+        actual_text.push('\n');
+        fs::write(&path, actual_text)
+            .map_err(|error| format!("failed to write {}: {error}", path.display()))?;
+        eprintln!("Updated golden file: {}", path.display());
+        return Ok(());
+    }
     let expected_text = fs::read_to_string(&path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     let expected: serde_json::Value = serde_json::from_str(&expected_text)

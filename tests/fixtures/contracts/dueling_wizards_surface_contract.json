@@ -266,7 +266,7 @@
       "status": "implemented",
       "title": "Task lens compiler",
       "plannedCommands": ["lens list", "lens explain", "pack --lens", "pack replay"],
-      "schemas": ["ee.response.v2", "ee.pack.v2", "ee.pack.replay.v1"],
+      "schemas": ["ee.response.v2", "ee.pack.v2", "ee.pack.replay.v2"],
       "degradedCodes": [],
       "envVars": [],
       "requiredArtifacts": ["capabilities", "agent_docs", "robot_docs", "help_prelude", "json_schema", "schema_drift", "failure_mode_fixture", "degraded_taxonomy", "env_registry", "determinism", "e2e_harness"],

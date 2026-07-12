@@ -458,7 +458,10 @@ fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
                 used_tokens: 8,
                 item_count: 1,
                 omitted_count: 0,
-                pack_hash: "blake3:fixture-pack-hash".to_owned(),
+                pack_hash: format!(
+                    "blake3:{}",
+                    blake3::hash(b"graph additive-only fixture pack").to_hex()
+                ),
                 degraded_json: None,
                 created_by: Some("graph-additive-only".to_owned()),
             },

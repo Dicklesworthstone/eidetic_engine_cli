@@ -1256,7 +1256,7 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
     ensure_json_pointer(
         &pack_replay_summary_json,
         "/schema",
-        json!("ee.support_bundle.pack_replay_summary.v1"),
+        json!("ee.support_bundle.pack_replay_summary.v2"),
         "support bundle pack replay summary schema",
     )?;
     ensure_json_pointer(

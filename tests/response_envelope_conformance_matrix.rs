@@ -10,6 +10,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use regex_lite::Regex;
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -528,6 +529,107 @@ fn bd_1wtsb_representative_artifacts_validate_against_declared_schemas() -> Test
 }
 
 #[test]
+fn replay_and_diff_goldens_structurally_validate_against_v2_schemas() -> TestResult {
+    let cases = [
+        (
+            "ee.pack.replay.v2.json",
+            "pack_replay_available.json.golden",
+        ),
+        (
+            "ee.pack.replay.v2.json",
+            "pack_replay_missing_ledger.json.golden",
+        ),
+        ("ee.pack.diff.v2.json", "pack_diff_no_change.json.golden"),
+        (
+            "ee.pack.diff.v2.json",
+            "pack_diff_ranking_change.json.golden",
+        ),
+        (
+            "ee.pack.diff.v2.json",
+            "pack_diff_redaction_change.json.golden",
+        ),
+        (
+            "ee.pack.diff.v2.json",
+            "pack_diff_degraded_assets.json.golden",
+        ),
+    ];
+
+    for (schema_file, golden_file) in cases {
+        let schema = schema_doc(schema_file)?;
+        let golden = read_json(
+            repo_root()
+                .join("tests")
+                .join("fixtures")
+                .join("golden")
+                .join("pack")
+                .join(golden_file),
+        )?;
+        validate_json_schema(&golden, &schema, &schema, "$")
+            .map_err(|error| format!("{golden_file} against {schema_file}: {error}"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn replay_schema_validation_enforces_public_scalar_and_collection_constraints() -> TestResult {
+    let schema = schema_doc("ee.pack.replay.v2.json")?;
+    let golden = read_json(
+        repo_root()
+            .join("tests")
+            .join("fixtures")
+            .join("golden")
+            .join("pack")
+            .join("pack_replay_available.json.golden"),
+    )?;
+
+    let mutations = [
+        ("canonical hash pattern", "/data/pack/packHash", json!("x")),
+        (
+            "non-empty replay text",
+            "/data/replay/ledger/request/query/text",
+            json!(""),
+        ),
+        (
+            "score maximum",
+            "/data/replay/ledger/selectedItems/0/scores/relevance",
+            json!(1.5),
+        ),
+        (
+            "RFC 3339 timestamp",
+            "/data/replay/ledger/createdAt",
+            json!("not-a-timestamp"),
+        ),
+    ];
+    for (label, pointer, replacement) in mutations {
+        let mut malformed = golden.clone();
+        let slot = malformed
+            .pointer_mut(pointer)
+            .ok_or_else(|| format!("missing mutation pointer {pointer}"))?;
+        *slot = replacement;
+        if validate_json_schema(&malformed, &schema, &schema, "$").is_ok() {
+            return Err(format!("validator accepted malformed {label}"));
+        }
+    }
+
+    let keyword_cases = [
+        (
+            json!(["same", "same"]),
+            json!({"type": "array", "uniqueItems": true}),
+        ),
+        (json!(-1), json!({"type": "integer", "minimum": 0})),
+        (json!(2), json!({"type": "integer", "maximum": 1})),
+    ];
+    for (value, keyword_schema) in keyword_cases {
+        if validate_json_schema(&value, &keyword_schema, &keyword_schema, "$").is_ok() {
+            return Err(format!(
+                "validator accepted {value} against constraint {keyword_schema}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn bd_1wtsb_validator_rejects_unexpected_envelope_fields() -> TestResult {
     let schema = schema_doc("ee.response.v2.json")?;
     let mut value = json!({
@@ -609,7 +711,75 @@ fn validate_json_schema(
         ));
     }
 
+    if let Some(string) = value.as_str() {
+        let length = string.chars().count();
+        if let Some(min_length) = schema.get("minLength").and_then(Value::as_u64)
+            && length < min_length as usize
+        {
+            return Err(format!("{path} has fewer than {min_length} characters"));
+        }
+        if let Some(max_length) = schema.get("maxLength").and_then(Value::as_u64)
+            && length > max_length as usize
+        {
+            return Err(format!("{path} has more than {max_length} characters"));
+        }
+        if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
+            let regex = Regex::new(pattern).map_err(|error| {
+                format!("{path} schema has invalid pattern {pattern:?}: {error}")
+            })?;
+            if !regex.is_match(string) {
+                return Err(format!(
+                    "{path} value {string:?} does not match {pattern:?}"
+                ));
+            }
+        }
+        if schema.get("format").and_then(Value::as_str) == Some("date-time")
+            && chrono::DateTime::parse_from_rfc3339(string).is_err()
+        {
+            return Err(format!(
+                "{path} value {string:?} is not an RFC 3339 date-time"
+            ));
+        }
+    }
+
+    if let Some(number) = value.as_f64() {
+        if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64)
+            && number < minimum
+        {
+            return Err(format!("{path} value {number} is below minimum {minimum}"));
+        }
+        if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64)
+            && number > maximum
+        {
+            return Err(format!("{path} value {number} is above maximum {maximum}"));
+        }
+        if let Some(minimum) = schema.get("exclusiveMinimum").and_then(Value::as_f64)
+            && number <= minimum
+        {
+            return Err(format!(
+                "{path} value {number} is not above exclusive minimum {minimum}"
+            ));
+        }
+        if let Some(maximum) = schema.get("exclusiveMaximum").and_then(Value::as_f64)
+            && number >= maximum
+        {
+            return Err(format!(
+                "{path} value {number} is not below exclusive maximum {maximum}"
+            ));
+        }
+    }
+
     if let Some(object) = value.as_object() {
+        if let Some(min_properties) = schema.get("minProperties").and_then(Value::as_u64)
+            && object.len() < min_properties as usize
+        {
+            return Err(format!("{path} has fewer than {min_properties} properties"));
+        }
+        if let Some(max_properties) = schema.get("maxProperties").and_then(Value::as_u64)
+            && object.len() > max_properties as usize
+        {
+            return Err(format!("{path} has more than {max_properties} properties"));
+        }
         if let Some(required) = schema.get("required").and_then(Value::as_array) {
             for field in required {
                 let field = field
@@ -660,6 +830,13 @@ fn validate_json_schema(
             && array.len() > max_items as usize
         {
             return Err(format!("{path} has more than {max_items} items"));
+        }
+        if schema.get("uniqueItems").and_then(Value::as_bool) == Some(true) {
+            for (index, item) in array.iter().enumerate() {
+                if array[..index].iter().any(|existing| existing == item) {
+                    return Err(format!("{path}[{index}] duplicates an earlier item"));
+                }
+            }
         }
         if let Some(prefix_items) = schema.get("prefixItems").and_then(Value::as_array) {
             for (index, item_schema) in prefix_items.iter().enumerate() {

@@ -150,7 +150,8 @@ mod tests {
     };
     use ee::db::{
         CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
-        CreateWorkspaceInput, DbConnection, MemoryLinkRelation, MemoryLinkSource, StoredAuditEntry,
+        CreatePackItemInput, CreatePackRecordInput, CreateWorkspaceInput, DbConnection,
+        MemoryLinkRelation, MemoryLinkSource, StoredAuditEntry,
     };
     use ee::models::{ProducerMetadata, WorkspaceId};
     use ee::output;
@@ -1409,6 +1410,46 @@ mod tests {
         connection.close().map_err(|error| error.to_string())
     }
 
+    fn seed_verified_pack_selection(database: &Path) -> TestResult {
+        let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
+        let pack_id = "pack_00000000000000000000000001";
+        connection
+            .insert_pack_record_at(
+                pack_id,
+                &CreatePackRecordInput {
+                    workspace_id: "wsp_searchjson0000000000000001".to_owned(),
+                    query: "format before release".to_owned(),
+                    profile: "compact".to_owned(),
+                    max_tokens: 4000,
+                    used_tokens: 8,
+                    item_count: 1,
+                    omitted_count: 0,
+                    pack_hash: fixture_blake3_hash("golden-why-pack"),
+                    degraded_json: None,
+                    created_by: Some("golden-test".to_owned()),
+                },
+                &[CreatePackItemInput {
+                    pack_id: pack_id.to_owned(),
+                    memory_id: "mem_00000000000000000000000001".to_owned(),
+                    rank: 1,
+                    section: "procedural_rules".to_owned(),
+                    estimated_tokens: 8,
+                    relevance: 0.91,
+                    utility: 0.8,
+                    why: "Selected because the memory matches release-formatting work.".to_owned(),
+                    diversity_key: Some("procedural:rule:cargo".to_owned()),
+                    provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[]}"#
+                        .to_owned(),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: Some("project-rule".to_owned()),
+                }],
+                &[],
+                "2026-04-29T12:01:00+00:00",
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
     fn sql_text(value: &str) -> String {
         format!("'{}'", value.replace('\'', "''"))
     }
@@ -1427,6 +1468,7 @@ mod tests {
         pack_hash: &'a str,
         ledger_hash: Option<&'a str>,
         ledger_json: Option<serde_json::Value>,
+        degraded_json: Option<serde_json::Value>,
         created_at: &'a str,
         rank: u32,
         relevance: f32,
@@ -1436,14 +1478,16 @@ mod tests {
 
     fn insert_pack_fixture(connection: &DbConnection, input: PackFixtureInput<'_>) -> TestResult {
         let ledger_json_sql = sql_json(input.ledger_json.as_ref())?;
+        let degraded_json_sql = sql_json(input.degraded_json.as_ref())?;
         let ledger_hash_sql = input
             .ledger_hash
             .map_or_else(|| "NULL".to_string(), sql_text);
         connection
             .execute_raw(&format!(
-                "INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, ledger_json, ledger_hash, created_at, created_by) VALUES ({}, 'wsp_searchjson0000000000000001', 'format before release', 'compact', 4000, 8, 1, 0, {}, NULL, {}, {}, {}, 'golden-test')",
+                "INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, ledger_json, ledger_hash, created_at, created_by) VALUES ({}, 'wsp_searchjson0000000000000001', 'format before release', 'compact', 4000, 8, 1, 0, {}, {}, {}, {}, {}, 'golden-test')",
                 sql_text(input.id),
                 sql_text(input.pack_hash),
+                degraded_json_sql,
                 ledger_json_sql,
                 ledger_hash_sql,
                 sql_text(input.created_at),
@@ -1464,7 +1508,7 @@ mod tests {
     struct PackFixtureLedgerInput<'a> {
         pack_id: &'a str,
         pack_hash: &'a str,
-        ledger_hash: &'a str,
+        created_at: &'a str,
         rank: u32,
         relevance: f32,
         utility: f32,
@@ -1474,86 +1518,127 @@ mod tests {
         degraded: Vec<serde_json::Value>,
     }
 
-    fn pack_fixture_ledger(input: PackFixtureLedgerInput<'_>) -> serde_json::Value {
-        serde_json::json!({
-            "core": {
-                "schema": "ee.pack_replay_ledger.v1",
-                "packId": input.pack_id,
-                "packHash": input.pack_hash,
-                "workspaceId": "wsp_searchjson0000000000000001",
-                "createdAt": "2026-04-29T12:01:00+00:00",
-                "createdBy": "golden-test",
-                "commandSurface": "ee context",
-                "request": {
-                    "query": {
-                        "hash": "blake3:query-fixture",
-                        "redacted": false,
-                        "redactionReasons": [],
-                        "text": "format before release",
-                        "redactedText": null
-                    },
-                    "profile": "compact",
-                    "maxTokens": 4000
+    fn pack_fixture_score(value: f32) -> Result<serde_json::Value, String> {
+        let encoded = serde_json::to_string(&value).map_err(|error| error.to_string())?;
+        serde_json::from_str(&encoded).map_err(|error| error.to_string())
+    }
+
+    fn fixture_blake3_hash(label: &str) -> String {
+        format!("blake3:{}", blake3::hash(label.as_bytes()).to_hex())
+    }
+
+    fn pack_fixture_ledger(
+        input: PackFixtureLedgerInput<'_>,
+    ) -> Result<(serde_json::Value, String), String> {
+        let relevance = pack_fixture_score(input.relevance)?;
+        let utility = pack_fixture_score(input.utility)?;
+        let query_hash = format!("blake3:{}", blake3::hash(b"format before release").to_hex());
+        let why_hash = format!(
+            "blake3:{}",
+            blake3::hash(b"Selected because the memory matches release-formatting work.").to_hex()
+        );
+        let provenance_hash = format!(
+            "blake3:{}",
+            blake3::hash(br#"{"schema":"ee.pack_item.provenance.v1","entries":[]}"#).to_hex()
+        );
+        let provenance_redacted = !input.redaction_classes.is_empty();
+        let mut ledger = serde_json::json!({
+            "schema": "ee.pack_replay_ledger.v1",
+            "packId": input.pack_id,
+            "packHash": input.pack_hash,
+            "workspaceId": "wsp_searchjson0000000000000001",
+            "createdAt": input.created_at,
+            "createdBy": "golden-test",
+            "commandSurface": "golden-test",
+            "request": {
+                "query": {
+                    "hash": query_hash,
+                    "redacted": false,
+                    "redactionReasons": [],
+                    "text": "format before release",
+                    "redactedText": null
                 },
-                "database": {
-                    "schemaVersion": 40,
-                    "generation": 40
-                },
-                "derivedAssets": {
-                    "searchIndex": input.search_index,
-                    "graphSnapshot": input.graph_snapshot
-                },
-                "candidateCounts": {
-                    "selected": 1,
-                    "omitted": 0,
-                    "candidatePool": 1
-                },
-                "selectedItems": [{
-                    "memoryId": "mem_00000000000000000000000001",
-                    "rank": input.rank,
-                    "section": "procedural_rules",
-                    "estimatedTokens": 8,
-                    "scores": {
-                        "relevance": input.relevance,
-                        "utility": input.utility
-                    },
-                    "why": {
-                        "hash": "blake3:why-fixture",
-                        "redacted": false,
-                        "redactionReasons": [],
-                        "text": "Selected because the memory matches release-formatting work.",
-                        "redactedText": null
-                    },
-                    "diversityKey": "procedural:rule:cargo",
-                    "trustClass": "human_explicit",
-                    "trustSubclass": "project-rule",
-                    "provenance": {
-                        "hash": "blake3:provenance-fixture",
-                        "redacted": false,
-                        "redactionReasons": []
-                    },
-                    "redactionClasses": input.redaction_classes,
-                    "freshness": "unavailable"
-                }],
-                "omittedItems": [],
-                "degraded": input.degraded
+                "profile": "compact",
+                "maxTokens": 4000
             },
-            "ledgerHash": input.ledger_hash
-        })
+            "database": {
+                "schemaVersion": 40,
+                "generation": 40
+            },
+            "derivedAssets": {
+                "searchIndex": input.search_index,
+                "graphSnapshot": input.graph_snapshot
+            },
+            "candidateCounts": {
+                "selected": 1,
+                "omitted": 0,
+                "candidatePool": 1
+            },
+            "selectedItems": [{
+                "memoryId": "mem_00000000000000000000000001",
+                "rank": input.rank,
+                "section": "procedural_rules",
+                "estimatedTokens": 8,
+                "scores": {
+                    "relevance": relevance,
+                    "utility": utility
+                },
+                "why": {
+                    "hash": why_hash,
+                    "redacted": false,
+                    "redactionReasons": [],
+                    "text": "Selected because the memory matches release-formatting work.",
+                    "redactedText": null
+                },
+                "diversityKey": "procedural:rule:cargo",
+                "trustClass": "human_explicit",
+                "trustSubclass": "project-rule",
+                "provenance": {
+                    "hash": provenance_hash,
+                    "redacted": provenance_redacted,
+                    "redactionReasons": input.redaction_classes
+                },
+                "redactionClasses": input.redaction_classes,
+                "freshness": "unavailable"
+            }],
+            "omittedItems": [],
+            "degraded": input.degraded
+        });
+        let canonical_core = serde_json::to_string(&ledger).map_err(|error| error.to_string())?;
+        let ledger_hash = format!(
+            "blake3:{}",
+            blake3::hash(canonical_core.as_bytes()).to_hex()
+        );
+        let object = ledger
+            .as_object_mut()
+            .ok_or_else(|| "pack fixture ledger core must be an object".to_owned())?;
+        object.insert(
+            "ledgerHash".to_owned(),
+            serde_json::Value::String(ledger_hash.clone()),
+        );
+        Ok((ledger, ledger_hash))
     }
 
     fn seed_pack_replay_fixtures(database: &Path) -> TestResult {
         let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
         let unavailable_asset = serde_json::json!({"status": "not_recorded", "manifestHash": null});
-        let available_search =
-            serde_json::json!({"status": "available", "manifestHash": "blake3:search-v2"});
-        let stale_graph =
-            serde_json::json!({"status": "stale", "manifestHash": "blake3:graph-old"});
+        let available_search = serde_json::json!({
+            "status": "available",
+            "manifestHash": fixture_blake3_hash("search-v2")
+        });
+        let stale_graph = serde_json::json!({
+            "status": "stale",
+            "manifestHash": fixture_blake3_hash("graph-old")
+        });
+        let base_pack_hash = fixture_blake3_hash("pack-base");
+        let ranking_pack_hash = fixture_blake3_hash("pack-ranking");
+        let redaction_pack_hash = fixture_blake3_hash("pack-redaction");
+        let degraded_pack_hash = fixture_blake3_hash("pack-degraded");
 
-        let base_ledger = pack_fixture_ledger(PackFixtureLedgerInput {
+        let (base_ledger, base_ledger_hash) = pack_fixture_ledger(PackFixtureLedgerInput {
             pack_id: "pack_00000000000000000000000011",
-            pack_hash: "blake3:pack-base",
-            ledger_hash: "blake3:ledger-base",
+            pack_hash: &base_pack_hash,
+            created_at: "2026-04-29T12:01:00+00:00",
             rank: 1,
             relevance: 0.91,
             utility: 0.80,
@@ -1561,14 +1646,15 @@ mod tests {
             search_index: unavailable_asset.clone(),
             graph_snapshot: unavailable_asset.clone(),
             degraded: Vec::new(),
-        });
+        })?;
         insert_pack_fixture(
             &connection,
             PackFixtureInput {
                 id: "pack_00000000000000000000000011",
-                pack_hash: "blake3:pack-base",
-                ledger_hash: Some("blake3:ledger-base"),
+                pack_hash: &base_pack_hash,
+                ledger_hash: Some(&base_ledger_hash),
                 ledger_json: Some(base_ledger),
+                degraded_json: None,
                 created_at: "2026-04-29T12:01:00+00:00",
                 rank: 1,
                 relevance: 0.91,
@@ -1577,10 +1663,10 @@ mod tests {
             },
         )?;
 
-        let ranking_ledger = pack_fixture_ledger(PackFixtureLedgerInput {
+        let (ranking_ledger, ranking_ledger_hash) = pack_fixture_ledger(PackFixtureLedgerInput {
             pack_id: "pack_00000000000000000000000012",
-            pack_hash: "blake3:pack-ranking",
-            ledger_hash: "blake3:ledger-ranking",
+            pack_hash: &ranking_pack_hash,
+            created_at: "2026-04-29T12:02:00+00:00",
             rank: 2,
             relevance: 0.84,
             utility: 0.70,
@@ -1588,14 +1674,15 @@ mod tests {
             search_index: unavailable_asset.clone(),
             graph_snapshot: unavailable_asset.clone(),
             degraded: Vec::new(),
-        });
+        })?;
         insert_pack_fixture(
             &connection,
             PackFixtureInput {
                 id: "pack_00000000000000000000000012",
-                pack_hash: "blake3:pack-ranking",
-                ledger_hash: Some("blake3:ledger-ranking"),
+                pack_hash: &ranking_pack_hash,
+                ledger_hash: Some(&ranking_ledger_hash),
                 ledger_json: Some(ranking_ledger),
+                degraded_json: None,
                 created_at: "2026-04-29T12:02:00+00:00",
                 rank: 2,
                 relevance: 0.84,
@@ -1604,25 +1691,27 @@ mod tests {
             },
         )?;
 
-        let redaction_ledger = pack_fixture_ledger(PackFixtureLedgerInput {
-            pack_id: "pack_00000000000000000000000013",
-            pack_hash: "blake3:pack-redaction",
-            ledger_hash: "blake3:ledger-redaction",
-            rank: 1,
-            relevance: 0.91,
-            utility: 0.80,
-            redaction_classes: &["anthropic_api_key"],
-            search_index: unavailable_asset.clone(),
-            graph_snapshot: unavailable_asset.clone(),
-            degraded: Vec::new(),
-        });
+        let (redaction_ledger, redaction_ledger_hash) =
+            pack_fixture_ledger(PackFixtureLedgerInput {
+                pack_id: "pack_00000000000000000000000013",
+                pack_hash: &redaction_pack_hash,
+                created_at: "2026-04-29T12:03:00+00:00",
+                rank: 1,
+                relevance: 0.91,
+                utility: 0.80,
+                redaction_classes: &["anthropic_api_key"],
+                search_index: unavailable_asset.clone(),
+                graph_snapshot: unavailable_asset.clone(),
+                degraded: Vec::new(),
+            })?;
         insert_pack_fixture(
             &connection,
             PackFixtureInput {
                 id: "pack_00000000000000000000000013",
-                pack_hash: "blake3:pack-redaction",
-                ledger_hash: Some("blake3:ledger-redaction"),
+                pack_hash: &redaction_pack_hash,
+                ledger_hash: Some(&redaction_ledger_hash),
                 ledger_json: Some(redaction_ledger),
+                degraded_json: None,
                 created_at: "2026-04-29T12:03:00+00:00",
                 rank: 1,
                 relevance: 0.91,
@@ -1631,29 +1720,32 @@ mod tests {
             },
         )?;
 
-        let degraded_ledger = pack_fixture_ledger(PackFixtureLedgerInput {
-            pack_id: "pack_00000000000000000000000014",
-            pack_hash: "blake3:pack-degraded",
-            ledger_hash: "blake3:ledger-degraded",
-            rank: 1,
-            relevance: 0.91,
-            utility: 0.80,
-            redaction_classes: &[],
-            search_index: available_search,
-            graph_snapshot: stale_graph,
-            degraded: vec![serde_json::json!({
-                "code": "context_graph_snapshot_stale",
-                "message": "Graph snapshot was stale during pack selection.",
-                "severity": "medium"
-            })],
-        });
+        let degraded = serde_json::json!([{
+            "code": "context_graph_snapshot_stale",
+            "message": "Graph snapshot was stale during pack selection.",
+            "severity": "medium"
+        }]);
+        let (degraded_ledger, degraded_ledger_hash) =
+            pack_fixture_ledger(PackFixtureLedgerInput {
+                pack_id: "pack_00000000000000000000000014",
+                pack_hash: &degraded_pack_hash,
+                created_at: "2026-04-29T12:04:00+00:00",
+                rank: 1,
+                relevance: 0.91,
+                utility: 0.80,
+                redaction_classes: &[],
+                search_index: available_search,
+                graph_snapshot: stale_graph,
+                degraded: degraded.as_array().cloned().unwrap_or_default(),
+            })?;
         insert_pack_fixture(
             &connection,
             PackFixtureInput {
                 id: "pack_00000000000000000000000014",
-                pack_hash: "blake3:pack-degraded",
-                ledger_hash: Some("blake3:ledger-degraded"),
+                pack_hash: &degraded_pack_hash,
+                ledger_hash: Some(&degraded_ledger_hash),
                 ledger_json: Some(degraded_ledger),
+                degraded_json: Some(degraded),
                 created_at: "2026-04-29T12:04:00+00:00",
                 rank: 1,
                 relevance: 0.91,
@@ -3721,7 +3813,7 @@ mod tests {
         })?;
 
         seed_search_workspace(&workspace, &database)?;
-        seed_pack_selection(&database)?;
+        seed_verified_pack_selection(&database)?;
 
         let output = Command::new(env!("CARGO_BIN_EXE_ee"))
             .arg("--json")

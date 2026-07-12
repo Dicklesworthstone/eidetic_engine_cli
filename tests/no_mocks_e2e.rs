@@ -501,10 +501,14 @@ fn assert_context_pack_ledgers_persisted(
 
     let mut pack_ids = BTreeSet::new();
     let mut ledger_hashes = BTreeSet::new();
-    for (record, _item) in history
+    for (record_metadata, _item) in history
         .iter()
         .filter(|(record, _item)| record.query == query && record.pack_hash == pack_hash)
     {
+        let record = connection
+            .get_pack_record(&record_metadata.id)
+            .map_err(|error| format!("load pack record {}: {error}", record_metadata.id))?
+            .ok_or_else(|| format!("pack record {} disappeared", record_metadata.id))?;
         ensure_equal(
             &record.created_by.as_deref(),
             &Some("ee context"),
@@ -526,8 +530,17 @@ fn assert_context_pack_ledgers_persisted(
             ),
         )?;
 
-        let parsed_ledger = parse_stored_pack_ledger(record);
-        let ledger = parsed_ledger.ledger.as_ref().ok_or_else(|| {
+        let parsed_ledger = parse_stored_pack_ledger(&record);
+        ensure_equal(
+            &parsed_ledger.status,
+            &ee::db::PackLedgerStatus::Available,
+            "pack ledger authority status",
+        )?;
+        ensure(
+            parsed_ledger.degraded.is_empty(),
+            "available pack ledger must not be degraded",
+        )?;
+        let ledger = parsed_ledger.available_ledger().ok_or_else(|| {
             format!(
                 "pack record {} ledger could not be replayed: {:?}",
                 record.id, parsed_ledger.degraded
@@ -3623,7 +3636,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 before_pack_id.clone(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.pack.replay.v1",
+            expected_schema: "ee.pack.replay.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3656,7 +3669,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 after_pack_id.clone(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.pack.replay.v1",
+            expected_schema: "ee.pack.replay.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3702,7 +3715,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 pack_query_after_pack_id.clone(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.pack.replay.v1",
+            expected_schema: "ee.pack.replay.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3749,7 +3762,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 after_pack_id.clone(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.pack.diff.v1",
+            expected_schema: "ee.pack.diff.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3785,7 +3798,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 pack_query_after_pack_id.clone(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.pack.diff.v1",
+            expected_schema: "ee.pack.diff.v2",
             expect_clean_stderr: true,
         },
     )?;

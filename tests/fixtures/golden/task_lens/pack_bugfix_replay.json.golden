@@ -1,37 +1,37 @@
 {
   "pack": {
-    "command": "pack",
-    "hash": "<blake3>",
-    "request": {
-      "candidatePool": 17,
-      "maxTokens": 2000,
-      "profile": "compact",
-      "query": "fix release failure"
-    },
     "schema": "ee.response.v2",
-    "selectedItemCount": 1,
-    "success": true
+    "success": true,
+    "command": "pack",
+    "request": {
+      "query": "fix release failure",
+      "profile": "compact",
+      "maxTokens": 2000,
+      "candidatePool": 17
+    },
+    "hash": "<blake3>",
+    "selectedItemCount": 1
   },
   "replay": {
+    "schema": "ee.pack.replay.v2",
+    "success": true,
     "command": "pack replay",
-    "ledgerRequest": {
+    "status": "available",
+    "pack": {
+      "profile": "compact",
       "maxTokens": 2000,
-      "profile": "compact"
+      "hash": "<blake3>",
+      "ledgerHash": "<blake3>"
+    },
+    "ledgerRequest": {
+      "profile": "compact",
+      "maxTokens": 2000
     },
     "ledgerTaskLens": {
       "id": "bugfix",
-      "lensHash": "<blake3>",
-      "version": 1
+      "version": 1,
+      "lensHash": "<blake3>"
     },
-    "pack": {
-      "hash": "<blake3>",
-      "ledgerHash": "<blake3>",
-      "maxTokens": 2000,
-      "profile": "compact"
-    },
-    "schema": "ee.pack.replay.v1",
-    "selectedItemCount": 1,
-    "status": "available",
-    "success": true
+    "selectedItemCount": 1
   }
 }

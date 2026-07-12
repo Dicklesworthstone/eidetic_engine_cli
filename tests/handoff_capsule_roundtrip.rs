@@ -143,7 +143,7 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
     ensure(
         json.pointer("/pack_replay_summary/schema")
             .and_then(|v| v.as_str())
-            == Some("ee.support_bundle.pack_replay_summary.v1"),
+            == Some("ee.support_bundle.pack_replay_summary.v2"),
         "create stdout includes pack replay summary schema",
     )?;
     ensure(
@@ -266,7 +266,7 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
         .ok_or_else(|| "capsule missing pack_replay_summary".to_string())?;
     ensure(
         pack_summary.get("schema").and_then(|v| v.as_str())
-            == Some("ee.support_bundle.pack_replay_summary.v1"),
+            == Some("ee.support_bundle.pack_replay_summary.v2"),
         "capsule pack replay summary schema",
     )?;
     ensure(
@@ -502,7 +502,7 @@ fn handoff_resume_emits_capsule_id_and_objective() -> TestResult {
     ensure(
         json.pointer("/pack_replay_summary/schema")
             .and_then(|v| v.as_str())
-            == Some("ee.support_bundle.pack_replay_summary.v1"),
+            == Some("ee.support_bundle.pack_replay_summary.v2"),
         "resume includes embedded pack replay summary",
     )?;
     ensure(
