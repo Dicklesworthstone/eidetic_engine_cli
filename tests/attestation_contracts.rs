@@ -7,17 +7,19 @@
 //! cross-surface invariants 22.3 relies on when it refactors support-bundle /
 //! handoff / pack-replay / why to consume the bundle.
 //!
-//! Goldens for `ee attest memory|pack` and the "consuming surfaces produce
-//! identical bundle hash" cross-check (which needs the 22.3 refactor) are owed:
-//! the goldens RCH-remote-regen (bd-17c65.10.17), the cross-surface check once
-//! 22.3 lands.
+//! Cross-surface bundle-hash parity is exercised by `scripts/e2e_attestation.sh`
+//! across direct pack attestation, support bundles, and handoff output; pack
+//! replay goldens pin the corresponding public attestation manifest.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use ee::core::attest::{
     ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1, attestation_surface_manifest, build_query_attestation,
+    public_attestation_bundle,
 };
 use ee::models::attestation::ATTESTATION_BUNDLE_SCHEMA_V1;
+
+const ATTEST_RESPONSE_SCHEMA: &str = include_str!("../docs/schemas/ee.attest.v1.json");
 
 #[test]
 fn bundle_hash_is_deterministic_and_subject_sensitive() {
@@ -85,7 +87,10 @@ fn surface_manifest_is_hash_only_and_reuses_bundle_hash() {
     assert_eq!(manifest["schema"], ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1);
     assert_eq!(manifest["status"], "available");
     assert_eq!(manifest["sourceSchema"], ATTESTATION_BUNDLE_SCHEMA_V1);
-    assert_eq!(manifest["bundleHash"], bundle.bundle_hash());
+    assert_eq!(
+        manifest["bundleHash"],
+        public_attestation_bundle(&bundle).bundle_hash()
+    );
     assert_eq!(manifest["subject"]["kind"], "query");
     assert!(
         manifest
@@ -100,4 +105,19 @@ fn surface_manifest_is_hash_only_and_reuses_bundle_hash() {
         !rendered.contains(secret),
         "surface manifest must not rehydrate raw subject text"
     );
+}
+
+#[test]
+fn attest_schema_matches_public_bundle_trust_shape_and_identity_posture() {
+    let schema: serde_json::Value =
+        serde_json::from_str(ATTEST_RESPONSE_SCHEMA).expect("ee.attest schema JSON");
+    assert_eq!(
+        schema.pointer("/properties/data/properties/bundle/properties/trustStatement/type"),
+        Some(&serde_json::json!("object"))
+    );
+    let subject_description = schema
+        .pointer("/properties/data/properties/subjectId/description")
+        .and_then(serde_json::Value::as_str)
+        .expect("subjectId description");
+    assert!(subject_description.contains("Raw query text is never emitted"));
 }

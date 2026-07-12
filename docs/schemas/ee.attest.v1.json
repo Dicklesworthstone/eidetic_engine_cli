@@ -25,9 +25,9 @@
         "bundleHash": {
           "type": "string",
           "pattern": "^blake3:[0-9a-f]{64}$",
-          "description": "blake3 hash over the canonical AttestationBundle. Deterministic for a fixed subject + database; this is the single value support-bundle/handoff/why should embed (bd-1n0np.22.3) so all surfaces share one chain-of-custody object."
+          "description": "blake3 hash over the exact public redaction-safe AttestationBundle emitted in data.bundle. Deterministic for a fixed subject + database; this is the single value support-bundle/handoff/why should embed (bd-1n0np.22.3) so all surfaces share one chain-of-custody object."
         },
-        "subjectId": {"type": "string", "description": "Memory id, pack id, or query text (per subjectKind)."},
+        "subjectId": {"type": "string", "description": "Canonical public memory/pack ID or a domain-separated blake3 identity for non-ID subjects. Raw query text is never emitted."},
         "subjectKind": {"type": "string", "enum": ["memory", "pack", "query"]},
         "rawTextIncluded": {
           "type": ["boolean", "null"],
@@ -57,11 +57,19 @@
           "properties": {
             "schema": {"type": "string", "const": "ee.attestation.bundle.v1"},
             "subject": {"type": "object"},
-            "evidenceManifest": {"type": "object", "description": "Hash-referenced evidence the bundle covers (no raw payloads)."},
+            "evidenceManifest": {"type": "object", "description": "Hash-referenced evidence the bundle covers. IDs are public aliases or domain hashes, provenanceUri is omitted, and noncanonical hashes are omitted explicitly."},
             "redactionManifest": {"type": "object", "description": "What was redacted and why — redaction is recorded, never silent."},
             "hashManifest": {"type": "object", "description": "Per-entry blake3 hashes that compose the bundleHash."},
             "omissions": {"type": "array", "description": "Recorded omissions (no silent loss).", "items": {"type": "object"}},
-            "trustStatement": {"type": "string"}
+            "trustStatement": {
+              "type": "object",
+              "required": ["scope", "statement"],
+              "additionalProperties": false,
+              "properties": {
+                "scope": {"type": "string"},
+                "statement": {"type": "string"}
+              }
+            }
           }
         }
       }

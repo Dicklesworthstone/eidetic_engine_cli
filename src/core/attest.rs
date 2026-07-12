@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Value, json};
 
 use crate::db::{
-    self, DbConnection, StoredAuditEntry, StoredMemory, StoredMemoryLink, StoredPackItem,
-    StoredPackRecord, compute_memory_provenance_chain_hash, parse_stored_pack_ledger,
+    self, DbConnection, StoredAuditEntry, StoredMemory, StoredMemoryLink, StoredPackRecord,
+    compute_memory_provenance_chain_hash, parse_stored_pack_ledger,
 };
 use crate::models::{
     AttestationBundle, AttestationEvidenceManifest, AttestationEvidenceRef, AttestationHashEntry,
@@ -40,7 +40,7 @@ pub fn build_memory_attestation(
     };
     let links = connection.list_memory_links_for_memory(memory_id, None)?;
     let anchors = connection.list_memory_anchors(memory_id)?;
-    let audits = memory_attestation_audits(connection, memory_id)?;
+    let audits = memory_attestation_audits(connection, memory_id, &memory.workspace_id)?;
 
     Ok(Some(build_memory_attestation_from_parts(
         &memory, &links, &anchors, &audits,
@@ -50,20 +50,82 @@ pub fn build_memory_attestation(
 fn memory_attestation_audits(
     connection: &DbConnection,
     memory_id: &str,
+    workspace_id: &str,
 ) -> db::Result<Vec<StoredAuditEntry>> {
-    connection
-        .list_audit_by_target("memory", memory_id, None)
-        .map(filter_memory_attestation_audits)
+    connection.list_audit_by_workspace_target(
+        workspace_id,
+        "memory",
+        memory_id,
+        Some(crate::db::audit_actions::WHY_INSPECTED),
+        ATTESTATION_AUDIT_LIMIT,
+    )
 }
 
+#[cfg(test)]
 fn filter_memory_attestation_audits(
     audits: impl IntoIterator<Item = StoredAuditEntry>,
+    workspace_id: &str,
 ) -> Vec<StoredAuditEntry> {
     audits
         .into_iter()
+        .filter(|entry| entry.workspace_id.as_deref() == Some(workspace_id))
         .filter(|entry| entry.action != crate::db::audit_actions::WHY_INSPECTED)
         .take(ATTESTATION_AUDIT_LIMIT as usize)
         .collect()
+}
+
+/// Build a memory attestation only when the loaded row belongs to the expected workspace.
+pub fn build_memory_attestation_for_workspace(
+    connection: &DbConnection,
+    memory_id: &str,
+    workspace_id: &str,
+) -> db::Result<Option<AttestationBundle>> {
+    let Some(memory) = connection.get_memory(memory_id)? else {
+        return Ok(None);
+    };
+    if memory.workspace_id != workspace_id {
+        return Ok(None);
+    }
+    let links = connection.list_memory_links_for_memory(memory_id, None)?;
+    let anchors = connection.list_memory_anchors(memory_id)?;
+    let audits = memory_attestation_audits(connection, memory_id, workspace_id)?;
+    Ok(Some(build_memory_attestation_from_parts(
+        &memory, &links, &anchors, &audits,
+    )))
+}
+
+fn pack_attestation_audits(
+    connection: &DbConnection,
+    pack_id: &str,
+    workspace_id: &str,
+) -> db::Result<Vec<StoredAuditEntry>> {
+    let pack = connection.list_audit_by_workspace_target(
+        workspace_id,
+        "pack",
+        pack_id,
+        None,
+        ATTESTATION_AUDIT_LIMIT,
+    )?;
+    let pack_record = connection.list_audit_by_workspace_target(
+        workspace_id,
+        "pack_record",
+        pack_id,
+        None,
+        ATTESTATION_AUDIT_LIMIT,
+    )?;
+    let mut audits = pack
+        .into_iter()
+        .chain(pack_record)
+        .filter(|entry| entry.workspace_id.as_deref() == Some(workspace_id))
+        .collect::<Vec<_>>();
+    audits.sort_by(|left, right| {
+        right
+            .timestamp
+            .cmp(&left.timestamp)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+    audits.truncate(ATTESTATION_AUDIT_LIMIT as usize);
+    Ok(audits)
 }
 
 /// Build an attestation bundle for a stored pack record, if the pack exists.
@@ -74,18 +136,55 @@ pub fn build_pack_attestation(
     let Some(record) = connection.get_pack_record(pack_id)? else {
         return Ok(None);
     };
-    let items = connection.get_pack_items(pack_id)?;
-    let mut audits =
-        connection.list_audit_by_target("pack", pack_id, Some(ATTESTATION_AUDIT_LIMIT))?;
-    audits.extend(connection.list_audit_by_target(
-        "pack_record",
-        pack_id,
-        Some(ATTESTATION_AUDIT_LIMIT),
-    )?);
+    let ledger = require_available_pack_attestation_ledger(&record)?;
+    let audits = pack_attestation_audits(connection, pack_id, &record.workspace_id)?;
 
-    Ok(Some(build_pack_attestation_from_parts(
-        &record, &items, &audits,
+    Ok(Some(build_trusted_pack_attestation_from_parts(
+        &record, &ledger, &audits,
     )))
+}
+
+/// Build a pack attestation from one checked row in the expected workspace.
+pub fn build_pack_attestation_for_workspace(
+    connection: &DbConnection,
+    pack_id: &str,
+    workspace_id: &str,
+) -> db::Result<Option<AttestationBundle>> {
+    let Some(record) = connection.get_pack_record(pack_id)? else {
+        return Ok(None);
+    };
+    if record.workspace_id != workspace_id {
+        return Ok(None);
+    }
+    build_pack_attestation_from_checked_record(connection, &record).map(Some)
+}
+
+/// Build from a caller-checked pack row without reloading or changing identity.
+pub fn build_pack_attestation_from_checked_record(
+    connection: &DbConnection,
+    record: &StoredPackRecord,
+) -> db::Result<AttestationBundle> {
+    let ledger = require_available_pack_attestation_ledger(record)?;
+    let audits = pack_attestation_audits(connection, &record.id, &record.workspace_id)?;
+    Ok(build_trusted_pack_attestation_from_parts(
+        record, &ledger, &audits,
+    ))
+}
+
+fn require_available_pack_attestation_ledger(
+    record: &StoredPackRecord,
+) -> db::Result<db::ParsedPackLedger> {
+    let ledger = parse_stored_pack_ledger(record);
+    if ledger.status != db::PackLedgerStatus::Available {
+        return Err(db::DbError::MalformedRow {
+            operation: db::DbOperation::Query,
+            message: format!(
+                "pack attestation requires an available integrity-verified selection ledger; status={}",
+                ledger.status.as_str()
+            ),
+        });
+    }
+    Ok(ledger)
 }
 
 /// Build an attestation bundle for a standalone query string.
@@ -131,6 +230,140 @@ pub fn build_query_attestation(query_text: &str) -> AttestationBundle {
     .with_omissions(query_omissions())
 }
 
+fn public_attestation_domain_hash(domain: &str, value: &str) -> String {
+    format!(
+        "blake3:{}",
+        blake3::hash(format!("{domain}:{value}").as_bytes()).to_hex()
+    )
+}
+
+fn public_attestation_evidence_id(kind: &str, id: &str) -> String {
+    match kind {
+        "memory" => crate::models::public_memory_id(id),
+        "pack" | "pack_record" => crate::models::public_pack_id(id),
+        "memory_link" => crate::models::public_memory_link_id(id),
+        "audit" | "audit_log" => crate::models::public_audit_id(id),
+        _ if crate::db::is_canonical_blake3_hash(id) => id.to_owned(),
+        _ => public_attestation_domain_hash(&format!("attestation-evidence-id:{kind}"), id),
+    }
+}
+
+fn public_attestation_subject_id(kind: AttestationSubjectKind, id: &str) -> String {
+    match kind {
+        AttestationSubjectKind::Pack => crate::models::public_pack_id(id),
+        AttestationSubjectKind::Memory => crate::models::public_memory_id(id),
+        AttestationSubjectKind::Query
+        | AttestationSubjectKind::CurationCandidate
+        | AttestationSubjectKind::Procedure
+        | AttestationSubjectKind::Backup => {
+            if crate::db::is_canonical_blake3_hash(id) {
+                id.to_owned()
+            } else {
+                public_attestation_domain_hash("attestation-subject-id", id)
+            }
+        }
+    }
+}
+
+/// Return the canonical redaction-safe bundle used by every public attestation surface.
+#[must_use]
+pub fn public_attestation_bundle(bundle: &AttestationBundle) -> AttestationBundle {
+    let mut public = bundle.clone();
+    let mut omitted_noncanonical_hash = false;
+    let mut omitted_provenance_uri = false;
+    public.schema = crate::models::attestation::ATTESTATION_BUNDLE_SCHEMA_V1.to_owned();
+    public.subject.id = public_attestation_subject_id(public.subject.kind, &public.subject.id);
+    public.subject.content_hashes.retain_mut(|entry| {
+        entry.label = crate::policy::redact_public_replay_field("hashLabel", &entry.label).content;
+        let canonical = crate::db::is_canonical_blake3_hash(&entry.hash);
+        omitted_noncanonical_hash |= !canonical;
+        if canonical {
+            entry.algorithm = "blake3".to_owned();
+        }
+        canonical
+    });
+    for entry in &mut public.evidence_manifest.entries {
+        let original_kind = entry.kind.clone();
+        entry.id = public_attestation_evidence_id(&original_kind, &entry.id);
+        entry.kind = crate::policy::redact_public_replay_field("kind", &entry.kind).content;
+        entry.schema = entry
+            .schema
+            .as_deref()
+            .map(|value| crate::policy::redact_public_replay_field("schema", value).content);
+        omitted_provenance_uri |= entry.provenance_uri.is_some();
+        entry.provenance_uri = None;
+        for hash in [&mut entry.content_hash, &mut entry.chain_hash] {
+            if hash
+                .as_deref()
+                .is_some_and(|value| !crate::db::is_canonical_blake3_hash(value))
+            {
+                *hash = None;
+                omitted_noncanonical_hash = true;
+            }
+        }
+    }
+    for entry in &mut public.redaction_manifest.entries {
+        entry.field = crate::policy::redact_public_replay_field("field", &entry.field).content;
+        entry.class = crate::policy::redact_public_replay_field("class", &entry.class).content;
+        entry.action = crate::policy::redact_public_replay_field("action", &entry.action).content;
+        entry.reason = crate::policy::redact_public_replay_field("reason", &entry.reason).content;
+        if entry
+            .replacement_hash
+            .as_deref()
+            .is_some_and(|value| !crate::db::is_canonical_blake3_hash(value))
+        {
+            entry.replacement_hash = None;
+            omitted_noncanonical_hash = true;
+        }
+    }
+    public.redaction_manifest.policy =
+        crate::policy::redact_public_replay_field("policy", &public.redaction_manifest.policy)
+            .content;
+    public.hash_manifest.entries.retain_mut(|entry| {
+        entry.label = crate::policy::redact_public_replay_field("hashLabel", &entry.label).content;
+        let canonical = crate::db::is_canonical_blake3_hash(&entry.hash);
+        omitted_noncanonical_hash |= !canonical;
+        if canonical {
+            entry.algorithm = "blake3".to_owned();
+        }
+        canonical
+    });
+    for omission in &mut public.omissions {
+        omission.field =
+            crate::policy::redact_public_replay_field("field", &omission.field).content;
+        omission.reason =
+            crate::policy::redact_public_replay_field("reason", &omission.reason).content;
+    }
+    if omitted_noncanonical_hash
+        && !public
+            .omissions
+            .iter()
+            .any(|entry| entry.field == "publicProjection.nonCanonicalHashes")
+    {
+        public.omissions.push(AttestationOmission::new(
+            "publicProjection.nonCanonicalHashes",
+            "noncanonical hash values were omitted from the public attestation bundle",
+        ));
+    }
+    if omitted_provenance_uri
+        && !public
+            .omissions
+            .iter()
+            .any(|entry| entry.field == "publicProjection.provenanceUri")
+    {
+        public.omissions.push(AttestationOmission::new(
+            "publicProjection.provenanceUri",
+            "provenance URIs are omitted from the public attestation bundle",
+        ));
+    }
+    public.trust_statement.scope =
+        crate::policy::redact_public_replay_field("scope", &public.trust_statement.scope).content;
+    public.trust_statement.statement =
+        crate::policy::redact_public_replay_field("statement", &public.trust_statement.statement)
+            .content;
+    public
+}
+
 /// Project a bundle into the compact manifest shape consumed by other surfaces.
 ///
 /// The projection is intentionally hash- and count-heavy: it lets support
@@ -138,6 +371,8 @@ pub fn build_query_attestation(query_text: &str) -> AttestationBundle {
 /// subject without copying raw evidence text into those surfaces.
 #[must_use]
 pub fn attestation_surface_manifest(bundle: &AttestationBundle) -> Value {
+    let public_bundle = public_attestation_bundle(bundle);
+    let bundle = &public_bundle;
     let evidence_kinds = count_tokens(
         bundle
             .evidence_manifest
@@ -157,14 +392,16 @@ pub fn attestation_surface_manifest(bundle: &AttestationBundle) -> Value {
             .evidence_manifest
             .entries
             .iter()
-            .filter_map(|entry| entry.content_hash.as_deref()),
+            .filter_map(|entry| entry.content_hash.as_deref())
+            .filter(|hash| crate::db::is_canonical_blake3_hash(hash)),
     );
     let evidence_chain_hashes = sorted_optional_tokens(
         bundle
             .evidence_manifest
             .entries
             .iter()
-            .filter_map(|entry| entry.chain_hash.as_deref()),
+            .filter_map(|entry| entry.chain_hash.as_deref())
+            .filter(|hash| crate::db::is_canonical_blake3_hash(hash)),
     );
     let subject_hash_labels = sorted_optional_tokens(
         bundle
@@ -185,7 +422,8 @@ pub fn attestation_surface_manifest(bundle: &AttestationBundle) -> Value {
             .hash_manifest
             .entries
             .iter()
-            .map(|entry| entry.hash.as_str()),
+            .map(|entry| entry.hash.as_str())
+            .filter(|hash| crate::db::is_canonical_blake3_hash(hash)),
     );
     let redaction_fields = sorted_optional_tokens(
         bundle
@@ -206,10 +444,12 @@ pub fn attestation_surface_manifest(bundle: &AttestationBundle) -> Value {
             .redaction_manifest
             .entries
             .iter()
-            .filter_map(|entry| entry.replacement_hash.as_deref()),
+            .filter_map(|entry| entry.replacement_hash.as_deref())
+            .filter(|hash| crate::db::is_canonical_blake3_hash(hash)),
     );
     let omission_fields =
         sorted_optional_tokens(bundle.omissions.iter().map(|entry| entry.field.as_str()));
+    let public_subject_id = bundle.subject.id.clone();
 
     json!({
         "schema": ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1,
@@ -218,7 +458,7 @@ pub fn attestation_surface_manifest(bundle: &AttestationBundle) -> Value {
         "bundleHash": bundle.bundle_hash(),
         "subject": {
             "kind": bundle.subject.kind.as_str(),
-            "id": &bundle.subject.id,
+            "id": public_subject_id,
             "contentHashCount": bundle.subject.content_hashes.len(),
             "contentHashLabels": subject_hash_labels,
         },
@@ -382,7 +622,17 @@ pub fn build_memory_attestation_from_parts(
 #[must_use]
 pub fn build_pack_attestation_from_parts(
     record: &StoredPackRecord,
-    items: &[StoredPackItem],
+    audits: &[StoredAuditEntry],
+) -> db::Result<AttestationBundle> {
+    let ledger = require_available_pack_attestation_ledger(record)?;
+    Ok(build_trusted_pack_attestation_from_parts(
+        record, &ledger, audits,
+    ))
+}
+
+fn build_trusted_pack_attestation_from_parts(
+    record: &StoredPackRecord,
+    ledger: &db::ParsedPackLedger,
     audits: &[StoredAuditEntry],
 ) -> AttestationBundle {
     let mut redactions = Vec::new();
@@ -407,11 +657,10 @@ pub fn build_pack_attestation_from_parts(
         redacted.hash
     });
 
-    let ledger = parse_stored_pack_ledger(record);
     let ledger_hash = record
         .ledger_hash
         .clone()
-        .or_else(|| ledger.ledger.as_ref().map(value_hash));
+        .or_else(|| ledger.available_ledger().map(value_hash));
 
     let record_hash = value_hash(&json!({
         "createdAt": record.created_at,
@@ -433,7 +682,7 @@ pub fn build_pack_attestation_from_parts(
             .with_schema("ee.pack_record.v1")
             .with_content_hash(record_hash.as_str()),
     ];
-    evidence_entries.extend(pack_item_evidence_refs(items, &mut redactions));
+    evidence_entries.extend(pack_ledger_item_evidence_refs(record, ledger));
     evidence_entries.extend(audit_evidence_refs(audits, &mut redactions));
 
     let item_manifest_hash = evidence_kind_manifest_hash(&evidence_entries, "pack_item");
@@ -576,59 +825,25 @@ fn memory_anchor_evidence_refs(
     refs
 }
 
-fn pack_item_evidence_refs(
-    items: &[StoredPackItem],
-    redactions: &mut Vec<AttestationRedactionEntry>,
+fn pack_ledger_item_evidence_refs(
+    record: &StoredPackRecord,
+    ledger: &db::ParsedPackLedger,
 ) -> Vec<AttestationEvidenceRef> {
-    let mut refs = Vec::with_capacity(items.len());
-    for item in items {
-        let why = redact_for_attestation("packItems[].why", "why", &item.why);
-        push_redaction(redactions, "packItems[].why", "why", &why);
-        let provenance = redact_for_attestation(
-            "packItems[].provenanceJson",
-            "provenance_json",
-            &item.provenance_json,
-        );
-        push_redaction(
-            redactions,
-            "packItems[].provenanceJson",
-            "provenance_json",
-            &provenance,
-        );
-        let diversity_hash = item.diversity_key.as_deref().map(|diversity_key| {
-            let redacted =
-                redact_for_attestation("packItems[].diversityKey", "diversity_key", diversity_key);
-            push_redaction(
-                redactions,
-                "packItems[].diversityKey",
-                "diversity_key",
-                &redacted,
-            );
-            redacted.hash
-        });
-        let row_hash = value_hash(&json!({
-            "diversityHash": diversity_hash,
-            "estimatedTokens": item.estimated_tokens,
-            "memoryId": item.memory_id,
-            "provenanceHash": provenance.hash,
-            "rank": item.rank,
-            "relevance": format_score(item.relevance),
-            "section": item.section,
-            "trustClass": item.trust_class,
-            "trustSubclass": item.trust_subclass,
-            "utility": format_score(item.utility),
-            "whyHash": why.hash,
-        }));
-        refs.push(
-            AttestationEvidenceRef::new(
-                "pack_item",
-                format!("{}:{}", item.pack_id, item.memory_id),
+    let Some(ledger) = ledger.available_ledger() else {
+        return Vec::new();
+    };
+    crate::db::pack_ledger_core_array(ledger, "selectedItems")
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let memory_id = item.get("memoryId").and_then(Value::as_str)?;
+            Some(
+                AttestationEvidenceRef::new("pack_item", format!("{}:{memory_id}", record.id))
+                    .with_schema(crate::db::PACK_REPLAY_LEDGER_SCHEMA_V1)
+                    .with_content_hash(value_hash(item)),
             )
-            .with_schema("ee.pack_item.v1")
-            .with_content_hash(row_hash),
-        );
-    }
-    refs
+        })
+        .collect()
 }
 
 fn audit_evidence_refs(
@@ -833,22 +1048,19 @@ mod tests {
         }
     }
 
-    fn stored_pack_item_with_secret() -> StoredPackItem {
-        StoredPackItem {
-            pack_id: "pack_attest_000000000000000001".to_owned(),
-            memory_id: "mem_attest_000000000000000001".to_owned(),
-            rank: 1,
-            section: "procedural".to_owned(),
-            estimated_tokens: 42,
-            relevance: 0.8,
-            utility: 0.7,
-            why: "Selected because sk-123456789012345678901234567890 was seen in logs."
-                .to_owned(),
-            diversity_key: Some("release".to_owned()),
-            provenance_json: "{\"uri\":\"file:///tmp/session.log\",\"note\":\"sk-123456789012345678901234567890\"}".to_owned(),
-            trust_class: "local".to_owned(),
-            trust_subclass: Some("explicit".to_owned()),
-        }
+    fn trusted_pack_ledger_for_attestation() -> db::ParsedPackLedger {
+        db::ParsedPackLedger::trusted_for_test(json!({
+            "ledgerHash": "blake3:trusted-ledger",
+            "selectedItems": [{
+                "memoryId": "mem_attest_000000000000000001",
+                "rank": 1,
+                "section": "procedural",
+                "estimatedTokens": 42,
+                "scores": {"relevance": 0.8, "utility": 0.7},
+                "why": {"hash": "blake3:redacted-why"},
+                "provenance": {"hash": "blake3:redacted-provenance"}
+            }]
+        }))
     }
 
     fn stored_audit_with_secret() -> StoredAuditEntry {
@@ -888,12 +1100,76 @@ mod tests {
         mutation.mutation_kind = "memory.updated".to_owned();
         mutation.timestamp = "2026-06-06T00:00:00Z".to_owned();
         audits.push(mutation.clone());
+        let mut cross_workspace = mutation.clone();
+        cross_workspace.id = "aud_attest_cross_workspace000001".to_owned();
+        cross_workspace.workspace_id = Some("wsp_attest_other000000000000001".to_owned());
+        audits.push(cross_workspace);
+        let mut unscoped = mutation.clone();
+        unscoped.id = "aud_attest_unscoped000000000001".to_owned();
+        unscoped.workspace_id = None;
+        audits.push(unscoped);
 
-        let filtered = filter_memory_attestation_audits(audits);
+        let filtered = filter_memory_attestation_audits(audits, "wsp_attest_000000000000000001");
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, mutation.id);
         assert_eq!(filtered[0].action, "memory.updated");
+    }
+
+    #[test]
+    fn memory_attestation_scoped_builder_rejects_cross_workspace_without_public_egress()
+    -> db::Result<()> {
+        const SECRET: &str = "AKIAIOSFODNN7EXAMPLE";
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let source_workspace_id = "wsp_attest_source000000000000001";
+        connection.insert_workspace(
+            source_workspace_id,
+            &db::CreateWorkspaceInput {
+                path: "/tmp/attest-source-workspace".to_owned(),
+                name: Some("attest-source".to_owned()),
+            },
+        )?;
+        let memory_id = format!("mem_{SECRET}000000");
+        connection.insert_memory(
+            &memory_id,
+            &db::CreateMemoryInput {
+                workspace_id: source_workspace_id.to_owned(),
+                level: "procedural".to_owned(),
+                kind: "rule".to_owned(),
+                content: format!("private credential {SECRET}"),
+                workflow_id: None,
+                confidence: 0.8,
+                utility: 0.7,
+                importance: 0.6,
+                provenance_uri: Some(format!("file:///private/{SECRET}")),
+                trust_class: "human_explicit".to_owned(),
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+        )?;
+
+        let attestation = build_memory_attestation_for_workspace(
+            &connection,
+            &memory_id,
+            "wsp_attest_expected0000000000001",
+        )?;
+        assert_eq!(
+            attestation, None,
+            "workspace mismatch must fail closed before loading public evidence"
+        );
+        let public_not_found = json!({
+            "resource": "memory",
+            "id": crate::models::public_memory_id(&memory_id),
+            "bundle": attestation.map(|bundle| public_attestation_bundle(&bundle)),
+        });
+        let rendered = public_not_found.to_string();
+        assert!(!rendered.contains(SECRET));
+        assert!(!rendered.contains(&memory_id));
+        assert!(public_not_found["bundle"].is_null());
+        Ok(())
     }
 
     #[test]
@@ -913,27 +1189,81 @@ mod tests {
     }
 
     #[test]
-    fn pack_attestation_hashes_query_item_why_and_provenance() {
+    fn pack_attestation_hashes_query_and_integrity_bound_ledger_items() {
         let record = stored_pack_with_secret();
-        let item = stored_pack_item_with_secret();
+        let ledger = trusted_pack_ledger_for_attestation();
         let audit = stored_audit_with_secret();
 
-        let bundle = build_pack_attestation_from_parts(&record, &[item], &[audit]);
+        let mut bundle = build_trusted_pack_attestation_from_parts(&record, &ledger, &[audit]);
+        bundle.evidence_manifest.entries.push(
+            AttestationEvidenceRef::new("audit_log", "audit-hostile")
+                .with_content_hash("credential-AKIAIOSFODNN7EXAMPLE")
+                .with_chain_hash("credential-AKIAIOSFODNN7EXAMPLE"),
+        );
+        bundle.redaction_manifest.entries.push(
+            AttestationRedactionEntry::new("audit", "secret", "hash", "fixture")
+                .with_replacement_hash("credential-AKIAIOSFODNN7EXAMPLE"),
+        );
         let canonical = bundle.canonical_json();
 
         assert!(!canonical.contains("sk-123456789012345678901234567890"));
         assert!(!canonical.contains("fix release with token"));
         assert!(canonical.contains("pack.redacted_query"));
         assert!(canonical.contains("pack_item"));
+        assert!(canonical.contains(crate::db::PACK_REPLAY_LEDGER_SCHEMA_V1));
         assert!(canonical.contains("pack.query"));
     }
 
     #[test]
+    fn public_pack_attestation_gate_rejects_unavailable_or_untrusted_ledgers() {
+        let missing = stored_pack_with_secret();
+        let missing_error = require_available_pack_attestation_ledger(&missing)
+            .expect_err("missing ledger must not produce an available pack attestation");
+        assert!(missing_error.to_string().contains("status=missing"));
+        let missing_parts_error = build_pack_attestation_from_parts(&missing, &[])
+            .expect_err("parts API must reject a missing selection ledger");
+        assert!(missing_parts_error.to_string().contains("status=missing"));
+
+        let mut oversized = stored_pack_with_secret();
+        oversized.ledger_json = Some(crate::db::PACK_REPLAY_LEDGER_OVERSIZED_SENTINEL.to_owned());
+        oversized.ledger_hash = Some("blake3:untrusted".to_owned());
+        let oversized_error = require_available_pack_attestation_ledger(&oversized)
+            .expect_err("oversized ledger must not produce an available pack attestation");
+        assert!(oversized_error.to_string().contains("status=malformed"));
+        let oversized_parts_error = build_pack_attestation_from_parts(&oversized, &[])
+            .expect_err("parts API must reject an untrusted selection ledger");
+        assert!(
+            oversized_parts_error
+                .to_string()
+                .contains("status=malformed")
+        );
+    }
+
+    #[test]
     fn attestation_surface_manifest_is_redaction_safe_and_deterministic() {
-        let record = stored_pack_with_secret();
-        let item = stored_pack_item_with_secret();
-        let audit = stored_audit_with_secret();
-        let bundle = build_pack_attestation_from_parts(&record, &[item], &[audit]);
+        let mut record = stored_pack_with_secret();
+        record.id = "pack_AKIAIOSFODNN7EXAMPLE000000".to_owned();
+        let ledger = trusted_pack_ledger_for_attestation();
+        let mut audit = stored_audit_with_secret();
+        audit.id = "audit_AKIAIOSFODNN7EXAMPLE00000".to_owned();
+        audit.this_row_hash = Some("credential-AKIAIOSFODNN7EXAMPLE".to_owned());
+        let mut bundle = build_trusted_pack_attestation_from_parts(&record, &ledger, &[audit]);
+        bundle.evidence_manifest.entries.push(
+            AttestationEvidenceRef::new("audit_log", "audit_AKIAIOSFODNN7EXAMPLE00000")
+                .with_content_hash("credential-AKIAIOSFODNN7EXAMPLE")
+                .with_chain_hash("credential-AKIAIOSFODNN7EXAMPLE")
+                .with_provenance_uri("file:///private/AKIAIOSFODNN7EXAMPLE"),
+        );
+        let public = public_attestation_bundle(&bundle);
+        assert_eq!(public_attestation_bundle(&public), public);
+        assert!(!public.canonical_json().contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(
+            public
+                .evidence_manifest
+                .entries
+                .iter()
+                .all(|entry| entry.provenance_uri.is_none())
+        );
 
         let first = attestation_surface_manifest(&bundle);
         let second = attestation_surface_manifest(&bundle);
@@ -941,6 +1271,7 @@ mod tests {
         assert_eq!(first["schema"], ATTESTATION_SURFACE_MANIFEST_SCHEMA_V1);
         assert_eq!(first["status"], "available");
         assert_eq!(first["subject"]["kind"], "pack");
+        assert_eq!(first["bundleHash"], public.bundle_hash());
         assert_eq!(
             first["redactionManifest"]["policy"],
             ATTESTATION_REDACTION_POLICY
@@ -953,8 +1284,25 @@ mod tests {
 
         let rendered = first.to_string();
         assert!(!rendered.contains("sk-123456789012345678901234567890"));
+        assert!(!rendered.contains("AKIAIOSFODNN7EXAMPLE"));
         assert!(!rendered.contains("fix release with token"));
         assert!(!rendered.contains("Selected because"));
+        for pointer in [
+            "/evidenceManifest/contentHashes",
+            "/evidenceManifest/chainHashes",
+            "/redactionManifest/replacementHashes",
+            "/hashManifest/hashes",
+        ] {
+            assert!(
+                first
+                    .pointer(pointer)
+                    .and_then(Value::as_array)
+                    .is_some_and(|hashes| hashes.iter().all(|hash| hash
+                        .as_str()
+                        .is_some_and(crate::db::is_canonical_blake3_hash))),
+                "surface manifest filters noncanonical hashes at {pointer}"
+            );
+        }
     }
 
     #[test]

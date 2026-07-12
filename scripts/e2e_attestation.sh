@@ -104,7 +104,7 @@ support_dir="$(printf '%s' "$support" | jq -r '.data.outputPath // empty')"
 assert_eq "$([ -n "$support_dir" ] && echo present || echo missing)" "present" \
     "support bundle output path present"
 support_pack_summary="$(cat "$support_dir/pack_replay_summary.json" 2>/dev/null || true)"
-assert_jq "$support_pack_summary" '.schema == "ee.support_bundle.pack_replay_summary.v1"' \
+assert_jq "$support_pack_summary" '.schema == "ee.support_bundle.pack_replay_summary.v2"' \
     "support bundle pack replay summary schema"
 support_hash_count="$(printf '%s' "$support_pack_summary" \
     | jq -r --arg pack "$pack_id" --arg hash "$pack_hash" \
