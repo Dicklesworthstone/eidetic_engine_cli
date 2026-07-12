@@ -6836,6 +6836,185 @@ ON CONFLICT(workspace_id) DO UPDATE SET
     "blake3:v083_error_fingerprint_generation_triggers_2026_06_19",
 );
 
+/// V084: expand persisted pack profiles to the complete canonical profile set.
+///
+/// SQLite cannot alter a CHECK constraint in place. All four tables with an
+/// inbound foreign key to `pack_records` are copied into FK-free temporary
+/// snapshots and removed before the parent rebuild, then recreated and restored
+/// in the same migration transaction. This avoids ALTER TABLE RENAME retargeting
+/// child FKs to the legacy table and avoids ON DELETE CASCADE data loss.
+pub const V084_PACK_RECORD_PROFILE_DOMAIN: Migration = Migration::new(
+    84,
+    "pack_record_profile_domain",
+    r#"
+CREATE TEMP TABLE v084_pack_items AS
+SELECT pack_id, memory_id, rank, section, estimated_tokens, relevance, utility,
+       why, diversity_key, provenance_json, trust_class, trust_subclass
+FROM pack_items;
+CREATE TEMP TABLE v084_pack_omissions AS
+SELECT pack_id, memory_id, estimated_tokens, reason
+FROM pack_omissions;
+CREATE TEMP TABLE v084_pack_candidate_impressions AS
+SELECT pack_id, memory_id, workspace_id, query_hash, lens_hash, rank, section,
+       token_estimate, selected, omission_reason, db_generation,
+       index_generation, graph_generation, created_at
+FROM pack_candidate_impressions;
+CREATE TEMP TABLE v084_pack_baselines AS
+SELECT workspace_id, agent_name, task_key, pack_id, pack_hash, created_at
+FROM pack_baselines;
+
+DROP TABLE pack_items;
+DROP TABLE pack_omissions;
+DROP TABLE pack_candidate_impressions;
+DROP TABLE pack_baselines;
+
+ALTER TABLE pack_records RENAME TO pack_records_v083;
+CREATE TABLE pack_records (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'pack_*' AND length(id) = 31),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    query TEXT NOT NULL CHECK (length(trim(query)) > 0),
+    profile TEXT NOT NULL CHECK (profile IN (
+        'compact', 'balanced', 'grounding', 'orientation', 'thorough', 'submodular'
+    )),
+    max_tokens INTEGER NOT NULL CHECK (max_tokens > 0),
+    used_tokens INTEGER NOT NULL CHECK (used_tokens >= 0 AND used_tokens <= max_tokens),
+    item_count INTEGER NOT NULL CHECK (item_count >= 0),
+    omitted_count INTEGER NOT NULL CHECK (omitted_count >= 0),
+    pack_hash TEXT NOT NULL CHECK (length(trim(pack_hash)) > 0),
+    degraded_json TEXT CHECK (degraded_json IS NULL OR json_valid(degraded_json)),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    created_by TEXT CHECK (created_by IS NULL OR length(trim(created_by)) > 0),
+    ledger_json TEXT CHECK (ledger_json IS NULL OR json_valid(ledger_json)),
+    ledger_hash TEXT CHECK (ledger_hash IS NULL OR length(trim(ledger_hash)) > 0)
+);
+INSERT INTO pack_records (
+    id, workspace_id, query, profile, max_tokens, used_tokens, item_count,
+    omitted_count, pack_hash, degraded_json, created_at, created_by,
+    ledger_json, ledger_hash
+)
+SELECT id, workspace_id, query, profile, max_tokens, used_tokens, item_count,
+       omitted_count, pack_hash, degraded_json, created_at, created_by,
+       ledger_json, ledger_hash
+FROM pack_records_v083
+ORDER BY rowid;
+DROP TABLE pack_records_v083;
+CREATE INDEX idx_pack_records_workspace ON pack_records(workspace_id);
+CREATE INDEX idx_pack_records_created ON pack_records(created_at);
+CREATE INDEX idx_pack_records_hash ON pack_records(pack_hash);
+CREATE INDEX idx_pack_records_ledger_hash ON pack_records(ledger_hash);
+
+CREATE TABLE pack_items (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    rank INTEGER NOT NULL CHECK (rank > 0),
+    section TEXT NOT NULL CHECK (section IN (
+        'procedural_rules', 'decisions', 'failures', 'evidence', 'artifacts'
+    )),
+    estimated_tokens INTEGER NOT NULL CHECK (estimated_tokens > 0),
+    relevance REAL NOT NULL CHECK (relevance >= 0.0 AND relevance <= 1.0),
+    utility REAL NOT NULL CHECK (utility >= 0.0 AND utility <= 1.0),
+    why TEXT NOT NULL CHECK (length(trim(why)) > 0),
+    diversity_key TEXT CHECK (diversity_key IS NULL OR length(trim(diversity_key)) > 0),
+    provenance_json TEXT NOT NULL DEFAULT '{"schema":"ee.pack_item.provenance.v1","entries":[]}'
+        CHECK (json_valid(provenance_json)),
+    trust_class TEXT NOT NULL DEFAULT 'agent_assertion'
+        CHECK (trust_class IN ('human_explicit', 'agent_validated', 'agent_assertion', 'cass_evidence', 'legacy_import')),
+    trust_subclass TEXT CHECK (trust_subclass IS NULL OR length(trim(trust_subclass)) > 0),
+    PRIMARY KEY (pack_id, memory_id)
+);
+INSERT INTO pack_items (
+    pack_id, memory_id, rank, section, estimated_tokens, relevance, utility,
+    why, diversity_key, provenance_json, trust_class, trust_subclass
+)
+SELECT pack_id, memory_id, rank, section, estimated_tokens, relevance, utility,
+       why, diversity_key, provenance_json, trust_class, trust_subclass
+FROM v084_pack_items;
+CREATE INDEX idx_pack_items_memory ON pack_items(memory_id);
+CREATE INDEX idx_pack_items_section ON pack_items(section);
+CREATE INDEX idx_pack_items_rank ON pack_items(pack_id, rank);
+CREATE INDEX idx_pack_items_trust_class ON pack_items(trust_class);
+
+CREATE TABLE pack_omissions (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    estimated_tokens INTEGER NOT NULL CHECK (estimated_tokens > 0),
+    reason TEXT NOT NULL CHECK (reason IN (
+        'token_budget_exceeded', 'redundant_candidate', 'below_relevance_floor',
+        'excluded_by_policy', 'excluded_by_filter', 'contradiction_suppressed'
+    )),
+    PRIMARY KEY (pack_id, memory_id)
+);
+INSERT INTO pack_omissions (pack_id, memory_id, estimated_tokens, reason)
+SELECT pack_id, memory_id, estimated_tokens, reason
+FROM v084_pack_omissions;
+CREATE INDEX idx_pack_omissions_memory ON pack_omissions(memory_id);
+
+CREATE TABLE pack_candidate_impressions (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    query_hash TEXT NOT NULL CHECK (
+        length(query_hash) = 71 AND substr(query_hash, 1, 7) = 'blake3:'
+    ),
+    lens_hash TEXT NOT NULL CHECK (
+        length(lens_hash) = 71 AND substr(lens_hash, 1, 7) = 'blake3:'
+    ),
+    rank INTEGER CHECK (rank IS NULL OR rank >= 0),
+    section TEXT CHECK (section IS NULL OR length(trim(section)) > 0),
+    token_estimate INTEGER NOT NULL CHECK (token_estimate >= 0),
+    selected INTEGER NOT NULL CHECK (selected IN (0, 1)),
+    omission_reason TEXT CHECK (omission_reason IS NULL OR length(trim(omission_reason)) > 0),
+    db_generation INTEGER NOT NULL CHECK (db_generation >= 0),
+    index_generation INTEGER CHECK (index_generation IS NULL OR index_generation >= 0),
+    graph_generation INTEGER CHECK (graph_generation IS NULL OR graph_generation >= 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    PRIMARY KEY (pack_id, memory_id),
+    CHECK (
+        (selected = 1 AND rank IS NOT NULL AND section IS NOT NULL AND omission_reason IS NULL)
+        OR (selected = 0 AND rank IS NULL AND section IS NULL AND omission_reason IS NOT NULL)
+    )
+);
+INSERT INTO pack_candidate_impressions (
+    pack_id, memory_id, workspace_id, query_hash, lens_hash, rank, section,
+    token_estimate, selected, omission_reason, db_generation,
+    index_generation, graph_generation, created_at
+)
+SELECT pack_id, memory_id, workspace_id, query_hash, lens_hash, rank, section,
+       token_estimate, selected, omission_reason, db_generation,
+       index_generation, graph_generation, created_at
+FROM v084_pack_candidate_impressions;
+CREATE INDEX idx_pack_candidate_impressions_memory
+    ON pack_candidate_impressions(memory_id, created_at);
+CREATE INDEX idx_pack_candidate_impressions_workspace
+    ON pack_candidate_impressions(workspace_id, created_at);
+CREATE INDEX idx_pack_candidate_impressions_query_lens
+    ON pack_candidate_impressions(query_hash, lens_hash, memory_id);
+
+CREATE TABLE pack_baselines (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    agent_name TEXT NOT NULL CHECK (length(trim(agent_name)) > 0),
+    task_key TEXT NOT NULL DEFAULT '',
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    pack_hash TEXT NOT NULL CHECK (length(trim(pack_hash)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    PRIMARY KEY (workspace_id, agent_name, task_key, pack_id)
+);
+INSERT INTO pack_baselines (
+    workspace_id, agent_name, task_key, pack_id, pack_hash, created_at
+)
+SELECT workspace_id, agent_name, task_key, pack_id, pack_hash, created_at
+FROM v084_pack_baselines;
+CREATE INDEX pack_baselines_resolution
+    ON pack_baselines(workspace_id, agent_name, created_at);
+
+DROP TABLE temp.v084_pack_items;
+DROP TABLE temp.v084_pack_omissions;
+DROP TABLE temp.v084_pack_candidate_impressions;
+DROP TABLE temp.v084_pack_baselines;
+"#,
+    "blake3:v084_pack_record_profile_domain_2026_07_11",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -6921,6 +7100,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V081_AUDIT_LOG_WORKSPACE_TIMELINE_INDEX,
     V082_MEMORY_DEBT_SNAPSHOTS,
     V083_ERROR_FINGERPRINT_GENERATION_TRIGGERS,
+    V084_PACK_RECORD_PROFILE_DOMAIN,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -15237,7 +15417,7 @@ fn validate_derivation_source_refs_json(raw: &str) -> Result<()> {
         let id = trimmed_json_string(object.get("id"), "derivation source id")?;
         let content_hash =
             trimmed_json_string(object.get("contentHash"), "derivation source contentHash")?;
-        if !is_canonical_blake3_content_hash(content_hash) {
+        if !is_canonical_blake3_hash(content_hash) {
             return Err(malformed_curation_candidate_input(
                 "derivation source contentHash must be a canonical blake3 hash",
             ));
@@ -15301,7 +15481,8 @@ fn trimmed_json_string<'a>(
     Ok(value)
 }
 
-fn is_canonical_blake3_content_hash(value: &str) -> bool {
+#[must_use]
+pub fn is_canonical_blake3_hash(value: &str) -> bool {
     let Some(hex) = value.strip_prefix("blake3:") else {
         return false;
     };
@@ -16758,6 +16939,40 @@ impl DbConnection {
                 Value::Text(target_id.to_string()),
             ],
         )?;
+        rows.iter().map(stored_audit_from_row).collect()
+    }
+
+    /// List a bounded target audit slice scoped to one non-null workspace.
+    pub fn list_audit_by_workspace_target(
+        &self,
+        workspace_id: &str,
+        target_type: &str,
+        target_id: &str,
+        excluded_action: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<StoredAuditEntry>> {
+        let (sql, mut params) = if let Some(excluded_action) = excluded_action {
+            (
+                "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash FROM audit_log WHERE workspace_id = ?1 AND target_type = ?2 AND target_id = ?3 AND action <> ?4 ORDER BY timestamp DESC, id DESC LIMIT ?5",
+                vec![
+                    Value::Text(workspace_id.to_owned()),
+                    Value::Text(target_type.to_owned()),
+                    Value::Text(target_id.to_owned()),
+                    Value::Text(excluded_action.to_owned()),
+                ],
+            )
+        } else {
+            (
+                "SELECT id, workspace_id, timestamp, actor, action, target_type, target_id, details, surface, mutation_kind, before_hash, after_hash, prev_row_hash, this_row_hash FROM audit_log WHERE workspace_id = ?1 AND target_type = ?2 AND target_id = ?3 ORDER BY timestamp DESC, id DESC LIMIT ?4",
+                vec![
+                    Value::Text(workspace_id.to_owned()),
+                    Value::Text(target_type.to_owned()),
+                    Value::Text(target_id.to_owned()),
+                ],
+            )
+        };
+        params.push(Value::BigInt(i64::from(limit)));
+        let rows = self.query_for(DbOperation::Query, sql, &params)?;
         rows.iter().map(stored_audit_from_row).collect()
     }
 
@@ -18295,6 +18510,28 @@ pub struct StoredPackRecord {
     pub created_by: Option<String>,
 }
 
+/// Pack-record metadata from a joined/list projection.
+///
+/// This type deliberately has no `ledger_json` field and therefore cannot be
+/// passed to `parse_stored_pack_ledger`. Load one chosen record by ID when
+/// integrity-bound replay evidence is required.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredPackRecordMetadata {
+    pub id: String,
+    pub workspace_id: String,
+    pub query: String,
+    pub profile: String,
+    pub max_tokens: u32,
+    pub used_tokens: u32,
+    pub item_count: u32,
+    pub omitted_count: u32,
+    pub pack_hash: String,
+    pub degraded_json: Option<String>,
+    pub ledger_hash: Option<String>,
+    pub created_at: String,
+    pub created_by: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PackLedgerStatus {
     Available,
@@ -18318,8 +18555,40 @@ impl PackLedgerStatus {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedPackLedger {
     pub status: PackLedgerStatus,
-    pub ledger: Option<serde_json::Value>,
+    ledger: Option<serde_json::Value>,
     pub degraded: Vec<serde_json::Value>,
+}
+
+impl ParsedPackLedger {
+    /// Return the canonical ledger only after every integrity and binding gate passed.
+    #[must_use]
+    pub fn available_ledger(&self) -> Option<&serde_json::Value> {
+        (self.status == PackLedgerStatus::Available)
+            .then_some(self.ledger.as_ref())
+            .flatten()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn trusted_for_test(ledger: serde_json::Value) -> Self {
+        Self {
+            status: PackLedgerStatus::Available,
+            ledger: Some(ledger),
+            degraded: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unavailable_for_test(
+        status: PackLedgerStatus,
+        degraded: Vec<serde_json::Value>,
+    ) -> Self {
+        assert_ne!(status, PackLedgerStatus::Available);
+        Self {
+            status,
+            ledger: None,
+            degraded,
+        }
+    }
 }
 
 /// Input for creating a pack item (junction with memory).
@@ -18615,7 +18884,7 @@ struct PackLedgerTaskLens {
     lens_hash: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerTextRecord {
     hash: String,
@@ -18711,11 +18980,13 @@ const PACK_REPLAY_LEDGER_COMPRESSION_LEVEL: i32 = 3;
 const PACK_REPLAY_LEDGER_COMPRESSION_MIN_BYTES: usize = 4 * 1024;
 const PACK_REPLAY_LEDGER_MAX_COMPRESSED_BYTES: u64 = 2 * 1024 * 1024;
 const PACK_REPLAY_LEDGER_MAX_UNCOMPRESSED_BYTES: u64 = 8 * 1024 * 1024;
-const PACK_REPLAY_LEDGER_MAX_STORED_BYTES: u64 = 3 * 1024 * 1024;
+pub(crate) const PACK_REPLAY_LEDGER_MAX_STORED_BYTES: u64 = 3 * 1024 * 1024;
 const PACK_REPLAY_LEDGER_MAX_BASE64_BYTES: u64 =
     ((PACK_REPLAY_LEDGER_MAX_COMPRESSED_BYTES + 2) / 3) * 4;
-const PACK_REPLAY_LEDGER_OVERSIZED_SENTINEL: &str =
+const PACK_REPLAY_LEDGER_OVERSIZED_SCHEMA_V1: &str = "ee.pack_replay_ledger.oversized.v1";
+pub(crate) const PACK_REPLAY_LEDGER_OVERSIZED_SENTINEL: &str =
     r#"{"schema":"ee.pack_replay_ledger.oversized.v1"}"#;
+const PACK_LEDGER_DEGRADATION_TEXT_MAX_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PackRecordInsertTimings {
@@ -18726,6 +18997,221 @@ pub struct PackRecordInsertTimings {
     pub omission_writes: Duration,
     pub item_write_batches: usize,
     pub omission_write_batches: usize,
+}
+
+fn validate_pack_record_input(
+    id: &str,
+    input: &CreatePackRecordInput,
+    items: &[CreatePackItemInput],
+    omissions: &[CreatePackOmissionInput],
+    created_at: &str,
+) -> Result<()> {
+    if !is_canonical_pack_id(id) || !is_canonical_workspace_id(&input.workspace_id) {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack and workspace ids must use canonical structural forms".to_owned(),
+        });
+    }
+    if input.query.trim().is_empty() || input.max_tokens == 0 {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack query must be non-empty and max_tokens must be positive".to_owned(),
+        });
+    }
+    if !is_canonical_blake3_hash(&input.pack_hash) {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack_hash must be canonical lowercase blake3 text".to_owned(),
+        });
+    }
+    if !is_canonical_pack_profile(&input.profile) {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack profile is not recognized".to_owned(),
+        });
+    }
+    if DateTime::parse_from_rfc3339(created_at).is_err() {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack created_at must be RFC 3339".to_owned(),
+        });
+    }
+    let item_count = u32::try_from(items.len()).map_err(|_| DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: "pack item length does not fit u32".to_owned(),
+    })?;
+    if item_count != input.item_count {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack item_count does not match selected item length".to_owned(),
+        });
+    }
+    let omission_count = u32::try_from(omissions.len()).map_err(|_| DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: "pack omission length does not fit u32".to_owned(),
+    })?;
+    if omission_count != input.omitted_count {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack omitted_count does not match omission length".to_owned(),
+        });
+    }
+    let selected_token_sum = items
+        .iter()
+        .map(|item| u64::from(item.estimated_tokens))
+        .try_fold(0_u64, u64::checked_add)
+        .ok_or_else(|| DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack selected token sum overflowed u64".to_owned(),
+        })?;
+    if selected_token_sum != u64::from(input.used_tokens) {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack used_tokens does not match selected estimated-token sum".to_owned(),
+        });
+    }
+    if input.used_tokens > input.max_tokens {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack used_tokens exceeds max_tokens".to_owned(),
+        });
+    }
+    if items.iter().any(|item| item.pack_id != id) {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "selected item pack_id does not match containing pack".to_owned(),
+        });
+    }
+    if omissions.iter().any(|omission| omission.pack_id != id) {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "omission pack_id does not match containing pack".to_owned(),
+        });
+    }
+    let selected_memory_ids = items
+        .iter()
+        .map(|item| item.memory_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if selected_memory_ids.len() != items.len() {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack selected memory ids must be unique".to_owned(),
+        });
+    }
+    let mut previous_rank = None;
+    for item in items {
+        if item.rank == 0 || previous_rank.is_some_and(|rank| item.rank <= rank) {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "pack selected ranks must be positive, unique, and strictly increasing"
+                    .to_owned(),
+            });
+        }
+        previous_rank = Some(item.rank);
+        if !item.relevance.is_finite()
+            || !(0.0..=1.0).contains(&item.relevance)
+            || !item.utility.is_finite()
+            || !(0.0..=1.0).contains(&item.utility)
+        {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "pack selected relevance and utility must be finite values in [0, 1]"
+                    .to_owned(),
+            });
+        }
+        if item.estimated_tokens == 0
+            || !is_canonical_memory_id(&item.memory_id)
+            || !is_pack_section(&item.section)
+            || item.why.trim().is_empty()
+            || !is_pack_trust_class(&item.trust_class)
+            || item
+                .trust_subclass
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            || item
+                .diversity_key
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            || serde_json::from_str::<serde_json::Value>(&item.provenance_json).is_err()
+        {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "pack selected item metadata is outside the storage domain".to_owned(),
+            });
+        }
+    }
+    let omitted_memory_ids = omissions
+        .iter()
+        .map(|omission| omission.memory_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if omitted_memory_ids.len() != omissions.len() {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack omitted memory ids must be unique".to_owned(),
+        });
+    }
+    if omissions.iter().any(|omission| {
+        omission.estimated_tokens == 0
+            || !is_canonical_memory_id(&omission.memory_id)
+            || !is_pack_omission_reason(&omission.reason)
+    }) {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack omission metadata is outside the storage domain".to_owned(),
+        });
+    }
+    if omissions.iter().any(|omission| {
+        selected_memory_ids.contains(omission.memory_id.as_str())
+            && omission.reason != "redundant_candidate"
+    }) {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack selected/omitted overlap requires redundant_candidate reason".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn is_pack_section(value: &str) -> bool {
+    matches!(
+        value,
+        "procedural_rules" | "decisions" | "failures" | "evidence" | "artifacts"
+    )
+}
+
+fn is_pack_trust_class(value: &str) -> bool {
+    matches!(
+        value,
+        "human_explicit"
+            | "agent_validated"
+            | "agent_assertion"
+            | "cass_evidence"
+            | "legacy_import"
+    )
+}
+
+fn is_pack_omission_reason(value: &str) -> bool {
+    matches!(
+        value,
+        "token_budget_exceeded"
+            | "redundant_candidate"
+            | "below_relevance_floor"
+            | "excluded_by_policy"
+            | "excluded_by_filter"
+            | "contradiction_suppressed"
+    )
+}
+
+fn is_canonical_pack_id(value: &str) -> bool {
+    value.len() == 31
+        && value.starts_with("pack_")
+        && value[5..].bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn is_canonical_workspace_id(value: &str) -> bool {
+    value.len() == 30
+        && value.starts_with("wsp_")
+        && value[4..].bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 impl DbConnection {
@@ -18739,6 +19225,130 @@ impl DbConnection {
     ) -> Result<()> {
         self.insert_pack_record_with_timings(id, input, items, omissions)
             .map(|_| ())
+    }
+
+    /// Append one explicit legacy pack-record corruption fixture for diagnostics.
+    ///
+    /// This deliberately bypasses normal pack consistency validation, writes no
+    /// child rows or replay ledger, refuses overwrite via plain `INSERT`, and
+    /// records the injection in the append-only audit chain atomically.
+    pub(crate) fn inject_pack_reference_issue_fixture(
+        &self,
+        id: &str,
+        input: &CreatePackRecordInput,
+    ) -> Result<()> {
+        self.insert_diag_pack_record(id, input, true)
+    }
+
+    /// Append one coherent diagnostic pack record with an atomic audit row.
+    pub(crate) fn insert_diag_pack_record_fixture(
+        &self,
+        id: &str,
+        input: &CreatePackRecordInput,
+    ) -> Result<()> {
+        self.insert_diag_pack_record(id, input, false)
+    }
+
+    fn insert_diag_pack_record(
+        &self,
+        id: &str,
+        input: &CreatePackRecordInput,
+        inject_reference_issue: bool,
+    ) -> Result<()> {
+        if inject_reference_issue && input.item_count == 0 && input.omitted_count == 0 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "reference-issue fixture requires a declared count mismatch".to_owned(),
+            });
+        }
+        if !inject_reference_issue
+            && (input.used_tokens != 0 || input.item_count != 0 || input.omitted_count != 0)
+        {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "coherent diagnostic pack requires zero tokens and child counts"
+                    .to_owned(),
+            });
+        }
+        if input.used_tokens > input.max_tokens
+            || !is_canonical_pack_profile(&input.profile)
+            || !is_canonical_blake3_hash(&input.pack_hash)
+        {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "reference-issue fixture metadata is invalid".to_owned(),
+            });
+        }
+        let created_at = Utc::now().to_rfc3339();
+        let action = if inject_reference_issue {
+            "diag.pack_reference_issue_injected"
+        } else {
+            "diag.pack_record_seeded"
+        };
+        let (ledger_json, ledger_hash) = if inject_reference_issue {
+            (None, None)
+        } else {
+            validate_pack_record_input(id, input, &[], &[], &created_at)?;
+            let (ledger_json, ledger_hash) =
+                build_pack_selection_ledger(id, input, &[], &[], &created_at, None)?;
+            (Some(ledger_json), Some(ledger_hash))
+        };
+        let audit_digest = blake3::hash(format!("{action}:{id}").as_bytes())
+            .to_hex()
+            .to_string();
+        let audit_id = format!("audit_{}", &audit_digest[..26]);
+        self.with_transaction(|| {
+            if let (Some(ledger_json), Some(ledger_hash)) = (&ledger_json, &ledger_hash) {
+                self.insert_pack_record_row(id, input, &created_at, ledger_json, ledger_hash)?;
+            } else {
+                self.execute_for(
+                    DbOperation::Execute,
+                    "INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, ledger_json, ledger_hash, created_at, created_by) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, NULL, ?10, ?11)",
+                    &[
+                        Value::Text(id.to_owned()),
+                        Value::Text(input.workspace_id.clone()),
+                        Value::Text(input.query.clone()),
+                        Value::Text(input.profile.clone()),
+                        Value::BigInt(i64::from(input.max_tokens)),
+                        Value::BigInt(i64::from(input.used_tokens)),
+                        Value::BigInt(i64::from(input.item_count)),
+                        Value::BigInt(i64::from(input.omitted_count)),
+                        Value::Text(input.pack_hash.clone()),
+                        Value::Text(created_at.clone()),
+                        input
+                            .created_by
+                            .clone()
+                            .map_or(Value::Null, Value::Text),
+                    ],
+                )?;
+            }
+            self.insert_audit_with_mutation_kind(
+                &audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(input.workspace_id.clone()),
+                    actor: input.created_by.clone(),
+                    action: action.to_owned(),
+                    target_type: Some("pack_record".to_owned()),
+                    target_id: Some(id.to_owned()),
+                    details: Some(
+                        serde_json::json!({
+                            "schema": if inject_reference_issue {
+                                "ee.audit.diag_pack_reference_issue.v1"
+                            } else {
+                                "ee.audit.diag_pack_record.v1"
+                            },
+                            "declaredItemCount": input.item_count,
+                            "declaredOmittedCount": input.omitted_count,
+                            "childrenInserted": false,
+                            "ledgerInserted": !inject_reference_issue,
+                            "referenceIssueInjected": inject_reference_issue,
+                        })
+                        .to_string(),
+                    ),
+                },
+                action,
+            )
+        })
     }
 
     /// Insert a pack record at an explicit integrity-bound RFC 3339 time.
@@ -18794,6 +19404,19 @@ impl DbConnection {
         created_at: &str,
         task_lens: Option<&CreatePackTaskLensInput>,
     ) -> Result<PackRecordInsertTimings> {
+        validate_pack_record_input(id, input, items, omissions, created_at)?;
+        if task_lens.is_some_and(|lens| {
+            lens.id.trim().is_empty()
+                || lens.version == 0
+                || !is_canonical_blake3_hash(&lens.lens_hash)
+        }) {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message:
+                    "pack task lens requires a non-empty id, positive version, and canonical hash"
+                        .to_owned(),
+            });
+        }
         let mut timings = PackRecordInsertTimings::default();
         let ledger_start = Instant::now();
         let (ledger_json, ledger_hash) =
@@ -18806,6 +19429,7 @@ impl DbConnection {
 
         let transaction_start = Instant::now();
         self.with_transaction(|| {
+            self.validate_pack_memory_workspace_membership(input, items, omissions)?;
             let record_start = Instant::now();
             self.insert_pack_record_row(id, input, created_at, &ledger_json, &ledger_hash)?;
             timings.record_write = record_start.elapsed();
@@ -18827,6 +19451,50 @@ impl DbConnection {
         })?;
         timings.transaction = transaction_start.elapsed();
         Ok(timings)
+    }
+
+    fn validate_pack_memory_workspace_membership(
+        &self,
+        input: &CreatePackRecordInput,
+        items: &[CreatePackItemInput],
+        omissions: &[CreatePackOmissionInput],
+    ) -> Result<()> {
+        let memory_ids = items
+            .iter()
+            .map(|item| item.memory_id.as_str())
+            .chain(omissions.iter().map(|omission| omission.memory_id.as_str()))
+            .collect::<BTreeSet<_>>();
+        let mut verified = BTreeSet::new();
+        for chunk in memory_ids.iter().copied().collect::<Vec<_>>().chunks(800) {
+            let placeholders = (1..=chunk.len())
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!("SELECT id, workspace_id FROM memories WHERE id IN ({placeholders})");
+            let params = chunk
+                .iter()
+                .map(|memory_id| Value::Text((*memory_id).to_owned()))
+                .collect::<Vec<_>>();
+            let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+            for row in rows {
+                let memory_id = required_text(&row, 0, DbOperation::Query, "memory_id")?;
+                let workspace_id = required_text(&row, 1, DbOperation::Query, "workspace_id")?;
+                if workspace_id != input.workspace_id {
+                    return Err(DbError::MalformedRow {
+                        operation: DbOperation::Execute,
+                        message: "pack memory belongs to a different workspace".to_owned(),
+                    });
+                }
+                verified.insert(memory_id.to_owned());
+            }
+        }
+        if verified.len() != memory_ids.len() {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "pack references a missing memory".to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// Record a per-agent pack baseline (bd-7lvbg.6) and evict rows past
@@ -19239,11 +19907,29 @@ impl DbConnection {
     pub fn get_pack_record(&self, id: &str) -> Result<Option<StoredPackRecord>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, ledger_json, ledger_hash, created_at, created_by FROM pack_records WHERE id = ?1",
-            &[Value::Text(id.to_string())],
+            "SELECT id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, CASE WHEN ledger_json IS NULL OR length(CAST(ledger_json AS BLOB)) <= ?2 THEN ledger_json ELSE ?3 END, ledger_hash, created_at, created_by FROM pack_records WHERE id = ?1",
+            &[
+                Value::Text(id.to_string()),
+                Value::BigInt(PACK_REPLAY_LEDGER_MAX_STORED_BYTES as i64),
+                Value::Text(PACK_REPLAY_LEDGER_OVERSIZED_SENTINEL.to_owned()),
+            ],
         )?;
 
         rows.first().map(stored_pack_record_from_row).transpose()
+    }
+
+    /// Return the stored ledger byte length without materializing its body.
+    pub fn get_pack_ledger_stored_byte_len(&self, id: &str) -> Result<Option<u64>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT length(CAST(ledger_json AS BLOB)) FROM pack_records WHERE id = ?1",
+            &[Value::Text(id.to_string())],
+        )?;
+
+        rows.first()
+            .map(|row| optional_u64(row, 0, DbOperation::Query, "ledger_json byte length"))
+            .transpose()
+            .map(Option::flatten)
     }
 
     /// Get the newest pack record for a workspace/query pair.
@@ -19254,10 +19940,12 @@ impl DbConnection {
     ) -> Result<Option<StoredPackRecord>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, ledger_json, ledger_hash, created_at, created_by FROM pack_records WHERE workspace_id = ?1 AND query = ?2 ORDER BY created_at DESC, id DESC LIMIT 1",
+            "SELECT id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, CASE WHEN ledger_json IS NULL OR length(CAST(ledger_json AS BLOB)) <= ?3 THEN ledger_json ELSE ?4 END, ledger_hash, created_at, created_by FROM pack_records WHERE workspace_id = ?1 AND query = ?2 ORDER BY created_at DESC, id DESC LIMIT 1",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(query.to_string()),
+                Value::BigInt(PACK_REPLAY_LEDGER_MAX_STORED_BYTES as i64),
+                Value::Text(PACK_REPLAY_LEDGER_OVERSIZED_SENTINEL.to_owned()),
             ],
         )?;
 
@@ -19275,36 +19963,46 @@ impl DbConnection {
         rows.iter().map(stored_pack_item_from_row).collect()
     }
 
-    /// List pack records that include a specific memory (for `ee why`).
+    /// List pack/item metadata that includes a specific memory.
+    ///
+    /// The returned metadata type has no ledger body; callers that need replay
+    /// evidence must load one selected record through `get_pack_record`.
     pub fn list_pack_records_for_memory(
         &self,
         memory_id: &str,
         limit: u32,
-    ) -> Result<Vec<(StoredPackRecord, StoredPackItem)>> {
+    ) -> Result<Vec<(StoredPackRecordMetadata, StoredPackItem)>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT pr.id, pr.workspace_id, pr.query, pr.profile, pr.max_tokens, pr.used_tokens, pr.item_count, pr.omitted_count, pr.pack_hash, pr.degraded_json, pr.ledger_json, pr.ledger_hash, pr.created_at, pr.created_by, pi.pack_id, pi.memory_id, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pi.diversity_key, pi.provenance_json, pi.trust_class, pi.trust_subclass FROM pack_items pi JOIN pack_records pr ON pi.pack_id = pr.id WHERE pi.memory_id = ?1 ORDER BY pr.created_at DESC LIMIT ?2",
-            &[Value::Text(memory_id.to_string()), Value::BigInt(i64::from(limit))],
+            "SELECT pr.id, pr.workspace_id, pr.query, pr.profile, pr.max_tokens, pr.used_tokens, pr.item_count, pr.omitted_count, pr.pack_hash, pr.degraded_json, pr.ledger_hash, pr.created_at, pr.created_by, pi.pack_id, pi.memory_id, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pi.diversity_key, pi.provenance_json, pi.trust_class, pi.trust_subclass FROM pack_items pi JOIN pack_records pr ON pi.pack_id = pr.id WHERE pi.memory_id = ?1 ORDER BY pr.created_at DESC LIMIT ?2",
+            &[
+                Value::Text(memory_id.to_string()),
+                Value::BigInt(i64::from(limit)),
+            ],
         )?;
 
         rows.iter()
             .map(|row| {
-                let record = stored_pack_record_from_row(row)?;
-                let item = stored_pack_item_from_joined_row(row, 14)?;
+                let record = stored_pack_record_metadata_from_row(row)?;
+                let item = stored_pack_item_from_joined_row(row, 13)?;
                 Ok((record, item))
             })
             .collect()
     }
 
-    /// List the most recent pack item selections for a workspace.
-    pub fn list_recent_pack_items_for_workspace(
+    /// List recent pack-record identities for bounded ledger-authority scans.
+    ///
+    /// Callers must load, centrally validate, and drop one record at a time.
+    /// Returning identities only prevents both ledger-body multiplication and
+    /// accidental authority decisions from denormalized `pack_items` rows.
+    pub fn list_recent_pack_record_ids_for_workspace(
         &self,
         workspace_id: &str,
         limit: u32,
-    ) -> Result<Vec<(StoredPackRecord, StoredPackItem)>> {
+    ) -> Result<Vec<String>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT pr.id, pr.workspace_id, pr.query, pr.profile, pr.max_tokens, pr.used_tokens, pr.item_count, pr.omitted_count, pr.pack_hash, pr.degraded_json, pr.ledger_json, pr.ledger_hash, pr.created_at, pr.created_by, pi.pack_id, pi.memory_id, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pi.diversity_key, pi.provenance_json, pi.trust_class, pi.trust_subclass FROM pack_items pi JOIN pack_records pr ON pi.pack_id = pr.id WHERE pr.workspace_id = ?1 ORDER BY pr.created_at DESC, pr.id DESC, pi.rank ASC, pi.memory_id ASC LIMIT ?2",
+            "SELECT id FROM pack_records WHERE workspace_id = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::BigInt(i64::from(limit)),
@@ -19312,27 +20010,48 @@ impl DbConnection {
         )?;
 
         rows.iter()
-            .map(|row| {
-                let record = stored_pack_record_from_row(row)?;
-                let item = stored_pack_item_from_joined_row(row, 14)?;
-                Ok((record, item))
-            })
+            .map(|row| Ok(required_text(row, 0, DbOperation::Query, "pack_id")?.to_owned()))
+            .collect()
+    }
+
+    /// List bounded candidate record IDs for an exact workspace/hash lookup.
+    ///
+    /// The indexed denormalized hash is admission only; callers must centrally
+    /// validate each selected record before treating the hash as authoritative.
+    pub fn list_pack_record_ids_by_hash_for_workspace(
+        &self,
+        workspace_id: &str,
+        pack_hash: &str,
+        limit: u32,
+    ) -> Result<Vec<String>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id FROM pack_records WHERE workspace_id = ?1 AND pack_hash = ?2 ORDER BY created_at DESC, id DESC LIMIT ?3",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(pack_hash.to_owned()),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?;
+        rows.iter()
+            .map(|row| Ok(required_text(row, 0, DbOperation::Query, "pack_id")?.to_owned()))
             .collect()
     }
 
     /// Bounded pack-item admission for the memory-drift claim collector.
     ///
-    /// The returned database-local `rowid` is an ordering cursor only. The
-    /// collector validates the integrity-bound replay-ledger timestamp before
-    /// applying its horizon and fails closed if this bounded scan truncates.
+    /// The returned database-local `rowid` is an ordering cursor only. This
+    /// legacy projection returns an explicit metadata type with no ledger body;
+    /// the production collector validates ledgers through the identity-first
+    /// API below and never duplicates bodies across joined item rows.
     pub fn list_pack_items_for_memory_drift(
         &self,
         workspace_id: &str,
         limit: u32,
-    ) -> Result<Vec<(i64, StoredPackRecord, StoredPackItem)>> {
+    ) -> Result<Vec<(i64, StoredPackRecordMetadata, StoredPackItem)>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT pr.id, pr.workspace_id, pr.query, pr.profile, pr.max_tokens, pr.used_tokens, pr.item_count, pr.omitted_count, pr.pack_hash, pr.degraded_json, pr.ledger_json, pr.ledger_hash, pr.created_at, pr.created_by, pi.pack_id, pi.memory_id, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pi.diversity_key, pi.provenance_json, pi.trust_class, pi.trust_subclass, pr.rowid FROM pack_items pi JOIN pack_records pr ON pi.pack_id = pr.id WHERE pr.workspace_id = ?1 ORDER BY pr.rowid DESC, pi.rank ASC, pi.memory_id ASC LIMIT ?2",
+            "SELECT pr.id, pr.workspace_id, pr.query, pr.profile, pr.max_tokens, pr.used_tokens, pr.item_count, pr.omitted_count, pr.pack_hash, pr.degraded_json, pr.ledger_hash, pr.created_at, pr.created_by, pi.pack_id, pi.memory_id, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pi.diversity_key, pi.provenance_json, pi.trust_class, pi.trust_subclass, pr.rowid FROM pack_items pi JOIN pack_records pr ON pi.pack_id = pr.id WHERE pr.workspace_id = ?1 ORDER BY pr.rowid DESC, pi.rank ASC, pi.memory_id ASC LIMIT ?2",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::BigInt(i64::from(limit)),
@@ -19341,9 +20060,9 @@ impl DbConnection {
 
         rows.iter()
             .map(|row| {
-                let record = stored_pack_record_from_row(row)?;
-                let item = stored_pack_item_from_joined_row(row, 14)?;
-                let admission_order = required_i64(row, 26, DbOperation::Query, "rowid")?;
+                let record = stored_pack_record_metadata_from_row(row)?;
+                let item = stored_pack_item_from_joined_row(row, 13)?;
+                let admission_order = required_i64(row, 25, DbOperation::Query, "rowid")?;
                 Ok((admission_order, record, item))
             })
             .collect()
@@ -19784,8 +20503,52 @@ fn pack_ledger_degradations(degraded_json: Option<&str>) -> Result<Vec<serde_jso
                 message: format!("pack degraded_json is malformed or incompatible JSON: {error}"),
             }
         })?;
+    if degraded
+        .iter()
+        .any(|entry| !pack_ledger_degradation_is_valid(entry))
+    {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: "pack degraded_json contains an invalid degradation entry".to_owned(),
+        });
+    }
     degraded.sort_by_key(degradation_sort_key);
     Ok(degraded)
+}
+
+fn pack_ledger_degradation_is_valid(value: &serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let text = |field: &str| {
+        object
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| {
+                !value.trim().is_empty() && value.len() <= PACK_LEDGER_DEGRADATION_TEXT_MAX_BYTES
+            })
+    };
+    text("code")
+        && text("message")
+        && object
+            .get("severity")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|severity| {
+                matches!(
+                    severity,
+                    "info" | "low" | "warning" | "medium" | "high" | "critical"
+                )
+            })
+        && object.get("repair").is_none_or(|repair| {
+            repair.is_null()
+                || repair.as_str().is_some_and(|value| {
+                    !value.trim().is_empty()
+                        && value.len() <= PACK_LEDGER_DEGRADATION_TEXT_MAX_BYTES
+                })
+        })
+        && object
+            .get("details")
+            .is_none_or(|details| details.is_null() || details.is_object())
 }
 
 pub fn pack_ledger_degradation(
@@ -19808,11 +20571,118 @@ pub fn pack_ledger_degradation(
 }
 
 pub fn parse_stored_pack_ledger(record: &StoredPackRecord) -> ParsedPackLedger {
-    parse_pack_ledger_fields(
+    let parsed = parse_pack_ledger_fields(
         &record.id,
         record.ledger_json.as_deref(),
         record.ledger_hash.as_deref(),
-    )
+    );
+    if parsed.status != PackLedgerStatus::Available {
+        return parsed;
+    }
+    let Some(ledger_value) = parsed.available_ledger() else {
+        return ParsedPackLedger {
+            status: PackLedgerStatus::Malformed,
+            ledger: None,
+            degraded: vec![malformed_pack_ledger_degradation(
+                &record.id,
+                serde_json::json!({"canonicalLedgerMissing": true}),
+            )],
+        };
+    };
+    let Ok(ledger) = serde_json::from_value::<PackSelectionLedger>(ledger_value.clone()) else {
+        return ParsedPackLedger {
+            status: PackLedgerStatus::Malformed,
+            ledger: None,
+            degraded: vec![malformed_pack_ledger_degradation(
+                &record.id,
+                serde_json::json!({"canonicalLedgerShapeLost": true}),
+            )],
+        };
+    };
+    let mismatches = pack_ledger_record_binding_mismatches(record, &ledger.core);
+    if mismatches.is_empty() {
+        return parsed;
+    }
+
+    ParsedPackLedger {
+        status: PackLedgerStatus::HashMismatch,
+        ledger: None,
+        degraded: vec![pack_ledger_degradation(
+            PACK_REPLAY_LEDGER_HASH_MISMATCH,
+            "Pack selection ledger is not bound to its containing pack record.",
+            "high",
+            Some("Treat this replay as diagnostic only and inspect the database."),
+            serde_json::json!({"recordBindingMismatches": mismatches}),
+        )],
+    }
+}
+
+fn pack_ledger_record_binding_mismatches(
+    record: &StoredPackRecord,
+    core: &PackSelectionLedgerCore,
+) -> Vec<&'static str> {
+    let mut mismatches = Vec::new();
+    if core.pack_id != record.id {
+        mismatches.push("packId");
+    }
+    if core.workspace_id != record.workspace_id {
+        mismatches.push("workspaceId");
+    }
+    if core.pack_hash != record.pack_hash {
+        mismatches.push("packHash");
+    }
+    if core.created_at != record.created_at {
+        mismatches.push("createdAt");
+    }
+    if core.created_by != record.created_by {
+        mismatches.push("createdBy");
+    }
+    if core.command_surface != record.created_by.as_deref().unwrap_or("unknown") {
+        mismatches.push("commandSurface");
+    }
+    if core.request.profile != record.profile {
+        mismatches.push("request.profile");
+    }
+    if core.request.max_tokens != record.max_tokens {
+        mismatches.push("request.maxTokens");
+    }
+    if core.request.query.hash != blake3_text_hash(&record.query)
+        || (!core.request.query.redacted
+            && core.request.query.text.as_deref() != Some(record.query.as_str()))
+    {
+        mismatches.push("request.query");
+    }
+    let selected_token_sum = core
+        .selected_items
+        .iter()
+        .map(|item| u64::from(item.estimated_tokens))
+        .try_fold(0_u64, u64::checked_add);
+    if selected_token_sum != Some(u64::from(record.used_tokens)) {
+        mismatches.push("usedTokens");
+    }
+    if pack_ledger_degradations(record.degraded_json.as_deref())
+        .map_or(true, |degraded| degraded != core.degraded)
+    {
+        mismatches.push("degraded");
+    }
+    if core.candidate_counts.selected != record.item_count {
+        mismatches.push("candidateCounts.selected");
+    }
+    if core.candidate_counts.omitted != record.omitted_count {
+        mismatches.push("candidateCounts.omitted");
+    }
+    if core.candidate_counts.candidate_pool
+        != record.item_count.saturating_add(record.omitted_count)
+    {
+        mismatches.push("candidateCounts.candidatePool");
+    }
+    if u32::try_from(core.selected_items.len()).ok() != Some(record.item_count) {
+        mismatches.push("selectedItems.length");
+    }
+    if u32::try_from(core.omitted_items.len()).ok() != Some(record.omitted_count) {
+        mismatches.push("omittedItems.length");
+    }
+    mismatches
 }
 
 pub fn parse_pack_ledger_fields(
@@ -19833,6 +20703,16 @@ pub fn parse_pack_ledger_fields(
             )],
         };
     };
+    if raw_ledger.len() as u64 > PACK_REPLAY_LEDGER_MAX_STORED_BYTES {
+        return ParsedPackLedger {
+            status: PackLedgerStatus::Malformed,
+            ledger: None,
+            degraded: vec![oversized_pack_ledger_degradation(
+                pack_id,
+                Some(raw_ledger.len() as u64),
+            )],
+        };
+    }
 
     let DecodedPackLedger {
         ledger: parsed,
@@ -19850,45 +20730,64 @@ pub fn parse_pack_ledger_fields(
 
     let typed = match serde_json::from_value::<PackSelectionLedger>(parsed.clone()) {
         Ok(typed) if typed.core.schema == PACK_REPLAY_LEDGER_SCHEMA_V1 => typed,
-        Ok(typed) => {
+        Ok(_) => {
             return ParsedPackLedger {
                 status: PackLedgerStatus::Malformed,
-                ledger: Some(parsed),
+                ledger: None,
                 degraded: vec![malformed_pack_ledger_degradation(
                     pack_id,
                     serde_json::json!({
                         "packId": pack_id,
-                        "schema": typed.core.schema,
+                        "schemaRecognized": false,
                         "expectedSchema": PACK_REPLAY_LEDGER_SCHEMA_V1,
                     }),
                 )],
             };
         }
-        Err(error) => {
+        Err(_) => {
             return ParsedPackLedger {
                 status: PackLedgerStatus::Malformed,
-                ledger: Some(parsed),
+                ledger: None,
                 degraded: vec![malformed_pack_ledger_degradation(
                     pack_id,
                     serde_json::json!({
                         "packId": pack_id,
-                        "shapeError": error.to_string(),
+                        "stage": "ledgerShape",
+                        "shapeInvalid": true,
                     }),
                 )],
             };
         }
     };
-    let canonical_ledger = match serde_json::to_value(&typed) {
-        Ok(canonical_ledger) => canonical_ledger,
-        Err(error) => {
+    let canonical_ledger_json = match pack_ledger_json(&typed, "parsed pack selection ledger") {
+        Ok(canonical_ledger_json) => canonical_ledger_json,
+        Err(_) => {
             return ParsedPackLedger {
                 status: PackLedgerStatus::Malformed,
-                ledger: Some(parsed),
+                ledger: None,
                 degraded: vec![malformed_pack_ledger_degradation(
                     pack_id,
                     serde_json::json!({
                         "packId": pack_id,
-                        "canonicalizationError": error.to_string(),
+                        "stage": "ledgerCanonicalization",
+                        "canonicalizationFailed": true,
+                    }),
+                )],
+            };
+        }
+    };
+    let canonical_ledger = match serde_json::from_str::<serde_json::Value>(&canonical_ledger_json) {
+        Ok(canonical_ledger) => canonical_ledger,
+        Err(_) => {
+            return ParsedPackLedger {
+                status: PackLedgerStatus::Malformed,
+                ledger: None,
+                degraded: vec![malformed_pack_ledger_degradation(
+                    pack_id,
+                    serde_json::json!({
+                        "packId": pack_id,
+                        "stage": "canonicalLedgerJson",
+                        "canonicalizationFailed": true,
                     }),
                 )],
             };
@@ -19900,7 +20799,7 @@ pub fn parse_pack_ledger_fields(
     if parsed != canonical_ledger {
         return ParsedPackLedger {
             status: PackLedgerStatus::Malformed,
-            ledger: Some(parsed),
+            ledger: None,
             degraded: vec![malformed_pack_ledger_degradation(
                 pack_id,
                 serde_json::json!({
@@ -19912,21 +20811,23 @@ pub fn parse_pack_ledger_fields(
     }
     let core_json = match pack_ledger_json(&typed.core, "parsed pack selection ledger core") {
         Ok(core_json) => core_json,
-        Err(error) => {
+        Err(_) => {
             return ParsedPackLedger {
                 status: PackLedgerStatus::Malformed,
-                ledger: Some(parsed),
+                ledger: None,
                 degraded: vec![malformed_pack_ledger_degradation(
                     pack_id,
                     serde_json::json!({
                         "packId": pack_id,
-                        "canonicalizationError": error.to_string(),
+                        "stage": "coreCanonicalization",
+                        "canonicalizationFailed": true,
                     }),
                 )],
             };
         }
     };
     let recomputed_hash = blake3_text_hash(&core_json);
+    let ledger_invariant_mismatches = pack_ledger_internal_invariant_mismatches(&typed.core);
     let embedded_hash = typed.ledger_hash;
     let compressed_envelope_hash_mismatch = compressed_envelope_ledger_hash
         .as_deref()
@@ -19936,19 +20837,19 @@ pub fn parse_pack_ledger_fields(
         || expected_hash != Some(recomputed_hash.as_str())
         || compressed_envelope_hash_mismatch
     {
-        let mut details = serde_json::json!({
+        let details = serde_json::json!({
             "packId": pack_id,
-            "recordLedgerHash": expected_hash,
-            "embeddedLedgerHash": embedded_hash,
-            "recomputedLedgerHash": recomputed_hash,
+            "recordHashPresent": expected_hash.is_some(),
+            "recordHashMatchesRecomputed": expected_hash == Some(recomputed_hash.as_str()),
+            "embeddedHashMatchesRecomputed": embedded_hash == recomputed_hash,
+            "compressedEnvelopeHashPresent": compressed_envelope_ledger_hash.is_some(),
+            "compressedEnvelopeHashMatchesRecomputed": compressed_envelope_ledger_hash
+                .as_deref()
+                .is_none_or(|hash| hash == recomputed_hash),
         });
-        if let Some(compressed_envelope_ledger_hash) = compressed_envelope_ledger_hash {
-            details["compressedEnvelopeLedgerHash"] =
-                serde_json::Value::String(compressed_envelope_ledger_hash);
-        }
         return ParsedPackLedger {
             status: PackLedgerStatus::HashMismatch,
-            ledger: Some(parsed),
+            ledger: None,
             degraded: vec![pack_ledger_degradation(
                 PACK_REPLAY_LEDGER_HASH_MISMATCH,
                 "Pack selection ledger hash does not match the pack record.",
@@ -19958,12 +20859,225 @@ pub fn parse_pack_ledger_fields(
             )],
         };
     }
+    if !ledger_invariant_mismatches.is_empty() {
+        return ParsedPackLedger {
+            status: PackLedgerStatus::Malformed,
+            ledger: None,
+            degraded: vec![malformed_pack_ledger_degradation(
+                pack_id,
+                serde_json::json!({
+                    "ledgerInvariantMismatches": ledger_invariant_mismatches,
+                }),
+            )],
+        };
+    }
 
     ParsedPackLedger {
         status: PackLedgerStatus::Available,
         ledger: Some(canonical_ledger),
         degraded: Vec::new(),
     }
+}
+
+fn pack_ledger_internal_invariant_mismatches(core: &PackSelectionLedgerCore) -> Vec<&'static str> {
+    let mut mismatches = Vec::new();
+    if !is_canonical_blake3_hash(&core.pack_hash) {
+        mismatches.push("packHash");
+    }
+    if !is_canonical_pack_id(&core.pack_id) {
+        mismatches.push("packId");
+    }
+    if !is_canonical_workspace_id(&core.workspace_id) {
+        mismatches.push("workspaceId");
+    }
+    if !is_canonical_pack_profile(&core.request.profile) {
+        mismatches.push("request.profile");
+    }
+    if core.request.max_tokens == 0 {
+        mismatches.push("request.maxTokens");
+    }
+    if DateTime::parse_from_rfc3339(&core.created_at).is_err() {
+        mismatches.push("createdAt");
+    }
+    if core.task_lens.as_ref().is_some_and(|lens| {
+        lens.id.trim().is_empty() || lens.version == 0 || !is_canonical_blake3_hash(&lens.lens_hash)
+    }) {
+        mismatches.push("taskLens.lensHash");
+    }
+    if [
+        &core.derived_assets.search_index,
+        &core.derived_assets.graph_snapshot,
+    ]
+    .into_iter()
+    .any(|asset| match asset.status.as_str() {
+        "not_recorded" => asset.manifest_hash.is_some(),
+        "available" | "stale" => asset
+            .manifest_hash
+            .as_deref()
+            .is_none_or(|hash| !is_canonical_blake3_hash(hash)),
+        _ => true,
+    }) {
+        mismatches.push("derivedAssets");
+    }
+    if core
+        .degraded
+        .iter()
+        .any(|entry| !pack_ledger_degradation_is_valid(entry))
+    {
+        mismatches.push("degraded");
+    }
+    if !pack_ledger_text_record_is_canonical(&core.request.query) {
+        mismatches.push("request.query");
+    }
+    if core
+        .selected_items
+        .iter()
+        .any(|item| !pack_ledger_text_record_is_canonical(&item.why))
+    {
+        mismatches.push("selectedItems.why");
+    }
+    let selected_memory_ids = core
+        .selected_items
+        .iter()
+        .map(|item| item.memory_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if selected_memory_ids.len() != core.selected_items.len() {
+        mismatches.push("selectedItems.memoryId");
+    }
+    if core.selected_items.iter().any(|item| item.rank == 0)
+        || core
+            .selected_items
+            .windows(2)
+            .any(|items| items[0].rank >= items[1].rank)
+    {
+        mismatches.push("selectedItems.rank");
+    }
+    if core.selected_items.iter().any(|item| {
+        !item.scores.relevance.is_finite()
+            || !(0.0..=1.0).contains(&item.scores.relevance)
+            || !item.scores.utility.is_finite()
+            || !(0.0..=1.0).contains(&item.scores.utility)
+    }) {
+        mismatches.push("selectedItems.scores");
+    }
+    if core.selected_items.iter().any(|item| {
+        item.estimated_tokens == 0
+            || !is_canonical_memory_id(&item.memory_id)
+            || !is_pack_section(&item.section)
+            || !is_pack_trust_class(&item.trust_class)
+            || item
+                .trust_subclass
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            || item
+                .diversity_key
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            || item.freshness != "unavailable"
+    }) {
+        mismatches.push("selectedItems.metadata");
+    }
+    if core.selected_items.iter().any(|item| {
+        !is_canonical_blake3_hash(&item.provenance.hash)
+            || (item.provenance.redacted && item.provenance.redaction_reasons.is_empty())
+            || (!item.provenance.redacted && !item.provenance.redaction_reasons.is_empty())
+            || !strings_are_non_blank_sorted_unique(&item.provenance.redaction_reasons)
+    }) {
+        mismatches.push("selectedItems.provenance");
+    }
+    if core.selected_items.iter().any(|item| {
+        let expected = item
+            .why
+            .redaction_reasons
+            .iter()
+            .chain(item.provenance.redaction_reasons.iter())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        item.redaction_classes != expected
+    }) {
+        mismatches.push("selectedItems.redactionClasses");
+    }
+    let selected_token_sum = core
+        .selected_items
+        .iter()
+        .map(|item| u64::from(item.estimated_tokens))
+        .try_fold(0_u64, u64::checked_add);
+    if selected_token_sum.is_none_or(|tokens| tokens > u64::from(core.request.max_tokens)) {
+        mismatches.push("selectedItems.estimatedTokens");
+    }
+    let omitted_memory_ids = core
+        .omitted_items
+        .iter()
+        .map(|item| item.memory_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if omitted_memory_ids.len() != core.omitted_items.len() {
+        mismatches.push("omittedItems.memoryId");
+    }
+    if core.omitted_items.iter().any(|item| {
+        item.estimated_tokens == 0
+            || !is_canonical_memory_id(&item.memory_id)
+            || !is_pack_omission_reason(&item.reason)
+    }) {
+        mismatches.push("omittedItems.metadata");
+    }
+    if core.omitted_items.iter().any(|item| {
+        selected_memory_ids.contains(item.memory_id.as_str())
+            && item.reason != "redundant_candidate"
+    }) {
+        mismatches.push("selectedItems.omittedItemsOverlap");
+    }
+    if u32::try_from(core.selected_items.len()).ok() != Some(core.candidate_counts.selected) {
+        mismatches.push("candidateCounts.selected");
+    }
+    if u32::try_from(core.omitted_items.len()).ok() != Some(core.candidate_counts.omitted) {
+        mismatches.push("candidateCounts.omitted");
+    }
+    if core
+        .candidate_counts
+        .selected
+        .checked_add(core.candidate_counts.omitted)
+        != Some(core.candidate_counts.candidate_pool)
+    {
+        mismatches.push("candidateCounts.candidatePool");
+    }
+    mismatches
+}
+
+fn pack_ledger_text_record_is_canonical(record: &PackLedgerTextRecord) -> bool {
+    is_canonical_blake3_hash(&record.hash)
+        && strings_are_non_blank_sorted_unique(&record.redaction_reasons)
+        && if record.redacted {
+            record.text.is_none()
+                && record
+                    .redacted_text
+                    .as_deref()
+                    .is_some_and(|text| !text.trim().is_empty())
+                && !record.redaction_reasons.is_empty()
+        } else {
+            record.text.is_some()
+                && record.redacted_text.is_none()
+                && record.redaction_reasons.is_empty()
+                && record.text.as_deref().is_some_and(|text| {
+                    !text.trim().is_empty() && blake3_text_hash(text) == record.hash
+                })
+        }
+}
+
+fn strings_are_non_blank_sorted_unique(values: &[String]) -> bool {
+    values.iter().all(|value| !value.trim().is_empty())
+        && values.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+fn is_canonical_memory_id(value: &str) -> bool {
+    value.len() == 30
+        && value.starts_with("mem_")
+        && value[4..].bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+fn is_canonical_pack_profile(value: &str) -> bool {
+    crate::models::ContextProfileName::parse(value).is_some_and(|profile| profile.as_str() == value)
 }
 
 pub fn pack_ledger_storage_summary(raw_ledger: Option<&str>) -> serde_json::Value {
@@ -19978,6 +21092,18 @@ pub fn pack_ledger_storage_summary(raw_ledger: Option<&str>) -> serde_json::Valu
         });
     };
     let raw_bytes = raw_ledger.len() as u64;
+    if raw_bytes > PACK_REPLAY_LEDGER_MAX_STORED_BYTES {
+        return serde_json::json!({
+            "mode": "oversized",
+            "schema": PACK_REPLAY_LEDGER_OVERSIZED_SCHEMA_V1,
+            "algorithm": null,
+            "compressedBytes": null,
+            "uncompressedBytes": null,
+            "storedBytes": raw_bytes,
+            "maxStoredBytes": PACK_REPLAY_LEDGER_MAX_STORED_BYTES,
+            "payloadIncluded": false,
+        });
+    }
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw_ledger) else {
         return serde_json::json!({
             "mode": "malformed",
@@ -19989,25 +21115,51 @@ pub fn pack_ledger_storage_summary(raw_ledger: Option<&str>) -> serde_json::Valu
         });
     };
     let schema = parsed.get("schema").and_then(serde_json::Value::as_str);
+    if schema == Some(PACK_REPLAY_LEDGER_OVERSIZED_SCHEMA_V1) {
+        return serde_json::json!({
+            "mode": "oversized",
+            "schema": PACK_REPLAY_LEDGER_OVERSIZED_SCHEMA_V1,
+            "algorithm": null,
+            "compressedBytes": null,
+            "uncompressedBytes": null,
+            "storedBytes": null,
+            "maxStoredBytes": PACK_REPLAY_LEDGER_MAX_STORED_BYTES,
+            "payloadIncluded": false,
+        });
+    }
     if schema == Some(PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1) {
         let compression = parsed
             .get("compression")
             .unwrap_or(&serde_json::Value::Null);
+        let algorithm_recognized = compression
+            .get("algorithm")
+            .and_then(serde_json::Value::as_str)
+            == Some(PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1);
         return serde_json::json!({
             "mode": "compressed_in_row",
-            "schema": schema,
-            "ledgerHash": parsed.get("ledgerHash").and_then(serde_json::Value::as_str),
-            "algorithm": compression.get("algorithm").and_then(serde_json::Value::as_str),
+            "schema": PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1,
+            "algorithm": algorithm_recognized.then_some(PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1),
+            "algorithmRecognized": algorithm_recognized,
             "compressedBytes": compression.get("compressedByteLen").and_then(serde_json::Value::as_u64),
             "uncompressedBytes": compression.get("uncompressedByteLen").and_then(serde_json::Value::as_u64),
-            "uncompressedHash": compression.get("uncompressedHash").and_then(serde_json::Value::as_str),
+            "payloadIncluded": false,
+        });
+    }
+    if schema == Some(PACK_REPLAY_LEDGER_SCHEMA_V1) {
+        return serde_json::json!({
+            "mode": "uncompressed_in_row",
+            "schema": PACK_REPLAY_LEDGER_SCHEMA_V1,
+            "algorithm": null,
+            "compressedBytes": null,
+            "uncompressedBytes": raw_bytes,
             "payloadIncluded": false,
         });
     }
 
     serde_json::json!({
-        "mode": "uncompressed_in_row",
-        "schema": schema,
+        "mode": "unrecognized",
+        "schema": null,
+        "schemaRecognized": false,
         "algorithm": null,
         "compressedBytes": null,
         "uncompressedBytes": raw_bytes,
@@ -20019,18 +21171,21 @@ fn decode_pack_ledger_value(
     pack_id: &str,
     raw_ledger: &str,
 ) -> std::result::Result<DecodedPackLedger, serde_json::Value> {
-    let parsed = serde_json::from_str::<serde_json::Value>(raw_ledger).map_err(|error| {
+    let parsed = serde_json::from_str::<serde_json::Value>(raw_ledger).map_err(|_| {
         malformed_pack_ledger_degradation(
             pack_id,
             serde_json::json!({
                 "packId": pack_id,
-                "parseError": error.to_string(),
+                "stage": "storedJson",
+                "jsonInvalid": true,
             }),
         )
     })?;
-    if parsed.get("schema").and_then(serde_json::Value::as_str)
-        != Some(PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1)
-    {
+    let schema = parsed.get("schema").and_then(serde_json::Value::as_str);
+    if schema == Some(PACK_REPLAY_LEDGER_OVERSIZED_SCHEMA_V1) {
+        return Err(oversized_pack_ledger_degradation(pack_id, None));
+    }
+    if schema != Some(PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1) {
         return Ok(DecodedPackLedger {
             ledger: parsed,
             compressed_envelope_ledger_hash: None,
@@ -20045,119 +21200,61 @@ fn decode_compressed_pack_ledger_value(
     envelope_value: serde_json::Value,
 ) -> std::result::Result<DecodedPackLedger, serde_json::Value> {
     let envelope = serde_json::from_value::<CompressedPackSelectionLedger>(envelope_value.clone())
-        .map_err(|error| {
-            compressed_pack_ledger_degradation(
-                pack_id,
-                "compressedEnvelope",
-                format!("compressed ledger envelope is malformed: {error}"),
-            )
+        .map_err(|_| compressed_pack_ledger_degradation(pack_id, "compressedEnvelope"))?;
+    let canonical_envelope_json =
+        pack_ledger_json(&envelope, "parsed compressed pack selection ledger").map_err(|_| {
+            compressed_pack_ledger_degradation(pack_id, "compressedEnvelopeCanonicalization")
         })?;
-    let canonical_envelope = serde_json::to_value(&envelope).map_err(|error| {
-        compressed_pack_ledger_degradation(
-            pack_id,
-            "compressedEnvelopeCanonicalization",
-            format!("compressed ledger envelope could not be canonicalized: {error}"),
-        )
-    })?;
+    let canonical_envelope = serde_json::from_str::<serde_json::Value>(&canonical_envelope_json)
+        .map_err(|_| {
+            compressed_pack_ledger_degradation(pack_id, "compressedEnvelopeCanonicalization")
+        })?;
     // Compression metadata participates in the stored replay contract too;
     // reject unknown envelope fields before trusting or allocating its payload.
     if envelope_value != canonical_envelope {
         return Err(compressed_pack_ledger_degradation(
             pack_id,
             "compressedEnvelopeShape",
-            "compressed ledger envelope contains fields outside its canonical shape".to_string(),
         ));
     }
     let compressed_envelope_ledger_hash = envelope.ledger_hash.clone();
     if envelope.compression.algorithm != PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1 {
-        return Err(compressed_pack_ledger_degradation(
-            pack_id,
-            "algorithm",
-            format!(
-                "unsupported compression algorithm {}",
-                envelope.compression.algorithm
-            ),
-        ));
+        return Err(compressed_pack_ledger_degradation(pack_id, "algorithm"));
     }
     if envelope.compression.compressed_byte_len > PACK_REPLAY_LEDGER_MAX_COMPRESSED_BYTES {
         return Err(compressed_pack_ledger_degradation(
             pack_id,
             "compressedByteLen",
-            format!(
-                "compressed byte length exceeds the {}-byte limit: {}",
-                PACK_REPLAY_LEDGER_MAX_COMPRESSED_BYTES, envelope.compression.compressed_byte_len
-            ),
         ));
     }
     if envelope.compression.uncompressed_byte_len > PACK_REPLAY_LEDGER_MAX_UNCOMPRESSED_BYTES {
         return Err(compressed_pack_ledger_degradation(
             pack_id,
             "uncompressedByteLen",
-            format!(
-                "uncompressed byte length exceeds the {}-byte limit: {}",
-                PACK_REPLAY_LEDGER_MAX_UNCOMPRESSED_BYTES,
-                envelope.compression.uncompressed_byte_len
-            ),
         ));
     }
     if envelope.compression.compressed_payload_base64.len() as u64
         > PACK_REPLAY_LEDGER_MAX_BASE64_BYTES
     {
-        return Err(compressed_pack_ledger_degradation(
-            pack_id,
-            "base64",
-            format!(
-                "base64 payload exceeds the {}-byte encoded limit",
-                PACK_REPLAY_LEDGER_MAX_BASE64_BYTES
-            ),
-        ));
+        return Err(compressed_pack_ledger_degradation(pack_id, "base64"));
     }
     let compressed = BASE64_STANDARD
         .decode(&envelope.compression.compressed_payload_base64)
-        .map_err(|error| {
-            compressed_pack_ledger_degradation(
-                pack_id,
-                "base64",
-                format!("compressed ledger payload is not base64: {error}"),
-            )
-        })?;
+        .map_err(|_| compressed_pack_ledger_degradation(pack_id, "base64"))?;
     if compressed.len() as u64 != envelope.compression.compressed_byte_len {
         return Err(compressed_pack_ledger_degradation(
             pack_id,
             "compressedByteLen",
-            format!(
-                "compressed byte length mismatch expected={} actual={}",
-                envelope.compression.compressed_byte_len,
-                compressed.len()
-            ),
         ));
     }
-    let capacity = usize::try_from(envelope.compression.uncompressed_byte_len).map_err(|_| {
-        compressed_pack_ledger_degradation(
-            pack_id,
-            "uncompressedByteLen",
-            format!(
-                "uncompressed byte length does not fit usize: {}",
-                envelope.compression.uncompressed_byte_len
-            ),
-        )
-    })?;
-    let uncompressed = zstd::bulk::decompress(&compressed, capacity).map_err(|error| {
-        compressed_pack_ledger_degradation(
-            pack_id,
-            "zstd",
-            format!("compressed ledger payload could not be decompressed: {error}"),
-        )
-    })?;
+    let capacity = usize::try_from(envelope.compression.uncompressed_byte_len)
+        .map_err(|_| compressed_pack_ledger_degradation(pack_id, "uncompressedByteLen"))?;
+    let uncompressed = zstd::bulk::decompress(&compressed, capacity)
+        .map_err(|_| compressed_pack_ledger_degradation(pack_id, "zstd"))?;
     if uncompressed.len() as u64 != envelope.compression.uncompressed_byte_len {
         return Err(compressed_pack_ledger_degradation(
             pack_id,
             "uncompressedByteLen",
-            format!(
-                "uncompressed byte length mismatch expected={} actual={}",
-                envelope.compression.uncompressed_byte_len,
-                uncompressed.len()
-            ),
         ));
     }
     let actual_hash = blake3_bytes_hash(&uncompressed);
@@ -20165,34 +21262,24 @@ fn decode_compressed_pack_ledger_value(
         return Err(compressed_pack_ledger_degradation(
             pack_id,
             "uncompressedHash",
-            format!(
-                "uncompressed hash mismatch expected={} actual={actual_hash}",
-                envelope.compression.uncompressed_hash
-            ),
         ));
     }
-    let uncompressed_json = String::from_utf8(uncompressed).map_err(|error| {
-        compressed_pack_ledger_degradation(
+    let uncompressed_json = String::from_utf8(uncompressed)
+        .map_err(|_| compressed_pack_ledger_degradation(pack_id, "utf8"))?;
+    let ledger = serde_json::from_str::<serde_json::Value>(&uncompressed_json).map_err(|_| {
+        malformed_pack_ledger_degradation(
             pack_id,
-            "utf8",
-            format!("uncompressed ledger is not valid UTF-8: {error}"),
+            serde_json::json!({
+                "packId": pack_id,
+                "compression": {
+                    "schema": PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1,
+                    "algorithm": PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1,
+                    "stage": "uncompressedJson",
+                    "jsonInvalid": true,
+                },
+            }),
         )
     })?;
-    let ledger =
-        serde_json::from_str::<serde_json::Value>(&uncompressed_json).map_err(|error| {
-            malformed_pack_ledger_degradation(
-                pack_id,
-                serde_json::json!({
-                    "packId": pack_id,
-                    "compression": {
-                        "schema": PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1,
-                        "algorithm": PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1,
-                        "stage": "uncompressedJson",
-                        "error": error.to_string(),
-                    },
-                }),
-            )
-        })?;
     Ok(DecodedPackLedger {
         ledger,
         compressed_envelope_ledger_hash: Some(compressed_envelope_ledger_hash),
@@ -20216,11 +21303,25 @@ fn malformed_pack_ledger_degradation(
     )
 }
 
-fn compressed_pack_ledger_degradation(
+fn oversized_pack_ledger_degradation(
     pack_id: &str,
-    stage: &str,
-    error: String,
+    observed_bytes: Option<u64>,
 ) -> serde_json::Value {
+    malformed_pack_ledger_degradation(
+        pack_id,
+        serde_json::json!({
+            "packId": pack_id,
+            "storage": {
+                "stage": "storedByteLen",
+                "oversized": true,
+                "maxStoredBytes": PACK_REPLAY_LEDGER_MAX_STORED_BYTES,
+                "observedBytes": observed_bytes,
+            },
+        }),
+    )
+}
+
+fn compressed_pack_ledger_degradation(pack_id: &str, stage: &str) -> serde_json::Value {
     malformed_pack_ledger_degradation(
         pack_id,
         serde_json::json!({
@@ -20229,7 +21330,7 @@ fn compressed_pack_ledger_degradation(
                 "schema": PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1,
                 "algorithm": PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1,
                 "stage": stage,
-                "error": error,
+                "failed": true,
             },
         }),
     )
@@ -20256,8 +21357,7 @@ pub fn stored_pack_ledger_degraded_values(parsed: &ParsedPackLedger) -> Vec<serd
         return Vec::new();
     }
     parsed
-        .ledger
-        .as_ref()
+        .available_ledger()
         .and_then(|ledger| pack_ledger_core_array(ledger, "degraded"))
         .cloned()
         .unwrap_or_default()
@@ -20342,6 +21442,24 @@ fn stored_pack_record_from_row(row: &Row) -> Result<StoredPackRecord> {
         ledger_hash: optional_text(row, 11)?.map(str::to_string),
         created_at: required_text(row, 12, DbOperation::Query, "created_at")?.to_string(),
         created_by: optional_text(row, 13)?.map(str::to_string),
+    })
+}
+
+fn stored_pack_record_metadata_from_row(row: &Row) -> Result<StoredPackRecordMetadata> {
+    Ok(StoredPackRecordMetadata {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        query: required_text(row, 2, DbOperation::Query, "query")?.to_string(),
+        profile: required_text(row, 3, DbOperation::Query, "profile")?.to_string(),
+        max_tokens: required_u32(row, 4, DbOperation::Query, "max_tokens")?,
+        used_tokens: required_u32(row, 5, DbOperation::Query, "used_tokens")?,
+        item_count: required_u32(row, 6, DbOperation::Query, "item_count")?,
+        omitted_count: required_u32(row, 7, DbOperation::Query, "omitted_count")?,
+        pack_hash: required_text(row, 8, DbOperation::Query, "pack_hash")?.to_string(),
+        degraded_json: optional_text(row, 9)?.map(str::to_string),
+        ledger_hash: optional_text(row, 10)?.map(str::to_string),
+        created_at: required_text(row, 11, DbOperation::Query, "created_at")?.to_string(),
+        created_by: optional_text(row, 12)?.map(str::to_string),
     })
 }
 
@@ -23682,7 +24800,7 @@ fn validate_reflection_request_id(value: &str) -> Result<()> {
 }
 
 fn validate_reflection_blake3_hash(value: &str, field: &'static str) -> Result<()> {
-    if is_canonical_blake3_content_hash(value.trim()) {
+    if is_canonical_blake3_hash(value.trim()) {
         Ok(())
     } else {
         Err(malformed_reflection_request_ledger_input(&format!(
@@ -23736,7 +24854,7 @@ fn validate_reflection_source_refs_json(raw: &str) -> Result<()> {
             object.get("contentHash"),
             "reflection source contentHash",
         )?;
-        if !is_canonical_blake3_content_hash(content_hash) {
+        if !is_canonical_blake3_hash(content_hash) {
             return Err(malformed_reflection_request_ledger_input(
                 "reflection source contentHash must be a canonical blake3 hash",
             ));
@@ -23774,7 +24892,7 @@ fn validate_reflection_source_content_hashes_json(raw: &str) -> Result<()> {
                 "source_content_hashes_json entries must be strings",
             ));
         };
-        if !is_canonical_blake3_content_hash(hash) {
+        if !is_canonical_blake3_hash(hash) {
             return Err(malformed_reflection_request_ledger_input(
                 "source_content_hashes_json entries must be canonical blake3 hashes",
             ));
@@ -24068,6 +25186,7 @@ pub fn rch_verify_run_id(
 // DB tests use unwrap/expect only as fixture assertions around in-memory stores.
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::error::Error as StdError;
     use std::fmt;
     use std::path::PathBuf;
@@ -24805,6 +25924,291 @@ mod tests {
                 &format!("MIGRATIONS[{index}] version"),
             )?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn v084_pack_profile_rebuild_preserves_parent_children_indexes_and_order() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 83)?;
+        setup_workspace(&connection)?;
+        for (memory_id, content) in [
+            ("mem_000000000000000000000v0841", "V084 selected memory"),
+            ("mem_000000000000000000000v0842", "V084 omitted memory"),
+            (
+                "mem_000000000000000000000v0843",
+                "V084 contradiction memory",
+            ),
+        ] {
+            insert_pack_test_memory(&connection, memory_id, content)?;
+        }
+
+        let first_id = "pack_000000000000000000000v0841";
+        let first_input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            query: "v084 preserved pack".to_owned(),
+            profile: "compact".to_owned(),
+            max_tokens: 512,
+            used_tokens: 50,
+            item_count: 1,
+            omitted_count: 1,
+            pack_hash: pack_test_hash("v084-preserved-pack"),
+            degraded_json: None,
+            created_by: Some("v084-test".to_owned()),
+        };
+        connection.insert_pack_record_at(
+            first_id,
+            &first_input,
+            &[pack_item_input(
+                first_id,
+                "mem_000000000000000000000v0841",
+                1,
+            )],
+            &[pack_omission_input(
+                first_id,
+                "mem_000000000000000000000v0842",
+            )],
+            "2026-07-11T00:00:00Z",
+        )?;
+        let second_id = "pack_000000000000000000000v0842";
+        connection.insert_pack_record_at(
+            second_id,
+            &super::CreatePackRecordInput {
+                query: "v084 row-order sentinel".to_owned(),
+                profile: "thorough".to_owned(),
+                used_tokens: 0,
+                item_count: 0,
+                omitted_count: 0,
+                pack_hash: pack_test_hash("v084-row-order-sentinel"),
+                ..first_input.clone()
+            },
+            &[],
+            &[],
+            "2026-07-11T00:00:00Z",
+        )?;
+        connection.insert_pack_baseline(
+            &super::CreatePackBaselineInput {
+                workspace_id: first_input.workspace_id.clone(),
+                agent_name: "V084Agent".to_owned(),
+                task_key: Some("migration".to_owned()),
+                pack_id: first_id.to_owned(),
+                pack_hash: first_input.pack_hash.clone(),
+            },
+            10,
+            Some("v084-test"),
+        )?;
+
+        let first_record_before = connection
+            .get_pack_record(first_id)?
+            .ok_or_else(|| TestFailure::new("V084 parent fixture missing before migration"))?;
+        let baseline_before = connection
+            .resolve_pack_baseline(&first_input.workspace_id, "V084Agent", Some("migration"))?
+            .ok_or_else(|| TestFailure::new("V084 baseline fixture missing before migration"))?;
+        let query_value_rows = |sql: &str| {
+            connection.query(sql, &[]).map(|rows| {
+                rows.into_iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|(_, value)| value.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let parent_values_before = query_value_rows(
+            "SELECT id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, created_at, created_by, ledger_json, ledger_hash FROM pack_records ORDER BY rowid",
+        )?;
+        let item_values_before = query_value_rows(
+            "SELECT pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key, provenance_json, trust_class, trust_subclass FROM pack_items ORDER BY pack_id, memory_id",
+        )?;
+        let omission_values_before = query_value_rows(
+            "SELECT pack_id, memory_id, estimated_tokens, reason FROM pack_omissions ORDER BY pack_id, memory_id",
+        )?;
+        let impression_values_before = query_value_rows(
+            "SELECT pack_id, memory_id, workspace_id, query_hash, lens_hash, rank, section, token_estimate, selected, omission_reason, db_generation, index_generation, graph_generation, created_at FROM pack_candidate_impressions ORDER BY pack_id, memory_id",
+        )?;
+        let baseline_values_before = query_value_rows(
+            "SELECT workspace_id, agent_name, task_key, pack_id, pack_hash, created_at FROM pack_baselines ORDER BY workspace_id, agent_name, task_key, pack_id",
+        )?;
+
+        let migration = connection.migrate()?;
+        ensure_equal(&migration.applied().to_vec(), &vec![84_u32], "V084 applied")?;
+        let first_record_after = connection
+            .get_pack_record(first_id)?
+            .ok_or_else(|| TestFailure::new("V084 parent fixture missing after migration"))?;
+        ensure_equal(
+            &first_record_after,
+            &first_record_before,
+            "V084 preserves every parent metadata and replay-ledger field",
+        )?;
+        let baseline_after = connection
+            .resolve_pack_baseline(&first_input.workspace_id, "V084Agent", Some("migration"))?
+            .ok_or_else(|| TestFailure::new("V084 baseline resolution failed after migration"))?;
+        ensure_equal(
+            &baseline_after,
+            &baseline_before,
+            "V084 preserves baseline fields and exact-task resolution",
+        )?;
+        for (label, before, sql) in [
+            (
+                "pack_records",
+                &parent_values_before,
+                "SELECT id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, created_at, created_by, ledger_json, ledger_hash FROM pack_records ORDER BY rowid",
+            ),
+            (
+                "pack_items",
+                &item_values_before,
+                "SELECT pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key, provenance_json, trust_class, trust_subclass FROM pack_items ORDER BY pack_id, memory_id",
+            ),
+            (
+                "pack_omissions",
+                &omission_values_before,
+                "SELECT pack_id, memory_id, estimated_tokens, reason FROM pack_omissions ORDER BY pack_id, memory_id",
+            ),
+            (
+                "pack_candidate_impressions selected and omitted rows",
+                &impression_values_before,
+                "SELECT pack_id, memory_id, workspace_id, query_hash, lens_hash, rank, section, token_estimate, selected, omission_reason, db_generation, index_generation, graph_generation, created_at FROM pack_candidate_impressions ORDER BY pack_id, memory_id",
+            ),
+            (
+                "pack_baselines",
+                &baseline_values_before,
+                "SELECT workspace_id, agent_name, task_key, pack_id, pack_hash, created_at FROM pack_baselines ORDER BY workspace_id, agent_name, task_key, pack_id",
+            ),
+        ] {
+            ensure_equal(
+                &query_value_rows(sql)?,
+                before,
+                &format!("V084 preserves all {label} field values"),
+            )?;
+        }
+        ensure_equal(
+            &connection.list_pack_record_ids_for_memory_drift(&first_input.workspace_id, 2)?,
+            &vec![(2, second_id.to_owned()), (1, first_id.to_owned())],
+            "pack rowid admission order preserved",
+        )?;
+        for (table, expected_rows) in [
+            ("pack_records", 2_i64),
+            ("pack_items", 1_i64),
+            ("pack_omissions", 1_i64),
+            ("pack_candidate_impressions", 2_i64),
+            ("pack_baselines", 1_i64),
+        ] {
+            let rows = connection.query(&format!("SELECT COUNT(*) FROM {table}"), &[])?;
+            ensure_equal(
+                &rows[0].get(0).and_then(|value| value.as_i64()),
+                &Some(expected_rows),
+                &format!("{table} row preservation"),
+            )?;
+        }
+        for table in [
+            "pack_items",
+            "pack_omissions",
+            "pack_candidate_impressions",
+            "pack_baselines",
+        ] {
+            let rows = connection.query(&format!("PRAGMA foreign_key_list({table})"), &[])?;
+            ensure(
+                rows.iter()
+                    .any(|row| row.get(2).and_then(|value| value.as_str()) == Some("pack_records")),
+                format!("{table} FK still targets pack_records"),
+            )?;
+        }
+        ensure(
+            connection.check_foreign_keys()?.passed,
+            "V084 foreign keys pass",
+        )?;
+        ensure(
+            connection.check_integrity()?.passed,
+            "V084 integrity passes",
+        )?;
+
+        let index_rows = connection.query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND (name LIKE 'idx_pack_%' OR name = 'pack_baselines_resolution')",
+            &[],
+        )?;
+        let indexes = index_rows
+            .iter()
+            .filter_map(|row| row.get(0).and_then(|value| value.as_str()))
+            .collect::<BTreeSet<_>>();
+        for required in [
+            "idx_pack_records_workspace",
+            "idx_pack_records_created",
+            "idx_pack_records_hash",
+            "idx_pack_records_ledger_hash",
+            "idx_pack_items_memory",
+            "idx_pack_items_section",
+            "idx_pack_items_rank",
+            "idx_pack_items_trust_class",
+            "idx_pack_omissions_memory",
+            "idx_pack_candidate_impressions_memory",
+            "idx_pack_candidate_impressions_workspace",
+            "idx_pack_candidate_impressions_query_lens",
+            "pack_baselines_resolution",
+        ] {
+            ensure(indexes.contains(required), format!("V084 index {required}"))?;
+        }
+        let leftovers = connection.query(
+            "SELECT name FROM sqlite_master WHERE name LIKE '%v083' OR name LIKE 'v084_%' UNION ALL SELECT name FROM sqlite_temp_master WHERE name LIKE 'v084_%'",
+            &[],
+        )?;
+        ensure(
+            leftovers.is_empty(),
+            "V084 leaves no snapshot/legacy tables",
+        )?;
+
+        for (index, profile) in [
+            "compact",
+            "balanced",
+            "grounding",
+            "orientation",
+            "thorough",
+            "submodular",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let profile_suffix = format!("profile{index}");
+            let pack_id = format!("pack_{profile_suffix:0>26}");
+            connection.insert_pack_record(
+                &pack_id,
+                &super::CreatePackRecordInput {
+                    workspace_id: first_input.workspace_id.clone(),
+                    query: format!("V084 profile {profile}"),
+                    profile: profile.to_owned(),
+                    max_tokens: 64,
+                    used_tokens: 0,
+                    item_count: 0,
+                    omitted_count: 0,
+                    pack_hash: pack_test_hash(&format!("v084-profile-{profile}")),
+                    degraded_json: None,
+                    created_by: Some("v084-test".to_owned()),
+                },
+                &[],
+                &[],
+            )?;
+        }
+        connection.insert_pack_record(
+            "pack_000000000000000000000v0843",
+            &super::CreatePackRecordInput {
+                workspace_id: first_input.workspace_id,
+                query: "V084 contradiction omission".to_owned(),
+                profile: "grounding".to_owned(),
+                max_tokens: 64,
+                used_tokens: 0,
+                item_count: 0,
+                omitted_count: 1,
+                pack_hash: pack_test_hash("v084-contradiction-omission"),
+                degraded_json: None,
+                created_by: Some("v084-test".to_owned()),
+            },
+            &[],
+            &[pack_omission_input_with_reason(
+                "pack_000000000000000000000v0843",
+                "mem_000000000000000000000v0843",
+                "contradiction_suppressed",
+            )],
+        )?;
         Ok(())
     }
 
@@ -34526,39 +35930,14 @@ mod tests {
         connection.insert_memory_link("link_00000000000000000000000101", &cross_workspace_link)?;
 
         let pack_id = "pack_00000000000000000000000101";
-        let pack_input = super::CreatePackRecordInput {
-            workspace_id: "wsp_01234567890123456789012345".to_string(),
-            query: "cross workspace pack".to_string(),
-            profile: "compact".to_string(),
-            max_tokens: 256,
-            used_tokens: 64,
-            item_count: 2,
-            omitted_count: 0,
-            pack_hash: "blake3:packhash101".to_string(),
-            degraded_json: None,
-            created_by: Some("agent:test".to_string()),
-        };
-        let pack_items = vec![super::CreatePackItemInput {
-            pack_id: pack_id.to_string(),
-            memory_id: "mem_00000000000000000000000102".to_string(),
-            rank: 1,
-            section: "evidence".to_string(),
-            estimated_tokens: 32,
-            relevance: 0.9,
-            utility: 0.7,
-            why: "cross workspace item".to_string(),
-            diversity_key: None,
-            provenance_json: r#"{"schema":"ee.pack_item.provenance.v1","entries":[]}"#.to_string(),
-            trust_class: "agent_assertion".to_string(),
-            trust_subclass: None,
-        }];
-        let pack_omissions = vec![super::CreatePackOmissionInput {
-            pack_id: pack_id.to_string(),
-            memory_id: "mem_00000000000000000000000102".to_string(),
-            estimated_tokens: 32,
-            reason: "token_budget_exceeded".to_string(),
-        }];
-        connection.insert_pack_record(pack_id, &pack_input, &pack_items, &pack_omissions)?;
+        // Intentional corruption fixture: bypass the normal writer, which now
+        // rejects cross-workspace memories and inconsistent declared counts.
+        connection.execute_raw(&format!(
+            r#"INSERT INTO pack_records (id, workspace_id, query, profile, max_tokens, used_tokens, item_count, omitted_count, pack_hash, degraded_json, created_at, created_by) VALUES ('{pack_id}', 'wsp_01234567890123456789012345', 'cross workspace pack', 'compact', 256, 64, 2, 0, '{}', NULL, '2026-07-11T00:00:00Z', 'agent:test');\
+             INSERT INTO pack_items (pack_id, memory_id, rank, section, estimated_tokens, relevance, utility, why, diversity_key, provenance_json, trust_class, trust_subclass) VALUES ('{pack_id}', 'mem_00000000000000000000000102', 1, 'evidence', 32, 0.9, 0.7, 'cross workspace item', NULL, '{{"schema":"ee.pack_item.provenance.v1","entries":[]}}', 'agent_assertion', NULL);\
+             INSERT INTO pack_omissions (pack_id, memory_id, estimated_tokens, reason) VALUES ('{pack_id}', 'mem_00000000000000000000000102', 32, 'token_budget_exceeded');"#,
+            pack_test_hash("cross-workspace-reference-fixture"),
+        ))?;
 
         let report = connection.check_reference_integrity()?;
         ensure_equal(
@@ -35587,6 +36966,10 @@ mod tests {
         }
     }
 
+    fn pack_test_hash(label: &str) -> String {
+        super::blake3_text_hash(label)
+    }
+
     fn pack_omission_input(pack_id: &str, memory_id: &str) -> super::CreatePackOmissionInput {
         pack_omission_input_with_reason(pack_id, memory_id, "token_budget_exceeded")
     }
@@ -35615,10 +36998,10 @@ mod tests {
             query: "cargo formatting".to_string(),
             profile: "balanced".to_string(),
             max_tokens: 4000,
-            used_tokens: 150,
+            used_tokens: 50,
             item_count: 1,
             omitted_count: 0,
-            pack_hash: "blake3:abc123".to_string(),
+            pack_hash: pack_test_hash("insert-and-get-pack"),
             degraded_json: None,
             created_by: Some("test".to_string()),
         };
@@ -35647,7 +37030,7 @@ mod tests {
         ensure_equal(&record.query, &"cargo formatting".to_string(), "query")?;
         ensure_equal(&record.profile, &"balanced".to_string(), "profile")?;
         ensure_equal(&record.max_tokens, &4000_u32, "max_tokens")?;
-        ensure_equal(&record.used_tokens, &150_u32, "used_tokens")?;
+        ensure_equal(&record.used_tokens, &50_u32, "used_tokens")?;
         ensure_equal(&record.item_count, &1_u32, "item_count")?;
 
         let pack_items = connection.get_pack_items("pack_000000000000000000000pack1")?;
@@ -35687,6 +37070,11 @@ mod tests {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
         setup_pack_test_memory(&connection)?;
+        insert_pack_test_memory(
+            &connection,
+            "mem_00000000000000000000pack02",
+            "Omitted formatting candidate",
+        )?;
 
         let pack_id = "pack_000000000000000000000imp01";
         let input = super::CreatePackRecordInput {
@@ -35694,10 +37082,10 @@ mod tests {
             query: "cargo formatting".to_string(),
             profile: "balanced".to_string(),
             max_tokens: 4000,
-            used_tokens: 150,
+            used_tokens: 50,
             item_count: 1,
             omitted_count: 1,
-            pack_hash: "blake3:impr-pack".to_string(),
+            pack_hash: pack_test_hash("impression-pack"),
             degraded_json: None,
             created_by: Some("ee context".to_string()),
         };
@@ -35793,7 +37181,7 @@ mod tests {
             used_tokens: 100,
             item_count: 1,
             omitted_count: 0,
-            pack_hash: "blake3:impr-det".to_string(),
+            pack_hash: pack_test_hash("impression-determinism"),
             degraded_json: None,
             created_by: Some("ee context".to_string()),
         };
@@ -35977,7 +37365,7 @@ mod tests {
             used_tokens: 50,
             item_count: 1,
             omitted_count: 0,
-            pack_hash: "blake3:ledger-pack".to_string(),
+            pack_hash: pack_test_hash("ledger-pack"),
             degraded_json: Some(
                 r#"[{"code":"graph_unavailable","severity":"low","message":"Graph unavailable."},{"code":"lexical_only","severity":"low","message":"Semantic search unavailable."}]"#
                     .to_string(),
@@ -36003,7 +37391,7 @@ mod tests {
         let task_lens = super::CreatePackTaskLensInput {
             id: "bugfix".to_string(),
             version: 1,
-            lens_hash: "blake3:task-lens-bugfix".to_string(),
+            lens_hash: pack_test_hash("task-lens-bugfix"),
         };
 
         connection.insert_pack_record_with_timings_and_task_lens(
@@ -36063,7 +37451,7 @@ mod tests {
         )?;
         ensure_equal(
             &ledger["taskLens"]["lensHash"],
-            &serde_json::json!("blake3:task-lens-bugfix"),
+            &serde_json::json!(pack_test_hash("task-lens-bugfix")),
             "task lens hash persisted",
         )?;
         let redaction_classes = ledger["selectedItems"][0]["redactionClasses"]
@@ -36084,6 +37472,147 @@ mod tests {
     }
 
     #[test]
+    fn pack_ledger_parser_rejects_blank_text_and_redaction_reasons() -> TestResult {
+        let pack_id = "pack_000000000000000000000reas1";
+        let raw_secret = "sk-proj-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: format!("release prep api_key={raw_secret}"),
+            profile: "compact".to_string(),
+            max_tokens: 1200,
+            used_tokens: 50,
+            item_count: 1,
+            omitted_count: 0,
+            pack_hash: pack_test_hash("blank-reason-pack"),
+            degraded_json: None,
+            created_by: Some("ee context".to_string()),
+        };
+        let mut item = pack_item_input(pack_id, "mem_00000000000000000000pack01", 1);
+        item.provenance_json = format!(
+            r#"{{"schema":"ee.pack_item.provenance.v1","entries":[{{"uri":"file://AGENTS.md#L42","note":"api_key={raw_secret}"}}]}}"#
+        );
+        let (ledger_json, ledger_hash) = super::build_uncompressed_pack_selection_ledger(
+            pack_id,
+            &input,
+            &[item],
+            &[],
+            "2026-07-11T00:00:00Z",
+            None,
+        )?;
+        let ledger: super::PackSelectionLedger = serde_json::from_str(&ledger_json)
+            .map_err(|error| TestFailure::new(format!("ledger json malformed: {error}")))?;
+        ensure_equal(
+            &super::parse_pack_ledger_fields(pack_id, Some(&ledger_json), Some(&ledger_hash))
+                .status,
+            &super::PackLedgerStatus::Available,
+            "baseline redacted ledger status",
+        )?;
+        ensure(
+            !ledger.core.request.query.redaction_reasons.is_empty(),
+            "baseline query must contain a redaction reason",
+        )?;
+        ensure(
+            !ledger.core.selected_items[0]
+                .provenance
+                .redaction_reasons
+                .is_empty(),
+            "baseline provenance must contain a redaction reason",
+        )?;
+
+        let parse_rehashed = |mut ledger: super::PackSelectionLedger,
+                              context: &str|
+         -> super::Result<super::ParsedPackLedger> {
+            let core_json = super::pack_ledger_json(&ledger.core, context)?;
+            let recomputed_hash = super::blake3_text_hash(&core_json);
+            ledger.ledger_hash = recomputed_hash.clone();
+            let ledger_json = super::pack_ledger_json(&ledger, context)?;
+            Ok(super::parse_pack_ledger_fields(
+                pack_id,
+                Some(&ledger_json),
+                Some(&recomputed_hash),
+            ))
+        };
+
+        let mut blank_unredacted_text = ledger.clone();
+        blank_unredacted_text.core.selected_items[0].why.text = Some(" \t ".to_owned());
+        blank_unredacted_text.core.selected_items[0].why.hash = super::blake3_text_hash(" \t ");
+        let blank_unredacted_text =
+            parse_rehashed(blank_unredacted_text, "blank unredacted text ledger")?;
+        ensure_equal(
+            &blank_unredacted_text.status,
+            &super::PackLedgerStatus::Malformed,
+            "blank unredacted text is malformed after valid rehash",
+        )?;
+        ensure_equal(
+            &blank_unredacted_text.degraded[0]["details"]["ledgerInvariantMismatches"],
+            &serde_json::json!(["selectedItems.why"]),
+            "blank unredacted text reaches text-record invariant validation",
+        )?;
+
+        let mut blank_redacted_text = ledger.clone();
+        blank_redacted_text.core.request.query.redacted_text = Some(" \n ".to_owned());
+        let blank_redacted_text =
+            parse_rehashed(blank_redacted_text, "blank redacted text ledger")?;
+        ensure_equal(
+            &blank_redacted_text.status,
+            &super::PackLedgerStatus::Malformed,
+            "blank redacted text is malformed after valid rehash",
+        )?;
+        ensure_equal(
+            &blank_redacted_text.degraded[0]["details"]["ledgerInvariantMismatches"],
+            &serde_json::json!(["request.query"]),
+            "blank redacted text reaches text-record invariant validation",
+        )?;
+
+        let mut blank_text_reason = ledger.clone();
+        blank_text_reason.core.request.query.redaction_reasons[0].clear();
+        let blank_text_reason =
+            parse_rehashed(blank_text_reason, "blank text redaction reason ledger")?;
+        ensure_equal(
+            &blank_text_reason.status,
+            &super::PackLedgerStatus::Malformed,
+            "blank text redaction reason is malformed after valid rehash",
+        )?;
+        ensure_equal(
+            &blank_text_reason.degraded[0]["details"]["ledgerInvariantMismatches"],
+            &serde_json::json!(["request.query"]),
+            "blank text reason reaches text-record invariant validation",
+        )?;
+
+        let mut blank_provenance_reason = ledger;
+        blank_provenance_reason.core.selected_items[0]
+            .provenance
+            .redaction_reasons[0] = " \t ".to_owned();
+        let redaction_classes = {
+            let selected_item = &blank_provenance_reason.core.selected_items[0];
+            selected_item
+                .why
+                .redaction_reasons
+                .iter()
+                .chain(selected_item.provenance.redaction_reasons.iter())
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        };
+        blank_provenance_reason.core.selected_items[0].redaction_classes = redaction_classes;
+        let blank_provenance_reason = parse_rehashed(
+            blank_provenance_reason,
+            "blank provenance redaction reason ledger",
+        )?;
+        ensure_equal(
+            &blank_provenance_reason.status,
+            &super::PackLedgerStatus::Malformed,
+            "blank provenance redaction reason is malformed after valid rehash",
+        )?;
+        ensure_equal(
+            &blank_provenance_reason.degraded[0]["details"]["ledgerInvariantMismatches"],
+            &serde_json::json!(["selectedItems.provenance"]),
+            "blank provenance reason reaches provenance invariant validation",
+        )
+    }
+
+    #[test]
     fn parse_stored_pack_ledger_reports_replay_statuses() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
@@ -36098,7 +37627,7 @@ mod tests {
             used_tokens: 50,
             item_count: 1,
             omitted_count: 0,
-            pack_hash: "blake3:parse-pack".to_string(),
+            pack_hash: pack_test_hash("parse-pack"),
             degraded_json: None,
             created_by: Some("ee context".to_string()),
         };
@@ -36129,12 +37658,161 @@ mod tests {
             "available ledger status",
         )?;
         ensure(
-            available.ledger.is_some(),
+            available.available_ledger().is_some(),
             "available ledger keeps parsed JSON",
         )?;
         ensure(
             available.degraded.is_empty(),
             "available ledger has no parser degradations",
+        )?;
+
+        let mut transplanted = record.clone();
+        transplanted.id = "pack_000000000000000000000pars2".to_string();
+        let transplanted = super::parse_stored_pack_ledger(&transplanted);
+        ensure_equal(
+            &transplanted.status,
+            &super::PackLedgerStatus::HashMismatch,
+            "valid ledger transplanted to another record is rejected",
+        )?;
+        ensure_equal(
+            &transplanted.degraded[0]["details"]["recordBindingMismatches"],
+            &serde_json::json!(["packId"]),
+            "transplanted ledger reports only bounded field names",
+        )?;
+
+        let mut request_mismatch = record.clone();
+        request_mismatch.query = "secret request value must not be reported".to_string();
+        request_mismatch.profile = "balanced".to_string();
+        request_mismatch.max_tokens = 999;
+        let request_mismatch = super::parse_stored_pack_ledger(&request_mismatch);
+        ensure_equal(
+            &request_mismatch.status,
+            &super::PackLedgerStatus::HashMismatch,
+            "request metadata mismatch is rejected",
+        )?;
+        ensure_equal(
+            &request_mismatch.degraded[0]["details"]["recordBindingMismatches"],
+            &serde_json::json!(["request.profile", "request.maxTokens", "request.query"]),
+            "request mismatch reports bounded field names",
+        )?;
+        ensure(
+            !request_mismatch.degraded[0]
+                .to_string()
+                .contains("secret request value"),
+            "record-binding diagnostics must not expose mismatched values",
+        )?;
+
+        let mut count_mismatch = record.clone();
+        count_mismatch.item_count = 2;
+        count_mismatch.omitted_count = 1;
+        let count_mismatch = super::parse_stored_pack_ledger(&count_mismatch);
+        ensure_equal(
+            &count_mismatch.status,
+            &super::PackLedgerStatus::HashMismatch,
+            "record candidate-count mismatch is rejected",
+        )?;
+        ensure_equal(
+            &count_mismatch.degraded[0]["details"]["recordBindingMismatches"],
+            &serde_json::json!([
+                "candidateCounts.selected",
+                "candidateCounts.omitted",
+                "candidateCounts.candidatePool",
+                "selectedItems.length",
+                "omittedItems.length"
+            ]),
+            "count mismatch reports bounded field names",
+        )?;
+
+        let mut used_tokens_mismatch = record.clone();
+        used_tokens_mismatch.used_tokens = 51;
+        let used_tokens_mismatch = super::parse_stored_pack_ledger(&used_tokens_mismatch);
+        ensure_equal(
+            &used_tokens_mismatch.status,
+            &super::PackLedgerStatus::HashMismatch,
+            "used token mismatch is rejected",
+        )?;
+        ensure_equal(
+            &used_tokens_mismatch.degraded[0]["details"]["recordBindingMismatches"],
+            &serde_json::json!(["usedTokens"]),
+            "used token mismatch reports a bounded field name",
+        )?;
+
+        let mut degraded_mismatch = record.clone();
+        degraded_mismatch.degraded_json = Some(
+            r#"[{"code":"forged","message":"must not become trusted","severity":"high"}]"#
+                .to_owned(),
+        );
+        let degraded_mismatch = super::parse_stored_pack_ledger(&degraded_mismatch);
+        ensure_equal(
+            &degraded_mismatch.status,
+            &super::PackLedgerStatus::HashMismatch,
+            "record degradation mismatch is rejected",
+        )?;
+        ensure_equal(
+            &degraded_mismatch.degraded[0]["details"]["recordBindingMismatches"],
+            &serde_json::json!(["degraded"]),
+            "degradation mismatch reports a bounded field name",
+        )?;
+
+        let mut inconsistent: super::PackSelectionLedger = serde_json::from_str(
+            record
+                .ledger_json
+                .as_deref()
+                .ok_or_else(|| TestFailure::new("available record missing ledger JSON"))?,
+        )
+        .map_err(|error| TestFailure::new(format!("ledger json malformed: {error}")))?;
+        inconsistent.core.candidate_counts.selected = 2;
+        inconsistent.core.candidate_counts.candidate_pool = 2;
+        let inconsistent_core_json = serde_json::to_string(&inconsistent.core)
+            .map_err(|error| TestFailure::new(format!("ledger core encode failed: {error}")))?;
+        let inconsistent_hash = super::blake3_text_hash(&inconsistent_core_json);
+        inconsistent.ledger_hash = inconsistent_hash.clone();
+        let inconsistent_json = serde_json::to_string(&inconsistent)
+            .map_err(|error| TestFailure::new(format!("ledger encode failed: {error}")))?;
+        let inconsistent = super::parse_pack_ledger_fields(
+            pack_id,
+            Some(&inconsistent_json),
+            Some(&inconsistent_hash),
+        );
+        ensure_equal(
+            &inconsistent.status,
+            &super::PackLedgerStatus::Malformed,
+            "internally inconsistent candidate counts are rejected",
+        )?;
+        ensure_equal(
+            &inconsistent.degraded[0]["details"]["ledgerInvariantMismatches"],
+            &serde_json::json!(["candidateCounts.selected"]),
+            "internal invariant failure reports bounded field names",
+        )?;
+
+        let mut structural_smuggle: super::PackSelectionLedger = serde_json::from_str(
+            record
+                .ledger_json
+                .as_deref()
+                .ok_or_else(|| TestFailure::new("available record missing ledger JSON"))?,
+        )
+        .map_err(|error| TestFailure::new(format!("ledger json malformed: {error}")))?;
+        structural_smuggle.core.selected_items[0].freshness = "AKIAIOSFODNN7EXAMPLE".to_owned();
+        let structural_core_json = serde_json::to_string(&structural_smuggle.core)
+            .map_err(|error| TestFailure::new(format!("ledger core encode failed: {error}")))?;
+        let structural_hash = super::blake3_text_hash(&structural_core_json);
+        structural_smuggle.ledger_hash = structural_hash.clone();
+        let structural_json = serde_json::to_string(&structural_smuggle)
+            .map_err(|error| TestFailure::new(format!("ledger encode failed: {error}")))?;
+        let structural_smuggle = super::parse_pack_ledger_fields(
+            pack_id,
+            Some(&structural_json),
+            Some(&structural_hash),
+        );
+        ensure_equal(
+            &structural_smuggle.status,
+            &super::PackLedgerStatus::Malformed,
+            "secret-shaped freshness cannot become a trusted structural value",
+        )?;
+        ensure_equal(
+            &structural_smuggle.degraded[0]["details"]["ledgerInvariantMismatches"],
+            &serde_json::json!(["selectedItems.metadata"]),
+            "structural smuggling reports only the bounded metadata field",
         )?;
 
         let mut missing = record.clone();
@@ -36215,14 +37893,9 @@ mod tests {
             &serde_json::json!(true),
             "unhashed core override rejected by canonical shape",
         )?;
-        let retained_injected_ledger = injected_core
-            .ledger
-            .as_ref()
-            .ok_or_else(|| TestFailure::new("malformed injected ledger was not retained"))?;
-        ensure_equal(
-            &super::pack_ledger_core_array(retained_injected_ledger, "selectedItems").map(Vec::len),
-            &Some(1),
-            "top-level integrity-bound items take precedence over injected core",
+        ensure(
+            injected_core.available_ledger().is_none(),
+            "non-available parser results must not retain untrusted JSON",
         )?;
         ensure(
             super::stored_pack_ledger_degraded_values(&injected_core).is_empty(),
@@ -36236,13 +37909,10 @@ mod tests {
             .is_none(),
             "nested core fields must never be exposed as canonical replay evidence",
         )?;
-        let untrusted_top_level_degraded = super::ParsedPackLedger {
-            status: super::PackLedgerStatus::HashMismatch,
-            ledger: Some(serde_json::json!({
-                "degraded": [{"code": "forged_top_level_degradation"}]
-            })),
-            degraded: Vec::new(),
-        };
+        let untrusted_top_level_degraded = super::ParsedPackLedger::unavailable_for_test(
+            super::PackLedgerStatus::HashMismatch,
+            Vec::new(),
+        );
         ensure(
             super::stored_pack_ledger_degraded_values(&untrusted_top_level_degraded).is_empty(),
             "hash-mismatched top-level degradations must not become replay evidence",
@@ -36275,7 +37945,7 @@ mod tests {
             "unhashed nested field rejected by canonical shape",
         )?;
 
-        let mut hash_mismatch = record;
+        let mut hash_mismatch = record.clone();
         hash_mismatch.ledger_hash = Some("blake3:not-the-stored-ledger-hash".to_string());
         let hash_mismatch = super::parse_stored_pack_ledger(&hash_mismatch);
         ensure_equal(
@@ -36287,6 +37957,178 @@ mod tests {
             &hash_mismatch.degraded[0]["code"],
             &serde_json::json!(super::PACK_REPLAY_LEDGER_HASH_MISMATCH),
             "hash mismatch ledger code",
+        )?;
+
+        let oversized_body = format!(
+            r#"{{"schema":"{}","padding":"{}"}}"#,
+            super::PACK_REPLAY_LEDGER_SCHEMA_V1,
+            "x".repeat(super::PACK_REPLAY_LEDGER_MAX_STORED_BYTES as usize)
+        );
+        let direct_oversized = super::parse_pack_ledger_fields(
+            pack_id,
+            Some(&oversized_body),
+            record.ledger_hash.as_deref(),
+        );
+        ensure_equal(
+            &direct_oversized.status,
+            &super::PackLedgerStatus::Malformed,
+            "direct oversized ledger status",
+        )?;
+        ensure_equal(
+            &direct_oversized.degraded[0]["details"]["storage"]["stage"],
+            &serde_json::json!("storedByteLen"),
+            "direct oversized ledger rejected before JSON parsing",
+        )?;
+        let oversized_storage = super::pack_ledger_storage_summary(Some(&oversized_body));
+        ensure_equal(
+            &oversized_storage["mode"],
+            &serde_json::json!("oversized"),
+            "oversized storage summary rejects before JSON parsing",
+        )?;
+        ensure_equal(
+            &oversized_storage["maxStoredBytes"],
+            &serde_json::json!(super::PACK_REPLAY_LEDGER_MAX_STORED_BYTES),
+            "oversized storage summary reports its hard cap",
+        )?;
+        let oversized_body_len = oversized_body.len() as u64;
+        connection.execute_for(
+            super::DbOperation::Execute,
+            "UPDATE pack_records SET ledger_json = ?1 WHERE id = ?2",
+            &[
+                super::Value::Text(oversized_body),
+                super::Value::Text(pack_id.to_owned()),
+            ],
+        )?;
+
+        let capped_records = vec![
+            connection
+                .get_pack_record(pack_id)?
+                .ok_or_else(|| TestFailure::new("capped pack record not found"))?,
+            connection
+                .get_latest_pack_record_for_query(&input.workspace_id, &input.query)?
+                .ok_or_else(|| TestFailure::new("capped latest pack record not found"))?,
+            connection
+                .get_pack_record_for_memory_drift(pack_id)?
+                .ok_or_else(|| TestFailure::new("capped drift identity record not found"))?,
+        ];
+        for capped in capped_records {
+            ensure_equal(
+                &capped.ledger_json.as_deref(),
+                &Some(super::PACK_REPLAY_LEDGER_OVERSIZED_SENTINEL),
+                "oversized ledger must be replaced before row materialization",
+            )?;
+            let parsed = super::parse_stored_pack_ledger(&capped);
+            ensure_equal(
+                &parsed.status,
+                &super::PackLedgerStatus::Malformed,
+                "SQL-capped oversized ledger status",
+            )?;
+            ensure_equal(
+                &parsed.degraded[0]["details"]["storage"]["stage"],
+                &serde_json::json!("storedByteLen"),
+                "SQL-capped oversized ledger sentinel classification",
+            )?;
+            ensure_equal(
+                &super::pack_ledger_storage_summary(capped.ledger_json.as_deref())["mode"],
+                &serde_json::json!("oversized"),
+                "SQL-capped oversized ledger storage classification",
+            )?;
+        }
+
+        ensure_equal(
+            &connection.get_pack_ledger_stored_byte_len(pack_id)?,
+            &Some(oversized_body_len),
+            "ledger byte length query reports size without materializing the body",
+        )?;
+        let recent = connection
+            .list_recent_pack_record_ids_for_workspace(&input.workspace_id, 1)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| TestFailure::new("recent pack-record identity not found"))?;
+        ensure_equal(
+            &recent,
+            &pack_id.to_string(),
+            "recent identity scan identifies the pack without carrying its ledger",
+        )?;
+        let (_, drift_record, _) = connection
+            .list_pack_items_for_memory_drift(&input.workspace_id, 1)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| TestFailure::new("drift pack-item projection not found"))?;
+        ensure_equal(
+            &drift_record.id,
+            &pack_id.to_string(),
+            "legacy drift join returns explicit body-free metadata",
+        )?;
+        let (memory_record, _) = connection
+            .list_pack_records_for_memory(&items[0].memory_id, 1)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| TestFailure::new("memory pack-item projection not found"))?;
+        ensure_equal(
+            &memory_record.id,
+            &pack_id.to_string(),
+            "memory pack-item join returns explicit body-free metadata",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn recent_pack_record_identity_scan_does_not_duplicate_large_ledger_bodies() -> TestResult {
+        const ITEM_COUNT: u32 = 64;
+
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let pack_id = "pack_00000000000000000000meta64";
+        let mut items = Vec::new();
+        for index in 0..ITEM_COUNT {
+            let memory_id = format!("mem_{index:026}");
+            insert_pack_test_memory(&connection, &memory_id, &format!("Memory {index}"))?;
+            items.push(pack_item_input(pack_id, &memory_id, index + 1));
+        }
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: "metadata-only recent item scan".to_string(),
+            profile: "compact".to_string(),
+            max_tokens: 4_000,
+            used_tokens: 3_200,
+            item_count: ITEM_COUNT,
+            omitted_count: 0,
+            pack_hash: pack_test_hash("metadata-only-pack"),
+            degraded_json: None,
+            created_by: Some("ee pack".to_string()),
+        };
+        connection.insert_pack_record(pack_id, &input, &items, &[])?;
+
+        let oversized_body = format!(
+            r#"{{"schema":"{}","padding":"{}"}}"#,
+            super::PACK_REPLAY_LEDGER_SCHEMA_V1,
+            "x".repeat(super::PACK_REPLAY_LEDGER_MAX_STORED_BYTES as usize)
+        );
+        let oversized_body_len = oversized_body.len() as u64;
+        connection.execute_for(
+            super::DbOperation::Execute,
+            "UPDATE pack_records SET ledger_json = ?1 WHERE id = ?2",
+            &[
+                super::Value::Text(oversized_body),
+                super::Value::Text(pack_id.to_owned()),
+            ],
+        )?;
+
+        let rows = connection
+            .list_recent_pack_record_ids_for_workspace(&input.workspace_id, ITEM_COUNT)?;
+        ensure_equal(&rows.len(), &1_usize, "one identity returned for the pack")?;
+        ensure(
+            rows.iter().all(|row| row == pack_id),
+            "identity row identifies its pack without carrying ledger bodies",
+        )?;
+        ensure_equal(
+            &connection.get_pack_ledger_stored_byte_len(pack_id)?,
+            &Some(oversized_body_len),
+            "one scalar query observes the shared ledger size",
         )?;
 
         connection.close()?;
@@ -36321,7 +38163,7 @@ mod tests {
             used_tokens: 4800,
             item_count: items.len() as u32,
             omitted_count: 0,
-            pack_hash: "blake3:compressed-pack".to_string(),
+            pack_hash: pack_test_hash("compressed-pack"),
             degraded_json: None,
             created_by: Some("ee context".to_string()),
         };
@@ -36378,8 +38220,7 @@ mod tests {
         )?;
         ensure_equal(
             &parsed
-                .ledger
-                .as_ref()
+                .available_ledger()
                 .and_then(|ledger| ledger.get("ledgerHash"))
                 .cloned()
                 .unwrap_or(serde_json::Value::Null),
@@ -36433,9 +38274,15 @@ mod tests {
             "compressed envelope ledger hash must bind to canonical core",
         )?;
         ensure_equal(
-            &mismatched_envelope_hash.degraded[0]["details"]["compressedEnvelopeLedgerHash"],
-            &serde_json::json!("blake3:unbound-envelope-hash"),
-            "compressed envelope hash mismatch is reported",
+            &mismatched_envelope_hash.degraded[0]["details"]["compressedEnvelopeHashMatchesRecomputed"],
+            &serde_json::json!(false),
+            "compressed envelope hash mismatch is reported without raw hash text",
+        )?;
+        ensure(
+            !mismatched_envelope_hash.degraded[0]
+                .to_string()
+                .contains("unbound-envelope-hash"),
+            "untrusted envelope hashes must not enter diagnostics",
         )?;
 
         let mut oversized = envelope;
@@ -36476,7 +38323,7 @@ mod tests {
             used_tokens: 4800,
             item_count: items.len() as u32,
             omitted_count: 0,
-            pack_hash: "blake3:compressed-pack-corrupt".to_string(),
+            pack_hash: pack_test_hash("compressed-pack-corrupt"),
             degraded_json: None,
             created_by: Some("ee context".to_string()),
         };
@@ -36512,7 +38359,7 @@ mod tests {
             "corrupt compressed ledger stage",
         )?;
         ensure(
-            parsed.ledger.is_none(),
+            parsed.available_ledger().is_none(),
             "corrupt compressed ledger must not be treated as a hash-mismatched valid ledger",
         )
     }
@@ -36532,7 +38379,7 @@ mod tests {
             used_tokens: 0,
             item_count: 0,
             omitted_count: 0,
-            pack_hash: "blake3:empty-pack".to_string(),
+            pack_hash: pack_test_hash("empty-pack"),
             degraded_json: Some(
                 r#"[{"code":"lexical_only","severity":"low","message":"Semantic search unavailable."}]"#
                     .to_string(),
@@ -36592,7 +38439,7 @@ mod tests {
             used_tokens: 100,
             item_count: 2,
             omitted_count: 1,
-            pack_hash: "blake3:deterministic-pack".to_string(),
+            pack_hash: pack_test_hash("deterministic-pack"),
             degraded_json: Some(
                 r#"[{"code":"zeta","severity":"low","message":"later"},{"code":"alpha","severity":"low","message":"earlier"}]"#
                     .to_string(),
@@ -36739,7 +38586,7 @@ mod tests {
             used_tokens: 150,
             item_count: 3,
             omitted_count: 1,
-            pack_hash: "blake3:hu8s-batched".to_string(),
+            pack_hash: pack_test_hash("hu8s-batched"),
             degraded_json: None,
             created_by: Some("test".to_string()),
         };
@@ -36788,6 +38635,7 @@ mod tests {
             "below_relevance_floor",
             "excluded_by_policy",
             "excluded_by_filter",
+            "contradiction_suppressed",
         ];
         let memory_ids = [
             "mem_00000000000000000000omrs01",
@@ -36795,6 +38643,7 @@ mod tests {
             "mem_00000000000000000000omrs03",
             "mem_00000000000000000000omrs04",
             "mem_00000000000000000000omrs05",
+            "mem_00000000000000000000omrs06",
         ];
         for (memory_id, reason) in memory_ids.iter().zip(reasons.iter().copied()) {
             insert_pack_test_memory(
@@ -36813,7 +38662,7 @@ mod tests {
             used_tokens: 0,
             item_count: 0,
             omitted_count: reasons.len() as u32,
-            pack_hash: "blake3:omission-reasons".to_string(),
+            pack_hash: pack_test_hash("omission-reasons"),
             degraded_json: None,
             created_by: Some("test".to_string()),
         };
@@ -36857,10 +38706,10 @@ mod tests {
             query: "cargo rollback".to_string(),
             profile: "balanced".to_string(),
             max_tokens: 4000,
-            used_tokens: 150,
+            used_tokens: 50,
             item_count: 1,
             omitted_count: 1,
-            pack_hash: "blake3:hu8s-rollback".to_string(),
+            pack_hash: pack_test_hash("hu8s-rollback"),
             degraded_json: None,
             created_by: Some("test".to_string()),
         };
@@ -36869,13 +38718,13 @@ mod tests {
             "mem_00000000000000000000pack01",
             1,
         )];
-        let omissions = vec![super::CreatePackOmissionInput {
-            reason: "invalid_reason".to_string(),
-            ..pack_omission_input(pack_id, "mem_00000000000000000000btch05")
-        }];
+        let omissions = vec![pack_omission_input(
+            pack_id,
+            "mem_00000000000000000000missing",
+        )];
 
         let result = connection.insert_pack_record(pack_id, &input, &items, &omissions);
-        ensure(result.is_err(), "invalid omission reason must fail")?;
+        ensure(result.is_err(), "missing omission memory must fail")?;
         ensure(
             connection.get_pack_record(pack_id)?.is_none(),
             "failed child insert rolls back pack record",
@@ -36900,10 +38749,10 @@ mod tests {
             query: "cargo formatting".to_string(),
             profile: "balanced".to_string(),
             max_tokens: 4000,
-            used_tokens: 150,
+            used_tokens: 50,
             item_count: 1,
             omitted_count: 0,
-            pack_hash: "blake3:def456".to_string(),
+            pack_hash: pack_test_hash("pack-history"),
             degraded_json: None,
             created_by: None,
         };
