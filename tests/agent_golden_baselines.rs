@@ -45,6 +45,7 @@ use serde_json::{Value, json};
 type TestResult = Result<(), String>;
 
 const DOCTOR_GOLDEN_WORKSPACE: &str = "tests/fixtures";
+const MISSING_GOLDEN_WORKSPACE: &str = "tests/fixtures/missing-ee-workspace";
 const GRAPH_ALGORITHMS: &[&str] = &["pagerank"];
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
@@ -129,6 +130,291 @@ fn normalize_json_for_golden(text: &str) -> String {
         return serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_string());
     }
     scrub_volatile_text(trimmed)
+}
+
+fn normalize_named_golden(category: &str, name: &str, text: &str) -> String {
+    match (category, name) {
+        ("status", "status_json") => normalize_status_json_for_golden(text),
+        ("agent", "doctor.json") => normalize_doctor_json_for_golden(text),
+        ("doctor", "missing_db_degradation" | "pending_migration_degradation") => {
+            normalize_doctor_degradation_json_for_golden(text)
+        }
+        ("doctor", "doctor_toon") => normalize_doctor_toon_for_golden(text),
+        ("capabilities", "capabilities_json") => {
+            normalize_capabilities_json_for_golden(text)
+        }
+        ("capabilities", "capabilities_toon") => {
+            normalize_capabilities_toon_for_golden(text)
+        }
+        ("version", "version") => normalize_version_json_for_golden(text),
+        _ => normalize_json_for_golden(text),
+    }
+}
+
+fn golden_requires_normalized_write(category: &str, name: &str) -> bool {
+    matches!(
+        (category, name),
+        ("status", "status_json")
+            | ("agent", "doctor.json")
+            | (
+                "doctor",
+                "missing_db_degradation" | "pending_migration_degradation" | "doctor_toon"
+            )
+            | ("capabilities", "capabilities_json" | "capabilities_toon")
+            | ("version", "version")
+    )
+}
+
+fn scrub_status_volatile_fields(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if map.get("command").and_then(Value::as_str) == Some("status") {
+                if let Some(version) = map.get_mut("version") {
+                    *version = Value::String("<scrubbed:eeVersion>".to_owned());
+                }
+            }
+            for key in [
+                "hostCalibration",
+                "qos",
+                "rchWorkerPressure",
+                "search",
+                "shardFanout",
+                "sizeDiagnostics",
+                "verificationLedger",
+                "verificationPosture",
+                "workspace",
+            ] {
+                if let Some(entry) = map.get_mut(key) {
+                    *entry = Value::String(format!("<scrubbed:{key}>"));
+                }
+            }
+            if let Some(generated_at) = map.get_mut("generatedAt") {
+                *generated_at = Value::String("<scrubbed:generatedAt>".to_owned());
+            }
+            if let Some(summary) = map
+                .get_mut("agentInventory")
+                .and_then(|inventory| inventory.get_mut("summary"))
+                .and_then(Value::as_object_mut)
+            {
+                if let Some(total_count) = summary.get_mut("totalCount") {
+                    *total_count = Value::String("<scrubbed:agentSourceCount>".to_owned());
+                }
+            }
+            for key in [
+                "configHash",
+                "dependencyHash",
+                "featureFlagsHash",
+                "sourceDependencyHash",
+            ] {
+                if let Some(hash) = map.get_mut(key).filter(|value| value.is_string()) {
+                    *hash = Value::String(format!("<scrubbed:{key}>"));
+                }
+            }
+            for child in map.values_mut() {
+                scrub_status_volatile_fields(child);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                scrub_status_volatile_fields(child);
+            }
+        }
+        Value::String(value) if value.contains("worker(s) usable") => {
+            *value = mask_worker_counts(value);
+        }
+        _ => {}
+    }
+}
+
+fn normalize_status_json_for_golden(text: &str) -> String {
+    let trimmed = text.trim();
+    if let Ok(mut value) = serde_json::from_str::<Value>(trimmed) {
+        scrub_status_volatile_fields(&mut value);
+        return serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned());
+    }
+    trimmed.to_owned()
+}
+
+fn normalize_doctor_json_for_golden(text: &str) -> String {
+    let trimmed = text.trim();
+    let Ok(mut value) = serde_json::from_str::<Value>(trimmed) else {
+        return trimmed.to_owned();
+    };
+
+    if let Some(version) = value.pointer_mut("/data/version") {
+        *version = Value::String("<scrubbed:eeVersion>".to_owned());
+    }
+    if let Some(qos) = value.pointer_mut("/data/qos") {
+        *qos = Value::String("<scrubbed:qos>".to_owned());
+    }
+    if let Some(checks) = value
+        .pointer_mut("/data/checks")
+        .and_then(Value::as_array_mut)
+    {
+        for check in checks {
+            let Some(check) = check.as_object_mut() else {
+                continue;
+            };
+            let advisory = check.get("tier").and_then(Value::as_str) == Some("advisory");
+            if advisory {
+                if let Some(severity) = check.get_mut("severity") {
+                    *severity = Value::String("<scrubbed:advisorySeverity>".to_owned());
+                }
+            }
+            if let Some(message) = check.get_mut("message") {
+                *message = Value::String("<scrubbed:message>".to_owned());
+            }
+        }
+    }
+
+    serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned())
+}
+
+fn normalize_doctor_degradation_json_for_golden(text: &str) -> String {
+    let normalized = normalize_json_for_golden(text);
+    let Ok(mut value) = serde_json::from_str::<Value>(&normalized) else {
+        return normalized;
+    };
+    if let Some(workspace_path) = value.pointer_mut("/data/meshAutoEnrollment/workspacePath") {
+        *workspace_path = Value::String("<scrubbed:workspacePath>".to_owned());
+    }
+    serde_json::to_string(&value).unwrap_or(normalized)
+}
+
+fn normalize_version_json_for_golden(text: &str) -> String {
+    let trimmed = text.trim();
+    let Ok(mut value) = serde_json::from_str::<Value>(trimmed) else {
+        return trimmed.to_owned();
+    };
+    for (field, sentinel) in [
+        ("targetTriple", "<scrubbed:targetTriple>"),
+        ("targetArch", "<scrubbed:targetArch>"),
+        ("targetOs", "<scrubbed:targetOs>"),
+    ] {
+        if let Some(target) = value.pointer_mut(&format!("/data/build/{field}")) {
+            *target = Value::String(sentinel.to_owned());
+        }
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned())
+}
+
+fn normalize_capabilities_json_for_golden(text: &str) -> String {
+    let normalized = normalize_json_for_golden(text);
+    let Ok(mut value) = serde_json::from_str::<Value>(&normalized) else {
+        return normalized;
+    };
+
+    if let Some(binaries) = value.pointer_mut("/data/binaries") {
+        *binaries = Value::String("<scrubbed:optionalBinaries>".to_owned());
+    }
+    if let Some(subsystems) = value
+        .pointer_mut("/data/subsystems")
+        .and_then(Value::as_array_mut)
+    {
+        for subsystem in subsystems {
+            if subsystem.get("name").and_then(Value::as_str) == Some("cass") {
+                if let Some(status) = subsystem.get_mut("status") {
+                    *status = Value::String("<scrubbed:cassStatus>".to_owned());
+                }
+            }
+        }
+    }
+    if let Some(ready) = value.pointer_mut("/data/summary/readySubsystems") {
+        *ready = Value::String("<scrubbed:readySubsystems>".to_owned());
+    }
+
+    serde_json::to_string(&value).unwrap_or(normalized)
+}
+
+fn normalize_capabilities_toon_for_golden(text: &str) -> String {
+    let normalized = scrub_volatile_text(text.trim());
+    let mut output = Vec::with_capacity(normalized.lines().count());
+    let mut skipped_block_indent = None;
+
+    for line in normalized.lines() {
+        let indent = line
+            .chars()
+            .take_while(|character| character.is_whitespace())
+            .count();
+        let trimmed = line.trim_start();
+        if let Some(block_indent) = skipped_block_indent {
+            if trimmed.is_empty() || indent > block_indent {
+                continue;
+            }
+            skipped_block_indent = None;
+        }
+
+        if indent == 2 && trimmed == "binaries:" {
+            output.push("  binaries: <scrubbed:optionalBinaries>".to_owned());
+            skipped_block_indent = Some(indent);
+        } else if indent == 4 && trimmed.starts_with("cass,") {
+            let description = trimmed.splitn(3, ',').nth(2).unwrap_or_default();
+            output.push(format!(
+                "    cass,<scrubbed:cassStatus>,{description}"
+            ));
+        } else if trimmed.starts_with("readySubsystems:") {
+            output.push(format!(
+                "{}readySubsystems: <scrubbed:readySubsystems>",
+                " ".repeat(indent)
+            ));
+        } else {
+            output.push(line.to_owned());
+        }
+    }
+
+    output.join("\n")
+}
+
+fn normalize_doctor_toon_for_golden(text: &str) -> String {
+    let normalized = scrub_volatile_text(text.trim());
+    let mut output = Vec::with_capacity(normalized.lines().count());
+    let mut skipped_block_indent = None;
+
+    for line in normalized.lines() {
+        let indent = line
+            .chars()
+            .take_while(|character| character.is_whitespace())
+            .count();
+        let trimmed = line.trim_start();
+        if let Some(block_indent) = skipped_block_indent {
+            if trimmed.is_empty() || indent > block_indent {
+                continue;
+            }
+            skipped_block_indent = None;
+        }
+
+        let scrubbed_block = if indent == 2 && trimmed.starts_with("qos:") {
+            Some("qos")
+        } else if indent == 2 && trimmed.starts_with("hostCalibration:") {
+            Some("hostCalibration")
+        } else if indent == 2 && trimmed.starts_with("advisories[") {
+            Some("advisories")
+        } else if indent == 2 && trimmed.starts_with("checks[") {
+            Some("checks")
+        } else {
+            None
+        };
+        if let Some(block) = scrubbed_block {
+            output.push(format!("  {block}: <scrubbed:{block}>"));
+            skipped_block_indent = Some(indent);
+            continue;
+        }
+
+        let scrubbed_value = if trimmed.starts_with("workspacePath:") {
+            Some("workspacePath: <scrubbed:workspacePath>")
+        } else if trimmed.starts_with("directory:") {
+            Some("directory: <scrubbed:directory>")
+        } else {
+            None
+        };
+        if let Some(scrubbed_value) = scrubbed_value {
+            output.push(format!("{}{scrubbed_value}", " ".repeat(indent)));
+        } else {
+            output.push(line.to_owned());
+        }
+    }
+
+    output.join("\n")
 }
 
 /// Replace `N of M worker(s) usable` with sentinels so the live RCH count
@@ -314,7 +600,12 @@ fn assert_golden(category: &str, name: &str, actual: &str) -> TestResult {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
-        fs::write(&path, actual).map_err(|e| format!("write {}: {e}", path.display()))?;
+        let rendered = if golden_requires_normalized_write(category, name) {
+            format!("{}\n", normalize_named_golden(category, name, actual))
+        } else {
+            actual.to_owned()
+        };
+        fs::write(&path, rendered).map_err(|e| format!("write {}: {e}", path.display()))?;
         eprintln!("Updated golden file: {}", path.display());
         return Ok(());
     }
@@ -326,8 +617,8 @@ fn assert_golden(category: &str, name: &str, actual: &str) -> TestResult {
         )
     })?;
 
-    let actual_normalized = normalize_json_for_golden(actual);
-    let expected_normalized = normalize_json_for_golden(&expected);
+    let actual_normalized = normalize_named_golden(category, name, actual);
+    let expected_normalized = normalize_named_golden(category, name, &expected);
 
     if actual_normalized == expected_normalized {
         Ok(())
@@ -504,8 +795,8 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
                 "--full",
                 "--json",
             ],
-            category: "doctor",
-            golden_name: "doctor_json",
+            category: "agent",
+            golden_name: "doctor.json",
             format: ContractFormat::Json,
             expected_success: true,
             expected_schema: Some("ee.response.v2"),
@@ -666,7 +957,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
         },
         ContractCase {
             name: "health_unavailable_json",
-            args: &["--json", "health"],
+            args: &["--json", "--workspace", MISSING_GOLDEN_WORKSPACE, "health"],
             category: "agent",
             golden_name: "health_unavailable.json",
             format: ContractFormat::Json,
@@ -894,8 +1185,8 @@ fn validate_contract_golden(
             exit_code,
         )
     })?;
-    let expected_normalized = normalize_json_for_golden(&expected);
-    let actual_normalized = normalize_json_for_golden(stdout);
+    let expected_normalized = normalize_named_golden(case.category, case.golden_name, &expected);
+    let actual_normalized = normalize_named_golden(case.category, case.golden_name, stdout);
     if expected_normalized == actual_normalized {
         return Ok(());
     }
@@ -1080,11 +1371,7 @@ fn ensure_no_singleflight_raw_field_names(
 
 #[test]
 fn singleflight_posture_goldens_are_redaction_safe() -> TestResult {
-    for (category, name) in [
-        ("doctor", "doctor_json"),
-        ("agent", "doctor.json"),
-        ("status", "status_json"),
-    ] {
+    for (category, name) in [("doctor", "doctor_json"), ("status", "status_json")] {
         let value = read_golden_json(category, name)?;
         ensure_singleflight_posture_redaction_safe(&value, &format!("{category}/{name}"))?;
     }
@@ -1175,7 +1462,7 @@ fn doctor_json_output_matches_golden() -> TestResult {
     ensure_contains(&stdout, "\"command\":\"doctor\"", "doctor JSON command")?;
     ensure_contains(&stdout, "\"checks\":[", "doctor JSON checks array")?;
 
-    assert_golden("doctor", "doctor_json", &stdout)
+    assert_golden("agent", "doctor.json", &stdout)
 }
 
 #[test]

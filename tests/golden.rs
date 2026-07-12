@@ -3520,8 +3520,8 @@ mod tests {
 
         let workspace_id = compute_stable_workspace_id(&workspace);
         let memory_id = "mem_00000000000000000000004201";
-        let accept_id = "curate_00000000000000000reason01";
-        let reject_id = "curate_00000000000000000reason02";
+        let accept_id = "curate_00000000000000000000000001";
+        let reject_id = "curate_00000000000000000000000002";
         let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
         connection.migrate().map_err(|error| error.to_string())?;
         connection
