@@ -14398,6 +14398,7 @@ pub fn escape_json_string(s: &str) -> String {
 #[must_use]
 pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile) -> String {
     let mut b = JsonBuilder::with_capacity(512);
+    let degraded = aggregate_status_degradations("status", &report.degradations);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
     b.field_str("fields", profile.as_str());
@@ -14466,10 +14467,10 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
                 &report.agent_inventory,
                 profile.include_verbose_details(),
             );
-            let degraded = aggregate_status_degradations("status", &report.degradations);
             d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
         }
     });
+    b.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     b.finish()
 }
 
@@ -23572,10 +23573,21 @@ mod tests {
         ensure_contains(&json, "\"fields\":\"minimal\"", "fields indicator")?;
         ensure_contains(&json, "\"command\":\"status\"", "command")?;
         ensure_contains(&json, "\"version\":", "version")?;
-        // Minimal should NOT have capabilities, runtime, or degraded
+        // Minimal omits optional data fields but keeps the response envelope.
         ensure(!json.contains("\"capabilities\":"), "no capabilities")?;
         ensure(!json.contains("\"runtime\":"), "no runtime")?;
-        ensure(!json.contains("\"degraded\":"), "no degraded")
+        let value = parse_rendered_json(&json, "minimal status")?;
+        ensure(
+            value
+                .get("degraded")
+                .and_then(serde_json::Value::as_array)
+                .is_some(),
+            "minimal status keeps top-level degraded array",
+        )?;
+        ensure(
+            value.pointer("/data/degraded").is_none(),
+            "minimal status omits data degraded array",
+        )
     }
 
     #[test]
@@ -23607,7 +23619,14 @@ mod tests {
             "has host calibration posture",
         )?;
         ensure(!data.contains_key("runtime"), "no runtime object")?;
-        ensure(!data.contains_key("degraded"), "no degraded array")
+        ensure(!data.contains_key("degraded"), "no data degraded array")?;
+        ensure(
+            value
+                .get("degraded")
+                .and_then(serde_json::Value::as_array)
+                .is_some(),
+            "summary status keeps top-level degraded array",
+        )
     }
 
     #[test]
@@ -23632,7 +23651,9 @@ mod tests {
         ensure_contains(&json, "\"degraded\":", "has degraded")?;
         // Standard degraded entries keep repair guidance because agents rely on
         // the default JSON profile for recovery planning.
-        ensure_contains(&json, "\"repair\":", "has repair in degraded")
+        ensure_contains(&json, "\"repair\":", "has repair in degraded")?;
+        let value = parse_rendered_json(&json, "standard status")?;
+        ensure_top_level_degraded_mirrors_data_degraded(&value, "standard status")
     }
 
     #[test]
@@ -23657,7 +23678,9 @@ mod tests {
         ensure_contains(&json, "\"mesh\":\"pending\"", "mesh capability default")?;
         ensure_contains(&json, "\"runtime\":", "has runtime")?;
         ensure_contains(&json, "\"degraded\":", "has degraded")?;
-        ensure_contains(&json, "\"repair\":", "has repair in degraded")
+        ensure_contains(&json, "\"repair\":", "has repair in degraded")?;
+        let value = parse_rendered_json(&json, "full status")?;
+        ensure_top_level_degraded_mirrors_data_degraded(&value, "full status")
     }
 
     #[test]

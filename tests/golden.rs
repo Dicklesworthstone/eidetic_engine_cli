@@ -4075,6 +4075,11 @@ mod tests {
             "outcome status",
         )?;
         ensure_equal(
+            &value["degraded"],
+            &value["data"]["degraded"],
+            "outcome top-level degraded mirrors data",
+        )?;
+        ensure_equal(
             &value["data"]["event"]["id"],
             &serde_json::json!("fb_31234567890123456789012345"),
             "outcome event id",
@@ -4287,6 +4292,16 @@ mod tests {
             &quarantined["data"]["feedback"]["totalCount"],
             &serde_json::json!(1),
             "quarantined event must not affect live feedback count",
+        )?;
+        ensure_equal(
+            &quarantined["degraded"],
+            &quarantined["data"]["degraded"],
+            "quarantine top-level degraded mirrors data",
+        )?;
+        ensure_equal(
+            &quarantined["degraded"][0]["code"],
+            &serde_json::json!("harmful_burst_quarantine"),
+            "quarantine degraded code",
         )?;
         let quarantine_id = quarantined["data"]["quarantine"]["id"]
             .as_str()

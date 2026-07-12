@@ -20368,11 +20368,16 @@ where
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
+                let degraded = report
+                    .degraded
+                    .iter()
+                    .map(crate::core::outcome::OutcomeDegradation::data_json)
+                    .collect::<Vec<_>>();
                 let json = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
-                    "degraded": [],
+                    "degraded": degraded,
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
@@ -68457,6 +68462,12 @@ mod tests {
         ensure(
             json.pointer("/data/degraded").is_none(),
             "default status JSON excludes data degraded array",
+        )?;
+        ensure(
+            json.get("degraded")
+                .and_then(serde_json::Value::as_array)
+                .is_some(),
+            "default status JSON keeps top-level degraded array",
         )
     }
 
