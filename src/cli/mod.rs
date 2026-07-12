@@ -12555,9 +12555,12 @@ where
                 output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &output::render_capabilities_human(&report))
                 }
-                output::Renderer::Toon => {
-                    write_stdout(stdout, &(output::render_capabilities_toon(&report) + "\n"))
-                }
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &(output::render_toon_from_json(&output::render_capabilities_json_filtered(
+                        &report, profile,
+                    )) + "\n"),
+                ),
                 output::Renderer::Json
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
@@ -12580,9 +12583,12 @@ where
                 output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &output::render_check_human(&report))
                 }
-                output::Renderer::Toon => {
-                    write_stdout(stdout, &(output::render_check_toon(&report) + "\n"))
-                }
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &(output::render_toon_from_json(&output::render_check_json_filtered(
+                        &report, profile,
+                    )) + "\n"),
+                ),
                 output::Renderer::Json
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact

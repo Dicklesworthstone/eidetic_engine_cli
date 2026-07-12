@@ -84,7 +84,7 @@ response_path, payload_path = sys.argv[1:]
 with open(response_path, "r", encoding="utf-8") as handle:
     response_json = handle.read()
 payload = {
-    "schema": "ee.pack.l2_context_response.v1",
+    "schema": "ee.pack.l2_context_response.v2",
     "responseJson": response_json,
 }
 with open(payload_path, "wb") as handle:

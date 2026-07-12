@@ -6211,6 +6211,8 @@ pub fn render_fix_plan_toon(plan: &FixPlan) -> String {
 /// Render dependency diagnostics as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_dependency_diagnostics_json(report: &DependencyDiagnosticsReport) -> String {
+    let degraded_entries = dependency_contract_degraded_entries(report);
+    let degraded = aggregate_dependency_contract_degradations(&degraded_entries);
     let mut b = JsonBuilder::with_capacity(4096);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.summary.forbidden_default_hit_count == 0);
@@ -6230,8 +6232,6 @@ pub fn render_dependency_diagnostics_json(report: &DependencyDiagnosticsReport) 
         d.field_array_of_objects("capabilityGaps", &capability_gap_entries, |obj, entry| {
             render_dependency_contract_capability_gap(obj, entry);
         });
-        let degraded_entries = dependency_contract_degraded_entries(report);
-        let degraded = aggregate_dependency_contract_degradations(&degraded_entries);
         d.field_array_of_objects("degraded", &degraded, |obj, entry| {
             render_dependency_contract_degradation(obj, entry);
         });
@@ -6247,6 +6247,9 @@ pub fn render_dependency_diagnostics_json(report: &DependencyDiagnosticsReport) 
                 report.drift_policy.runtime_diagnostic_owner,
             );
         });
+    });
+    b.field_array_of_objects("degraded", &degraded, |obj, entry| {
+        render_dependency_contract_degradation(obj, entry);
     });
     b.finish()
 }
@@ -6289,6 +6292,7 @@ pub fn render_dependency_diagnostics_toon(report: &DependencyDiagnosticsReport) 
 /// Render integrity diagnostics as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_integrity_diagnostics_json(report: &IntegrityDiagnosticsReport) -> String {
+    let degraded = aggregate_integrity_degradations(&report.degraded);
     let mut b = JsonBuilder::with_capacity(2048);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", report.success());
@@ -6314,9 +6318,9 @@ pub fn render_integrity_diagnostics_json(report: &IntegrityDiagnosticsReport) ->
         d.field_object("canary", |canary| {
             build_integrity_canary(canary, &report.canary)
         });
-        let degraded = aggregate_integrity_degradations(&report.degraded);
         d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     });
+    b.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     b.finish()
 }
 
@@ -6469,6 +6473,7 @@ pub fn render_franken_health_json(report: &FrankenHealthReport) -> String {
             render_franken_dependency_health(obj, dependency);
         });
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -6657,11 +6662,13 @@ fn render_dependency_contract_degradation(
 ) {
     build_aggregated_degradation(obj, &entry.aggregate);
     if !entry.dependencies.is_empty() {
-        obj.field_array_of_strs("dependencies", &entry.dependencies);
-        obj.field_array_of_strs("owningSurfaces", &entry.owning_surfaces);
-        obj.field_array_of_strs("statuses", &entry.statuses);
-        obj.field_array_of_strs("readiness", &entry.readiness);
-        obj.field_array_of_strs("diagnosticCommands", &entry.diagnostic_commands);
+        obj.field_object("details", |details| {
+            details.field_array_of_strs("dependencies", &entry.dependencies);
+            details.field_array_of_strs("owningSurfaces", &entry.owning_surfaces);
+            details.field_array_of_strs("statuses", &entry.statuses);
+            details.field_array_of_strs("readiness", &entry.readiness);
+            details.field_array_of_strs("diagnosticCommands", &entry.diagnostic_commands);
+        });
     }
 }
 
@@ -7175,6 +7182,7 @@ pub fn render_check_json(report: &CheckReport) -> String {
             },
         );
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -7253,6 +7261,7 @@ pub fn render_health_json(report: &HealthReport) -> String {
             obj.field_str("message", issue.message);
         });
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -8820,6 +8829,7 @@ pub fn render_curate_disposition_toon(report: &CurateDispositionReport) -> Strin
 /// Render binary version and build provenance as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_version_json(report: &VersionReport) -> String {
+    let degraded = aggregate_build_provenance_degradations(&report.degradations);
     let mut b = JsonBuilder::with_capacity(2048);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
@@ -8860,10 +8870,10 @@ pub fn render_version_json(report: &VersionReport) -> String {
         });
         d.field_object("provenance", |provenance| {
             provenance.field_bool("available", report.provenance_available());
-            let degraded = aggregate_build_provenance_degradations(&report.degradations);
             provenance.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
         });
     });
+    b.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     b.finish()
 }
 
@@ -9149,6 +9159,7 @@ pub fn render_capabilities_json(report: &CapabilitiesReport) -> String {
             s.field_raw("totalCommands", &report.commands.len().to_string());
         });
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -11039,6 +11050,7 @@ pub fn render_schema_list_json() -> String {
             obj.field_str("category", entry.category);
         });
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -11099,6 +11111,7 @@ fn render_all_schemas_export() -> String {
         d.field_str("command", "schema export");
         d.field_raw("schemas", &schema_definition_array_json());
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -12348,6 +12361,7 @@ pub fn schema_json() -> String {
         d.field_str("schemaId", RESPONSE_SCHEMA_V2);
         d.field_raw("definition", &response_schema_definition());
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -13860,6 +13874,7 @@ pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
             });
         }
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -14562,6 +14577,7 @@ pub fn render_capabilities_json_filtered(
             });
         }
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -14657,6 +14673,7 @@ pub fn render_health_json_filtered(report: &HealthReport, profile: FieldProfile)
             });
         }
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -14693,6 +14710,7 @@ pub fn render_check_json_filtered(report: &CheckReport, profile: FieldProfile) -
             );
         }
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -18198,7 +18216,8 @@ mod tests {
         OutputContext, OutputEnvironment, Renderer, ResponseEnvelope, SHADOW_RUN_SCHEMA_V1,
         ShadowRunComparison, ShadowRunReport, build_aggregated_degradation, error_response_json,
         escape_json_string, help_text, human_status, render_agent_docs_json,
-        render_agent_docs_toon, render_context_response_json,
+        render_agent_docs_toon, render_capabilities_json, render_capabilities_json_filtered,
+        render_check_json, render_check_json_filtered, render_context_response_json,
         render_context_response_json_with_options, render_context_response_markdown,
         render_context_response_toon, render_dependency_diagnostics_json,
         render_doctor_concise_json, render_doctor_concise_toon, render_doctor_json,
@@ -18217,13 +18236,13 @@ mod tests {
         render_proximity_markdown, render_proximity_toon, render_quarantine_entry_human,
         render_quarantine_entry_json, render_quarantine_entry_toon, render_quarantine_human,
         render_quarantine_json, render_quarantine_json_filtered, render_quarantine_toon,
-        render_schema_export_json, render_shadow_run_human, render_shadow_run_json,
-        render_shadow_run_toon, render_status_json, render_status_json_filtered,
-        render_status_json_with_meta, render_status_skyline_json, render_status_skyline_markdown,
-        render_status_skyline_toon, render_status_toon, render_structural_health_json,
-        render_structural_health_markdown, render_structural_health_toon, render_version_json,
-        render_why_causal_json, render_why_causal_markdown, render_why_causal_toon, schema_json,
-        status_response_json,
+        render_schema_export_json, render_schema_list_json, render_shadow_run_human,
+        render_shadow_run_json, render_shadow_run_toon, render_status_json,
+        render_status_json_filtered, render_status_json_with_meta, render_status_skyline_json,
+        render_status_skyline_markdown, render_status_skyline_toon, render_status_toon,
+        render_structural_health_json, render_structural_health_markdown,
+        render_structural_health_toon, render_version_json, render_why_causal_json,
+        render_why_causal_markdown, render_why_causal_toon, schema_json, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::degraded_aggregation::AggregatedDegradation;
@@ -18468,6 +18487,8 @@ mod tests {
             .as_array()
             .ok_or_else(|| "degraded must be an array".to_string())?;
 
+        ensure_top_level_degraded_mirrors_data_degraded(&parsed, "dependency diagnostics JSON")?;
+
         assert_eq!(degraded.len(), 1);
         assert_eq!(degraded[0]["code"], "graph_unavailable");
         assert_eq!(
@@ -18475,11 +18496,11 @@ mod tests {
             serde_json::json!(["dependency_contract"])
         );
         assert_eq!(
-            degraded[0]["dependencies"],
+            degraded[0]["details"]["dependencies"],
             serde_json::json!(["graph-alpha", "graph-beta"])
         );
         assert_eq!(
-            degraded[0]["diagnosticCommands"],
+            degraded[0]["details"]["diagnosticCommands"],
             serde_json::json!(["ee diag graph --json"])
         );
         Ok(())
@@ -19453,6 +19474,25 @@ mod tests {
             ensure_top_level_degraded_mirrors_data_degraded(&value, context)?;
         }
 
+        let capabilities = crate::core::capabilities::CapabilitiesReport::gather();
+        let check = crate::core::check::CheckReport::gather();
+        for (context, json) in [
+            ("capabilities JSON", render_capabilities_json(&capabilities)),
+            (
+                "filtered capabilities JSON",
+                render_capabilities_json_filtered(&capabilities, FieldProfile::Standard),
+            ),
+            ("check JSON", render_check_json(&check)),
+            (
+                "filtered check JSON",
+                render_check_json_filtered(&check, FieldProfile::Standard),
+            ),
+            ("schema list JSON", render_schema_list_json()),
+        ] {
+            let value = parse_rendered_json(&json, context)?;
+            ensure_empty_top_level_degraded(&value, context)?;
+        }
+
         let memory = output_test_memory(None);
         let memory_show = MemoryShowReport::found(MemoryDetails {
             memory: memory.clone(),
@@ -19964,6 +20004,7 @@ mod tests {
         let json = render_integrity_diagnostics_json(&report);
         let value: serde_json::Value =
             serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        ensure_top_level_degraded_mirrors_data_degraded(&value, "integrity diagnostics JSON")?;
         let sample = &value["data"]["provenanceSample"];
 
         ensure_equal(

@@ -52,8 +52,8 @@ use crate::cache::pack_l2::{
 use crate::config::{
     ConfigFile, EnvVar, GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
     GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY,
-    GRAPH_PACK_DNA_MAX_ITEMS_KEY, ReadPoolConfig, WorkspaceLocation, parse_env_bool_flag,
-    read_env_var,
+    GRAPH_PACK_DNA_MAX_ITEMS_KEY, ReadPoolConfig, WorkspaceLocation, env_var_is_set,
+    parse_env_bool_flag, read_env_var,
 };
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
@@ -110,8 +110,8 @@ static CONTEXT_PROXIMITY_TREE_CACHE: OnceLock<RwLock<Option<CachedContextProximi
     OnceLock::new();
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
-pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V1: &str = "ee.pack.l2_cache_key.v1";
-const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1: &str = "ee.pack.l2_context_response.v1";
+pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V2: &str = "ee.pack.l2_cache_key.v2";
+const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2: &str = "ee.pack.l2_context_response.v2";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
 const CONTEXT_CHANGED_SYMBOL_BOOST: f32 = 0.05;
 const CONTEXT_MEMORY_TIER_HOT_BOOST: f32 = 0.025;
@@ -5161,6 +5161,7 @@ fn context_pack_l2_prepare(
         redaction_level: options.redaction_level,
         request: request.clone(),
         output_options: options.output_options,
+        include_legacy_selection_certificate: env_var_is_set(EnvVar::LegacySelectionCertificate),
         memory_scope: options.memory_scope,
         strict_scope: options.strict_scope,
         source_mode: options.source_mode,
@@ -5300,7 +5301,7 @@ fn context_pack_l2_store(
         crate::output::ContextJsonRenderOptions::from(options.output_options),
     );
     let payload = serde_json::json!({
-        "schema": PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1,
+        "schema": PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2,
         "responseJson": rendered,
         "sourceMode": {
             "requested": source_mode_metadata.requested.as_str(),
@@ -5632,7 +5633,7 @@ fn context_pack_l2_cached_response_json(
         .get("schema")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "L2 pack cache payload is missing schema".to_string())?;
-    if schema != PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1 {
+    if schema != PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2 {
         return Err(format!(
             "L2 pack cache payload has unexpected schema {schema}"
         ));
@@ -5894,6 +5895,7 @@ pub(crate) struct PackL2CacheKeyInput {
     pub(crate) redaction_level: RedactionLevel,
     pub(crate) request: ContextRequest,
     pub(crate) output_options: ContextPackOutputOptions,
+    pub(crate) include_legacy_selection_certificate: bool,
     pub(crate) memory_scope: MemoryScope,
     pub(crate) strict_scope: bool,
     pub(crate) source_mode: crate::core::search::SearchSourceMode,
@@ -5907,7 +5909,7 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
     hash_labeled_bytes(
         &mut hasher,
         "schema",
-        PACK_L2_CACHE_KEY_SCHEMA_V1.as_bytes(),
+        PACK_L2_CACHE_KEY_SCHEMA_V2.as_bytes(),
     );
     hash_labeled_bytes(&mut hasher, "workspace_id", input.workspace_id.as_bytes());
     hash_labeled_u64(
@@ -5995,6 +5997,11 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
         &mut hasher,
         "include_non_affecting_degradations",
         input.output_options.include_non_affecting_degradations,
+    );
+    hash_labeled_bool(
+        &mut hasher,
+        "include_legacy_selection_certificate",
+        input.include_legacy_selection_certificate,
     );
     hash_labeled_bytes(
         &mut hasher,
@@ -14002,7 +14009,7 @@ pub fn unrelated_context() -> u64 {{
         })
         .to_string();
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2,
             "responseJson": response_json,
         });
 
@@ -14015,6 +14022,47 @@ pub fn unrelated_context() -> u64 {{
                 .and_then(serde_json::Value::as_str)
                 .unwrap(),
             "current cached responses should replay byte-identically"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn l2_cached_response_json_rejects_v1_banner_semantics() -> Result<(), String> {
+        let payload = serde_json::json!({
+            "schema": "ee.pack.l2_context_response.v1",
+            "responseJson": serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": {
+                    "command": "pack",
+                    "pack": {
+                        "schema": crate::models::PACK_SCHEMA_V2,
+                        "query": "prepare release",
+                        "advisoryBanner": {
+                            "status": "degraded",
+                            "degradationCount": 1
+                        }
+                    },
+                    "degraded": [{
+                        "code": "index_missing",
+                        "severity": "medium",
+                        "message": "stale pre-filter cache semantics"
+                    }]
+                },
+                "degraded": [{
+                    "code": "index_missing",
+                    "severity": "medium",
+                    "message": "stale pre-filter cache semantics"
+                }]
+            })
+            .to_string(),
+        });
+
+        let error = super::context_pack_l2_cached_response_json(&payload, "pack")
+            .expect_err("v1 cached response semantics must be invalidated");
+        assert!(
+            error.contains("unexpected schema ee.pack.l2_context_response.v1"),
+            "unexpected cache rejection: {error}"
         );
         Ok(())
     }
@@ -14034,7 +14082,7 @@ pub fn unrelated_context() -> u64 {{
         })
         .to_string();
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2,
             "responseJson": response_json,
         });
 
@@ -14097,7 +14145,7 @@ pub fn unrelated_context() -> u64 {{
             no_lod: false,
         };
         let payload = serde_json::json!({
-            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1,
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V2,
             "responseJson": "{\"schema\":\"ee.response.v2\",\"success\":true,\"data\":{\"command\":\"pack\"},\"degraded\":[]}",
             "sourceMode": {
                 "requested": "semantic_only",
@@ -14402,6 +14450,32 @@ pub fn unrelated_context() -> u64 {{
             crate::output::render_context_response_json_with_options(&fresh, render_options);
         let cached_json =
             crate::output::render_context_response_json_with_options(&cached, render_options);
+        for (label, rendered) in [("fresh", &fresh_json), ("cached", &cached_json)] {
+            let parsed = serde_json::from_str::<serde_json::Value>(rendered)
+                .map_err(|error| format!("parse {label} L2 response JSON: {error}"))?;
+            assert_eq!(
+                parsed.pointer("/degraded"),
+                parsed.pointer("/data/degraded"),
+                "{label} L2 response must mirror top-level and data degradations"
+            );
+            let degraded = parsed
+                .pointer("/data/degraded")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| format!("{label} L2 response data.degraded must be an array"))?;
+            assert!(
+                degraded.iter().all(|entry| {
+                    entry.get("code").and_then(serde_json::Value::as_str) != Some("index_missing")
+                }),
+                "{label} default L2 response must filter non-affecting index_missing"
+            );
+            assert_eq!(
+                parsed
+                    .pointer("/data/pack/advisoryBanner/degradationCount")
+                    .and_then(serde_json::Value::as_u64),
+                Some(degraded.len() as u64),
+                "{label} L2 advisory banner must count the filtered degradation set"
+            );
+        }
         assert_eq!(
             fresh_json, cached_json,
             "L2 hit must replay byte-identical JSON"
@@ -16627,6 +16701,7 @@ pub fn unrelated_context() -> u64 {{
             request,
             output_options: ContextPackOutputOptions::default()
                 .with_resource_profile(PackResourceProfile::SwarmHeavy),
+            include_legacy_selection_certificate: false,
             memory_scope: MemoryScope::Swarm,
             strict_scope: true,
             source_mode: crate::core::search::SearchSourceMode::Hybrid,
@@ -16700,6 +16775,14 @@ pub fn unrelated_context() -> u64 {{
             key,
             compute_pack_l2_cache_key(&changed_redaction),
             "redaction level changes must alter the L2 key"
+        );
+
+        let mut changed_legacy_selection_certificate = base.clone();
+        changed_legacy_selection_certificate.include_legacy_selection_certificate = true;
+        assert_ne!(
+            key,
+            compute_pack_l2_cache_key(&changed_legacy_selection_certificate),
+            "legacy selection-certificate emission must alter the L2 key"
         );
 
         let mut changed_source_mode = base.clone();

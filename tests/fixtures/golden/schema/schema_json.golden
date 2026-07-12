@@ -1,1 +1,75 @@
-{"schema":"ee.response.v2","success":true,"data":{"command":"schema","schemaId":"ee.response.v2","definition":{"$schema":"https://json-schema.org/draft/2020-12/schema","$id":"https://eidetic-engine/schemas/ee.response.v2.json","title":"ee.response.v2","description":"Canonical success or degraded-success response envelope for ee commands. Command-specific schemas constrain the data payload.","type":"object","required":["schema","success","data"],"additionalProperties":false,"properties":{"schema":{"type":"string","const":"ee.response.v2"},"success":{"type":"boolean"},"fields":{"type":"string"},"data":{"type":"object","description":"Command-specific payload. See the per-command schema files in docs/schemas.","additionalProperties":{"$ref":"#/$defs/jsonValue"}},"degraded":{"type":"array","items":{"$ref":"#/$defs/degradation"}}},"field_presets":{"minimal":["schema","success","data"],"summary":["schema","success","fields","data"],"standard":["schema","success","fields","data","degraded"],"full":["*"]},"$defs":{"degradation":{"type":"object","required":["code","severity","message"],"additionalProperties":false,"properties":{"code":{"type":"string"},"severity":{"type":"string","enum":["info","low","warning","medium","high","critical"]},"message":{"type":"string"},"repair":{"type":"string"},"repairKind":{"type":"string","enum":["actionable","template","placeholder","unknown","empty"]},"sources":{"type":"array","items":{"type":"string"}},"details":{"type":"object","additionalProperties":{"$ref":"#/$defs/jsonValue"}}}},"jsonValue":{"oneOf":[{"type":"null"},{"type":"boolean"},{"type":"number"},{"type":"string"},{"type":"array","items":{"$ref":"#/$defs/jsonValue"}},{"type":"object","additionalProperties":{"$ref":"#/$defs/jsonValue"}}]}}}}}
+{"schema":"ee.response.v2","success":true,"data":{"command":"schema","schemaId":"ee.response.v2","definition":{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.response.v2.json",
+  "title": "ee.response.v2",
+  "description": "Canonical success or degraded-success response envelope for ee commands. Command-specific schemas constrain the data payload.",
+  "type": "object",
+  "required": ["schema", "success", "data"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.response.v2"
+    },
+    "success": {
+      "type": "boolean"
+    },
+    "fields": {
+      "type": "string"
+    },
+    "data": {
+      "type": "object",
+      "description": "Command-specific payload. See the per-command schema files in docs/schemas.",
+      "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradation"}
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "success", "data"],
+    "summary": ["schema", "success", "fields", "data"],
+    "standard": ["schema", "success", "fields", "data", "degraded"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string"},
+        "repair": {"type": "string"},
+        "repairKind": {
+          "type": "string",
+          "enum": ["actionable", "template", "placeholder", "unknown", "empty"]
+        },
+        "sources": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+        }
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}
+},"degraded":[]}

@@ -46,11 +46,36 @@ type TestResult = Result<(), String>;
 
 const DOCTOR_GOLDEN_WORKSPACE: &str = "tests/fixtures";
 const MISSING_GOLDEN_WORKSPACE: &str = "tests/fixtures/missing-ee-workspace";
+const CAPABILITIES_CASS_BINARY: &str = "tests/fixtures/missing-ee-workspace/no-cass";
 const GRAPH_ALGORITHMS: &[&str] = &["pagerank"];
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
+        .output()
+        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn run_ee_with_deterministic_external_probes(args: &[&str]) -> Result<Output, String> {
+    let isolated_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/missing-ee-workspace/no-bin");
+    Command::new(env!("CARGO_BIN_EXE_ee"))
+        .env("PATH", isolated_path)
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn run_ee_with_deterministic_capabilities_env(args: &[&str]) -> Result<Output, String> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command.args(args);
+    for (name, _) in env::vars_os() {
+        if name.to_string_lossy().starts_with("EE_") {
+            command.env_remove(name);
+        }
+    }
+    command.env("EE_CASS_BINARY", CAPABILITIES_CASS_BINARY);
+    command
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
@@ -132,6 +157,27 @@ fn normalize_json_for_golden(text: &str) -> String {
     scrub_volatile_text(trimmed)
 }
 
+/// Preserve the public `sizeDiagnostics` structure while replacing live
+/// measurements with deterministic numeric sentinels.
+fn scrub_size_diagnostics_measurements(value: &mut Value) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                scrub_size_diagnostics_measurements(item);
+            }
+        }
+        Value::Object(map) => {
+            for child in map.values_mut() {
+                scrub_size_diagnostics_measurements(child);
+            }
+        }
+        Value::Number(number) => {
+            *number = serde_json::Number::from(0);
+        }
+        Value::Null | Value::Bool(_) | Value::String(_) => {}
+    }
+}
+
 fn normalize_named_golden(category: &str, name: &str, text: &str) -> String {
     match (category, name) {
         ("status", "status_json") => normalize_status_json_for_golden(text),
@@ -140,8 +186,6 @@ fn normalize_named_golden(category: &str, name: &str, text: &str) -> String {
             normalize_doctor_degradation_json_for_golden(text)
         }
         ("doctor", "doctor_toon") => normalize_doctor_toon_for_golden(text),
-        ("capabilities", "capabilities_json") => normalize_capabilities_json_for_golden(text),
-        ("capabilities", "capabilities_toon") => normalize_capabilities_toon_for_golden(text),
         ("version", "version") => normalize_version_json_for_golden(text),
         _ => normalize_json_for_golden(text),
     }
@@ -152,11 +196,11 @@ fn golden_requires_normalized_write(category: &str, name: &str) -> bool {
         (category, name),
         ("status", "status_json")
             | ("agent", "doctor.json")
+            | ("capabilities", "capabilities_json" | "capabilities_toon")
             | (
                 "doctor",
                 "missing_db_degradation" | "pending_migration_degradation" | "doctor_toon"
             )
-            | ("capabilities", "capabilities_json" | "capabilities_toon")
             | ("version", "version")
     )
 }
@@ -175,7 +219,6 @@ fn scrub_status_volatile_fields(value: &mut Value) {
                 "rchWorkerPressure",
                 "search",
                 "shardFanout",
-                "sizeDiagnostics",
                 "verificationLedger",
                 "verificationPosture",
                 "workspace",
@@ -183,6 +226,9 @@ fn scrub_status_volatile_fields(value: &mut Value) {
                 if let Some(entry) = map.get_mut(key) {
                     *entry = Value::String(format!("<scrubbed:{key}>"));
                 }
+            }
+            if let Some(size_diagnostics) = map.get_mut("sizeDiagnostics") {
+                scrub_size_diagnostics_measurements(size_diagnostics);
             }
             if let Some(generated_at) = map.get_mut("generatedAt") {
                 *generated_at = Value::String("<scrubbed:generatedAt>".to_owned());
@@ -292,71 +338,6 @@ fn normalize_version_json_for_golden(text: &str) -> String {
         }
     }
     serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned())
-}
-
-fn normalize_capabilities_json_for_golden(text: &str) -> String {
-    let normalized = normalize_json_for_golden(text);
-    let Ok(mut value) = serde_json::from_str::<Value>(&normalized) else {
-        return normalized;
-    };
-
-    if let Some(binaries) = value.pointer_mut("/data/binaries") {
-        *binaries = Value::String("<scrubbed:optionalBinaries>".to_owned());
-    }
-    if let Some(subsystems) = value
-        .pointer_mut("/data/subsystems")
-        .and_then(Value::as_array_mut)
-    {
-        for subsystem in subsystems {
-            if subsystem.get("name").and_then(Value::as_str) == Some("cass") {
-                if let Some(status) = subsystem.get_mut("status") {
-                    *status = Value::String("<scrubbed:cassStatus>".to_owned());
-                }
-            }
-        }
-    }
-    if let Some(ready) = value.pointer_mut("/data/summary/readySubsystems") {
-        *ready = Value::String("<scrubbed:readySubsystems>".to_owned());
-    }
-
-    serde_json::to_string(&value).unwrap_or(normalized)
-}
-
-fn normalize_capabilities_toon_for_golden(text: &str) -> String {
-    let normalized = scrub_volatile_text(text.trim());
-    let mut output = Vec::with_capacity(normalized.lines().count());
-    let mut skipped_block_indent = None;
-
-    for line in normalized.lines() {
-        let indent = line
-            .chars()
-            .take_while(|character| character.is_whitespace())
-            .count();
-        let trimmed = line.trim_start();
-        if let Some(block_indent) = skipped_block_indent {
-            if trimmed.is_empty() || indent > block_indent {
-                continue;
-            }
-            skipped_block_indent = None;
-        }
-
-        if indent == 2 && trimmed == "binaries:" {
-            output.push("  binaries: <scrubbed:optionalBinaries>".to_owned());
-            skipped_block_indent = Some(indent);
-        } else if indent == 4 && trimmed.starts_with("cass,") {
-            let description = trimmed.splitn(3, ',').nth(2).unwrap_or_default();
-            output.push(format!("    cass,<scrubbed:cassStatus>,{description}"));
-        } else if trimmed.starts_with("readySubsystems:") {
-            output.push(format!(
-                "{}readySubsystems: <scrubbed:readySubsystems>",
-                " ".repeat(indent)
-            ));
-        } else {
-            output.push(line.to_owned());
-        }
-    }
-
-    output.join("\n")
 }
 
 fn normalize_doctor_toon_for_golden(text: &str) -> String {
@@ -543,15 +524,13 @@ fn scrub_volatile_fields(value: &mut Value) {
                         Value::String("<scrubbed:writeGroupCommit.generatedAt>".to_owned());
                 }
             }
-            for key in [
-                "hostCalibration",
-                "qos",
-                "rchWorkerPressure",
-                "sizeDiagnostics",
-            ] {
+            for key in ["hostCalibration", "qos", "rchWorkerPressure"] {
                 if let Some(entry) = map.get_mut(key) {
                     *entry = Value::String(format!("<scrubbed:{key}>"));
                 }
+            }
+            if let Some(size_diagnostics) = map.get_mut("sizeDiagnostics") {
+                scrub_size_diagnostics_measurements(size_diagnostics);
             }
             for key in [
                 "configHash",
@@ -963,7 +942,13 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
 }
 
 fn validate_contract_case(case: ContractCase) -> TestResult {
-    let output = run_ee(case.args)?;
+    let output = if matches!(case.name, "capabilities_json" | "capabilities_toon") {
+        run_ee_with_deterministic_capabilities_env(case.args)?
+    } else if matches!(case.name, "status_json" | "doctor_json" | "doctor_toon") {
+        run_ee_with_deterministic_external_probes(case.args)?
+    } else {
+        run_ee(case.args)?
+    };
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("{} stdout was not UTF-8: {error}", case.command_display()))?;
     let stderr = String::from_utf8(output.stderr)
@@ -1082,16 +1067,54 @@ fn validate_json_contract(case: ContractCase, stdout: &str, exit_code: Option<i3
                     exit_code,
                 ));
             }
-            let data = value.get("data").ok_or_else(|| {
-                contract_failure(
-                    case,
-                    FailureClass::SchemaMismatch,
-                    "/data",
-                    "object",
-                    "missing",
-                    exit_code,
-                )
-            })?;
+            let degraded = value
+                .get("degraded")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    contract_failure(
+                        case,
+                        FailureClass::SchemaMismatch,
+                        "/degraded",
+                        "array",
+                        format!("{:?}", value.get("degraded")),
+                        exit_code,
+                    )
+                })?;
+            let data = value
+                .get("data")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    contract_failure(
+                        case,
+                        FailureClass::SchemaMismatch,
+                        "/data",
+                        "object",
+                        format!("{:?}", value.get("data")),
+                        exit_code,
+                    )
+                })?;
+            if let Some(data_degraded) = data.get("degraded") {
+                let data_degraded = data_degraded.as_array().ok_or_else(|| {
+                    contract_failure(
+                        case,
+                        FailureClass::SchemaMismatch,
+                        "/data/degraded",
+                        "array",
+                        format!("{data_degraded:?}"),
+                        exit_code,
+                    )
+                })?;
+                if data_degraded != degraded {
+                    return Err(contract_failure(
+                        case,
+                        FailureClass::SchemaMismatch,
+                        "/data/degraded",
+                        "exact mirror of /degraded",
+                        format!("{data_degraded:?}"),
+                        exit_code,
+                    ));
+                }
+            }
             if let Some(expected_command) = case.expected_command {
                 let actual_command = data.get("command").and_then(Value::as_str);
                 if actual_command != Some(expected_command) {
@@ -1211,6 +1234,8 @@ fn first_value_diff_pointer(expected: &Value, actual: &Value) -> &'static str {
     for pointer in [
         "/schema",
         "/success",
+        "/degraded",
+        "/data/degraded",
         "/data/command",
         "/data",
         "/error/code",
@@ -1418,6 +1443,7 @@ fn check_toon_output_matches_golden() -> TestResult {
         "check --format toon stderr must be empty",
     )?;
     ensure_contains(&stdout, "schema: ee.response.v2", "check TOON schema")?;
+    ensure_contains(&stdout, "fields: standard", "check TOON field profile")?;
 
     assert_golden("check", "check_toon", &stdout)
 }
@@ -1428,7 +1454,7 @@ fn check_toon_output_matches_golden() -> TestResult {
 
 #[test]
 fn doctor_json_output_matches_golden() -> TestResult {
-    let output = run_ee(&[
+    let output = run_ee_with_deterministic_external_probes(&[
         "--workspace",
         DOCTOR_GOLDEN_WORKSPACE,
         "--fields",
@@ -1461,7 +1487,7 @@ fn doctor_json_output_matches_golden() -> TestResult {
 
 #[test]
 fn doctor_toon_output_matches_golden() -> TestResult {
-    let output = run_ee(&[
+    let output = run_ee_with_deterministic_external_probes(&[
         "--workspace",
         DOCTOR_GOLDEN_WORKSPACE,
         "--fields",
@@ -1627,7 +1653,7 @@ fn diag_integrity_json_matches_golden() -> TestResult {
 
 #[test]
 fn capabilities_json_output_matches_golden() -> TestResult {
-    let output = run_ee(&[
+    let output = run_ee_with_deterministic_capabilities_env(&[
         "--workspace",
         DOCTOR_GOLDEN_WORKSPACE,
         "capabilities",
@@ -1668,13 +1694,43 @@ fn capabilities_json_output_matches_golden() -> TestResult {
         "\"package\":\"tru\"",
         "capabilities JSON toon package",
     )?;
+    let value = serde_json::from_str::<Value>(&stdout)
+        .map_err(|error| format!("parse capabilities JSON: {error}"))?;
+    ensure_equal(
+        &value
+            .pointer("/data/binaries/cass/source")
+            .and_then(Value::as_str),
+        &Some("missing"),
+        "capabilities CASS discovery source",
+    )?;
+    ensure_equal(
+        &value
+            .pointer("/data/binaries/cass/trusted")
+            .and_then(Value::as_bool),
+        &Some(false),
+        "capabilities CASS discovery trust",
+    )?;
+    ensure_contains(
+        value
+            .pointer("/data/binaries/cass/error")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        "must be configured as an absolute path",
+        "capabilities CASS discovery error",
+    )?;
+    ensure(
+        value
+            .pointer("/data/summary/readySubsystems")
+            .is_some_and(Value::is_number),
+        "capabilities readySubsystems must remain numeric",
+    )?;
 
     assert_golden("capabilities", "capabilities_json", &stdout)
 }
 
 #[test]
 fn capabilities_toon_output_matches_golden() -> TestResult {
-    let output = run_ee(&[
+    let output = run_ee_with_deterministic_capabilities_env(&[
         "--workspace",
         DOCTOR_GOLDEN_WORKSPACE,
         "capabilities",
@@ -1696,6 +1752,11 @@ fn capabilities_toon_output_matches_golden() -> TestResult {
         &stdout,
         "schema: ee.response.v2",
         "capabilities TOON schema",
+    )?;
+    ensure_contains(
+        &stdout,
+        "fields: standard",
+        "capabilities TOON field profile",
     )?;
     ensure_contains(&stdout, "output:", "capabilities TOON output metadata")?;
     ensure_contains(&stdout, "package: tru", "capabilities TOON toon package")?;
@@ -2395,7 +2456,7 @@ fn doctor_degradation_projection(report: &DoctorReport) -> Result<String, String
 
 #[test]
 fn status_json_output_matches_golden() -> TestResult {
-    let output = run_ee(&[
+    let output = run_ee_with_deterministic_external_probes(&[
         "--workspace",
         DOCTOR_GOLDEN_WORKSPACE,
         "--fields",

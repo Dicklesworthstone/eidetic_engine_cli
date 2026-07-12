@@ -10,6 +10,7 @@
     "schema": {"type": "string", "const": "ee.response.v2"},
     "success": {"type": "boolean"},
     "fields": {"type": "string"},
+    "degraded": {"type": "array", "items": {"type": "object"}},
     "data": {
       "type": "object",
       "required": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "meshAutoEnrollment", "advisories", "checks"],

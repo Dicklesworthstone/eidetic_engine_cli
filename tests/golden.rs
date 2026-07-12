@@ -197,6 +197,16 @@ mod tests {
             .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
     }
 
+    fn run_ee_with_deterministic_external_probes(args: &[&str]) -> Result<Output, String> {
+        let isolated_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/missing-ee-workspace/no-bin");
+        Command::new(ee_binary_path()?)
+            .env("PATH", isolated_path)
+            .args(args)
+            .output()
+            .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+    }
+
     fn run_ee_offline(args: &[&str]) -> Result<Output, String> {
         Command::new(ee_binary_path()?)
             .env("EE_EMBED_DOWNLOAD", "off")
@@ -1262,7 +1272,11 @@ mod tests {
     }
 
     fn assert_agent_stdout_golden(args: &[&str], name: &str, expect_success: bool) -> TestResult {
-        let output = run_ee(args)?;
+        let output = if matches!(name, "status.json" | "doctor.json") {
+            run_ee_with_deterministic_external_probes(args)?
+        } else {
+            run_ee(args)?
+        };
         let stdout = String::from_utf8(output.stdout)
             .map_err(|error| format!("stdout was not UTF-8 for ee {}: {error}", args.join(" ")))?;
         let stderr = String::from_utf8(output.stderr)

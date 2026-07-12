@@ -5,8 +5,8 @@ source of truth remains FrankenSQLite plus rebuildable search and graph indexes.
 Any cache hit must preserve the same output contract as a fresh command.
 
 This page defines the L2 pack cache configuration contract for canonical
-`ee pack` swarm workloads and the soft-deprecated `ee context` alias.
-Runtime lookup, writes, and eviction land in later beads.
+`ee pack` swarm workloads. The soft-deprecated `ee context` alias bypasses L2
+entirely. Runtime lookup, writes, and eviction land in later beads.
 
 ## L2 Pack Cache
 
@@ -16,19 +16,20 @@ similar or identical context questions against the same workspace.
 
 Default directories:
 
-- Linux: `/dev/shm/ee/packs/<workspace_id>/`
-- macOS and other non-Linux systems: `$TMPDIR/ee_packs_l2/<workspace_id>/`
+- Linux: `/dev/shm/ee/pack-l2/<workspace_id>/`
+- macOS and other non-Linux systems: `$TMPDIR/ee/pack-l2/<workspace_id>/`
 - Explicit override: `EE_L2_PACK_CACHE_DIR`
 
 The cache directory must be created with mode `0700`. If the directory cannot
-be created or written, `ee pack` and the `ee context` compatibility alias must
-continue through the normal assembly path and emit a low-severity degraded
-signal rather than failing the request.
+be created or written, `ee pack` must continue through the normal assembly path
+and emit a low-severity degraded signal rather than failing the request. The
+`ee context` compatibility alias does not inspect this directory because it
+bypasses L2.
 
 ## Canonical Key
 
 The L2 key is a BLAKE3 hash of every input that can affect emitted pack JSON.
-The canonical key schema is `ee.pack.l2_cache_key.v1`.
+The canonical key schema is `ee.pack.l2_cache_key.v2`.
 At minimum, the canonical input set includes:
 
 - workspace ID
@@ -52,19 +53,19 @@ to notice.
 
 ## Cached Value
 
-The cache value is the exact successful `ee pack --json` response body, or the
-equivalent `ee context --json` alias response body for compatibility calls. It
-is not wrapped in cache metadata. A cache hit should be byte-for-byte equivalent
-to a fresh assembly result for the same canonical key.
+The emitted cache value is the exact successful `ee pack --json` response body.
+A cache hit must remain byte-for-byte equivalent to a fresh assembly result for
+the same canonical key.
 
-Operational metadata belongs in tracing events, not inside the cached JSON
-body. This keeps cached and fresh responses comparable by ordinary determinism
-tests.
+The physical file uses the `ee.pack.l2_cache.entry.v2` storage wrapper. Its
+decompressed payload is an `ee.pack.l2_context_response.v2` object containing
+the exact response body in `responseJson` plus source-mode metadata used to
+reject unsafe fallback replays. Compression and source-mode metadata never
+enter the emitted response.
 
-Future compressed cache entries must preserve this rule. The compression
-manifest contract is `ee.pack.compression_manifest.v1`; see
+The compression manifest contract is `ee.pack.compression_manifest.v1`; see
 `docs/pack-compression.md`. Compression metadata can select a storage
-representation, but it must not change the canonical key or the emitted JSON.
+representation, but it must not change the canonical key or emitted JSON.
 
 ## Read Path
 
