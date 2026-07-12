@@ -2372,10 +2372,12 @@ pub fn render_context_response_json_with_options(
     });
     // Keep the top-level ee.response.v2 envelope and data.degraded in lockstep.
     // Both apply the same default filter for non-affecting degradation signals.
-    let aggregated_degraded =
-        aggregate_context_degraded(response.data.degraded.iter().filter(|d| {
+    let filtered_degraded = || {
+        response.data.degraded.iter().filter(|d| {
             options.include_non_affecting_degradations || d.category().included_by_default()
-        }));
+        })
+    };
+    let aggregated_degraded = aggregate_context_degraded(filtered_degraded());
     let mut b = JsonBuilder::with_capacity(2048 + rendered_text.as_ref().map_or(0, String::len));
     b.field_str("schema", response.schema);
     b.field_bool("success", response.success);
@@ -2480,7 +2482,10 @@ pub fn render_context_response_json_with_options(
                     build_pack_assembly_slo(slo_obj, slo);
                 });
             }
-            let advisory_banner = context_advisory_banner_with_aggregated_degraded(response);
+            let advisory_banner = context_advisory_banner_with_aggregated_degraded(
+                response,
+                filtered_degraded(),
+            );
             pack.field_object("advisoryBanner", |banner| {
                 build_pack_advisory_banner(banner, &advisory_banner);
             });
@@ -2814,7 +2819,8 @@ pub fn render_context_response_human(response: &ContextResponse) -> String {
         context_pack_hash(response)
     ));
 
-    let advisory_banner = context_advisory_banner_with_aggregated_degraded(response);
+    let advisory_banner =
+        context_advisory_banner_with_aggregated_degraded(response, response.data.degraded.iter());
     output.push_str(&format!(
         "Advisory: {} — {}\n\n",
         advisory_banner.status.as_str(),
@@ -3058,10 +3064,14 @@ fn context_pack_hash(response: &ContextResponse) -> &str {
     response.data.pack.hash.as_deref().unwrap_or("absent")
 }
 
-fn context_advisory_banner_with_aggregated_degraded(
+fn context_advisory_banner_with_aggregated_degraded<'a, I>(
     response: &ContextResponse,
-) -> PackAdvisoryBanner {
-    let degraded = aggregate_context_degraded_as_response(response.data.degraded.iter());
+    degraded: I,
+) -> PackAdvisoryBanner
+where
+    I: IntoIterator<Item = &'a ContextResponseDegradation>,
+{
+    let degraded = aggregate_context_degraded_as_response(degraded);
     response.data.advisory_banner_for_degraded(&degraded)
 }
 
@@ -21036,6 +21046,11 @@ mod tests {
         if pack_text.contains("behind the database generation") {
             return Err("default pack.text must not mention the dropped degradation".to_string());
         }
+        ensure_equal(
+            &parsed["data"]["pack"]["advisoryBanner"]["degradationCount"],
+            &serde_json::json!(0),
+            "default advisory banner drops the non-affecting degradation",
+        )?;
 
         // Verbose render (--include-non-affecting-degradations): both surfaces
         // include the signal again.
@@ -21058,6 +21073,11 @@ mod tests {
             verbose_text,
             "behind the database generation",
             "verbose pack.text surfaces the non-affecting degradation",
+        )?;
+        ensure_equal(
+            &verbose_parsed["data"]["pack"]["advisoryBanner"]["degradationCount"],
+            &serde_json::json!(1),
+            "verbose advisory banner includes the non-affecting degradation",
         )
     }
 
