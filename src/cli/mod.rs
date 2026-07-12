@@ -20367,16 +20367,11 @@ where
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
-                let degraded = report
-                    .degraded
-                    .iter()
-                    .map(crate::core::outcome::OutcomeDegradation::data_json)
-                    .collect::<Vec<_>>();
                 let json = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
-                    "degraded": degraded,
+                    "degraded": [],
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
@@ -42720,11 +42715,16 @@ where
             | output::Renderer::Jsonl
             | output::Renderer::Compact
             | output::Renderer::Hook => {
+                let degraded = report
+                    .degraded
+                    .iter()
+                    .map(crate::core::outcome::OutcomeDegradation::data_json)
+                    .collect::<Vec<_>>();
                 let json = serde_json::json!({
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
-                    "degraded": [],
+                    "degraded": degraded,
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"))
             }
