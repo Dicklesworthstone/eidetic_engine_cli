@@ -11412,6 +11412,11 @@ pub struct MemoryExpireArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+
+    /// Operate on the user-global memory store (ADR 0083) instead of the
+    /// workspace store.
+    #[arg(long, conflicts_with = "database", action = ArgAction::SetTrue)]
+    pub global: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -11459,6 +11464,11 @@ pub struct MemoryDriftArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+
+    /// Operate on the user-global memory store (ADR 0083) instead of the
+    /// workspace store.
+    #[arg(long, conflicts_with = "database", action = ArgAction::SetTrue)]
+    pub global: bool,
 }
 
 /// Arguments for `ee memory level`.
@@ -11495,6 +11505,11 @@ pub struct MemoryLevelArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+
+    /// Operate on the user-global memory store (ADR 0083) instead of the
+    /// workspace store.
+    #[arg(long, conflicts_with = "database", action = ArgAction::SetTrue)]
+    pub global: bool,
 }
 
 // ============================================================================
@@ -11641,6 +11656,11 @@ pub struct MemoryLinkArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+
+    /// Operate on the user-global memory store (ADR 0083) instead of the
+    /// workspace store.
+    #[arg(long, conflicts_with = "database", action = ArgAction::SetTrue)]
+    pub global: bool,
 }
 
 /// Arguments for `ee memory list`.
@@ -11666,6 +11686,11 @@ pub struct MemoryListArgs {
     #[arg(long = "no-tombstoned", action = ArgAction::SetTrue)]
     pub no_tombstoned: bool,
 
+    /// List memories from the user-global memory store (ADR 0083) instead of
+    /// the workspace store.
+    #[arg(long, conflicts_with = "database", action = ArgAction::SetTrue)]
+    pub global: bool,
+
     /// Resume a budget-truncated page sequence from an `ee.cursor.v1`
     /// continuation cursor (ADR 0063 §3, bd-7lvbg.3).
     #[arg(long, value_name = "CURSOR")]
@@ -11682,6 +11707,11 @@ pub struct MemoryShowArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+
+    /// Operate on the user-global memory store (ADR 0083) instead of the
+    /// workspace store.
+    #[arg(long, conflicts_with = "database", action = ArgAction::SetTrue)]
+    pub global: bool,
 }
 
 /// Arguments for `ee memory history`.
@@ -11698,6 +11728,11 @@ pub struct MemoryHistoryArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+
+    /// Operate on the user-global memory store (ADR 0083) instead of the
+    /// workspace store.
+    #[arg(long, conflicts_with = "database", action = ArgAction::SetTrue)]
+    pub global: bool,
 }
 
 /// Arguments for `ee memory revise`.
@@ -11746,6 +11781,11 @@ pub struct MemoryReviseArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+
+    /// Operate on the user-global memory store (ADR 0083) instead of the
+    /// workspace store.
+    #[arg(long, conflicts_with = "database", action = ArgAction::SetTrue)]
+    pub global: bool,
 }
 
 /// Arguments for `ee memory tags`.
@@ -11786,6 +11826,11 @@ pub struct MemoryTagsArgs {
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
+
+    /// Operate on the user-global memory store (ADR 0083) instead of the
+    /// workspace store.
+    #[arg(long, conflicts_with = "database", action = ArgAction::SetTrue)]
+    pub global: bool,
 }
 
 /// Subcommands for `ee coordination`.
@@ -33595,6 +33640,64 @@ fn graph_neighborhood_toon_output(report: &crate::graph::GraphNeighborhoodReport
     )
 }
 
+/// Storage target for an `ee memory ...` verb: the workspace path used for
+/// workspace-id derivation and the database file to open.
+struct MemoryStoreTarget {
+    workspace: PathBuf,
+    database_path: PathBuf,
+}
+
+/// Resolve the store a memory curation verb operates on (GH#23).
+///
+/// Default: the current workspace store (`<workspace>/.ee/ee.db`, or
+/// `--database`). With `--global`: the user-global memory store (ADR 0083) —
+/// both the workspace path and the database come from the global store root,
+/// mirroring the `ee remember --global` write path, so the workspace-id guard
+/// inside the core memory verbs resolves the global workspace row.
+fn resolve_memory_store_target(
+    cli: &Cli,
+    global: bool,
+    database: Option<&PathBuf>,
+) -> Result<MemoryStoreTarget, DomainError> {
+    if global {
+        let paths = crate::core::global_store::default_global_store_paths_from_env().map_err(
+            |message| DomainError::Configuration {
+                message,
+                repair: Some(
+                    "Set HOME or XDG_DATA_HOME so the user-global store can be located.".to_owned(),
+                ),
+            },
+        )?;
+        if !paths.database_path.exists() {
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Global memory store not found at {}",
+                    paths.database_path.display()
+                ),
+                repair: Some("ee remember --global \"<content>\" --json".to_owned()),
+            });
+        }
+        return Ok(MemoryStoreTarget {
+            workspace: paths.root,
+            database_path: paths.database_path,
+        });
+    }
+    let workspace = cli.resolve_workspace();
+    let database_path = database
+        .cloned()
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace .".to_string()),
+        });
+    }
+    Ok(MemoryStoreTarget {
+        workspace,
+        database_path,
+    })
+}
+
 fn handle_memory_list<W, E>(
     cli: &Cli,
     args: &MemoryListArgs,
@@ -33610,20 +33713,15 @@ where
     }
     set_governor_resume_cursor(args.cursor.as_deref());
 
-    let workspace = cli.resolve_workspace();
-
-    let database_path = args
-        .database
-        .clone()
-        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
-
-    if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
+    let MemoryStoreTarget {
+        workspace,
+        database_path,
+    } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
 
     let options = ListMemoriesOptions {
         database_path: &database_path,
@@ -33670,20 +33768,15 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli.resolve_workspace();
-
-    let database_path = args
-        .database
-        .clone()
-        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
-
-    if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
+    let MemoryStoreTarget {
+        workspace,
+        database_path,
+    } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
 
     let options = ExpireMemoryOptions {
         workspace_path: &workspace,
@@ -33721,19 +33814,15 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli.resolve_workspace();
-    let database_path = args
-        .database
-        .clone()
-        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
-
-    if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
+    let MemoryStoreTarget {
+        workspace,
+        database_path,
+    } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
 
     let mode = match memory_drift_mode_from_args(args) {
         Ok(mode) => mode,
@@ -33825,20 +33914,15 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli.resolve_workspace();
-
-    let database_path = args
-        .database
-        .clone()
-        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
-
-    if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
+    let MemoryStoreTarget {
+        workspace,
+        database_path,
+    } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
 
     let options = MemoryLevelOptions {
         workspace_path: &workspace,
@@ -34004,6 +34088,7 @@ where
             let memory_args = MemoryShowArgs {
                 memory_id: args.id.clone(),
                 database: args.database.clone(),
+                global: false,
             };
             handle_memory_show(cli, &memory_args, stdout, stderr)
         }
@@ -34060,6 +34145,7 @@ where
         dry_run: false,
         include_tombstoned: false,
         database: args.database.clone(),
+        global: false,
     };
     handle_memory_link(cli, &memory_args, stdout, stderr)
 }
@@ -34090,6 +34176,7 @@ where
         dry_run: false,
         include_tombstoned: false,
         database: args.database.clone(),
+        global: false,
     };
     handle_memory_tags(cli, &memory_args, stdout, stderr)
 }
@@ -34111,6 +34198,7 @@ where
         memory_id: args.memory_id.clone(),
         limit: args.limit,
         database: args.database.clone(),
+        global: false,
     };
     handle_memory_history(cli, &memory_args, stdout, stderr)
 }
@@ -34125,20 +34213,15 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli.resolve_workspace();
-
-    let database_path = args
-        .database
-        .clone()
-        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
-
-    if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
+    let MemoryStoreTarget {
+        workspace,
+        database_path,
+    } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
 
     let mode = match memory_link_mode_from_args(args) {
         Ok(mode) => mode,
@@ -34186,20 +34269,15 @@ where
         return exit_code;
     }
 
-    let workspace = cli.resolve_workspace();
-
-    let database_path = args
-        .database
-        .clone()
-        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
-
-    if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
+    let MemoryStoreTarget {
+        workspace: _,
+        database_path,
+    } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
 
     let options = GetMemoryOptions {
         database_path: &database_path,
@@ -34254,20 +34332,15 @@ where
 {
     use crate::core::memory::{GetMemoryHistoryOptions, get_memory_history};
 
-    let workspace = cli.resolve_workspace();
-
-    let database_path = args
-        .database
-        .clone()
-        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
-
-    if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
+    let MemoryStoreTarget {
+        workspace: _,
+        database_path,
+    } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
 
     let options = GetMemoryHistoryOptions {
         database_path: &database_path,
@@ -34329,20 +34402,15 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli.resolve_workspace();
-
-    let database_path = args
-        .database
-        .clone()
-        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
-
-    if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
+    let MemoryStoreTarget {
+        workspace: _,
+        database_path,
+    } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
 
     let confidence = match parse_memory_revise_confidence(args.confidence.as_deref()) {
         Ok(value) => value,
@@ -34393,20 +34461,15 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = cli.resolve_workspace();
-
-    let database_path = args
-        .database
-        .clone()
-        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
-
-    if !database_path.exists() {
-        let domain_error = DomainError::Storage {
-            message: format!("Database not found at {}", database_path.display()),
-            repair: Some("ee init --workspace .".to_string()),
-        };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-    }
+    let MemoryStoreTarget {
+        workspace,
+        database_path,
+    } = match resolve_memory_store_target(cli, args.global, args.database.as_ref()) {
+        Ok(target) => target,
+        Err(domain_error) => {
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
 
     let mode = match memory_tags_mode_from_args(args) {
         Ok(mode) => mode,

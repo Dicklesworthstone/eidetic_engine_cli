@@ -66,6 +66,15 @@ rows.
   the pack budget (`DEFAULT_GLOBAL_FAN_IN_BASIS_POINTS` = 1500 bp = 15%,
   configurable), reusing the house-rules quota
   (`crate::core::house_rules`) so global rules never crowd out project context.
+- **Curation parity (GH#23):** every `ee memory ...` verb (`list`, `show`,
+  `history`, `expire`, `revise`, `level`, `tags`, `link`, `drift`) accepts
+  `--global` and then operates on the global store — same schema, same audit
+  trail, same workspace-id guard, just resolved against the global workspace
+  row. Without this the store was write-only through the normal verbs: a
+  memory `ee search` federated back could not be listed, expired, or revised.
+  `--global` conflicts with `--database` (it *is* the database selector), and
+  the workspace-id guard still rejects cross-store access — a workspace-scoped
+  verb cannot mutate a global memory and vice versa.
 
 ### 4. Conflict surfacing (non-negotiable, not silent)
 

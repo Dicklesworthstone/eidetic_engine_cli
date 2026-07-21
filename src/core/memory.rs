@@ -7278,12 +7278,10 @@ pub fn list_memories(options: &ListMemoriesOptions<'_>) -> MemoryListReport {
     };
 
     // Match `remember`'s workspace-ID derivation so absolute paths,
-    // relative paths, and symlinked paths all address the same records.
-    let workspace_path = options
-        .workspace_path
-        .canonicalize()
-        .unwrap_or_else(|_| options.workspace_path.to_path_buf());
-    let workspace_id = stable_workspace_id(&workspace_path);
+    // relative paths, symlinked paths, and the user-global store root all
+    // address the same records (GH#23: prefers the DB's own path-keyed
+    // workspace row, falling back to the canonical-path hash).
+    let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
 
     // If filtering by tag, get memory IDs first
     let memory_ids: Option<Vec<String>> = if let Some(tag) = options.tag {
@@ -7664,11 +7662,30 @@ fn memory_command_not_found(memory_id: &str) -> DomainError {
     }
 }
 
-fn memory_command_workspace_id(workspace_path: &Path) -> String {
-    let workspace_path = workspace_path
+/// Resolve the workspace id a memory verb should scope to.
+///
+/// Prefers the opened database's own path-keyed workspace row (GH#23): the
+/// user-global store (ADR 0083) records its store root as the workspace path,
+/// so resolving through the row keeps the curation verbs
+/// (`ee memory list/expire/revise/... --global`) in agreement with the
+/// `ee remember --global` write path even when the root is reached through a
+/// symlink or the recorded id predates canonicalization. Falls back to the
+/// canonical-path hash — the historical derivation — when no row matches, so
+/// workspace stores behave exactly as before (`ee init` keys the row by the
+/// same path and hash).
+pub(crate) fn workspace_id_for_database(conn: &DbConnection, workspace_path: &Path) -> String {
+    if let Ok(Some(row)) = conn.get_workspace_by_path(&workspace_path.to_string_lossy()) {
+        return row.id;
+    }
+    let canonical = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
-    stable_workspace_id(&workspace_path)
+    if canonical != workspace_path
+        && let Ok(Some(row)) = conn.get_workspace_by_path(&canonical.to_string_lossy())
+    {
+        return row.id;
+    }
+    stable_workspace_id(&canonical)
 }
 
 fn get_memory_for_workspace(
@@ -7701,7 +7718,7 @@ fn expire_audit_details(reason: Option<&str>) -> String {
 pub fn expire_memory(options: &ExpireMemoryOptions<'_>) -> Result<MemoryExpireReport, DomainError> {
     let conn = open_migrated_memory_database(options.database_path)
         .map_err(memory_command_storage_error)?;
-    let workspace_id = memory_command_workspace_id(options.workspace_path);
+    let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
     let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
     let expires_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
 
@@ -7958,7 +7975,7 @@ pub fn update_memory_level(
         .map(|level| level.as_str().to_owned());
     let conn = open_migrated_memory_database(options.database_path)
         .map_err(memory_command_storage_error)?;
-    let workspace_id = memory_command_workspace_id(options.workspace_path);
+    let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
     let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
 
     if memory.tombstoned_at.is_some() {
@@ -8320,7 +8337,7 @@ pub fn update_memory_link(
 ) -> Result<MemoryLinkReport, DomainError> {
     let conn = open_migrated_memory_database(options.database_path)
         .map_err(memory_command_storage_error)?;
-    let workspace_id = memory_command_workspace_id(options.workspace_path);
+    let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
     let source_memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
 
     match &options.mode {
@@ -8517,7 +8534,7 @@ pub fn update_memory_tags(
 ) -> Result<MemoryTagsReport, DomainError> {
     let conn = open_migrated_memory_database(options.database_path)
         .map_err(memory_command_storage_error)?;
-    let workspace_id = memory_command_workspace_id(options.workspace_path);
+    let workspace_id = workspace_id_for_database(&conn, options.workspace_path);
     let memory = get_memory_for_workspace(&conn, options.memory_id, &workspace_id)?;
 
     if memory.tombstoned_at.is_some() {

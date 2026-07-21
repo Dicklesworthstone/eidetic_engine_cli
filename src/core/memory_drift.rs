@@ -8,6 +8,7 @@ use std::process::Command;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use super::workspace::stable_workspace_id;
 use crate::db::{
     DbConnection, DbError, PackLedgerStatus, StoredMemory, StoredPackRecord,
@@ -1357,7 +1358,9 @@ fn build_memory_drift_report_in_snapshot(
         .workspace_path
         .canonicalize()
         .unwrap_or_else(|_| options.workspace_path.to_path_buf());
-    let workspace_id = stable_workspace_id(&workspace_path);
+    // GH#23: prefer the DB's own path-keyed workspace row (user-global store
+    // support), falling back to the canonical-path hash.
+    let workspace_id = super::memory::workspace_id_for_database(connection, options.workspace_path);
     let limit = options.limit.max(1);
 
     let (items, generated_at) = match options.mode {

@@ -199,3 +199,202 @@ fn remember_global_then_pack_reads_from_global_store() -> TestResult {
 
     Ok(())
 }
+
+fn remember_global(
+    workspace: &Path,
+    xdg_data_home: &Path,
+    content: &str,
+) -> Result<String, String> {
+    let envelope = stdout_json(
+        run_ee(
+            workspace,
+            xdg_data_home,
+            &[
+                "remember", "--global", content, "--level", "semantic", "--kind", "rule", "--json",
+            ],
+        )?,
+        "ee remember --global",
+    )?;
+    envelope
+        .pointer("/data/memory_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("remember response missing memory_id: {envelope}"))
+}
+
+/// GH#23: the memory curation verbs (`list`, `show`, `expire`, `revise`,
+/// `history`, ...) must reach the user-global store via `--global`, from any
+/// workspace — previously the store was write-only through the normal verbs
+/// (`remember --global` worked, but list/expire/revise could not resolve the
+/// global workspace and reported "memory not found" / 0 memories).
+#[test]
+fn memory_curation_verbs_reach_global_store() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace_a = tempdir.path().join("workspace-a");
+    let workspace_b = tempdir.path().join("workspace-b");
+    let xdg_data_home = tempdir.path().join("xdg-data");
+    for dir in [&workspace_a, &workspace_b, &xdg_data_home] {
+        std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    }
+
+    stdout_json(
+        run_ee(&workspace_a, &xdg_data_home, &["init", "--json"])?,
+        "ee init",
+    )?;
+    let expire_target = remember_global(
+        &workspace_a,
+        &xdg_data_home,
+        "GH-23 expire target: global curation must reach this memory.",
+    )?;
+    let revise_target = remember_global(
+        &workspace_a,
+        &xdg_data_home,
+        "GH-23 revise target: global curation must reach this memory.",
+    )?;
+
+    // `--global` list reaches the global store even from an unrelated,
+    // never-initialized workspace.
+    let list = stdout_json(
+        run_ee(
+            &workspace_b,
+            &xdg_data_home,
+            &["memory", "list", "--global", "--json"],
+        )?,
+        "ee memory list --global",
+    )?;
+    let listed_ids: Vec<String> = list
+        .pointer("/data/memories")
+        .and_then(serde_json::Value::as_array)
+        .map(|memories| {
+            memories
+                .iter()
+                .filter_map(|memory| {
+                    memory
+                        .pointer("/id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    for id in [&expire_target, &revise_target] {
+        if !listed_ids.iter().any(|listed| listed == id) {
+            return Err(format!(
+                "memory list --global did not return {id}; listed ids: {listed_ids:?}; envelope: {list}"
+            ));
+        }
+    }
+
+    // The workspace lane stays isolated: a plain workspace list must NOT
+    // contain the global memories ...
+    let workspace_list = stdout_json(
+        run_ee(&workspace_a, &xdg_data_home, &["memory", "list", "--json"])?,
+        "ee memory list (workspace lane)",
+    )?;
+    let workspace_listed = workspace_list.to_string();
+    if workspace_listed.contains(&expire_target) || workspace_listed.contains(&revise_target) {
+        return Err(format!(
+            "workspace memory list leaked global memories: {workspace_list}"
+        ));
+    }
+
+    // ... and a workspace-scoped expire still cannot reach a global memory
+    // (the workspace-id guard is intact).
+    let guarded = run_ee(
+        &workspace_a,
+        &xdg_data_home,
+        &["memory", "expire", &expire_target, "--json"],
+    )?;
+    if guarded.status.success() {
+        return Err(format!(
+            "workspace-scoped expire unexpectedly reached global memory {expire_target}: {}",
+            String::from_utf8_lossy(&guarded.stdout)
+        ));
+    }
+
+    // `show --global` resolves the memory.
+    let shown = stdout_json(
+        run_ee(
+            &workspace_b,
+            &xdg_data_home,
+            &["memory", "show", &expire_target, "--global", "--json"],
+        )?,
+        "ee memory show --global",
+    )?;
+    if !shown.to_string().contains(&expire_target) {
+        return Err(format!(
+            "memory show --global did not return {expire_target}: {shown}"
+        ));
+    }
+
+    // `revise --global` writes an immutable revision into the global store.
+    let revised = stdout_json(
+        run_ee(
+            &workspace_b,
+            &xdg_data_home,
+            &[
+                "memory",
+                "revise",
+                &revise_target,
+                "--content",
+                "GH-23 revise target: revised in the global store.",
+                "--global",
+                "--json",
+            ],
+        )?,
+        "ee memory revise --global",
+    )?;
+    let revised_id = revised
+        .pointer("/data/new_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("memory revise --global returned no new_id: {revised}"))?
+        .to_owned();
+    let global_paths = GlobalStorePaths::from_data_root(&xdg_data_home.join("ee"));
+    let global_memories = read_global_store_memories(&global_paths, true)
+        .map_err(|error| format!("read global store after revise: {error}"))?;
+    if !global_memories.iter().any(|memory| memory.id == revised_id) {
+        return Err(format!(
+            "revision {revised_id} did not land in the global store {}",
+            global_paths.database_path.display()
+        ));
+    }
+
+    // `expire --global` tombstone-expires the global memory.
+    let expired = stdout_json(
+        run_ee(
+            &workspace_b,
+            &xdg_data_home,
+            &[
+                "memory",
+                "expire",
+                &expire_target,
+                "--global",
+                "--reason",
+                "GH-23 e2e curation",
+                "--json",
+            ],
+        )?,
+        "ee memory expire --global",
+    )?;
+    let status = expired
+        .pointer("/data/status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if status != "expired" {
+        return Err(format!(
+            "memory expire --global reported status {status:?}, expected \"expired\": {expired}"
+        ));
+    }
+
+    // `history --global` reads the audit trail of a global memory.
+    stdout_json(
+        run_ee(
+            &workspace_b,
+            &xdg_data_home,
+            &["memory", "history", &expire_target, "--global", "--json"],
+        )?,
+        "ee memory history --global",
+    )?;
+
+    Ok(())
+}
