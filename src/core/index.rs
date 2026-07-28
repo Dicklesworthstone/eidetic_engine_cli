@@ -939,8 +939,6 @@ pub fn rebuild_index(
         memories_indexed,
         sessions_indexed,
         artifacts_indexed,
-        rules_indexed: _,
-        evidence_indexed: _,
         documents_total,
         documents: indexable_docs,
         evidence_admission,
@@ -1049,8 +1047,6 @@ pub fn reembed_index(
         memories_indexed,
         sessions_indexed,
         artifacts_indexed,
-        rules_indexed: _,
-        evidence_indexed: _,
         documents_total,
         documents: indexable_docs,
         evidence_admission,
@@ -2434,8 +2430,6 @@ struct WorkspaceIndexSourceSnapshot {
     memories_indexed: u32,
     sessions_indexed: u32,
     artifacts_indexed: u32,
-    rules_indexed: u32,
-    evidence_indexed: u32,
     documents_total: u32,
     documents: Vec<crate::search::IndexableDocument>,
     evidence_admission: EvidenceAdmissionReport,
@@ -2474,8 +2468,8 @@ fn collect_workspace_index_source_snapshot(
             memories_indexed,
             sessions_indexed,
             artifacts_indexed,
-            rules_indexed,
-            evidence_indexed,
+            _rules_indexed,
+            _evidence_indexed,
             documents_total,
         ) = checked_document_counts(
             memory_docs.len(),
@@ -2508,8 +2502,6 @@ fn collect_workspace_index_source_snapshot(
             memories_indexed,
             sessions_indexed,
             artifacts_indexed,
-            rules_indexed,
-            evidence_indexed,
             documents_total,
             documents,
             evidence_admission,
@@ -3005,8 +2997,15 @@ fn ensure_index_path_has_no_symlinks(path: &Path, action: &str) -> Result<(), In
 fn first_existing_index_symlink_component(
     path: &Path,
 ) -> Result<Option<PathBuf>, IndexRebuildError> {
+    // macOS exposes its process temp directory through the root-owned `/var`
+    // compatibility symlink even though the backing directory lives below
+    // `/private/var`. Treat only that OS-selected prefix as already resolved;
+    // every component below the temp root is still inspected without following
+    // symlinks, so an attacker-controlled parent inside the temp tree remains
+    // rejected.
+    let inspected_path = path_with_canonical_temp_prefix(path);
     let mut current = PathBuf::new();
-    for component in path.components() {
+    for component in inspected_path.components() {
         match component {
             std::path::Component::Prefix(_) | std::path::Component::RootDir => {
                 current.push(component.as_os_str());
@@ -3031,6 +3030,17 @@ fn first_existing_index_symlink_component(
         }
     }
     Ok(None)
+}
+
+fn path_with_canonical_temp_prefix(path: &Path) -> PathBuf {
+    let temp_dir = std::env::temp_dir();
+    let Ok(suffix) = path.strip_prefix(&temp_dir) else {
+        return path.to_path_buf();
+    };
+    let Ok(canonical_temp_dir) = temp_dir.canonicalize() else {
+        return path.to_path_buf();
+    };
+    canonical_temp_dir.join(suffix)
 }
 
 fn path_is_regular_file_no_follow(path: &Path) -> bool {
