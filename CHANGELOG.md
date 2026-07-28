@@ -24,6 +24,13 @@ Evidence scale:
 
 ## [Unreleased]
 
+### Fixed
+
+- The Unix release installer now forwards an empty proxy argument list safely
+  under `set -u` on Apple's stock Bash 3.2, so proxy-free macOS installs can
+  resolve the latest release instead of reporting the misleading
+  `Could not resolve latest release` error.
+
 ## [0.3.9] - 2026-06-01
 
 ### Added

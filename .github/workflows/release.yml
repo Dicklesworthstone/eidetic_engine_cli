@@ -746,8 +746,15 @@ jobs:
       - name: Download and install ee
         run: |
           set -euo pipefail
+          # Pin the public curl-pipe path to Apple's stock Bash 3.2 with no
+          # explicit proxy arguments. This guards the default macOS install,
+          # where `set -u` historically rejected an empty proxy array.
           curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/${{ needs.tag.outputs.tag }}/install.sh \
-            | EE_VERSION="${{ needs.tag.outputs.tag }}" EE_INSTALL_DIR="$RUNNER_TEMP/ee-bin" EE_INSTALL_SEMANTIC_SMOKE=require bash -s -- --verify
+            | env -u HTTPS_PROXY -u HTTP_PROXY \
+                EE_VERSION="${{ needs.tag.outputs.tag }}" \
+                EE_INSTALL_DIR="$RUNNER_TEMP/ee-bin" \
+                EE_INSTALL_SEMANTIC_SMOKE=require \
+                /bin/bash -s -- --verify
 
       - name: Verify installation
         run: |

@@ -15,14 +15,16 @@
 **Install**
 
 ```bash
-curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest/download/install.sh | bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash
 ```
 
-Verifies the Sigstore-signed binary against its checksum, drops `ee` into
+Always verifies the release binary's SHA-256 checksum, verifies its Sigstore
+bundle when one is published and `cosign` is available, drops `ee` into
 `~/.local/bin`, installs shell completions, and auto-configures the Claude Code /
-Codex / Gemini agent hooks if those harnesses are detected. Pass `--help`
-(e.g. `bash install.sh --help`) for offline tarballs, proxy options, `--no-gum`,
-and `--force` reinstall.
+Codex / Gemini agent hooks if those harnesses are detected. Pass
+`--require-provenance` for fail-closed signature and SLSA provenance
+verification. Pass `--help` (e.g. `bash install.sh --help`) for offline
+tarballs, proxy options, `--no-gum`, and `--force` reinstall.
 
 </div>
 
@@ -311,17 +313,19 @@ Hard constraints. CI fails if any of them break.
 **Recommended — release installer:**
 
 ```bash
-curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest/download/install.sh | bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash
 ```
 
-This downloads the signed binary for your platform, verifies it against its
-SHA-256 checksum and Sigstore bundle, drops `ee` into `~/.local/bin`, installs
-shell completions, and auto-configures the Claude Code / Codex / Gemini agent
-hooks when those harnesses are detected. Pass `--require-provenance` to also
-verify the SLSA provenance attestation.
+This downloads the latest release binary for your platform, always verifies its
+SHA-256 checksum, verifies its Sigstore bundle when one is published and
+`cosign` is available, drops `ee` into `~/.local/bin`, installs shell
+completions, and auto-configures the Claude Code / Codex / Gemini agent hooks
+when those harnesses are detected. Pass `--require-provenance` to require both
+the artifact signature and a verified SLSA provenance attestation; without that
+flag, a missing bundle is reported and the checksum-verified install continues.
 
-[Signed binaries](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest)
-are published for every release across macOS (`aarch64`, `x86_64`), Linux
+[Release binaries](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest)
+are published across macOS (`aarch64`, `x86_64`), Linux
 (`aarch64`, `x86_64` gnu + musl), and Windows (`x86_64`).
 
 **Windows (PowerShell):**
@@ -2178,10 +2182,12 @@ Yes. Reads are concurrent. Writes serialize through a job lock. For heavy
 multi-writer swarms, run `ee daemon` and let the daemon own the write side.
 
 **Should I use the curl installer?**
-Yes — it's the recommended install. It fetches the signed binary for your
-platform from the latest GitHub release, verifies the checksum and Sigstore
-bundle, and wires up shell completions and agent hooks. Building from source is
-the alternative if you want a local debug build or are hacking on `ee` itself.
+Yes — it's the recommended install. It fetches the binary for your platform
+from the latest GitHub release, always verifies the checksum, verifies Sigstore
+when the release includes a bundle and `cosign` is available, and wires up shell
+completions and agent hooks. Use `--require-provenance` for fail-closed
+signature and provenance verification. Building from source is the alternative
+if you want a local debug build or are hacking on `ee` itself.
 
 **Should I enable mesh?**
 Usually no. Mesh helps trusted peers exchange redaction-safe posture and memory

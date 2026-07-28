@@ -4,7 +4,7 @@
 # Durable, local-first, explainable memory for coding agents.
 #
 # One-liner install (cache-busted):
-#   curl -fsSL "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest/download/install.sh?$(date +%s)" | bash
+#   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash
 #
 # Pinned version:
 #   curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.sh | EE_VERSION=v0.1.0 bash
@@ -293,12 +293,16 @@ setup_proxy() {
 # largest expected tarball download on a slow link without letting a stuck
 # server pin the installer past a normal operator's patience window.
 ee_curl() {
+  # Stock macOS ships Bash 3.2, where expanding an empty array under
+  # `set -u` raises "unbound variable". The `+word` form expands to zero
+  # arguments when PROXY_ARGS is empty and preserves both proxy arguments
+  # when it is populated.
   curl -fsSL \
     --connect-timeout 15 \
     --max-time 600 \
     --retry 2 \
     --retry-delay 1 \
-    "${PROXY_ARGS[@]}" "$@"
+    "${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"}" "$@"
 }
 
 # ───────────────────────────────────────────────────────────────────────────

@@ -225,6 +225,87 @@ fn installer_archive_binary_selection_refuses_ambiguous_fallbacks() -> TestResul
 }
 
 #[cfg(unix)]
+#[test]
+fn installer_proxy_forwarding_is_bash_3_2_nounset_safe() -> TestResult {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+    let installer = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let section_start = installer
+        .find("PROXY_ARGS=()")
+        .ok_or_else(|| "installer proxy section start is missing".to_owned())?;
+    let section_end = installer[section_start..]
+        .find("\nusage() {")
+        .map(|offset| section_start + offset)
+        .ok_or_else(|| "installer proxy section end is missing".to_owned())?;
+    let proxy_section = &installer[section_start..section_end];
+
+    let safe_forwarding = r#""${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"}" "$@""#;
+    ensure(
+        proxy_section.contains(safe_forwarding),
+        "installer must use Bash 3.2-safe forwarding for an empty proxy array under set -u",
+    )?;
+
+    let harness = format!(
+        r#"set -euo pipefail
+{proxy_section}
+curl() {{
+  local empty=0
+  local proxy=""
+  local last=""
+  local arg=""
+  for arg in "$@"; do
+    [ -n "$arg" ] || empty=1
+    last="$arg"
+  done
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--proxy" ]; then
+      proxy="${{2:-}}"
+      shift 2
+    else
+      shift
+    fi
+  done
+  printf 'empty=%s proxy=<%s> last=<%s>\n' "$empty" "$proxy" "$last"
+}}
+
+unset HTTPS_PROXY HTTP_PROXY
+setup_proxy
+ee_curl https://example.invalid/direct
+
+HTTPS_PROXY=https://proxy.invalid:8443
+HTTP_PROXY=http://ignored.invalid:8080
+setup_proxy
+ee_curl https://example.invalid/proxied
+"#
+    );
+    let output = Command::new("/bin/bash")
+        .arg("-c")
+        .arg(harness)
+        .env_remove("BASH_ENV")
+        .output()
+        .map_err(|error| format!("failed to run installer proxy harness: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        output.status.success(),
+        &format!(
+            "installer proxy harness failed with status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status.code()
+        ),
+    )?;
+    ensure_equal(
+        stdout.as_ref(),
+        concat!(
+            "empty=0 proxy=<> last=<https://example.invalid/direct>\n",
+            "empty=0 proxy=<https://proxy.invalid:8443> ",
+            "last=<https://example.invalid/proxied>\n"
+        ),
+        "installer proxy forwarding",
+    )
+}
+
+#[cfg(unix)]
 fn write_fake_ee(path: &Path) -> TestResult {
     fs::write(path, "#!/bin/sh\nexit 0\n").map_err(|error| error.to_string())?;
     let mut permissions = fs::metadata(path)
