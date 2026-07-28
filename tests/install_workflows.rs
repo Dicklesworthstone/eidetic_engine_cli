@@ -434,6 +434,134 @@ printf 'explicit-checksum=failed-closed selected=%s\n' "$TARGET"
     )
 }
 
+#[cfg(unix)]
+#[test]
+fn source_installers_fail_closed_on_missing_or_non_tagged_requested_versions() -> TestResult {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let unix_installer = fs::read_to_string(root.join("install.sh"))
+        .map_err(|error| format!("failed to read install.sh: {error}"))?;
+    let helper_start = unix_installer
+        .find("clone_source_tree() {")
+        .ok_or_else(|| "Unix source-clone helper is missing".to_owned())?;
+    let helper_end = unix_installer[helper_start..]
+        .find("\nensure_rust() {")
+        .map(|offset| helper_start + offset)
+        .ok_or_else(|| "Unix source-clone helper boundary is missing".to_owned())?;
+    let helper = &unix_installer[helper_start..helper_end];
+
+    ensure(
+        helper.contains("--branch \"$VERSION\" --single-branch"),
+        "Unix source install should clone only the requested release ref",
+    )?;
+    ensure(
+        helper.contains("\"refs/tags/${VERSION}^{commit}\""),
+        "Unix source install should require the requested name to resolve as a tag",
+    )?;
+    ensure(
+        helper.contains("[ \"$head_commit\" != \"$requested_commit\" ]"),
+        "Unix source install should prove HEAD matches the requested tag commit",
+    )?;
+
+    let harness = format!(
+        r#"set -euo pipefail
+OWNER="Dicklesworthstone"
+REPO="eidetic_engine_cli"
+VERSION="v999.0.0"
+err() {{ printf 'error=%s\n' "$*"; }}
+git() {{
+  printf 'git=%s\n' "$*" >&2
+  case "$GIT_MODE" in
+    missing)
+      return 42
+      ;;
+    non-tag)
+      [ "$1" = "clone" ] && return 0
+      return 1
+      ;;
+    matching-tag)
+      [ "$1" = "clone" ] && return 0
+      printf '0123456789abcdef0123456789abcdef01234567\n'
+      return 0
+      ;;
+    *)
+      return 99
+      ;;
+  esac
+}}
+
+{helper}
+
+GIT_MODE="missing"
+if clone_source_tree /tmp/ee-source-clone-must-not-exist; then
+  printf 'missing-tag=unexpected-success\n'
+  exit 1
+fi
+printf 'missing-tag=failed-closed\n'
+
+GIT_MODE="non-tag"
+if clone_source_tree /tmp/ee-source-clone-must-not-exist; then
+  printf 'non-tag=unexpected-success\n'
+  exit 1
+fi
+printf 'non-tag=failed-closed\n'
+
+GIT_MODE="matching-tag"
+clone_source_tree /tmp/ee-source-clone-must-not-exist
+printf 'matching-tag=accepted\n'
+"#
+    );
+    let output = Command::new("/bin/bash")
+        .arg("-c")
+        .arg(harness)
+        .env_remove("BASH_ENV")
+        .output()
+        .map_err(|error| format!("failed to run pinned source-clone harness: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure(
+        output.status.success(),
+        &format!(
+            "pinned source-clone harness failed with status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status.code()
+        ),
+    )?;
+    ensure_equal(
+        stderr.matches("git=clone ").count(),
+        3,
+        "each source-clone scenario should make exactly one clone attempt",
+    )?;
+    ensure(
+        stdout.contains("missing-tag=failed-closed")
+            && stdout.contains("non-tag=failed-closed")
+            && stdout.contains("matching-tag=accepted"),
+        "source clone helper should reject missing/non-tag refs and accept an exact matching tag",
+    )?;
+    ensure(
+        stdout.contains("Refusing to build a different revision")
+            && stdout.contains("Refusing to build a branch or different revision"),
+        "rejected source revisions should explain the fail-closed behavior",
+    )?;
+
+    let windows_installer = fs::read_to_string(root.join("install.ps1"))
+        .map_err(|error| format!("failed to read install.ps1: {error}"))?;
+    ensure(
+        windows_installer.contains("clone --depth 1 --branch $VersionTag --single-branch"),
+        "Windows source install should clone only the requested release ref",
+    )?;
+    ensure(
+        windows_installer.contains("rev-parse --verify \"refs/tags/${VersionTag}^{commit}\""),
+        "Windows source install should require the requested name to resolve as a tag",
+    )?;
+    ensure(
+        windows_installer.contains("$headCommit -ne $tagCommit"),
+        "Windows source install should prove HEAD matches the requested tag commit",
+    )?;
+    ensure(
+        !windows_installer.contains("default-branch retry has somewhere to go"),
+        "Windows source install must not retain the missing-tag default-branch fallback",
+    )
+}
+
 #[test]
 fn franken_stack_lock_is_complete_full_sha_and_ci_proven() -> TestResult {
     const EXPECTED: &[(&str, &str)] = &[

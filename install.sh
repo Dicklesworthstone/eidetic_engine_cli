@@ -1134,6 +1134,43 @@ run_semantic_first_use_smoke() {
 # Build-from-source helpers
 # ───────────────────────────────────────────────────────────────────────────
 
+clone_source_tree() {
+  local destination="$1"
+  local repository_url="https://github.com/${OWNER}/${REPO}.git"
+
+  if [ -z "$VERSION" ]; then
+    git clone --depth 1 "$repository_url" "$destination"
+    return
+  fi
+
+  # A requested release is an immutable identity boundary. Never turn a
+  # misspelled/missing tag into a successful build of the default branch:
+  # callers would believe they installed VERSION while receiving unrelated
+  # code. Clone only that ref, then prove both that it is a tag and that HEAD
+  # resolves to the tag's commit (including annotated tags).
+  if ! git clone --depth 1 --branch "$VERSION" --single-branch \
+        "$repository_url" "$destination"; then
+    err "Could not clone requested release tag $VERSION."
+    err "Refusing to build a different revision; verify the version and try again."
+    return 1
+  fi
+
+  local requested_commit=""
+  local head_commit=""
+  if ! requested_commit=$(git -C "$destination" rev-parse --verify \
+        "refs/tags/${VERSION}^{commit}" 2>/dev/null) || [ -z "$requested_commit" ]; then
+    err "Requested source revision $VERSION is not an exact release tag."
+    err "Refusing to build a branch or different revision."
+    return 1
+  fi
+  if ! head_commit=$(git -C "$destination" rev-parse --verify HEAD 2>/dev/null) \
+     || [ -z "$head_commit" ] || [ "$head_commit" != "$requested_commit" ]; then
+    err "Source checkout for $VERSION does not match its release tag."
+    err "Refusing to build an unverified revision."
+    return 1
+  fi
+}
+
 ensure_rust() {
   if [ "${RUSTUP_INIT_SKIP:-0}" != "0" ]; then
     info "Skipping rustup install (RUSTUP_INIT_SKIP set)"
@@ -1349,18 +1386,8 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
     exit 1
   fi
 
-  # First attempt: pinned to the requested tag/branch if any. If that fails
-  # (tag doesn't exist, partial clone left a non-empty dest dir, etc.),
-  # remove the dest and retry without --branch. Git refuses to clone into a
-  # non-empty directory, so the cleanup is required for the fallback to
-  # succeed — the previous version silently lost the fallback when the first
-  # clone partially populated $TMP/src.
-  branch_args=""
-  [ -n "$VERSION" ] && branch_args="--branch $VERSION"
-  # shellcheck disable=SC2086
-  if ! git clone --depth 1 $branch_args "https://github.com/${OWNER}/${REPO}.git" "$TMP/src" 2>/dev/null; then
-    rm -rf "$TMP/src"
-    git clone --depth 1 "https://github.com/${OWNER}/${REPO}.git" "$TMP/src"
+  if ! clone_source_tree "$TMP/src"; then
+    exit 1
   fi
 
   info "Checking out locked Franken-stack source dependencies"

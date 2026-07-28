@@ -735,14 +735,21 @@ function Invoke-FromSource {
     try {
         Write-Info "Cloning $Script:RepoOwner/$Script:RepoName ..."
         if ($VersionTag) {
-            & git -c core.longpaths=true clone --depth 1 --branch $VersionTag "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
+            & git -c core.longpaths=true clone --depth 1 --branch $VersionTag --single-branch "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) {
-                # Git refuses to clone into a non-empty directory. The pinned
-                # clone may have partially populated $src before failing
-                # (e.g., wrong tag); wipe it before the fallback so the
-                # default-branch retry has somewhere to go.
-                Remove-Item -Recurse -Force $src -ErrorAction SilentlyContinue
-                & git -c core.longpaths=true clone --depth 1 "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
+                Write-ErrorExit "Could not clone requested release tag $VersionTag. Refusing to build a different revision; verify the version and try again."
+            }
+
+            # --branch accepts a branch as well as a tag. Prove that the
+            # requested name is an exact release tag and that the checked-out
+            # HEAD resolves to that tag's commit before compiling anything.
+            $tagCommit = (& git -C $src rev-parse --verify "refs/tags/${VersionTag}^{commit}" 2>$null) -join ""
+            if ($LASTEXITCODE -ne 0 -or -not $tagCommit) {
+                Write-ErrorExit "Requested source revision $VersionTag is not an exact release tag. Refusing to build a branch or different revision."
+            }
+            $headCommit = (& git -C $src rev-parse --verify HEAD 2>$null) -join ""
+            if ($LASTEXITCODE -ne 0 -or -not $headCommit -or $headCommit -ne $tagCommit) {
+                Write-ErrorExit "Source checkout for $VersionTag does not match its release tag. Refusing to build an unverified revision."
             }
         } else {
             & git -c core.longpaths=true clone --depth 1 "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
