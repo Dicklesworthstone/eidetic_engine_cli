@@ -3738,7 +3738,10 @@ mod tests {
                 lock_path: observed_lock_path,
                 holder_run_id,
             }) => {
-                assert_eq!(observed_lock_path, lock_path);
+                assert_eq!(
+                    observed_lock_path,
+                    fs::canonicalize(&lock_path).expect("canonicalize oversized doctor lock")
+                );
                 assert_eq!(holder_run_id, None);
             }
             Err(other) => {
