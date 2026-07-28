@@ -31,7 +31,10 @@ use crate::core::memory::{
 use crate::core::provenance_health::{
     MemoryProvenanceHealth, ProvenancePointerStatus, assess_memory_provenance_health,
 };
-use crate::db::{DbConnection, generate_audit_id, generate_audit_id_seeded};
+use crate::db::{
+    DatabaseConfig, DbConnection,
+    read_pool::{PoolConfig, registered_process_read_pool},
+};
 use crate::models::{
     AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
     AgentContextProfileCounts, RationaleTrace, RationaleTraceVisibility,
@@ -1083,58 +1086,73 @@ fn trace_why_math_surfaces(
 /// Explains why a memory was stored, how it would be retrieved,
 /// and how it would be selected for context packs.
 pub fn explain_memory(options: &WhyOptions<'_>) -> WhyReport {
-    let mut audit_ids = WhyAuditIdSource::Ambient;
-    explain_memory_inner(options, &mut audit_ids)
+    let target = resolve_why_target(options.memory_id);
+    let memory_id = target.document_id;
+    if !options.database_path.exists() {
+        return WhyReport::error(
+            memory_id.to_string(),
+            format!("Database not found at {}", options.database_path.display()),
+        );
+    }
+    let read_pool = registered_process_read_pool(
+        DatabaseConfig::file(options.database_path.to_path_buf()),
+        PoolConfig::default_single(),
+    );
+    let read_snapshot = match read_pool.pin_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return WhyReport::error(
+                memory_id.to_string(),
+                format!("Failed to acquire why read snapshot: {error}"),
+            );
+        }
+    };
+    let report = {
+        let conn = match read_snapshot.checked_connection() {
+            Ok(connection) => connection,
+            Err(error) => {
+                return WhyReport::error(
+                    memory_id.to_string(),
+                    format!("Why read snapshot became unavailable: {error}"),
+                );
+            }
+        };
+        match conn.needs_migration() {
+            Ok(false) => explain_memory_with_connection(options, conn),
+            Ok(true) => WhyReport::error(
+                memory_id.to_string(),
+                "Database migration is required before read-only why; run `ee migrate run --workspace .`."
+                    .to_owned(),
+            ),
+            Err(error) => WhyReport::error(
+                memory_id.to_string(),
+                format!("Failed to inspect database migration state before why: {error}"),
+            ),
+        }
+    };
+    if let Err(error) = read_snapshot.commit() {
+        return WhyReport::error(
+            memory_id.to_string(),
+            format!("Failed to release why read snapshot: {error}"),
+        );
+    }
+    report
 }
 
 pub fn explain_memory_seeded(
     options: &WhyOptions<'_>,
-    determinism: &mut Deterministic<Seed>,
+    _determinism: &mut Deterministic<Seed>,
 ) -> WhyReport {
-    let mut audit_ids = WhyAuditIdSource::Seeded(determinism);
-    explain_memory_inner(options, &mut audit_ids)
+    explain_memory(options)
 }
 
-enum WhyAuditIdSource<'a> {
-    Ambient,
-    Seeded(&'a mut Deterministic<Seed>),
-}
-
-impl WhyAuditIdSource<'_> {
-    fn next_audit_id(&mut self) -> String {
-        match self {
-            Self::Ambient => generate_audit_id(),
-            Self::Seeded(determinism) => generate_audit_id_seeded(determinism),
-        }
-    }
-}
-
-fn explain_memory_inner(
-    options: &WhyOptions<'_>,
-    audit_ids: &mut WhyAuditIdSource<'_>,
-) -> WhyReport {
+pub fn explain_memory_with_connection(options: &WhyOptions<'_>, conn: &DbConnection) -> WhyReport {
     let started = Instant::now();
     let target = resolve_why_target(options.memory_id);
     let memory_id = target.document_id;
 
-    let conn = match DbConnection::open_file(options.database_path) {
-        Ok(c) => c,
-        Err(e) => {
-            return WhyReport::error(
-                memory_id.to_string(),
-                format!("Failed to open database: {e}"),
-            );
-        }
-    };
-    if let Err(error) = conn.migrate() {
-        return WhyReport::error(
-            memory_id.to_string(),
-            format!("Failed to migrate database before why query: {error}"),
-        );
-    }
-
     if let Some(source) = target.unsupported_result_source() {
-        return WhyReport::unsupported_result_target(memory_id.to_string(), source, &conn);
+        return WhyReport::unsupported_result_target(memory_id.to_string(), source, conn);
     }
 
     let memory = match conn.get_memory(memory_id) {
@@ -1397,20 +1415,6 @@ fn explain_memory_inner(
     };
 
     trace_why_math_surfaces(&memory.workspace_id, memory_id, "response", started, &[]);
-
-    // Bead bd-17c65.7.7 (G8): best-effort audit row so L3 has a
-    // last_accessed signal for `ee why` reads, and G1 can count
-    // why-inspection activity per workspace.
-    let details = serde_json::json!({"surface": "why"}).to_string();
-    let audit_input = crate::db::CreateAuditInput {
-        workspace_id: Some(memory.workspace_id.clone()),
-        actor: None,
-        action: crate::db::audit_actions::WHY_INSPECTED.to_owned(),
-        target_type: Some("memory".to_owned()),
-        target_id: Some(memory_id.to_owned()),
-        details: Some(details),
-    };
-    let _ = conn.insert_audit(&audit_ids.next_audit_id(), &audit_input);
 
     report
 }
@@ -4052,8 +4056,8 @@ mod tests {
     }
 
     #[test]
-    fn explain_memory_seeded_replays_why_inspected_audit_id() -> TestResult {
-        fn run_seeded(seed: u64) -> Result<String, String> {
+    fn explain_memory_seeded_remains_read_only() -> TestResult {
+        fn run_seeded(seed: u64) -> Result<(), String> {
             let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
             let database_path = temp.path().join(".ee").join("ee.db");
             std::fs::create_dir_all(
@@ -4112,25 +4116,108 @@ mod tests {
             let audits = connection
                 .list_audit_by_target("memory", memory_id, None)
                 .map_err(|error| error.to_string())?;
-            let why_audit_ids = audits
+            let why_audit_count = audits
                 .iter()
                 .filter(|entry| entry.action == crate::db::audit_actions::WHY_INSPECTED)
-                .map(|entry| entry.id.clone())
-                .collect::<Vec<_>>();
-            ensure(why_audit_ids.len(), 1_usize, "why audit row count")?;
-            let audit_id = why_audit_ids
-                .first()
-                .ok_or_else(|| "why audit row missing".to_string())?
-                .clone();
-            ensure(audit_id.starts_with("audit_"), true, "audit id prefix")?;
-            Ok(audit_id)
+                .count();
+            ensure(why_audit_count, 0_usize, "why audit row count")?;
+            Ok(())
         }
 
-        let first = run_seeded(45_001)?;
-        let replay = run_seeded(45_001)?;
-        let other = run_seeded(45_002)?;
-        ensure(first.clone(), replay, "same seed replays why audit ID")?;
-        ensure(first == other, false, "different seed changes why audit ID")
+        run_seeded(45_001)?;
+        run_seeded(45_001)?;
+        run_seeded(45_002)
+    }
+
+    #[test]
+    fn why_projection_stays_consistent_across_concurrent_writer_commit() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_00000000000000000000000031";
+        let memory_id = "mem_00000000000000000000000031";
+        let writer =
+            crate::db::DbConnection::open_file(&database_path).map_err(|e| e.to_string())?;
+        writer.migrate().map_err(|e| e.to_string())?;
+        writer
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: temp.path().display().to_string(),
+                    name: Some("why-snapshot".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        writer
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "snapshot content before writer commit".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.6,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let read_pool = registered_process_read_pool(
+            DatabaseConfig::file(database_path.clone()),
+            PoolConfig::default_single(),
+        );
+        let snapshot = read_pool
+            .pin_snapshot()
+            .map_err(|error| error.to_string())?;
+        let connection = snapshot
+            .checked_connection()
+            .map_err(|error| error.to_string())?;
+        let options = WhyOptions {
+            database_path: &database_path,
+            memory_id,
+            confidence_threshold: WhyOptions::DEFAULT_CONFIDENCE_THRESHOLD,
+        };
+        let before = explain_memory_with_connection(&options, connection);
+        ensure(
+            before.content,
+            Some("snapshot content before writer commit".to_owned()),
+            "why snapshot initial content",
+        )?;
+
+        writer
+            .execute_raw(
+                "UPDATE memories SET content = 'content committed by concurrent writer' \
+                 WHERE id = 'mem_00000000000000000000000031'",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let during = explain_memory_with_connection(&options, connection);
+        ensure(
+            during.content,
+            Some("snapshot content before writer commit".to_owned()),
+            "why snapshot excludes concurrent commit",
+        )?;
+        snapshot.commit().map_err(|error| error.to_string())?;
+
+        let after = explain_memory(&options);
+        ensure(
+            after.content,
+            Some("content committed by concurrent writer".to_owned()),
+            "new why snapshot observes concurrent commit",
+        )
     }
 
     #[test]

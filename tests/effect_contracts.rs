@@ -11,7 +11,7 @@ use std::process::Command;
 
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
 const EFFECT_SOURCE: &str = include_str!("../src/core/effect.rs");
-const NORMALIZED_CLI_COMMAND_COUNT: usize = 399;
+const NORMALIZED_CLI_COMMAND_COUNT: usize = 400;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",
@@ -159,6 +159,108 @@ fn bare_status_inspects_current_workspace() -> TestResult {
         true,
         "bare status should not have null workspace",
     )
+}
+
+#[test]
+fn canonical_database_reads_leave_initialized_workspace_byte_identical() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = temp.path();
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be valid UTF-8".to_owned())?;
+
+    let init = run_ee(&["--workspace", workspace_arg, "--json", "init"])?;
+    ensure(init.status.success(), true, "init should succeed")?;
+    let remember = run_ee(&[
+        "--workspace",
+        workspace_arg,
+        "--json",
+        "remember",
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+        "Run cargo fmt --check before release.",
+    ])?;
+    ensure(remember.status.success(), true, "remember should succeed")?;
+    let remember_json: serde_json::Value = serde_json::from_slice(&remember.stdout)
+        .map_err(|error| format!("parse remember JSON: {error}"))?;
+    let memory_id = remember_json["data"]["public_id"]
+        .as_str()
+        .or_else(|| remember_json["data"]["memory_id"].as_str())
+        .or_else(|| remember_json["data"]["id"].as_str())
+        .ok_or_else(|| format!("remember response missing memory id: {remember_json}"))?
+        .to_owned();
+
+    let rebuild = run_ee(&["--workspace", workspace_arg, "--json", "index", "rebuild"])?;
+    ensure(
+        rebuild.status.success(),
+        true,
+        "index rebuild should succeed",
+    )?;
+
+    let cases = [
+        (
+            "search",
+            vec![
+                "--workspace",
+                workspace_arg,
+                "--json",
+                "search",
+                "format before release",
+                "--source-mode",
+                "lexical_only",
+            ],
+        ),
+        (
+            "why",
+            vec![
+                "--workspace",
+                workspace_arg,
+                "--json",
+                "why",
+                memory_id.as_str(),
+            ],
+        ),
+        (
+            "status",
+            vec!["--workspace", workspace_arg, "--json", "status"],
+        ),
+        (
+            "pack --read-only",
+            vec![
+                "--workspace",
+                workspace_arg,
+                "--json",
+                "pack",
+                "prepare release",
+                "--read-only",
+                "--source-mode",
+                "lexical_only",
+            ],
+        ),
+    ];
+
+    for (surface, args) in cases {
+        let before = hash_directory(workspace);
+        let output = run_ee(&args)?;
+        ensure(
+            output.status.success() || output.status.code() == Some(3),
+            true,
+            &format!(
+                "{surface} should complete; stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+        let after = hash_directory(workspace);
+        ensure(
+            after,
+            before,
+            &format!("{surface} must not mutate database, WAL, audit, cache, or pack state"),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -352,6 +454,29 @@ fn effect_manifest_includes_index_rebuild_as_derived_write() -> TestResult {
         rebuild.write_surfaces.derived_paths.contains(&".ee/index/"),
         true,
         "index rebuild writes to .ee/index/",
+    )
+}
+
+#[test]
+fn effect_manifest_classifies_search_recalibration_as_derived_write() -> TestResult {
+    use ee::core::effect::{EffectClass, EffectManifest};
+
+    let manifest = EffectManifest::build();
+    let recalibration = manifest
+        .get("search --recalibrate-now")
+        .ok_or_else(|| "search --recalibrate-now not in manifest".to_owned())?;
+    ensure(
+        recalibration.default_effect,
+        EffectClass::DerivedIndexWrite,
+        "search recalibration writes a rebuildable derived artifact",
+    )?;
+    ensure(
+        recalibration
+            .write_surfaces
+            .derived_paths
+            .contains(&".ee/search/calibration.jsonl"),
+        true,
+        "search recalibration declares its calibration JSONL write",
     )
 }
 

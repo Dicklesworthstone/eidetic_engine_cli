@@ -1215,7 +1215,7 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
     };
 
     let graph_explain_start = Instant::now();
-    let connection = match DbConnection::open_file(database_path) {
+    let connection = match DbConnection::open_file_read_only(database_path) {
         Ok(connection) => connection,
         Err(error) => {
             response.data.pack_dna = Some(serde_json::Value::Null);

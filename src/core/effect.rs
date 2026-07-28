@@ -1828,6 +1828,11 @@ impl EffectManifest {
                 "Rebuild semantic embeddings from database records",
             ),
             CommandEffect::derived_write(
+                "search --recalibrate-now",
+                vec![".ee/search/calibration.jsonl"],
+                "Rewrite the derived search score calibration artifact from persisted feedback",
+            ),
+            CommandEffect::derived_write(
                 "graph centrality-refresh",
                 vec![".ee/graph/"],
                 "Refresh derived graph centrality metrics",

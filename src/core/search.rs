@@ -13,8 +13,9 @@ use crate::core::why::{DedupLinkEvidence, find_embed_dedup_link};
 #[cfg(test)]
 use crate::db::generate_audit_id_seeded;
 use crate::db::{
-    CreateAuditInput, DbConnection, DbError, FeedbackEventsFingerprint, StoredFeedbackEvent,
-    StoredMemory, StoredModelRegistryEntry, audit_actions, generate_audit_id,
+    CreateAuditInput, DatabaseConfig, DbConnection, DbError, FeedbackEventsFingerprint,
+    StoredFeedbackEvent, StoredMemory, StoredModelRegistryEntry, audit_actions, generate_audit_id,
+    read_pool::{PoolConfig, registered_process_read_pool},
 };
 use crate::models::degradation::{
     CONFORMAL_CALIBRATION_INSUFFICIENT_CODE, SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE,
@@ -1175,7 +1176,7 @@ pub fn apply_memory_kind_and_typed_field_filters_to_report(
     }
 
     let database_path = options.resolve_database_path();
-    let connection = DbConnection::open_file(&database_path).map_err(|error| {
+    let connection = DbConnection::open_file_read_only(&database_path).map_err(|error| {
         SearchError::Index(format!(
             "Failed to open database for typed memory filters: {error}"
         ))
@@ -2913,7 +2914,7 @@ fn search_score_calibration_feedback_fingerprint(
         return Some(SearchScoreCalibrationFeedbackFingerprint::NoDatabase);
     }
 
-    DbConnection::open_file(database_path)
+    DbConnection::open_file_read_only(database_path)
         .ok()
         .and_then(|connection| {
             let fingerprint = connection.feedback_events_fingerprint(workspace_id).ok();
@@ -5424,7 +5425,7 @@ fn mi_dedup_hit_contents(
 
     let database_path = options.resolve_database_path();
     if database_path.exists()
-        && let Ok(connection) = DbConnection::open_file(&database_path)
+        && let Ok(connection) = DbConnection::open_file_read_only(&database_path)
     {
         extend_mi_dedup_contents_from_connection(&mut contents, &doc_ids, &connection);
     }
@@ -5709,10 +5710,9 @@ fn search_query_miss_audit_details(details: SearchQueryMissAuditDetails<'_>) -> 
 /// bd-21gya: per-search audit batch.
 ///
 /// Buffers `search.executed` / `search.miss_recorded` /
-/// `search.returned_mem` / `redact_at_output` rows so the hot read path opens
-/// exactly one DbConnection and writes a
-/// single transaction, instead of `1 + R + R*P` separate opens (one per
-/// returned hit and per redaction pattern).
+/// `search.returned_mem` / `redact_at_output` rows for an enclosing mutating
+/// operation that explicitly supplies its write connection. Canonical search
+/// never constructs or flushes this batch.
 struct SearchAuditBatch {
     entries: Vec<(String, CreateAuditInput)>,
 }
@@ -5743,16 +5743,6 @@ impl SearchAuditBatch {
             details,
         };
         self.entries.push((audit_id, input));
-    }
-
-    fn flush_best_effort(self, database_path: &Path) {
-        if self.entries.is_empty() {
-            return;
-        }
-        let Ok(conn) = DbConnection::open_file(database_path) else {
-            return;
-        };
-        self.flush_best_effort_with_connection(&conn);
     }
 
     fn flush_best_effort_with_connection(self, conn: &DbConnection) {
@@ -5793,34 +5783,91 @@ fn search_audit_workspace_persisted(conn: Option<&DbConnection>, workspace_id: &
 }
 
 pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> {
-    run_search_with_performance(options).map(|run| run.report)
+    run_search_with_filters(options, None, &[])
+}
+
+pub fn run_search_with_filters(
+    options: &SearchOptions,
+    kind_filter: Option<&str>,
+    typed_field_filters: &[TypedMemoryFieldFilter],
+) -> Result<SearchReport, SearchError> {
+    run_search_with_performance_and_filters(options, kind_filter, typed_field_filters)
+        .map(|run| run.report)
 }
 
 pub fn run_search_with_performance(
     options: &SearchOptions,
 ) -> Result<SearchPerformanceRun, SearchError> {
+    run_search_with_performance_and_filters(options, None, &[])
+}
+
+pub fn run_search_with_performance_and_filters(
+    options: &SearchOptions,
+    kind_filter: Option<&str>,
+    typed_field_filters: &[TypedMemoryFieldFilter],
+) -> Result<SearchPerformanceRun, SearchError> {
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
 
     let database_path = options.resolve_database_path();
-    if database_path.exists()
-        && let Ok(connection) = DbConnection::open_file(&database_path)
-    {
-        let result = run_search_inner_with_performance(
-            options,
-            Some(&connection),
-            &determinism,
-            &mut audit_ids,
-            Some(&connection),
-            None,
-            true,
-            None,
+    if database_path.exists() {
+        let read_pool = registered_process_read_pool(
+            DatabaseConfig::file(database_path.clone()),
+            PoolConfig::default_single(),
         );
-        let _ = connection.close();
+        let read_snapshot = read_pool.pin_snapshot().map_err(|error| {
+            SearchError::Index(format!(
+                "Failed to acquire search read snapshot for {}: {error}",
+                database_path.display()
+            ))
+        })?;
+        let result = {
+            let connection = read_snapshot.checked_connection().map_err(|error| {
+                SearchError::Index(format!(
+                    "Search read snapshot became unavailable for {}: {error}",
+                    database_path.display()
+                ))
+            })?;
+            if connection.needs_migration().map_err(|error| {
+                SearchError::Index(format!(
+                    "Failed to inspect database migration state before search: {error}"
+                ))
+            })? {
+                return Err(SearchError::Index(
+                    "Database migration is required before read-only search; run `ee migrate run --workspace .`."
+                        .to_owned(),
+                ));
+            }
+            run_search_inner_with_performance(
+                options,
+                Some(connection),
+                &determinism,
+                &mut audit_ids,
+                None,
+                None,
+                true,
+                None,
+            )
+            .and_then(|mut run| {
+                apply_memory_kind_and_typed_field_filters_to_report_with_connection(
+                    connection,
+                    &mut run.report,
+                    kind_filter,
+                    typed_field_filters,
+                )?;
+                Ok(run)
+            })
+        };
+        read_snapshot.commit().map_err(|error| {
+            SearchError::Index(format!(
+                "Failed to release search read snapshot for {}: {error}",
+                database_path.display()
+            ))
+        })?;
         return result;
     }
 
-    run_search_inner_with_performance(
+    let run = run_search_inner_with_performance(
         options,
         None,
         &determinism,
@@ -5829,7 +5876,14 @@ pub fn run_search_with_performance(
         None,
         true,
         None,
-    )
+    )?;
+    if kind_filter.is_some() || !typed_field_filters.is_empty() {
+        return Err(SearchError::Index(format!(
+            "Database not found at {}; typed memory filters require an initialized workspace",
+            database_path.display()
+        )));
+    }
+    Ok(run)
 }
 
 pub fn run_search_seeded(
@@ -6016,7 +6070,7 @@ fn resolve_similar_seed_memory(
 
 pub fn run_similar(options: &SimilarOptions) -> Result<SimilarReport, SimilarError> {
     let database_path = options.resolve_database_path();
-    let connection = DbConnection::open_file(&database_path)?;
+    let connection = DbConnection::open_file_read_only(&database_path)?;
     // Resolve the requested workspace and memory scope BEFORE the seed lookup so
     // the seed is admitted through the same workspace / `--memory-scope` /
     // validity gating search uses for every other candidate (bd-2vq2z.25).
@@ -6256,7 +6310,7 @@ impl SearchRerankTextProvider {
     }
 
     fn load_scoped_memory_text(&self, doc_id: &str) -> Option<String> {
-        let connection = DbConnection::open_file(&self.database_path).ok()?;
+        let connection = DbConnection::open_file_read_only(&self.database_path).ok()?;
         let memory = connection.get_memory(doc_id).ok().flatten()?;
         let tags = if matches!(self.scope_context.scope, MemoryScope::Global) {
             connection.get_memory_tags(doc_id).unwrap_or_default()
@@ -6302,7 +6356,7 @@ fn resolve_search_rerank_runtime(
                     database_path.display()
                 ))
             } else {
-                DbConnection::open_file(&database_path)
+                DbConnection::open_file_read_only(&database_path)
                     .map_err(|error| error.to_string())
                     .and_then(|connection| {
                         selected_available_reranker_entry(&connection, &workspace_id)
@@ -6314,35 +6368,10 @@ fn resolve_search_rerank_runtime(
     let entry = match entry_result {
         Ok(Some(entry)) => entry,
         Ok(None) => {
-            // bd-2vq2z.24/.26/.28: no reranker is registered yet. The reranker
-            // has no bundled artifact and no network fetch, so before giving up
-            // we probe the default model-store cache for an artifact the
-            // operator already fetched and, if present, register it on first
-            // use (mode=reranked) — real available-when-cached auto-provision.
-            // When no cached artifact exists we degrade honestly to fusion-only
-            // with a repair hint pointing at the `--from-file` fetch.
-            match auto_provision_default_reranker_entry(options, &workspace_id, &database_path) {
-                Ok(Some(entry)) => {
-                    tracing::info!(
-                        target: "ee::search::rerank",
-                        event = "rerank_model_auto_provisioned",
-                        model_id = %entry.model_name,
-                    );
-                    entry
-                }
-                Ok(None) => {
-                    degraded.push(SearchDegradation::rerank_model_unavailable(
-                        "No reranker model is registered, and no cached default reranker artifact was found to auto-provision.",
-                    ));
-                    return SearchRerankRuntime::disabled();
-                }
-                Err(error) => {
-                    degraded.push(SearchDegradation::rerank_model_unavailable(&format!(
-                        "Auto-provisioning the cached default reranker did not complete: {error}"
-                    )));
-                    return SearchRerankRuntime::disabled();
-                }
-            }
+            degraded.push(SearchDegradation::rerank_model_unavailable(
+                "No reranker model is registered. Read-only search never auto-registers cached artifacts; run the explicit model fetch command first.",
+            ));
+            return SearchRerankRuntime::disabled();
         }
         Err(error) => {
             degraded.push(SearchDegradation::rerank_model_unavailable(&format!(
@@ -6390,79 +6419,6 @@ fn selected_available_reranker_entry(
             .then_with(|| left.id.cmp(&right.id))
     });
     Ok(entries.into_iter().next())
-}
-
-/// First-use auto-provision of the default local reranker (bd-2vq2z.24/.26,
-/// bd-2vq2z.28).
-///
-/// The reranker has no bundled artifact and no network fetch (only the
-/// embedding model is bundled, via the frankensearch manifest). So the only
-/// real source for an "available-when-available" auto-provision is a reranker
-/// artifact an operator already fetched into the default model-store cache.
-/// This probes that cache and, when the artifact is present on disk, registers
-/// it through the SAME `crate::core::model` provisioning entry point that
-/// `ee model fetch rerank-default --from-file ...` uses, then re-selects the
-/// now-`Available` entry. Returns:
-/// - `Ok(Some(entry))` when a cached artifact was found and registered (search
-///   loads it and enters `mode=reranked`) — i.e. available-when-cached;
-/// - `Ok(None)` when no cached artifact exists, so the caller emits an honest
-///   `rerank_model_unavailable` degradation pointing at the `--from-file` fetch;
-/// - `Err(message)` when a cached artifact exists but could not be verified or
-///   registered (corrupt / hash-mismatched artifact, or a registry error).
-///
-/// Crucially this is NOT a fake auto-provision: it never claims success without
-/// a real artifact on disk that `fetch_rerank_model` validates against the
-/// bundled manifest.
-fn auto_provision_default_reranker_entry(
-    options: &SearchOptions,
-    workspace_id: &str,
-    database_path: &Path,
-) -> Result<Option<StoredModelRegistryEntry>, String> {
-    let manifest =
-        crate::core::model::bundled_rerank_model_manifest().map_err(|error| error.to_string())?;
-    // Probe the default model-store cache for a previously-fetched artifact.
-    let Some(cached_artifact) = default_cached_reranker_artifact_path(&manifest.model_id) else {
-        return Ok(None);
-    };
-    if !cached_artifact.is_file() {
-        // No cached artifact on disk: honest degrade upstream, never a fake
-        // provision.
-        return Ok(None);
-    }
-    // Cache hit: register the artifact through the shared provisioning entry
-    // point (which re-verifies it against the bundled manifest), then re-select
-    // the now-`Available` entry so search enters `mode=reranked`.
-    let fetch_options = crate::core::model::ModelFetchOptions {
-        workspace_path: options.workspace_path.as_path(),
-        database_path: Some(database_path),
-        model_id: manifest.model_id.as_str(),
-        from_file: Some(cached_artifact.as_path()),
-        model_store_root: None,
-    };
-    crate::core::model::fetch_rerank_model(&fetch_options).map_err(|error| error.to_string())?;
-    let connection = DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
-    selected_available_reranker_entry(&connection, workspace_id)
-}
-
-/// Default on-disk location of a cached default-reranker artifact, mirroring
-/// `crate::core::model::default_model_store_root` + `fetch_rerank_model`
-/// (`$HOME/.local/share/ee/models/rerank/<model_id>/rerank-default-v1.tar.zst`;
-/// see `src/core/model.rs` `stored_dir.join(DEFAULT_RERANK_MODEL_ARTIFACT_NAME)`
-/// and the artifact-name constant). Returns `None` when `HOME` is unset, which
-/// matches the model store's own resolution failure (so the caller degrades
-/// honestly rather than panicking).
-fn default_cached_reranker_artifact_path(model_id: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(
-        PathBuf::from(home)
-            .join(".local")
-            .join("share")
-            .join("ee")
-            .join("models")
-            .join("rerank")
-            .join(model_id)
-            .join("rerank-default-v1.tar.zst"),
-    )
 }
 
 fn load_search_reranker(entry: &StoredModelRegistryEntry) -> Result<Arc<dyn Reranker>, String> {
@@ -6920,127 +6876,123 @@ fn run_search_inner_with_performance(
                 );
             }
 
-            let audit_workspace_start = Instant::now();
-            // Bead bd-17c65.7.7 (G8): best-effort audit-log instrumentation.
-            // One `search.executed` row per call + one `search.returned_mem`
-            // row per memory hit so L3 has a `last_accessed` signal and
-            // G1 can count search activity per workspace. Privacy: only
-            // the BLAKE3 prefix of the query reaches the audit log.
-            let database_path = options.resolve_database_path();
-            // Match memory_command_workspace_id's canonicalize-then-hash so the
-            // audit row joins to the same workspace the memory was written
-            // under (especially important on macOS where /tmp -> /private/tmp).
-            let canonical_workspace = default_workspace_root(&options.workspace_path);
-            let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
-            let audit_workspace_persisted = search_audit_workspace_persisted(
-                audit_connection.or(read_connection),
-                &workspace_id,
-            );
-            trace.record_elapsed("search::auditWorkspaceCheck", audit_workspace_start);
-            if audit_workspace_persisted {
-                let audit_payload_start = Instant::now();
-                let q_hash = audit_query_hash(&options.query);
-                let source_arms: Vec<&str> = above_floor
-                    .iter()
-                    .map(|hit| hit.source.as_str())
-                    .collect::<std::collections::BTreeSet<&str>>()
-                    .into_iter()
-                    .collect();
-                let executed_details = serde_json::json!({
-                    "queryHash": &q_hash,
-                    "resultCount": above_floor.len(),
-                    "sourceArms": source_arms,
-                    "status": status.as_str(),
-                })
-                .to_string();
-                // bd-21gya: buffer audit rows and flush in one connection +
-                // one transaction instead of opening DbConnection per row.
-                // Capacity hint sized for the worst case (1 executed + 1
-                // optional miss row + 1 returned_mem per hit + redaction
-                // overhead).
-                let mut audit_batch =
-                    SearchAuditBatch::new(2 + above_floor.len().saturating_mul(2));
-                audit_batch.push(
-                    audit_ids,
-                    Some(&workspace_id),
-                    audit_actions::SEARCH_EXECUTED,
-                    Some("workspace"),
-                    Some(&workspace_id),
-                    Some(executed_details),
-                );
-                if let Some(miss_reason) = classify_search_query_miss(
-                    kept,
-                    pre_floor_count,
-                    floor,
-                    above_floor.first().map(|hit| hit.score),
-                ) {
-                    let miss_details =
-                        search_query_miss_audit_details(SearchQueryMissAuditDetails {
-                            query_hash: &q_hash,
-                            reason: miss_reason,
-                            status,
-                            kept,
-                            considered: pre_floor_count,
-                            dropped_below_floor: dropped,
-                            floor,
-                            top_score_before_floor: pre_floor_top_score,
-                            top_score_after_floor: above_floor.first().map(|hit| hit.score),
-                        });
-                    audit_batch.push(
-                        audit_ids,
-                        Some(&workspace_id),
-                        audit_actions::SEARCH_MISS_RECORDED,
-                        Some("query_hash"),
-                        Some(&q_hash),
-                        Some(miss_details),
-                    );
-                }
-                for (rank, hit) in above_floor.iter().enumerate() {
-                    let returned_details = serde_json::json!({
+            // Search is a canonical no-write surface. Audit rows are only
+            // emitted when an enclosing mutating operation supplies its
+            // already-owned write connection (for example, persisted pack
+            // assembly). A missing audit connection means "do not audit";
+            // it must never trigger an implicit read-write reopen.
+            if let Some(audit_connection) = audit_connection {
+                let audit_workspace_start = Instant::now();
+                // Match memory_command_workspace_id's canonicalize-then-hash
+                // so the audit row joins to the same workspace the enclosing
+                // write was recorded under (especially on macOS where
+                // /tmp -> /private/tmp).
+                let canonical_workspace = default_workspace_root(&options.workspace_path);
+                let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
+                let audit_workspace_persisted =
+                    search_audit_workspace_persisted(Some(audit_connection), &workspace_id);
+                trace.record_elapsed("search::auditWorkspaceCheck", audit_workspace_start);
+                if audit_workspace_persisted {
+                    let audit_payload_start = Instant::now();
+                    let q_hash = audit_query_hash(&options.query);
+                    let source_arms: Vec<&str> = above_floor
+                        .iter()
+                        .map(|hit| hit.source.as_str())
+                        .collect::<std::collections::BTreeSet<&str>>()
+                        .into_iter()
+                        .collect();
+                    let executed_details = serde_json::json!({
                         "queryHash": &q_hash,
-                        "rank": (rank + 1) as u32,
-                        "score": hit.score,
-                        "source": hit.source.as_str(),
+                        "resultCount": above_floor.len(),
+                        "sourceArms": source_arms,
+                        "status": status.as_str(),
                     })
                     .to_string();
+                    // bd-21gya: buffer audit rows and flush in one connection +
+                    // one transaction instead of opening DbConnection per row.
+                    // Capacity hint sized for the worst case (1 executed + 1
+                    // optional miss row + 1 returned_mem per hit + redaction
+                    // overhead).
+                    let mut audit_batch =
+                        SearchAuditBatch::new(2 + above_floor.len().saturating_mul(2));
                     audit_batch.push(
                         audit_ids,
                         Some(&workspace_id),
-                        audit_actions::SEARCH_RETURNED_MEM,
-                        Some("memory"),
-                        Some(&hit.doc_id),
-                        Some(returned_details),
+                        audit_actions::SEARCH_EXECUTED,
+                        Some("workspace"),
+                        Some(&workspace_id),
+                        Some(executed_details),
                     );
-                    if output_redaction_enabled {
-                        for detected_pattern in search_hit_output_redaction_patterns(hit) {
-                            let redaction_details = serde_json::json!({
-                                "queryHash": &q_hash,
-                                "rank": (rank + 1) as u32,
-                                "surface": "search",
-                                "memoryId": &hit.doc_id,
-                                "detectedPattern": detected_pattern,
-                                "action": audit_actions::REDACT_AT_OUTPUT,
-                            })
-                            .to_string();
-                            audit_batch.push(
-                                audit_ids,
-                                Some(&workspace_id),
-                                audit_actions::REDACT_AT_OUTPUT,
-                                Some("memory"),
-                                Some(&hit.doc_id),
-                                Some(redaction_details),
-                            );
+                    if let Some(miss_reason) = classify_search_query_miss(
+                        kept,
+                        pre_floor_count,
+                        floor,
+                        above_floor.first().map(|hit| hit.score),
+                    ) {
+                        let miss_details =
+                            search_query_miss_audit_details(SearchQueryMissAuditDetails {
+                                query_hash: &q_hash,
+                                reason: miss_reason,
+                                status,
+                                kept,
+                                considered: pre_floor_count,
+                                dropped_below_floor: dropped,
+                                floor,
+                                top_score_before_floor: pre_floor_top_score,
+                                top_score_after_floor: above_floor.first().map(|hit| hit.score),
+                            });
+                        audit_batch.push(
+                            audit_ids,
+                            Some(&workspace_id),
+                            audit_actions::SEARCH_MISS_RECORDED,
+                            Some("query_hash"),
+                            Some(&q_hash),
+                            Some(miss_details),
+                        );
+                    }
+                    for (rank, hit) in above_floor.iter().enumerate() {
+                        let returned_details = serde_json::json!({
+                            "queryHash": &q_hash,
+                            "rank": (rank + 1) as u32,
+                            "score": hit.score,
+                            "source": hit.source.as_str(),
+                        })
+                        .to_string();
+                        audit_batch.push(
+                            audit_ids,
+                            Some(&workspace_id),
+                            audit_actions::SEARCH_RETURNED_MEM,
+                            Some("memory"),
+                            Some(&hit.doc_id),
+                            Some(returned_details),
+                        );
+                        if output_redaction_enabled {
+                            for detected_pattern in search_hit_output_redaction_patterns(hit) {
+                                let redaction_details = serde_json::json!({
+                                    "queryHash": &q_hash,
+                                    "rank": (rank + 1) as u32,
+                                    "surface": "search",
+                                    "memoryId": &hit.doc_id,
+                                    "detectedPattern": detected_pattern,
+                                    "action": audit_actions::REDACT_AT_OUTPUT,
+                                })
+                                .to_string();
+                                audit_batch.push(
+                                    audit_ids,
+                                    Some(&workspace_id),
+                                    audit_actions::REDACT_AT_OUTPUT,
+                                    Some("memory"),
+                                    Some(&hit.doc_id),
+                                    Some(redaction_details),
+                                );
+                            }
                         }
                     }
+                    trace.record_elapsed("search::auditPayloadBuild", audit_payload_start);
+                    let audit_flush_start = Instant::now();
+                    audit_batch.flush_best_effort_with_connection(audit_connection);
+                    trace.record_elapsed("search::auditFlush", audit_flush_start);
                 }
-                trace.record_elapsed("search::auditPayloadBuild", audit_payload_start);
-                let audit_flush_start = Instant::now();
-                if let Some(conn) = audit_connection {
-                    audit_batch.flush_best_effort_with_connection(conn);
-                } else {
-                    audit_batch.flush_best_effort(&database_path);
-                }
-                trace.record_elapsed("search::auditFlush", audit_flush_start);
             }
 
             trace.record_elapsed("search::total", start);
@@ -9276,7 +9228,7 @@ fn live_admitted_evidence_doc_ids(
     }
 
     let database_path = options.resolve_database_path();
-    let Ok(connection) = DbConnection::open_file(&database_path) else {
+    let Ok(connection) = DbConnection::open_file_read_only(&database_path) else {
         return BTreeSet::new();
     };
     live_admitted_evidence_doc_ids_with_connection(options, evidence_ids, &connection)
@@ -9396,7 +9348,7 @@ fn apply_tombstone_visibility_collecting(
     if !explicit_database_path && !database_path.exists() {
         return hits;
     }
-    let connection = match DbConnection::open_file(&database_path) {
+    let connection = match DbConnection::open_file_read_only(&database_path) {
         Ok(connection) => connection,
         Err(error) => {
             degraded.push(SearchDegradation::tombstone_visibility_unavailable(
@@ -9735,7 +9687,7 @@ fn apply_memory_scope_visibility_with_metadata_mode_collecting(
         return (Vec::new(), stats);
     }
 
-    let connection = match DbConnection::open_file(&database_path) {
+    let connection = match DbConnection::open_file_read_only(&database_path) {
         Ok(connection) => connection,
         Err(error) => {
             for hit in &hits {
@@ -10349,7 +10301,7 @@ mod tests {
             Some("mem_00000000000000000000000001"),
             Some(r#"{"queryHash":"hash","rank":1}"#.to_owned()),
         );
-        batch.flush_best_effort(&database_path);
+        batch.flush_best_effort_with_connection(&connection);
 
         let mut entries = connection
             .list_audit_by_target("workspace", workspace_id, None)
@@ -10376,11 +10328,9 @@ mod tests {
 
     #[test]
     fn search_audit_batch_empty_is_no_op() {
-        // An empty batch must not even attempt to open the database.
-        // Pass a path that doesn't exist to prove no I/O is attempted.
-        let bogus = std::path::PathBuf::from("/this/path/does/not/exist/ee.db");
+        let connection = DbConnection::open_memory().expect("open in-memory audit fixture");
         let batch = SearchAuditBatch::new(0);
-        batch.flush_best_effort(&bogus);
+        batch.flush_best_effort_with_connection(&connection);
     }
 
     fn test_runtime_profile() -> RuntimeProfileReport {
@@ -16078,10 +16028,8 @@ mod tests {
 
     #[test]
     fn default_reranker_fetch_without_from_file_reports_network_unavailable() {
-        // bd-2vq2z.28: the reranker has no network/bundled fetch — fetch_rerank_model
-        // errors unconditionally without --from-file. This is WHY auto-provision
-        // must probe the on-disk cache and pass a real artifact as from_file
-        // rather than calling fetch with None (which can never succeed).
+        // The reranker has no network/bundled fetch. Registration is an
+        // explicit mutating command, so read-only search must never attempt it.
         let tempdir = tempfile::tempdir().expect("tempdir");
         let workspace = tempdir.path();
         let database_path = workspace.join("registry.db");
@@ -16101,28 +16049,6 @@ mod tests {
                 .contains("Network model fetch is not available"),
             "expected offline network-unavailable error, got: {error}"
         );
-    }
-
-    #[test]
-    fn default_cached_reranker_artifact_path_targets_model_store() {
-        // bd-2vq2z.28: auto-provision is available-when-cached, so the probe must
-        // target the same model-store layout fetch_rerank_model writes to
-        // ($HOME/.local/share/ee/models/rerank/<model_id>/rerank-default-v1.tar.zst).
-        // A wrong probe location would silently never discover a cached artifact.
-        if let Some(path) = default_cached_reranker_artifact_path("rerank-default-v1") {
-            let suffix = Path::new(".local")
-                .join("share")
-                .join("ee")
-                .join("models")
-                .join("rerank")
-                .join("rerank-default-v1")
-                .join("rerank-default-v1.tar.zst");
-            assert!(
-                path.ends_with(&suffix),
-                "cache probe must target the model store layout, got: {}",
-                path.display()
-            );
-        }
     }
 
     #[test]

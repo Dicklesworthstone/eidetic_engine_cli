@@ -243,9 +243,9 @@ use crate::core::rule::{
 use crate::core::search::{
     SearchDedupMode, SearchDegradation, SearchOptions, SearchReport,
     SearchScoreRecalibrationReport, SearchSourceMode, SimilarError, SimilarOptions, SimilarReport,
-    TypedMemoryFieldFilter, apply_memory_kind_and_typed_field_filters_to_report,
-    elapsed_timing_json, normalize_memory_kind_filter, recalibrate_search_score_calibration,
-    run_diag_search, run_search, run_search_with_performance, run_similar,
+    TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
+    recalibrate_search_score_calibration, run_diag_search, run_search_with_filters,
+    run_search_with_performance_and_filters, run_similar,
 };
 use crate::core::sentinel::{SentinelCheckContext, observe_sentinel_explicit};
 use crate::core::session_budget::{BudgetPlannerInput, plan_cheapest_next_command};
@@ -293,7 +293,7 @@ use crate::core::verify_ledger::{
     audit_rch_topology_closure, ingest_rch_verify_v1, list_rch_verify_blockers,
     list_rch_verify_runs,
 };
-use crate::core::why::{WhyOptions, explain_memory};
+use crate::core::why::{WhyOptions, explain_memory_with_connection};
 use crate::core::witness_retention::{
     WITNESS_PRUNE_REPORT_SCHEMA_V1, WitnessAction, WitnessRetentionPolicy,
     classify_witnesses_for_pruning,
@@ -42435,28 +42435,19 @@ where
 
     if args.explain_performance {
         let core_search_start = Instant::now();
-        return match run_search_with_performance(&options) {
-            Ok(mut run) => {
+        return match run_search_with_performance_and_filters(
+            &options,
+            kind_filter.as_deref(),
+            &typed_field_filters,
+        ) {
+            Ok(run) => {
                 command_timings.push(cli_performance_timing_json(
                     "command::coreSearch",
                     core_search_start.elapsed(),
                 ));
-                let typed_filter_start = Instant::now();
-                if let Err(error) = apply_memory_kind_and_typed_field_filters_to_report(
-                    &options,
-                    &mut run.report,
-                    kind_filter.as_deref(),
-                    &typed_field_filters,
-                ) {
-                    let domain_error = DomainError::SearchIndex {
-                        message: error.to_string(),
-                        repair: error.repair_hint().map(str::to_string),
-                    };
-                    return write_domain_error(&domain_error, true, stdout, stderr);
-                }
                 command_timings.push(cli_performance_timing_json(
                     "command::typedFilterApply",
-                    typed_filter_start.elapsed(),
+                    Duration::ZERO,
                 ));
                 let payload_start = Instant::now();
                 let mut payload = run.report.performance_explain_json_with_trace(
@@ -42493,47 +42484,28 @@ where
         };
     }
 
-    match run_search(&options) {
-        Ok(mut report) => {
-            if let Err(error) = apply_memory_kind_and_typed_field_filters_to_report(
-                &options,
-                &mut report,
-                kind_filter.as_deref(),
-                &typed_field_filters,
-            ) {
-                let domain_error = DomainError::SearchIndex {
-                    message: error.to_string(),
-                    repair: error.repair_hint().map(str::to_string),
-                };
-                return write_domain_error(
-                    &domain_error,
-                    cli.wants_json() || args.explain_performance,
-                    stdout,
-                    stderr,
-                );
+    match run_search_with_filters(&options, kind_filter.as_deref(), &typed_field_filters) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
             }
-            match cli.renderer() {
-                output::Renderer::Human | output::Renderer::Markdown => {
-                    write_stdout(stdout, &report.human_summary())
-                }
-                output::Renderer::Toon => write_stdout(
-                    stdout,
-                    &(format_search_toon_with_mesh(&report, args.mesh_mode) + "\n"),
-                ),
-                output::Renderer::Json
-                | output::Renderer::Jsonl
-                | output::Renderer::Compact
-                | output::Renderer::Hook => write_stdout(
-                    stdout,
-                    &(format_search_json_with_mesh_and_recalibration(
-                        &report,
-                        args.mesh_mode,
-                        recalibration.as_ref(),
-                        args.explain.then_some("data.results"),
-                    ) + "\n"),
-                ),
-            }
-        }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(format_search_toon_with_mesh(&report, args.mesh_mode) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(format_search_json_with_mesh_and_recalibration(
+                    &report,
+                    args.mesh_mode,
+                    recalibration.as_ref(),
+                    args.explain.then_some("data.results"),
+                ) + "\n"),
+            ),
+        },
         Err(error) => {
             let domain_error = DomainError::SearchIndex {
                 message: error.to_string(),
@@ -46682,7 +46654,49 @@ where
         confidence_threshold: args.confidence_threshold,
     };
 
-    let mut report = explain_memory(&options);
+    let read_pool = crate::db::read_pool::registered_process_read_pool(
+        crate::db::DatabaseConfig::file(database_path.clone()),
+        crate::db::read_pool::PoolConfig::default_single(),
+    );
+    let read_snapshot = match read_pool.pin_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to acquire why read snapshot: {error}"),
+                repair: Some("ee status --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let connection = match read_snapshot.checked_connection() {
+        Ok(connection) => connection,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Why read snapshot became unavailable: {error}"),
+                repair: Some("ee status --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    match connection.needs_migration() {
+        Ok(false) => {}
+        Ok(true) => {
+            let domain_error = DomainError::MigrationRequired {
+                message: "Database migration is required before read-only why.".to_owned(),
+                repair: Some("ee migrate run --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to inspect database migration state before why: {error}"),
+                repair: Some("ee migrate status --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    }
+
+    let mut report = explain_memory_with_connection(&options, connection);
 
     if let Some(ref error) = report.error {
         let domain_error = DomainError::Storage {
@@ -46703,7 +46717,7 @@ where
 
     if args.causal_explain {
         let causal_explanation = match causal_explain_feature_enabled(cli) {
-            Ok(true) => why_causal_explanation_json(&database_path, &args.memory_id),
+            Ok(true) => why_causal_explanation_json(connection, &args.memory_id),
             Ok(false) => why_causal_explanation_feature_disabled_json(&args.memory_id),
             Err(error) => {
                 let domain_error = config_surface_error_to_domain(error);
@@ -46713,13 +46727,20 @@ where
         report = report.with_causal_explanation(causal_explanation);
     }
     let sentinel_data = if args.include_sentinel {
-        match why_sentinel_data(&database_path, &args.memory_id) {
+        match why_sentinel_data(connection, &args.memory_id) {
             Ok(data) => Some(data),
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         }
     } else {
         None
     };
+    if let Err(error) = read_snapshot.commit() {
+        let domain_error = DomainError::Storage {
+            message: format!("Failed to release why read snapshot: {error}"),
+            repair: Some("ee status --workspace . --json".to_owned()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
 
     if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
         write_stdout(stdout, &(output::render_why_mermaid(&report) + "\n"))
@@ -46752,17 +46773,9 @@ where
 }
 
 fn why_sentinel_data(
-    database_path: &Path,
+    connection: &DbConnection,
     memory_id: &str,
 ) -> Result<serde_json::Value, DomainError> {
-    let connection =
-        DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
-            message: format!(
-                "Failed to open database {} for sentinel history: {error}",
-                database_path.display()
-            ),
-            repair: Some("ee doctor --workspace . --json".to_string()),
-        })?;
     let specs = connection
         .list_memory_sentinel_specs(memory_id)
         .map_err(|error| DomainError::Storage {
@@ -47206,28 +47219,10 @@ fn format_coverage_gap_human(report: &crate::pack::CoverageGapReport) -> String 
     out
 }
 
-fn why_causal_explanation_json(database_path: &Path, memory_id: &str) -> serde_json::Value {
-    let connection = match crate::db::DbConnection::open_file(database_path) {
-        Ok(connection) => connection,
-        Err(error) => {
-            return empty_why_causal_explanation_json(
-                memory_id,
-                "graph_causal_projection_unavailable",
-                "medium",
-                format!("Failed to open workspace database for causal explanation: {error}"),
-                Some("ee doctor --workspace . --json".to_owned()),
-            );
-        }
-    };
-    if let Err(error) = connection.migrate() {
-        return empty_why_causal_explanation_json(
-            memory_id,
-            "graph_causal_projection_unavailable",
-            "medium",
-            format!("Failed to migrate database before causal explanation: {error}"),
-            Some("ee migrate run --workspace . --json".to_owned()),
-        );
-    }
+fn why_causal_explanation_json(
+    connection: &crate::db::DbConnection,
+    memory_id: &str,
+) -> serde_json::Value {
     let memory = match connection.get_memory(memory_id) {
         Ok(Some(memory)) => memory,
         Ok(None) => {
@@ -60715,6 +60710,9 @@ impl NormalizedInvocation {
                     SchemaCommand::Export { .. } => "schema export".to_string(),
                 },
                 Command::Impact(_) => "impact".to_string(),
+                Command::Search(args) if args.recalibrate_now => {
+                    "search --recalibrate-now".to_string()
+                }
                 Command::Search(_) => "search".to_string(),
                 Command::Similar(_) => "similar".to_string(),
                 Command::Sentinel(command) => match command {
@@ -79226,6 +79224,44 @@ demos:
         ensure(
             !dry_mutates,
             "review session --propose --dry-run previews without persisting",
+        )
+    }
+
+    #[test]
+    fn search_recalibrate_now_resolves_to_derived_write_effect() -> TestResult {
+        let manifest = crate::core::effect::EffectManifest::build();
+        let effect_for = |argv: &[&str]| -> Result<(String, bool), String> {
+            let cli = Cli::try_parse_from(argv.iter().copied())
+                .map_err(|error| format!("parse {argv:?}: {error}"))?;
+            let args = argv.iter().map(OsString::from).collect::<Vec<_>>();
+            let path = super::NormalizedInvocation::from_cli(&cli, &args).command_path;
+            let effect = manifest
+                .get(&path)
+                .ok_or_else(|| format!("no effect manifest entry for {path:?}"))?;
+            Ok((path, effect.default_effect.is_mutating()))
+        };
+
+        let (read_path, read_mutates) = effect_for(&["ee", "search", "release"])?;
+        ensure_equal(
+            &read_path,
+            &"search".to_owned(),
+            "ordinary search command path",
+        )?;
+        ensure(
+            !read_mutates,
+            "ordinary search must remain a read-only snapshot",
+        )?;
+
+        let (recalibrate_path, recalibrate_mutates) =
+            effect_for(&["ee", "search", "release", "--recalibrate-now"])?;
+        ensure_equal(
+            &recalibrate_path,
+            &"search --recalibrate-now".to_owned(),
+            "recalibrating search command path",
+        )?;
+        ensure(
+            recalibrate_mutates,
+            "search --recalibrate-now must declare its derived artifact write",
         )
     }
 
