@@ -41,6 +41,52 @@ boundary migration coverage path before source work starts.
 Do not reuse migration numbers. If the compiled tail moves past `V086`, update
 this registry in the same change that adds the runtime migration.
 
+### V085 legacy-evidence remediation
+
+`V085_EVIDENCE_SECURITY_POSTURE` immediately denies pre-migration evidence and
+removes its raw upstream references. It does not silently infer trust or
+rewrite stored excerpts. An operator can then re-screen legacy rows through the
+bounded maintenance job:
+
+```bash
+# Apply the fail-closed posture before requesting a rescreen preview.
+ee migrate run --workspace . --json
+
+# Preview the next deterministic batch; this never writes evidence or audit rows.
+ee job run evidence_rescreen --workspace . --item-limit 500 --dry-run --json
+
+# Apply exactly one preview-sized batch in a transaction.
+ee job run evidence_rescreen --workspace . --item-limit 500 --json
+```
+
+Repeat the apply command while `pendingAfter` is greater than zero. Each
+rewritten row gets one redaction-safe `evidence.security_rescreen` audit record;
+reruns skip completed rows. Recognized producers are re-screened under the
+current policy, supporting evidence remains denied from direct retrieval, and
+ambiguous, malformed, instruction-like, or cross-workspace rows remain
+quarantined. The report exposes IDs, dispositions, reason codes, and counts,
+never the raw excerpt or upstream path.
+
+Applying the job can permanently replace secrets in legacy excerpts with
+redaction markers, while the V085 migration itself permanently replaces raw
+upstream references. Before migrating or applying the job, create a protected
+offline snapshot of the entire workspace `.ee` state if exact byte-for-byte
+recovery is required. Stop all writers first and keep the database, WAL, and
+shared-memory files together. The normal `ee backup create` artifact is still
+recommended for logical source-of-truth recovery, but it is intentionally
+redacted and does not preserve raw legacy evidence as an in-place rollback
+mechanism.
+
+There is no automatic in-place rollback because restoring the old evidence
+would reintroduce the unsafe bytes. If recovery is required, validate the
+protected snapshot in an isolated side path and make the restore decision
+explicit. After the final applied batch—and after any explicit restore—rebuild
+the derived index so stale pre-remediation bytes cannot remain searchable:
+
+```bash
+ee index rebuild --workspace . --json
+```
+
 ## Allocations
 
 | Version | Allocation | Status | Bead | Durable scope |
