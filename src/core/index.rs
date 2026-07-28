@@ -3003,7 +3003,7 @@ fn first_existing_index_symlink_component(
     // every component below the temp root is still inspected without following
     // symlinks, so an attacker-controlled parent inside the temp tree remains
     // rejected.
-    let inspected_path = path_with_canonical_temp_prefix(path);
+    let inspected_path = crate::util::path_with_canonical_process_temp_prefix(path);
     let mut current = PathBuf::new();
     for component in inspected_path.components() {
         match component {
@@ -3030,17 +3030,6 @@ fn first_existing_index_symlink_component(
         }
     }
     Ok(None)
-}
-
-fn path_with_canonical_temp_prefix(path: &Path) -> PathBuf {
-    let temp_dir = std::env::temp_dir();
-    let Ok(suffix) = path.strip_prefix(&temp_dir) else {
-        return path.to_path_buf();
-    };
-    let Ok(canonical_temp_dir) = temp_dir.canonicalize() else {
-        return path.to_path_buf();
-    };
-    canonical_temp_dir.join(suffix)
 }
 
 fn path_is_regular_file_no_follow(path: &Path) -> bool {

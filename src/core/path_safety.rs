@@ -24,8 +24,9 @@ use std::path::{Component, Path, PathBuf};
 /// the walk correct both for the canonicalized, `\\?\`-prefixed paths Rust
 /// produces on Windows and for ordinary POSIX paths.
 pub(crate) fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
+    let inspected_path = crate::util::path_with_canonical_process_temp_prefix(path);
     let mut current = PathBuf::new();
-    for component in path.components() {
+    for component in inspected_path.components() {
         current.push(component.as_os_str());
         if matches!(component, Component::Prefix(_) | Component::RootDir) {
             continue;
@@ -107,7 +108,10 @@ mod tests {
         let found = first_existing_symlink_component(&through_link)
             .expect("walk succeeds")
             .expect("symlink component detected");
-        assert_eq!(found, link);
+        assert_eq!(
+            found,
+            crate::util::path_with_canonical_process_temp_prefix(&link)
+        );
 
         let _ = fs::remove_dir_all(&base);
     }

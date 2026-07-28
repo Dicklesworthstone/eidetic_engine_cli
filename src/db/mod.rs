@@ -765,8 +765,9 @@ struct SymlinkComponentInspectionError {
 fn first_existing_symlink_component(
     path: &Path,
 ) -> std::result::Result<Option<PathBuf>, SymlinkComponentInspectionError> {
+    let inspected_path = crate::util::path_with_canonical_process_temp_prefix(path);
     let mut current = PathBuf::new();
-    for component in path.components() {
+    for component in inspected_path.components() {
         current.push(component.as_os_str());
         #[cfg(windows)]
         if matches!(
@@ -7256,9 +7257,11 @@ UPDATE workspace_generations
 /// the owning workspace through the rule instead of trusting the linked
 /// memory's workspace.
 ///
-/// Existing databases never counted this source family. The final repair adds
-/// each pre-existing rule and junction row exactly once without lowering (or
-/// resetting) an already higher live generation.
+/// Existing databases never counted this source family. The final repair
+/// advances each workspace containing a pre-existing rule exactly once. A
+/// generation is a monotonic invalidation watermark, not a row counter, so one
+/// workspace-scoped bump is sufficient and avoids correlated scalar subqueries
+/// that are not supported by every pinned FrankenSQLite execution path.
 pub const V086_RULE_INDEX_GENERATIONS: Migration = Migration::new(
     86,
     "rule_index_generations",
@@ -7419,22 +7422,13 @@ INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_a
 SELECT id, 0, updated_at FROM workspaces;
 
 UPDATE workspace_generations
-   SET generation = generation
-       + (SELECT COUNT(*) FROM procedural_rules r
-           WHERE r.workspace_id = workspace_generations.workspace_id)
-       + (SELECT COUNT(*) FROM rule_tags rt
-           JOIN procedural_rules r ON r.id = rt.rule_id
-          WHERE r.workspace_id = workspace_generations.workspace_id)
-       + (SELECT COUNT(*) FROM rule_source_memories rsm
-           JOIN procedural_rules r ON r.id = rsm.rule_id
-          WHERE r.workspace_id = workspace_generations.workspace_id),
+   SET generation = generation + 1,
        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
- WHERE EXISTS (
-    SELECT 1 FROM procedural_rules r
-     WHERE r.workspace_id = workspace_generations.workspace_id
+ WHERE workspace_id IN (
+    SELECT DISTINCT workspace_id FROM procedural_rules
  );
 "#,
-    "blake3:v086_rule_index_generations_2026_07_28",
+    "blake3:v086_rule_index_generations_workspace_invalidation_2026_07_28",
 );
 
 /// All migrations in version order.
@@ -27695,12 +27689,12 @@ mod tests {
         )?;
         ensure_equal(
             &workspace_generation(&connection, workspace_id)?,
-            &(generation_before + 3),
-            "V086 invalidates one legacy rule, tag, and source-memory join",
+            &(generation_before + 1),
+            "V086 invalidates a workspace containing legacy rule projections",
         )?;
         ensure_equal(
             &workspace_generation(&connection, other_workspace_id)?,
-            &102,
+            &101,
             "V086 advances rather than rewinds an already higher generation",
         )?;
 

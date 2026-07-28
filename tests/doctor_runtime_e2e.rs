@@ -404,16 +404,20 @@ fn finish_refuses_regular_latest_without_overwriting_or_removing_it() {
     let latest = ws.path().join(".doctor").join("latest");
     let sentinel = b"peer-owned regular latest file";
     fs::write(&latest, sentinel).expect("plant regular latest file");
+    let canonical_latest = latest.canonicalize().expect("canonical latest path");
 
     let result = ctx.finish(RunStatus::CompletedOk);
 
-    assert!(matches!(
-        result,
-        Err(DoctorRuntimeError::UnsafeLatestEntry {
-            ref path,
-            ref observed_kind,
-        }) if path == &latest && observed_kind == "regular file"
-    ));
+    assert!(
+        matches!(
+            &result,
+            Err(DoctorRuntimeError::UnsafeLatestEntry {
+                path,
+                observed_kind,
+            }) if path == &canonical_latest && observed_kind == "regular file"
+        ),
+        "unexpected finish result: {result:?}"
+    );
     assert_eq!(
         fs::read(&latest).expect("read preserved latest"),
         sentinel,
