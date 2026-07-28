@@ -308,7 +308,8 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_c
 This downloads the latest release binary for your platform, always verifies its
 SHA-256 checksum, verifies its Sigstore bundle when one is published and
 `cosign` is available, drops `ee` into `~/.local/bin`, installs shell
-completions, repairs writable `~/.zshrc`/`~/.bashrc` files, and runs `ee --version` plus `ee doctor --json`.
+completions, repairs writable zsh/bash startup files (creating the active
+shell's file for a fresh home), and runs `ee --version` plus `ee doctor --json`.
 The informational agent scan prints setup guidance without changing agent settings. Open a new shell (or source its rc file) afterward.
 Re-running the command repairs `PATH` and completions and re-verifies a matching version without downloading or rebuilding it.
 Pass `--require-provenance` to require its signature and SLSA attestation; otherwise a missing bundle is reported and the checksum-verified install continues.

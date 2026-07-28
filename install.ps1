@@ -843,13 +843,13 @@ function Show-AgentIntegration {
         Write-Host "      Before risky shell commands:"
         Write-Host "        ee preflight check --cmd `"<shell command>`" --workspace . --json"
         Write-Host "      Before substantial work:"
-        Write-Host "        ee context `"<task>`" --workspace . --max-tokens 4000 --format markdown"
+        Write-Host "        ee pack `"<task>`" --workspace . --max-tokens 4000 --format markdown"
         Write-Host ""
     }
     if ($Agents -contains "Codex CLI") {
         if ($Script:Color) { Write-Host "  -> Codex CLI" -ForegroundColor Cyan } else { Write-Host "  -> Codex CLI" }
         Write-Host "      Before substantial work:"
-        Write-Host "        ee context `"<task>`" --workspace . --json"
+        Write-Host "        ee pack `"<task>`" --workspace . --json"
         Write-Host "      Optional risk guard:"
         Write-Host "        ee preflight check --cmd `"<command>`" --workspace . --json"
         Write-Host ""
@@ -858,7 +858,7 @@ function Show-AgentIntegration {
         if ($Script:Color) { Write-Host "  -> Gemini CLI" -ForegroundColor Cyan } else { Write-Host "  -> Gemini CLI" }
         Write-Host "      For BeforeTool integration, see docs/agent-ux/auto_enrollment_onboarding.md"
         Write-Host "      For context packs:"
-        Write-Host "        ee context `"<task>`" --workspace . --json"
+        Write-Host "        ee pack `"<task>`" --workspace . --json"
         Write-Host ""
     }
     if ($Agents -contains "Cursor IDE") {
@@ -875,7 +875,7 @@ function Show-AgentIntegration {
     if ($other.Count -gt 0) {
         if ($Script:Color) { Write-Host "  -> Aider / Continue / Copilot CLI" -ForegroundColor Cyan } else { Write-Host "  -> Aider / Continue / Copilot CLI" }
         Write-Host "      No documented PreToolUse surface for ee yet. Call directly from your prompt setup:"
-        Write-Host "        ee context `"<task>`" --workspace . --json"
+        Write-Host "        ee pack `"<task>`" --workspace . --json"
         Write-Host ""
     }
 }
@@ -900,7 +900,7 @@ function Show-Summary {
     Write-Host ""
     Write-Host "  Get started:"
     Write-Host "    ee init --workspace ."
-    Write-Host "    ee context `"<task>`" --workspace . --max-tokens 4000"
+    Write-Host "    ee pack `"<task>`" --workspace . --max-tokens 4000"
     Write-Host "    ee --help"
     Write-Host ""
     Write-Host "  Inspect health: ee doctor --json"

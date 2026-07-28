@@ -244,6 +244,10 @@ if (Test-Path $installPath) {
         -Assertion "show_agent_integration_array_wraps_optional_agents" `
         -Condition ($arrayAssignmentIndex -ge 0 -and $countReadIndex -gt $arrayAssignmentIndex -and $functionText -match '\$other\s*=\s*@\(\s*@\(') `
         -Diagnosis "Show-AgentIntegration must wrap optional-agent Where-Object results in @() before reading .Count under Set-StrictMode -Version Latest"
+    Assert-True `
+        -Assertion "installer_guidance_uses_canonical_pack_surface" `
+        -Condition ($installText -match 'ee pack' -and $installText -notmatch 'ee context') `
+        -Diagnosis "install.ps1 must introduce new users to canonical ee pack, not the soft-deprecated ee context alias"
 
     $testInstalledVersion = $ast.Find({
         param($node)
@@ -392,7 +396,7 @@ if (Test-Path $releaseWorkflowPath) {
 
 if (Test-Path $conformancePath) {
     $conformanceText = Get-Content -Raw -Path $conformancePath
-    foreach ($rowId in @("WIN-PS1-003", "WIN-PS1-004", "WIN-PS1-005", "WIN-PS1-006", "WIN-PS1-007", "WIN-PS1-008", "WIN-PS1-009", "WIN-PS1-010", "WIN-PS1-012", "WIN-PS1-013", "WIN-PS1-014")) {
+    foreach ($rowId in @("WIN-PS1-003", "WIN-PS1-004", "WIN-PS1-005", "WIN-PS1-006", "WIN-PS1-007", "WIN-PS1-008", "WIN-PS1-009", "WIN-PS1-010", "WIN-PS1-012", "WIN-PS1-013", "WIN-PS1-014", "WIN-PS1-015")) {
         Assert-True `
             -Assertion "conformance_matrix_includes_$rowId" `
             -Condition ($conformanceText -match [regex]::Escape($rowId)) `

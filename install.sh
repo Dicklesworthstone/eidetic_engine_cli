@@ -13,7 +13,7 @@
 #   --version vX.Y.Z   Install specific version (default: latest)
 #   --dest DIR         Install to DIR (default: ~/.local/bin)
 #   --system           Install to /usr/local/bin (requires sudo)
-#   --easy-mode        Auto-update PATH in ~/.zshrc/~/.bashrc
+#   --easy-mode        Persist PATH in the active zsh/bash startup file
 #   --verify           Run `ee --version` and `ee doctor --json` self-test
 #   --from-source      Build from source instead of downloading binary
 #   --quiet, -q        Suppress non-error output
@@ -315,7 +315,7 @@ Options:
   --version vX.Y.Z   Install specific version (default: latest GitHub release)
   --dest DIR         Install to DIR (default: ~/.local/bin)
   --system           Install to /usr/local/bin (requires write permission)
-  --easy-mode        Auto-update PATH in ~/.zshrc and ~/.bashrc
+  --easy-mode        Persist PATH in zsh/bash startup files, creating the active one if absent
   --verify           Run \`ee --version\` and \`ee doctor --json\` after install
   --artifact-url URL Override the tarball download URL
   --checksum HEX     Use this SHA256 instead of fetching <url>.sha256
@@ -787,33 +787,62 @@ check_installed_version() {
 # ───────────────────────────────────────────────────────────────────────────
 
 maybe_add_path() {
+  local path_active=0
   case ":$PATH:" in
-    *:"$DEST":*) return 0 ;;
-    *)
-      if [ "$EASY" -eq 1 ]; then
-        local appended=0
-        local rc_existed=0
-        for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
-          if [ -e "$rc" ] && [ -w "$rc" ]; then
-            rc_existed=1
-            if ! grep -F "$DEST" "$rc" >/dev/null 2>&1; then
-              echo "export PATH=\"$DEST:\$PATH\"" >> "$rc"
-              appended=1
-            fi
-          fi
-        done
-        if [ "$appended" -eq 1 ]; then
-          warn "PATH updated in ~/.zshrc/.bashrc — restart your shell to use $BINARY"
-        elif [ "$rc_existed" -eq 1 ]; then
-          info "PATH already configured in ~/.zshrc/.bashrc — restart your shell to use $BINARY"
-        else
-          warn "Add $DEST to PATH to use $BINARY (no writable ~/.zshrc or ~/.bashrc found)"
-        fi
-      else
-        warn "Add $DEST to PATH to use $BINARY (or re-run with --easy-mode to auto-update)"
-      fi
-      ;;
+    *:"$DEST":*) path_active=1 ;;
   esac
+
+  if [ "$EASY" -ne 1 ]; then
+    if [ "$path_active" -eq 0 ]; then
+      warn "Add $DEST to PATH to use $BINARY (or re-run with --easy-mode to auto-update)"
+    fi
+    return 0
+  fi
+
+  # `--easy-mode` promises persistent integration, so do not return merely
+  # because this process inherited DEST on PATH. A transient PATH entry must
+  # not hide a missing startup-file entry on a matching-version repair run.
+  local preferred_rc=""
+  case "${SHELL:-}" in
+    */zsh) preferred_rc="$HOME/.zshrc" ;;
+    */bash) preferred_rc="$HOME/.bashrc" ;;
+  esac
+
+  # Brand-new macOS/Linux accounts may not have an rc file yet. Create only
+  # the active supported shell's file, refuse dangling symlinks, and use a
+  # private creation mode. Existing writable zsh/bash files are still kept in
+  # sync for users who switch between the two shells.
+  if [ -n "$preferred_rc" ] && [ ! -e "$preferred_rc" ] && [ ! -L "$preferred_rc" ] \
+     && [ -d "$HOME" ] && [ -w "$HOME" ]; then
+    (umask 077; : > "$preferred_rc") 2>/dev/null || true
+  fi
+
+  local appended=0
+  local configured=0
+  local path_line="export PATH=\"$DEST:\$PATH\""
+  local rc
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    if [ -f "$rc" ] && [ -w "$rc" ]; then
+      if grep -F "$DEST" "$rc" >/dev/null 2>&1; then
+        configured=1
+      elif printf '%s\n' "$path_line" >> "$rc"; then
+        appended=1
+        configured=1
+      else
+        warn "Could not update PATH in $rc"
+      fi
+    fi
+  done
+
+  if [ "$appended" -eq 1 ]; then
+    warn "PATH updated in shell startup files — restart your shell to use $BINARY"
+  elif [ "$configured" -eq 1 ]; then
+    info "PATH already configured in shell startup files — restart your shell to use $BINARY"
+  elif [ "$path_active" -eq 1 ]; then
+    warn "$DEST is active in this shell, but no writable zsh/bash startup file was available to persist it"
+  else
+    warn "Add $DEST to PATH to use $BINARY (no writable zsh/bash startup file was available)"
+  fi
 }
 
 detect_default_shell() {
@@ -1550,7 +1579,7 @@ Before risky shell commands:
   ee preflight check --cmd \"<shell command>\" --workspace . --json
 
 Before substantial work:
-  ee context \"<task>\" --workspace . --max-tokens 4000 --format markdown
+  ee pack \"<task>\" --workspace . --max-tokens 4000 --format markdown
 
 Or wire as a PreToolUse hook (writes a shell snippet to stdout):
   $DEST/$BINARY hook preflight-shell --shell bash"
@@ -1560,7 +1589,7 @@ Or wire as a PreToolUse hook (writes a shell snippet to stdout):
   if is_agent_detected "codex-cli"; then
     print_integration_snippet "Codex CLI (~/.codex/AGENTS.md)" "\
 Before substantial work:
-  ee context \"<task>\" --workspace . --json
+  ee pack \"<task>\" --workspace . --json
 
 Optional risk guard (call from codex shell hooks):
   ee preflight check --cmd \"<command>\" --workspace . --json"
@@ -1572,7 +1601,7 @@ Optional risk guard (call from codex shell hooks):
 For BeforeTool integration, see the ee docs:
   $DEST/$BINARY hook preflight-shell --shell bash
 For context packs:
-  ee context \"<task>\" --workspace . --json"
+  ee pack \"<task>\" --workspace . --json"
     echo ""
   fi
 
@@ -1589,7 +1618,7 @@ docs/agent-ux/auto_enrollment_onboarding.md for current guidance."
     print_integration_snippet "Aider / Continue / Copilot CLI" "\
 These harnesses don't have a documented PreToolUse hook surface for ee yet.
 You can still call ee directly from your prompt setup:
-  ee context \"<task>\" --workspace . --json"
+  ee pack \"<task>\" --workspace . --json"
     echo ""
   fi
 }
@@ -1613,7 +1642,7 @@ if [ "$HAS_GUM" -eq 1 ] && [ "$NO_GUM" -eq 0 ]; then
     echo ""
     gum style --foreground 245 "Get started:"
     gum style --foreground 39  "  ee init --workspace ."
-    gum style --foreground 39  "  ee context \"<task>\" --workspace . --max-tokens 4000"
+    gum style --foreground 39  "  ee pack \"<task>\" --workspace . --max-tokens 4000"
     gum style --foreground 39  "  ee --help"
     echo ""
     gum style --foreground 245 --italic "Inspect health:  ee doctor --json"
@@ -1628,7 +1657,7 @@ else
   echo ""
   echo -e "  Get started:"
   echo -e "    \033[0;34mee init --workspace .\033[0m"
-  echo -e "    \033[0;34mee context \"<task>\" --workspace . --max-tokens 4000\033[0m"
+  echo -e "    \033[0;34mee pack \"<task>\" --workspace . --max-tokens 4000\033[0m"
   echo -e "    \033[0;34mee --help\033[0m"
   echo ""
   echo -e "  \033[0;90mInspect health:  ee doctor --json\033[0m"

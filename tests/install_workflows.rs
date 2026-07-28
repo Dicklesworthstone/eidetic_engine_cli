@@ -485,10 +485,6 @@ fn matching_version_installer_command(
     fs::create_dir_all(&home).map_err(|error| error.to_string())?;
     fs::create_dir_all(&dest).map_err(|error| error.to_string())?;
     fs::create_dir_all(&mock_bin).map_err(|error| error.to_string())?;
-    let zshrc = home.join(".zshrc");
-    if !zshrc.exists() {
-        fs::write(zshrc, "").map_err(|error| error.to_string())?;
-    }
 
     write_installer_fixture_script(
         &dest.join("ee"),
@@ -540,7 +536,14 @@ exec /bin/mkdir "$@"
 "#,
     )?;
 
-    let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", mock_bin.display());
+    // Keep the destination active in this process PATH while leaving the
+    // fresh HOME without any shell rc files. `--easy-mode` must still create
+    // and persist the active shell's startup file rather than returning early.
+    let path = format!(
+        "{}:{}:/usr/bin:/bin:/usr/sbin:/sbin",
+        mock_bin.display(),
+        dest.display()
+    );
     let mut command = Command::new("/bin/bash");
     command
         .arg(installer)
@@ -626,6 +629,10 @@ fn matching_version_installer_rerun_repairs_integration_without_acquisition() ->
         1,
         "matching-version PATH repair count",
     )?;
+    ensure(
+        !root.join("home/.bashrc").exists(),
+        "fresh zsh integration should create only the active shell startup file",
+    )?;
     ensure_equal(
         fs::read_to_string(root.join("home/.local/share/zsh/site-functions/_ee"))
             .map_err(|error| format!("failed to read generated zsh completion: {error}"))?,
@@ -707,6 +714,26 @@ fn matching_version_installer_verify_fails_on_nonzero_version_command() -> TestR
         !mkdir_log.contains("ee-install.lock.d"),
         "failed matching-version verification must remain lock-free",
     )
+}
+
+#[test]
+fn installers_recommend_the_canonical_pack_surface() -> TestResult {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for installer in ["install.sh", "install.ps1"] {
+        let content = fs::read_to_string(root.join(installer))
+            .map_err(|error| format!("failed to read {installer}: {error}"))?;
+        ensure(
+            content.contains("ee pack"),
+            &format!("{installer} should recommend the canonical ee pack surface"),
+        )?;
+        ensure(
+            !content.contains("ee context"),
+            &format!(
+                "{installer} should not introduce new users to the soft-deprecated ee context alias"
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
