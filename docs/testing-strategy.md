@@ -251,7 +251,7 @@ workspace/artifacts.
 
 The script proves:
 
-- `ee capture suggest` is read-only, returns `ee.capture_suggestions.v1`,
+- `ee capture suggest` is read-only, returns `ee.capture_suggestions.v2`,
   emits explicit accept/reject commands, and preserves the source workspace in
   every returned command.
 - `ee review session --propose` creates curation proposals for a fixture CASS

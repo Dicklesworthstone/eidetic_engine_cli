@@ -9043,19 +9043,15 @@ pub struct DoctorArgs {
     )]
     pub diff: Vec<String>,
 
-    /// Apply auto-fixers for detected P0/P1 failure modes, routing every
-    /// mutation through the `src/core/doctor_runtime::mutate` chokepoint.
+    /// Apply registered auto-fixers for detected P0/P1 failure modes,
+    /// routing every mutation through the
+    /// `src/core/doctor_runtime::mutate` chokepoint.
     /// Opens a `<workspace>/.doctor/runs/<run-id>/` directory under the
-    /// `RunContext` lock, runs the fixer dispatch table (per-FM fixers
-    /// land via `bd-tu4s8`), and finishes the run with a `RunSummary`
-    /// emitted as `ee.doctor.fix_summary.v1`. Until the fixer dispatch
-    /// table is fully populated by `bd-tu4s8`, the surface is a no-op
-    /// chokepoint scaffold: it acquires the run lock, allocates the
-    /// run dir, finishes with `RunStatus::CompletedOk` and zero
-    /// actions, and emits the run summary so the caller can verify
-    /// runtime reachability + lock semantics from the CLI without any
-    /// file mutations. Pair with `--undo <RUN_ID>` to release the
-    /// run-dir / lock cycle.
+    /// `RunContext` lock, runs the supported fixer dispatch table, and
+    /// finishes the run with a `RunSummary`. JSON mode emits the canonical
+    /// `ee.response.v2` envelope with typed `ee.doctor.fix_summary.v1`
+    /// data. Pair with `--undo <RUN_ID>` to reverse recorded actions and
+    /// release the run-dir / lock cycle.
     #[arg(
         long = "fix",
         action = ArgAction::SetTrue,
@@ -12893,8 +12889,13 @@ where
                 let workspace = cli.workspace.clone().unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 });
-                write_stdout(stdout, &(doctor_fix_json(&workspace) + "\n"));
-                return ProcessExitCode::Success;
+                let (json, command_exit) = doctor_fix_json(&workspace);
+                let write_exit = write_stdout(stdout, &(json + "\n"));
+                return if write_exit == ProcessExitCode::Success {
+                    command_exit
+                } else {
+                    write_exit
+                };
             }
             if let Some(run_id) = args.undo.as_deref() {
                 let workspace = cli.workspace.clone().unwrap_or_else(|| {
@@ -16133,7 +16134,9 @@ fn build_eval_search_index_from_memories(
         });
     }
 
+    let documents_total = u32::try_from(documents.len()).unwrap_or(u32::MAX);
     let index_dir = index_dir.to_path_buf();
+    let metadata_index_dir = index_dir.clone();
     crate::core::run_cli_future(async move {
         // Invariant: run_cli_future's block_on installs an ambient runtime Cx.
         #[allow(clippy::expect_used)]
@@ -16155,7 +16158,14 @@ fn build_eval_search_index_from_memories(
     })
     .and_then(|stats| {
         if stats.errors.is_empty() {
-            Ok(())
+            crate::core::index::write_memory_eval_index_metadata(
+                &metadata_index_dir,
+                documents_total,
+            )
+            .map_err(|error| DomainError::SearchIndex {
+                message: format!("failed to finalize eval fixture index metadata: {error}"),
+                repair: Some("Check the temporary index path and retry the evaluation.".to_owned()),
+            })
         } else {
             let details = stats
                 .errors
@@ -19811,19 +19821,16 @@ fn doctor_run_diff_json(workspace: &Path, baseline_id: &str, comparison_id: &str
 /// Wire the agent-facing `ee doctor --fix` surface onto the runtime
 /// chokepoint. Per bd-3boan pass-2 + AGENTS.md RULE 1, this surface
 /// MUST route every file mutation through
-/// `src/core/doctor_runtime::mutate`. Until the per-FM fixer dispatch
-/// table lands via bd-tu4s8, this scaffold:
+/// `src/core/doctor_runtime::mutate`. The command:
 ///
 /// * acquires the doctor run lock via `RunContext::start`,
 /// * allocates the `<workspace>/.doctor/runs/<run-id>/` directory,
-/// * finishes the run with `RunStatus::CompletedOk` and zero actions,
-/// * emits the resulting `RunSummary` as `ee.doctor.fix_summary.v1`
-///   with `actionCount=0`, `fixerDispatchPending=true`, and the
-///   `repair` hint pointing at bd-tu4s8.
-///
-/// The chokepoint reachability is the contract this slice closes; the
-/// actual per-FM repairs come from bd-tu4s8's fixer dispatch.
-fn doctor_fix_json(workspace: &Path) -> String {
+/// * dispatches registered fixers for actionable findings,
+/// * finishes the run with `RunStatus::CompletedOk`, and
+/// * emits `ee.response.v2` with an `ee.doctor.fix_summary.v1` value
+///   under `data`, the actual `actionCount`, and
+///   `fixerDispatchPending=false`.
+fn doctor_fix_json(workspace: &Path) -> (String, ProcessExitCode) {
     use crate::core::doctor::DoctorReport;
     use crate::core::doctor_fixers::*;
     use crate::core::doctor_runtime::{RunContext, RunStatus, default_blast_radius_roots, mutate};
@@ -19855,49 +19862,151 @@ fn doctor_fix_json(workspace: &Path) -> String {
 
                 if let Some(d) = dispatch {
                     let target_path = d.path;
-                    let _ = mutate(&mut ctx, &target_path, d.op);
+                    match mutate(&mut ctx, &target_path, d.op) {
+                        Ok(_)
+                        | Err(crate::core::doctor_runtime::DoctorRuntimeError::NoOpIdempotent) => {}
+                        Err(error) => return doctor_runtime_error_json(&error, "mutate"),
+                    }
                 }
             }
 
             match ctx.finish(RunStatus::CompletedOk) {
-                Ok(summary) => {
-                    let status_str = serde_json::to_value(&summary.status)
-                        .ok()
-                        .and_then(|v| v.as_str().map(str::to_owned))
-                        .unwrap_or_else(|| "unknown".to_owned());
-                    serde_json::json!({
-                        "schema": "ee.doctor.fix_summary.v1",
-                        "doctor_version": env!("CARGO_PKG_VERSION"),
-                        "workspace": workspace.display().to_string(),
-                        "runId": summary.run_id,
-                        "runDir": summary.run_dir.display().to_string(),
-                        "actionCount": summary.action_count,
-                        "status": status_str,
-                        "fixerDispatchPending": false,
-                        "sideEffectFree": false,
-                        "configMutation": "never",
-                    })
-                    .to_string()
-                }
-                Err(error) => serde_json::json!({
-                    "schema": "ee.doctor.fix_summary.v1",
-                    "error": error.to_string(),
-                    "phase": "finish",
-                    "repair": "Inspect <workspace>/.ee/.doctor.lock and <workspace>/.doctor/runs/ for partial state.",
-                    "fixerDispatchPending": false,
-                })
-                .to_string(),
+                Ok(summary) => (
+                    doctor_fix_success_json(workspace, &summary),
+                    ProcessExitCode::Success,
+                ),
+                Err(error) => doctor_runtime_error_json(&error, "finish"),
             }
         }
-        Err(error) => serde_json::json!({
-            "schema": "ee.doctor.fix_summary.v1",
-            "error": error.to_string(),
-            "phase": "start",
-            "repair": "Concurrency lock at <workspace>/.ee/.doctor.lock blocks a fresh run; release the prior holder or wait for it to finish.",
-            "fixerDispatchPending": false,
+        Err(error) => doctor_runtime_error_json(&error, "start"),
+    }
+}
+
+fn doctor_fix_success_json(
+    workspace: &Path,
+    summary: &crate::core::doctor_runtime::RunSummary,
+) -> String {
+    let status_str = serde_json::to_value(&summary.status)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned());
+    let data = serde_json::json!({
+        "schema": crate::models::DOCTOR_FIX_SUMMARY_SCHEMA_V1,
+        "doctor_version": env!("CARGO_PKG_VERSION"),
+        "workspace": workspace.display().to_string(),
+        "runId": summary.run_id,
+        "runDir": summary.run_dir.display().to_string(),
+        "actionCount": summary.action_count,
+        "status": status_str,
+        "fixerDispatchPending": false,
+        "sideEffectFree": false,
+        "configMutation": "never",
+    });
+
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": [],
+    })
+    .to_string()
+}
+
+fn doctor_runtime_error_json(
+    error: &crate::core::doctor_runtime::DoctorRuntimeError,
+    phase: &'static str,
+) -> (String, ProcessExitCode) {
+    use crate::core::doctor_runtime::DoctorRuntimeError;
+
+    let (code, severity, repair, exit_code, path) = match error {
+        DoctorRuntimeError::SymlinkedRunRoot { path } => (
+            "doctor_run_root_symlink_refused",
+            "critical",
+            "Replace the symlinked .ee/.doctor lifecycle component with a real directory inside the canonical workspace, then retry.",
+            ProcessExitCode::PolicyDenied,
+            Some(path.display().to_string()),
+        ),
+        DoctorRuntimeError::LifecycleRootChanged { path } => (
+            "doctor_run_root_changed",
+            "critical",
+            "Stop concurrent workspace lifecycle changes, restore the original .ee/.doctor directory bindings, and start a fresh doctor run.",
+            ProcessExitCode::PolicyDenied,
+            Some(path.display().to_string()),
+        ),
+        DoctorRuntimeError::UnsafeLatestEntry { path, .. } => (
+            "doctor_latest_entry_unsafe",
+            "high",
+            "Inspect <workspace>/.doctor/latest and preserve the existing entry; doctor will only publish over an absent entry or a verified symlink.",
+            ProcessExitCode::PolicyDenied,
+            Some(path.display().to_string()),
+        ),
+        DoctorRuntimeError::BlastRadiusExceeded { path, .. } => (
+            "doctor_blast_radius_exceeded",
+            "high",
+            "Narrow the fixer target to one of the declared doctor blast-radius roots.",
+            ProcessExitCode::PolicyDenied,
+            Some(path.display().to_string()),
+        ),
+        DoctorRuntimeError::BackupDirUnwritable { dir, .. } => (
+            "doctor_backup_directory_unwritable",
+            "high",
+            "Restore safe owner-only write access to <workspace>/.doctor/runs/ and retry.",
+            ProcessExitCode::Storage,
+            Some(dir.display().to_string()),
+        ),
+        DoctorRuntimeError::ConcurrencyLost { lock_path, .. } => (
+            "doctor_concurrency_lost",
+            "medium",
+            "Wait for the active doctor run to finish, then inspect ee doctor --list-runs --json before retrying.",
+            ProcessExitCode::Configuration,
+            Some(lock_path.display().to_string()),
+        ),
+        DoctorRuntimeError::Io { .. }
+        | DoctorRuntimeError::ActionsLogCorrupt { .. }
+        | DoctorRuntimeError::UndoStateDrifted { .. }
+        | DoctorRuntimeError::UndoBackupCorrupt { .. } => (
+            "doctor_runtime_io",
+            "high",
+            "Inspect <workspace>/.doctor/runs/ and ee doctor --list-runs --json for partial state before retrying.",
+            ProcessExitCode::Storage,
+            None,
+        ),
+        DoctorRuntimeError::NoOpIdempotent => (
+            "doctor_runtime_noop",
+            "info",
+            "Re-run ee doctor --fix-plan --json to confirm no repair remains.",
+            ProcessExitCode::Configuration,
+            None,
+        ),
+    };
+
+    let mut details = serde_json::json!({
+        "phase": phase,
+        "recovery": [{
+            "priority": 0,
+            "kind": "command",
+            "rationale": "Inspect the read-only doctor plan and lifecycle posture before retrying mutation.",
+            "command": "ee doctor --fix-plan --workspace . --json",
+        }],
+    });
+    if let Some(path) = path {
+        details["path"] = serde_json::Value::String(path);
+    }
+
+    (
+        serde_json::json!({
+            "schema": crate::models::ERROR_SCHEMA_V2,
+            "error": {
+                "code": code,
+                "message": error.to_string(),
+                "severity": severity,
+                "repair": repair,
+                "details": details,
+            },
         })
         .to_string(),
-    }
+        exit_code,
+    )
 }
 
 fn clap_error_message(error: &clap::Error) -> String {
@@ -41810,10 +41919,7 @@ fn format_review_session_human(report: &ReviewSessionReport) -> String {
     };
     let mut output = format!(
         "{mode}: review session {}\n\n  evidence spans: {}\n  topics: {}\n  candidates: {}\n",
-        report.cass_session_id,
-        report.evidence_span_count,
-        report.topic_count,
-        report.candidate_count
+        report.session_id, report.evidence_span_count, report.topic_count, report.candidate_count
     );
     for candidate in &report.candidates {
         output.push_str(&format!(
@@ -61272,19 +61378,21 @@ mod tests {
         ShadowMode, SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand,
         SwarmRepairPlanArgs, SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand,
         TrustCommand, VerifyCommand, VerifyRchCommand, WorkflowCommand, WorkspaceCommand,
-        WorkspaceHygieneArgs, WorkspaceHygieneMode, context_request_from_options,
-        context_stream_header_frame, context_stream_options_for_request,
-        db_inspect_redact_source_uri, diag_environment_attestation_response_json,
-        environment_attestation_unavailable_sources, format_impact_json,
-        format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
-        hook_status_response_json, init_report_exit_code, json_with_data_result_path, mesh,
-        orient_next_commands, parse_completion_audit_evidence_input, parse_context_profile,
+        WorkspaceHygieneArgs, WorkspaceHygieneMode, cass_import_domain_error,
+        context_request_from_options, context_stream_header_frame,
+        context_stream_options_for_request, db_inspect_redact_source_uri,
+        diag_environment_attestation_response_json, environment_attestation_unavailable_sources,
+        format_impact_json, format_search_json_with_mesh_and_recalibration,
+        hook_git_readiness_response_json, hook_status_response_json, init_report_exit_code,
+        json_with_data_result_path, mesh, orient_next_commands,
+        parse_completion_audit_evidence_input, parse_context_profile,
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json,
         read_environment_attestation_fixture_json, run, write_context_stream_terminal_error,
         write_index_rebuild_error,
     };
+    use crate::cass::CassImportError;
     use crate::config::MeshCommandMode;
     use crate::core::impact::{
         IMPACT_SCHEMA_V1, ImpactFallbackStatus, ImpactMatchType, ImpactMemorySummary, ImpactReport,
@@ -61313,6 +61421,46 @@ mod tests {
     use crate::search::plan_cache::{DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, PlanCache};
 
     type TestResult = Result<(), String>;
+
+    #[test]
+    fn cass_import_domain_error_envelope_and_details_are_public_safe() -> TestResult {
+        let secret = format!("sk_live_{}", "1234567890abcdef1234567890abcdef");
+        let windows_path = r"C:\Users\Alice\private\session.jsonl";
+        let unc_path = r"\\fileserver\profiles\Alice\trace.jsonl";
+        let error = CassImportError::CassCommand {
+            command: format!(r#"cass view "{windows_path}" --api-key {secret}"#),
+            exit_code: Some(2),
+            stderr: format!(
+                "failed {unc_path}; fallback file:///C:/Users/Alice/private/fallback.jsonl token={secret}"
+            ),
+            timed_out: false,
+            stderr_truncated: false,
+            stdout_line_count: None,
+            peak_stdout_line_bytes: None,
+            peak_stdout_buffer_bytes: None,
+        };
+        let domain = cass_import_domain_error(&error);
+        let message = domain.message();
+        let details = match &domain {
+            DomainError::ImportWithDetails { details_json, .. } => details_json.as_str(),
+            other => return Err(format!("expected import details error, got {other:?}")),
+        };
+        for rendered in [message.as_str(), details] {
+            for forbidden in [windows_path, unc_path, "C:/Users/Alice", secret.as_str()] {
+                if rendered.contains(forbidden) {
+                    return Err(format!(
+                        "forbidden CASS error material {forbidden:?} escaped ee.error.v2 input: {rendered}"
+                    ));
+                }
+            }
+        }
+        if !message.contains("[REDACTED_PATH]") || !details.contains("[REDACTED_PATH]") {
+            return Err(format!(
+                "CASS error envelope inputs should retain redaction markers: message={message:?} details={details:?}"
+            ));
+        }
+        Ok(())
+    }
 
     #[derive(Clone, Default)]
     struct SharedWriteBuffer {
@@ -70764,6 +70912,143 @@ mod tests {
             "fix-plan suggested commands",
         )?;
         ensure(stderr.is_empty(), "fix-plan json stderr empty")
+    }
+
+    #[test]
+    fn doctor_fix_success_uses_canonical_response_envelope() -> TestResult {
+        let workspace = Path::new("/workspace");
+        let summary = crate::core::doctor_runtime::RunSummary {
+            run_id: "doctor-run-test".to_owned(),
+            run_dir: workspace
+                .join(".doctor")
+                .join("runs")
+                .join("doctor-run-test"),
+            action_count: 3,
+            status: crate::core::doctor_runtime::RunStatus::CompletedOk,
+        };
+        let raw = super::doctor_fix_success_json(workspace, &summary);
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "response envelope schema",
+        )?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "success")?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!(crate::models::DOCTOR_FIX_SUMMARY_SCHEMA_V1),
+            "typed data schema",
+        )?;
+        ensure_equal(
+            &value["data"]["actionCount"],
+            &serde_json::json!(3),
+            "action count lives under data",
+        )?;
+        ensure_equal(
+            &value["data"]["fixerDispatchPending"],
+            &serde_json::json!(false),
+            "fixer dispatch is active",
+        )?;
+        ensure_equal(
+            &value["degraded"],
+            &serde_json::json!([]),
+            "successful fix response has no degradation",
+        )?;
+        ensure(
+            value.get("actionCount").is_none(),
+            "typed fix fields must not leak outside data",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_fix_symlinked_run_root_emits_error_envelope_and_nonzero_exit() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path().join("workspace");
+        let external = root.path().join("external-doctor");
+        fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        fs::create_dir(&external).map_err(|error| error.to_string())?;
+        let sentinel = external.join("sentinel");
+        fs::write(&sentinel, b"external doctor target").map_err(|error| error.to_string())?;
+        symlink(&external, workspace.join(".doctor")).map_err(|error| error.to_string())?;
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace_arg,
+            "doctor",
+            "--fix",
+            "--json",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::PolicyDenied,
+            "symlink refusal exit",
+        )?;
+        ensure(stderr.is_empty(), "JSON refusal stderr must be empty")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "error envelope schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("doctor_run_root_symlink_refused"),
+            "typed refusal code",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["phase"],
+            &serde_json::json!("start"),
+            "refusal phase",
+        )?;
+        ensure(
+            !workspace.join(".ee").exists(),
+            "start refusal must happen before lock directory creation",
+        )?;
+        ensure_equal(
+            &fs::read(&sentinel).map_err(|error| error.to_string())?,
+            &b"external doctor target".to_vec(),
+            "external sentinel bytes",
+        )
+    }
+
+    #[test]
+    fn doctor_lifecycle_root_change_maps_to_typed_policy_error() -> TestResult {
+        let error = crate::core::doctor_runtime::DoctorRuntimeError::LifecycleRootChanged {
+            path: PathBuf::from("/workspace/.doctor"),
+        };
+        let (stdout, exit) = doctor_runtime_error_json(&error, "finish");
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::PolicyDenied,
+            "lifecycle substitution exit",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "error envelope schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("doctor_run_root_changed"),
+            "typed lifecycle substitution code",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["phase"],
+            &serde_json::json!("finish"),
+            "lifecycle substitution phase",
+        )
     }
 
     #[test]

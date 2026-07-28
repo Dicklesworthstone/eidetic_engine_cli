@@ -28,6 +28,7 @@ in the same commit, keeping the catalog complete by construction.
 | `duplicates_collapsed` | search | low | bd-17c65.2.3 (B3) |
 | `index_stale` | index status | high | bd-17c65.2.1 (B1) |
 | `search_index_stale` | search, context | medium | bd-17c65.2.1 (B1) |
+| `evidence_live_admission_filtered` | search, diag search | warning | bd-4frzq (P0) |
 | `index_missing` | search, context | medium | bd-17c65.2.1 (B1) |
 | `index_corrupt` | search, context | high | bd-17c65.2.1 (B1) |
 | `tombstoned_in_results` | search | low | bd-17c65.2.8 (B8) |

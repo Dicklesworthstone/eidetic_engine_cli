@@ -1,12 +1,12 @@
 {
-  "schema": "ee.review.session.v1",
+  "schema": "ee.review.session.v2",
   "command": "review session",
   "version": "0.0.0",
   "workspaceId": "wsp_review_golden",
   "workspacePath": "/workspace/example",
   "databasePath": "/workspace/example/.ee/ee.db",
   "sessionId": "sess_review_golden",
-  "cassSessionId": "cass-review-golden",
+  "sessionProvenanceUri": "cass-session://sess_review_golden",
   "proposeMode": true,
   "dryRun": true,
   "durableMutation": false,
@@ -27,12 +27,12 @@
         "ev_review_a",
         "ev_review_b"
       ],
-      "reason": "Session review clustered 2 evidence span(s) for topic `testing` from CASS session `cass-review-golden`.",
+      "reason": "Session review clustered 2 evidence span(s) for topic `testing` from CASS session `sess_review_golden`.",
       "confidence": 0.61,
       "contentHash": "blake3:review-golden-hash",
       "persisted": false
     }
   ],
   "degraded": [],
-  "nextAction": "ee review session cass-review-golden --workspace /workspace/example --propose --json"
+  "nextAction": "ee review session sess_review_golden --workspace /workspace/example --propose --json"
 }

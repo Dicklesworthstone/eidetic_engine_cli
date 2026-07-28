@@ -26,7 +26,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use ee::db::{CreateEvidenceSpanInput, DbConnection, SearchIndexJobStatus};
+use ee::db::{CreateEvidenceSpanInput, DbConnection, EvidenceProducerKind, SearchIndexJobStatus};
 use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
@@ -911,6 +911,7 @@ fn persist_linked_review_spans(
                     workspace_id: workspace_id.to_owned(),
                     session_id: session_id.to_owned(),
                     memory_id: Some(memory_id.to_owned()),
+                    producer_kind: EvidenceProducerKind::CassImport,
                     cass_span_id: cass_span_id.to_owned(),
                     span_kind: "message".to_owned(),
                     start_line: line,
@@ -921,6 +922,7 @@ fn persist_linked_review_spans(
                     excerpt: excerpt.to_owned(),
                     content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
                     metadata_json: Some(r#"{"schema":"lpb5.review_span.v1"}"#.to_owned()),
+                    inherited_redaction_classes: Vec::new(),
                 },
             )
             .map_err(|error| format!("insert linked evidence span {id}: {error}"))?;

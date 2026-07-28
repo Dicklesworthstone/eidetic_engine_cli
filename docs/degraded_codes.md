@@ -5041,6 +5041,39 @@ EE_EMBED_MODEL_PATH=/nonexistent/model ee search 'cargo workspace' --workspace .
 
 ---
 
+## `evidence_live_admission_filtered`
+
+**Severity:** warning
+
+**Surfaces:** search, diag search
+
+**Introduced by:** bd-4frzq (epic P0)
+
+**Trigger.** A derived index still contains an evidence document whose current database row, session, workspace, canonical hash, or security posture can no longer be positively revalidated. The hit is removed before relevance-floor and query-assist processing.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+ee import cass --workspace .
+ee index rebuild --workspace .
+# Change or quarantine a source evidence row after the rebuild.
+```
+
+**Invocation.**
+
+```bash
+ee search '<previous evidence phrase>' --workspace . --json
+```
+
+**Expected emission.** Message contains: `Filtered ... source-of-truth admission could not be verified`
+
+**Repair hint.** `ee index rebuild --workspace .`
+
+**Fixture.** [`tests/fixtures/failure_modes/evidence_live_admission_filtered.json`](../tests/fixtures/failure_modes/evidence_live_admission_filtered.json)
+
+---
+
 ## `expired_filtered`
 
 **Severity:** low

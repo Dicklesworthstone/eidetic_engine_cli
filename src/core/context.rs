@@ -84,9 +84,9 @@ use crate::models::degradation::{
 };
 use crate::models::{
     AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
-    AgentContextProfileCounts, GLOBAL_MEMORY_SCOPE_TAG, MemoryId, MemoryScope, MemoryScopeStats,
-    MemorySentinelResultStatus, PACK_SCHEMA_V2, PackId, ProvenanceUri, RedactionLevel, TrustClass,
-    UnitScore, WorkspaceId, posture_for_trust_class,
+    AgentContextProfileCounts, EvidenceId, GLOBAL_MEMORY_SCOPE_TAG, MemoryId, MemoryScope,
+    MemoryScopeStats, MemorySentinelResultStatus, PACK_SCHEMA_V2, PackId, ProvenanceUri,
+    RedactionLevel, RuleId, TrustClass, UnitScore, WorkspaceId, posture_for_trust_class,
 };
 use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
@@ -6500,7 +6500,14 @@ fn candidates_from_search_with_metrics(
                     .or_else(|| rule_linked_memory_id(connection, hit, degraded))
                     // Imported evidence hits hydrate through the memory the
                     // span was distilled into, when one exists (bd-16imy).
-                    .or_else(|| evidence_linked_memory_id(hit, degraded))
+                    .or_else(|| {
+                        evidence_linked_memory_id(
+                            connection,
+                            workspace_path,
+                            hit,
+                            degraded,
+                        )
+                    })
             }
         };
         if resolution.is_some() {
@@ -9788,28 +9795,51 @@ fn artifact_linked_memory_id(
     hit: &crate::core::search::SearchHit,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<(MemoryId, Option<String>)> {
-    let has_artifact_metadata = hit
+    let claims_artifact = hit
         .metadata
         .as_ref()
         .and_then(|metadata| metadata.get("source"))
         .and_then(serde_json::Value::as_str)
-        == Some("artifact");
-    if !has_artifact_metadata && !is_registered_artifact_hit(connection, &hit.doc_id, degraded) {
+        == Some("artifact")
+        || hit.doc_id.starts_with("art_");
+    if !claims_artifact {
         return None;
     }
+    if !is_registry_artifact_id(&hit.doc_id) {
+        push_degradation(
+            degraded,
+            "context_artifact_lookup_unavailable",
+            ContextResponseSeverity::Low,
+            "A malformed artifact identifier from the derived index was excluded.".to_owned(),
+            Some("ee index rebuild --json".to_owned()),
+        );
+        return None;
+    }
+    let artifact_id = hit.doc_id.clone();
+    match connection.get_artifact(&artifact_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return None,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_artifact_lookup_unavailable",
+                ContextResponseSeverity::Low,
+                format!("Artifact {artifact_id} could not be loaded: {error}"),
+                Some(format!("ee artifact inspect {artifact_id} --json")),
+            );
+            return None;
+        }
+    }
 
-    let links = match connection.list_artifact_links(&hit.doc_id) {
+    let links = match connection.list_artifact_links(&artifact_id) {
         Ok(links) => links,
         Err(error) => {
             push_degradation(
                 degraded,
                 "context_artifact_links_unavailable",
                 ContextResponseSeverity::Low,
-                format!(
-                    "Artifact links for {} could not be loaded: {error}",
-                    hit.doc_id
-                ),
-                Some(format!("ee artifact inspect {} --json", hit.doc_id)),
+                format!("Artifact links for {artifact_id} could not be loaded: {error}"),
+                Some(format!("ee artifact inspect {artifact_id} --json")),
             );
             return None;
         }
@@ -9820,16 +9850,13 @@ fn artifact_linked_memory_id(
             continue;
         }
         match MemoryId::from_str(&link.target_id) {
-            Ok(memory_id) => return Some((memory_id, Some(hit.doc_id.clone()))),
-            Err(error) => push_degradation(
+            Ok(memory_id) => return Some((memory_id, Some(artifact_id.clone()))),
+            Err(_) => push_degradation(
                 degraded,
                 "context_artifact_memory_link_invalid",
                 ContextResponseSeverity::Low,
-                format!(
-                    "Artifact {} links to invalid memory id `{}`: {error}",
-                    hit.doc_id, link.target_id
-                ),
-                Some(format!("ee artifact inspect {} --json", hit.doc_id)),
+                format!("Artifact {artifact_id} links to a malformed memory identifier."),
+                Some(format!("ee artifact inspect {artifact_id} --json")),
             ),
         }
     }
@@ -9840,7 +9867,7 @@ fn artifact_linked_memory_id(
         ContextResponseSeverity::Low,
         format!(
             "Artifact {} matched search but has no valid memory link for context packing.",
-            hit.doc_id
+            artifact_id
         ),
         Some("ee artifact register <path> --link-memory <memory-id> --json".to_string()),
     );
@@ -9863,17 +9890,31 @@ fn rule_linked_memory_id(
     hit: &crate::core::search::SearchHit,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<(MemoryId, Option<String>)> {
-    let has_rule_metadata = hit
+    let claims_rule = hit
         .metadata
         .as_ref()
         .and_then(|metadata| metadata.get("source"))
         .and_then(serde_json::Value::as_str)
-        == Some("rule");
-    if !has_rule_metadata && !hit.doc_id.starts_with("rule_") {
+        == Some("rule")
+        || hit.doc_id.starts_with("rule_");
+    if !claims_rule {
         return None;
     }
+    let rule_id = match RuleId::from_str(&hit.doc_id) {
+        Ok(id) => id.to_string(),
+        Err(_) => {
+            push_degradation(
+                degraded,
+                "context_rule_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                "A malformed rule identifier from the derived index was excluded.".to_owned(),
+                Some("ee index rebuild --json".to_owned()),
+            );
+            return None;
+        }
+    };
 
-    match connection.get_procedural_rule(&hit.doc_id) {
+    match connection.get_procedural_rule(&rule_id) {
         Ok(Some(_)) => {}
         Ok(None) => return None,
         Err(error) => {
@@ -9883,15 +9924,15 @@ fn rule_linked_memory_id(
                 ContextResponseSeverity::Low,
                 format!(
                     "Rule {} matched search but could not be loaded for context packing: {error}",
-                    hit.doc_id
+                    rule_id
                 ),
-                Some(format!("ee rule show {} --json", hit.doc_id)),
+                Some(format!("ee rule show {rule_id} --json")),
             );
             return None;
         }
     }
 
-    let mut source_memory_ids = match connection.get_rule_source_memory_ids(&hit.doc_id) {
+    let mut source_memory_ids = match connection.get_rule_source_memory_ids(&rule_id) {
         Ok(ids) => ids,
         Err(error) => {
             push_degradation(
@@ -9900,9 +9941,9 @@ fn rule_linked_memory_id(
                 ContextResponseSeverity::Low,
                 format!(
                     "Source memories for rule {} could not be loaded for context packing: {error}",
-                    hit.doc_id
+                    rule_id
                 ),
-                Some(format!("ee rule show {} --json", hit.doc_id)),
+                Some(format!("ee rule show {rule_id} --json")),
             );
             return None;
         }
@@ -9911,16 +9952,13 @@ fn rule_linked_memory_id(
 
     for source_memory_id in &source_memory_ids {
         match MemoryId::from_str(source_memory_id) {
-            Ok(memory_id) => return Some((memory_id, Some(hit.doc_id.clone()))),
-            Err(error) => push_degradation(
+            Ok(memory_id) => return Some((memory_id, Some(rule_id.clone()))),
+            Err(_) => push_degradation(
                 degraded,
                 "context_rule_hit_unhydrated",
                 ContextResponseSeverity::Low,
-                format!(
-                    "Rule {} references invalid source memory id `{source_memory_id}`: {error}",
-                    hit.doc_id
-                ),
-                Some(format!("ee rule show {} --json", hit.doc_id)),
+                format!("Rule {rule_id} references a malformed source memory identifier."),
+                Some(format!("ee rule show {rule_id} --json")),
             ),
         }
     }
@@ -9931,11 +9969,11 @@ fn rule_linked_memory_id(
         ContextResponseSeverity::Low,
         format!(
             "Rule {} matched search but has no source memories to hydrate into the pack; the rule remains retrievable via ee search.",
-            hit.doc_id
+            rule_id
         ),
         Some(format!(
             "ee rule update {} --source-memory <memory-id> --json",
-            hit.doc_id
+            rule_id
         )),
     );
     None
@@ -9944,91 +9982,188 @@ fn rule_linked_memory_id(
 /// Resolve an imported-evidence search hit to the memory its span was
 /// distilled into so the hit can hydrate into the pack (bd-16imy).
 ///
-/// Evidence spans are indexed as first-class `source=import` documents with
-/// their `memory_id` linkage carried in document metadata, so this needs no
-/// database lookup. A span that was never distilled into a memory
-/// (`memory_id=None` — the common state for a fresh import) cannot become a
-/// memory-centric pack candidate; it degrades honestly with the distill
-/// path as the repair instead of being silently dropped. The excerpt stays
-/// retrievable via `ee search` either way.
+/// Search-hit metadata is a derived, staleable asset and therefore never
+/// authorizes pack hydration. Reload the span, session, and linked memory,
+/// verify that the evidence belongs to the requested workspace, and re-run
+/// the current positive-admission policy before returning a memory id.
 fn evidence_linked_memory_id(
+    connection: &DbConnection,
+    workspace_path: &Path,
     hit: &crate::core::search::SearchHit,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<(MemoryId, Option<String>)> {
-    let has_import_metadata = hit
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("source"))
-        .and_then(serde_json::Value::as_str)
-        == Some("import");
-    if !has_import_metadata && !hit.doc_id.starts_with("ev_") {
+    if !hit.doc_id.starts_with("ev_") {
         return None;
     }
+    let evidence_id = match EvidenceId::from_str(&hit.doc_id) {
+        Ok(id) => id.to_string(),
+        Err(_) => {
+            push_degradation(
+                degraded,
+                "context_evidence_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                "A malformed evidence identifier from the derived index was excluded.".to_owned(),
+                Some("ee index rebuild --json".to_owned()),
+            );
+            return None;
+        }
+    };
 
-    let linked_memory_id = hit
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("memory_id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    if let Some(linked_memory_id) = linked_memory_id {
-        match MemoryId::from_str(&linked_memory_id) {
-            Ok(memory_id) => return Some((memory_id, Some(hit.doc_id.clone()))),
-            Err(error) => push_degradation(
+    let span = match connection.get_evidence_span(&evidence_id) {
+        Ok(Some(span)) => span,
+        Ok(None) => {
+            push_degradation(
                 degraded,
                 "context_evidence_hit_unhydrated",
                 ContextResponseSeverity::Low,
                 format!(
-                    "Imported evidence {} links to invalid memory id `{linked_memory_id}`: {error}",
-                    hit.doc_id
+                    "Evidence {} matched a stale search index but no live source row exists.",
+                    evidence_id
+                ),
+                Some("ee index rebuild --json".to_owned()),
+            );
+            return None;
+        }
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_evidence_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                format!("Evidence {evidence_id} could not be revalidated: {error}"),
+                Some("ee doctor --json".to_owned()),
+            );
+            return None;
+        }
+    };
+    let workspace_ids = context_workspace_ids(connection, workspace_path, degraded);
+    if !workspace_ids.iter().any(|id| id == &span.workspace_id) {
+        push_degradation(
+            degraded,
+            "context_evidence_hit_unhydrated",
+            ContextResponseSeverity::Low,
+            format!(
+                "Evidence {} was excluded because its live workspace is outside this pack request.",
+                evidence_id
+            ),
+            None,
+        );
+        return None;
+    }
+    let session = match connection.get_session(&span.session_id) {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            push_degradation(
+                degraded,
+                "context_evidence_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Evidence {} was excluded because its live session provenance is missing.",
+                    evidence_id
+                ),
+                Some("ee index rebuild --json".to_owned()),
+            );
+            return None;
+        }
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_evidence_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Evidence {} session provenance could not be revalidated: {error}",
+                    evidence_id
+                ),
+                Some("ee doctor --json".to_owned()),
+            );
+            return None;
+        }
+    };
+    if !span.is_search_admitted_for_session(&span.workspace_id, &session) {
+        push_degradation(
+            degraded,
+            "context_evidence_hit_unhydrated",
+            ContextResponseSeverity::Low,
+            format!(
+                "Evidence {} was excluded because its live security posture is not admitted.",
+                evidence_id
+            ),
+            Some("ee index rebuild --json".to_owned()),
+        );
+        return None;
+    }
+    let Some(linked_memory_id) = span.memory_id.as_deref() else {
+        push_degradation(
+            degraded,
+            "context_evidence_hit_unhydrated",
+            ContextResponseSeverity::Low,
+            format!(
+                "Imported evidence {} matched search but has not been distilled into a memory, so it cannot hydrate into the pack.",
+                evidence_id
+            ),
+            Some(format!(
+                "ee review session {} --propose --dry-run --json",
+                session.id
+            )),
+        );
+        return None;
+    };
+    let memory_id = match MemoryId::from_str(linked_memory_id) {
+        Ok(memory_id) => memory_id,
+        Err(_) => {
+            push_degradation(
+                degraded,
+                "context_evidence_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                format!("Evidence {evidence_id} links to a malformed memory identifier."),
+                None,
+            );
+            return None;
+        }
+    };
+    let memory = match connection.get_memory(linked_memory_id) {
+        Ok(Some(memory)) => memory,
+        Ok(None) => {
+            push_degradation(
+                degraded,
+                "context_evidence_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Evidence {} links to a memory that is no longer present.",
+                    evidence_id
                 ),
                 None,
-            ),
+            );
+            return None;
         }
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_evidence_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                format!(
+                    "Evidence {} linked memory could not be revalidated: {error}",
+                    evidence_id
+                ),
+                Some("ee doctor --json".to_owned()),
+            );
+            return None;
+        }
+    };
+    if span.is_pack_admitted(&span.workspace_id, &session, &memory) {
+        return Some((memory_id, Some(evidence_id)));
     }
 
-    let session_repair = hit
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.get("session_id"))
-        .and_then(serde_json::Value::as_str)
-        .map(|session_id| format!("ee review session {session_id} --propose --dry-run --json"));
     push_degradation(
         degraded,
         "context_evidence_hit_unhydrated",
         ContextResponseSeverity::Low,
         format!(
-            "Imported evidence {} matched search but has not been distilled into a memory, so it cannot hydrate into the pack; the excerpt remains retrievable via ee search.",
-            hit.doc_id
+            "Evidence {} was excluded because its live pack admission proof is incomplete.",
+            evidence_id
         ),
-        session_repair,
+        Some("ee index rebuild --json".to_owned()),
     );
     None
-}
-
-fn is_registered_artifact_hit(
-    connection: &DbConnection,
-    artifact_id: &str,
-    degraded: &mut Vec<ContextResponseDegradation>,
-) -> bool {
-    if !is_registry_artifact_id(artifact_id) {
-        return false;
-    }
-
-    match connection.get_artifact(artifact_id) {
-        Ok(Some(_)) => true,
-        Ok(None) => false,
-        Err(error) => {
-            push_degradation(
-                degraded,
-                "context_artifact_lookup_unavailable",
-                ContextResponseSeverity::Low,
-                format!("Artifact {artifact_id} could not be loaded: {error}"),
-                Some(format!("ee artifact inspect {artifact_id} --json")),
-            );
-            false
-        }
-    }
 }
 
 fn is_registry_artifact_id(value: &str) -> bool {

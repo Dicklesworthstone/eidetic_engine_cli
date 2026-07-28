@@ -560,16 +560,8 @@ impl SessionDocumentBuilder {
     /// Build a canonical search document from a stored CASS session row.
     #[must_use]
     pub fn build(self, session: &crate::db::StoredSession) -> CanonicalSearchDocument {
-        let safe_source_path = session
-            .source_path
-            .as_deref()
-            .map(redact_session_search_ref);
-        let safe_metadata_json = session
-            .metadata_json
-            .as_deref()
-            .map(redact_session_search_ref);
-        let mut lines = vec![format!("CASS session: {}", session.cass_session_id)];
-        push_optional_labeled_line(&mut lines, "Source path", safe_source_path.as_deref());
+        let public_provenance = format!("cass-session://{}", session.id);
+        let mut lines = vec![format!("CASS session: {}", session.id)];
         push_optional_labeled_line(&mut lines, "Agent", session.agent_name.as_deref());
         push_optional_labeled_line(&mut lines, "Model", session.model.as_deref());
         push_optional_labeled_line(&mut lines, "Started at", session.started_at.as_deref());
@@ -578,8 +570,6 @@ impl SessionDocumentBuilder {
         if let Some(token_count) = session.token_count {
             lines.push(format!("Tokens: {token_count}"));
         }
-        push_labeled_line(&mut lines, "Content hash", &session.content_hash);
-        push_optional_labeled_line(&mut lines, "Metadata", safe_metadata_json.as_deref());
 
         let created_at = session
             .started_at
@@ -588,21 +578,17 @@ impl SessionDocumentBuilder {
 
         let mut doc =
             CanonicalSearchDocument::new(&session.id, lines.join("\n"), DocumentSource::Session)
-                .with_title(format!("CASS session {}", session.cass_session_id))
+                .with_title(format!("CASS session {}", session.id))
                 .with_kind("cass_session")
                 .with_created_at(created_at)
                 .with_metadata_entry("workspace_id", &session.workspace_id)
-                .with_metadata_entry("cass_session_id", &session.cass_session_id)
+                .with_metadata_entry("provenance_uri", public_provenance)
                 .with_metadata_entry("message_count", session.message_count.to_string())
-                .with_metadata_entry("content_hash", &session.content_hash)
                 .with_metadata_entry("imported_at", &session.imported_at)
                 .with_metadata_entry("updated_at", &session.updated_at);
 
         if let Some(workspace) = self.workspace_path {
             doc = doc.with_workspace(workspace);
-        }
-        if let Some(source_path) = &safe_source_path {
-            doc = doc.with_metadata_entry("source_path", source_path);
         }
         if let Some(agent_name) = &session.agent_name {
             doc = doc.with_metadata_entry("agent_name", agent_name);
@@ -618,9 +604,6 @@ impl SessionDocumentBuilder {
         }
         if let Some(token_count) = session.token_count {
             doc = doc.with_metadata_entry("token_count", token_count.to_string());
-        }
-        if let Some(metadata_json) = &safe_metadata_json {
-            doc = doc.with_metadata_entry("metadata_json", metadata_json);
         }
         if !self.tags.is_empty() {
             doc = doc.with_tags(self.tags);
@@ -699,32 +682,51 @@ pub fn rule_to_document(rule: &crate::db::StoredProceduralRule) -> CanonicalSear
 
 /// Convert a stored imported evidence span to a canonical search document.
 ///
-/// `ee import cass` persists transcript excerpts as `evidence_spans`, but
-/// the derived corpus previously carried only session METADATA documents —
-/// a unique phrase from an imported transcript was undiscoverable by
-/// `ee search` and could never reach a pack (bd-16imy). The excerpt stored
-/// in the row is already secret-redacted at import time
-/// (`policy::redact_secret_like_content` in `cass::import`), so indexing it
-/// preserves the exact redaction posture memory content already has.
-/// Line-range and session provenance ride in metadata so a hit points back
-/// at the exact imported lines.
+/// The caller must have positively admitted the live row through
+/// `StoredEvidenceSpan::is_search_admitted_for_session`. This projection
+/// still repeats the egress screen defensively and never includes a raw CASS
+/// span id, source path, or upstream metadata.
 #[must_use]
 pub fn evidence_span_to_document(span: &crate::db::StoredEvidenceSpan) -> CanonicalSearchDocument {
-    let mut doc =
-        CanonicalSearchDocument::new(&span.id, span.excerpt.clone(), DocumentSource::Import)
-            .with_title(format!(
-                "Imported evidence {} (session {}, lines {}-{})",
-                span.id, span.session_id, span.start_line, span.end_line
-            ))
-            .with_kind("evidence_span")
-            .with_created_at(&span.created_at)
-            .with_metadata_entry("workspace_id", &span.workspace_id)
-            .with_metadata_entry("session_id", &span.session_id)
-            .with_metadata_entry("cass_span_id", &span.cass_span_id)
-            .with_metadata_entry("span_kind", &span.span_kind)
-            .with_metadata_entry("start_line", span.start_line.to_string())
-            .with_metadata_entry("end_line", span.end_line.to_string())
-            .with_metadata_entry("content_hash", &span.content_hash);
+    let egress = crate::policy::screen_external_text_for_ingestion(&span.excerpt);
+    let withheld = egress.redacted
+        || egress.instruction_like
+        || !matches!(egress.instruction_risk, "none" | "low");
+    let safe_excerpt = if withheld {
+        "[EVIDENCE_WITHHELD]".to_owned()
+    } else {
+        egress.content
+    };
+    let mut doc = CanonicalSearchDocument::new(&span.id, safe_excerpt, DocumentSource::Import)
+        .with_title(format!(
+            "Imported evidence {} (session {}, lines {}-{})",
+            span.id, span.session_id, span.start_line, span.end_line
+        ))
+        .with_kind("evidence_span")
+        .with_created_at(&span.created_at)
+        .with_metadata_entry("workspace_id", &span.workspace_id)
+        .with_metadata_entry("session_id", &span.session_id)
+        .with_metadata_entry("provenance_uri", span.canonical_provenance_uri())
+        .with_metadata_entry("span_kind", &span.span_kind)
+        .with_metadata_entry("start_line", span.start_line.to_string())
+        .with_metadata_entry("end_line", span.end_line.to_string())
+        .with_metadata_entry("producer_kind", &span.producer_kind)
+        .with_metadata_entry("screening_version", span.screening_version.to_string())
+        .with_metadata_entry(
+            "security_policy_epoch",
+            span.security_policy_epoch.to_string(),
+        )
+        .with_metadata_entry(
+            "canonical_provenance_revision",
+            span.canonical_provenance_revision.to_string(),
+        )
+        .with_metadata_entry("secret_redaction_status", &span.secret_redaction_status)
+        .with_metadata_entry("instruction_risk", &span.instruction_risk)
+        .with_metadata_entry("search_eligibility", &span.search_eligibility)
+        .with_metadata_entry("pack_eligibility", &span.pack_eligibility);
+    if !withheld {
+        doc = doc.with_metadata_entry("content_hash", &span.content_hash);
+    }
     if let Some(memory_id) = span.memory_id.as_deref() {
         doc = doc.with_metadata_entry("memory_id", memory_id);
     }
@@ -831,10 +833,6 @@ impl ArtifactDocumentBuilder {
 }
 
 fn redact_artifact_search_ref(value: &str) -> String {
-    redact_search_projection_ref(value)
-}
-
-fn redact_session_search_ref(value: &str) -> String {
     redact_search_projection_ref(value)
 }
 
@@ -3639,6 +3637,45 @@ mod tests {
         }
     }
 
+    fn make_test_evidence_span(excerpt: &str) -> crate::db::StoredEvidenceSpan {
+        let content_hash = format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex());
+        crate::db::StoredEvidenceSpan {
+            id: "ev_01234567890123456789012345".to_owned(),
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            session_id: "sess_01234567890123456789012345".to_owned(),
+            memory_id: Some("mem_01234567890123456789012345".to_owned()),
+            cass_span_id: "/Users/alice/private/session.jsonl:42".to_owned(),
+            span_kind: "message".to_owned(),
+            start_line: 42,
+            end_line: 42,
+            start_byte: None,
+            end_byte: None,
+            role: Some("assistant".to_owned()),
+            excerpt: excerpt.to_owned(),
+            content_hash: content_hash.clone(),
+            metadata_json: Some(
+                r#"{"sourcePath":"/Users/alice/private/session.jsonl","upstreamId":"raw-42"}"#
+                    .to_owned(),
+            ),
+            producer_kind: "cass_import".to_owned(),
+            screening_version: crate::db::EVIDENCE_SCREENING_VERSION,
+            secret_redaction_status: "clean".to_owned(),
+            redaction_classes_json: "[]".to_owned(),
+            instruction_risk: "none".to_owned(),
+            search_eligibility: "admitted".to_owned(),
+            pack_eligibility: "admitted".to_owned(),
+            canonical_provenance_revision: crate::db::EVIDENCE_CANONICAL_PROVENANCE_REVISION,
+            canonical_excerpt_hash: Some(content_hash),
+            security_policy_epoch: crate::db::EVIDENCE_SECURITY_POLICY_EPOCH,
+            upstream_ref_hash: Some(
+                "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+            ),
+            created_at: "2026-07-28T00:00:00Z".to_owned(),
+            updated_at: "2026-07-28T00:00:00Z".to_owned(),
+        }
+    }
+
     fn make_test_artifact() -> crate::db::StoredArtifact {
         crate::db::StoredArtifact {
             id: "art_01234567890123456789012345".to_string(),
@@ -3943,18 +3980,15 @@ mod tests {
         assert_eq!(doc.source(), DocumentSource::Session);
         assert!(
             doc.content()
-                .contains("CASS session: cass-session-2026-04-29")
+                .contains("CASS session: sess_01234567890123456789012345")
         );
         assert!(doc.content().contains("Messages: 42"));
-        assert!(
-            doc.content()
-                .contains("Content hash: blake3:session-content")
-        );
+        assert!(!doc.content().contains("Content hash:"));
 
         let indexable = doc.into_indexable();
         assert_eq!(
             indexable.title.as_deref(),
-            Some("CASS session cass-session-2026-04-29")
+            Some("CASS session sess_01234567890123456789012345")
         );
         assert_eq!(
             indexable.metadata.get("source"),
@@ -3973,15 +4007,52 @@ mod tests {
             Some(&"2026-04-29T12:31:00Z".to_owned())
         );
         assert_eq!(
-            indexable.metadata.get("cass_session_id"),
-            Some(&"cass-session-2026-04-29".to_owned())
+            indexable.metadata.get("provenance_uri"),
+            Some(&"cass-session://sess_01234567890123456789012345".to_owned())
         );
+        assert!(!indexable.metadata.contains_key("cass_session_id"));
         assert_eq!(
             indexable.metadata.get("message_count"),
             Some(&"42".to_owned())
         );
+        assert!(!indexable.metadata.contains_key("content_hash"));
         assert!(!indexable.metadata.contains_key("workspace"));
         assert!(!indexable.metadata.contains_key("token_count"));
+    }
+
+    #[test]
+    fn evidence_document_projection_uses_only_canonical_provenance() {
+        let span = make_test_evidence_span("Release verification completed successfully.");
+        let doc = super::evidence_span_to_document(&span);
+        let content = doc.content().to_owned();
+        let indexable = doc.into_indexable();
+        let rendered = format!("{content}\n{:?}", indexable.metadata);
+
+        assert!(content.contains("Release verification completed successfully."));
+        assert_eq!(
+            indexable.metadata.get("provenance_uri"),
+            Some(&"cass-session://sess_01234567890123456789012345#L42-42".to_owned())
+        );
+        assert!(!indexable.metadata.contains_key("cass_span_id"));
+        assert!(!indexable.metadata.contains_key("source_path"));
+        assert!(!indexable.metadata.contains_key("metadata_json"));
+        assert!(!rendered.contains("/Users/alice"));
+        assert!(!rendered.contains("raw-42"));
+    }
+
+    #[test]
+    fn evidence_document_defensive_withhold_has_no_raw_derived_hash() {
+        let raw = "api_key=low-entropy-secret";
+        let raw_hash = format!("blake3:{}", blake3::hash(raw.as_bytes()).to_hex());
+        let span = make_test_evidence_span(raw);
+        let doc = super::evidence_span_to_document(&span);
+        assert_eq!(doc.content(), "[EVIDENCE_WITHHELD]");
+        let indexable = doc.into_indexable();
+        let rendered = format!("{:?}", indexable.metadata);
+
+        assert!(!rendered.contains(raw));
+        assert!(!rendered.contains(&raw_hash));
+        assert!(!indexable.metadata.contains_key("content_hash"));
     }
 
     #[test]
@@ -3999,8 +4070,8 @@ mod tests {
         assert!(doc.content().contains("Agent: codex"));
         assert!(doc.content().contains("Model: gpt-5"));
         assert!(doc.content().contains("Tokens: 12345"));
-        assert!(doc.content().contains("Metadata: {\"source\":\"cass\""));
-        assert!(doc.content().contains("Source path: [REDACTED_PATH]"));
+        assert!(!doc.content().contains("Metadata:"));
+        assert!(!doc.content().contains("Source path:"));
         assert!(
             !doc.content()
                 .contains("/home/user/.cass/sessions/session.jsonl"),
@@ -4034,14 +4105,8 @@ mod tests {
             indexable.metadata.get("token_count"),
             Some(&"12345".to_owned())
         );
-        assert_eq!(
-            indexable.metadata.get("metadata_json"),
-            Some(&r#"{"source":"cass","schema":"cass.session.v1"}"#.to_owned())
-        );
-        assert_eq!(
-            indexable.metadata.get("source_path"),
-            Some(&"[REDACTED_PATH]".to_owned())
-        );
+        assert!(!indexable.metadata.contains_key("metadata_json"));
+        assert!(!indexable.metadata.contains_key("source_path"));
         assert_eq!(
             indexable.metadata.get("tags"),
             Some(&"cass,session".to_owned())
@@ -4049,7 +4114,7 @@ mod tests {
     }
 
     #[test]
-    fn session_document_builder_redacts_sensitive_source_path() {
+    fn session_document_builder_omits_sensitive_source_path() {
         let mut session = make_test_session();
         session.source_path = Some(
             "file:///Volumes/USBNVME16TB/private/session.jsonl?api_key=redaction-fixture"
@@ -4061,14 +4126,7 @@ mod tests {
         let indexable = doc.into_indexable();
         let rendered = format!("{}\n{:?}", content, indexable.metadata);
 
-        assert!(
-            rendered.contains("[REDACTED_PATH]"),
-            "redacted session source should retain path placeholders"
-        );
-        assert!(
-            rendered.contains("[REDACTED:api_key]"),
-            "redacted session source should retain secret placeholders"
-        );
+        assert!(!rendered.contains("source_path"));
         assert!(
             !rendered.contains("/Volumes/USBNVME16TB/private/session.jsonl"),
             "session search document leaked source path: {rendered}"
@@ -4077,10 +4135,7 @@ mod tests {
             !rendered.contains("redaction-fixture"),
             "session search document leaked secret-like source path: {rendered}"
         );
-        assert_eq!(
-            indexable.metadata.get("source_path"),
-            Some(&"file://[REDACTED_PATH]?api_key=[REDACTED:api_key]".to_owned())
-        );
+        assert!(!indexable.metadata.contains_key("source_path"));
     }
 
     #[test]
@@ -4581,25 +4636,20 @@ mod tests {
     }
 
     #[test]
-    fn session_document_builder_redacts_sensitive_metadata_json() {
+    fn session_document_builder_omits_sensitive_metadata_json() {
         let mut session = make_test_session();
         session.metadata_json = Some(
             r#"{"source":"cass","sourcePath":"file:///Users/alice/private/session.jsonl?api_key=redaction-fixture"}"#.to_owned(),
         );
+        session.content_hash =
+            "file:///C:/Users/Alice/private/hash.txt?api_key=hash-redaction-fixture".to_owned();
 
         let doc = super::session_to_document(&session);
         let content = doc.content().to_string();
         let indexable = doc.into_indexable();
         let rendered = format!("{}\n{:?}", content, indexable.metadata);
 
-        assert!(
-            rendered.contains("[REDACTED_PATH]"),
-            "redacted session metadata should retain path placeholders"
-        );
-        assert!(
-            rendered.contains("[REDACTED:api_key]"),
-            "redacted session metadata should retain secret placeholders"
-        );
+        assert!(!rendered.contains("metadata_json"));
         assert!(
             !rendered.contains("/Users/alice/private/session.jsonl"),
             "session search document leaked metadata path: {rendered}"
@@ -4608,13 +4658,12 @@ mod tests {
             !rendered.contains("redaction-fixture"),
             "session search document leaked secret-like metadata: {rendered}"
         );
-        assert_eq!(
-            indexable.metadata.get("metadata_json"),
-            Some(
-                &r#"{"source":"cass","sourcePath":"file://[REDACTED_PATH]?api_key=[REDACTED:api_key]"}"#
-                    .to_owned()
-            )
+        assert!(
+            !rendered.contains("C:/Users/Alice") && !rendered.contains("hash-redaction-fixture"),
+            "session search document leaked untrusted upstream content_hash: {rendered}"
         );
+        assert!(!indexable.metadata.contains_key("metadata_json"));
+        assert!(!indexable.metadata.contains_key("content_hash"));
     }
 
     #[test]

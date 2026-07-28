@@ -278,8 +278,8 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
     }
 
     let spans = if options.from_cass {
-        match connection.list_evidence_spans_for_workspace(&workspace_id) {
-            Ok(rows) => rows
+        match connection.list_search_admitted_evidence_spans_for_workspace(&workspace_id) {
+            Ok((rows, _admission)) => rows
                 .into_iter()
                 .filter(|span| {
                     DateTime::parse_from_rfc3339(&span.created_at)
@@ -519,18 +519,14 @@ fn score_and_emit_topics(
         let Some(memory_id) = span.memory_id.as_deref() else {
             continue;
         };
-        // `docs/schemas/ee.focus.suggest.v1.json` constrains each spanIds
-        // entry to `minLength: 1`. `StoredEvidenceSpan::cass_span_id` is a
-        // plain `String` with no NOT NULL invariant at the type level, so an
-        // empty `cass_span_id` (corrupt row, partial migration, legacy
-        // import) would otherwise leak into the response and violate the
-        // schema's per-item `minLength` contract.
-        if span.cass_span_id.is_empty() {
+        // Public provenance uses ee's opaque evidence id. Upstream CASS
+        // identifiers are storage-internal and never projected.
+        if span.id.is_empty() {
             continue;
         }
         for cluster in clusters.values_mut() {
             if cluster.member_ids.iter().any(|id| id == memory_id) {
-                cluster.span_ids.push(span.cass_span_id.clone());
+                cluster.span_ids.push(span.id.clone());
                 break;
             }
         }
@@ -1006,13 +1002,24 @@ mod tests {
             excerpt: "snippet".to_owned(),
             content_hash: "abc".to_owned(),
             metadata_json: None,
+            producer_kind: "cass_import".to_owned(),
+            screening_version: 1,
+            secret_redaction_status: "clean".to_owned(),
+            redaction_classes_json: "[]".to_owned(),
+            instruction_risk: "none".to_owned(),
+            search_eligibility: "admitted".to_owned(),
+            pack_eligibility: "admitted".to_owned(),
+            canonical_provenance_revision: 1,
+            canonical_excerpt_hash: Some("abc".to_owned()),
+            security_policy_epoch: 1,
+            upstream_ref_hash: Some(cass_id.to_owned()),
             created_at: "2026-05-26T11:30:00Z".to_owned(),
             updated_at: "2026-05-26T11:30:00Z".to_owned(),
         };
         let spans = vec![
             mk_span("s1", "01", "cass_a"),
             mk_span("s2", "01", "cass_b"),
-            mk_span("s3", "01", "cass_b"), // duplicate cass_span_id, deduped
+            mk_span("s3", "01", "cass_b"),
         ];
         let options = FocusSuggestOptions {
             workspace_path: PathBuf::from("/tmp"),
@@ -1025,7 +1032,7 @@ mod tests {
         assert_eq!(recs.len(), 1);
         assert_eq!(
             recs[0].span_ids,
-            vec!["cass_a".to_owned(), "cass_b".to_owned()]
+            vec!["s1".to_owned(), "s2".to_owned(), "s3".to_owned()]
         );
     }
 

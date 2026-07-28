@@ -1866,11 +1866,7 @@ fn unsupported_result_target_storage(
                     origin: "Imported CASS session search document".to_owned(),
                     trust_class: "cass_evidence".to_owned(),
                     trust_subclass: Some("search_result_session".to_owned()),
-                    provenance_uri: session
-                        .source_path
-                        .clone()
-                        .or_else(|| Some(format!("cass://session/{}", session.cass_session_id)))
-                        .map(redact_why_search_result_provenance_uri),
+                    provenance_uri: Some(format!("cass-session://{}", session.id)),
                     workflow_id: None,
                     created_at: session.imported_at,
                     valid_from: session.started_at,
@@ -4632,7 +4628,7 @@ mod tests {
     }
 
     #[test]
-    fn why_session_result_storage_redacts_path_and_secret_source_path() -> TestResult {
+    fn why_session_result_storage_uses_opaque_canonical_session_provenance() -> TestResult {
         let conn = DbConnection::open_memory().map_err(|error| error.to_string())?;
         conn.migrate().map_err(|error| error.to_string())?;
         conn.insert_workspace(
@@ -4667,29 +4663,22 @@ mod tests {
             .ok_or_else(|| "session provenance present".to_owned())?;
 
         ensure(
-            provenance.contains("/Volumes/USBNVME16TB"),
+            provenance.to_owned(),
+            "cass-session://sess_00000000000000000000000001".to_owned(),
+            "canonical opaque session provenance",
+        )?;
+        ensure(
+            provenance.contains("/Volumes/USBNVME16TB")
+                || provenance.contains("cass-session-a")
+                || provenance.contains("redaction-fixture")
+                || provenance.contains("[REDACTED"),
             false,
-            "raw session source path redacted",
-        )?;
-        ensure(
-            provenance.contains("[REDACTED_PATH]"),
-            true,
-            "path placeholder present",
-        )?;
-        ensure(
-            provenance.contains("redaction-fixture"),
-            false,
-            "secret value redacted",
-        )?;
-        ensure(
-            provenance.contains("[REDACTED:"),
-            true,
-            "secret placeholder present",
+            "canonical provenance omits source path, upstream id, secret, and placeholders",
         )
     }
 
     #[test]
-    fn why_session_result_storage_preserves_safe_cass_fallback() -> TestResult {
+    fn why_session_result_storage_does_not_expose_safe_upstream_cass_id() -> TestResult {
         let conn = DbConnection::open_memory().map_err(|error| error.to_string())?;
         conn.migrate().map_err(|error| error.to_string())?;
         conn.insert_workspace(
@@ -4721,8 +4710,8 @@ mod tests {
 
         ensure(
             provenance.to_owned(),
-            "cass://session/cass-session-b".to_owned(),
-            "safe cass fallback preserved",
+            "cass-session://sess_00000000000000000000000002".to_owned(),
+            "canonical session provenance uses only the stable internal id",
         )
     }
 

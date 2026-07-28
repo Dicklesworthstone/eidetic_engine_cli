@@ -1,0 +1,57 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "evidence_live_admission_filtered",
+  "introduced_by": {
+    "bead": "bd-4frzq",
+    "epic_letter": "P0"
+  },
+  "surfaces": [
+    "search",
+    "diag search"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A derived index still contains an evidence document whose current database row, session, workspace, canonical hash, or security posture can no longer be positively revalidated. The hit is removed before relevance-floor and query-assist processing.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee import cass --workspace .",
+      "ee index rebuild --workspace .",
+      "# Change or quarantine a source evidence row after the rebuild."
+    ],
+    "invocation": "ee search '<previous evidence phrase>' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "evidence_live_admission_filtered",
+    "severity": "warning",
+    "message_contains": [
+      "Filtered",
+      "source-of-truth admission could not be verified"
+    ],
+    "repair_contains": "ee index rebuild",
+    "repair_string": "ee index rebuild --workspace .",
+    "repair_command_regex": "(?<cmd>ee index rebuild --workspace \\.)",
+    "repair_safety": [
+      {
+        "appliesTo": "ee index rebuild --workspace .",
+        "command": "ee index rebuild --workspace .",
+        "riskClass": "idempotent_refresh",
+        "preflightCommand": null,
+        "requiresHumanApproval": false,
+        "mutatesExternalState": false,
+        "mutatesTrackerState": false,
+        "privacyClass": "bounded_command_no_raw_state",
+        "nextAction": "run_directly",
+        "ruleId": "repair_safety:idempotent_refresh",
+        "source": "repair_action_safety",
+        "reasonCode": "idempotent_refresh_command",
+        "evidence": [
+          "derived_asset_refresh_command"
+        ],
+        "preconditions": [
+          "workspace_must_be_explicit"
+        ]
+      }
+    ]
+  }
+}

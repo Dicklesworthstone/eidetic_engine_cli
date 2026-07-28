@@ -23,8 +23,8 @@ use crate::models::degradation::{
 use crate::models::model_registry::{ModelPurpose, ModelRegistryStatus};
 use crate::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use crate::models::{
-    GLOBAL_MEMORY_SCOPE_TAG, MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri, TrustClass,
-    UnitScore, degraded_recovery_actions,
+    EvidenceId, GLOBAL_MEMORY_SCOPE_TAG, MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri,
+    TrustClass, UnitScore, degraded_recovery_actions,
 };
 use crate::obs::audit_events::query_hash as audit_query_hash;
 use crate::pack::{
@@ -1397,6 +1397,19 @@ impl SearchDegradation {
             severity: "medium".to_string(),
             message: format!(
                 "Search index is stale; returning lexical fallback results from the current index.{generation_detail} Newer memories may be omitted until the index is rebuilt."
+            ),
+            repair: Some("ee index rebuild --workspace .".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn evidence_live_admission_filtered(filtered: usize) -> Self {
+        Self {
+            code: "evidence_live_admission_filtered".to_string(),
+            severity: "warning".to_string(),
+            message: format!(
+                "Filtered {filtered} indexed evidence candidate{} because current source-of-truth admission could not be verified.",
+                if filtered == 1 { "" } else { "s" },
             ),
             repair: Some("ee index rebuild --workspace .".to_string()),
         }
@@ -6598,6 +6611,10 @@ fn run_search_inner_with_performance(
         trace.record_elapsed("search::indexExists", index_exists_start);
         return Err(SearchError::NoIndex);
     }
+    if !crate::core::index::index_evidence_security_policy_is_current(&index_dir) {
+        trace.record_elapsed("search::indexExists", index_exists_start);
+        return Err(SearchError::NoIndex);
+    }
     trace.record_elapsed("search::indexExists", index_exists_start);
 
     let degradation_start = Instant::now();
@@ -6709,6 +6726,13 @@ fn run_search_inner_with_performance(
                 raw_hits.extend(global_hits);
                 sort_search_hits_by_score_order(&mut raw_hits);
             }
+            let evidence_visibility_start = Instant::now();
+            let raw_hits =
+                apply_live_evidence_visibility(options, raw_hits, &mut degraded, read_connection);
+            trace.record_elapsed(
+                "search::evidenceLiveAdmissionVisibility",
+                evidence_visibility_start,
+            );
             trace.record_elapsed("search::dedupeDocId", dedupe_doc_id_start);
             let dedupe_mi_start = Instant::now();
             let (raw_hits, mi_duplicates_collapsed, mi_eligible_count) =
@@ -7097,6 +7121,9 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
     if !index_dir.exists() {
         return Err(SearchError::NoIndex);
     }
+    if !crate::core::index::index_evidence_security_policy_is_current(&index_dir) {
+        return Err(SearchError::NoIndex);
+    }
 
     let mut degraded = search_degradations(options, &index_dir);
     push_model_lifecycle_search_degradation(options, None, &mut degraded);
@@ -7110,7 +7137,7 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
 
     let config = options.two_tier_config_for_limit(effective_limit);
     let fusion_weights = resolved_search_fusion_weights(&options.workspace_path);
-    let diag_result = diag_search_sync(
+    let mut diag_result = diag_search_sync(
         &index_dir,
         &options.query,
         effective_limit as usize,
@@ -7120,6 +7147,7 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
         fusion_weights,
     )
     .map_err(SearchError::Index)?;
+    apply_live_evidence_visibility_to_diag(options, &mut diag_result, &mut degraded);
 
     let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(diag_result.final_hits);
     let (raw_hits, mi_duplicates_collapsed, mi_eligible_count) =
@@ -9181,6 +9209,142 @@ fn push_search_performance_timing(
     }
 }
 
+/// Fail closed for evidence documents against the live source of truth.
+///
+/// The derived index is only a cache: neither its document id nor any indexed
+/// metadata can authorize an evidence hit. This filter intentionally runs
+/// before the relevance floor and query-assist construction so a row whose
+/// posture changed after indexing cannot survive through a below-floor hint.
+fn apply_live_evidence_visibility(
+    options: &SearchOptions,
+    hits: Vec<SearchHit>,
+    degraded: &mut Vec<SearchDegradation>,
+    read_connection: Option<&DbConnection>,
+) -> Vec<SearchHit> {
+    let evidence_ids = hits
+        .iter()
+        .filter(|hit| hit.doc_id.starts_with("ev_"))
+        .map(|hit| hit.doc_id.clone())
+        .collect::<BTreeSet<_>>();
+    if evidence_ids.is_empty() {
+        return hits;
+    }
+
+    let admitted = live_admitted_evidence_doc_ids(options, &evidence_ids, read_connection);
+    let mut filtered = 0usize;
+    let visible = hits
+        .into_iter()
+        .filter(|hit| {
+            let visible = !hit.doc_id.starts_with("ev_") || admitted.contains(hit.doc_id.as_str());
+            if !visible {
+                filtered = filtered.saturating_add(1);
+            }
+            visible
+        })
+        .collect();
+    if filtered > 0 {
+        degraded.push(SearchDegradation::evidence_live_admission_filtered(
+            filtered,
+        ));
+    }
+    visible
+}
+
+fn live_admitted_evidence_doc_ids(
+    options: &SearchOptions,
+    evidence_ids: &BTreeSet<String>,
+    read_connection: Option<&DbConnection>,
+) -> BTreeSet<String> {
+    if let Some(connection) = read_connection {
+        return live_admitted_evidence_doc_ids_with_connection(options, evidence_ids, connection);
+    }
+
+    let database_path = options.resolve_database_path();
+    let Ok(connection) = DbConnection::open_file(&database_path) else {
+        return BTreeSet::new();
+    };
+    live_admitted_evidence_doc_ids_with_connection(options, evidence_ids, &connection)
+}
+
+fn live_admitted_evidence_doc_ids_with_connection(
+    options: &SearchOptions,
+    evidence_ids: &BTreeSet<String>,
+    connection: &DbConnection,
+) -> BTreeSet<String> {
+    let canonical_workspace = default_workspace_root(&options.workspace_path);
+    let canonical_workspace_path = canonical_workspace.to_string_lossy();
+    let Some(workspace_id) = connection
+        .get_workspace_by_path(canonical_workspace_path.as_ref())
+        .ok()
+        .flatten()
+        .map(|workspace| workspace.id)
+    else {
+        return BTreeSet::new();
+    };
+    evidence_ids
+        .iter()
+        .filter_map(|doc_id| {
+            let evidence_id = EvidenceId::from_str(doc_id).ok()?;
+            if evidence_id.to_string() != *doc_id {
+                return None;
+            }
+            let span = connection.get_evidence_span(doc_id).ok()??;
+            let session = connection.get_session(&span.session_id).ok()??;
+            span.is_search_admitted_for_session(&workspace_id, &session)
+                .then(|| doc_id.clone())
+        })
+        .collect()
+}
+
+fn apply_live_evidence_visibility_to_diag(
+    options: &SearchOptions,
+    diag: &mut DiagSearchSyncResult,
+    degraded: &mut Vec<SearchDegradation>,
+) {
+    let evidence_ids = diag
+        .pre_fusion
+        .lexical
+        .results
+        .iter()
+        .chain(&diag.pre_fusion.semantic_fast.results)
+        .map(|hit| hit.doc_id.as_str())
+        .chain(
+            diag.fusion
+                .per_doc_contribution
+                .iter()
+                .map(|hit| hit.doc_id.as_str()),
+        )
+        .chain(diag.final_hits.iter().map(|hit| hit.doc_id.as_str()))
+        .filter(|doc_id| doc_id.starts_with("ev_"))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if evidence_ids.is_empty() {
+        return;
+    }
+
+    let admitted = live_admitted_evidence_doc_ids(options, &evidence_ids, None);
+    let is_visible = |doc_id: &str| !doc_id.starts_with("ev_") || admitted.contains(doc_id);
+    diag.pre_fusion
+        .lexical
+        .results
+        .retain(|hit| is_visible(&hit.doc_id));
+    diag.pre_fusion
+        .semantic_fast
+        .results
+        .retain(|hit| is_visible(&hit.doc_id));
+    diag.fusion
+        .per_doc_contribution
+        .retain(|hit| is_visible(&hit.doc_id));
+    diag.final_hits.retain(|hit| is_visible(&hit.doc_id));
+
+    let filtered = evidence_ids.len().saturating_sub(admitted.len());
+    if filtered > 0 {
+        degraded.push(SearchDegradation::evidence_live_admission_filtered(
+            filtered,
+        ));
+    }
+}
+
 #[cfg(test)]
 fn apply_tombstone_visibility(
     options: &SearchOptions,
@@ -10027,7 +10191,8 @@ fn open_lexical_searcher(_index_dir: &Path) -> Result<Option<Arc<dyn LexicalSear
 mod tests {
     use super::*;
     use crate::db::{
-        CreateFeedbackEventInput, CreateMemoryInput, CreateWorkspaceInput, DbConnection,
+        CreateEvidenceSpanInput, CreateFeedbackEventInput, CreateMemoryInput, CreateSessionInput,
+        CreateWorkspaceInput, DbConnection, EvidenceProducerKind,
     };
     use crate::search::{Embedder, EmbedderStack, IndexBuilder, IndexableDocument};
 
@@ -10043,6 +10208,21 @@ mod tests {
             label,
             std::process::id()
         ))
+    }
+
+    fn write_current_evidence_security_epoch_metadata(index_dir: &Path) -> TestResult {
+        std::fs::write(
+            index_dir.join("meta.json"),
+            serde_json::json!({
+                "schema": "ee.index_metadata.v1",
+                "generation": 0,
+                "sourceGeneration": 0,
+                "evidenceSecurityPolicyEpoch": crate::db::EVIDENCE_SECURITY_POLICY_EPOCH,
+                "documentCount": 0,
+            })
+            .to_string(),
+        )
+        .map_err(|error| error.to_string())
     }
 
     fn seeded_search_audit_ids(seed: u64) -> Result<Vec<String>, String> {
@@ -10537,6 +10717,7 @@ mod tests {
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
+        write_current_evidence_security_epoch_metadata(&index_dir)?;
 
         let similar = run_similar(&SimilarOptions {
             workspace_path: workspace.clone(),
@@ -13492,6 +13673,44 @@ mod tests {
     }
 
     #[test]
+    fn search_refuses_pre_security_epoch_index_before_open() -> TestResult {
+        let workspace = unique_test_dir("pre-security-epoch-index");
+        let index_dir = workspace.join("index");
+        std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            index_dir.join("meta.json"),
+            r#"{"schema":"ee.index_metadata.v1","generation":0,"sourceGeneration":0}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        let options = SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(workspace.join("missing.db")),
+            index_dir: Some(index_dir),
+            query: "must not open stale evidence".to_owned(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        };
+
+        assert!(
+            matches!(run_search(&options), Err(SearchError::NoIndex)),
+            "pre-security-epoch index must fail closed before retrieval"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn search_degradations_reuse_index_status_within_ttl() -> TestResult {
         let workspace = unique_test_dir("cached-index-status");
         let index_dir = workspace.join("index");
@@ -13604,6 +13823,195 @@ mod tests {
 
     #[cfg(feature = "lexical-bm25")]
     #[test]
+    fn live_evidence_admission_filters_stale_index_from_search_assist_and_diag() -> TestResult {
+        let workspace = unique_test_dir("evidence-live-admission");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let database_path = workspace.join("ee.db");
+        let index_dir = workspace.join("index");
+        let workspace_id = "wsp_49000000000000000000000001".to_owned();
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x4f_001)).to_string();
+        let evidence_id = EvidenceId::from_uuid(uuid::Uuid::from_u128(0x4f_002)).to_string();
+        let memory_id = "mem_40000000000000000000000001";
+        let denied_phrase = "forbidden old evidence phrase visibility canary";
+        let safe_phrase = "safe memory visibility canary remains available";
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: default_workspace_root(&workspace).display().to_string(),
+                    name: Some("evidence-live-admission".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_session(
+                &session_id,
+                &CreateSessionInput {
+                    workspace_id: workspace_id.clone(),
+                    cass_session_id: "upstream-evidence-live-admission".to_owned(),
+                    source_path: None,
+                    agent_name: Some("codex".to_owned()),
+                    model: Some("gpt-5".to_owned()),
+                    started_at: Some("2026-07-28T12:00:00Z".to_owned()),
+                    ended_at: Some("2026-07-28T12:01:00Z".to_owned()),
+                    message_count: 1,
+                    token_count: Some(8),
+                    content_hash: format!(
+                        "blake3:{}",
+                        blake3::hash(b"evidence-live-admission-session").to_hex()
+                    ),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(memory_id, &test_memory_input(&workspace_id, safe_phrase))
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_evidence_span(
+                &evidence_id,
+                &CreateEvidenceSpanInput {
+                    workspace_id: workspace_id.clone(),
+                    session_id,
+                    memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
+                    cass_span_id: "upstream-evidence-live-admission-span".to_owned(),
+                    span_kind: "message".to_owned(),
+                    start_line: 1,
+                    end_line: 1,
+                    start_byte: None,
+                    end_byte: None,
+                    role: Some("assistant".to_owned()),
+                    excerpt: denied_phrase.to_owned(),
+                    content_hash: format!(
+                        "blake3:{}",
+                        blake3::hash(denied_phrase.as_bytes()).to_hex()
+                    ),
+                    metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let build_index_dir = index_dir.clone();
+        let documents = vec![
+            IndexableDocument::new(evidence_id.clone(), denied_phrase),
+            IndexableDocument::new(memory_id, safe_phrase),
+        ];
+        crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            let stack = EmbedderStack::from_parts(
+                Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>,
+                None,
+            );
+            IndexBuilder::new(&build_index_dir)
+                .with_embedder_stack(stack)
+                .add_documents(documents)
+                .build(&cx)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())??;
+        write_current_evidence_security_epoch_metadata(&index_dir)?;
+
+        let initially_admitted = run_search(&SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database_path.clone()),
+            index_dir: Some(index_dir.clone()),
+            query: "forbidden old evidence phrase".to_owned(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: true,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        })
+        .map_err(|error| error.to_string())?;
+        assert!(
+            initially_admitted
+                .results
+                .iter()
+                .any(|hit| hit.doc_id == evidence_id),
+            "live admission must resolve the actual canonical workspace row rather than synthesize its id"
+        );
+
+        connection
+            .execute_raw(&format!(
+                "UPDATE evidence_spans SET search_eligibility = 'denied' WHERE id = '{}'",
+                evidence_id
+            ))
+            .map_err(|error| error.to_string())?;
+
+        let base_options = SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database_path),
+            index_dir: Some(index_dir),
+            query: "visibility canary".to_owned(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: true,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        };
+
+        let search = run_search(&base_options).map_err(|error| error.to_string())?;
+        assert!(
+            search.results.iter().all(|hit| hit.doc_id != evidence_id),
+            "live-denied evidence must not survive normal search"
+        );
+        assert!(
+            search.results.iter().any(|hit| hit.doc_id == memory_id),
+            "non-evidence hits remain usable"
+        );
+        assert!(
+            search
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "evidence_live_admission_filtered")
+        );
+
+        let assist = run_search(&SearchOptions {
+            relevance_floor: Some(f32::MAX),
+            ..base_options.clone()
+        })
+        .map_err(|error| error.to_string())?;
+        let assist_json = assist.data_json().to_string();
+        assert!(!assist_json.contains(&evidence_id));
+        assert!(!assist_json.contains(denied_phrase));
+
+        let diag = run_diag_search(&base_options).map_err(|error| error.to_string())?;
+        let diag_json = diag.data_json().to_string();
+        assert!(!diag_json.contains(&evidence_id));
+        assert!(!diag_json.contains(denied_phrase));
+        assert!(diag_json.contains(memory_id));
+        Ok(())
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    #[test]
     fn diag_search_report_exposes_prefusion_arms_and_fusion_contributions() -> TestResult {
         let workspace = unique_test_dir("diag-search-workspace");
         let index_dir = workspace.join("index");
@@ -13638,6 +14046,7 @@ mod tests {
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
+        write_current_evidence_security_epoch_metadata(&index_dir)?;
 
         let report = run_diag_search(&SearchOptions {
             workspace_path: workspace.clone(),

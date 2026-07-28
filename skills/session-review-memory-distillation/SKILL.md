@@ -47,8 +47,8 @@ cass search "<query>" --json
 ```
 
 JSON from stdout is evidence. stderr is diagnostics only. The skill may consume
-`ee.response.v1`, `ee.error.v1`, `ee.import.cass.v1`,
-`ee.review.session.v1`, `ee.curate.*`, CASS robot JSON, and
+`ee.response.v2`, `ee.error.v2`, `ee.import.cass.v1`,
+`ee.review.session.v2`, `ee.curate.*`, CASS robot JSON, and
 `ee.skill_evidence_bundle.v1` artifacts when their paths, hashes, provenance,
 redaction status, trust class, degraded state, and prompt-injection quarantine
 status are present.

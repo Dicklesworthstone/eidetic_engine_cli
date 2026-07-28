@@ -55,8 +55,8 @@ use crate::graph::decay::{
 };
 use crate::models::degradation::GRAPH_CURATE_DISCONNECTED_GRAPH_CODE;
 use crate::models::{
-    CandidateId, DomainError, MemoryId, MemoryKind, MemoryLevel, ProducerMetadata, ProvenanceUri,
-    REVIEW_SESSION_SCHEMA_V1, RuleId, Tag, TrustClass, UnitScore, WorkspaceId,
+    CandidateId, DomainError, EvidenceId, MemoryId, MemoryKind, MemoryLevel, ProducerMetadata,
+    ProvenanceUri, REVIEW_SESSION_SCHEMA_V2, RuleId, Tag, TrustClass, UnitScore, WorkspaceId,
 };
 use crate::search::HashEmbedder;
 
@@ -86,6 +86,8 @@ pub const CURATE_AUTO_PROMOTE_SCHEMA_V1: &str = "ee.curate.auto_promote.v1";
 pub const REVIEW_WORKSPACE_SCHEMA_V1: &str = "ee.review.workspace.v1";
 /// Stable schema for ambient capture suggestion reports.
 pub const CAPTURE_SUGGESTIONS_SCHEMA_V1: &str = "ee.capture_suggestions.v1";
+/// Privacy-safe ambient capture schema with canonical provenance URIs.
+pub const CAPTURE_SUGGESTIONS_SCHEMA_V2: &str = "ee.capture_suggestions.v2";
 /// Stable schema for failed-to-fixed session arc metadata.
 pub const SESSION_ARC_SCHEMA_V1: &str = "ee.session_arc.v1";
 /// Stable schema for explicit propose-derived candidate reports (bd-kxm0c).
@@ -644,7 +646,7 @@ pub struct ReviewSessionReport {
     pub workspace_path: String,
     pub database_path: String,
     pub session_id: String,
-    pub cass_session_id: String,
+    pub session_provenance_uri: String,
     pub propose_mode: bool,
     pub dry_run: bool,
     pub durable_mutation: bool,
@@ -699,7 +701,7 @@ pub struct ReviewSessionArcMetadata {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewSessionArcSpan {
     pub evidence_span_id: String,
-    pub cass_span_id: String,
+    pub provenance_uri: String,
     pub start_line: u32,
     pub end_line: u32,
     pub content_hash: String,
@@ -711,7 +713,7 @@ pub struct ReviewSessionArcSpan {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewSessionArcProvenance {
     pub session_id: String,
-    pub cass_session_id: String,
+    pub provenance_uri: String,
 }
 
 /// Result of read-only ambient capture suggestion.
@@ -728,7 +730,7 @@ pub struct CaptureSuggestionsReport {
     pub read_only: bool,
     pub durable_mutation: bool,
     pub session_id: String,
-    pub cass_session_id: String,
+    pub session_provenance_uri: String,
     pub evidence_span_count: usize,
     pub candidate_count: usize,
     pub suppressed_count: usize,
@@ -783,7 +785,7 @@ pub struct CaptureSuggestionProposedFields {
 #[serde(rename_all = "camelCase")]
 pub struct CaptureSuggestionEvidence {
     pub evidence_span_id: String,
-    pub cass_span_id: String,
+    pub provenance_uri: String,
     pub role: Option<String>,
     pub start_line: u32,
     pub end_line: u32,
@@ -2714,7 +2716,7 @@ pub fn review_session_proposals(
             .filter(|value| !value.is_empty()),
     )?;
     let evidence_spans = connection
-        .list_evidence_spans_for_session(&session.id)
+        .list_search_admitted_evidence_spans_for_session(&prepared.workspace_id, &session.id)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list session evidence spans: {error}"),
             repair: Some("ee import cass --workspace . --json".to_owned()),
@@ -2749,7 +2751,7 @@ pub fn review_session_proposals(
         .len();
     let candidate_count = candidates.len();
     let workspace_arg = shell_quote_command_arg(&prepared.workspace_path.display().to_string());
-    let session_arg = shell_quote_command_arg(&session.cass_session_id);
+    let session_arg = shell_quote_command_arg(&session.id);
     let next_action = if candidate_count == 0 {
         "no session-review candidates proposed".to_owned()
     } else if options.propose && !options.dry_run {
@@ -2759,14 +2761,14 @@ pub fn review_session_proposals(
     };
 
     Ok(ReviewSessionReport {
-        schema: REVIEW_SESSION_SCHEMA_V1,
+        schema: REVIEW_SESSION_SCHEMA_V2,
         command: "review session",
         version: env!("CARGO_PKG_VERSION"),
         workspace_id: prepared.workspace_id,
         workspace_path: prepared.workspace_path.display().to_string(),
         database_path: prepared.database_path.display().to_string(),
-        session_id: session.id,
-        cass_session_id: session.cass_session_id,
+        session_id: session.id.clone(),
+        session_provenance_uri: format!("cass-session://{}", session.id),
         propose_mode: options.propose,
         dry_run: options.dry_run,
         durable_mutation,
@@ -2794,7 +2796,7 @@ pub fn capture_suggestions(
     let session =
         resolve_review_session(&connection, &prepared.workspace_id, requested_session_id)?;
     let evidence_spans = connection
-        .list_evidence_spans_for_session(&session.id)
+        .list_search_admitted_evidence_spans_for_session(&prepared.workspace_id, &session.id)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list capture suggestion evidence spans: {error}"),
             repair: Some("ee import cass --workspace . --json".to_owned()),
@@ -2852,7 +2854,7 @@ pub fn capture_suggestions(
     let candidate_count = suggestions.len();
     let suppressed_count = suppressed.len();
     let workspace_arg = shell_quote_command_arg(&prepared.workspace_path.display().to_string());
-    let session_arg = shell_quote_command_arg(&session.cass_session_id);
+    let session_arg = shell_quote_command_arg(&session.id);
     let next_action = if candidate_count == 0 {
         "no capture suggestions proposed".to_owned()
     } else {
@@ -2866,7 +2868,6 @@ pub fn capture_suggestions(
         event = "capture_suggest",
         workspace_id = prepared.workspace_id.as_str(),
         session_id = session.id.as_str(),
-        cass_session_id = session.cass_session_id.as_str(),
         evidence_span_count = evidence_spans.len(),
         candidate_count,
         suppressed_count,
@@ -2877,7 +2878,7 @@ pub fn capture_suggestions(
     );
 
     Ok(CaptureSuggestionsReport {
-        schema: CAPTURE_SUGGESTIONS_SCHEMA_V1,
+        schema: CAPTURE_SUGGESTIONS_SCHEMA_V2,
         command: "capture suggest",
         version: env!("CARGO_PKG_VERSION"),
         workspace_id: prepared.workspace_id,
@@ -2891,12 +2892,12 @@ pub fn capture_suggestions(
             } else {
                 "latest_session".to_owned()
             },
-            requested_session_id: requested_session_id.map(str::to_owned),
+            requested_session_id: requested_session_id.map(|_| session.id.clone()),
         },
         read_only: true,
         durable_mutation: false,
-        session_id: session.id,
-        cass_session_id: session.cass_session_id,
+        session_id: session.id.clone(),
+        session_provenance_uri: format!("cass-session://{}", session.id),
         evidence_span_count: evidence_spans.len(),
         candidate_count,
         suppressed_count,
@@ -3023,7 +3024,8 @@ fn list_workspace_cass_evidence_spans(
     workspace_id: &str,
 ) -> Result<Vec<StoredEvidenceSpan>, DomainError> {
     connection
-        .list_evidence_spans_for_workspace(workspace_id)
+        .list_search_admitted_evidence_spans_for_workspace(workspace_id)
+        .map(|(spans, _)| spans)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list workspace CASS evidence spans: {error}"),
             repair: Some("ee import cass --workspace . --json".to_owned()),
@@ -3034,12 +3036,7 @@ fn count_workspace_cass_evidence_spans(
     connection: &DbConnection,
     workspace_id: &str,
 ) -> Result<usize, DomainError> {
-    connection
-        .count_evidence_spans_for_workspace(workspace_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to count workspace CASS evidence spans: {error}"),
-            repair: Some("ee import cass --workspace . --json".to_owned()),
-        })
+    list_workspace_cass_evidence_spans(connection, workspace_id).map(|spans| spans.len())
 }
 
 fn list_workspace_cass_evidence_spans_for_scope(
@@ -3366,7 +3363,6 @@ fn build_bootstrap_candidate(
     let candidate_id = deterministic_curate_id(&[
         workspace_id,
         session.id.as_str(),
-        session.cass_session_id.as_str(),
         "bootstrap",
         topic_key,
         evidence_ids.join(",").as_str(),
@@ -3375,7 +3371,7 @@ fn build_bootstrap_candidate(
     let reason = format!(
         "Bootstrap candidate: clustered {} cass-imported span(s) for topic `{topic_key}` from session `{}` (no existing memory linked yet — promote to a new memory via `ee curate accept`).",
         evidence_ids.len(),
-        session.cass_session_id
+        session.id
     );
 
     Some(ReviewSessionCandidate {
@@ -3427,7 +3423,6 @@ fn build_review_candidate(
     let candidate_id = deterministic_curate_id(&[
         workspace_id,
         session.id.as_str(),
-        session.cass_session_id.as_str(),
         topic_key,
         evidence_ids.join(",").as_str(),
         content_hash.as_str(),
@@ -3435,7 +3430,7 @@ fn build_review_candidate(
     let reason = format!(
         "Session review clustered {} evidence span(s) for topic `{topic_key}` from CASS session `{}`.",
         evidence_ids.len(),
-        session.cass_session_id
+        session.id
     );
 
     Some(ReviewSessionCandidate {
@@ -3545,7 +3540,6 @@ fn build_session_arc_candidate_pair(
     let anti_pattern_id = deterministic_curate_id(&[
         workspace_id,
         session.id.as_str(),
-        session.cass_session_id.as_str(),
         "session_arc",
         arc_id.as_str(),
         "anti_pattern",
@@ -3554,7 +3548,6 @@ fn build_session_arc_candidate_pair(
     let rule_id = deterministic_curate_id(&[
         workspace_id,
         session.id.as_str(),
-        session.cass_session_id.as_str(),
         "session_arc",
         arc_id.as_str(),
         "rule",
@@ -3636,7 +3629,6 @@ fn session_arc_id(
     deterministic_curate_id(&[
         workspace_id,
         session.id.as_str(),
-        session.cass_session_id.as_str(),
         "session_arc",
         topic_key,
         failure_span.id.as_str(),
@@ -3667,7 +3659,7 @@ fn session_arc_metadata(
         linkage: "failed_to_fixed".to_owned(),
         session_provenance: ReviewSessionArcProvenance {
             session_id: session.id.clone(),
-            cass_session_id: session.cass_session_id.clone(),
+            provenance_uri: format!("cass-session://{}", session.id),
         },
     }
 }
@@ -3675,7 +3667,7 @@ fn session_arc_metadata(
 fn session_arc_span(span: &StoredEvidenceSpan) -> ReviewSessionArcSpan {
     ReviewSessionArcSpan {
         evidence_span_id: span.id.clone(),
-        cass_span_id: span.cass_span_id.clone(),
+        provenance_uri: span.canonical_provenance_uri(),
         start_line: span.start_line,
         end_line: span.end_line,
         content_hash: span.content_hash.clone(),
@@ -3760,7 +3752,7 @@ fn capture_suggestion_from_review_candidate(
         .filter_map(|source_id| evidence_by_id.get(source_id.as_str()).copied())
         .map(|span| CaptureSuggestionEvidence {
             evidence_span_id: span.id.clone(),
-            cass_span_id: span.cass_span_id.clone(),
+            provenance_uri: span.canonical_provenance_uri(),
             role: span.role.clone(),
             start_line: span.start_line,
             end_line: span.end_line,
@@ -3775,7 +3767,7 @@ fn capture_suggestion_from_review_candidate(
             .then_with(|| left.evidence_span_id.cmp(&right.evidence_span_id))
     });
     let workspace_arg = shell_quote_command_arg(&workspace_path.display().to_string());
-    let session_arg = shell_quote_command_arg(&session.cass_session_id);
+    let session_arg = shell_quote_command_arg(&session.id);
     let candidate_arg = shell_quote_command_arg(&candidate.candidate_id);
     let review_command =
         format!("ee review session {session_arg} --workspace {workspace_arg} --propose --json");
@@ -7313,26 +7305,29 @@ pub fn propose_derived_candidate(
                 "ee curate propose-derived --help",
             ));
         }
+        let id = EvidenceId::from_str(id).map_err(|_| {
+            curate_usage_error(
+                "propose-derived received a malformed source evidence identifier".to_owned(),
+                "ee curate propose-derived --help",
+            )
+        })?;
+        let id = id.to_string();
         let span = connection
-            .get_evidence_span(id)
+            .get_derivation_admitted_evidence_span(&id, &prepared.workspace_id)
             .map_err(|error| DomainError::Storage {
-                message: format!("Failed to load source evidence span {id}: {error}"),
+                message: format!("Failed to revalidate source evidence admission: {error}"),
                 repair: Some("ee import cass --workspace . --json".to_owned()),
             })?
-            .ok_or_else(|| DomainError::NotFound {
-                resource: "evidence_span".to_owned(),
-                id: id.to_owned(),
-                repair: Some("ee import cass --workspace . --json".to_owned()),
-            })?;
-        if span.workspace_id != prepared.workspace_id {
-            return Err(curate_usage_error(
-                format!(
-                    "propose-derived --source-evidence-span {id} belongs to a different workspace"
+            .ok_or_else(|| DomainError::Usage {
+                message:
+                    "propose-derived source evidence is missing or not admitted by the current evidence-security policy"
+                        .to_owned(),
+                repair: Some(
+                    "Re-import or choose evidence that passes current positive admission."
+                        .to_owned(),
                 ),
-                "ee curate propose-derived --help",
-            ));
-        }
-        refs.insert(("evidence_span".to_owned(), id.to_owned(), span.content_hash));
+            })?;
+        refs.insert(("evidence_span".to_owned(), id, span.content_hash));
     }
 
     let source_refs: Vec<ProposeDerivedSourceRef> = refs
@@ -7786,7 +7781,7 @@ fn resolve_reflection_source(
             repair: Some(format!("ee memory show {id} --json")),
         })?;
     let evidence_span = connection
-        .get_evidence_span(id)
+        .get_derivation_admitted_evidence_span(id, workspace_id)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to load reflection source evidence span {id}: {error}"),
             repair: Some("ee import cass --workspace . --json".to_owned()),
@@ -7848,7 +7843,7 @@ fn resolve_reflection_evidence_span_source(
         ));
     }
     let span = connection
-        .get_evidence_span(id)
+        .get_derivation_admitted_evidence_span(id, workspace_id)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to load reflection source evidence span {id}: {error}"),
             repair: Some("ee import cass --workspace . --json".to_owned()),
@@ -7897,6 +7892,9 @@ fn reflection_source_input_from_evidence_span(
     span: StoredEvidenceSpan,
     workspace_id: &str,
 ) -> Result<ReflectionSourceInput, DomainError> {
+    // The resolver loads this row through the live positive-admission
+    // boundary. Keep the workspace check here as a defense-in-depth guard
+    // before its excerpt enters a public reflection package.
     if span.workspace_id != workspace_id {
         return Err(curate_usage_error(
             format!(
@@ -8215,6 +8213,33 @@ fn validate_reflection_current_source_hashes(
                         format!(
                             "reflection source evidence span {} belongs to workspace {}, not {}",
                             span.id, span.workspace_id, workspace_id
+                        ),
+                        "ee reflect propose --workspace . --json",
+                    ));
+                }
+                let session = connection
+                    .get_session(&span.session_id)
+                    .map_err(|error| DomainError::Storage {
+                        message: format!(
+                            "Failed to revalidate reflection source evidence session {}: {error}",
+                            span.session_id
+                        ),
+                        repair: Some("ee import cass --workspace . --json".to_owned()),
+                    })?
+                    .ok_or_else(|| {
+                        curate_usage_error(
+                            format!(
+                                "reflection source evidence span {} no longer has live session provenance",
+                                span.id
+                            ),
+                            "ee reflect propose --workspace . --json",
+                        )
+                    })?;
+                if !span.is_derivation_admitted_for_session(workspace_id, &session) {
+                    return Err(curate_usage_error(
+                        format!(
+                            "reflection source evidence span {} is no longer admitted by the current evidence-security policy",
+                            span.id
                         ),
                         "ee reflect propose --workspace . --json",
                     ));
@@ -9162,17 +9187,38 @@ fn review_bootstrap_derivation_package(
                 evidence_span.id, evidence_span.workspace_id, workspace_id
             )));
         }
+        let evidence_session = connection
+            .get_session(&evidence_span.session_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to load review bootstrap session {}: {error}",
+                    evidence_span.session_id
+                ),
+                repair: Some("ee import cass --workspace . --json".to_owned()),
+            })?
+            .ok_or_else(|| {
+                review_bootstrap_derivation_error(format!(
+                    "Review bootstrap evidence span {} has no live session provenance.",
+                    evidence_span.id
+                ))
+            })?;
+        if !evidence_span.is_search_admitted_for_session(workspace_id, &evidence_session) {
+            return Err(review_bootstrap_derivation_error(format!(
+                "Review bootstrap evidence span {} is no longer admitted by the current evidence-security policy.",
+                evidence_span.id
+            )));
+        }
+        if loaded_session
+            .as_ref()
+            .is_some_and(|loaded: &StoredSession| loaded.id != evidence_session.id)
+        {
+            return Err(review_bootstrap_derivation_error(format!(
+                "Review bootstrap candidate {} mixes evidence from multiple sessions.",
+                candidate.candidate_id
+            )));
+        }
         if loaded_session.is_none() {
-            loaded_session =
-                connection
-                    .get_session(&evidence_span.session_id)
-                    .map_err(|error| DomainError::Storage {
-                        message: format!(
-                            "Failed to load review bootstrap session {}: {error}",
-                            evidence_span.session_id
-                        ),
-                        repair: Some("ee import cass --workspace . --json".to_owned()),
-                    })?;
+            loaded_session = Some(evidence_session);
         }
         source_refs.push(DerivationSourceRef::new(
             DerivationSourceKind::EvidenceSpan,
@@ -9197,6 +9243,14 @@ fn review_bootstrap_derivation_package(
             session.id, session.workspace_id, workspace_id
         )));
     }
+    if let (Some(requested), Some(loaded)) = (session, loaded_session.as_ref())
+        && requested.id != loaded.id
+    {
+        return Err(review_bootstrap_derivation_error(format!(
+            "Review bootstrap candidate {} session does not match its admitted evidence provenance.",
+            candidate.candidate_id
+        )));
+    }
 
     let memory_kind = review_candidate_derived_memory_kind(candidate);
     let trust_subclass = review_candidate_derived_trust_subclass(candidate);
@@ -9208,7 +9262,8 @@ fn review_bootstrap_derivation_package(
         "sourceIds": &candidate.source_ids,
         "topicKey": candidate.topic_key.as_str(),
         "sessionId": session.map(|session| session.id.as_str()),
-        "cassSessionId": session.map(|session| session.cass_session_id.as_str()),
+        "sessionProvenanceUri": session
+            .map(|session| format!("cass-session://{}", session.id)),
         "proposedMemory": {
             "level": "procedural",
             "kind": memory_kind,
@@ -9721,46 +9776,15 @@ fn validate_evidence_derivation_source(
     source_ref: &DerivationSourceRef,
     errors: &mut Vec<CurateValidationIssue>,
 ) {
-    match connection.get_evidence_span(source_ref.id.as_str()) {
-        Ok(Some(span)) if span.workspace_id != stored.workspace_id => {
-            errors.push(validation_issue(
-                "derived_source_workspace_mismatch",
-                format!(
-                    "Evidence source {} belongs to workspace {}, not {}.",
-                    span.id, span.workspace_id, stored.workspace_id
-                ),
-                "Re-propose the candidate from sources in the same workspace.",
-            ));
-        }
-        Ok(Some(span)) if span.content_hash != source_ref.content_hash => {
-            errors.push(validation_issue(
-                "derived_source_hash_mismatch",
-                format!(
-                    "Evidence source {} hash drifted from {} to {}.",
-                    span.id, source_ref.content_hash, span.content_hash
-                ),
-                "Re-propose the candidate against the current source content.",
-            ));
-        }
-        Ok(Some(span))
-            if span
-                .memory_id
-                .as_deref()
-                .is_some_and(|memory_id| !memory_id.trim().is_empty()) =>
-        {
-            errors.push(validation_issue(
-                "derived_source_evidence_already_linked",
-                format!("Evidence source {} is already linked to a memory.", span.id),
-                "Re-propose the candidate with unlinked evidence spans.",
-            ));
-        }
-        Ok(Some(_)) => {}
+    let span = match connection.get_evidence_span(source_ref.id.as_str()) {
+        Ok(Some(span)) => span,
         Ok(None) => {
             errors.push(validation_issue(
                 "derived_source_evidence_missing",
                 format!("Evidence source {} does not exist.", source_ref.id),
                 "Re-propose the candidate from existing evidence spans.",
             ));
+            return;
         }
         Err(error) => {
             errors.push(validation_issue(
@@ -9768,7 +9792,77 @@ fn validate_evidence_derivation_source(
                 format!("Failed to load evidence source {}: {error}", source_ref.id),
                 "Retry validation after repairing storage.",
             ));
+            return;
         }
+    };
+    if span.workspace_id != stored.workspace_id {
+        errors.push(validation_issue(
+            "derived_source_workspace_mismatch",
+            format!(
+                "Evidence source {} belongs to workspace {}, not {}.",
+                span.id, span.workspace_id, stored.workspace_id
+            ),
+            "Re-propose the candidate from sources in the same workspace.",
+        ));
+        return;
+    }
+    let session = match connection.get_session(&span.session_id) {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            errors.push(validation_issue(
+                "derived_source_evidence_not_admitted",
+                format!(
+                    "Evidence source {} has no live session provenance and is not admitted.",
+                    span.id
+                ),
+                "Re-import the source session and re-propose the candidate.",
+            ));
+            return;
+        }
+        Err(error) => {
+            errors.push(validation_issue(
+                "derived_source_evidence_load_failed",
+                format!(
+                    "Failed to load session provenance for evidence source {}: {error}",
+                    span.id
+                ),
+                "Retry validation after repairing storage.",
+            ));
+            return;
+        }
+    };
+    if !span.is_derivation_admitted_for_session(&stored.workspace_id, &session) {
+        errors.push(validation_issue(
+            "derived_source_evidence_not_admitted",
+            format!(
+                "Evidence source {} is no longer admitted by the current evidence-security policy.",
+                span.id
+            ),
+            "Re-import or re-propose from evidence that passes the current security policy.",
+        ));
+        return;
+    }
+    if span.content_hash != source_ref.content_hash {
+        errors.push(validation_issue(
+            "derived_source_hash_mismatch",
+            format!(
+                "Evidence source {} hash drifted from {} to {}.",
+                span.id, source_ref.content_hash, span.content_hash
+            ),
+            "Re-propose the candidate against the current source content.",
+        ));
+        return;
+    }
+    if span
+        .memory_id
+        .as_deref()
+        .is_some_and(|memory_id| !memory_id.trim().is_empty())
+    {
+        errors.push(validation_issue(
+            "derived_source_evidence_already_linked",
+            format!("Evidence source {} is already linked to a memory.", span.id),
+            "Re-propose the candidate with unlinked evidence spans.",
+        ));
     }
 }
 
@@ -14764,7 +14858,7 @@ mod tests {
     use tracing_subscriber::registry::Registry;
 
     use super::{
-        CAPTURE_SUGGESTIONS_SCHEMA_V1, CURATE_APPLY_SCHEMA_V1, CURATE_CANDIDATES_SCHEMA_V1,
+        CAPTURE_SUGGESTIONS_SCHEMA_V2, CURATE_APPLY_SCHEMA_V1, CURATE_CANDIDATES_SCHEMA_V1,
         CURATE_DISPOSITION_SCHEMA_V1, CURATE_RETIRE_SCHEMA_V1, CURATE_REVIEW_SCHEMA_V1,
         CURATE_TOMBSTONE_SCHEMA_V1, CURATE_UNTOMBSTONE_SCHEMA_V1, CURATE_VALIDATE_SCHEMA_V1,
         CandidateStatus, CandidateType, CaptureSuggestOptions, CurateCandidatesDegradation,
@@ -14773,7 +14867,7 @@ mod tests {
         REFLECTION_INGEST_SCHEMA_V1, REFLECTION_PROPOSE_SCHEMA_V1,
         REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY,
         REVIEW_CANDIDATE_KIND_SESSION_ARC_ANTI_PATTERN, REVIEW_CANDIDATE_KIND_SESSION_ARC_RULE,
-        REVIEW_SESSION_SCHEMA_V1, REVIEW_WORKSPACE_SCHEMA_V1, ReflectionIngestOptions,
+        REVIEW_SESSION_SCHEMA_V2, REVIEW_WORKSPACE_SCHEMA_V1, ReflectionIngestOptions,
         ReflectionProposeOptions, ReflectionRequestDurableLedgerOutcome,
         ReflectionRequestLedgerDiagnosticsOptions, ReflectionResultDurableIngestOutcome,
         ReviewSessionCandidate, ReviewSessionOptions, ReviewSessionReport, ReviewWorkspaceOptions,
@@ -14810,9 +14904,10 @@ mod tests {
     use crate::db::{
         CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateFeedbackEventInput,
         CreateMemoryInput, CreateMemoryLinkInput, CreateProceduralRuleInput, CreateSessionInput,
-        CreateWorkspaceInput, DbConnection, EvidenceSpanMemoryAttachResult, MemoryLinkRelation,
-        MemoryLinkSource, ReflectionRequestReplayStatus, StoredCurationCandidate,
-        StoredEvidenceSpan, StoredReflectionRequestLedger, StoredSession, audit_actions,
+        CreateWorkspaceInput, DbConnection, EvidenceProducerKind, EvidenceSpanMemoryAttachResult,
+        MemoryLinkRelation, MemoryLinkSource, ReflectionRequestReplayStatus,
+        StoredCurationCandidate, StoredEvidenceSpan, StoredReflectionRequestLedger, StoredSession,
+        audit_actions,
     };
     use crate::models::degradation::{
         ADVISORY_LOCK_TIMEOUT_CODE, GRAPH_CURATE_DISCONNECTED_GRAPH_CODE,
@@ -15397,6 +15492,154 @@ mod tests {
         assert_eq!(replay.candidate_id, ingest.candidate_id);
         assert_eq!(replay.validation.source_lock, "not_checked");
         assert_eq!(replay.validation.replay_gate, "accepted_replay");
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_ingest_rejects_evidence_posture_drift_without_candidate_or_excerpt_egress()
+    -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let key_path = workspace_path.join("reflect.key");
+        let workspace_id = test_workspace_id(workspace_path);
+        let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(0x24_10)).to_string();
+        let evidence_source_id = evidence_id(0x24_11);
+        let forbidden_excerpt =
+            "Private CASS excerpt used only to build the bounded reflection package.";
+        fs::write(&key_path, b"reflection-posture-drift-test-key")
+            .map_err(|error| error.to_string())?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("reflection-evidence-posture-drift".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_session(
+                &session_id,
+                &session_input(&workspace_id, "reflection-posture-drift-session"),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_evidence_span(
+                &evidence_source_id,
+                &evidence_span_input(
+                    &workspace_id,
+                    &session_id,
+                    None,
+                    "reflection-posture-drift-span",
+                    1,
+                    forbidden_excerpt,
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+
+        let source_ids = Vec::<String>::new();
+        let source_memory_ids = Vec::<String>::new();
+        let source_evidence_span_ids = vec![evidence_source_id.clone()];
+        let propose = propose_reflection_request(&ReflectionProposeOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            reflection_kind: "gaps",
+            gaps_only: false,
+            source_ids: &source_ids,
+            source_memory_ids: &source_memory_ids,
+            source_evidence_span_ids: &source_evidence_span_ids,
+            created_at: Some("2026-05-24T00:00:00Z"),
+            limits: ReflectionSourcePackageLimits::default(),
+            dry_run: false,
+            hmac_key_config: Some(ReflectionHmacKeyConfig::new(
+                Some("reflect-posture-key".to_owned()),
+                Some(key_path.clone()),
+            )),
+            lifecycle_config: Some(
+                ReflectionRequestLifecycleConfig::new(3600, 60)
+                    .map_err(|error| error.to_string())?,
+            ),
+        })
+        .map_err(|error| error.message())?;
+        let challenge = propose
+            .request
+            .challenge
+            .clone()
+            .ok_or_else(|| "expected posture-drift request challenge".to_owned())?;
+
+        connection
+            .execute_raw(&format!(
+                "UPDATE evidence_spans SET search_eligibility = 'quarantined' WHERE id = '{}'",
+                evidence_source_id
+            ))
+            .map_err(|error| error.to_string())?;
+
+        let mut kind_fields = serde_json::Map::new();
+        kind_fields.insert(
+            "knowledgeGaps".to_owned(),
+            serde_json::json!([{
+                "topic": "evidence admission",
+                "question": "Does the current source still pass positive admission?"
+            }]),
+        );
+        let result = ReflectionResultArtifact {
+            schema: REFLECTION_RESULT_SCHEMA.to_owned(),
+            request_id: propose.request_id.clone(),
+            request_hash: propose.request_hash.clone(),
+            challenge,
+            producer: ReflectionResultProducer {
+                kind: "agent_harness".to_owned(),
+                id: "cod_posture_test".to_owned(),
+                version: None,
+                extra: BTreeMap::new(),
+            },
+            reflection_kind: "gaps".to_owned(),
+            cited_source_ids: vec![evidence_source_id.clone()],
+            body: "The source must be revalidated before this result can create a candidate."
+                .to_owned(),
+            kind_fields,
+            self_reported_confidence: 0.72,
+        };
+        let result_json = serde_json::to_string(&result).map_err(|error| error.to_string())?;
+        let error = ingest_reflection_result(&ReflectionIngestOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            result_json: &result_json,
+            consumed_at: Some("2026-05-24T00:30:00Z"),
+            dry_run: false,
+            gaps_only: false,
+            hmac_key_config: Some(ReflectionHmacKeyConfig::new(
+                Some("reflect-posture-key".to_owned()),
+                Some(key_path),
+            )),
+        })
+        .expect_err("posture drift must reject reflection ingest");
+        let public_message = error.message();
+        assert!(
+            public_message.contains("no longer admitted"),
+            "reflection posture failure should be explicit: {public_message}"
+        );
+        assert!(
+            !public_message.contains(forbidden_excerpt),
+            "denied evidence excerpt must not escape through reflection errors: {public_message}"
+        );
+        let candidates = connection
+            .list_curation_candidates(&workspace_id, None, None, None)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            candidates.is_empty(),
+            "posture-drifted reflection result must not persist a candidate: {candidates:?}"
+        );
+        let ledger = connection
+            .get_reflection_request_ledger(&workspace_id, &propose.request_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "reflection request ledger disappeared".to_owned())?;
+        assert_eq!(ledger.status, "pending");
         Ok(())
     }
 
@@ -17389,12 +17632,12 @@ mod tests {
         })
         .map_err(|error| error.message())?;
 
-        assert_eq!(report.schema, CAPTURE_SUGGESTIONS_SCHEMA_V1);
+        assert_eq!(report.schema, CAPTURE_SUGGESTIONS_SCHEMA_V2);
         assert_eq!(report.command, "capture suggest");
         assert_eq!(report.selection.source, "from_session");
         assert_eq!(
             report.selection.requested_session_id.as_deref(),
-            Some("cass-review-session-a")
+            Some(fixture.session_id.as_str())
         );
         assert!(report.read_only);
         assert!(!report.durable_mutation);
@@ -17417,7 +17660,7 @@ mod tests {
         assert!(!suggestion.evidence.is_empty());
         let workspace_arg =
             super::shell_quote_command_arg(&fixture.workspace_path.display().to_string());
-        let session_arg = super::shell_quote_command_arg("cass-review-session-a");
+        let session_arg = super::shell_quote_command_arg(&fixture.session_id);
         let candidate_arg = super::shell_quote_command_arg(&suggestion.candidate_id);
         let expected_review =
             format!("ee review session {session_arg} --workspace {workspace_arg} --propose --json");
@@ -17755,7 +17998,9 @@ mod tests {
             .ok_or_else(|| "expected derivation metadata".to_owned())?;
         assert!(metadata.contains("\"producer\":\"review_session\""));
         assert!(metadata.contains("\"candidateKind\":\"propose_new_memory\""));
-        assert!(metadata.contains("\"cassSessionId\":\"cass-bootstrap-direct\""));
+        assert!(metadata.contains(&format!(
+            "\"sessionProvenanceUri\":\"cass-session://{bootstrap_session_id}\""
+        )));
 
         let report = list_curation_candidates(&CurateCandidatesOptions {
             workspace_path: fixture.workspace_path.as_path(),
@@ -18337,14 +18582,14 @@ mod tests {
     #[test]
     fn review_session_report_json_matches_golden() -> TestResult {
         let report = ReviewSessionReport {
-            schema: "ee.review.session.v1",
+            schema: REVIEW_SESSION_SCHEMA_V2,
             command: "review session",
             version: "0.0.0",
             workspace_id: "wsp_review_golden".to_owned(),
             workspace_path: "/workspace/example".to_owned(),
             database_path: "/workspace/example/.ee/ee.db".to_owned(),
             session_id: "sess_review_golden".to_owned(),
-            cass_session_id: "cass-review-golden".to_owned(),
+            session_provenance_uri: "cass-session://sess_review_golden".to_owned(),
             propose_mode: true,
             dry_run: true,
             durable_mutation: false,
@@ -18364,7 +18609,7 @@ mod tests {
                 source_type: "agent_inference".to_owned(),
                 source_ids: vec!["ev_review_a".to_owned(), "ev_review_b".to_owned()],
                 reason:
-                    "Session review clustered 2 evidence span(s) for topic `testing` from CASS session `cass-review-golden`."
+                    "Session review clustered 2 evidence span(s) for topic `testing` from CASS session `sess_review_golden`."
                         .to_owned(),
                 confidence: 0.61,
                 content_hash: "blake3:review-golden-hash".to_owned(),
@@ -18373,7 +18618,7 @@ mod tests {
             }],
             degraded: Vec::new(),
             next_action:
-                "ee review session cass-review-golden --workspace /workspace/example --propose --json"
+                "ee review session sess_review_golden --workspace /workspace/example --propose --json"
                     .to_owned(),
         };
 
@@ -18387,14 +18632,15 @@ mod tests {
     #[test]
     fn review_session_bootstrap_report_json_matches_golden() -> TestResult {
         let report = ReviewSessionReport {
-            schema: "ee.review.session.v1",
+            schema: REVIEW_SESSION_SCHEMA_V2,
             command: "review session",
             version: "0.0.0",
             workspace_id: "wsp_review_bootstrap_golden".to_owned(),
             workspace_path: "/workspace/bootstrap".to_owned(),
             database_path: "/workspace/bootstrap/.ee/ee.db".to_owned(),
             session_id: "sess_review_bootstrap_golden".to_owned(),
-            cass_session_id: "cass-review-bootstrap-golden".to_owned(),
+            session_provenance_uri:
+                "cass-session://sess_review_bootstrap_golden".to_owned(),
             propose_mode: true,
             dry_run: true,
             durable_mutation: false,
@@ -18413,7 +18659,7 @@ mod tests {
                 source_type: "agent_inference".to_owned(),
                 source_ids: vec!["ev_review_bootstrap".to_owned()],
                 reason:
-                    "Bootstrap candidate from 1 evidence span(s) in CASS session `cass-review-bootstrap-golden`."
+                    "Bootstrap candidate from 1 evidence span(s) in CASS session `sess_review_bootstrap_golden`."
                         .to_owned(),
                 confidence: 0.58,
                 content_hash: "blake3:review-bootstrap-golden-hash".to_owned(),
@@ -18422,7 +18668,7 @@ mod tests {
             }],
             degraded: Vec::new(),
             next_action:
-                "ee review session cass-review-bootstrap-golden --workspace /workspace/bootstrap --propose --json"
+                "ee review session sess_review_bootstrap_golden --workspace /workspace/bootstrap --propose --json"
                     .to_owned(),
         };
 
@@ -21024,6 +21270,192 @@ mod tests {
     }
 
     #[test]
+    fn apply_curation_candidate_rejects_evidence_posture_drift_without_excerpt_egress() -> TestResult
+    {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x6_510_1)).to_string();
+        let evidence_source_id = evidence_id(0x6_510_2);
+        let candidate_id = curate_id(0x6_510_3);
+        let forbidden_excerpt =
+            "CASS evidence requires create-derived validation to compare locked source hashes.";
+        let connection = seed_create_derived_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &memory_id,
+            &evidence_source_id,
+            &candidate_id,
+            None,
+            None,
+            None,
+        )?;
+
+        validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        connection
+            .execute_raw(&format!(
+                "UPDATE evidence_spans SET search_eligibility = 'denied' WHERE id = '{}'",
+                evidence_source_id
+            ))
+            .map_err(|error| error.to_string())?;
+
+        let report = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.application.status, "blocked");
+        assert_eq!(report.application.decision, "unchanged");
+        assert!(
+            report
+                .application
+                .errors
+                .iter()
+                .any(|issue| issue.code == "derived_source_evidence_not_admitted"),
+            "apply report should name evidence posture drift: {:?}",
+            report.application.errors
+        );
+        let rendered_errors =
+            serde_json::to_string(&report.application.errors).map_err(|error| error.to_string())?;
+        assert!(
+            !rendered_errors.contains(forbidden_excerpt),
+            "denied evidence excerpt must not escape through apply errors: {rendered_errors}"
+        );
+        assert!(!report.mutation.persisted);
+        assert_eq!(report.mutation.from_status, "approved");
+        assert_eq!(report.mutation.to_status, "approved");
+        assert_no_create_derived_apply_side_effects(
+            &connection,
+            &workspace_id,
+            &candidate_id,
+            &memory_id,
+            &evidence_source_id,
+            None,
+            1,
+            "evidence posture drift",
+        )
+    }
+
+    #[test]
+    fn apply_curation_candidate_accepts_safe_nonindexed_agentsmd_derivation_evidence() -> TestResult
+    {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x6_520_1)).to_string();
+        let evidence_source_id = evidence_id(0x6_520_2);
+        let candidate_id = curate_id(0x6_520_3);
+        let connection = seed_create_derived_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &memory_id,
+            &evidence_source_id,
+            &candidate_id,
+            None,
+            None,
+            None,
+        )?;
+        let seeded_evidence = connection
+            .get_evidence_span(&evidence_source_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "seeded derivation evidence missing".to_owned())?;
+        let agentsmd_security_metadata = serde_json::json!({
+            "schema": crate::db::EVIDENCE_SECURITY_METADATA_SCHEMA_V1,
+            "producerKind": "agentsmd_import",
+            "screeningVersion": crate::db::EVIDENCE_SCREENING_VERSION,
+            "securityPolicyEpoch": crate::db::EVIDENCE_SECURITY_POLICY_EPOCH,
+            "secretRedactionStatus": seeded_evidence.secret_redaction_status,
+            "redactionClasses": [],
+            "instructionRisk": seeded_evidence.instruction_risk,
+            "searchEligibility": "denied",
+            "packEligibility": "denied",
+            "canonicalProvenanceRevision":
+                crate::db::EVIDENCE_CANONICAL_PROVENANCE_REVISION,
+            "canonicalExcerptHash": seeded_evidence.canonical_excerpt_hash,
+            "upstreamRefHash": seeded_evidence.upstream_ref_hash,
+            "sourceMetadataHash": null
+        })
+        .to_string();
+        connection
+            .execute_raw(&format!(
+                "UPDATE evidence_spans
+                 SET producer_kind = 'agentsmd_import',
+                     role = 'agentsmd_import',
+                     search_eligibility = 'denied',
+                     pack_eligibility = 'denied',
+                     metadata_json = '{}'
+                 WHERE id = '{}'",
+                agentsmd_security_metadata, evidence_source_id
+            ))
+            .map_err(|error| error.to_string())?;
+
+        assert!(
+            connection
+                .get_search_admitted_evidence_span(&evidence_source_id, &workspace_id)
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            "safe AGENTS.md evidence must never become directly searchable"
+        );
+        assert!(
+            connection
+                .get_derivation_admitted_evidence_span(&evidence_source_id, &workspace_id)
+                .map_err(|error| error.to_string())?
+                .is_some(),
+            "safe AGENTS.md evidence should remain available to explicit derivation"
+        );
+
+        let validation = validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(validation.validation.status, "passed");
+
+        let report = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(report.application.status, "applied");
+        let derived_memory_id = report
+            .application
+            .created_memory_id
+            .as_deref()
+            .ok_or_else(|| "safe AGENTS.md derivation did not create a memory".to_owned())?;
+        let evidence = connection
+            .get_evidence_span(&evidence_source_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "AGENTS.md evidence disappeared after apply".to_owned())?;
+        assert_eq!(evidence.memory_id.as_deref(), Some(derived_memory_id));
+        assert_eq!(evidence.search_eligibility, "denied");
+        assert_eq!(evidence.pack_eligibility, "denied");
+        Ok(())
+    }
+
+    #[test]
     fn apply_curation_candidate_rejects_create_derived_tombstoned_source_memory_race() -> TestResult
     {
         // bd-39by4: source memory drift between validate and apply.
@@ -23377,14 +23809,14 @@ mod tests {
         assert_aggregated_degraded_source(&disposition_report.data_json(), "curate_disposition")?;
 
         let review_session_report = ReviewSessionReport {
-            schema: REVIEW_SESSION_SCHEMA_V1,
+            schema: REVIEW_SESSION_SCHEMA_V2,
             command: "review session",
             version: env!("CARGO_PKG_VERSION"),
             workspace_id: "wsp_curate_aggregate".to_owned(),
             workspace_path: "/workspace".to_owned(),
             database_path: "/workspace/.ee/ee.db".to_owned(),
             session_id: "ses_aggregate".to_owned(),
-            cass_session_id: "cass_aggregate".to_owned(),
+            session_provenance_uri: "cass-session://ses_aggregate".to_owned(),
             propose_mode: false,
             dry_run: true,
             durable_mutation: false,
@@ -24151,6 +24583,7 @@ mod tests {
             workspace_id: workspace_id.to_owned(),
             session_id: session_id.to_owned(),
             memory_id: memory_id.map(str::to_owned),
+            producer_kind: EvidenceProducerKind::CassImport,
             cass_span_id: cass_span_id.to_owned(),
             span_kind: "message".to_owned(),
             start_line,
@@ -24161,6 +24594,7 @@ mod tests {
             excerpt: excerpt.to_owned(),
             content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
             metadata_json: Some(r#"{"source":"cass","schema":"cass.evidence_span.v1"}"#.to_owned()),
+            inherited_redaction_classes: Vec::new(),
         }
     }
 
@@ -24212,6 +24646,17 @@ mod tests {
             excerpt: excerpt.to_owned(),
             content_hash: format!("blake3:span-{id}"),
             metadata_json: None,
+            producer_kind: "cass_import".to_owned(),
+            screening_version: 1,
+            secret_redaction_status: "clean".to_owned(),
+            redaction_classes_json: "[]".to_owned(),
+            instruction_risk: "none".to_owned(),
+            search_eligibility: "admitted".to_owned(),
+            pack_eligibility: "admitted".to_owned(),
+            canonical_provenance_revision: 1,
+            canonical_excerpt_hash: Some(format!("blake3:span-{id}")),
+            security_policy_epoch: 1,
+            upstream_ref_hash: Some(format!("blake3:cass-span-{id}")),
             created_at: "2026-05-20T03:05:00Z".to_owned(),
             updated_at: "2026-05-20T03:05:00Z".to_owned(),
         }
@@ -24368,8 +24813,8 @@ mod tests {
         assert_eq!(anti_arc.linkage, "failed_to_fixed");
         assert_eq!(anti_arc.session_provenance.session_id, session.id);
         assert_eq!(
-            anti_arc.session_provenance.cass_session_id,
-            session.cass_session_id
+            anti_arc.session_provenance.provenance_uri,
+            format!("cass-session://{}", session.id)
         );
     }
 

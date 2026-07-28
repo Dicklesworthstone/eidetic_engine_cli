@@ -15,8 +15,9 @@
 //! 2. It begins with a bash shebang and `set -euo pipefail`.
 //! 3. It declares the bd-3boan bead id in a header comment.
 //! 4. It invokes both `ee doctor --fix` and `ee doctor --undo`.
-//! 5. It asserts the canonical schemas
-//!    `ee.doctor.fix_summary.v1` and `ee.doctor.undo_summary.v1`.
+//! 5. It asserts the canonical `ee.response.v2` success envelope for
+//!    `ee.doctor.fix_summary.v1`, plus the canonical
+//!    `ee.doctor.undo_summary.v1` undo surface.
 //! 6. It refuses Cargo/git/destructive shortcuts (no `cargo `, no
 //!    `git reset`, no `rm -rf` literal — the harness lives outside
 //!    the per-FM fixture suite and uses a temp workspace it leaves
@@ -100,6 +101,7 @@ fn doctor_undo_replay_script_invokes_fix_and_undo() {
 fn doctor_undo_replay_script_asserts_canonical_schemas() {
     let body = fs::read_to_string(script_path()).expect("read script");
     for needle in [
+        "ee.response.v2",
         "ee.doctor.fix_summary.v1",
         "ee.doctor.undo_summary.v1",
         "ee.doctor.run_state.v1",

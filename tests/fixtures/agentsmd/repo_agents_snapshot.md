@@ -1490,11 +1490,12 @@ Mutation and audit rules:
   `actionCountDelta`, `sameTargetSha`, `finishedAtTransition`, and
   `statusTransition`. Read-only.
 - `ee doctor --fix --json` invokes the runtime chokepoint (lock,
-  `<workspace>/.doctor/runs/<run-id>/` allocation, `RunContext::finish`) and
-  emits `ee.doctor.fix_summary.v1`. Until the per-FM fixer dispatch table
-  lands (`bd-tu4s8`), this surface returns `actionCount: 0` and
-  `fixerDispatchPending: true`. Pair with `--undo <run-id>` to release the
-  run state.
+  `<workspace>/.doctor/runs/<run-id>/` allocation, registered fixer dispatch,
+  `RunContext::finish`) and emits `ee.response.v2` with typed
+  `ee.doctor.fix_summary.v1` content under `data`. Read
+  `data.actionCount` for the actions actually recorded by the run;
+  `data.fixerDispatchPending` is `false`. Pair with `--undo <run-id>` to
+  reverse recorded actions and release the run state.
 - `ee doctor --undo <run-id> --json` replays a prior doctor run's undo log
   through `src/core/doctor_runtime::replay_undo`. Per RULE NUMBER 1, undo
   never deletes files; files created by the original run are quarantined by

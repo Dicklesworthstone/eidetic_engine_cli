@@ -26,7 +26,8 @@ use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
     CreateAuditInput, CreateCurationCandidateInput, CreateEvidenceSpanInput,
     CreateJournalEntryInput, CreateSessionInput, CreateWorkspaceInput, DbConnection,
-    JournalEntryListFilter, StoredJournalEntry, StoredMemory, audit_actions, generate_audit_id,
+    EvidenceProducerKind, JournalEntryListFilter, StoredJournalEntry, StoredMemory, audit_actions,
+    generate_audit_id,
 };
 use crate::models::{CandidateId, DomainError};
 use crate::policy::{InstructionRisk, detect_instruction_like_content, redact_secret_like_content};
@@ -2117,12 +2118,22 @@ fn apply_distill_proposals(
                             "entryCreatedAt": &entry.created_at,
                         })
                         .to_string();
+                        let inherited_redaction_classes = entry
+                            .redaction_report
+                            .get("classesApplied")
+                            .and_then(serde_json::Value::as_array)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            .collect();
                         connection.insert_evidence_span(
                             &span_id,
                             &CreateEvidenceSpanInput {
                                 workspace_id: workspace_id.to_owned(),
                                 session_id: session_id.to_owned(),
                                 memory_id: None,
+                                producer_kind: EvidenceProducerKind::JournalDistill,
                                 cass_span_id: format!("journal:{entry_id}"),
                                 span_kind: "summary".to_owned(),
                                 start_line: 1,
@@ -2136,6 +2147,7 @@ fn apply_distill_proposals(
                                     blake3::hash(entry.body.as_bytes()).to_hex()
                                 ),
                                 metadata_json: Some(metadata_json),
+                                inherited_redaction_classes,
                             },
                         )?;
                     }

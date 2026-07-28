@@ -2741,9 +2741,15 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
     )?;
     ensure(
         spans.iter().all(|span| {
-            span.cass_span_id.starts_with(session_arg.as_str()) && !span.content_hash.is_empty()
+            span.cass_span_id.starts_with("blake3:")
+                && span.cass_span_id.len() == 71
+                && span.upstream_ref_hash.as_deref() == Some(span.cass_span_id.as_str())
+                && span.producer_kind == "cass_import"
+                && span.search_eligibility == "admitted"
+                && !span.cass_span_id.contains(session_arg.as_str())
+                && !span.content_hash.is_empty()
         }),
-        "evidence spans must preserve CASS source IDs and content hashes",
+        "evidence spans must retain only hashed upstream references with admitted CASS posture",
     )?;
     let stored_session_id = sessions[0].id.clone();
     connection.close().map_err(|error| error.to_string())?;

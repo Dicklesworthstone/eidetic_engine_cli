@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use ee::db::{CreateEvidenceSpanInput, CreateSessionInput, DbConnection};
+use ee::db::{CreateEvidenceSpanInput, CreateSessionInput, DbConnection, EvidenceProducerKind};
 use ee::models::{EvidenceId, SessionId, WorkspaceId};
 use ee::obs::test_log::{EventKind, LogLevel, TestEvent, excerpt_stderr, hash_bytes, log_event_to};
 use serde_json::{Value, json};
@@ -178,6 +178,7 @@ fn evidence_span_input(
         workspace_id: workspace_id.to_owned(),
         session_id: session_id.to_owned(),
         memory_id: None,
+        producer_kind: EvidenceProducerKind::CassImport,
         cass_span_id: cass_span_id.to_owned(),
         span_kind: "message".to_owned(),
         start_line,
@@ -188,6 +189,7 @@ fn evidence_span_input(
         excerpt: excerpt.to_owned(),
         content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
         metadata_json: Some(r#"{"source":"cass","schema":"cass.evidence_span.v1"}"#.to_owned()),
+        inherited_redaction_classes: Vec::new(),
     }
 }
 
@@ -239,7 +241,7 @@ fn seed_capture_session(workspace: &Path, log_path: &Path) -> Result<(PathBuf, S
         json!({
             "workspaceId": workspace_id,
             "sessionId": session_id,
-            "cassSessionId": CASS_SESSION_ID,
+            "inputSessionFixtureId": CASS_SESSION_ID,
             "evidenceSpanCount": 3,
             "curationCandidateCountBefore": before_count,
             "databasePathHash": hash_bytes(database_path.display().to_string().as_bytes()),
@@ -271,7 +273,7 @@ fn assert_capture_report(
         "capture_response_envelope",
         parsed["schema"].as_str() == Some("ee.response.v2")
             && parsed["success"] == Value::Bool(true)
-            && parsed["data"]["schema"].as_str() == Some("ee.capture_suggestions.v1"),
+            && parsed["data"]["schema"].as_str() == Some("ee.capture_suggestions.v2"),
         json!({
             "schema": parsed["schema"],
             "success": parsed["success"],
@@ -284,7 +286,11 @@ fn assert_capture_report(
         log_path,
         "capture_selection_source",
         data["selection"]["source"].as_str() == Some(expected_source)
-            && data["selection"]["requestedSessionId"].as_str() == requested_session,
+            && if requested_session.is_some() {
+                data["selection"]["requestedSessionId"] == data["sessionId"]
+            } else {
+                data["selection"]["requestedSessionId"].is_null()
+            },
         json!({
             "expectedSource": expected_source,
             "actualSource": data["selection"]["source"],
@@ -294,10 +300,16 @@ fn assert_capture_report(
     assert_logged(
         log_path,
         "capture_read_only_contract",
-        data["readOnly"] == Value::Bool(true) && data["durableMutation"] == Value::Bool(false),
+        data["readOnly"] == Value::Bool(true)
+            && data["durableMutation"] == Value::Bool(false)
+            && data["sessionProvenanceUri"]
+                .as_str()
+                .is_some_and(|uri| uri.starts_with("cass-session://sess_"))
+            && data.get("cassSessionId").is_none(),
         json!({
             "readOnly": data["readOnly"],
             "durableMutation": data["durableMutation"],
+            "sessionProvenanceUri": data["sessionProvenanceUri"],
         }),
     )?;
     assert_logged(
@@ -325,15 +337,22 @@ fn assert_capture_report(
         .iter()
         .filter_map(Value::as_str)
         .collect::<BTreeSet<_>>();
+    let evidence_is_canonical = candidate["evidence"].as_array().is_some_and(|rows| {
+        !rows.is_empty()
+            && rows.iter().all(|row| {
+                row["provenanceUri"]
+                    .as_str()
+                    .is_some_and(|uri| uri.starts_with("cass-session://sess_"))
+                    && row.get("cassSpanId").is_none()
+            })
+    });
     assert_logged(
         log_path,
         "capture_candidate_fields",
         candidate["dedupeStatus"]["status"].as_str() == Some("unique")
             && candidate["proposedFields"]["level"].as_str() == Some("procedural")
             && tags.contains("ambient-capture")
-            && candidate["evidence"]
-                .as_array()
-                .is_some_and(|rows| !rows.is_empty()),
+            && evidence_is_canonical,
         json!({
             "candidateId": candidate["candidateId"],
             "dedupeStatus": candidate["dedupeStatus"]["status"],
@@ -457,7 +476,7 @@ fn capture_suggest_real_binary_is_read_only_and_repairable() -> TestResult {
     emit_note(
         &log_path,
         "act_from_session",
-        json!({"cassSessionId": CASS_SESSION_ID}),
+        json!({"inputSessionFixtureId": CASS_SESSION_ID}),
     )?;
     let (session_output, session_report) = run_ee_json(
         &log_path,

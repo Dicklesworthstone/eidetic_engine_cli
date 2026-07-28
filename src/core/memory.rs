@@ -36,9 +36,9 @@ use crate::db::{
     AdvisoryLockId, ApplyMemoryLevelTransitionInput, CreateAuditInput,
     CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateMemoryInput,
     CreateMemoryLinkInput, CreateRememberIdempotencyKeyInput, CreateSearchIndexJobInput,
-    CreateSessionInput, CreateWorkspaceInput, DbConnection, DbOperation, MemoryContentSimHash,
-    MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType, StoredMemory, StoredMemoryLink,
-    audit_actions, generate_audit_id, generate_audit_id_seeded,
+    CreateSessionInput, CreateWorkspaceInput, DbConnection, DbOperation, EvidenceProducerKind,
+    MemoryContentSimHash, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType, StoredMemory,
+    StoredMemoryLink, audit_actions, generate_audit_id, generate_audit_id_seeded,
 };
 use crate::models::{
     DomainError, GLOBAL_MEMORY_SCOPE_TAG, MAX_TAG_BYTES, MemoryContent, MemoryId, MemoryKind,
@@ -6121,6 +6121,7 @@ fn apply_remember_reinforce(
         workspace_id: context.workspace_id.to_owned(),
         session_id: session_id.clone(),
         memory_id: Some(context.target_memory_id.to_owned()),
+        producer_kind: EvidenceProducerKind::RememberReinforcement,
         cass_span_id: format!("reinforce:{evidence_span_id}"),
         span_kind: "summary".to_owned(),
         start_line: 1,
@@ -6131,6 +6132,7 @@ fn apply_remember_reinforce(
         excerpt: context.canonical_content.to_owned(),
         content_hash: context.content_hash.to_owned(),
         metadata_json: Some(evidence_metadata),
+        inherited_redaction_classes: Vec::new(),
     };
     let audit_details = serde_json::json!({
         "schema": REMEMBER_REINFORCE_AUDIT_SCHEMA_V1,

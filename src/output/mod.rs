@@ -9905,9 +9905,16 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
         SchemaEntry {
             id: crate::core::curate::CAPTURE_SUGGESTIONS_SCHEMA_V1,
             version: "1",
-            description: "Read-only ambient capture suggestions with explicit curation accept/reject commands",
+            description: "Legacy ambient capture suggestions contract (superseded by v2 canonical provenance)",
             category: "curate",
-            definition: capture_suggestions_schema_definition,
+            definition: capture_suggestions_v1_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::curate::CAPTURE_SUGGESTIONS_SCHEMA_V2,
+            version: "2",
+            description: "Read-only ambient capture suggestions with canonical opaque provenance",
+            category: "curate",
+            definition: capture_suggestions_v2_schema_definition,
         },
         SchemaEntry {
             id: crate::core::curate::CURATE_AUTO_PROMOTE_SCHEMA_V1,
@@ -11259,8 +11266,12 @@ fn curate_candidates_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.curate.candidates.v1.json").to_string()
 }
 
-fn capture_suggestions_schema_definition() -> String {
+fn capture_suggestions_v1_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.capture_suggestions.v1.json").to_string()
+}
+
+fn capture_suggestions_v2_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.capture_suggestions.v2.json").to_string()
 }
 
 fn curate_auto_promote_schema_definition() -> String {

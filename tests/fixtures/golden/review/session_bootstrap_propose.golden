@@ -1,12 +1,12 @@
 {
-  "schema": "ee.review.session.v1",
+  "schema": "ee.review.session.v2",
   "command": "review session",
   "version": "0.0.0",
   "workspaceId": "wsp_review_bootstrap_golden",
   "workspacePath": "/workspace/bootstrap",
   "databasePath": "/workspace/bootstrap/.ee/ee.db",
   "sessionId": "sess_review_bootstrap_golden",
-  "cassSessionId": "cass-review-bootstrap-golden",
+  "sessionProvenanceUri": "cass-session://sess_review_bootstrap_golden",
   "proposeMode": true,
   "dryRun": true,
   "durableMutation": false,
@@ -26,12 +26,12 @@
       "sourceIds": [
         "ev_review_bootstrap"
       ],
-      "reason": "Bootstrap candidate from 1 evidence span(s) in CASS session `cass-review-bootstrap-golden`.",
+      "reason": "Bootstrap candidate from 1 evidence span(s) in CASS session `sess_review_bootstrap_golden`.",
       "confidence": 0.58,
       "contentHash": "blake3:review-bootstrap-golden-hash",
       "persisted": false
     }
   ],
   "degraded": [],
-  "nextAction": "ee review session cass-review-bootstrap-golden --workspace /workspace/bootstrap --propose --json"
+  "nextAction": "ee review session sess_review_bootstrap_golden --workspace /workspace/bootstrap --propose --json"
 }

@@ -17,7 +17,8 @@ use crate::core::curate::{
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
     CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateSessionInput,
-    CreateWorkspaceInput, DbConnection, StoredCurationCandidate, WorkspaceScopeFields,
+    CreateWorkspaceInput, DbConnection, EvidenceProducerKind, StoredCurationCandidate,
+    WorkspaceScopeFields,
 };
 use crate::models::{CandidateId, DomainError, EvidenceId, SessionId};
 
@@ -732,6 +733,7 @@ fn ensure_bootstrap_evidence_span(
                 workspace_id: workspace_id.to_owned(),
                 session_id: session_id.to_owned(),
                 memory_id: None,
+                producer_kind: EvidenceProducerKind::DocsBootstrap,
                 cass_span_id: candidate.candidate_id.clone(),
                 span_kind: "file".to_owned(),
                 start_line: line_number_to_u32(candidate.source_span.start_line),
@@ -742,6 +744,7 @@ fn ensure_bootstrap_evidence_span(
                 excerpt: candidate.proposed_content.clone(),
                 content_hash: evidence_hash.clone(),
                 metadata_json: Some(metadata_json),
+                inherited_redaction_classes: candidate.redacted_reasons.clone(),
             },
         )
         .map_err(|error| DomainError::Storage {

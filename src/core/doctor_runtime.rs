@@ -44,6 +44,8 @@
 //! `src/cli/mod.rs` and is queued as a follow-up bead. The chokepoint is
 //! self-contained, fully testable, and ready for the wiring pass.
 
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -64,14 +66,20 @@ pub const ACTION_LINE_SCHEMA_V1: &str = "ee.doctor.action.v1";
 pub const RUN_STATE_SCHEMA_V1: &str = "ee.doctor.run_state.v1";
 
 static DOCTOR_RUN_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+static DOCTOR_STATE_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+std::thread_local! {
+    static DOCTOR_LOCK_RELEASE_ATTEMPTS: std::cell::Cell<u64> = const {
+        std::cell::Cell::new(0)
+    };
+}
 
-/// Canonical doctor-runtime errors. Every variant maps to a specific exit code
-/// in the CLI wiring layer:
-///
-/// - `BlastRadiusExceeded` → 4 (refused_unsafe)
-/// - `ConcurrencyLost` → 5 (concurrency_lost)
-/// - `BackupDirUnwritable` → 4 (refused_unsafe)
-/// - `Io` (anything else) → 3 (storage error) or 74 (i/o)
+/// Canonical doctor-runtime errors. The CLI wiring maps unsafe-path errors
+/// (`BlastRadiusExceeded`, `SymlinkedRunRoot`, `LifecycleRootChanged`, and
+/// `UnsafeLatestEntry`) to `ProcessExitCode::PolicyDenied` (7), storage and
+/// backup failures to `ProcessExitCode::Storage` (3), and concurrency/no-op
+/// outcomes to `ProcessExitCode::Configuration` (2).
 #[derive(Debug)]
 pub enum DoctorRuntimeError {
     /// The target path is outside the declared blast radius.
@@ -86,6 +94,22 @@ pub enum DoctorRuntimeError {
     },
     /// The `.doctor/runs/<run-id>/backups/` dir cannot be created or written.
     BackupDirUnwritable { dir: PathBuf, source: io::Error },
+    /// A workspace lifecycle path (`.ee`, `.doctor`, or one of their
+    /// descendants) traverses an existing symbolic link. Doctor refuses
+    /// before creating a lock or run artifact so a redirected root cannot
+    /// escape the canonical workspace.
+    SymlinkedRunRoot { path: PathBuf },
+    /// A lifecycle directory no longer resolves to the directory descriptor
+    /// opened by `RunContext::start`. This detects rename-and-substitute races
+    /// before any path-based backup or quarantine operation can follow the
+    /// replacement tree.
+    LifecycleRootChanged { path: PathBuf },
+    /// `<workspace>/.doctor/latest` is not safe to replace. In particular,
+    /// doctor never removes or overwrites a regular file at this path.
+    UnsafeLatestEntry {
+        path: PathBuf,
+        observed_kind: String,
+    },
     /// Underlying I/O failure (open/read/write/rename).
     Io { context: String, source: io::Error },
     /// The `actions.jsonl` is malformed during an undo.
@@ -147,6 +171,25 @@ impl std::fmt::Display for DoctorRuntimeError {
                 "cannot write doctor backups under {}: {}",
                 dir.display(),
                 source
+            ),
+            Self::SymlinkedRunRoot { path } => write!(
+                f,
+                "doctor refused lifecycle path {}: symbolic-link components are not allowed",
+                path.display()
+            ),
+            Self::LifecycleRootChanged { path } => write!(
+                f,
+                "doctor refused lifecycle path {}: it no longer resolves to the directory opened at run start",
+                path.display()
+            ),
+            Self::UnsafeLatestEntry {
+                path,
+                observed_kind,
+            } => write!(
+                f,
+                "doctor refused to replace {}: expected a symbolic link or an absent entry, observed {}",
+                path.display(),
+                observed_kind
             ),
             Self::Io { context, source } => {
                 write!(f, "doctor I/O failure ({}): {}", context, source)
@@ -395,6 +438,23 @@ pub enum RunStatus {
     UndonePartial,
 }
 
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+#[derive(Debug)]
+struct DoctorLifecycleHandles {
+    workspace_dir: fs::File,
+    ee_dir: fs::File,
+    lock_file: fs::File,
+    doctor_dir: fs::File,
+    runs_dir: fs::File,
+    run_dir: fs::File,
+    backups_dir: fs::File,
+    quarantine_dir: fs::File,
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+#[derive(Debug)]
+struct DoctorLifecycleHandles;
+
 /// One `ee doctor --fix` invocation's state. Owns the lock file and the
 /// `.doctor/runs/<run-id>/` directory.
 #[derive(Debug)]
@@ -409,6 +469,7 @@ pub struct RunContext {
     workspace: PathBuf,
     run_dir: PathBuf,
     lock_path: PathBuf,
+    lifecycle: DoctorLifecycleHandles,
     state: RunState,
     actions_handle: Option<fs::File>,
     blast_radius_roots: Vec<PathBuf>,
@@ -420,10 +481,9 @@ pub struct RunContext {
     //   - normal teardown via `finish()` → already released, no-op.
     //   - error/panic teardown via implicit drop → lock leaked, clean it up.
     //
-    // Critically the flip happens AFTER `remove_file`, not before, so that
-    // a thread interleaving between `remove_file` and the function return
-    // doesn't accidentally cause Drop to double-remove and steal a
-    // newly-acquired lock from a different process.
+    // Critically the flip happens only AFTER a successful release. If release
+    // fails, `finish()` propagates the error with this flag still true so Drop
+    // performs one final best-effort retry.
     lock_owned: bool,
 }
 
@@ -441,11 +501,11 @@ impl Drop for RunContext {
         // We deliberately do NOT inspect the lock contents before
         // removing: if `lock_owned == true`, we hold the lock by
         // construction (start() returned Self, finish() hasn't run),
-        // so the file on disk is ours to delete. `let _` swallows
-        // NotFound and EPERM the way fs::remove_file should be
-        // tolerated in a destructor.
+        // so the file on disk is ours to delete. A destructor cannot report an
+        // I/O error, so only this final best-effort path intentionally discards
+        // a release failure; `finish()` itself always propagates one.
         if self.lock_owned {
-            let _ = fs::remove_file(&self.lock_path);
+            let _ = release_doctor_lock(&self.lifecycle, &self.lock_path);
         }
     }
 }
@@ -463,119 +523,49 @@ impl RunContext {
         blast_radius_roots: Vec<PathBuf>,
         dry_run: bool,
     ) -> Result<Self, DoctorRuntimeError> {
-        // Round-5 self-review: absolutize the workspace before doing anything
-        // else. The cli layer falls back to `PathBuf::from(".")` when
-        // `current_dir()` errors, and callers can pass `--workspace .` (a
-        // bare relative path) directly. If we stored the relative form in
-        // `state.workspace`, a subsequent `--undo <run-id>` invoked from a
-        // different CWD would resolve `.ee/.doctor.lock` against THAT CWD
-        // instead of the workspace that originally ran `--fix`, silently
-        // breaking lock isolation and creating undo artifacts in the wrong
-        // place. Join with CWD up front; fall back to the caller's input
-        // only if even `current_dir()` is unavailable (in which case there
-        // is nothing better we can do).
-        let workspace_buf = if workspace.is_absolute() {
-            workspace.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(workspace))
-                .unwrap_or_else(|_| workspace.to_path_buf())
-        };
+        // Resolve the workspace to one canonical directory before deriving
+        // any lifecycle path. This prevents relative-path drift between
+        // `--fix` and `--undo` and removes platform aliases such as macOS
+        // `/var -> /private/var` from the path used by the no-follow walk.
+        // The input leaf itself is still rejected when it is a symlink.
+        let workspace_buf = canonical_doctor_workspace(workspace)?;
         let workspace = workspace_buf.as_path();
 
-        // Ensure .ee/ exists for the lock file. This is itself inside the
-        // documented blast radius for ee.
-        let ee_dir = workspace.join(".ee");
-        fs::create_dir_all(&ee_dir).map_err(|source| DoctorRuntimeError::Io {
-            context: format!("create_dir_all({})", ee_dir.display()),
-            source,
-        })?;
-
-        let lock_path = ee_dir.join(".doctor.lock");
         let run_id = derive_run_id(target_sha);
         let started_at = Utc::now().to_rfc3339();
-
-        // Try to take the lock. Round-2 fresh-eyes (F2): use
-        // `OpenOptions::create_new(true)` which is atomic at the OS level —
-        // either we are the unique creator (success) or the file existed
-        // (fails with AlreadyExists). This closes the previous TOCTOU window
-        // between `lock_path.exists()` and the subsequent write.
-        //
-        // Round-3 self-review (Bug #5): if create_new succeeds but the
-        // subsequent write fails (e.g., disk full mid-write), the empty
-        // lock file persists and the next doctor invocation sees a
-        // phantom holder. Remove the lock on write failure before
-        // propagating the error.
-        let lock_contents = format!("{}\n{}\n", run_id, std::process::id());
-        match fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&lock_path)
-        {
-            Ok(mut f) => {
-                if let Err(source) = f
-                    .write_all(lock_contents.as_bytes())
-                    .and_then(|()| f.flush())
-                {
-                    let _ = fs::remove_file(&lock_path);
-                    return Err(DoctorRuntimeError::Io {
-                        context: format!("write lock file {}", lock_path.display()),
-                        source,
-                    });
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                let holder = read_doctor_lock_holder(&lock_path);
-                return Err(DoctorRuntimeError::ConcurrencyLost {
-                    lock_path,
-                    holder_run_id: holder,
-                });
-            }
-            Err(source) => {
-                return Err(DoctorRuntimeError::Io {
-                    context: format!("create_new lock file {}", lock_path.display()),
-                    source,
-                });
-            }
-        }
-
-        // Round-6 self-review (R6-5 part 1): from this point on we own the
-        // lock file. Every error path below MUST `fs::remove_file(&lock_path)`
-        // before returning, otherwise the lock leaks and every future doctor
-        // invocation against this workspace will fail with
-        // `ConcurrencyLost { holder_run_id: <crashed-run> }`. The post-
-        // construction case (panics, `?` propagation from caller) is handled
-        // by `impl Drop for RunContext` below; this block handles the
-        // construction-time leaks where we haven't built `Self` yet.
-        let run_dir = workspace.join(".doctor").join("runs").join(&run_id);
+        let ee_dir = workspace.join(".ee");
+        let lock_path = ee_dir.join(".doctor.lock");
+        let doctor_dir = workspace.join(".doctor");
+        let runs_dir = doctor_dir.join("runs");
+        let run_dir = runs_dir.join(&run_id);
         let backups_dir = run_dir.join("backups");
         let quarantine_dir = run_dir.join("quarantine");
-        for d in [&run_dir, &backups_dir, &quarantine_dir] {
-            if let Err(source) = fs::create_dir_all(d) {
-                let _ = fs::remove_file(&lock_path);
-                return Err(DoctorRuntimeError::BackupDirUnwritable {
-                    dir: d.clone(),
-                    source,
-                });
-            }
-        }
-
-        // Open actions.jsonl append-only.
         let actions_path = run_dir.join("actions.jsonl");
-        let actions_handle = match fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&actions_path)
-        {
-            Ok(h) => h,
-            Err(source) => {
-                let _ = fs::remove_file(&lock_path);
-                return Err(DoctorRuntimeError::Io {
-                    context: format!("open actions.jsonl {}", actions_path.display()),
-                    source,
-                });
-            }
-        };
+        let state_path = run_dir.join("state.json");
+
+        // This entire scan runs before `.ee` creation, lock acquisition, or
+        // run-directory allocation. A pre-existing redirect therefore fails
+        // closed without touching either the workspace or the symlink target.
+        validate_doctor_lifecycle_paths([
+            workspace,
+            ee_dir.as_path(),
+            lock_path.as_path(),
+            doctor_dir.as_path(),
+            runs_dir.as_path(),
+            run_dir.as_path(),
+            backups_dir.as_path(),
+            quarantine_dir.as_path(),
+            actions_path.as_path(),
+            state_path.as_path(),
+        ])?;
+
+        let lock_contents = format!("{}\n{}\n", run_id, std::process::id());
+        let (lifecycle, actions_handle) =
+            prepare_doctor_lifecycle(workspace, &run_id, &lock_path, &run_dir, &lock_contents)?;
+        if let Err(error) = ensure_doctor_lifecycle_bindings(&lifecycle, workspace, &run_dir) {
+            let _ = release_doctor_lock(&lifecycle, &lock_path);
+            return Err(error);
+        }
 
         let state = RunState {
             schema: RUN_STATE_SCHEMA_V1.into(),
@@ -588,8 +578,8 @@ impl RunContext {
             action_count: 0,
             dry_run,
         };
-        if let Err(e) = write_state(&run_dir, &state) {
-            let _ = fs::remove_file(&lock_path);
+        if let Err(e) = write_lifecycle_state(&lifecycle, &run_dir, &state) {
+            let _ = release_doctor_lock(&lifecycle, &lock_path);
             return Err(e);
         }
 
@@ -598,6 +588,7 @@ impl RunContext {
             workspace: workspace.to_path_buf(),
             run_dir,
             lock_path,
+            lifecycle,
             state,
             actions_handle: Some(actions_handle),
             blast_radius_roots,
@@ -630,9 +621,11 @@ impl RunContext {
     /// flushes `actions.jsonl`. The symlink `<workspace>/.doctor/latest` is
     /// updated atomically to point at this run.
     pub fn finish(mut self, status: RunStatus) -> Result<RunSummary, DoctorRuntimeError> {
+        ensure_doctor_lifecycle_bindings(&self.lifecycle, &self.workspace, &self.run_dir)?;
+
         self.state.finished_at = Some(Utc::now().to_rfc3339());
         self.state.status = status.clone();
-        write_state(&self.run_dir, &self.state)?;
+        write_lifecycle_state(&self.lifecycle, &self.run_dir, &self.state)?;
 
         // Flush the actions log.
         if let Some(mut h) = self.actions_handle.take() {
@@ -642,27 +635,28 @@ impl RunContext {
             })?;
         }
 
-        // Update the `latest` symlink (best-effort; symlinks on Windows
-        // sometimes require privilege). Use a relative target so the symlink
-        // survives workspace moves.
+        // Update `latest` through the descriptor-anchored lifecycle root.
+        // On Linux and Apple platforms this uses an atomic no-replace or
+        // exchange rename. A displaced entry is retained inside this run
+        // directory; doctor never deletes an existing `latest` entry.
         let latest_link = self.workspace.join(".doctor").join("latest");
-        let _ = fs::remove_file(&latest_link); // ignore error if missing
-        let symlink_target = Path::new("runs").join(&self.run_id);
-        #[cfg(unix)]
-        {
-            let _ = std::os::unix::fs::symlink(&symlink_target, &latest_link);
-        }
-        #[cfg(windows)]
-        {
-            let _ = std::os::windows::fs::symlink_dir(&symlink_target, &latest_link);
-        }
+        ensure_doctor_lifecycle_bindings(&self.lifecycle, &self.workspace, &self.run_dir)?;
+        publish_doctor_latest(&self.lifecycle, &self.run_id, &self.run_dir, &latest_link)?;
+        // Do not return a lexical run path after a concurrent namespace
+        // substitution. Publishing is descriptor-anchored, so a race cannot
+        // escape, but the summary must fail closed instead of reporting a path
+        // that now resolves somewhere else.
+        ensure_doctor_lifecycle_bindings(&self.lifecycle, &self.workspace, &self.run_dir)?;
 
-        // Release the lock. Round-6 self-review (R6-5): flip `lock_owned`
-        // AFTER the `remove_file` so the subsequent `Drop` skips the
-        // remove. Setting the flag before `remove_file` would re-introduce
-        // a tiny window where a panic between flag-set and remove_file
-        // would leak the lock again.
-        let _ = fs::remove_file(&self.lock_path);
+        // Clear ownership only after release succeeds. On failure, `?` returns
+        // the typed I/O error while `lock_owned` remains true, causing Drop to
+        // make one final best-effort retry.
+        release_doctor_lock(&self.lifecycle, &self.lock_path).map_err(|source| {
+            DoctorRuntimeError::Io {
+                context: format!("release doctor lock {}", self.lock_path.display()),
+                source,
+            }
+        })?;
         self.lock_owned = false;
 
         Ok(RunSummary {
@@ -703,6 +697,8 @@ pub struct RunSummary {
 /// (same bytes for `WriteFile`, same mode for `Chmod`, target already gone
 /// for `QuarantineByRename`), returns `NoOpIdempotent` and records nothing.
 pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, DoctorRuntimeError> {
+    ensure_doctor_lifecycle_bindings(&ctx.lifecycle, &ctx.workspace, &ctx.run_dir)?;
+
     // Every writing action is later replayed by path from actions.jsonl. A
     // relative path may pass the blast-radius check when the current directory
     // is inside an allowed root, but undo from a different current directory
@@ -779,17 +775,23 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
             }
             // Path-traversal defense — round-1 fresh-eyes.
             validate_relative_quarantine_dest(dest_under_quarantine, &ctx.run_dir)?;
-            // Bug #4: refuse if the quarantine destination is already
-            // occupied. `fs::rename` would silently overwrite on Unix.
-            let dest = ctx.run_dir.join("quarantine").join(dest_under_quarantine);
-            if dest.exists() {
-                return Err(DoctorRuntimeError::Io {
-                    context: format!("quarantine destination already exists: {}", dest.display()),
-                    source: io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        "quarantine destination collision",
-                    ),
-                });
+            #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+            {
+                // The supported Unix path below performs this check and the
+                // eventual move relative to a retained quarantine dirfd.
+                let dest = ctx.run_dir.join("quarantine").join(dest_under_quarantine);
+                if dest.exists() {
+                    return Err(DoctorRuntimeError::Io {
+                        context: format!(
+                            "quarantine destination already exists: {}",
+                            dest.display()
+                        ),
+                        source: io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            "quarantine destination collision",
+                        ),
+                    });
+                }
             }
         }
         // Advisory ops (Manual, EmitDiagnostic, RunX, RewriteJsonl,
@@ -797,6 +799,33 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
         // they just record evidence.
         _ => {}
     }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    let quarantine_destination = match &op {
+        Op::QuarantineByRename {
+            dest_under_quarantine,
+        } => {
+            let destination = prepare_doctor_relative_destination(
+                &ctx.lifecycle.quarantine_dir,
+                &ctx.run_dir.join("quarantine"),
+                dest_under_quarantine,
+            )?;
+            if doctor_entry_type_at(&destination.parent, destination.leaf.as_os_str())?.is_some() {
+                return Err(DoctorRuntimeError::Io {
+                    context: format!(
+                        "quarantine destination already exists: {}",
+                        destination.display_path.display()
+                    ),
+                    source: io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "quarantine destination collision",
+                    ),
+                });
+            }
+            Some(destination)
+        }
+        _ => None,
+    };
 
     // Backup (only for writing ops on existing files). Runs AFTER the
     // idempotence + validation pre-check above so NoOp / validation
@@ -861,19 +890,69 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
         Op::QuarantineByRename {
             dest_under_quarantine,
         } => {
-            // Validation + collision check already done in pre-check.
-            let dest = ctx.run_dir.join("quarantine").join(dest_under_quarantine);
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent).map_err(|source| DoctorRuntimeError::Io {
-                    context: format!("create_dir_all({}) for quarantine", parent.display()),
-                    source,
-                })?;
+            #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+            {
+                use rustix::fs::RenameFlags;
+
+                let destination =
+                    quarantine_destination
+                        .as_ref()
+                        .ok_or_else(|| DoctorRuntimeError::Io {
+                            context: "prepare descriptor-anchored quarantine destination".into(),
+                            source: io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "quarantine destination was not prepared",
+                            ),
+                        })?;
+                ensure_doctor_lifecycle_bindings(&ctx.lifecycle, &ctx.workspace, &ctx.run_dir)?;
+                if !ctx.dry_run {
+                    rustix::fs::renameat_with(
+                        rustix::fs::CWD,
+                        path,
+                        &destination.parent,
+                        destination.leaf.as_os_str(),
+                        RenameFlags::NOREPLACE,
+                    )
+                    .map_err(|source| {
+                        if source == rustix::io::Errno::EXIST {
+                            DoctorRuntimeError::Io {
+                                context: format!(
+                                    "quarantine destination already exists: {}",
+                                    destination.display_path.display()
+                                ),
+                                source: io::Error::new(
+                                    io::ErrorKind::AlreadyExists,
+                                    "quarantine destination collision",
+                                ),
+                            }
+                        } else {
+                            doctor_lifecycle_errno(
+                                &destination.display_path,
+                                &format!("rename {} into quarantine", path.display()),
+                                source,
+                            )
+                        }
+                    })?;
+                }
             }
-            if !ctx.dry_run {
-                fs::rename(path, &dest).map_err(|source| DoctorRuntimeError::Io {
-                    context: format!("rename({} -> {})", path.display(), dest.display()),
-                    source,
-                })?;
+
+            #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+            {
+                // Compatibility path for platforms without the required
+                // openat/renameat no-follow primitives.
+                let dest = ctx.run_dir.join("quarantine").join(dest_under_quarantine);
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent).map_err(|source| DoctorRuntimeError::Io {
+                        context: format!("create_dir_all({}) for quarantine", parent.display()),
+                        source,
+                    })?;
+                }
+                if !ctx.dry_run {
+                    fs::rename(path, &dest).map_err(|source| DoctorRuntimeError::Io {
+                        context: format!("rename({} -> {})", path.display(), dest.display()),
+                        source,
+                    })?;
+                }
             }
             quarantine_dest_rel = Some(dest_under_quarantine.clone());
             // After quarantine, original is gone.
@@ -970,7 +1049,8 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
 
     // Commit the sequence advance now that the action is durably logged.
     ctx.state.action_count = proposed_seq;
-    write_state(&ctx.run_dir, &ctx.state)?;
+    write_lifecycle_state(&ctx.lifecycle, &ctx.run_dir, &ctx.state)?;
+    ensure_doctor_lifecycle_bindings(&ctx.lifecycle, &ctx.workspace, &ctx.run_dir)?;
 
     Ok(line)
 }
@@ -1516,6 +1596,931 @@ pub fn default_blast_radius_roots(workspace: &Path) -> Vec<PathBuf> {
 
 // ---------- private helpers ----------
 
+fn canonical_doctor_workspace(workspace: &Path) -> Result<PathBuf, DoctorRuntimeError> {
+    let absolute = if workspace.is_absolute() {
+        workspace.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(workspace))
+            .map_err(|source| DoctorRuntimeError::Io {
+                context: format!("resolve relative doctor workspace {}", workspace.display()),
+                source,
+            })?
+    };
+
+    let metadata = fs::symlink_metadata(&absolute).map_err(|source| DoctorRuntimeError::Io {
+        context: format!("inspect doctor workspace {}", absolute.display()),
+        source,
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(DoctorRuntimeError::SymlinkedRunRoot { path: absolute });
+    }
+    if !metadata.is_dir() {
+        return Err(DoctorRuntimeError::Io {
+            context: format!("inspect doctor workspace {}", absolute.display()),
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "doctor workspace is not a directory",
+            ),
+        });
+    }
+
+    fs::canonicalize(&absolute).map_err(|source| DoctorRuntimeError::Io {
+        context: format!("canonicalize doctor workspace {}", absolute.display()),
+        source,
+    })
+}
+
+fn validate_doctor_lifecycle_paths<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
+) -> Result<(), DoctorRuntimeError> {
+    for path in paths {
+        match super::path_safety::first_existing_symlink_component(path) {
+            Ok(Some(path)) => return Err(DoctorRuntimeError::SymlinkedRunRoot { path }),
+            Ok(None) => {}
+            Err(source) => {
+                return Err(DoctorRuntimeError::Io {
+                    context: format!("inspect doctor lifecycle path {}", path.display()),
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn prepare_doctor_lifecycle(
+    workspace: &Path,
+    run_id: &str,
+    lock_path: &Path,
+    run_dir: &Path,
+    lock_contents: &str,
+) -> Result<(DoctorLifecycleHandles, fs::File), DoctorRuntimeError> {
+    use rustix::fs::{Mode, OFlags};
+
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let workspace_fd = rustix::fs::openat(
+        rustix::fs::CWD,
+        workspace,
+        directory_flags,
+        Mode::from_raw_mode(0),
+    )
+    .map(fs::File::from)
+    .map_err(|source| doctor_lifecycle_errno(workspace, "open canonical workspace", source))?;
+
+    let ee_path = workspace.join(".ee");
+    let ee_dir =
+        open_or_create_doctor_directory_at(&workspace_fd, OsStr::new(".ee"), &ee_path, true)?;
+    let lock_file = acquire_doctor_lock_at(&ee_dir, lock_path, lock_contents)?;
+
+    let prepared = (|| {
+        let doctor_path = workspace.join(".doctor");
+        let doctor_dir = open_or_create_doctor_directory_at(
+            &workspace_fd,
+            OsStr::new(".doctor"),
+            &doctor_path,
+            true,
+        )?;
+        let runs_path = doctor_path.join("runs");
+        let runs_dir =
+            open_or_create_doctor_directory_at(&doctor_dir, OsStr::new("runs"), &runs_path, true)?;
+        let run_dir_fd =
+            open_or_create_doctor_directory_at(&runs_dir, OsStr::new(run_id), run_dir, false)?;
+        let backups_dir = open_or_create_doctor_directory_at(
+            &run_dir_fd,
+            OsStr::new("backups"),
+            &run_dir.join("backups"),
+            false,
+        )?;
+        let quarantine_dir = open_or_create_doctor_directory_at(
+            &run_dir_fd,
+            OsStr::new("quarantine"),
+            &run_dir.join("quarantine"),
+            false,
+        )?;
+
+        let actions_path = run_dir.join("actions.jsonl");
+        let actions_fd = rustix::fs::openat(
+            &run_dir_fd,
+            "actions.jsonl",
+            OFlags::WRONLY
+                | OFlags::CREATE
+                | OFlags::EXCL
+                | OFlags::APPEND
+                | OFlags::NOFOLLOW
+                | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|source| doctor_lifecycle_errno(&actions_path, "create actions.jsonl", source))?;
+
+        Ok((
+            doctor_dir,
+            runs_dir,
+            run_dir_fd,
+            backups_dir,
+            quarantine_dir,
+            fs::File::from(actions_fd),
+        ))
+    })();
+
+    match prepared {
+        Ok((doctor_dir, runs_dir, run_dir, backups_dir, quarantine_dir, actions_handle)) => Ok((
+            DoctorLifecycleHandles {
+                workspace_dir: workspace_fd,
+                ee_dir,
+                lock_file,
+                doctor_dir,
+                runs_dir,
+                run_dir,
+                backups_dir,
+                quarantine_dir,
+            },
+            actions_handle,
+        )),
+        Err(error) => {
+            let _ = release_owned_doctor_lock_at(&ee_dir, &lock_file);
+            Err(error)
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn prepare_doctor_lifecycle(
+    workspace: &Path,
+    _run_id: &str,
+    lock_path: &Path,
+    run_dir: &Path,
+    lock_contents: &str,
+) -> Result<(DoctorLifecycleHandles, fs::File), DoctorRuntimeError> {
+    let ee_dir = workspace.join(".ee");
+    fs::create_dir_all(&ee_dir).map_err(|source| DoctorRuntimeError::Io {
+        context: format!("create_dir_all({})", ee_dir.display()),
+        source,
+    })?;
+
+    match fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(lock_path)
+    {
+        Ok(mut lock) => {
+            if let Err(source) = lock
+                .write_all(lock_contents.as_bytes())
+                .and_then(|()| lock.flush())
+            {
+                let _ = fs::remove_file(lock_path);
+                return Err(DoctorRuntimeError::Io {
+                    context: format!("write lock file {}", lock_path.display()),
+                    source,
+                });
+            }
+        }
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(DoctorRuntimeError::ConcurrencyLost {
+                lock_path: lock_path.to_path_buf(),
+                holder_run_id: read_doctor_lock_holder(lock_path),
+            });
+        }
+        Err(source) => {
+            return Err(DoctorRuntimeError::Io {
+                context: format!("create_new lock file {}", lock_path.display()),
+                source,
+            });
+        }
+    }
+
+    let backups_dir = run_dir.join("backups");
+    let quarantine_dir = run_dir.join("quarantine");
+    for dir in [run_dir, backups_dir.as_path(), quarantine_dir.as_path()] {
+        if let Err(source) = fs::create_dir_all(dir) {
+            let _ = fs::remove_file(lock_path);
+            return Err(DoctorRuntimeError::BackupDirUnwritable {
+                dir: dir.to_path_buf(),
+                source,
+            });
+        }
+    }
+
+    let actions_path = run_dir.join("actions.jsonl");
+    let actions_handle = match fs::OpenOptions::new()
+        .create_new(true)
+        .append(true)
+        .open(&actions_path)
+    {
+        Ok(handle) => handle,
+        Err(source) => {
+            let _ = fs::remove_file(lock_path);
+            return Err(DoctorRuntimeError::Io {
+                context: format!("open actions.jsonl {}", actions_path.display()),
+                source,
+            });
+        }
+    };
+
+    Ok((DoctorLifecycleHandles, actions_handle))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn open_or_create_doctor_directory_at(
+    parent: &fs::File,
+    name: &OsStr,
+    full_path: &Path,
+    allow_existing: bool,
+) -> Result<fs::File, DoctorRuntimeError> {
+    use rustix::fs::{FileType, Mode, OFlags};
+    use rustix::io::Errno;
+
+    match rustix::fs::mkdirat(parent, name, Mode::from_raw_mode(0o700)) {
+        Ok(()) => {}
+        Err(source) if source == Errno::EXIST && allow_existing => {}
+        Err(source) if source == Errno::EXIST => {
+            if doctor_entry_type_at(parent, name)? == Some(FileType::Symlink) {
+                return Err(DoctorRuntimeError::SymlinkedRunRoot {
+                    path: full_path.to_path_buf(),
+                });
+            }
+            return Err(DoctorRuntimeError::Io {
+                context: format!("create unique doctor directory {}", full_path.display()),
+                source: io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "doctor run directory already exists",
+                ),
+            });
+        }
+        Err(source) => {
+            return Err(doctor_lifecycle_errno(
+                full_path,
+                "create doctor directory",
+                source,
+            ));
+        }
+    }
+
+    rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0),
+    )
+    .map(fs::File::from)
+    .map_err(|source| doctor_lifecycle_errno(full_path, "open doctor directory", source))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+#[derive(Debug)]
+struct DoctorRelativeDestination {
+    parent: fs::File,
+    leaf: OsString,
+    display_path: PathBuf,
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn prepare_doctor_relative_destination(
+    root: &fs::File,
+    root_path: &Path,
+    relative: &Path,
+) -> Result<DoctorRelativeDestination, DoctorRuntimeError> {
+    let leaf = relative
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| DoctorRuntimeError::BlastRadiusExceeded {
+            path: relative.to_path_buf(),
+            allowed_roots: vec![root_path.to_path_buf()],
+        })?
+        .to_os_string();
+    let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
+    let parent = open_or_create_doctor_relative_directory(root, root_path, parent_relative)?;
+
+    Ok(DoctorRelativeDestination {
+        parent,
+        leaf,
+        display_path: root_path.join(relative),
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn open_or_create_doctor_relative_directory(
+    root: &fs::File,
+    root_path: &Path,
+    relative: &Path,
+) -> Result<fs::File, DoctorRuntimeError> {
+    let mut directory = root.try_clone().map_err(|source| DoctorRuntimeError::Io {
+        context: format!(
+            "duplicate doctor directory descriptor {}",
+            root_path.display()
+        ),
+        source,
+    })?;
+    let mut display_path = root_path.to_path_buf();
+
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(DoctorRuntimeError::BlastRadiusExceeded {
+                path: relative.to_path_buf(),
+                allowed_roots: vec![root_path.to_path_buf()],
+            });
+        };
+        display_path.push(name);
+        directory = open_or_create_doctor_directory_at(&directory, name, &display_path, true)?;
+    }
+
+    Ok(directory)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn acquire_doctor_lock_at(
+    ee_dir: &fs::File,
+    lock_path: &Path,
+    lock_contents: &str,
+) -> Result<fs::File, DoctorRuntimeError> {
+    use rustix::fs::{FileType, Mode, OFlags};
+    use rustix::io::Errno;
+
+    let fd = match rustix::fs::openat(
+        ee_dir,
+        ".doctor.lock",
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    ) {
+        Ok(fd) => fd,
+        Err(source) if source == Errno::EXIST => {
+            if doctor_entry_type_at(ee_dir, OsStr::new(".doctor.lock"))? == Some(FileType::Symlink)
+            {
+                return Err(DoctorRuntimeError::SymlinkedRunRoot {
+                    path: lock_path.to_path_buf(),
+                });
+            }
+            return Err(DoctorRuntimeError::ConcurrencyLost {
+                lock_path: lock_path.to_path_buf(),
+                holder_run_id: read_doctor_lock_holder_at(ee_dir),
+            });
+        }
+        Err(source) => {
+            return Err(doctor_lifecycle_errno(
+                lock_path,
+                "create doctor lock",
+                source,
+            ));
+        }
+    };
+
+    let mut lock = fs::File::from(fd);
+    if let Err(source) = lock
+        .write_all(lock_contents.as_bytes())
+        .and_then(|()| lock.flush())
+    {
+        let _ = release_owned_doctor_lock_at(ee_dir, &lock);
+        return Err(DoctorRuntimeError::Io {
+            context: format!("write doctor lock {}", lock_path.display()),
+            source,
+        });
+    }
+    Ok(lock)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn read_doctor_lock_holder_at(ee_dir: &fs::File) -> Option<String> {
+    use rustix::fs::{Mode, OFlags};
+
+    let fd = rustix::fs::openat(
+        ee_dir,
+        ".doctor.lock",
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0),
+    )
+    .ok()?;
+    let file = fs::File::from(fd);
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > DOCTOR_LOCK_FILE_INSPECT_LIMIT {
+        return None;
+    }
+    let mut raw = String::new();
+    file.take(DOCTOR_LOCK_FILE_INSPECT_LIMIT.saturating_add(1))
+        .read_to_string(&mut raw)
+        .ok()?;
+    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > DOCTOR_LOCK_FILE_INSPECT_LIMIT {
+        return None;
+    }
+    raw.lines().next().map(str::to_owned)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn doctor_entry_type_at(
+    directory: &fs::File,
+    name: &OsStr,
+) -> Result<Option<rustix::fs::FileType>, DoctorRuntimeError> {
+    use rustix::fs::{AtFlags, FileType};
+    use rustix::io::Errno;
+
+    match rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => Ok(Some(FileType::from_raw_mode(stat.st_mode))),
+        Err(source) if source == Errno::NOENT => Ok(None),
+        Err(source) => Err(DoctorRuntimeError::Io {
+            context: format!("inspect doctor lifecycle entry {}", name.to_string_lossy()),
+            source: io::Error::from(source),
+        }),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn doctor_file_type_name(file_type: rustix::fs::FileType) -> &'static str {
+    use rustix::fs::FileType;
+
+    match file_type {
+        FileType::RegularFile => "regular file",
+        FileType::Directory => "directory",
+        FileType::Symlink => "symbolic link",
+        FileType::Fifo => "fifo",
+        FileType::Socket => "socket",
+        FileType::CharacterDevice => "character device",
+        FileType::BlockDevice => "block device",
+        FileType::Unknown => "unknown filesystem entry",
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn doctor_lifecycle_errno(
+    path: &Path,
+    operation: &str,
+    source: rustix::io::Errno,
+) -> DoctorRuntimeError {
+    if matches!(source, rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR)
+        && let Ok(Some(path)) = super::path_safety::first_existing_symlink_component(path)
+    {
+        return DoctorRuntimeError::SymlinkedRunRoot { path };
+    }
+    DoctorRuntimeError::Io {
+        context: format!("{operation} {}", path.display()),
+        source: io::Error::from(source),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+/// Detects whether the public workspace names still identify the directories
+/// opened at run start. Device/inode equality is only a substitution detector;
+/// it is not TOCTOU-safe authorization for a later pathname write. Backup and
+/// quarantine mutations are therefore performed relative to their retained
+/// directory descriptors even after this check succeeds.
+fn ensure_doctor_lifecycle_bindings(
+    lifecycle: &DoctorLifecycleHandles,
+    workspace: &Path,
+    run_dir: &Path,
+) -> Result<(), DoctorRuntimeError> {
+    let doctor_dir = workspace.join(".doctor");
+    let runs_dir = doctor_dir.join("runs");
+
+    ensure_doctor_directory_binding(
+        rustix::fs::CWD,
+        workspace,
+        &lifecycle.workspace_dir,
+        workspace,
+    )?;
+    ensure_doctor_directory_binding(
+        &lifecycle.workspace_dir,
+        Path::new(".ee"),
+        &lifecycle.ee_dir,
+        &workspace.join(".ee"),
+    )?;
+    ensure_doctor_directory_binding(
+        &lifecycle.workspace_dir,
+        Path::new(".doctor"),
+        &lifecycle.doctor_dir,
+        &doctor_dir,
+    )?;
+    ensure_doctor_directory_binding(
+        &lifecycle.doctor_dir,
+        Path::new("runs"),
+        &lifecycle.runs_dir,
+        &runs_dir,
+    )?;
+    let run_name = run_dir.file_name().ok_or_else(|| DoctorRuntimeError::Io {
+        context: format!(
+            "derive doctor run directory name from {}",
+            run_dir.display()
+        ),
+        source: io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "run directory has no file name",
+        ),
+    })?;
+    ensure_doctor_directory_binding(
+        &lifecycle.runs_dir,
+        Path::new(run_name),
+        &lifecycle.run_dir,
+        run_dir,
+    )?;
+    ensure_doctor_directory_binding(
+        &lifecycle.run_dir,
+        Path::new("backups"),
+        &lifecycle.backups_dir,
+        &run_dir.join("backups"),
+    )?;
+    ensure_doctor_directory_binding(
+        &lifecycle.run_dir,
+        Path::new("quarantine"),
+        &lifecycle.quarantine_dir,
+        &run_dir.join("quarantine"),
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn ensure_doctor_directory_binding<Fd: std::os::fd::AsFd>(
+    parent: Fd,
+    name: &Path,
+    opened: &fs::File,
+    full_path: &Path,
+) -> Result<(), DoctorRuntimeError> {
+    use rustix::fs::{AtFlags, FileType};
+
+    let observed = match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(source)
+            if matches!(
+                source,
+                rustix::io::Errno::NOENT | rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR
+            ) =>
+        {
+            return Err(DoctorRuntimeError::LifecycleRootChanged {
+                path: full_path.to_path_buf(),
+            });
+        }
+        Err(source) => {
+            return Err(DoctorRuntimeError::Io {
+                context: format!("inspect doctor lifecycle binding {}", full_path.display()),
+                source: io::Error::from(source),
+            });
+        }
+    };
+    let expected = rustix::fs::fstat(opened).map_err(|source| DoctorRuntimeError::Io {
+        context: format!("inspect opened doctor directory {}", full_path.display()),
+        source: io::Error::from(source),
+    })?;
+
+    if FileType::from_raw_mode(observed.st_mode) != FileType::Directory
+        || observed.st_dev != expected.st_dev
+        || observed.st_ino != expected.st_ino
+    {
+        return Err(DoctorRuntimeError::LifecycleRootChanged {
+            path: full_path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn ensure_doctor_lifecycle_bindings(
+    _lifecycle: &DoctorLifecycleHandles,
+    workspace: &Path,
+    run_dir: &Path,
+) -> Result<(), DoctorRuntimeError> {
+    let ee_dir = workspace.join(".ee");
+    let doctor_dir = workspace.join(".doctor");
+    let backups_dir = run_dir.join("backups");
+    let quarantine_dir = run_dir.join("quarantine");
+    validate_doctor_lifecycle_paths([
+        workspace,
+        ee_dir.as_path(),
+        doctor_dir.as_path(),
+        run_dir,
+        backups_dir.as_path(),
+        quarantine_dir.as_path(),
+    ])
+}
+
+fn write_lifecycle_state(
+    lifecycle: &DoctorLifecycleHandles,
+    run_dir: &Path,
+    state: &RunState,
+) -> Result<(), DoctorRuntimeError> {
+    let bytes = serde_json::to_vec_pretty(state).map_err(|error| DoctorRuntimeError::Io {
+        context: "serialize RunState".into(),
+        source: io::Error::new(io::ErrorKind::InvalidData, error),
+    })?;
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    {
+        return write_doctor_file_atomic_at(&lifecycle.run_dir, "state.json", &bytes).map_err(
+            |source| DoctorRuntimeError::Io {
+                context: format!("write state.json {}", run_dir.join("state.json").display()),
+                source,
+            },
+        );
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+    {
+        let _ = lifecycle;
+        let path = run_dir.join("state.json");
+        write_file_atomic(&path, &bytes).map_err(|source| DoctorRuntimeError::Io {
+            context: format!("write state.json {}", path.display()),
+            source,
+        })
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn write_doctor_file_atomic_at(directory: &fs::File, name: &str, bytes: &[u8]) -> io::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+
+    let sequence = DOCTOR_STATE_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = format!(".{name}.tmp.{}.{}", std::process::id(), sequence);
+    let fd = rustix::fs::openat(
+        directory,
+        temporary.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )
+    .map_err(io::Error::from)?;
+    let mut file = fs::File::from(fd);
+    file.write_all(bytes)?;
+    file.flush()?;
+    drop(file);
+    rustix::fs::renameat(directory, temporary.as_str(), directory, name).map_err(io::Error::from)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn publish_doctor_latest(
+    lifecycle: &DoctorLifecycleHandles,
+    run_id: &str,
+    run_dir: &Path,
+    latest_link: &Path,
+) -> Result<(), DoctorRuntimeError> {
+    use rustix::fs::{FileType, RenameFlags};
+
+    const CANDIDATE: &str = "latest-candidate";
+    const PREVIOUS: &str = "previous-latest";
+
+    let target = Path::new("runs").join(run_id);
+    rustix::fs::symlinkat(&target, &lifecycle.run_dir, CANDIDATE).map_err(|source| {
+        doctor_lifecycle_errno(
+            &latest_link.with_file_name(CANDIDATE),
+            "create latest candidate",
+            source,
+        )
+    })?;
+
+    match doctor_entry_type_at(&lifecycle.doctor_dir, OsStr::new("latest"))? {
+        None => rustix::fs::renameat_with(
+            &lifecycle.run_dir,
+            CANDIDATE,
+            &lifecycle.doctor_dir,
+            "latest",
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|source| {
+            if source == rustix::io::Errno::EXIST {
+                let observed = doctor_entry_type_at(&lifecycle.doctor_dir, OsStr::new("latest"))
+                    .ok()
+                    .flatten()
+                    .map(doctor_file_type_name)
+                    .unwrap_or("concurrently-created entry");
+                DoctorRuntimeError::UnsafeLatestEntry {
+                    path: latest_link.to_path_buf(),
+                    observed_kind: observed.to_owned(),
+                }
+            } else {
+                doctor_lifecycle_errno(latest_link, "publish latest", source)
+            }
+        }),
+        Some(FileType::Symlink) => {
+            rustix::fs::renameat_with(
+                &lifecycle.run_dir,
+                CANDIDATE,
+                &lifecycle.doctor_dir,
+                "latest",
+                RenameFlags::EXCHANGE,
+            )
+            .map_err(|source| doctor_lifecycle_errno(latest_link, "exchange latest", source))?;
+
+            let displaced = doctor_entry_type_at(&lifecycle.run_dir, OsStr::new(CANDIDATE))?;
+            if displaced == Some(FileType::Symlink) {
+                // Preserve the prior pointer as a run artifact. This is an
+                // atomic rename, not a delete, and the unique run directory
+                // guarantees `previous-latest` is not an existing user path.
+                return rustix::fs::renameat_with(
+                    &lifecycle.run_dir,
+                    CANDIDATE,
+                    &lifecycle.run_dir,
+                    PREVIOUS,
+                    RenameFlags::NOREPLACE,
+                )
+                .map_err(|source| DoctorRuntimeError::Io {
+                    context: format!(
+                        "preserve prior latest at {}",
+                        run_dir.join(PREVIOUS).display()
+                    ),
+                    source: io::Error::from(source),
+                });
+            }
+
+            // A peer substituted a non-symlink after our initial inspection.
+            // Exchange it back so no regular file is overwritten or removed.
+            let rollback = rustix::fs::renameat_with(
+                &lifecycle.run_dir,
+                CANDIDATE,
+                &lifecycle.doctor_dir,
+                "latest",
+                RenameFlags::EXCHANGE,
+            );
+            let observed = displaced
+                .map(doctor_file_type_name)
+                .unwrap_or("missing entry")
+                .to_owned();
+            if let Err(source) = rollback {
+                return Err(DoctorRuntimeError::Io {
+                    context: format!(
+                        "rollback concurrent latest substitution at {} (displaced {observed})",
+                        latest_link.display()
+                    ),
+                    source: io::Error::from(source),
+                });
+            }
+            Err(DoctorRuntimeError::UnsafeLatestEntry {
+                path: latest_link.to_path_buf(),
+                observed_kind: observed,
+            })
+        }
+        Some(file_type) => Err(DoctorRuntimeError::UnsafeLatestEntry {
+            path: latest_link.to_path_buf(),
+            observed_kind: doctor_file_type_name(file_type).to_owned(),
+        }),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn publish_doctor_latest(
+    _lifecycle: &DoctorLifecycleHandles,
+    run_id: &str,
+    run_dir: &Path,
+    latest_link: &Path,
+) -> Result<(), DoctorRuntimeError> {
+    validate_doctor_lifecycle_paths([run_dir, latest_link])?;
+
+    match fs::symlink_metadata(latest_link) {
+        Ok(metadata) if !metadata.file_type().is_symlink() => {
+            return Err(DoctorRuntimeError::UnsafeLatestEntry {
+                path: latest_link.to_path_buf(),
+                observed_kind: if metadata.is_dir() {
+                    "directory".to_owned()
+                } else {
+                    "regular file".to_owned()
+                },
+            });
+        }
+        Ok(_) => {
+            let previous = run_dir.join("previous-latest");
+            if fs::symlink_metadata(&previous).is_ok() {
+                return Err(DoctorRuntimeError::Io {
+                    context: format!("preserve prior latest at {}", previous.display()),
+                    source: io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "previous-latest run artifact already exists",
+                    ),
+                });
+            }
+
+            fs::rename(latest_link, &previous).map_err(|source| DoctorRuntimeError::Io {
+                context: format!(
+                    "preserve existing latest {} at {}",
+                    latest_link.display(),
+                    previous.display()
+                ),
+                source,
+            })?;
+            let displaced =
+                fs::symlink_metadata(&previous).map_err(|source| DoctorRuntimeError::Io {
+                    context: format!("inspect preserved latest {}", previous.display()),
+                    source,
+                })?;
+            if !displaced.file_type().is_symlink() {
+                let observed_kind = if displaced.is_dir() {
+                    "directory"
+                } else {
+                    "regular file"
+                };
+                let _ = fs::rename(&previous, latest_link);
+                return Err(DoctorRuntimeError::UnsafeLatestEntry {
+                    path: latest_link.to_path_buf(),
+                    observed_kind: observed_kind.to_owned(),
+                });
+            }
+
+            let target = Path::new("runs").join(run_id);
+            let created = create_doctor_latest_symlink(&target, latest_link);
+            if let Err(source) = created {
+                if fs::symlink_metadata(latest_link).is_err() {
+                    let _ = fs::rename(&previous, latest_link);
+                }
+                return Err(DoctorRuntimeError::Io {
+                    context: format!("create latest link {}", latest_link.display()),
+                    source,
+                });
+            }
+            return Ok(());
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            let target = Path::new("runs").join(run_id);
+            create_doctor_latest_symlink(&target, latest_link).map_err(|source| {
+                DoctorRuntimeError::Io {
+                    context: format!("create latest link {}", latest_link.display()),
+                    source,
+                }
+            })?;
+            return Ok(());
+        }
+        Err(source) => {
+            return Err(DoctorRuntimeError::Io {
+                context: format!("inspect latest link {}", latest_link.display()),
+                source,
+            });
+        }
+    }
+}
+
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "android", target_vendor = "apple"))
+))]
+fn create_doctor_latest_symlink(target: &Path, latest_link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, latest_link)
+}
+
+#[cfg(windows)]
+fn create_doctor_latest_symlink(target: &Path, latest_link: &Path) -> io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, latest_link)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_doctor_latest_symlink(_target: &Path, _latest_link: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "symbolic links are unsupported on this platform",
+    ))
+}
+
+#[cfg(test)]
+fn record_doctor_lock_release_attempt() {
+    DOCTOR_LOCK_RELEASE_ATTEMPTS.with(|attempts| {
+        attempts.set(attempts.get().saturating_add(1));
+    });
+}
+
+#[cfg(test)]
+fn doctor_lock_release_attempts() -> u64 {
+    DOCTOR_LOCK_RELEASE_ATTEMPTS.with(std::cell::Cell::get)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn release_owned_doctor_lock_at(ee_dir: &fs::File, lock_file: &fs::File) -> io::Result<()> {
+    use rustix::fs::{AtFlags, FileType};
+
+    let expected = rustix::fs::fstat(lock_file).map_err(io::Error::from)?;
+    let observed = match rustix::fs::statat(ee_dir, ".doctor.lock", AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(source) if source == rustix::io::Errno::NOENT => return Ok(()),
+        Err(source) => return Err(io::Error::from(source)),
+    };
+
+    // The public name may have been unlinked and replaced after acquisition.
+    // Compare the no-follow entry identity immediately before unlinkat and
+    // refuse rather than deleting anything other than this context's lock.
+    if FileType::from_raw_mode(expected.st_mode) != FileType::RegularFile
+        || FileType::from_raw_mode(observed.st_mode) != FileType::RegularFile
+        || observed.st_dev != expected.st_dev
+        || observed.st_ino != expected.st_ino
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "doctor lock path no longer refers to the acquired lock inode",
+        ));
+    }
+
+    rustix::fs::unlinkat(ee_dir, ".doctor.lock", AtFlags::empty()).map_err(io::Error::from)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn release_doctor_lock(lifecycle: &DoctorLifecycleHandles, _lock_path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    record_doctor_lock_release_attempt();
+
+    release_owned_doctor_lock_at(&lifecycle.ee_dir, &lifecycle.lock_file)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn release_doctor_lock(_lifecycle: &DoctorLifecycleHandles, lock_path: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    record_doctor_lock_release_attempt();
+
+    // Compatibility platforms do not retain a rustix directory/lock handle;
+    // this fallback remains pathname-based and cannot prove inode ownership.
+    match fs::remove_file(lock_path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(source),
+    }
+}
+
 fn derive_run_id(target_sha: &str) -> String {
     let now = Utc::now();
     let sequence = DOCTOR_RUN_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -1591,6 +2596,12 @@ fn validate_relative_quarantine_dest(
     dest: &Path,
     run_dir: &Path,
 ) -> Result<(), DoctorRuntimeError> {
+    if dest.as_os_str().is_empty() {
+        return Err(DoctorRuntimeError::BlastRadiusExceeded {
+            path: dest.to_path_buf(),
+            allowed_roots: vec![run_dir.join("quarantine")],
+        });
+    }
     for component in dest.components() {
         match component {
             std::path::Component::Normal(_) => continue,
@@ -1718,6 +2729,131 @@ fn sanitize_path_for_run_dir(path: &Path) -> PathBuf {
     rel
 }
 
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn stage_backup(
+    ctx: &RunContext,
+    path: &Path,
+    expected_hash: &Option<String>,
+) -> Result<PathBuf, DoctorRuntimeError> {
+    use rustix::fs::{Mode, OFlags};
+
+    let path_rel = sanitize_path_for_run_dir(path);
+    let next_seq = ctx.state.action_count + 1;
+    let seq_dir = PathBuf::from(format!("{:06}", next_seq));
+    let rel = seq_dir.join(&path_rel);
+    let backups_path = ctx.run_dir.join("backups");
+
+    // Open the source before allocating its destination so a missing or
+    // unreadable target cannot leave an empty backup artifact.
+    let mut source = if ctx.dry_run {
+        None
+    } else {
+        Some(
+            fs::File::open(path).map_err(|source| DoctorRuntimeError::Io {
+                context: format!("open backup source {}", path.display()),
+                source,
+            })?,
+        )
+    };
+    let destination =
+        prepare_doctor_relative_destination(&ctx.lifecycle.backups_dir, &backups_path, &rel)?;
+
+    if ctx.dry_run {
+        if doctor_entry_type_at(&destination.parent, destination.leaf.as_os_str())?.is_some() {
+            return Err(DoctorRuntimeError::Io {
+                context: format!(
+                    "backup collision at sequence {} target {}: {} already exists",
+                    next_seq,
+                    path.display(),
+                    destination.display_path.display()
+                ),
+                source: io::Error::new(io::ErrorKind::AlreadyExists, "backup collision"),
+            });
+        }
+        return Ok(rel);
+    }
+
+    // The destination is created relative to the retained backups descriptor.
+    // The earlier device/inode audit is deliberately not used as authorization
+    // for this write: openat + O_EXCL + O_NOFOLLOW binds it atomically.
+    let destination_fd = rustix::fs::openat(
+        &destination.parent,
+        destination.leaf.as_os_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )
+    .map_err(|source| {
+        if source == rustix::io::Errno::EXIST {
+            DoctorRuntimeError::Io {
+                context: format!(
+                    "backup collision at sequence {} target {}: {} already exists",
+                    next_seq,
+                    path.display(),
+                    destination.display_path.display()
+                ),
+                source: io::Error::new(io::ErrorKind::AlreadyExists, "backup collision"),
+            }
+        } else {
+            doctor_lifecycle_errno(&destination.display_path, "create doctor backup", source)
+        }
+    })?;
+    let mut destination_file = fs::File::from(destination_fd);
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 8192];
+    let source = source.as_mut().ok_or_else(|| DoctorRuntimeError::Io {
+        context: format!("open backup source {}", path.display()),
+        source: io::Error::new(io::ErrorKind::InvalidInput, "backup source was not opened"),
+    })?;
+    loop {
+        let read = source
+            .read(&mut buffer)
+            .map_err(|source| DoctorRuntimeError::Io {
+                context: format!("read backup source {}", path.display()),
+                source,
+            })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        destination_file
+            .write_all(&buffer[..read])
+            .map_err(|source| DoctorRuntimeError::Io {
+                context: format!(
+                    "write descriptor-anchored backup {}",
+                    destination.display_path.display()
+                ),
+                source,
+            })?;
+    }
+    destination_file
+        .flush()
+        .map_err(|source| DoctorRuntimeError::Io {
+            context: format!(
+                "flush descriptor-anchored backup {}",
+                destination.display_path.display()
+            ),
+            source,
+        })?;
+
+    if let Some(expected) = expected_hash {
+        let observed = hasher.finalize().to_hex().to_string();
+        if &observed != expected {
+            return Err(DoctorRuntimeError::Io {
+                context: format!(
+                    "backup hash mismatch after copy ({}): expected {}, observed {}",
+                    destination.display_path.display(),
+                    expected,
+                    observed
+                ),
+                source: io::Error::new(io::ErrorKind::Other, "backup race"),
+            });
+        }
+    }
+
+    Ok(rel)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
 fn stage_backup(
     ctx: &RunContext,
     path: &Path,
@@ -2046,19 +3182,6 @@ fn acquire_undo_lock(workspace: &Path) -> Result<UndoLockGuard, DoctorRuntimeErr
     }
 }
 
-fn write_state(run_dir: &Path, state: &RunState) -> Result<(), DoctorRuntimeError> {
-    let path = run_dir.join("state.json");
-    let bytes = serde_json::to_vec_pretty(state).map_err(|e| DoctorRuntimeError::Io {
-        context: "serialize RunState".into(),
-        source: io::Error::new(io::ErrorKind::InvalidData, e),
-    })?;
-    write_file_atomic(&path, &bytes).map_err(|source| DoctorRuntimeError::Io {
-        context: format!("write state.json {}", path.display()),
-        source,
-    })?;
-    Ok(())
-}
-
 // ----------------------------------------------------------------------------
 // Tests
 // ----------------------------------------------------------------------------
@@ -2205,6 +3328,41 @@ mod tests {
             serde_json::from_slice(&fs::read(run_dir.join("state.json")).unwrap()).unwrap();
         assert!(matches!(state.status, RunStatus::CompletedOk));
         assert!(state.finished_at.is_some());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn finish_and_drop_refuse_to_unlink_substituted_regular_lock_file() {
+        let ws = fresh_workspace();
+        let ctx = start_run(ws.path());
+        let lock = ws.path().join(".ee").join(".doctor.lock");
+        let retained_lock = ws.path().join(".ee").join(".doctor.lock-retained");
+        fs::rename(&lock, &retained_lock).expect("retain original lock inode");
+        let peer_bytes = b"peer-owned replacement lock";
+        fs::write(&lock, peer_bytes).expect("substitute peer-owned regular file");
+        let attempts_before = doctor_lock_release_attempts();
+
+        let result = ctx.finish(RunStatus::CompletedOk);
+
+        assert!(matches!(
+            result,
+            Err(DoctorRuntimeError::Io { ref context, .. })
+                if context.contains("release doctor lock")
+        ));
+        assert_eq!(
+            doctor_lock_release_attempts().saturating_sub(attempts_before),
+            2,
+            "finish must attempt release once and leave ownership set so Drop retries once"
+        );
+        assert_eq!(
+            fs::read(&lock).expect("read preserved replacement lock"),
+            peer_bytes,
+            "neither finish nor Drop may unlink or overwrite a substituted regular file"
+        );
+        assert!(
+            retained_lock.is_file(),
+            "the original lock inode must remain available for operator recovery"
+        );
     }
 
     #[test]

@@ -12,7 +12,8 @@ use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_d
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DbConnection, DbError,
-    DbOperation, ModelRegistryUpsertOutcome, SearchIndexJobType, StoredSearchIndexJob,
+    DbOperation, EVIDENCE_SECURITY_POLICY_EPOCH, EvidenceAdmissionReport,
+    ModelRegistryUpsertOutcome, SearchIndexJobType, StoredSearchIndexJob,
 };
 use crate::models::MemoryId;
 use crate::models::model_registry::{
@@ -240,6 +241,7 @@ pub struct IndexRebuildReport {
     pub index_dir: PathBuf,
     pub elapsed_ms: f64,
     pub dry_run: bool,
+    pub evidence_admission: EvidenceAdmissionReport,
     pub errors: Vec<String>,
     pub runtime_profile: RuntimeProfileReport,
 }
@@ -284,6 +286,7 @@ pub struct IndexReembedReport {
     pub elapsed_ms: f64,
     pub dry_run: bool,
     pub idempotency_key: String,
+    pub evidence_admission: EvidenceAdmissionReport,
     pub errors: Vec<String>,
     pub runtime_profile: RuntimeProfileReport,
 }
@@ -506,6 +509,10 @@ impl IndexRebuildReport {
         output.push_str(&format!("  Memories: {}\n", self.memories_indexed));
         output.push_str(&format!("  Sessions: {}\n", self.sessions_indexed));
         output.push_str(&format!("  Artifacts: {}\n", self.artifacts_indexed));
+        output.push_str(&format!(
+            "  Evidence admission: {}\n",
+            serde_json::to_string(&self.evidence_admission).unwrap_or_else(|_| "{}".to_owned())
+        ));
         output.push_str(&format!("  Total documents: {}\n", self.documents_total));
         output.push_str(&format!(
             "  Index directory: {}\n",
@@ -535,6 +542,7 @@ impl IndexRebuildReport {
             "index_dir": self.index_dir.to_string_lossy(),
             "elapsed_ms": self.elapsed_ms,
             "dry_run": self.dry_run,
+            "evidenceAdmission": self.evidence_admission,
             "profileRuntime": self.runtime_profile.data_json(),
             "errors": self.errors,
         })
@@ -580,6 +588,10 @@ impl IndexReembedReport {
         output.push_str(&format!("  Sessions: {}\n", self.sessions_indexed));
         output.push_str(&format!("  Artifacts: {}\n", self.artifacts_indexed));
         output.push_str(&format!(
+            "  Evidence admission: {}\n",
+            serde_json::to_string(&self.evidence_admission).unwrap_or_else(|_| "{}".to_owned())
+        ));
+        output.push_str(&format!(
             "  Embedded documents: {}/{}\n",
             self.documents_embedded, self.documents_total
         ));
@@ -620,6 +632,7 @@ impl IndexReembedReport {
             "elapsed_ms": self.elapsed_ms,
             "dry_run": self.dry_run,
             "idempotency_key": self.idempotency_key,
+            "evidenceAdmission": self.evidence_admission,
             "profileRuntime": self.runtime_profile.data_json(),
             "errors": self.errors,
         })
@@ -935,7 +948,9 @@ pub fn rebuild_index(
     let artifact_docs: Vec<CanonicalSearchDocument> =
         artifacts.iter().map(artifact_to_document).collect();
     let rule_docs = rule_documents(&db, &workspace_id)?;
-    let evidence_docs = evidence_documents(&db, &workspace_id)?;
+    let evidence_selection = evidence_documents(&db, &workspace_id)?;
+    let evidence_admission = evidence_selection.admission;
+    let evidence_docs = evidence_selection.documents;
 
     let (
         memories_indexed,
@@ -963,6 +978,7 @@ pub fn rebuild_index(
             index_dir,
             elapsed_ms,
             dry_run: true,
+            evidence_admission,
             errors: Vec::new(),
             runtime_profile,
         });
@@ -979,6 +995,7 @@ pub fn rebuild_index(
             index_dir,
             elapsed_ms,
             dry_run: false,
+            evidence_admission,
             errors: Vec::new(),
             runtime_profile,
         });
@@ -1031,6 +1048,7 @@ pub fn rebuild_index(
                     index_dir,
                     elapsed_ms,
                     dry_run: false,
+                    evidence_admission: evidence_admission.clone(),
                     errors: stats
                         .errors
                         .iter()
@@ -1048,6 +1066,7 @@ pub fn rebuild_index(
                 index_dir,
                 elapsed_ms,
                 dry_run: false,
+                evidence_admission,
                 errors: vec![e],
                 runtime_profile: runtime_profile.clone(),
             }),
@@ -1084,7 +1103,9 @@ pub fn reembed_index(
     let artifact_docs: Vec<CanonicalSearchDocument> =
         artifacts.iter().map(artifact_to_document).collect();
     let rule_docs = rule_documents(&db, &workspace_id)?;
-    let evidence_docs = evidence_documents(&db, &workspace_id)?;
+    let evidence_selection = evidence_documents(&db, &workspace_id)?;
+    let evidence_admission = evidence_selection.admission;
+    let evidence_docs = evidence_selection.documents;
 
     let (
         memories_indexed,
@@ -1130,6 +1151,7 @@ pub fn reembed_index(
             elapsed_ms,
             dry_run: true,
             idempotency_key,
+            evidence_admission,
             errors: Vec::new(),
             runtime_profile,
         });
@@ -1170,6 +1192,7 @@ pub fn reembed_index(
             elapsed_ms,
             dry_run: false,
             idempotency_key,
+            evidence_admission,
             errors: Vec::new(),
             runtime_profile,
         });
@@ -1186,6 +1209,8 @@ pub fn reembed_index(
             .into_iter()
             .chain(session_docs)
             .chain(artifact_docs)
+            .chain(rule_docs)
+            .chain(evidence_docs)
             .map(|doc| doc.into_indexable())
             .collect();
 
@@ -1237,6 +1262,7 @@ pub fn reembed_index(
                     elapsed_ms,
                     dry_run: false,
                     idempotency_key,
+                    evidence_admission: evidence_admission.clone(),
                     errors: stats
                         .errors
                         .iter()
@@ -1272,6 +1298,7 @@ pub fn reembed_index(
                     elapsed_ms,
                     dry_run: false,
                     idempotency_key,
+                    evidence_admission,
                     errors,
                     runtime_profile: runtime_profile.clone(),
                 })
@@ -2205,6 +2232,16 @@ fn validate_incremental_index_metadata(
             format!("failed to parse index metadata: {error}"),
         )
     })?;
+    if json
+        .get("evidenceSecurityPolicyEpoch")
+        .and_then(serde_json::Value::as_u64)
+        != Some(u64::from(EVIDENCE_SECURITY_POLICY_EPOCH))
+    {
+        return Err(incremental_fallback(
+            IncrementalFallbackReason::GenerationSkew,
+            "index metadata evidence security policy epoch is absent or stale",
+        ));
+    }
     let index_generation = json
         .get("generation")
         .and_then(serde_json::Value::as_u64)
@@ -2493,7 +2530,7 @@ fn collect_workspace_indexable_documents(
     let artifact_docs: Vec<CanonicalSearchDocument> =
         artifacts.iter().map(artifact_to_document).collect();
     let rule_docs = rule_documents(db, workspace_id)?;
-    let evidence_docs = evidence_documents(db, workspace_id)?;
+    let evidence_docs = evidence_documents(db, workspace_id)?.documents;
     let (
         memories_indexed,
         sessions_indexed,
@@ -2725,6 +2762,7 @@ fn write_index_metadata(
         "schema": "ee.index_metadata.v1",
         "generation": generation,
         "sourceGeneration": generation,
+        "evidenceSecurityPolicyEpoch": EVIDENCE_SECURITY_POLICY_EPOCH,
         "lastRebuildAt": timestamp,
         "documentCount": documents_total,
     });
@@ -2793,6 +2831,42 @@ fn write_index_metadata(
     drop(file);
 
     publish_index_metadata_temp_file(&meta_path, &temp_path)
+}
+
+/// Stamp a freshly built, memory-only evaluation index with the current
+/// evidence-egress policy.
+///
+/// Evaluation indexes are assembled directly from typed in-process fixture
+/// memories and intentionally bypass the workspace database/rebuild pipeline.
+/// They still need canonical metadata before `run_search` can open them:
+/// missing security metadata must remain indistinguishable from a pre-policy
+/// on-disk index everywhere else.
+pub(crate) fn write_memory_eval_index_metadata(
+    index_dir: &Path,
+    documents_total: u32,
+) -> Result<(), IndexRebuildError> {
+    write_index_metadata(index_dir, 0, documents_total, None)
+}
+
+/// Whether an existing derived index was built under the current evidence
+/// egress policy.
+///
+/// Missing, malformed, oversized, symlinked, or pre-policy metadata all fail
+/// closed. Search callers must check this before opening any lexical/vector
+/// index bytes because a stale generation can contain content that is no
+/// longer admissible.
+pub(crate) fn index_evidence_security_policy_is_current(index_dir: &Path) -> bool {
+    let metadata_path = index_dir.join(INDEX_METADATA_FILE);
+    let Ok(Some(content)) = read_index_metadata_contents(&metadata_path) else {
+        return false;
+    };
+    let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return false;
+    };
+    metadata
+        .get("evidenceSecurityPolicyEpoch")
+        .and_then(serde_json::Value::as_u64)
+        == Some(u64::from(EVIDENCE_SECURITY_POLICY_EPOCH))
 }
 
 fn unique_index_metadata_temp_path(meta_path: &Path) -> Result<PathBuf, IndexRebuildError> {
@@ -3160,16 +3234,24 @@ fn rule_documents(
 /// `ee import cass` persists transcript excerpts as `evidence_spans`, but
 /// the corpus previously carried only session METADATA documents, so a
 /// unique phrase from an imported transcript was undiscoverable by
-/// `ee search` (bd-16imy). Excerpts are secret-redacted at import time, so
-/// projecting them into the derived index preserves the storage redaction
-/// posture. The listing query orders deterministically by
+/// `ee search` (bd-16imy). Every row is positively re-admitted from live
+/// storage before projection, then screened again at egress. The listing
+/// query orders deterministically by
 /// `(session_id, start_line, end_line, id)`.
+struct EvidenceDocumentSelection {
+    documents: Vec<CanonicalSearchDocument>,
+    admission: EvidenceAdmissionReport,
+}
+
 fn evidence_documents(
     db: &DbConnection,
     workspace_id: &str,
-) -> Result<Vec<CanonicalSearchDocument>, IndexRebuildError> {
-    let spans = db.list_evidence_spans_for_workspace(workspace_id)?;
-    Ok(spans.iter().map(evidence_span_to_document).collect())
+) -> Result<EvidenceDocumentSelection, IndexRebuildError> {
+    let (spans, admission) = db.list_search_admitted_evidence_spans_for_workspace(workspace_id)?;
+    Ok(EvidenceDocumentSelection {
+        documents: spans.iter().map(evidence_span_to_document).collect(),
+        admission,
+    })
 }
 
 fn get_default_workspace_id(db: &DbConnection) -> Result<String, IndexRebuildError> {
@@ -5275,6 +5357,22 @@ fn read_index_metadata(index_dir: &Path) -> (Option<u64>, Option<String>, Option
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
+    let security_epoch = parsed
+        .get("evidenceSecurityPolicyEpoch")
+        .and_then(serde_json::Value::as_u64);
+    if security_epoch != Some(u64::from(EVIDENCE_SECURITY_POLICY_EPOCH)) {
+        return (
+            generation,
+            last_rebuild,
+            Some(format!(
+                "index metadata '{}' has incompatible evidence security policy epoch {:?}; current epoch is {} and a full index rebuild is required",
+                meta_path.display(),
+                security_epoch,
+                EVIDENCE_SECURITY_POLICY_EPOCH
+            )),
+        );
+    }
+
     (generation, last_rebuild, None)
 }
 
@@ -6541,6 +6639,7 @@ mod tests {
             index_dir: PathBuf::from("/tmp/index"),
             elapsed_ms: 123.4,
             dry_run: false,
+            evidence_admission: EvidenceAdmissionReport::default(),
             errors: Vec::new(),
             runtime_profile: test_runtime_profile(),
         };
@@ -7165,6 +7264,7 @@ mod tests {
             elapsed_ms: 123.4,
             dry_run: false,
             idempotency_key: "blake3:test".to_owned(),
+            evidence_admission: EvidenceAdmissionReport::default(),
             errors: Vec::new(),
             runtime_profile: test_runtime_profile(),
         };
@@ -8251,6 +8351,44 @@ mod tests {
         ensure(
             report.data_json()["lastCheckError"].as_str().is_some(),
             "status JSON should expose lastCheckError for corrupt metadata",
+        )
+    }
+
+    #[test]
+    fn index_status_marks_pre_security_epoch_metadata_as_corrupt() -> TestResult {
+        let root = unique_test_dir("metadata-security-epoch-status");
+        let index_dir = root.join("index");
+        std::fs::create_dir_all(&index_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            index_dir.join("meta.json"),
+            r#"{"schema":"ee.index_metadata.v1","generation":0,"sourceGeneration":0,"documentCount":0}"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = get_index_status(&IndexStatusOptions {
+            workspace_path: root.clone(),
+            database_path: Some(root.join("missing.db")),
+            index_dir: Some(index_dir),
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            report.health == IndexHealth::Corrupt,
+            format!("pre-security-epoch metadata must fail closed as corrupt: {report:?}"),
+        )?;
+        ensure(
+            report.last_check_error.as_deref().is_some_and(|error| {
+                error.contains("incompatible evidence security policy epoch")
+                    && error.contains("full index rebuild is required")
+            }),
+            format!(
+                "status must explain the incompatible security epoch: {:?}",
+                report.last_check_error
+            ),
+        )?;
+        ensure(
+            report.repair_hint == Some("ee index rebuild --workspace ."),
+            "status must provide an actionable rebuild repair",
         )
     }
 

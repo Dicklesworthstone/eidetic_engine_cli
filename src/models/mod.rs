@@ -509,7 +509,10 @@ pub const IMPORT_EIDETIC_LEGACY_SCAN_SCHEMA_V1: &str = "ee.import.eidetic_legacy
 pub const IMPORT_JSONL_SCHEMA_V1: &str = "ee.import.jsonl.v1";
 
 /// Schema for review session reports (`ee review session --propose`).
-pub const REVIEW_SESSION_SCHEMA_V1: &str = "ee.review.session.v1";
+///
+/// V2 replaces raw upstream CASS identifiers with canonical opaque
+/// provenance URIs.
+pub const REVIEW_SESSION_SCHEMA_V2: &str = "ee.review.session.v2";
 
 /// Schema for import ledger entries.
 pub const IMPORT_LEDGER_SCHEMA_V1: &str = "ee.import_ledger.v1";
