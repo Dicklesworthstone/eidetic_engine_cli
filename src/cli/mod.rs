@@ -12889,10 +12889,10 @@ where
                 let workspace = cli.workspace.clone().unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 });
-                let (json, command_exit) = doctor_fix_json(&workspace);
-                let write_exit = write_stdout(stdout, &(json + "\n"));
+                let result = doctor_fix_json(&workspace);
+                let write_exit = write_stdout(stdout, &(result.json + "\n"));
                 return if write_exit == ProcessExitCode::Success {
-                    command_exit
+                    result.exit_code
                 } else {
                     write_exit
                 };
@@ -19818,78 +19818,237 @@ fn doctor_run_diff_json(workspace: &Path, baseline_id: &str, comparison_id: &str
     .to_string()
 }
 
+#[derive(Debug)]
+struct DoctorFixCommandResult {
+    json: String,
+    exit_code: ProcessExitCode,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorFixerResult {
+    finding_code: &'static str,
+    operation: &'static str,
+    path: String,
+    outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action_sequence: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorFixRunEvidence {
+    run_id: String,
+    run_dir: String,
+    action_count: u64,
+    status: crate::core::doctor_runtime::RunStatus,
+}
+
+impl DoctorFixRunEvidence {
+    fn from_summary(summary: &crate::core::doctor_runtime::RunSummary) -> Self {
+        Self {
+            run_id: summary.run_id.clone(),
+            run_dir: summary.run_dir.display().to_string(),
+            action_count: summary.action_count,
+            status: summary.status.clone(),
+        }
+    }
+}
+
 /// Wire the agent-facing `ee doctor --fix` surface onto the runtime
-/// chokepoint. Per bd-3boan pass-2 + AGENTS.md RULE 1, this surface
-/// MUST route every file mutation through
-/// `src/core/doctor_runtime::mutate`. The command:
+/// chokepoint. Per bd-3boan pass-2 + AGENTS.md RULE 1, this surface MUST route
+/// every file mutation through `src/core/doctor_runtime::mutate`.
 ///
-/// * acquires the doctor run lock via `RunContext::start`,
-/// * allocates the `<workspace>/.doctor/runs/<run-id>/` directory,
-/// * dispatches registered fixers for actionable findings,
-/// * finishes the run with `RunStatus::CompletedOk`, and
-/// * emits `ee.response.v2` with an `ee.doctor.fix_summary.v1` value
-///   under `data`, the actual `actionCount`, and
-///   `fixerDispatchPending=false`.
-fn doctor_fix_json(workspace: &Path) -> (String, ProcessExitCode) {
+/// Fixers run in the deterministic order emitted by [`DoctorReport`]. The
+/// command uses an explicit fail-fast policy: the first mutation failure is
+/// recorded, all remaining dispatches are marked skipped, and the run is
+/// finalized as `completed_partial`. Start, mutation, and finish failures all
+/// return `ee.error.v2` plus a non-zero process exit.
+fn doctor_fix_json(workspace: &Path) -> DoctorFixCommandResult {
     use crate::core::doctor::DoctorReport;
     use crate::core::doctor_fixers::*;
-    use crate::core::doctor_runtime::{RunContext, RunStatus, default_blast_radius_roots, mutate};
 
     let report = DoctorReport::gather_for_workspace(workspace);
+    let mut dispatches = Vec::new();
+    for check in report.checks {
+        if check.severity.is_healthy() {
+            continue;
+        }
+
+        let dispatch = match check.error_code.map(|error_code| error_code.id) {
+            Some("EE-E301") => Some(fix_search_index_stale(workspace)),
+            Some("EE-E700") => Some(fix_schema_migration_pending(workspace, "V_LATEST")),
+            Some("EE-E507") => Some(fix_cass_integration_drift(workspace)),
+            _ if check.name == "search_index" => Some(fix_search_index_stale(workspace)),
+            _ => None,
+        };
+        if let Some(dispatch) = dispatch {
+            dispatches.push(dispatch);
+        }
+    }
+
+    doctor_fix_dispatches(workspace, dispatches)
+}
+
+fn doctor_fix_dispatches(
+    workspace: &Path,
+    dispatches: Vec<crate::core::doctor_fixers::FixerDispatch>,
+) -> DoctorFixCommandResult {
+    use crate::core::doctor_runtime::{
+        DoctorRuntimeError, RunContext, RunStatus, default_blast_radius_roots, mutate,
+    };
+
     let blast_radius = default_blast_radius_roots(workspace);
-    let target_sha = format!("scaffold-{}", chrono::Utc::now().timestamp());
+    let target_sha = format!("doctor-fix-{}", chrono::Utc::now().timestamp_micros());
 
     match RunContext::start(workspace, target_sha.as_str(), blast_radius, false) {
         Ok(mut ctx) => {
-            for check in report.checks {
-                if check.severity.is_healthy() {
-                    continue;
-                }
-
-                let dispatch = match check.error_code.map(|ec| ec.id) {
-                    Some("EE-E301") => Some(fix_search_index_stale(workspace)),
-                    Some("EE-E700") => Some(fix_schema_migration_pending(workspace, "V_LATEST")),
-                    Some("EE-E507") => Some(fix_cass_integration_drift(workspace)),
-                    // Map other finding codes heuristically if we know them
-                    _ => {
-                        if check.name == "search_index" {
-                            Some(fix_search_index_stale(workspace))
-                        } else {
-                            None
-                        }
+            let mut fixer_results = Vec::with_capacity(dispatches.len());
+            let mut pending = dispatches.into_iter();
+            while let Some(dispatch) = pending.next() {
+                let finding_code = dispatch.finding_code;
+                let operation = dispatch.op.kind_str();
+                let path = dispatch.path.display().to_string();
+                match mutate(&mut ctx, &dispatch.path, dispatch.op) {
+                    Ok(action) => fixer_results.push(DoctorFixerResult {
+                        finding_code,
+                        operation,
+                        path,
+                        outcome: "applied",
+                        action_sequence: Some(action.sequence),
+                        error: None,
+                    }),
+                    Err(DoctorRuntimeError::NoOpIdempotent) => {
+                        fixer_results.push(DoctorFixerResult {
+                            finding_code,
+                            operation,
+                            path,
+                            outcome: "idempotent_noop",
+                            action_sequence: None,
+                            error: None,
+                        });
                     }
-                };
+                    Err(mutation_error) => {
+                        fixer_results.push(DoctorFixerResult {
+                            finding_code,
+                            operation,
+                            path,
+                            outcome: "failed",
+                            action_sequence: None,
+                            error: Some(mutation_error.to_string()),
+                        });
+                        fixer_results.extend(pending.map(|skipped| DoctorFixerResult {
+                            finding_code: skipped.finding_code,
+                            operation: skipped.op.kind_str(),
+                            path: skipped.path.display().to_string(),
+                            outcome: "skipped_after_failure",
+                            action_sequence: None,
+                            error: None,
+                        }));
 
-                if let Some(d) = dispatch {
-                    let target_path = d.path;
-                    match mutate(&mut ctx, &target_path, d.op) {
-                        Ok(_)
-                        | Err(crate::core::doctor_runtime::DoctorRuntimeError::NoOpIdempotent) => {}
-                        Err(error) => return doctor_runtime_error_json(&error, "mutate"),
+                        let run_id = ctx.run_id().to_owned();
+                        let run_dir = ctx.run_dir().display().to_string();
+                        let action_count = doctor_fixer_action_count(&fixer_results);
+                        return match ctx.finish(RunStatus::CompletedPartial) {
+                            Ok(summary) => {
+                                let run = DoctorFixRunEvidence::from_summary(&summary);
+                                doctor_runtime_error_result(
+                                    &mutation_error,
+                                    "mutate",
+                                    &fixer_results,
+                                    Some(&run),
+                                    None,
+                                )
+                            }
+                            Err(finish_error) => {
+                                let run = DoctorFixRunEvidence {
+                                    run_id,
+                                    run_dir,
+                                    action_count,
+                                    status: RunStatus::Failed,
+                                };
+                                doctor_runtime_error_result(
+                                    &finish_error,
+                                    "finish",
+                                    &fixer_results,
+                                    Some(&run),
+                                    Some(("mutate", &mutation_error)),
+                                )
+                            }
+                        };
                     }
                 }
             }
 
+            let run_id = ctx.run_id().to_owned();
+            let run_dir = ctx.run_dir().display().to_string();
+            let action_count = doctor_fixer_action_count(&fixer_results);
             match ctx.finish(RunStatus::CompletedOk) {
-                Ok(summary) => (
-                    doctor_fix_success_json(workspace, &summary),
-                    ProcessExitCode::Success,
-                ),
-                Err(error) => doctor_runtime_error_json(&error, "finish"),
+                Ok(summary) => DoctorFixCommandResult {
+                    json: doctor_fix_success_json(workspace, &summary, &fixer_results),
+                    exit_code: ProcessExitCode::Success,
+                },
+                Err(error) => {
+                    let run = DoctorFixRunEvidence {
+                        run_id,
+                        run_dir,
+                        action_count,
+                        status: RunStatus::Failed,
+                    };
+                    doctor_runtime_error_result(&error, "finish", &fixer_results, Some(&run), None)
+                }
             }
         }
-        Err(error) => doctor_runtime_error_json(&error, "start"),
+        Err(error) => {
+            let fixer_results = dispatches
+                .iter()
+                .map(|dispatch| DoctorFixerResult {
+                    finding_code: dispatch.finding_code,
+                    operation: dispatch.op.kind_str(),
+                    path: dispatch.path.display().to_string(),
+                    outcome: "not_started",
+                    action_sequence: None,
+                    error: None,
+                })
+                .collect::<Vec<_>>();
+            doctor_runtime_error_result(&error, "start", &fixer_results, None, None)
+        }
     }
+}
+
+fn doctor_fixer_action_count(results: &[DoctorFixerResult]) -> u64 {
+    results
+        .iter()
+        .filter_map(|result| result.action_sequence)
+        .max()
+        .unwrap_or(0)
+}
+
+fn doctor_fixer_result_counts(results: &[DoctorFixerResult]) -> (usize, usize, usize) {
+    let attempted = results
+        .iter()
+        .filter(|result| matches!(result.outcome, "applied" | "idempotent_noop" | "failed"))
+        .count();
+    let failed = results
+        .iter()
+        .filter(|result| result.outcome == "failed")
+        .count();
+    let skipped = results.len().saturating_sub(attempted);
+    (attempted, failed, skipped)
 }
 
 fn doctor_fix_success_json(
     workspace: &Path,
     summary: &crate::core::doctor_runtime::RunSummary,
+    fixer_results: &[DoctorFixerResult],
 ) -> String {
     let status_str = serde_json::to_value(&summary.status)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_else(|| "unknown".to_owned());
+    let (attempted, failed, skipped) = doctor_fixer_result_counts(fixer_results);
     let data = serde_json::json!({
         "schema": crate::models::DOCTOR_FIX_SUMMARY_SCHEMA_V1,
         "doctor_version": env!("CARGO_PKG_VERSION"),
@@ -19899,6 +20058,12 @@ fn doctor_fix_success_json(
         "actionCount": summary.action_count,
         "status": status_str,
         "fixerDispatchPending": false,
+        "failurePolicy": "fail_fast",
+        "fixerResultCount": fixer_results.len(),
+        "attemptedFixerCount": attempted,
+        "failedFixerCount": failed,
+        "skippedFixerCount": skipped,
+        "fixerResults": fixer_results,
         "sideEffectFree": false,
         "configMutation": "never",
     });
@@ -19912,10 +20077,16 @@ fn doctor_fix_success_json(
     .to_string()
 }
 
-fn doctor_runtime_error_json(
+fn doctor_runtime_error_result(
     error: &crate::core::doctor_runtime::DoctorRuntimeError,
     phase: &'static str,
-) -> (String, ProcessExitCode) {
+    fixer_results: &[DoctorFixerResult],
+    run: Option<&DoctorFixRunEvidence>,
+    caused_by: Option<(
+        &'static str,
+        &crate::core::doctor_runtime::DoctorRuntimeError,
+    )>,
+) -> DoctorFixCommandResult {
     use crate::core::doctor_runtime::DoctorRuntimeError;
 
     let (code, severity, repair, exit_code, path) = match error {
@@ -19971,6 +20142,13 @@ fn doctor_runtime_error_json(
             ProcessExitCode::Storage,
             None,
         ),
+        DoctorRuntimeError::FinishStateUpdateFailed { .. } => (
+            "doctor_finish_state_update_failed",
+            "critical",
+            "Preserve the run directory, restore safe write access to state.json, and inspect the nested finalization failures before retrying.",
+            ProcessExitCode::Storage,
+            None,
+        ),
         DoctorRuntimeError::NoOpIdempotent => (
             "doctor_runtime_noop",
             "info",
@@ -19980,8 +20158,15 @@ fn doctor_runtime_error_json(
         ),
     };
 
+    let (attempted, failed, skipped) = doctor_fixer_result_counts(fixer_results);
     let mut details = serde_json::json!({
         "phase": phase,
+        "failurePolicy": "fail_fast",
+        "fixerResultCount": fixer_results.len(),
+        "attemptedFixerCount": attempted,
+        "failedFixerCount": failed,
+        "skippedFixerCount": skipped,
+        "fixerResults": fixer_results,
         "recovery": [{
             "priority": 0,
             "kind": "command",
@@ -19992,9 +20177,18 @@ fn doctor_runtime_error_json(
     if let Some(path) = path {
         details["path"] = serde_json::Value::String(path);
     }
+    if let Some(run) = run {
+        details["run"] = serde_json::json!(run);
+    }
+    if let Some((cause_phase, cause)) = caused_by {
+        details["causedBy"] = serde_json::json!({
+            "phase": cause_phase,
+            "message": cause.to_string(),
+        });
+    }
 
-    (
-        serde_json::json!({
+    DoctorFixCommandResult {
+        json: serde_json::json!({
             "schema": crate::models::ERROR_SCHEMA_V2,
             "error": {
                 "code": code,
@@ -20006,7 +20200,7 @@ fn doctor_runtime_error_json(
         })
         .to_string(),
         exit_code,
-    )
+    }
 }
 
 fn clap_error_message(error: &clap::Error) -> String {
@@ -61381,11 +61575,12 @@ mod tests {
         WorkspaceHygieneArgs, WorkspaceHygieneMode, cass_import_domain_error,
         context_request_from_options, context_stream_header_frame,
         context_stream_options_for_request, db_inspect_redact_source_uri,
-        diag_environment_attestation_response_json, doctor_runtime_error_json,
-        environment_attestation_unavailable_sources, format_impact_json,
-        format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
-        hook_status_response_json, init_report_exit_code, json_with_data_result_path, mesh,
-        orient_next_commands, parse_completion_audit_evidence_input, parse_context_profile,
+        diag_environment_attestation_response_json, doctor_fix_dispatches,
+        doctor_runtime_error_result, environment_attestation_unavailable_sources,
+        format_impact_json, format_search_json_with_mesh_and_recalibration,
+        hook_git_readiness_response_json, hook_status_response_json, init_report_exit_code,
+        json_with_data_result_path, mesh, orient_next_commands,
+        parse_completion_audit_evidence_input, parse_context_profile,
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json,
@@ -70926,7 +71121,7 @@ mod tests {
             action_count: 3,
             status: crate::core::doctor_runtime::RunStatus::CompletedOk,
         };
-        let raw = super::doctor_fix_success_json(workspace, &summary);
+        let raw = super::doctor_fix_success_json(workspace, &summary, &[]);
         let value: serde_json::Value =
             serde_json::from_str(&raw).map_err(|error| error.to_string())?;
 
@@ -70959,6 +71154,338 @@ mod tests {
         ensure(
             value.get("actionCount").is_none(),
             "typed fix fields must not leak outside data",
+        )
+    }
+
+    #[test]
+    fn doctor_fix_existing_lock_emits_error_envelope_and_nonzero_exit() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path();
+        let holder = crate::core::doctor_runtime::RunContext::start(
+            workspace,
+            "doctor-fix-lock-holder",
+            crate::core::doctor_runtime::default_blast_radius_roots(workspace),
+            false,
+        )
+        .map_err(|error| error.to_string())?;
+        let lock_path = workspace.join(".ee").join(".doctor.lock");
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace_arg,
+            "doctor",
+            "--fix",
+            "--json",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Configuration, "held lock exit")?;
+        ensure(stderr.is_empty(), "held-lock JSON stderr must be empty")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "held-lock error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("doctor_concurrency_lost"),
+            "held-lock error code",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["phase"],
+            &serde_json::json!("start"),
+            "held-lock phase",
+        )?;
+        ensure(lock_path.exists(), "the holder must retain its live lock")?;
+
+        holder
+            .finish(crate::core::doctor_runtime::RunStatus::Failed)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            !lock_path.exists(),
+            "holder finalization must release the lock",
+        )
+    }
+
+    #[test]
+    fn doctor_fix_mutation_failure_is_partial_audited_and_undoable() -> TestResult {
+        use crate::core::doctor_fixers::FixerDispatch;
+        use crate::core::doctor_runtime::Op;
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        let outside = root.path().join("outside-doctor-blast-radius");
+        let dispatches = vec![
+            FixerDispatch {
+                finding_code: "test_applied_before_failure",
+                severity: "warning",
+                path: workspace.join(".ee"),
+                op: Op::Manual {
+                    steps: vec!["record deterministic pre-failure action".to_owned()],
+                },
+            },
+            FixerDispatch {
+                finding_code: "test_forced_mutation_failure",
+                severity: "high",
+                path: outside.clone(),
+                op: Op::WriteFile {
+                    bytes: b"must never be written".to_vec(),
+                },
+            },
+            FixerDispatch {
+                finding_code: "test_skipped_after_failure",
+                severity: "warning",
+                path: workspace.join(".ee"),
+                op: Op::Manual {
+                    steps: vec!["must not run after fail-fast boundary".to_owned()],
+                },
+            },
+        ];
+
+        let result = doctor_fix_dispatches(&workspace, dispatches);
+
+        ensure_equal(
+            &result.exit_code,
+            &ProcessExitCode::PolicyDenied,
+            "mutation failure exit",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&result.json).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "mutation failure schema",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["phase"],
+            &serde_json::json!("mutate"),
+            "mutation failure phase",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["failurePolicy"],
+            &serde_json::json!("fail_fast"),
+            "mutation failure policy",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["attemptedFixerCount"],
+            &serde_json::json!(2),
+            "attempted fixer count",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["failedFixerCount"],
+            &serde_json::json!(1),
+            "failed fixer count",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["skippedFixerCount"],
+            &serde_json::json!(1),
+            "skipped fixer count",
+        )?;
+        let outcomes = value["error"]["details"]["fixerResults"]
+            .as_array()
+            .ok_or_else(|| "fixerResults must be an array".to_owned())?
+            .iter()
+            .map(|entry| entry["outcome"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &outcomes,
+            &vec!["applied", "failed", "skipped_after_failure"],
+            "ordered fixer outcomes",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["run"]["status"],
+            &serde_json::json!("completed_partial"),
+            "partial run status",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["run"]["actionCount"],
+            &serde_json::json!(1),
+            "partial run action count",
+        )?;
+        ensure(
+            !outside.exists(),
+            "blast-radius failure must not write the target",
+        )?;
+
+        let run_id = value["error"]["details"]["run"]["runId"]
+            .as_str()
+            .ok_or_else(|| "partial failure runId missing".to_owned())?;
+        let run_dir = PathBuf::from(
+            value["error"]["details"]["run"]["runDir"]
+                .as_str()
+                .ok_or_else(|| "partial failure runDir missing".to_owned())?,
+        );
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(run_dir.join("state.json")).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &state["status"],
+            &serde_json::json!("completed_partial"),
+            "persisted partial status",
+        )?;
+        ensure(
+            state["finished_at"].is_string(),
+            "partial run must persist finished_at",
+        )?;
+        ensure(
+            !workspace.join(".ee").join(".doctor.lock").exists(),
+            "partial run must release its lock",
+        )?;
+
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+        let (undo_exit, undo_stdout, undo_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace_arg,
+            "doctor",
+            "--undo",
+            run_id,
+            "--json",
+        ]);
+        ensure_equal(
+            &undo_exit,
+            &ProcessExitCode::Success,
+            "partial run undo exit",
+        )?;
+        ensure(
+            undo_stderr.is_empty(),
+            "partial run undo JSON stderr must be empty",
+        )?;
+        let undo: serde_json::Value =
+            serde_json::from_str(&undo_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &undo["schema"],
+            &serde_json::json!("ee.doctor.undo_summary.v1"),
+            "partial run undo schema",
+        )?;
+        let undone_state: serde_json::Value = serde_json::from_slice(
+            &fs::read(run_dir.join("state.json")).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &undone_state["status"],
+            &serde_json::json!("undone"),
+            "partial run becomes undone",
+        )
+    }
+
+    #[test]
+    fn doctor_fix_finish_failure_is_failed_nonzero_and_undoable() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path().join("workspace");
+        let doctor_dir = workspace.join(".doctor");
+        fs::create_dir_all(&doctor_dir).map_err(|error| error.to_string())?;
+        let latest = doctor_dir.join("latest");
+        let sentinel = b"peer-owned latest entry";
+        fs::write(&latest, sentinel).map_err(|error| error.to_string())?;
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace_arg,
+            "doctor",
+            "--fix",
+            "--json",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::PolicyDenied, "finish failure exit")?;
+        ensure(
+            stderr.is_empty(),
+            "finish-failure JSON stderr must be empty",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "finish failure schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("doctor_latest_entry_unsafe"),
+            "finish failure code",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["phase"],
+            &serde_json::json!("finish"),
+            "finish failure phase",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["run"]["status"],
+            &serde_json::json!("failed"),
+            "finish failure run status",
+        )?;
+        ensure_equal(
+            &fs::read(&latest).map_err(|error| error.to_string())?,
+            &sentinel.to_vec(),
+            "finish failure preserves latest",
+        )?;
+
+        let run_id = value["error"]["details"]["run"]["runId"]
+            .as_str()
+            .ok_or_else(|| "finish failure runId missing".to_owned())?;
+        let run_dir = PathBuf::from(
+            value["error"]["details"]["run"]["runDir"]
+                .as_str()
+                .ok_or_else(|| "finish failure runDir missing".to_owned())?,
+        );
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(run_dir.join("state.json")).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &state["status"],
+            &serde_json::json!("failed"),
+            "finish failure persisted state",
+        )?;
+        ensure(
+            state["finished_at"].is_string(),
+            "finish failure must persist finished_at",
+        )?;
+        ensure(
+            !workspace.join(".ee").join(".doctor.lock").exists(),
+            "finish failure must release its lock",
+        )?;
+
+        let (undo_exit, undo_stdout, undo_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace_arg,
+            "doctor",
+            "--undo",
+            run_id,
+            "--json",
+        ]);
+        ensure_equal(
+            &undo_exit,
+            &ProcessExitCode::Success,
+            "failed run undo exit",
+        )?;
+        ensure(
+            undo_stderr.is_empty(),
+            "failed run undo JSON stderr must be empty",
+        )?;
+        let undo: serde_json::Value =
+            serde_json::from_str(&undo_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &undo["schema"],
+            &serde_json::json!("ee.doctor.undo_summary.v1"),
+            "failed run undo schema",
+        )?;
+        let undone_state: serde_json::Value = serde_json::from_slice(
+            &fs::read(run_dir.join("state.json")).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &undone_state["status"],
+            &serde_json::json!("undone"),
+            "failed run becomes undone",
         )
     }
 
@@ -71025,15 +71552,15 @@ mod tests {
         let error = crate::core::doctor_runtime::DoctorRuntimeError::LifecycleRootChanged {
             path: PathBuf::from("/workspace/.doctor"),
         };
-        let (stdout, exit) = doctor_runtime_error_json(&error, "finish");
+        let result = doctor_runtime_error_result(&error, "finish", &[], None, None);
 
         ensure_equal(
-            &exit,
+            &result.exit_code,
             &ProcessExitCode::PolicyDenied,
             "lifecycle substitution exit",
         )?;
         let value: serde_json::Value =
-            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+            serde_json::from_str(&result.json).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
             &serde_json::json!(crate::models::ERROR_SCHEMA_V2),

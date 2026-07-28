@@ -401,6 +401,8 @@ fn backup_refuses_nested_symlink_without_touching_external_destination() {
 fn finish_refuses_regular_latest_without_overwriting_or_removing_it() {
     let ws = fresh_workspace();
     let ctx = start_test_run(ws.path());
+    let run_dir = ctx.run_dir().to_path_buf();
+    let lock_path = ws.path().join(".ee").join(".doctor.lock");
     let latest = ws.path().join(".doctor").join("latest");
     let sentinel = b"peer-owned regular latest file";
     fs::write(&latest, sentinel).expect("plant regular latest file");
@@ -422,6 +424,21 @@ fn finish_refuses_regular_latest_without_overwriting_or_removing_it() {
         fs::read(&latest).expect("read preserved latest"),
         sentinel,
         "doctor must never overwrite or remove a regular latest entry"
+    );
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(run_dir.join("state.json")).expect("read run state"))
+            .expect("parse run state");
+    assert_eq!(
+        state["status"], "failed",
+        "a finalization failure must not leave completed_ok in state.json"
+    );
+    assert!(
+        state["finished_at"].is_string(),
+        "a finalization failure must persist a terminal timestamp"
+    );
+    assert!(
+        !lock_path.exists(),
+        "finish failure must release the run lock through Drop"
     );
 }
 

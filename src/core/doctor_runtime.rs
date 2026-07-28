@@ -128,6 +128,13 @@ pub enum DoctorRuntimeError {
         expected_hash: String,
         observed_hash: Option<String>,
     },
+    /// Finalization failed and the runtime was also unable to persist the
+    /// terminal `failed` state. Both failures are retained so callers never
+    /// lose the original cause while diagnosing the incomplete run.
+    FinishStateUpdateFailed {
+        finish_error: Box<DoctorRuntimeError>,
+        state_error: Box<DoctorRuntimeError>,
+    },
     /// The fixer planned a write but the target's current bytes already match
     /// the desired bytes. Not an error — the caller can treat this as
     /// "idempotent no-op".
@@ -232,6 +239,13 @@ impl std::fmt::Display for DoctorRuntimeError {
                     expected_hash
                 ),
             },
+            Self::FinishStateUpdateFailed {
+                finish_error,
+                state_error,
+            } => write!(
+                f,
+                "doctor finalization failed ({finish_error}); additionally failed to persist terminal run state ({state_error})"
+            ),
             Self::NoOpIdempotent => {
                 write!(f, "idempotent no-op: target already in desired state")
             }
@@ -621,43 +635,66 @@ impl RunContext {
     /// flushes `actions.jsonl`. The symlink `<workspace>/.doctor/latest` is
     /// updated atomically to point at this run.
     pub fn finish(mut self, status: RunStatus) -> Result<RunSummary, DoctorRuntimeError> {
-        ensure_doctor_lifecycle_bindings(&self.lifecycle, &self.workspace, &self.run_dir)?;
+        let finish_result = (|| {
+            ensure_doctor_lifecycle_bindings(&self.lifecycle, &self.workspace, &self.run_dir)?;
 
-        self.state.finished_at = Some(Utc::now().to_rfc3339());
-        self.state.status = status.clone();
-        write_lifecycle_state(&self.lifecycle, &self.run_dir, &self.state)?;
+            self.state.finished_at = Some(Utc::now().to_rfc3339());
+            self.state.status = status.clone();
+            write_lifecycle_state(&self.lifecycle, &self.run_dir, &self.state)?;
 
-        // Flush the actions log.
-        if let Some(mut h) = self.actions_handle.take() {
-            h.flush().map_err(|source| DoctorRuntimeError::Io {
-                context: "flush actions.jsonl".into(),
-                source,
-            })?;
-        }
-
-        // Update `latest` through the descriptor-anchored lifecycle root.
-        // On Linux and Apple platforms this uses an atomic no-replace or
-        // exchange rename. A displaced entry is retained inside this run
-        // directory; doctor never deletes an existing `latest` entry.
-        let latest_link = self.workspace.join(".doctor").join("latest");
-        ensure_doctor_lifecycle_bindings(&self.lifecycle, &self.workspace, &self.run_dir)?;
-        publish_doctor_latest(&self.lifecycle, &self.run_id, &self.run_dir, &latest_link)?;
-        // Do not return a lexical run path after a concurrent namespace
-        // substitution. Publishing is descriptor-anchored, so a race cannot
-        // escape, but the summary must fail closed instead of reporting a path
-        // that now resolves somewhere else.
-        ensure_doctor_lifecycle_bindings(&self.lifecycle, &self.workspace, &self.run_dir)?;
-
-        // Clear ownership only after release succeeds. On failure, `?` returns
-        // the typed I/O error while `lock_owned` remains true, causing Drop to
-        // make one final best-effort retry.
-        release_doctor_lock(&self.lifecycle, &self.lock_path).map_err(|source| {
-            DoctorRuntimeError::Io {
-                context: format!("release doctor lock {}", self.lock_path.display()),
-                source,
+            // Flush the actions log.
+            if let Some(mut h) = self.actions_handle.take() {
+                h.flush().map_err(|source| DoctorRuntimeError::Io {
+                    context: "flush actions.jsonl".into(),
+                    source,
+                })?;
             }
-        })?;
-        self.lock_owned = false;
+
+            // Update `latest` through the descriptor-anchored lifecycle root.
+            // On Linux and Apple platforms this uses an atomic no-replace or
+            // exchange rename. A displaced entry is retained inside this run
+            // directory; doctor never deletes an existing `latest` entry.
+            let latest_link = self.workspace.join(".doctor").join("latest");
+            ensure_doctor_lifecycle_bindings(&self.lifecycle, &self.workspace, &self.run_dir)?;
+            publish_doctor_latest(&self.lifecycle, &self.run_id, &self.run_dir, &latest_link)?;
+            // Do not return a lexical run path after a concurrent namespace
+            // substitution. Publishing is descriptor-anchored, so a race
+            // cannot escape, but the summary must fail closed instead of
+            // reporting a path that now resolves somewhere else.
+            ensure_doctor_lifecycle_bindings(&self.lifecycle, &self.workspace, &self.run_dir)?;
+
+            // Clear ownership only after release succeeds. On failure, the
+            // typed I/O error is returned while `lock_owned` remains true,
+            // causing Drop to make one final best-effort retry.
+            release_doctor_lock(&self.lifecycle, &self.lock_path).map_err(|source| {
+                DoctorRuntimeError::Io {
+                    context: format!("release doctor lock {}", self.lock_path.display()),
+                    source,
+                }
+            })?;
+            self.lock_owned = false;
+            Ok(())
+        })();
+
+        if let Err(finish_error) = finish_result {
+            // A run is not completed merely because its requested terminal
+            // status was written before a later flush, publication, binding,
+            // or lock-release failure. Persist the truthful terminal state
+            // through the descriptor-anchored run handle before returning.
+            self.state
+                .finished_at
+                .get_or_insert_with(|| Utc::now().to_rfc3339());
+            self.state.status = RunStatus::Failed;
+            if let Err(state_error) =
+                write_lifecycle_state(&self.lifecycle, &self.run_dir, &self.state)
+            {
+                return Err(DoctorRuntimeError::FinishStateUpdateFailed {
+                    finish_error: Box::new(finish_error),
+                    state_error: Box::new(state_error),
+                });
+            }
+            return Err(finish_error);
+        }
 
         Ok(RunSummary {
             run_id: self.run_id.clone(),
