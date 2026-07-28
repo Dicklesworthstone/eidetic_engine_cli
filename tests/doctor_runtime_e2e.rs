@@ -29,6 +29,7 @@ use ee::core::doctor_runtime::{
     ACTION_LINE_SCHEMA_V1, CAPABILITIES_SCHEMA_V1, CapabilitiesReport, DoctorRuntimeError, Op,
     RUN_STATE_SCHEMA_V1, RunContext, RunStatus, default_blast_radius_roots, mutate, replay_undo,
 };
+use fs4::fs_std::FileExt as Fs4FileExt;
 use tempfile::TempDir;
 
 fn fresh_workspace() -> TempDir {
@@ -74,9 +75,12 @@ fn assert_persistent_doctor_lock_released(workspace: &Path) {
         .write(true)
         .open(&lock_path)
         .expect("open persistent doctor lock");
-    lock.try_lock()
-        .expect("persistent doctor advisory lock should be released");
-    lock.unlock().expect("unlock test doctor lock");
+    assert!(
+        Fs4FileExt::try_lock_exclusive(&lock)
+            .expect("probe released persistent doctor advisory lock"),
+        "persistent doctor advisory lock should be released"
+    );
+    Fs4FileExt::unlock(&lock).expect("unlock test doctor lock");
 }
 
 #[test]

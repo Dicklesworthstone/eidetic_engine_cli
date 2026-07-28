@@ -1287,6 +1287,7 @@ dependencies = [
  "fnx-runtime",
  "franken-agent-detection",
  "frankensearch",
+ "fs4",
  "getrandom 0.4.3",
  "insta",
  "libc",

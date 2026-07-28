@@ -61550,6 +61550,7 @@ mod tests {
     use std::rc::Rc;
 
     use clap::{Parser, error::ErrorKind};
+    use fs4::fs_std::FileExt as Fs4FileExt;
 
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, AttestCommand, AuditCommand, BackupCommand,
@@ -61799,10 +61800,12 @@ mod tests {
             .write(true)
             .open(&lock_path)
             .map_err(|error| format!("open persistent doctor lock: {error}"))?;
-        lock.try_lock()
-            .map_err(|error| format!("persistent doctor lock is still held: {error}"))?;
-        lock.unlock()
-            .map_err(|error| format!("release test doctor lock: {error}"))
+        ensure(
+            Fs4FileExt::try_lock_exclusive(&lock)
+                .map_err(|error| format!("probe persistent doctor lock: {error}"))?,
+            "persistent doctor lock is still held",
+        )?;
+        Fs4FileExt::unlock(&lock).map_err(|error| format!("release test doctor lock: {error}"))
     }
 
     fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult

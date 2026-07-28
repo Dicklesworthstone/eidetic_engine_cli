@@ -53,6 +53,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+))]
+use fs4::fs_std::FileExt as Fs4FileExt;
 use serde::{Deserialize, Serialize};
 
 /// Public schema string for the doctor capabilities report. Bump only on a
@@ -1788,7 +1795,7 @@ fn prepare_doctor_lifecycle(
             actions_handle,
         )),
         Err(error) => {
-            let _ = lock_file.unlock();
+            let _ = Fs4FileExt::unlock(&lock_file);
             Err(error)
         }
     }
@@ -1813,7 +1820,7 @@ fn prepare_doctor_lifecycle(
     let quarantine_dir = run_dir.join("quarantine");
     for dir in [run_dir, backups_dir.as_path(), quarantine_dir.as_path()] {
         if let Err(source) = fs::create_dir_all(dir) {
-            let _ = lock.unlock();
+            let _ = Fs4FileExt::unlock(&lock);
             return Err(DoctorRuntimeError::BackupDirUnwritable {
                 dir: dir.to_path_buf(),
                 source,
@@ -1829,7 +1836,7 @@ fn prepare_doctor_lifecycle(
     {
         Ok(handle) => handle,
         Err(source) => {
-            let _ = lock.unlock();
+            let _ = Fs4FileExt::unlock(&lock);
             return Err(DoctorRuntimeError::Io {
                 context: format!("open actions.jsonl {}", actions_path.display()),
                 source,
@@ -1909,7 +1916,7 @@ fn acquire_windows_doctor_lock(lock_path: &Path) -> Result<fs::File, DoctorRunti
     }
     acquire_doctor_advisory_lock(&lock, lock_path)?;
     if created && let Err(source) = write_doctor_lock_contents(&mut lock, DOCTOR_LOCK_FILE_MARKER) {
-        let _ = lock.unlock();
+        let _ = Fs4FileExt::unlock(&lock);
         return Err(DoctorRuntimeError::Io {
             context: format!("initialize persistent doctor lock {}", lock_path.display()),
             source,
@@ -2094,7 +2101,7 @@ fn acquire_doctor_lock_at(
         }
     });
     if let Err(source) = initialized {
-        let _ = lock.unlock();
+        let _ = Fs4FileExt::unlock(&lock);
         return Err(DoctorRuntimeError::Io {
             context: format!("initialize persistent doctor lock {}", lock_path.display()),
             source,
@@ -2107,13 +2114,13 @@ fn acquire_doctor_advisory_lock(
     lock_file: &fs::File,
     lock_path: &Path,
 ) -> Result<(), DoctorRuntimeError> {
-    match lock_file.try_lock() {
-        Ok(()) => Ok(()),
-        Err(fs::TryLockError::WouldBlock) => Err(DoctorRuntimeError::ConcurrencyLost {
+    match Fs4FileExt::try_lock_exclusive(lock_file) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(DoctorRuntimeError::ConcurrencyLost {
             lock_path: lock_path.to_path_buf(),
             holder_run_id: read_doctor_lock_holder_file(lock_file),
         }),
-        Err(fs::TryLockError::Error(source)) => Err(DoctorRuntimeError::Io {
+        Err(source) => Err(DoctorRuntimeError::Io {
             context: format!("acquire persistent doctor lock {}", lock_path.display()),
             source,
         }),
@@ -2693,7 +2700,7 @@ fn unlock_doctor_lock_file(lock_file: &fs::File) -> io::Result<()> {
     // Release only the retained kernel lock. The `.doctor.lock` pathname is
     // persistent and may now name a peer replacement, so teardown must never
     // inspect, unlink, overwrite, or rename it.
-    lock_file.unlock()
+    Fs4FileExt::unlock(lock_file)
 }
 
 #[cfg(not(any(
@@ -3423,9 +3430,12 @@ mod tests {
             .write(true)
             .open(&lock_path)
             .expect("open persistent doctor lock");
-        lock.try_lock()
-            .expect("persistent doctor advisory lock should be released");
-        lock.unlock().expect("unlock test doctor lock");
+        assert!(
+            Fs4FileExt::try_lock_exclusive(&lock)
+                .expect("probe released persistent doctor advisory lock"),
+            "persistent doctor advisory lock should be released"
+        );
+        Fs4FileExt::unlock(&lock).expect("unlock test doctor lock");
     }
 
     #[test]
@@ -3552,7 +3562,10 @@ mod tests {
             .write(true)
             .open(&lock_path)
             .unwrap();
-        lock.try_lock().expect("hold external advisory lock");
+        assert!(
+            Fs4FileExt::try_lock_exclusive(&lock).expect("hold external advisory lock"),
+            "external advisory lock should be available"
+        );
 
         let result = RunContext::start(
             ws.path(),
@@ -3568,7 +3581,7 @@ mod tests {
                 ..
             }) if holder == "external-verifier-holder"
         ));
-        lock.unlock().expect("release external advisory lock");
+        Fs4FileExt::unlock(&lock).expect("release external advisory lock");
     }
 
     #[test]
@@ -3723,7 +3736,10 @@ mod tests {
         let lock = fs::File::create(&lock_path).unwrap();
         lock.set_len(DOCTOR_LOCK_FILE_INSPECT_LIMIT.saturating_add(1))
             .unwrap();
-        lock.try_lock().expect("hold oversized lock");
+        assert!(
+            Fs4FileExt::try_lock_exclusive(&lock).expect("hold oversized lock"),
+            "oversized advisory lock should be available"
+        );
 
         let result = RunContext::start(
             ws.path(),
@@ -3759,7 +3775,10 @@ mod tests {
         let original = b"peer-owned read-only lock contents";
         fs::write(&lock_path, original).unwrap();
         let mut read_only = fs::OpenOptions::new().read(true).open(&lock_path).unwrap();
-        read_only.try_lock().expect("acquire test advisory lock");
+        assert!(
+            Fs4FileExt::try_lock_exclusive(&read_only).expect("acquire test advisory lock"),
+            "read-only test advisory lock should be available"
+        );
 
         let result = write_doctor_lock_contents(&mut read_only, "replacement\n");
 
@@ -3769,7 +3788,7 @@ mod tests {
         );
         assert_eq!(fs::read(&lock_path).unwrap(), original);
         assert!(lock_path.is_file());
-        read_only.unlock().expect("release test advisory lock");
+        Fs4FileExt::unlock(&read_only).expect("release test advisory lock");
     }
 
     #[cfg(any(
