@@ -19,7 +19,6 @@ const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon start",
     "daemon stop",
     "orient decisions",
-    "review session --propose",
 ];
 
 type TestResult = Result<(), String>;
