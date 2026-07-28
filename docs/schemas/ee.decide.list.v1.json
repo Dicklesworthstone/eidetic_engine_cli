@@ -30,6 +30,32 @@
     "decisions": {"type": "array", "items": {"$ref": "#/$defs/decisionItem"}},
     "subscribe": {"$ref": "#/$defs/subscribe"}
   },
+  "field_presets": {
+    "minimal": ["schema", "version", "returnedCount", "truncated"],
+    "summary": [
+      "schema",
+      "version",
+      "about",
+      "includeSuperseded",
+      "totalCount",
+      "returnedCount",
+      "truncated"
+    ],
+    "standard": [
+      "schema",
+      "version",
+      "workspaceId",
+      "databasePath",
+      "about",
+      "includeSuperseded",
+      "totalCount",
+      "returnedCount",
+      "truncated",
+      "decisions",
+      "subscribe"
+    ],
+    "full": ["*"]
+  },
   "$defs": {
     "decisionItem": {
       "type": "object",

@@ -39,6 +39,7 @@ use ee::core::memory::{
     MemoryDetails, MemoryListFilter, MemoryListReport, MemoryShowReport, MemorySummary,
     MemoryTimelineReport, TimelineChange, TimelineMemory,
 };
+use ee::core::status::StatusReport;
 use ee::core::swarm_next_action::SWARM_NEXT_ACTION_SCHEMA_V1;
 use ee::curate::{
     DerivationSourceKind, DerivationSourceRef, ReflectionChallengeBinding,
@@ -54,9 +55,9 @@ use ee::models::{
     DomainError, IMPORT_CASS_SCHEMA_V1, ProducerMetadata, QUERY_SCHEMA_V1, RESPONSE_SCHEMA_V2,
 };
 use ee::output::{
-    error_response_json, render_curate_candidates_json, render_learn_gaps_json,
+    FieldProfile, error_response_json, render_curate_candidates_json, render_learn_gaps_json,
     render_mcp_manifest_json, render_memory_list_json, render_memory_show_json,
-    render_reflect_propose_json, render_schema_export_json,
+    render_reflect_propose_json, render_schema_export_json, render_status_json_filtered,
 };
 use ee::policy::{
     SWARM_SLO_COORDINATION_EVENT_SCHEMA_V1, SWARM_SLO_RESOURCE_USAGE_EVENT_SCHEMA_V1,
@@ -2081,11 +2082,9 @@ fn diag_incident_replay_response_matches_schema() -> TestResult {
 
 #[test]
 fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
+    let status_response = status_conformance_sample()?;
     let fixture_cases = [
-        (
-            "ee.response.v2",
-            read_json(&fixture_path("golden/status/status_json.golden"))?,
-        ),
+        ("ee.response.v2", status_response.clone()),
         (
             "ee.pack.v2",
             read_json(&fixture_path("golden/agent/context_pack.json.golden"))?,
@@ -2096,10 +2095,7 @@ fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
                 "golden/agent/search_deterministic_ranking.json.golden",
             ))?,
         ),
-        (
-            "ee.status.v1",
-            read_json(&fixture_path("golden/status/status_json.golden"))?,
-        ),
+        ("ee.status.v1", status_response),
         (
             "ee.doctor.v1",
             read_json(&fixture_path("golden/doctor/doctor_json.golden"))?,
@@ -2352,12 +2348,14 @@ fn search_document_conformance_sample() -> Value {
     json!({
         "docId": "mem_search_document_schema",
         "memoryId": "mem_search_document_schema",
-        "score": 0.91,
+        "score": 0.029836,
+        "relevanceScore": 0.91,
+        "scoreKind": "rrf_fused",
         "scoreInterval": [0.72, 0.97],
         "coverageGuarantee": 0.95,
         "calibrated": true,
         "source": "hybrid",
-        "why": "Selected by hybrid retrieval with score 0.9100.",
+        "why": "Selected by hybrid retrieval with raw RRF score 0.029836.",
         "provenance": [
             {
                 "kind": "provenance_uri",
@@ -2389,6 +2387,25 @@ fn search_document_conformance_sample() -> Value {
             ]
         }
     })
+}
+
+fn status_conformance_sample() -> Result<Value, String> {
+    let workspace =
+        tempfile::tempdir().map_err(|error| format!("create status workspace: {error}"))?;
+    let report = StatusReport::gather_for_workspace(workspace.path());
+    let rendered = render_status_json_filtered(&report, FieldProfile::Standard);
+    let response: Value = serde_json::from_str(&rendered)
+        .map_err(|error| format!("parse rendered status response: {error}"))?;
+    if !response
+        .pointer("/data/workspace")
+        .is_some_and(Value::is_object)
+    {
+        return Err(
+            "rendered status response must retain the public workspace object before schema validation"
+                .to_owned(),
+        );
+    }
+    Ok(response)
 }
 
 fn pack_stream_header_conformance_sample() -> Value {

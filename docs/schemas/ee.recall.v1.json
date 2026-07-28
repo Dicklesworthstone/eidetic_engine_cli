@@ -110,5 +110,43 @@
     "droppedCount": {"type": "integer", "minimum": 0},
     "continuationCursor": {"type": ["string", "null"]}
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "field_presets": {
+    "minimal": ["schema", "query", "memoryId", "score"],
+    "summary": [
+      "schema",
+      "query",
+      "totalMatched",
+      "truncated",
+      "memoryId",
+      "level",
+      "kind",
+      "contentPreview",
+      "score",
+      "freshnessState"
+    ],
+    "standard": [
+      "schema",
+      "query",
+      "items",
+      "indexGeneration",
+      "dbGeneration",
+      "totalMatched",
+      "truncated",
+      "droppedCount",
+      "continuationCursor",
+      "memoryId",
+      "level",
+      "kind",
+      "contentPreview",
+      "tags",
+      "score",
+      "scoreComponents",
+      "freshnessState",
+      "provenance",
+      "anchor",
+      "repair"
+    ],
+    "full": ["*"]
+  }
 }

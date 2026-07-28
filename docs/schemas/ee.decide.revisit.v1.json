@@ -32,6 +32,34 @@
     "decisions": {"type": "array", "items": {"$ref": "#/$defs/decisionItem"}},
     "subscribe": {"$ref": "#/$defs/subscribe"}
   },
+  "field_presets": {
+    "minimal": ["schema", "version", "dueCount", "returnedCount", "truncated"],
+    "summary": [
+      "schema",
+      "version",
+      "now",
+      "warningDays",
+      "windowEnd",
+      "dueCount",
+      "returnedCount",
+      "truncated"
+    ],
+    "standard": [
+      "schema",
+      "version",
+      "workspaceId",
+      "databasePath",
+      "now",
+      "warningDays",
+      "windowEnd",
+      "dueCount",
+      "returnedCount",
+      "truncated",
+      "decisions",
+      "subscribe"
+    ],
+    "full": ["*"]
+  },
   "$defs": {
     "decisionItem": {
       "type": "object",

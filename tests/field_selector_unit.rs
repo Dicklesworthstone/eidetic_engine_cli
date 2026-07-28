@@ -507,7 +507,9 @@ fn collect_selected_names(
 fn synthetic_response(schema: &Value, command: &str) -> Result<String, String> {
     let data_schema = response_data_schema(schema)?;
     let mut data = sample_object_from_schema(data_schema);
-    data.insert("command".to_string(), Value::String(command.to_string()));
+    if data_schema.pointer("/properties/command").is_some() {
+        data.insert("command".to_string(), Value::String(command.to_string()));
+    }
     enrich_surface_samples(command, &mut data);
     let response = json!({
         "schema": "ee.response.v2",

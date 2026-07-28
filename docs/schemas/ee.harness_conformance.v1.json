@@ -65,6 +65,43 @@
       "$ref": "#/$defs/compatibility"
     }
   },
+  "field_presets": {
+    "minimal": [
+      "schema",
+      "fixtureVersion",
+      "caseId",
+      "harness",
+      "fixtureKind",
+      "eventName"
+    ],
+    "summary": [
+      "schema",
+      "fixtureVersion",
+      "caseId",
+      "harness",
+      "fixtureKind",
+      "eventName",
+      "harnessSupport",
+      "expected",
+      "assertions",
+      "compatibility"
+    ],
+    "standard": [
+      "schema",
+      "fixtureVersion",
+      "caseId",
+      "harness",
+      "fixtureKind",
+      "eventName",
+      "harnessSupport",
+      "input",
+      "expected",
+      "assertions",
+      "artifactPolicy",
+      "compatibility"
+    ],
+    "full": ["*"]
+  },
   "$defs": {
     "harnessId": {
       "type": "string",
