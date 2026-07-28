@@ -5,8 +5,8 @@
 //! upgraded doctor will route every state-changing operation through:
 //!
 //! - `RunContext`     — one per `ee doctor --fix` invocation; owns the
-//!   `.doctor/runs/<run-id>/` directory and the lock file at
-//!   `<workspace>/.ee/.doctor.lock`.
+//!   `.doctor/runs/<run-id>/` directory and an OS advisory lock on the
+//!   persistent `<workspace>/.ee/.doctor.lock` file.
 //! - `Op`             — the closed set of write-flavored operations. The
 //!   Phase-2 repair specs reference these variants verbatim.
 //! - `mutate()`       — the chokepoint. Every fixer must call this; nothing
@@ -48,7 +48,7 @@
 use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -65,14 +65,21 @@ pub const ACTION_LINE_SCHEMA_V1: &str = "ee.doctor.action.v1";
 /// Public schema string for the run state file (`<run-dir>/state.json`).
 pub const RUN_STATE_SCHEMA_V1: &str = "ee.doctor.run_state.v1";
 
+/// Stable contents written only when doctor atomically creates the persistent
+/// advisory-lock inode. Reacquisition never rewrites an existing path because
+/// it may have been substituted by a same-user peer between runs.
+const DOCTOR_LOCK_FILE_MARKER: &str = "ee.doctor.persistent_lock.v1\n";
+
 static DOCTOR_RUN_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 static DOCTOR_STATE_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 std::thread_local! {
-    static DOCTOR_LOCK_RELEASE_ATTEMPTS: std::cell::Cell<u64> = const {
-        std::cell::Cell::new(0)
-    };
+    static DOCTOR_LOCK_BEFORE_UNLOCK_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    static DOCTOR_LOCK_FAIL_NEXT_WRITE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 /// Canonical doctor-runtime errors. The CLI wiring maps unsafe-path errors
@@ -465,12 +472,23 @@ struct DoctorLifecycleHandles {
     quarantine_dir: fs::File,
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+#[cfg(windows)]
+#[derive(Debug)]
+struct DoctorLifecycleHandles {
+    lock_file: fs::File,
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+)))]
 #[derive(Debug)]
 struct DoctorLifecycleHandles;
 
-/// One `ee doctor --fix` invocation's state. Owns the lock file and the
-/// `.doctor/runs/<run-id>/` directory.
+/// One `ee doctor --fix` invocation's state. Owns the advisory lock handle and
+/// the `.doctor/runs/<run-id>/` directory.
 #[derive(Debug)]
 pub struct RunContext {
     run_id: String,
@@ -488,12 +506,12 @@ pub struct RunContext {
     actions_handle: Option<fs::File>,
     blast_radius_roots: Vec<PathBuf>,
     dry_run: bool,
-    // Round-6 self-review (R6-5): true between successful lock acquisition
-    // and lock release. `finish()` flips this to false AFTER manually
-    // removing the lock so the `Drop` impl below can distinguish:
+    // True between successful advisory-lock acquisition and release.
+    // `finish()` flips this to false only after explicitly unlocking the
+    // retained file handle so the `Drop` impl below can distinguish:
     //
     //   - normal teardown via `finish()` → already released, no-op.
-    //   - error/panic teardown via implicit drop → lock leaked, clean it up.
+    //   - error/panic teardown via implicit drop → lock held, unlock it.
     //
     // Critically the flip happens only AFTER a successful release. If release
     // fails, `finish()` propagates the error with this flag still true so Drop
@@ -503,21 +521,17 @@ pub struct RunContext {
 
 impl Drop for RunContext {
     fn drop(&mut self) {
-        // Round-6 self-review (R6-5): RunContext owns the workspace lock
-        // for its lifetime. `finish()` is the canonical release path and
-        // flips `lock_owned` to false. If `finish()` was never called —
-        // because the caller propagated an error via `?`, the doctor
-        // process panicked mid-fix, or a future code path forgot to
-        // finish — the lock file would otherwise linger forever and
-        // every future `ee doctor --fix` against this workspace would
-        // see a phantom holder. Sweep it up.
+        // RunContext owns the advisory lock for its lifetime. `finish()` is
+        // the canonical release path and flips `lock_owned` to false. If
+        // `finish()` was never called because the caller propagated an error,
+        // a panic unwound, or a future code path forgot to finish, dropping the
+        // retained handle releases the OS lock. The persistent public lock
+        // path is deliberately never unlinked, renamed, or overwritten here:
+        // a same-user peer may have substituted that name at any point.
         //
-        // We deliberately do NOT inspect the lock contents before
-        // removing: if `lock_owned == true`, we hold the lock by
-        // construction (start() returned Self, finish() hasn't run),
-        // so the file on disk is ours to delete. A destructor cannot report an
-        // I/O error, so only this final best-effort path intentionally discards
-        // a release failure; `finish()` itself always propagates one.
+        // A destructor cannot report an I/O error, so only this final
+        // best-effort unlock intentionally discards a release failure;
+        // `finish()` itself always propagates one.
         if self.lock_owned {
             let _ = release_doctor_lock(&self.lifecycle, &self.lock_path);
         }
@@ -573,9 +587,8 @@ impl RunContext {
             state_path.as_path(),
         ])?;
 
-        let lock_contents = format!("{}\n{}\n", run_id, std::process::id());
         let (lifecycle, actions_handle) =
-            prepare_doctor_lifecycle(workspace, &run_id, &lock_path, &run_dir, &lock_contents)?;
+            prepare_doctor_lifecycle(workspace, &run_id, &lock_path, &run_dir)?;
         if let Err(error) = ensure_doctor_lifecycle_bindings(&lifecycle, workspace, &run_dir) {
             let _ = release_doctor_lock(&lifecycle, &lock_path);
             return Err(error);
@@ -1099,11 +1112,11 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
 /// plus the first error encountered; the caller can inspect
 /// `<run-dir>/undo_log.jsonl` for line-level detail.
 ///
-/// Round-2 fresh-eyes (R2-P1-01): acquires the workspace's
-/// `.ee/.doctor.lock` for the duration of the call via `OpenOptions::
-/// create_new` so two concurrent `ee doctor --undo <run-id>` invocations
-/// cannot race on the same `actions.jsonl` / `undo_log.jsonl`. The lock
-/// is held in a Drop guard so it's released even on partial-undo aborts.
+/// Acquires an exclusive OS advisory lock on the workspace's persistent
+/// `.ee/.doctor.lock` file so two concurrent `ee doctor --undo <run-id>`
+/// invocations cannot race on the same `actions.jsonl` / `undo_log.jsonl`.
+/// The exact locked handle is held in a Drop guard, so it is released even on
+/// partial-undo aborts without deleting or renaming the public lock path.
 /// If the workspace lock is held by another doctor (concurrent --fix or
 /// --undo), returns `ConcurrencyLost` with exit semantics that match
 /// `RunContext::start`.
@@ -1692,7 +1705,6 @@ fn prepare_doctor_lifecycle(
     run_id: &str,
     lock_path: &Path,
     run_dir: &Path,
-    lock_contents: &str,
 ) -> Result<(DoctorLifecycleHandles, fs::File), DoctorRuntimeError> {
     use rustix::fs::{Mode, OFlags};
 
@@ -1709,7 +1721,7 @@ fn prepare_doctor_lifecycle(
     let ee_path = workspace.join(".ee");
     let ee_dir =
         open_or_create_doctor_directory_at(&workspace_fd, OsStr::new(".ee"), &ee_path, true)?;
-    let lock_file = acquire_doctor_lock_at(&ee_dir, lock_path, lock_contents)?;
+    let lock_file = acquire_doctor_lock_at(&ee_dir, lock_path)?;
 
     let prepared = (|| {
         let doctor_path = workspace.join(".doctor");
@@ -1776,19 +1788,18 @@ fn prepare_doctor_lifecycle(
             actions_handle,
         )),
         Err(error) => {
-            let _ = release_owned_doctor_lock_at(&ee_dir, &lock_file);
+            let _ = lock_file.unlock();
             Err(error)
         }
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+#[cfg(windows)]
 fn prepare_doctor_lifecycle(
     workspace: &Path,
     _run_id: &str,
     lock_path: &Path,
     run_dir: &Path,
-    lock_contents: &str,
 ) -> Result<(DoctorLifecycleHandles, fs::File), DoctorRuntimeError> {
     let ee_dir = workspace.join(".ee");
     fs::create_dir_all(&ee_dir).map_err(|source| DoctorRuntimeError::Io {
@@ -1796,42 +1807,13 @@ fn prepare_doctor_lifecycle(
         source,
     })?;
 
-    match fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(lock_path)
-    {
-        Ok(mut lock) => {
-            if let Err(source) = lock
-                .write_all(lock_contents.as_bytes())
-                .and_then(|()| lock.flush())
-            {
-                let _ = fs::remove_file(lock_path);
-                return Err(DoctorRuntimeError::Io {
-                    context: format!("write lock file {}", lock_path.display()),
-                    source,
-                });
-            }
-        }
-        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
-            return Err(DoctorRuntimeError::ConcurrencyLost {
-                lock_path: lock_path.to_path_buf(),
-                holder_run_id: read_doctor_lock_holder(lock_path),
-            });
-        }
-        Err(source) => {
-            return Err(DoctorRuntimeError::Io {
-                context: format!("create_new lock file {}", lock_path.display()),
-                source,
-            });
-        }
-    }
+    let lock = acquire_windows_doctor_lock(lock_path)?;
 
     let backups_dir = run_dir.join("backups");
     let quarantine_dir = run_dir.join("quarantine");
     for dir in [run_dir, backups_dir.as_path(), quarantine_dir.as_path()] {
         if let Err(source) = fs::create_dir_all(dir) {
-            let _ = fs::remove_file(lock_path);
+            let _ = lock.unlock();
             return Err(DoctorRuntimeError::BackupDirUnwritable {
                 dir: dir.to_path_buf(),
                 source,
@@ -1847,7 +1829,7 @@ fn prepare_doctor_lifecycle(
     {
         Ok(handle) => handle,
         Err(source) => {
-            let _ = fs::remove_file(lock_path);
+            let _ = lock.unlock();
             return Err(DoctorRuntimeError::Io {
                 context: format!("open actions.jsonl {}", actions_path.display()),
                 source,
@@ -1855,7 +1837,106 @@ fn prepare_doctor_lifecycle(
         }
     };
 
-    Ok((DoctorLifecycleHandles, actions_handle))
+    Ok((DoctorLifecycleHandles { lock_file: lock }, actions_handle))
+}
+
+#[cfg(windows)]
+fn configure_windows_doctor_lock_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // Open the reparse-point object itself instead of following it. The
+    // metadata check above/below then rejects symlink/junction substitutions
+    // without ever opening their target for writing.
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+}
+
+#[cfg(windows)]
+fn acquire_windows_doctor_lock(lock_path: &Path) -> Result<fs::File, DoctorRuntimeError> {
+    use std::os::windows::fs::MetadataExt;
+
+    if fs::symlink_metadata(lock_path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(DoctorRuntimeError::SymlinkedRunRoot {
+            path: lock_path.to_path_buf(),
+        });
+    }
+
+    let mut create_options = fs::OpenOptions::new();
+    create_options
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .truncate(false);
+    configure_windows_doctor_lock_open_no_follow(&mut create_options);
+    let (mut lock, created) = match create_options.open(lock_path) {
+        Ok(lock) => (lock, true),
+        Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+            let mut existing_options = fs::OpenOptions::new();
+            existing_options.read(true).write(true).truncate(false);
+            configure_windows_doctor_lock_open_no_follow(&mut existing_options);
+            let lock =
+                existing_options
+                    .open(lock_path)
+                    .map_err(|source| DoctorRuntimeError::Io {
+                        context: format!(
+                            "open existing persistent doctor lock {}",
+                            lock_path.display()
+                        ),
+                        source,
+                    })?;
+            (lock, false)
+        }
+        Err(source) => {
+            return Err(DoctorRuntimeError::Io {
+                context: format!("create persistent doctor lock {}", lock_path.display()),
+                source,
+            });
+        }
+    };
+    let metadata = lock.metadata().map_err(|source| DoctorRuntimeError::Io {
+        context: format!("inspect persistent doctor lock {}", lock_path.display()),
+        source,
+    })?;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(DoctorRuntimeError::Io {
+            context: format!("inspect persistent doctor lock {}", lock_path.display()),
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "doctor lock is not a regular non-reparse file",
+            ),
+        });
+    }
+    acquire_doctor_advisory_lock(&lock, lock_path)?;
+    if created && let Err(source) = write_doctor_lock_contents(&mut lock, DOCTOR_LOCK_FILE_MARKER) {
+        let _ = lock.unlock();
+        return Err(DoctorRuntimeError::Io {
+            context: format!("initialize persistent doctor lock {}", lock_path.display()),
+            source,
+        });
+    }
+    Ok(lock)
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+)))]
+fn prepare_doctor_lifecycle(
+    _workspace: &Path,
+    _run_id: &str,
+    lock_path: &Path,
+    _run_dir: &Path,
+) -> Result<(DoctorLifecycleHandles, fs::File), DoctorRuntimeError> {
+    Err(DoctorRuntimeError::Io {
+        context: format!("acquire persistent doctor lock {}", lock_path.display()),
+        source: io::Error::new(
+            io::ErrorKind::Unsupported,
+            "doctor mutation is disabled because this platform cannot prove lock ownership",
+        ),
+    })
 }
 
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
@@ -1969,77 +2050,154 @@ fn open_or_create_doctor_relative_directory(
 fn acquire_doctor_lock_at(
     ee_dir: &fs::File,
     lock_path: &Path,
-    lock_contents: &str,
 ) -> Result<fs::File, DoctorRuntimeError> {
-    use rustix::fs::{FileType, Mode, OFlags};
+    use rustix::fs::{Mode, OFlags};
     use rustix::io::Errno;
 
-    let fd = match rustix::fs::openat(
+    let create_flags =
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let (fd, created) = match rustix::fs::openat(
         ee_dir,
         ".doctor.lock",
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        create_flags,
         Mode::from_raw_mode(0o600),
     ) {
-        Ok(fd) => fd,
+        Ok(fd) => (fd, true),
         Err(source) if source == Errno::EXIST => {
-            if doctor_entry_type_at(ee_dir, OsStr::new(".doctor.lock"))? == Some(FileType::Symlink)
-            {
-                return Err(DoctorRuntimeError::SymlinkedRunRoot {
-                    path: lock_path.to_path_buf(),
-                });
-            }
-            return Err(DoctorRuntimeError::ConcurrencyLost {
-                lock_path: lock_path.to_path_buf(),
-                holder_run_id: read_doctor_lock_holder_at(ee_dir),
-            });
+            let fd = rustix::fs::openat(
+                ee_dir,
+                ".doctor.lock",
+                OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0),
+            )
+            .map_err(|source| {
+                doctor_lifecycle_errno(lock_path, "open existing persistent doctor lock", source)
+            })?;
+            (fd, false)
         }
         Err(source) => {
             return Err(doctor_lifecycle_errno(
                 lock_path,
-                "create doctor lock",
+                "create persistent doctor lock",
                 source,
             ));
         }
     };
 
     let mut lock = fs::File::from(fd);
-    if let Err(source) = lock
-        .write_all(lock_contents.as_bytes())
-        .and_then(|()| lock.flush())
-    {
-        let _ = release_owned_doctor_lock_at(ee_dir, &lock);
+    acquire_doctor_advisory_lock(&lock, lock_path)?;
+    let initialized = ensure_doctor_lock_binding_at(ee_dir, &lock).and_then(|()| {
+        if created {
+            write_doctor_lock_contents(&mut lock, DOCTOR_LOCK_FILE_MARKER)
+        } else {
+            Ok(())
+        }
+    });
+    if let Err(source) = initialized {
+        let _ = lock.unlock();
         return Err(DoctorRuntimeError::Io {
-            context: format!("write doctor lock {}", lock_path.display()),
+            context: format!("initialize persistent doctor lock {}", lock_path.display()),
             source,
         });
     }
     Ok(lock)
 }
 
-#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-fn read_doctor_lock_holder_at(ee_dir: &fs::File) -> Option<String> {
-    use rustix::fs::{Mode, OFlags};
+fn acquire_doctor_advisory_lock(
+    lock_file: &fs::File,
+    lock_path: &Path,
+) -> Result<(), DoctorRuntimeError> {
+    match lock_file.try_lock() {
+        Ok(()) => Ok(()),
+        Err(fs::TryLockError::WouldBlock) => Err(DoctorRuntimeError::ConcurrencyLost {
+            lock_path: lock_path.to_path_buf(),
+            holder_run_id: read_doctor_lock_holder_file(lock_file),
+        }),
+        Err(fs::TryLockError::Error(source)) => Err(DoctorRuntimeError::Io {
+            context: format!("acquire persistent doctor lock {}", lock_path.display()),
+            source,
+        }),
+    }
+}
 
-    let fd = rustix::fs::openat(
-        ee_dir,
-        ".doctor.lock",
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::from_raw_mode(0),
-    )
-    .ok()?;
-    let file = fs::File::from(fd);
-    let metadata = file.metadata().ok()?;
+fn read_doctor_lock_holder_file(lock_file: &fs::File) -> Option<String> {
+    let metadata = lock_file.metadata().ok()?;
     if !metadata.is_file() || metadata.len() > DOCTOR_LOCK_FILE_INSPECT_LIMIT {
         return None;
     }
     let mut raw = String::new();
-    file.take(DOCTOR_LOCK_FILE_INSPECT_LIMIT.saturating_add(1))
+    lock_file
+        .take(DOCTOR_LOCK_FILE_INSPECT_LIMIT.saturating_add(1))
         .read_to_string(&mut raw)
         .ok()?;
     if u64::try_from(raw.len()).unwrap_or(u64::MAX) > DOCTOR_LOCK_FILE_INSPECT_LIMIT {
         return None;
     }
-    raw.lines().next().map(str::to_owned)
+    doctor_lock_holder_from_raw(&raw)
+}
+
+fn write_doctor_lock_contents(lock_file: &mut fs::File, contents: &str) -> io::Result<()> {
+    #[cfg(test)]
+    if DOCTOR_LOCK_FAIL_NEXT_WRITE.with(|flag| flag.replace(false)) {
+        return Err(io::Error::other(
+            "injected doctor lock metadata write failure",
+        ));
+    }
+
+    // The advisory lock is already held and every write is descriptor-based.
+    // If a peer renames or replaces `.doctor.lock` now, this still updates
+    // only the exact inode/handle acquired above and never the replacement.
+    lock_file.set_len(0)?;
+    lock_file.seek(SeekFrom::Start(0))?;
+    lock_file.write_all(contents.as_bytes())?;
+    lock_file.flush()
+}
+
+#[cfg(test)]
+fn fail_next_doctor_lock_metadata_write() {
+    DOCTOR_LOCK_FAIL_NEXT_WRITE.with(|flag| flag.set(true));
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn ensure_doctor_lock_binding_at(ee_dir: &fs::File, lock_file: &fs::File) -> io::Result<()> {
+    use rustix::fs::{AtFlags, FileType};
+
+    let expected = rustix::fs::fstat(lock_file).map_err(io::Error::from)?;
+    let observed = rustix::fs::statat(ee_dir, ".doctor.lock", AtFlags::SYMLINK_NOFOLLOW).map_err(
+        |source| {
+            if source == rustix::io::Errno::NOENT {
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "doctor lock path disappeared during acquisition",
+                )
+            } else {
+                io::Error::from(source)
+            }
+        },
+    )?;
+
+    if FileType::from_raw_mode(expected.st_mode) != FileType::RegularFile
+        || FileType::from_raw_mode(observed.st_mode) != FileType::RegularFile
+        || observed.st_dev != expected.st_dev
+        || observed.st_ino != expected.st_ino
+        || expected.st_nlink != 1
+        || observed.st_nlink != 1
+        || expected.st_uid != rustix::process::geteuid().as_raw()
+        || observed.st_uid != expected.st_uid
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "doctor lock path changed or lacks single-link process ownership",
+        ));
+    }
+    Ok(())
+}
+
+fn doctor_lock_holder_from_raw(raw: &str) -> Option<String> {
+    raw.lines()
+        .next()
+        .filter(|holder| *holder != DOCTOR_LOCK_FILE_MARKER.trim_end())
+        .map(str::to_owned)
 }
 
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
@@ -2497,65 +2655,71 @@ fn create_doctor_latest_symlink(_target: &Path, _latest_link: &Path) -> io::Resu
 }
 
 #[cfg(test)]
-fn record_doctor_lock_release_attempt() {
-    DOCTOR_LOCK_RELEASE_ATTEMPTS.with(|attempts| {
-        attempts.set(attempts.get().saturating_add(1));
+fn set_doctor_lock_before_unlock_hook(hook: impl FnOnce() + 'static) {
+    DOCTOR_LOCK_BEFORE_UNLOCK_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
     });
 }
 
 #[cfg(test)]
-fn doctor_lock_release_attempts() -> u64 {
-    DOCTOR_LOCK_RELEASE_ATTEMPTS.with(std::cell::Cell::get)
+fn run_doctor_lock_before_unlock_hook() {
+    DOCTOR_LOCK_BEFORE_UNLOCK_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
 }
 
-#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
-fn release_owned_doctor_lock_at(ee_dir: &fs::File, lock_file: &fs::File) -> io::Result<()> {
-    use rustix::fs::{AtFlags, FileType};
-
-    let expected = rustix::fs::fstat(lock_file).map_err(io::Error::from)?;
-    let observed = match rustix::fs::statat(ee_dir, ".doctor.lock", AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(stat) => stat,
-        Err(source) if source == rustix::io::Errno::NOENT => return Ok(()),
-        Err(source) => return Err(io::Error::from(source)),
-    };
-
-    // The public name may have been unlinked and replaced after acquisition.
-    // Compare the no-follow entry identity immediately before unlinkat and
-    // refuse rather than deleting anything other than this context's lock.
-    if FileType::from_raw_mode(expected.st_mode) != FileType::RegularFile
-        || FileType::from_raw_mode(observed.st_mode) != FileType::RegularFile
-        || observed.st_dev != expected.st_dev
-        || observed.st_ino != expected.st_ino
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "doctor lock path no longer refers to the acquired lock inode",
-        ));
-    }
-
-    rustix::fs::unlinkat(ee_dir, ".doctor.lock", AtFlags::empty()).map_err(io::Error::from)
-}
-
-#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+))]
 fn release_doctor_lock(lifecycle: &DoctorLifecycleHandles, _lock_path: &Path) -> io::Result<()> {
-    #[cfg(test)]
-    record_doctor_lock_release_attempt();
-
-    release_owned_doctor_lock_at(&lifecycle.ee_dir, &lifecycle.lock_file)
+    unlock_doctor_lock_file(&lifecycle.lock_file)
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
-fn release_doctor_lock(_lifecycle: &DoctorLifecycleHandles, lock_path: &Path) -> io::Result<()> {
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+))]
+fn unlock_doctor_lock_file(lock_file: &fs::File) -> io::Result<()> {
     #[cfg(test)]
-    record_doctor_lock_release_attempt();
+    run_doctor_lock_before_unlock_hook();
 
-    // Compatibility platforms do not retain a rustix directory/lock handle;
-    // this fallback remains pathname-based and cannot prove inode ownership.
-    match fs::remove_file(lock_path) {
-        Ok(()) => Ok(()),
-        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(source),
-    }
+    // Release only the retained kernel lock. The `.doctor.lock` pathname is
+    // persistent and may now name a peer replacement, so teardown must never
+    // inspect, unlink, overwrite, or rename it.
+    lock_file.unlock()
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+)))]
+fn unlock_doctor_lock_file(_lock_file: &fs::File) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "doctor lock ownership cannot be proven on this platform",
+    ))
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+)))]
+fn release_doctor_lock(_lifecycle: &DoctorLifecycleHandles, _lock_path: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "doctor mutation is disabled because this platform cannot prove lock ownership",
+    ))
 }
 
 fn derive_run_id(target_sha: &str) -> String {
@@ -2983,7 +3147,8 @@ const DOCTOR_RUN_STATE_INSPECT_LIMIT: u64 = 4 * 1024 * 1024;
 const DOCTOR_ACTION_LOG_INSPECT_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// Maximum bytes inspected when reading `<workspace>/.ee/.doctor.lock`.
-/// The lock file contains only a run id plus a process id.
+/// Doctor-created files contain only the stable marker; external conformance
+/// holders may add a short diagnostic label and process id.
 const DOCTOR_LOCK_FILE_INSPECT_LIMIT: u64 = 4 * 1024;
 
 fn read_required_doctor_jsonl_file(
@@ -3002,13 +3167,6 @@ fn read_optional_doctor_jsonl_file(
     label: &'static str,
 ) -> Result<Option<String>, DoctorRuntimeError> {
     read_optional_doctor_text_file(path, label, DOCTOR_ACTION_LOG_INSPECT_LIMIT)
-}
-
-fn read_doctor_lock_holder(lock_path: &Path) -> Option<String> {
-    read_optional_doctor_text_file(lock_path, "doctor lock", DOCTOR_LOCK_FILE_INSPECT_LIMIT)
-        .ok()
-        .flatten()
-        .and_then(|s| s.lines().next().map(std::string::ToString::to_string))
 }
 
 fn read_optional_doctor_text_file(
@@ -3154,69 +3312,82 @@ fn read_state(run_dir: &Path) -> Result<RunState, DoctorRuntimeError> {
 
 /// Drop-guarded lock around `<workspace>/.ee/.doctor.lock` used by
 /// [`replay_undo`] to serialize against concurrent `--fix` or `--undo` runs.
-/// Round-2 fresh-eyes (R2-P1-01).
+///
+/// The public file is persistent. Ownership is the retained OS advisory lock,
+/// and release only unlocks/drops this exact handle. Drop never removes a
+/// pathname that a peer could have replaced.
 struct UndoLockGuard {
-    lock_path: PathBuf,
+    lock_file: fs::File,
 }
 
 impl Drop for UndoLockGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.lock_path);
+        let _ = unlock_doctor_lock_file(&self.lock_file);
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
 fn acquire_undo_lock(workspace: &Path) -> Result<UndoLockGuard, DoctorRuntimeError> {
-    // Round-5 self-review: defend against a state.json that has a relative
-    // `workspace` (shouldn't happen with the round-5 fix in `RunContext::
-    // start` that absolutizes the input, but a corrupt or hand-edited
-    // state.json could still smuggle one in). Joining a relative workspace
-    // with the CURRENT CWD when undo runs would point the lock at the wrong
-    // place. Pin it to CWD-at-undo-time only when we can't recover an
-    // absolute form — better than silently failing isolation.
-    let workspace_abs = if workspace.is_absolute() {
-        workspace.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(workspace))
-            .unwrap_or_else(|_| workspace.to_path_buf())
-    };
+    use rustix::fs::{Mode, OFlags};
+
+    let workspace_abs = canonical_doctor_workspace(workspace)?;
     let ee_dir = workspace_abs.join(".ee");
+    let lock_path = ee_dir.join(".doctor.lock");
+    validate_doctor_lifecycle_paths([
+        workspace_abs.as_path(),
+        ee_dir.as_path(),
+        lock_path.as_path(),
+    ])?;
+
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let workspace_fd = rustix::fs::openat(
+        rustix::fs::CWD,
+        &workspace_abs,
+        directory_flags,
+        Mode::from_raw_mode(0),
+    )
+    .map(fs::File::from)
+    .map_err(|source| {
+        doctor_lifecycle_errno(&workspace_abs, "open canonical undo workspace", source)
+    })?;
+    let ee_dir_fd =
+        open_or_create_doctor_directory_at(&workspace_fd, OsStr::new(".ee"), &ee_dir, true)?;
+    let lock_file = acquire_doctor_lock_at(&ee_dir_fd, &lock_path)?;
+    Ok(UndoLockGuard { lock_file })
+}
+
+#[cfg(windows)]
+fn acquire_undo_lock(workspace: &Path) -> Result<UndoLockGuard, DoctorRuntimeError> {
+    let workspace_abs = canonical_doctor_workspace(workspace)?;
+    let ee_dir = workspace_abs.join(".ee");
+    let lock_path = ee_dir.join(".doctor.lock");
+    validate_doctor_lifecycle_paths([
+        workspace_abs.as_path(),
+        ee_dir.as_path(),
+        lock_path.as_path(),
+    ])?;
     fs::create_dir_all(&ee_dir).map_err(|source| DoctorRuntimeError::Io {
         context: format!("create_dir_all({}) for undo lock", ee_dir.display()),
         source,
     })?;
-    let lock_path = ee_dir.join(".doctor.lock");
-    let contents = format!("undo\n{}\n", std::process::id());
-    match fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&lock_path)
-    {
-        Ok(mut f) => {
-            // Round-3 self-review (Bug #5): clean up the lock file if the
-            // initial write fails, so a partial create doesn't strand a
-            // phantom holder for subsequent doctor invocations.
-            if let Err(source) = f.write_all(contents.as_bytes()).and_then(|()| f.flush()) {
-                let _ = fs::remove_file(&lock_path);
-                return Err(DoctorRuntimeError::Io {
-                    context: format!("write undo lock {}", lock_path.display()),
-                    source,
-                });
-            }
-            Ok(UndoLockGuard { lock_path })
-        }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            let holder = read_doctor_lock_holder(&lock_path);
-            Err(DoctorRuntimeError::ConcurrencyLost {
-                lock_path,
-                holder_run_id: holder,
-            })
-        }
-        Err(source) => Err(DoctorRuntimeError::Io {
-            context: format!("create undo lock {}", lock_path.display()),
-            source,
-        }),
-    }
+    let lock_file = acquire_windows_doctor_lock(&lock_path)?;
+    Ok(UndoLockGuard { lock_file })
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    windows
+)))]
+fn acquire_undo_lock(workspace: &Path) -> Result<UndoLockGuard, DoctorRuntimeError> {
+    Err(DoctorRuntimeError::Io {
+        context: format!("acquire doctor undo lock for {}", workspace.display()),
+        source: io::Error::new(
+            io::ErrorKind::Unsupported,
+            "doctor undo is disabled because this platform cannot prove lock ownership",
+        ),
+    })
 }
 
 // ----------------------------------------------------------------------------
@@ -3239,6 +3410,22 @@ mod tests {
         // can write a file at workspace.join("data.txt").
         roots.push(ws.to_path_buf());
         RunContext::start(ws, "deadbeefcafe", roots, false).expect("start run")
+    }
+
+    fn assert_persistent_doctor_lock_released(workspace: &Path) {
+        let lock_path = workspace.join(".ee").join(".doctor.lock");
+        assert!(
+            lock_path.is_file(),
+            "persistent doctor lock file is missing"
+        );
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("open persistent doctor lock");
+        lock.try_lock()
+            .expect("persistent doctor advisory lock should be released");
+        lock.unlock().expect("unlock test doctor lock");
     }
 
     #[test]
@@ -3346,12 +3533,61 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(DoctorRuntimeError::ConcurrencyLost { .. })
+            Err(DoctorRuntimeError::ConcurrencyLost {
+                holder_run_id: None,
+                ..
+            })
         ));
     }
 
     #[test]
-    fn finish_releases_lock_and_writes_state() {
+    fn concurrency_diagnostic_preserves_explicit_external_holder_label() {
+        let ws = fresh_workspace();
+        let ee_dir = ws.path().join(".ee");
+        fs::create_dir_all(&ee_dir).unwrap();
+        let lock_path = ee_dir.join(".doctor.lock");
+        fs::write(&lock_path, b"external-verifier-holder\n42\n").unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        lock.try_lock().expect("hold external advisory lock");
+
+        let result = RunContext::start(
+            ws.path(),
+            "contended-by-external-holder",
+            default_blast_radius_roots(ws.path()),
+            false,
+        );
+
+        assert!(matches!(
+            result,
+            Err(DoctorRuntimeError::ConcurrencyLost {
+                holder_run_id: Some(holder),
+                ..
+            }) if holder == "external-verifier-holder"
+        ));
+        lock.unlock().expect("release external advisory lock");
+    }
+
+    #[test]
+    fn reacquisition_never_overwrites_preexisting_unlocked_lock_path() {
+        let ws = fresh_workspace();
+        let ee_dir = ws.path().join(".ee");
+        fs::create_dir_all(&ee_dir).unwrap();
+        let lock_path = ee_dir.join(".doctor.lock");
+        let peer_bytes = b"unlocked peer replacement remains immutable";
+        fs::write(&lock_path, peer_bytes).unwrap();
+
+        let context = start_run(ws.path());
+        assert_eq!(fs::read(&lock_path).unwrap(), peer_bytes);
+        context.finish(RunStatus::CompletedOk).unwrap();
+        assert_eq!(fs::read(&lock_path).unwrap(), peer_bytes);
+    }
+
+    #[test]
+    fn finish_unlocks_persistent_lock_and_writes_state() {
         let ws = fresh_workspace();
         let ctx = start_run(ws.path());
         let run_dir = ctx.run_dir().to_path_buf();
@@ -3359,17 +3595,24 @@ mod tests {
         assert!(lock.exists());
 
         ctx.finish(RunStatus::CompletedOk).expect("finish");
-        assert!(!lock.exists(), "lock released after finish");
+        assert!(
+            lock.is_file(),
+            "the advisory lock file is intentionally persistent"
+        );
 
         let state: RunState =
             serde_json::from_slice(&fs::read(run_dir.join("state.json")).unwrap()).unwrap();
         assert!(matches!(state.status, RunStatus::CompletedOk));
         assert!(state.finished_at.is_some());
+
+        let next = start_run(ws.path());
+        next.finish(RunStatus::CompletedOk)
+            .expect("persistent lock must be reacquirable after finish");
     }
 
     #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     #[test]
-    fn finish_and_drop_refuse_to_unlink_substituted_regular_lock_file() {
+    fn finish_never_touches_lock_path_substituted_before_release() {
         let ws = fresh_workspace();
         let ctx = start_run(ws.path());
         let lock = ws.path().join(".ee").join(".doctor.lock");
@@ -3377,40 +3620,84 @@ mod tests {
         fs::rename(&lock, &retained_lock).expect("retain original lock inode");
         let peer_bytes = b"peer-owned replacement lock";
         fs::write(&lock, peer_bytes).expect("substitute peer-owned regular file");
-        let attempts_before = doctor_lock_release_attempts();
 
         let result = ctx.finish(RunStatus::CompletedOk);
 
-        assert!(matches!(
-            result,
-            Err(DoctorRuntimeError::Io { ref context, .. })
-                if context.contains("release doctor lock")
-        ));
-        assert_eq!(
-            doctor_lock_release_attempts().saturating_sub(attempts_before),
-            2,
-            "finish must attempt release once and leave ownership set so Drop retries once"
-        );
+        assert!(result.is_ok(), "unlocking the retained handle must succeed");
         assert_eq!(
             fs::read(&lock).expect("read preserved replacement lock"),
             peer_bytes,
-            "neither finish nor Drop may unlink or overwrite a substituted regular file"
+            "finish may not unlink or overwrite a substituted regular file"
         );
         assert!(
             retained_lock.is_file(),
-            "the original lock inode must remain available for operator recovery"
+            "the acquired lock inode remains untouched under its peer-assigned name"
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
     #[test]
-    fn drop_releases_lock_when_finish_was_skipped() {
-        // Round-6 self-review (R6-5): if `RunContext` is dropped without
-        // `finish()` being called — caller propagated an error via `?`, a
-        // panic unwound past the doctor scope, or a future code path
-        // simply forgot to call `finish()` — the workspace lock must
-        // still be released so the next `ee doctor --fix` can run.
-        // Previously the lock leaked forever and the only recovery was
-        // to manually delete `.ee/.doctor.lock`.
+    fn finish_never_touches_lock_path_substituted_during_release() {
+        let ws = fresh_workspace();
+        let ctx = start_run(ws.path());
+        let lock = ws.path().join(".ee").join(".doctor.lock");
+        let retained_lock = ws.path().join(".ee").join(".doctor.lock-retained");
+        let peer_bytes = b"peer replacement installed at the unlock boundary";
+        let hook_lock = lock.clone();
+        let hook_retained = retained_lock.clone();
+        set_doctor_lock_before_unlock_hook(move || {
+            fs::rename(&hook_lock, &hook_retained)
+                .expect("retain acquired lock at unlock boundary");
+            fs::write(&hook_lock, peer_bytes).expect("install peer replacement at unlock boundary");
+        });
+
+        ctx.finish(RunStatus::CompletedOk)
+            .expect("descriptor-only unlock must ignore namespace substitution");
+
+        assert_eq!(fs::read(&lock).expect("read peer replacement"), peer_bytes);
+        assert!(retained_lock.is_file());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn drop_never_touches_lock_path_substituted_after_acquisition() {
+        let ws = fresh_workspace();
+        let lock = ws.path().join(".ee").join(".doctor.lock");
+        let retained_lock = ws.path().join(".ee").join(".doctor.lock-retained");
+        let peer_bytes = b"peer replacement before implicit drop";
+        {
+            let _ctx = start_run(ws.path());
+            fs::rename(&lock, &retained_lock).expect("retain acquired lock inode");
+            fs::write(&lock, peer_bytes).expect("install peer replacement");
+        }
+
+        assert_eq!(
+            fs::read(&lock).expect("read replacement after drop"),
+            peer_bytes
+        );
+        assert!(retained_lock.is_file());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn completed_context_never_touches_lock_path_substituted_after_release() {
+        let ws = fresh_workspace();
+        let lock = ws.path().join(".ee").join(".doctor.lock");
+        let prior_lock = ws.path().join(".ee").join(".doctor.lock-prior");
+        start_run(ws.path())
+            .finish(RunStatus::CompletedOk)
+            .expect("finish releases advisory lock");
+
+        fs::rename(&lock, &prior_lock).expect("retain persistent lock after release");
+        let peer_bytes = b"peer replacement after release";
+        fs::write(&lock, peer_bytes).expect("install post-release replacement");
+
+        assert_eq!(fs::read(&lock).unwrap(), peer_bytes);
+        assert!(prior_lock.is_file());
+    }
+
+    #[test]
+    fn drop_unlocks_persistent_lock_when_finish_was_skipped() {
         let ws = fresh_workspace();
         let lock = ws.path().join(".ee").join(".doctor.lock");
         {
@@ -3419,13 +3706,12 @@ mod tests {
             // _ctx is intentionally not `.finish()`-ed; it drops here.
         }
         assert!(
-            !lock.exists(),
-            "lock must be released by Drop when finish() was skipped (R6-5)"
+            lock.is_file(),
+            "Drop releases the advisory lock without deleting its persistent file"
         );
-        // Verify the next start() can acquire the lock cleanly.
         let ctx2 = start_run(ws.path());
         ctx2.finish(RunStatus::CompletedOk).expect("finish");
-        assert!(!lock.exists());
+        assert!(lock.is_file());
     }
 
     #[test]
@@ -3437,6 +3723,7 @@ mod tests {
         let lock = fs::File::create(&lock_path).unwrap();
         lock.set_len(DOCTOR_LOCK_FILE_INSPECT_LIMIT.saturating_add(1))
             .unwrap();
+        lock.try_lock().expect("hold oversized lock");
 
         let result = RunContext::start(
             ws.path(),
@@ -3458,6 +3745,82 @@ mod tests {
                 panic!("expected oversized doctor lock to report concurrency, got {other:?}")
             }
         }
+    }
+
+    #[test]
+    fn failed_lock_metadata_write_never_removes_or_truncates_public_path() {
+        let ws = fresh_workspace();
+        let ee_dir = ws.path().join(".ee");
+        fs::create_dir_all(&ee_dir).unwrap();
+        let lock_path = ee_dir.join(".doctor.lock");
+        let original = b"peer-owned read-only lock contents";
+        fs::write(&lock_path, original).unwrap();
+        let mut read_only = fs::OpenOptions::new().read(true).open(&lock_path).unwrap();
+        read_only.try_lock().expect("acquire test advisory lock");
+
+        let result = write_doctor_lock_contents(&mut read_only, "replacement\n");
+
+        assert!(
+            result.is_err(),
+            "read-only handle must reject lock metadata write"
+        );
+        assert_eq!(fs::read(&lock_path).unwrap(), original);
+        assert!(lock_path.is_file());
+        read_only.unlock().expect("release test advisory lock");
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple",
+        windows
+    ))]
+    #[test]
+    fn failed_initial_lock_write_leaves_an_unlocked_reusable_persistent_file() {
+        let ws = fresh_workspace();
+        fail_next_doctor_lock_metadata_write();
+
+        let result = RunContext::start(
+            ws.path(),
+            "injected-lock-write-failure",
+            default_blast_radius_roots(ws.path()),
+            false,
+        );
+
+        assert!(matches!(
+            result,
+            Err(DoctorRuntimeError::Io { ref context, .. })
+                if context.contains("initialize persistent doctor lock")
+        ));
+        assert_persistent_doctor_lock_released(ws.path());
+
+        let next = start_run(ws.path());
+        next.finish(RunStatus::CompletedOk)
+            .expect("existing persistent file must be reusable after failed initial write");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+    #[test]
+    fn start_rejects_hard_linked_lock_without_overwriting_peer_inode() {
+        let ws = fresh_workspace();
+        let ee_dir = ws.path().join(".ee");
+        fs::create_dir_all(&ee_dir).unwrap();
+        let peer_path = ws.path().join("peer-owned-lock-source");
+        let peer_bytes = b"peer inode must remain byte-identical";
+        fs::write(&peer_path, peer_bytes).unwrap();
+        let lock_path = ee_dir.join(".doctor.lock");
+        fs::hard_link(&peer_path, &lock_path).unwrap();
+
+        let result = RunContext::start(
+            ws.path(),
+            "hard-linked-lock",
+            default_blast_radius_roots(ws.path()),
+            false,
+        );
+
+        assert!(matches!(result, Err(DoctorRuntimeError::Io { .. })));
+        assert_eq!(fs::read(&peer_path).unwrap(), peer_bytes);
+        assert_eq!(fs::read(&lock_path).unwrap(), peer_bytes);
     }
 
     #[test]
@@ -3649,10 +4012,7 @@ mod tests {
             !run_dir.join("undo_log.jsonl").exists(),
             "undo must stop before replay artifacts are written"
         );
-        assert!(
-            !ws.path().join(".ee").join(".doctor.lock").exists(),
-            "undo lock must be released after a log-read failure"
-        );
+        assert_persistent_doctor_lock_released(ws.path());
     }
 
     #[test]
@@ -3696,10 +4056,7 @@ mod tests {
             b"updated",
             "undo must not start mutating before it can inspect the undo log"
         );
-        assert!(
-            !ws.path().join(".ee").join(".doctor.lock").exists(),
-            "undo lock must be released after a log-read failure"
-        );
+        assert_persistent_doctor_lock_released(ws.path());
     }
 
     #[test]

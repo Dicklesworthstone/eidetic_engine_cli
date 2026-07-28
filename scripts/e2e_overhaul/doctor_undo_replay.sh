@@ -238,14 +238,17 @@ run_finish_failure_and_undo() {
     printf 'error: finish failure changed peer-owned latest entry\n' >&2
     exit 6
   fi
-  if [ -e "$FAILURE_WORKSPACE/.ee/.doctor.lock" ] ||
+  if [ ! -f "$FAILURE_WORKSPACE/.ee/.doctor.lock" ] ||
      [ -L "$FAILURE_WORKSPACE/.ee/.doctor.lock" ]; then
-    emit_event "finish_failure" "fail" "doctor lock survived failed finalization"
-    printf 'error: finish failure leaked doctor lock\n' >&2
+    emit_event "finish_failure" "fail" "persistent doctor lock is missing or unsafe"
+    printf 'error: finish failure did not preserve a regular persistent doctor lock\n' >&2
     exit 6
   fi
 
   assert_state_json "$run_id" "failed" "$FAILURE_WORKSPACE"
+  # Successful undo acquisition is the behavioral proof that failed
+  # finalization released the advisory lock. The public lock file itself is
+  # intentionally persistent and must not be removed during teardown.
   run_undo "$run_id" "$FAILURE_WORKSPACE"
   assert_state_json "$run_id" "undone" "$FAILURE_WORKSPACE"
   emit_event "finish_failure" "ok" \

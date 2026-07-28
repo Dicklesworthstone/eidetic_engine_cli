@@ -61788,6 +61788,23 @@ mod tests {
         }
     }
 
+    fn ensure_persistent_doctor_lock_released(workspace: &Path) -> TestResult {
+        let lock_path = workspace.join(".ee").join(".doctor.lock");
+        ensure(
+            lock_path.is_file(),
+            "persistent doctor lock file must remain present",
+        )?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| format!("open persistent doctor lock: {error}"))?;
+        lock.try_lock()
+            .map_err(|error| format!("persistent doctor lock is still held: {error}"))?;
+        lock.unlock()
+            .map_err(|error| format!("release test doctor lock: {error}"))
+    }
+
     fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult
     where
         T: Debug + PartialEq,
@@ -71204,10 +71221,7 @@ mod tests {
         holder
             .finish(crate::core::doctor_runtime::RunStatus::Failed)
             .map_err(|error| error.to_string())?;
-        ensure(
-            !lock_path.exists(),
-            "holder finalization must release the lock",
-        )
+        ensure_persistent_doctor_lock_released(workspace)
     }
 
     #[test]
@@ -71332,10 +71346,7 @@ mod tests {
             state["finished_at"].is_string(),
             "partial run must persist finished_at",
         )?;
-        ensure(
-            !workspace.join(".ee").join(".doctor.lock").exists(),
-            "partial run must release its lock",
-        )?;
+        ensure_persistent_doctor_lock_released(workspace)?;
 
         let workspace_arg = workspace.to_string_lossy().into_owned();
         let (undo_exit, undo_stdout, undo_stderr) = invoke(&[
@@ -71448,10 +71459,7 @@ mod tests {
             state["finished_at"].is_string(),
             "finish failure must persist finished_at",
         )?;
-        ensure(
-            !workspace.join(".ee").join(".doctor.lock").exists(),
-            "finish failure must release its lock",
-        )?;
+        ensure_persistent_doctor_lock_released(workspace)?;
 
         let (undo_exit, undo_stdout, undo_stderr) = invoke(&[
             "ee",

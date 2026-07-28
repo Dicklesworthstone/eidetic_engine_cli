@@ -63,6 +63,22 @@ fn start_test_run(ws_path: &std::path::Path) -> RunContext {
     RunContext::start(ws_path, "e2e_sha", roots, false).expect("start run")
 }
 
+fn assert_persistent_doctor_lock_released(workspace: &Path) {
+    let lock_path = workspace.join(".ee").join(".doctor.lock");
+    assert!(
+        lock_path.is_file(),
+        "persistent doctor lock file is missing"
+    );
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .expect("open persistent doctor lock");
+    lock.try_lock()
+        .expect("persistent doctor advisory lock should be released");
+    lock.unlock().expect("unlock test doctor lock");
+}
+
 #[test]
 fn full_corrupt_fix_diagnose_undo_roundtrip_is_byte_identical() {
     // The canonical Polish-Bar round-trip: take a known-good file, "fix"
@@ -402,7 +418,6 @@ fn finish_refuses_regular_latest_without_overwriting_or_removing_it() {
     let ws = fresh_workspace();
     let ctx = start_test_run(ws.path());
     let run_dir = ctx.run_dir().to_path_buf();
-    let lock_path = ws.path().join(".ee").join(".doctor.lock");
     let latest = ws.path().join(".doctor").join("latest");
     let sentinel = b"peer-owned regular latest file";
     fs::write(&latest, sentinel).expect("plant regular latest file");
@@ -436,10 +451,7 @@ fn finish_refuses_regular_latest_without_overwriting_or_removing_it() {
         state["finished_at"].is_string(),
         "a finalization failure must persist a terminal timestamp"
     );
-    assert!(
-        !lock_path.exists(),
-        "finish failure must release the run lock through Drop"
-    );
+    assert_persistent_doctor_lock_released(ws.path());
 }
 
 #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
