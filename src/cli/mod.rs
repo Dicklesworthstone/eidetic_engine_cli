@@ -71346,7 +71346,7 @@ mod tests {
             state["finished_at"].is_string(),
             "partial run must persist finished_at",
         )?;
-        ensure_persistent_doctor_lock_released(workspace)?;
+        ensure_persistent_doctor_lock_released(&workspace)?;
 
         let workspace_arg = workspace.to_string_lossy().into_owned();
         let (undo_exit, undo_stdout, undo_stderr) = invoke(&[
@@ -71459,7 +71459,7 @@ mod tests {
             state["finished_at"].is_string(),
             "finish failure must persist finished_at",
         )?;
-        ensure_persistent_doctor_lock_released(workspace)?;
+        ensure_persistent_doctor_lock_released(&workspace)?;
 
         let (undo_exit, undo_stdout, undo_stderr) = invoke(&[
             "ee",
