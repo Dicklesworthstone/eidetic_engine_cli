@@ -87,3 +87,4 @@ including rejected alternatives and verification hooks.
 - [ADR 0082: Code-Anchor Drift is a Flag, Not a Rank Penalty](0082-stale-anchor-flag-not-penalize.md)
 - [ADR 0083: User-Global Memory Store (Separate Local Store)](0083-user-global-memory-store.md)
 - [ADR 0084: Read-Only Hotset Manifest Contract](0084-hotset-manifest-contract.md)
+- [ADR 0085: Typed Pack Entity Identity](0085-typed-pack-entity-identity.md)
