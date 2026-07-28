@@ -534,6 +534,11 @@ pub const fn default_floor_for_source(source: ScoreSource) -> f32 {
     }
 }
 
+fn search_hit_meets_relevance_floor(hit: &SearchHit, user_floor_override: Option<f32>) -> bool {
+    let floor = user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
+    hit.score.is_finite() && hit.score >= floor
+}
+
 impl SearchOptions {
     fn resolve_database_path(&self) -> PathBuf {
         self.database_path
@@ -6760,12 +6765,9 @@ fn run_search_inner_with_performance(
             // Floor of 0.0 is "disabled" — keep everything. NaN scores are
             // always dropped because NaN >= per_hit_floor is false.
             let relevance_floor_start = Instant::now();
-            let (above_floor, below_floor): (Vec<_>, Vec<_>) =
-                raw_hits.into_iter().partition(|hit| {
-                    let per_hit_floor =
-                        user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
-                    hit.score.is_finite() && hit.score >= per_hit_floor
-                });
+            let (above_floor, below_floor): (Vec<_>, Vec<_>) = raw_hits
+                .into_iter()
+                .partition(|hit| search_hit_meets_relevance_floor(hit, user_floor_override));
             let dropped = below_floor.len();
             let query_assist_visibility_start = Instant::now();
             let query_assist_candidates = query_assist_visible_candidates(options, &below_floor);
@@ -7165,11 +7167,9 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
     let pre_floor_count = raw_hits.len();
     let pre_floor_top_score = raw_hits.first().map(|hit| hit.score);
     let pre_floor_top_source = raw_hits.first().map(|hit| hit.source);
-    let (above_floor, below_floor): (Vec<_>, Vec<_>) = raw_hits.into_iter().partition(|hit| {
-        let per_hit_floor =
-            user_floor_override.unwrap_or_else(|| default_floor_for_source(hit.source));
-        hit.score.is_finite() && hit.score >= per_hit_floor
-    });
+    let (above_floor, below_floor): (Vec<_>, Vec<_>) = raw_hits
+        .into_iter()
+        .partition(|hit| search_hit_meets_relevance_floor(hit, user_floor_override));
     let (mut above_floor, scope_stats) =
         apply_memory_scope_visibility(options, above_floor, &mut degraded, None);
     annotate_hits_with_score_calibration(
@@ -8187,7 +8187,10 @@ fn configured_fusion_adjustment(
     source_mode: SearchSourceMode,
     weights: SearchFusionWeights,
 ) -> Option<SearchFusionAdjustment> {
-    if source_mode != SearchSourceMode::Hybrid || !hit.score.is_finite() {
+    if source_mode != SearchSourceMode::Hybrid
+        || hit.source == ScoreSource::Reranked
+        || !hit.score.is_finite()
+    {
         return None;
     }
 
@@ -8256,14 +8259,27 @@ fn search_hit_from_scored_result(
     source_mode: SearchSourceMode,
     fusion_weights: SearchFusionWeights,
 ) -> SearchHit {
+    let source = score_source_from_frankensearch(result.source);
+    let rerank_score = result.rerank_score.filter(|score| score.is_finite());
+    // Frankensearch intentionally retains the pre-rerank retrieval score in
+    // `ScoredResult::score` and writes the cross-encoder's final score to
+    // `rerank_score`. EE's public `score`, relevance floor, explanation, and
+    // pack ranking all consume `SearchHit::score`, so promote the validated
+    // reranker score at this adapter boundary. This also makes the existing
+    // `score = rerank_score` explanation truthful.
+    let score = if source == ScoreSource::Reranked {
+        rerank_score.unwrap_or(result.score)
+    } else {
+        result.score
+    };
     let mut hit = SearchHit {
         doc_id: result.doc_id.to_string(),
-        score: result.score,
-        source: score_source_from_frankensearch(result.source),
+        score,
+        source,
         fast_score: result.fast_score,
         quality_score: result.quality_score,
         lexical_score: result.lexical_score,
-        rerank_score: result.rerank_score,
+        rerank_score,
         metadata: result.metadata.map(|m| (*m).clone()),
         explanation: None,
     };
@@ -8283,12 +8299,12 @@ fn search_hit_from_scored_result(
 
 fn sort_search_hits_by_score_order(hits: &mut [SearchHit]) {
     // bd-2vq2z.30: when a reranker ran, its order must survive to the output.
-    // frankensearch returns reranked candidates carrying `rerank_score` but
-    // leaves the original fusion value in `.score`; sorting purely by `.score`
-    // here discarded the rerank order, making reranking cosmetic. Reranked hits
-    // now sort ahead of fusion-only hits and amongst themselves by descending
-    // rerank score; fusion-only hits keep the prior descending `.score` order,
-    // so non-reranked queries are unchanged.
+    // Frankensearch returns reranked candidates carrying `rerank_score`;
+    // `search_hit_from_scored_result` promotes that value into the public
+    // `.score`. The marker still determines that reranked hits sort ahead of
+    // fusion-only hits and amongst themselves by descending rerank score;
+    // fusion-only hits keep the prior descending `.score` order, so
+    // non-reranked queries are unchanged.
     hits.sort_by(rerank_aware_hit_order);
     let mut run_start = 0_usize;
     while run_start < hits.len() {
@@ -15684,6 +15700,91 @@ mod tests {
     }
 
     #[test]
+    fn reranked_adapter_promotes_final_score_before_default_floor() {
+        // bd-1zltr: Frankensearch preserves the pre-rerank RRF value in
+        // `ScoredResult::score`. That value is below EE's unit-domain rerank
+        // floor even when the cross-encoder returned a strong match.
+        let fusion_score = RRF_HYBRID_TYPICAL_MAX;
+        let rerank_score = 0.91;
+        assert!(fusion_score < DEFAULT_RELEVANCE_FLOOR);
+
+        let hit = search_hit_from_scored_result(
+            crate::search::ScoredResult {
+                doc_id: "mem_reranked_score_domain".into(),
+                score: fusion_score,
+                source: crate::search::ScoreSource::Reranked,
+                index: None,
+                fast_score: Some(0.70),
+                quality_score: None,
+                lexical_score: Some(0.60),
+                rerank_score: Some(rerank_score),
+                explanation: None,
+                metadata: None,
+            },
+            true,
+            SearchSourceMode::Hybrid,
+            SearchFusionWeights::default(),
+        );
+
+        assert_eq!(hit.source, ScoreSource::Reranked);
+        assert!((hit.score - rerank_score).abs() < f32::EPSILON);
+        assert!((hit.relevance_score() - rerank_score).abs() < f32::EPSILON);
+        assert!(search_hit_meets_relevance_floor(&hit, None));
+        let explanation = hit
+            .explanation
+            .as_ref()
+            .expect("explain=true should produce a score explanation");
+        assert!(explanation.summary.contains("0.9100"));
+        assert!(
+            explanation
+                .factors
+                .iter()
+                .any(|factor| factor.name == "rerank" && factor.formula == "score = rerank_score")
+        );
+    }
+
+    #[test]
+    fn configured_fusion_weights_do_not_rescale_reranker_score() {
+        // Fusion weights apply to the candidate-retrieval score, not the
+        // cross-encoder's final score. With these components the old path
+        // would multiply 0.80 by 2x and report a fictitious 1.60 score.
+        let rerank_score = 0.80;
+        let hit = search_hit_from_scored_result(
+            crate::search::ScoredResult {
+                doc_id: "mem_reranked_weight_invariant".into(),
+                score: 0.02,
+                source: crate::search::ScoreSource::Reranked,
+                index: None,
+                fast_score: Some(0.10),
+                quality_score: None,
+                lexical_score: Some(0.90),
+                rerank_score: Some(rerank_score),
+                explanation: None,
+                metadata: None,
+            },
+            true,
+            SearchSourceMode::Hybrid,
+            SearchFusionWeights {
+                lexical: 1.0,
+                semantic: 0.0,
+                graph: 0.0,
+            },
+        );
+
+        assert!((hit.score - rerank_score).abs() < f32::EPSILON);
+        let explanation = hit
+            .explanation
+            .as_ref()
+            .expect("explain=true should produce a score explanation");
+        assert!(
+            explanation
+                .factors
+                .iter()
+                .all(|factor| factor.name != "configured_fusion_weight")
+        );
+    }
+
+    #[test]
     fn graph_only_config_does_not_zero_hybrid_recall_bd_d67os_19() {
         let hit = search_hit_from_scored_result(
             crate::search::ScoredResult {
@@ -16033,11 +16134,11 @@ mod tests {
         // search degrades when the model is absent. A deterministic stub reranker
         // scores candidates so the LAST one ranks highest (full reversal).
         //
-        // Scope: this proves the apply-helper reorders the candidate set. ee's
-        // end-to-end search pipeline currently re-sorts reranked hits by the
-        // fusion `hit.score` and discards this order — tracked separately as
-        // bd-2vq2z.30. A real cross-encoder model fixture is exercised by
-        // scripts/e2e_rerank.sh, not unit tests.
+        // bd-1zltr extends the proof across EE's adapter and relevance floor:
+        // realistic RRF-magnitude candidate scores are all below the reranked
+        // unit-domain floor, so only promotion of the final rerank score keeps
+        // the reranked winner visible. A real cross-encoder model fixture is
+        // exercised by scripts/e2e_rerank.sh, not unit tests.
         struct StubReverseReranker;
         impl frankensearch::SyncRerank for StubReverseReranker {
             fn rerank_sync(
@@ -16051,7 +16152,7 @@ mod tests {
                     .enumerate()
                     .map(|(rank, document)| frankensearch::RerankScore {
                         doc_id: document.doc_id.clone(),
-                        score: rank as f32,
+                        score: (rank + 1) as f32 / documents.len() as f32,
                         original_rank: rank,
                         raw_logit: None,
                     })
@@ -16067,17 +16168,20 @@ mod tests {
 
         // Fusion order: mem_0000 (highest fusion score) .. mem_0005 (lowest).
         let mut candidates: Vec<crate::search::ScoredResult> = (0..6)
-            .map(|i| crate::search::ScoredResult {
-                doc_id: format!("mem_{i:04}").into(),
-                score: (100 - i) as f32,
-                source: crate::search::ScoreSource::Hybrid,
-                index: None,
-                fast_score: None,
-                quality_score: None,
-                lexical_score: Some((100 - i) as f32),
-                rerank_score: None,
-                explanation: None,
-                metadata: None,
+            .map(|i| {
+                let fusion_score = 2.0 / (61.0 + i as f32);
+                crate::search::ScoredResult {
+                    doc_id: format!("mem_{i:04}").into(),
+                    score: fusion_score,
+                    source: crate::search::ScoreSource::Hybrid,
+                    index: None,
+                    fast_score: None,
+                    quality_score: None,
+                    lexical_score: Some(fusion_score),
+                    rerank_score: None,
+                    explanation: None,
+                    metadata: None,
+                }
             })
             .collect();
         let fusion_order: Vec<String> = candidates
@@ -16089,7 +16193,7 @@ mod tests {
         let reranker: Arc<dyn Reranker> =
             Arc::new(frankensearch::SyncRerankerAdapter(StubReverseReranker));
 
-        let (reranked_order, top_rerank_score) = crate::core::run_cli_future(async move {
+        let (reranked_order, top_candidate) = crate::core::run_cli_future(async move {
             let cx = asupersync::Cx::for_testing();
             frankensearch::rerank::rerank_step(
                 &cx,
@@ -16106,7 +16210,11 @@ mod tests {
                 .iter()
                 .map(|hit| hit.doc_id.to_string())
                 .collect();
-            Ok::<(Vec<String>, Option<f32>), String>((order, candidates[0].rerank_score))
+            let top_candidate = candidates
+                .into_iter()
+                .next()
+                .ok_or_else(|| "rerank unexpectedly returned no candidates".to_string())?;
+            Ok::<(Vec<String>, crate::search::ScoredResult), String>((order, top_candidate))
         })
         .map_err(|error| error.to_string())??;
 
@@ -16124,9 +16232,29 @@ mod tests {
             Some("mem_0000"),
             "stub scored the first candidate lowest, so it must rank last after rerank"
         );
+        let top_rerank_score = top_candidate
+            .rerank_score
+            .ok_or_else(|| "reranked top candidate has no rerank score".to_string())?;
         assert!(
-            top_rerank_score.is_some(),
-            "the reranked top candidate must carry a rerank_score"
+            (top_rerank_score - 1.0).abs() < f32::EPSILON,
+            "the reranked top candidate must carry the highest unit-domain score"
+        );
+        assert!(
+            top_candidate.score < DEFAULT_RELEVANCE_FLOOR,
+            "the retained pre-rerank RRF score should reproduce the original floor bug"
+        );
+
+        let top_hit = search_hit_from_scored_result(
+            top_candidate,
+            true,
+            SearchSourceMode::Hybrid,
+            SearchFusionWeights::default(),
+        );
+        assert_eq!(top_hit.source, ScoreSource::Reranked);
+        assert!((top_hit.score - 1.0).abs() < f32::EPSILON);
+        assert!(
+            search_hit_meets_relevance_floor(&top_hit, None),
+            "the reranked winner must survive EE's default relevance floor"
         );
         Ok(())
     }
@@ -16185,10 +16313,6 @@ mod tests {
         assert_eq!(hits[1].doc_id, "mem_b");
     }
 
-    fn test_effective_floor(user_floor_override: Option<f32>, source: ScoreSource) -> f32 {
-        user_floor_override.unwrap_or_else(|| default_floor_for_source(source))
-    }
-
     #[test]
     fn adaptive_partition_keeps_typical_hybrid_hit_with_no_override() {
         // Reproduces the bd-n22a4 acceptance path: a hybrid hit at the
@@ -16199,10 +16323,7 @@ mod tests {
         let hits = vec![synthetic_hybrid_hit("mem_canonical", 2.0 / 61.0)];
         let kept: Vec<_> = hits
             .into_iter()
-            .filter(|hit| {
-                let per_hit_floor = test_effective_floor(None, hit.source);
-                hit.score.is_finite() && hit.score >= per_hit_floor
-            })
+            .filter(|hit| search_hit_meets_relevance_floor(hit, None))
             .collect();
         assert_eq!(
             kept.len(),
@@ -16220,10 +16341,7 @@ mod tests {
         let hits = vec![synthetic_hit("mem_semantic_noise", 0.02)];
         let kept: Vec<_> = hits
             .into_iter()
-            .filter(|hit| {
-                let per_hit_floor = test_effective_floor(None, hit.source);
-                hit.score.is_finite() && hit.score >= per_hit_floor
-            })
+            .filter(|hit| search_hit_meets_relevance_floor(hit, None))
             .collect();
         assert!(
             kept.is_empty(),
@@ -16246,10 +16364,7 @@ mod tests {
         ];
         let kept: Vec<_> = hits
             .into_iter()
-            .filter(|hit| {
-                let per_hit_floor = test_effective_floor(Some(0.10), hit.source);
-                hit.score.is_finite() && hit.score >= per_hit_floor
-            })
+            .filter(|hit| search_hit_meets_relevance_floor(hit, Some(0.10)))
             .collect();
         assert_eq!(kept.len(), 2, "0.10 override should keep both strong hits");
         assert!(kept.iter().any(|h| h.doc_id == "mem_hybrid_strong"));
