@@ -467,7 +467,7 @@ fn effect_manifest_classifies_search_recalibration_as_derived_write() -> TestRes
         .ok_or_else(|| "search --recalibrate-now not in manifest".to_owned())?;
     ensure(
         recalibration.default_effect,
-        EffectClass::DerivedIndexWrite,
+        EffectClass::DerivedArtifactWrite,
         "search recalibration writes a rebuildable derived artifact",
     )?;
     ensure(
