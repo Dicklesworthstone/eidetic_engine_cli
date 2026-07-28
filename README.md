@@ -54,9 +54,12 @@ graph features; and emits compact context packs with provenance.
 ee pack "prepare release for this project" --workspace . --max-tokens 4000 --format markdown
 ```
 
-The command returns a Markdown pack with project release rules, prior release
-incidents from `cass`, verification commands, branch traps, and high-severity
-warnings. Each item carries an evidence pointer and a score breakdown.
+The command returns a Markdown pack of matching durable memories, such as
+project release rules, verification commands, branch traps, and high-severity
+warnings. Each item carries an evidence pointer and a score breakdown. Imported
+`cass` excerpts become searchable after the import report's indexing action;
+they reach the memory-centric pack only after curation links an excerpt to a
+distilled memory.
 
 ### What You Get
 
@@ -147,57 +150,43 @@ $ ee remember --workspace . --level procedural --kind rule \
 ✓ memory mem_01HQ3K5Z stored (procedural · rule · confidence 0.80)
 ✓ indexed in 14ms
 
-# 3. Pull session evidence from your cass history
-$ ee import cass --workspace . --limit 50 --json | jq '.summary'
+# 3. Pull session evidence from your cass history and inspect the v2 payload
+$ ee import cass --workspace . --limit 50 --json | jq '.data | {schema, status, sessionsDiscovered, sessionsImported, sessionsSkipped, spansImported, indexJobsQueued, indexRequiredAction}'
 {
-  "sessions_imported": 47,
-  "evidence_spans": 312,
-  "candidates_proposed": 8,
-  "duration_ms": 2341
+  "schema": "ee.import.cass.v1",
+  "status": "completed",
+  "sessionsDiscovered": 50,
+  "sessionsImported": 47,
+  "sessionsSkipped": 3,
+  "spansImported": 312,
+  "indexJobsQueued": 47,
+  "indexRequiredAction": "ee index rebuild --workspace /path/to/project --database /path/to/project/.ee/ee.db"
 }
 
-# 4. Ask for context before working
-$ ee pack "fix the failing release workflow" --workspace . --profile thorough
-## procedural_rules
+# 4. Apply the reported indexing action (default workspace form shown)
+$ ee index rebuild --workspace .
 
-### 1. mem_01HQ3K5Z (42 tokens)
+# 5. Search the indexed CASS excerpts directly
+$ ee search "release workflow failure" --workspace . --limit 20 --explain --json
 
-**Why:** procedural rule matched release workflow query
+# 6. Pack durable memories for the task; the manual rule from step 2 is eligible
+$ ee pack "enforce clippy warnings as errors in CI" --workspace . --profile thorough
 
-**Trust:** `procedural` / `accepted`
+# 7. Inspect that manually remembered rule
+$ ee why mem_01HQ3K5Z --workspace . --json
 
-**Provenance:**
-- `cass-session://7f4e` (cass-session)
-
-## failures
-
-### 2. mem_01HPCC3T (58 tokens)
-
-**Why:** prior failure linked to release artifacts
-
-# 5. Ask why a memory was selected
-$ ee why mem_01HPCC3T --json | jq '.data | {retrieval, graphRetrievalFeatures}'
-{
-  "retrieval": {
-    "confidence": 0.92,
-    "utility": 0.74,
-    "importance": 0.81,
-    "tags": ["release", "ci"],
-    "level": "procedural",
-    "kind": "rule"
-  },
-  "graphRetrievalFeatures": {
-    "status": "available",
-    "centralityScore": 0.64,
-    "authorityScore": 0.57,
-    "reasons": ["linked to recent release evidence"]
-  }
-}
-
-# 6. Record that the rule helped
+# 8. Record that the rule helped
 $ ee outcome mem_01HQ3K5Z --signal helpful --reason "Caught a clippy regression"
 ✓ utility +0.08 → confidence 0.63
 ```
+
+The manual rule and imported CASS evidence are separate records in this
+example. Step 6 can select the rule because step 2 created a durable memory;
+the import does not retroactively give that rule CASS provenance. Fresh
+imported excerpts are searchable after step 4, but an excerpt requires a
+linked, distilled memory before it can hydrate into a memory-centric pack. A
+matching unlinked excerpt is reported as
+`context_evidence_hit_unhydrated` instead of being represented as a pack item.
 
 The flow runs locally with no daemon and no cloud. On a typical project, the
 interactive steps are fast enough to use before ordinary agent work.
@@ -379,10 +368,11 @@ ee doctor --gc-plan 30 --json
 # 1. Open a workspace (idempotent)
 ee init --workspace .
 
-# 2. Optionally seed from your cass history (recommended once)
-ee import cass --workspace . --limit 50
+# 2. Optionally import cass history, then build the derived evidence index
+ee import cass --workspace . --limit 50 --json
+ee index rebuild --workspace .
 
-# 3. Get context for a task
+# 3. Get context from durable memories for a task
 ee pack "what should I know before refactoring the storage layer?" \
   --workspace . --profile thorough --max-tokens 4000 --format markdown
 
@@ -391,11 +381,13 @@ ee remember --workspace . --level procedural --kind rule \
   --tags rust,testing \
   "Integration tests must hit a real Postgres instance, never a mock. See incident 2025-Q3."
 
-# 5. After a session, distill evidence-backed curation candidates
+# 5. Preview CASS-backed candidates, then persist and apply a reviewed candidate
 ee review session <cass-session-id> --workspace . --propose --dry-run --json
-ee curate candidates --workspace .
-ee curate validate <candidate-id>
-ee curate apply <candidate-id>
+ee review session <cass-session-id> --workspace . --propose --json
+ee curate candidates --workspace . --json
+ee curate validate <candidate-id> --workspace . --json
+ee curate apply <candidate-id> --workspace . --json
+ee index rebuild --workspace .
 
 # 6. Search at any time
 ee search "release failure clippy" --workspace . --limit 20 --explain --json
@@ -1608,19 +1600,39 @@ still carry emitted items; `kind: "error"` is the hard failure path.
 
 ## CASS Integration
 
-`ee` consumes `coding_agent_session_search` (`cass`) as the raw session source; it does **not** duplicate the underlying store. Every fact imported from a session carries a provenance URI back to the exact session and line range.
+`ee` consumes `coding_agent_session_search` (`cass`) as the raw session source;
+it does **not** duplicate the underlying store. An imported evidence span keeps
+the source session and exact line range as provenance.
 
 ```bash
 # Discover what cass has
 ee import cass --workspace . --limit 50 --dry-run --json
 
-# Real import (idempotent, resumable, ledger-tracked)
-ee import cass --workspace . --limit 50
+# Real import (idempotent, resumable, ledger-tracked); read fields under .data
+ee import cass --workspace . --limit 50 --json \
+  | jq '.data | {status, sessionsDiscovered, sessionsImported, sessionsSkipped, spansImported, indexJobsQueued, indexRequiredAction}'
 
-# Review curation candidates proposed from imported session evidence
+# Apply data.indexRequiredAction (the default workspace form is shown here)
+ee index rebuild --workspace .
+
+# Imported excerpts are now directly retrievable as evidence
+ee search "<phrase from a prior session>" --workspace . --limit 20 --explain --json
+
+# Preview curation candidates without writing
 ee review session <cass-session-id> --workspace . --propose --dry-run --json
-ee curate candidates --workspace .
+
+# Persist proposals only after review, then validate and apply one
+ee review session <cass-session-id> --workspace . --propose --json
+ee curate candidates --workspace . --json
+ee curate validate <candidate-id> --workspace . --json
+ee curate apply <candidate-id> --workspace . --json
+ee index rebuild --workspace .
 ```
+
+Fresh imported spans have no memory link. They remain searchable, but a
+memory-centric pack skips them with `context_evidence_hit_unhydrated` until a
+reviewed curation candidate creates the linked memory. Rebuilding the derived
+index after curation makes the new linkage visible to retrieval.
 
 Required `cass` commands consumed (all with stable contracts):
 
