@@ -54,10 +54,10 @@
     Build from source via git + cargo instead of downloading.
 
 .EXAMPLE
-    # One-liner: download the installer to a file, then run it. (Do NOT pipe an
-    # iwr `.Content` into iex — GitHub serves release assets as
-    # application/octet-stream, so `.Content` is a byte[], not a string.)
-    $f = Join-Path $env:TEMP 'install-ee.ps1'; iwr -useb https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest/download/install.ps1 -OutFile $f; & $f
+    # One-liner: download the current installer to a file, then run it. Keeping
+    # the script inspectable also avoids fragile Invoke-Expression/content-type
+    # behavior.
+    $f = Join-Path $env:TEMP 'install-ee.ps1'; $u = "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1?cache=$([guid]::NewGuid())"; iwr -useb $u -OutFile $f; & $f -Verify
 
 .EXAMPLE
     .\install.ps1 -Version 0.1.0 -Verify
@@ -478,7 +478,10 @@ function Test-InstalledVersion {
     param([string]$BinaryPath, [string]$TargetVersion)
     if (-not (Test-Path $BinaryPath)) { return $false }
     try {
-        $raw = (& $BinaryPath --version 2>$null | Select-Object -First 1)
+        $versionOutput = @(& $BinaryPath --version 2>$null)
+        $versionExitCode = $LASTEXITCODE
+        if ($versionExitCode -ne 0) { return $false }
+        $raw = ($versionOutput | Select-Object -First 1)
         if (-not $raw) { return $false }
         if ($raw -match '([0-9]+\.[0-9]+\.[0-9]+)') {
             $installed = $Matches[1]
@@ -618,6 +621,11 @@ function Install-Completions {
     $target = Join-Path $profileDir "ee-completion.ps1"
     try {
         & $BinaryPath completion powershell > $target 2>$null
+        $completionExitCode = $LASTEXITCODE
+        if ($completionExitCode -ne 0) {
+            Write-Warning2 "Failed to write PowerShell completions (exit code $completionExitCode)"
+            return
+        }
         Write-Ok "PowerShell completions written to $target"
         Write-Info "Add this to your `$PROFILE: . `"$target`""
     } catch {
@@ -634,6 +642,13 @@ function Invoke-SelfTest {
     Write-Info "Running self-test"
     try {
         $version = & $BinaryPath --version 2>&1
+        $versionExitCode = $LASTEXITCODE
+        if ($versionExitCode -ne 0) {
+            Write-ErrorExit "ee --version failed with exit code ${versionExitCode}: $version"
+        }
+        if ([string]::IsNullOrWhiteSpace(($version | Out-String))) {
+            Write-ErrorExit "ee --version returned no output"
+        }
         Write-Host "  $version"
     } catch {
         Write-ErrorExit "Failed to run ee --version: $_"
@@ -958,11 +973,14 @@ function Main {
 
     $binaryPath = Join-Path $InstallDir $Script:BinaryName
 
-    # Already-installed short-circuit.
+    # Already-installed short-circuit. Acquisition and locking stay skipped,
+    # but idempotent shell integration and explicit verification still run.
     if (-not $FromSource -and -not $Force -and $Version -and (Test-InstalledVersion -BinaryPath $binaryPath -TargetVersion $Version)) {
         Write-Ok "$Script:ProjectName $Version is already installed at $binaryPath"
         Write-Info "Use -Force to reinstall"
+        Update-UserPath -Dir $InstallDir
         Install-Completions -BinaryPath $binaryPath
+        if ($Verify) { Invoke-SelfTest -BinaryPath $binaryPath }
         return
     }
 
@@ -990,6 +1008,7 @@ function Main {
                     }
                     Write-Warning2 "Falling back to -FromSource"
                     Invoke-FromSource -DestDir $InstallDir -BinaryName $Script:BinaryName -VersionTag $Version
+                    Update-UserPath -Dir $InstallDir
                     Install-Completions -BinaryPath $binaryPath
                     if ($Verify) { Invoke-SelfTest -BinaryPath $binaryPath }
                     Invoke-SemanticFirstUseSmoke -BinaryPath $binaryPath -SmokeRoot $tempDir

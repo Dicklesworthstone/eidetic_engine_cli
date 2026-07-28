@@ -15,13 +15,13 @@
 **Install**
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash -s -- --easy-mode --verify
 ```
 
 Always verifies the release binary's SHA-256 checksum, verifies its Sigstore
 bundle when one is published and `cosign` is available, drops `ee` into
-`~/.local/bin`, installs shell completions, and auto-configures the Claude Code /
-Codex / Gemini agent hooks if those harnesses are detected. Pass
+`~/.local/bin`, repairs `PATH`, installs shell completions, runs a self-test,
+and prints guidance for detected agent harnesses; settings remain untouched. Pass
 `--require-provenance` for fail-closed signature and SLSA provenance
 verification. Pass `--help` (e.g. `bash install.sh --help`) for offline
 tarballs, proxy options, `--no-gum`, and `--force` reinstall.
@@ -302,16 +302,16 @@ Hard constraints. CI fails if any of them break.
 **Recommended — release installer:**
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash -s -- --easy-mode --verify
 ```
 
 This downloads the latest release binary for your platform, always verifies its
 SHA-256 checksum, verifies its Sigstore bundle when one is published and
 `cosign` is available, drops `ee` into `~/.local/bin`, installs shell
-completions, and auto-configures the Claude Code / Codex / Gemini agent hooks
-when those harnesses are detected. Pass `--require-provenance` to require both
-the artifact signature and a verified SLSA provenance attestation; without that
-flag, a missing bundle is reported and the checksum-verified install continues.
+completions, repairs writable `~/.zshrc`/`~/.bashrc` files, and runs `ee --version` plus `ee doctor --json`.
+The informational agent scan prints setup guidance without changing agent settings. Open a new shell (or source its rc file) afterward.
+Re-running the command repairs `PATH` and completions and re-verifies a matching version without downloading or rebuilding it.
+Pass `--require-provenance` to require its signature and SLSA attestation; otherwise a missing bundle is reported and the checksum-verified install continues.
 
 [Release binaries](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest)
 cover macOS (`aarch64`, `x86_64`), Linux (`aarch64` and `x86_64` GNU,
@@ -322,13 +322,13 @@ compatible GNU build when that release does not include musl.
 **Windows (PowerShell):**
 
 ```powershell
-$f = Join-Path $env:TEMP 'install-ee.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest/download/install.ps1 -OutFile $f; & $f
+$f = Join-Path $env:TEMP 'install-ee.ps1'; $u = "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1?cache=$([guid]::NewGuid())"; Invoke-WebRequest -UseBasicParsing $u -OutFile $f; & $f -Verify
 ```
 
-Downloads `install.ps1` to a file and runs it (GitHub serves release assets as
-`application/octet-stream`, so the `iwr ... | iex` form does not work — its
-`.Content` is a byte array). The script SHA-256-verifies and installs `ee.exe`
-into `%LOCALAPPDATA%\ee\bin`, and updates your user `PATH`. Add
+Downloads the current installer to a temporary file before running it. This
+keeps the script inspectable and avoids fragile `Invoke-Expression` and
+content-type behavior. The script SHA-256-verifies and installs `ee.exe`
+into `%LOCALAPPDATA%\ee\bin`, updates your user `PATH`, installs PowerShell completions, and runs the same version/doctor self-test. Add
 `-RequireProvenance`, or set `EE_REQUIRE_PROVENANCE=1`, to also
 enforce Sigstore signature verification.
 The Windows installer conformance contract is tracked in
@@ -2208,10 +2208,11 @@ multi-writer swarms, run `ee daemon` and let the daemon own the write side.
 **Should I use the curl installer?**
 Yes — it's the recommended install. It fetches the binary for your platform
 from the latest GitHub release, always verifies the checksum, verifies Sigstore
-when the release includes a bundle and `cosign` is available, and wires up shell
-completions and agent hooks. Use `--require-provenance` for fail-closed
-signature and provenance verification. Building from source is the alternative
-if you want a local debug build or are hacking on `ee` itself.
+when the release includes a bundle and `cosign` is available, repairs `PATH`,
+installs shell completions, and verifies the installed binary. It prints agent
+integration guidance without changing agent settings. Use `--require-provenance`
+for fail-closed signature and provenance verification. Build from source if you
+want a local debug build or are hacking on `ee` itself.
 
 **Should I enable mesh?**
 Usually no. Mesh helps trusted peers exchange redaction-safe posture and memory

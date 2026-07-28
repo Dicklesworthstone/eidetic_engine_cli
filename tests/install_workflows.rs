@@ -52,6 +52,30 @@ fn ensure_equal<T: std::fmt::Debug + PartialEq>(
     }
 }
 
+#[test]
+fn readme_recommends_verified_idempotent_installers_without_claiming_hook_mutation() -> TestResult {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+    let readme = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+
+    ensure(
+        readme.matches("| bash -s -- --easy-mode --verify").count() >= 2,
+        "README should recommend PATH repair and executable verification in both Unix install examples",
+    )?;
+    ensure(
+        readme.contains(
+            "raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1?cache=",
+        ) && readme.contains("& $f -Verify"),
+        "README should fetch the current Windows installer and recommend executable verification",
+    )?;
+    ensure(
+        readme.contains("settings remain untouched")
+            && readme.contains("without changing agent settings")
+            && !readme.contains("auto-configures the Claude Code"),
+        "README must describe the informational agent scan without claiming installer-side hook mutation",
+    )
+}
+
 fn parse_stdout(output: &Output) -> Result<serde_json::Value, String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout).map_err(|error| format!("invalid JSON stdout: {error}\n{stdout}"))
@@ -431,6 +455,257 @@ printf 'explicit-checksum=failed-closed selected=%s\n' "$TARGET"
             && explicit_checksum
                 .contains("explicit-checksum=failed-closed selected=x86_64-unknown-linux-musl"),
         "installer must not retarget a caller-pinned checksum to the GNU fallback",
+    )
+}
+
+#[cfg(unix)]
+fn write_installer_fixture_script(path: &Path, content: &str) -> TestResult {
+    fs::write(path, content).map_err(|error| error.to_string())?;
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| error.to_string())?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+fn matching_version_installer_command(
+    installer: &Path,
+    root: &Path,
+    fail_version_at: Option<u32>,
+) -> Result<Command, String> {
+    let home = root.join("home");
+    let dest = root.join("bin");
+    let mock_bin = root.join("mock-bin");
+    let ee_log = root.join("ee-invocations.log");
+    let mkdir_log = root.join("mkdir-invocations.log");
+    let curl_log = root.join("curl-invocations.log");
+    let version_count = root.join("version-count");
+
+    fs::create_dir_all(&home).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&dest).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&mock_bin).map_err(|error| error.to_string())?;
+    let zshrc = home.join(".zshrc");
+    if !zshrc.exists() {
+        fs::write(zshrc, "").map_err(|error| error.to_string())?;
+    }
+
+    write_installer_fixture_script(
+        &dest.join("ee"),
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$EE_TEST_EE_LOG"
+case "${1:-}" in
+  --version)
+    count=0
+    if [ -f "$EE_TEST_VERSION_COUNT" ]; then
+      count=$(sed -n '1p' "$EE_TEST_VERSION_COUNT")
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$EE_TEST_VERSION_COUNT"
+    printf 'ee 0.13.0\n'
+    if [ -n "${EE_TEST_FAIL_VERSION_AT:-}" ] &&
+       [ "$count" -ge "$EE_TEST_FAIL_VERSION_AT" ]; then
+      exit 23
+    fi
+    ;;
+  completion)
+    case "${2:-}" in
+      --help) exit 0 ;;
+      zsh) printf '#compdef ee\n' ;;
+      *) exit 2 ;;
+    esac
+    ;;
+  doctor)
+    printf '{"schema":"ee.response.v2","success":true,"degraded":[{"code":"fixture"}]}\n'
+    exit 6
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+"#,
+    )?;
+    write_installer_fixture_script(
+        &mock_bin.join("curl"),
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$EE_TEST_CURL_LOG"
+exit 97
+"#,
+    )?;
+    write_installer_fixture_script(
+        &mock_bin.join("mkdir"),
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$EE_TEST_MKDIR_LOG"
+exec /bin/mkdir "$@"
+"#,
+    )?;
+
+    let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", mock_bin.display());
+    let mut command = Command::new("/bin/bash");
+    command
+        .arg(installer)
+        .args([
+            "--version",
+            "v0.13.0",
+            "--dest",
+            dest.to_str()
+                .ok_or_else(|| "installer destination was not UTF-8".to_owned())?,
+            "--easy-mode",
+            "--verify",
+            "--offline",
+            "--no-gum",
+            "--no-configure",
+        ])
+        .env("HOME", &home)
+        .env("SHELL", "/bin/zsh")
+        .env("PATH", path)
+        .env("EE_INSTALLER_AGENT_VERSIONS", "0")
+        .env("EE_TEST_EE_LOG", ee_log)
+        .env("EE_TEST_MKDIR_LOG", mkdir_log)
+        .env("EE_TEST_CURL_LOG", curl_log)
+        .env("EE_TEST_VERSION_COUNT", version_count)
+        .env_remove("BASH_ENV")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("HTTP_PROXY")
+        .env_remove("EE_VERSION")
+        .env_remove("VERSION")
+        .env_remove("EE_INSTALL_DIR")
+        .env_remove("DEST")
+        .env_remove("EE_SKIP_VERIFY")
+        .env_remove("EE_REQUIRE_PROVENANCE")
+        .env_remove("EE_INSTALL_REQUIRE_KEYLESS")
+        .env_remove("EE_OFFLINE")
+        .env_remove("ARTIFACT_URL")
+        .env_remove("CHECKSUM")
+        .env_remove("CHECKSUM_URL");
+    if let Some(call) = fail_version_at {
+        command.env("EE_TEST_FAIL_VERSION_AT", call.to_string());
+    } else {
+        command.env_remove("EE_TEST_FAIL_VERSION_AT");
+    }
+    Ok(command)
+}
+
+#[cfg(unix)]
+#[test]
+fn matching_version_installer_rerun_repairs_integration_without_acquisition() -> TestResult {
+    let root = unique_artifact_dir("matching-version-rerun")?;
+    let installer = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+    let mut first = matching_version_installer_command(&installer, &root, None)?;
+    let first_output = first
+        .output()
+        .map_err(|error| format!("failed to run matching-version installer: {error}"))?;
+    let first_stdout = String::from_utf8_lossy(&first_output.stdout);
+    let first_stderr = String::from_utf8_lossy(&first_output.stderr);
+    ensure(
+        first_output.status.success(),
+        &format!(
+            "matching-version installer failed with status {:?}\nstdout:\n{first_stdout}\nstderr:\n{first_stderr}",
+            first_output.status.code()
+        ),
+    )?;
+    ensure(
+        first_stdout.contains("is already installed")
+            && first_stdout.contains("Running self-test")
+            && first_stderr.contains("ee doctor reported issues"),
+        "matching-version rerun should verify the binary and keep doctor degradation advisory",
+    )?;
+    ensure(
+        !first_stdout.contains("Downloading") && !first_stdout.contains("Building from source"),
+        "matching-version rerun must skip acquisition",
+    )?;
+
+    let zshrc = fs::read_to_string(root.join("home/.zshrc"))
+        .map_err(|error| format!("failed to read repaired .zshrc: {error}"))?;
+    let expected_path_line = format!("export PATH=\"{}:$PATH\"", root.join("bin").display());
+    ensure_equal(
+        zshrc
+            .lines()
+            .filter(|line| *line == expected_path_line.as_str())
+            .count(),
+        1,
+        "matching-version PATH repair count",
+    )?;
+    ensure_equal(
+        fs::read_to_string(root.join("home/.local/share/zsh/site-functions/_ee"))
+            .map_err(|error| format!("failed to read generated zsh completion: {error}"))?,
+        "#compdef ee\n".to_owned(),
+        "matching-version completion content",
+    )?;
+
+    let ee_log = fs::read_to_string(root.join("ee-invocations.log"))
+        .map_err(|error| format!("failed to read fake ee log: {error}"))?;
+    ensure(
+        ee_log.contains("completion --help")
+            && ee_log.contains("completion zsh")
+            && ee_log.contains("doctor --json"),
+        "matching-version rerun should regenerate completions and run requested verification",
+    )?;
+    ensure(
+        !root.join("curl-invocations.log").exists(),
+        "matching-version rerun must not invoke curl",
+    )?;
+    let mkdir_log = fs::read_to_string(root.join("mkdir-invocations.log"))
+        .map_err(|error| format!("failed to read mkdir log: {error}"))?;
+    ensure(
+        !mkdir_log.contains("ee-install.lock.d"),
+        "matching-version rerun must not acquire the installer lock",
+    )?;
+
+    let mut second = matching_version_installer_command(&installer, &root, None)?;
+    let second_output = second
+        .output()
+        .map_err(|error| format!("failed to rerun matching-version installer: {error}"))?;
+    ensure(
+        second_output.status.success(),
+        "second matching-version rerun should remain idempotent",
+    )?;
+    let zshrc = fs::read_to_string(root.join("home/.zshrc"))
+        .map_err(|error| format!("failed to reread repaired .zshrc: {error}"))?;
+    ensure_equal(
+        zshrc
+            .lines()
+            .filter(|line| *line == expected_path_line.as_str())
+            .count(),
+        1,
+        "idempotent matching-version PATH repair count",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn matching_version_installer_verify_fails_on_nonzero_version_command() -> TestResult {
+    let root = unique_artifact_dir("matching-version-broken-binary")?;
+    let installer = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+    let output = matching_version_installer_command(&installer, &root, Some(3))?
+        .output()
+        .map_err(|error| format!("failed to run broken-binary installer fixture: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        !output.status.success(),
+        "matching-version --verify must fail when ee --version exits nonzero",
+    )?;
+    ensure(
+        stderr.contains("ee --version failed with exit code 23"),
+        &format!("fatal version failure was not explained\nstdout:\n{stdout}\nstderr:\n{stderr}"),
+    )?;
+    let ee_log = fs::read_to_string(root.join("ee-invocations.log"))
+        .map_err(|error| format!("failed to read broken-binary ee log: {error}"))?;
+    ensure(
+        !ee_log.contains("doctor --json"),
+        "doctor must not mask a fatal ee --version failure",
+    )?;
+    ensure(
+        !root.join("curl-invocations.log").exists(),
+        "failed matching-version verification must remain acquisition-free",
+    )?;
+    let mkdir_log = fs::read_to_string(root.join("mkdir-invocations.log"))
+        .map_err(|error| format!("failed to read broken-binary mkdir log: {error}"))?;
+    ensure(
+        !mkdir_log.contains("ee-install.lock.d"),
+        "failed matching-version verification must remain lock-free",
     )
 }
 

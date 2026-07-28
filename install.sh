@@ -112,8 +112,6 @@ h3VXjvm63PcMNKFcvqq39g3UIGwQMLdNPwkiPHM4lqE2vrQOoAHcRIXf4Q==
 verify_blob_against_anchors() {
   local bundle="$1" payload="$2"
 
-  SIGSTORE_VERIFIED_VIA=""
-
   # Path 1..N: keyless identity-bound certs (CI builds + device-flow).
   local i
   for i in "${!CERT_IDENTITY_REGEXPS[@]}"; do
@@ -123,7 +121,6 @@ verify_blob_against_anchors() {
           --certificate-identity-regexp "${CERT_IDENTITY_REGEXPS[$i]}" \
           --certificate-oidc-issuer "${CERT_OIDC_ISSUERS[$i]}" \
           "$payload" >/dev/null 2>&1; then
-      SIGSTORE_VERIFIED_VIA="keyless:${i}"
       return 0
     fi
   done
@@ -141,7 +138,6 @@ verify_blob_against_anchors() {
         --insecure-ignore-tlog=false \
         --key "$pubkey_file" \
         "$payload" >/dev/null 2>&1; then
-    SIGSTORE_VERIFIED_VIA="pinned-key"
     info "Sigstore verified via pinned-key fallback for $(basename "$payload")"
     return 0
   fi
@@ -153,7 +149,6 @@ EASY=0
 QUIET=0
 VERIFY=0
 FROM_SOURCE=0
-SYSTEM=0
 NO_GUM=0
 NO_CONFIGURE=0
 NO_CHECKSUM="${EE_SKIP_VERIFY:-0}"
@@ -361,7 +356,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --version) require_option_value "$1" "${2:-}"; VERSION="$2"; shift 2;;
     --dest) require_option_value "$1" "${2:-}"; DEST="$2"; shift 2;;
-    --system) SYSTEM=1; DEST="/usr/local/bin"; shift;;
+    --system) DEST="/usr/local/bin"; shift;;
     --easy-mode) EASY=1; shift;;
     --verify) VERIFY=1; shift;;
     --artifact-url) require_option_value "$1" "${2:-}"; ARTIFACT_URL="$2"; shift 2;;
@@ -563,7 +558,7 @@ TARGET=""
 FALLBACK_TARGET=""
 
 detect_platform() {
-  OS=$(uname -s | tr 'A-Z' 'a-z')
+  OS=$(uname -s | tr '[:upper:]' '[:lower:]')
   ARCH=$(uname -m)
   TARGET=""
   FALLBACK_TARGET=""
@@ -768,12 +763,16 @@ preflight_checks() {
 check_installed_version() {
   local target="$1"
   [ -x "$DEST/$BINARY" ] || return 1
+  local version_output=""
   local installed
+  if ! version_output=$("$DEST/$BINARY" --version 2>/dev/null); then
+    return 1
+  fi
   # BSD sed (macOS) treats `\+` as literal `+`, not the GNU "one or more"
   # quantifier — so the prior regex silently failed to match on macOS,
   # making check_installed_version always return 1 (broken short-circuit,
   # benign re-install). Use portable POSIX BRE: `[[:space:]][[:space:]]*`.
-  installed=$("$DEST/$BINARY" --version 2>/dev/null | head -1 \
+  installed=$(printf '%s\n' "$version_output" | head -1 \
     | sed -n -e 's/.*ee[[:space:]][[:space:]]*v\{0,1\}\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
              -e 's/^[[:space:]]*v\{0,1\}\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)[[:space:]]*$/\1/p' \
     | head -1)
@@ -867,6 +866,35 @@ maybe_install_completions() {
     return 0
   fi
   install_completions_for_shell "$shell" || true
+}
+
+# `--verify` validates the executable itself strictly while keeping doctor
+# posture advisory. A fresh database or unavailable optional capability can
+# make doctor non-zero without meaning the installed binary is unusable.
+run_install_self_test() {
+  info "Running self-test"
+
+  local version_output=""
+  local version_status=0
+  if version_output=$("$DEST/$BINARY" --version 2>&1); then
+    version_status=0
+  else
+    version_status=$?
+    err "$BINARY --version failed with exit code $version_status"
+    [ -n "$version_output" ] && printf '%s\n' "$version_output" >&2
+    return 1
+  fi
+  if [ -z "$version_output" ]; then
+    err "$BINARY --version returned no output"
+    return 1
+  fi
+  printf '%s\n' "$version_output"
+
+  if "$DEST/$BINARY" doctor --json >/dev/null 2>&1; then
+    ok "ee doctor: pass"
+  else
+    warn "ee doctor reported issues — run 'ee doctor --json | jq .' to inspect"
+  fi
 }
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -1058,7 +1086,7 @@ PY
 # ───────────────────────────────────────────────────────────────────────────
 
 semantic_smoke_mode() {
-  printf '%s' "${EE_INSTALL_SEMANTIC_SMOKE:-0}" | tr 'A-Z' 'a-z'
+  printf '%s' "${EE_INSTALL_SEMANTIC_SMOKE:-0}" | tr '[:upper:]' '[:lower:]'
 }
 
 semantic_smoke_enabled() {
@@ -1214,7 +1242,7 @@ select_extracted_binary() {
   if [ "${#executable_candidates[@]}" -gt 1 ]; then
     err "Archive contains multiple executable '$BINARY' candidates:"
     for candidate in "${executable_candidates[@]}"; do
-      err "  - ${candidate#$TMP/extract/}"
+      err "  - ${candidate#"$TMP"/extract/}"
     done
     err "Refusing to choose by filesystem traversal order."
     return 1
@@ -1234,20 +1262,20 @@ select_extracted_binary() {
   if [ "${#all_candidates[@]}" -gt 1 ]; then
     err "Archive contains multiple matching '$BINARY' candidates without owner-execute mode:"
     for candidate in "${all_candidates[@]}"; do
-      err "  - ${candidate#$TMP/extract/}"
+      err "  - ${candidate#"$TMP"/extract/}"
     done
     err "Refusing to choose by filesystem traversal order."
     return 1
   fi
 
   BIN="${all_candidates[0]}"
-  warn "Extracted '$BINARY' lacks owner-execute mode; applying chmod u+x to ${BIN#$TMP/extract/}"
+  warn "Extracted '$BINARY' lacks owner-execute mode; applying chmod u+x to ${BIN#"$TMP"/extract/}"
   if ! chmod u+x "$BIN" 2>/dev/null; then
-    err "Binary '$BINARY' found but chmod u+x failed: ${BIN#$TMP/extract/}"
+    err "Binary '$BINARY' found but chmod u+x failed: ${BIN#"$TMP"/extract/}"
     return 1
   fi
   if [ ! -x "$BIN" ]; then
-    err "Binary '$BINARY' found but is still not executable after chmod: ${BIN#$TMP/extract/}"
+    err "Binary '$BINARY' found but is still not executable after chmod: ${BIN#"$TMP"/extract/}"
     return 1
   fi
 }
@@ -1296,12 +1324,17 @@ mkdir -p "$DEST" 2>/dev/null || true
 
 preflight_checks
 
-# Already-installed short-circuit (still configure shell completions).
+# Already-installed short-circuit. Acquisition and locking stay skipped, but
+# idempotent shell integration and explicitly requested verification still run.
 if [ "$FROM_SOURCE" -eq 0 ] && [ "$FORCE_INSTALL" -eq 0 ] && [ -n "$VERSION" ] \
    && check_installed_version "$VERSION"; then
   ok "$PROJECT_LABEL $VERSION is already installed at $DEST/$BINARY"
   info "Use --force to reinstall"
+  maybe_add_path
   maybe_install_completions
+  if [ "$VERIFY" -eq 1 ]; then
+    run_install_self_test || exit 1
+  fi
   exit 0
 fi
 
@@ -1472,17 +1505,7 @@ maybe_add_path
 maybe_install_completions
 
 if [ "$VERIFY" -eq 1 ]; then
-  info "Running self-test"
-  if "$DEST/$BINARY" --version >/dev/null 2>&1; then
-    "$DEST/$BINARY" --version || true
-  else
-    warn "$BINARY --version returned non-zero"
-  fi
-  if "$DEST/$BINARY" doctor --json >/dev/null 2>&1; then
-    ok "ee doctor: pass"
-  else
-    warn "ee doctor reported issues — run 'ee doctor --json | jq .' to inspect"
-  fi
+  run_install_self_test || exit 1
 fi
 
 run_semantic_first_use_smoke "$DEST/$BINARY"
