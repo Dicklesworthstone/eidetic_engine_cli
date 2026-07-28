@@ -1551,6 +1551,7 @@ dependencies = [
  "asupersync",
  "dirs",
  "frankensearch-core",
+ "rayon",
  "safetensors",
  "serde",
  "serde_json",
@@ -1590,6 +1591,7 @@ dependencies = [
  "memmap2",
  "rayon",
  "serde",
+ "tempfile",
  "tracing",
  "wide 1.4.0",
 ]

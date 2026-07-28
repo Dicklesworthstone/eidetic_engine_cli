@@ -2118,15 +2118,38 @@ fn apply_distill_proposals(
                             "entryCreatedAt": &entry.created_at,
                         })
                         .to_string();
-                        let inherited_redaction_classes = entry
-                            .redaction_report
+                        let redaction_report = serde_json::from_str::<serde_json::Value>(
+                            &entry.redaction_report,
+                        )
+                        .map_err(|error| crate::db::DbError::MalformedRow {
+                            operation: crate::db::DbOperation::Execute,
+                            message: format!(
+                                "journal entry {entry_id} has a corrupt redaction report: {error}"
+                            ),
+                        })?;
+                        let inherited_redaction_classes = redaction_report
                             .get("classesApplied")
                             .and_then(serde_json::Value::as_array)
-                            .into_iter()
-                            .flatten()
-                            .filter_map(serde_json::Value::as_str)
-                            .map(str::to_owned)
-                            .collect();
+                            .ok_or_else(|| crate::db::DbError::MalformedRow {
+                                operation: crate::db::DbOperation::Execute,
+                                message: format!(
+                                    "journal entry {entry_id} redaction report is missing \
+                                     classesApplied[]"
+                                ),
+                            })?
+                            .iter()
+                            .map(|value| {
+                                value.as_str().map(str::to_owned).ok_or_else(|| {
+                                    crate::db::DbError::MalformedRow {
+                                        operation: crate::db::DbOperation::Execute,
+                                        message: format!(
+                                            "journal entry {entry_id} redaction report contains \
+                                             a non-string class"
+                                        ),
+                                    }
+                                })
+                            })
+                            .collect::<std::result::Result<Vec<_>, _>>()?;
                         connection.insert_evidence_span(
                             &span_id,
                             &CreateEvidenceSpanInput {

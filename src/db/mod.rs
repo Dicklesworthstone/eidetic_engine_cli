@@ -9705,15 +9705,6 @@ fn canonical_evidence_hash(content: &str) -> String {
     format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex())
 }
 
-fn is_canonical_blake3_hash(value: &str) -> bool {
-    value.strip_prefix("blake3:").is_some_and(|hex| {
-        hex.len() == 64
-            && hex
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    })
-}
-
 fn valid_evidence_security_token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -10238,8 +10229,8 @@ impl DbConnection {
         if !current.is_derivation_admitted_for_session(workspace_id, &current_session) {
             return Ok(EvidenceSpanMemoryAttachResult::NotFoundOrHashMismatch);
         }
-        match current.memory_id {
-            Some(attached_memory_id) if text_matches(&attached_memory_id, memory_id) => {
+        match current.memory_id.as_deref() {
+            Some(attached_memory_id) if text_matches(attached_memory_id, memory_id) => {
                 let Some(current_memory) = self.get_memory(memory_id)? else {
                     return Ok(EvidenceSpanMemoryAttachResult::NotFoundOrHashMismatch);
                 };
