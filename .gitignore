@@ -294,6 +294,8 @@ tests/audit_artifacts/install_pipeline_*.json
 /.verification-drift-report.json
 # --- repo-janitor: skill/session leak + scratch ---
 /.skill-loop-progress.md
+/.skill-loop-progress-*.md
+/tmp/
 /ee_illustration.png
 /.beads.snapshot_*/
 /tests/artifacts/
