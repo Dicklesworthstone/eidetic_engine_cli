@@ -30,6 +30,7 @@ use ee::core::curate::{
     ReflectionRequestLedgerDiagnosticsReport, ReflectionRequestLedgerExportHygieneReport,
     ReflectionRequestLedgerMigrationSafety, ReflectionRequestLedgerRetentionReport,
 };
+use ee::core::doctor::DoctorReport;
 use ee::core::lab::{SWARM_REPLAY_RESULT_SCHEMA_V1, SWARM_WORKLOAD_SCHEMA_V1};
 use ee::core::learn::{
     LEARN_GAPS_SCHEMA_V1, LearnGapCluster, LearnGapOriginDemand, LearnGapRememberTemplate,
@@ -55,9 +56,10 @@ use ee::models::{
     DomainError, IMPORT_CASS_SCHEMA_V1, ProducerMetadata, QUERY_SCHEMA_V1, RESPONSE_SCHEMA_V2,
 };
 use ee::output::{
-    FieldProfile, error_response_json, render_curate_candidates_json, render_learn_gaps_json,
-    render_mcp_manifest_json, render_memory_list_json, render_memory_show_json,
-    render_reflect_propose_json, render_schema_export_json, render_status_json_filtered,
+    FieldProfile, error_response_json, render_curate_candidates_json, render_doctor_json,
+    render_learn_gaps_json, render_mcp_manifest_json, render_memory_list_json,
+    render_memory_show_json, render_reflect_propose_json, render_schema_export_json,
+    render_status_json_filtered,
 };
 use ee::policy::{
     SWARM_SLO_COORDINATION_EVENT_SCHEMA_V1, SWARM_SLO_RESOURCE_USAGE_EVENT_SCHEMA_V1,
@@ -2083,6 +2085,7 @@ fn diag_incident_replay_response_matches_schema() -> TestResult {
 #[test]
 fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
     let status_response = status_conformance_sample()?;
+    let doctor_response = doctor_conformance_sample()?;
     let fixture_cases = [
         ("ee.response.v2", status_response.clone()),
         (
@@ -2096,10 +2099,7 @@ fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
             ))?,
         ),
         ("ee.status.v1", status_response),
-        (
-            "ee.doctor.v1",
-            read_json(&fixture_path("golden/doctor/doctor_json.golden"))?,
-        ),
+        ("ee.doctor.v1", doctor_response),
         (
             "ee.capabilities.v1",
             read_json(&fixture_path(
@@ -2402,6 +2402,25 @@ fn status_conformance_sample() -> Result<Value, String> {
     {
         return Err(
             "rendered status response must retain the public workspace object before schema validation"
+                .to_owned(),
+        );
+    }
+    Ok(response)
+}
+
+fn doctor_conformance_sample() -> Result<Value, String> {
+    let workspace =
+        tempfile::tempdir().map_err(|error| format!("create doctor workspace: {error}"))?;
+    let report = DoctorReport::gather_for_workspace(workspace.path());
+    let response: Value = serde_json::from_str(&render_doctor_json(&report))
+        .map_err(|error| format!("parse rendered doctor response: {error}"))?;
+    if response
+        .pointer("/data/advisories")
+        .and_then(Value::as_array)
+        .is_none()
+    {
+        return Err(
+            "rendered doctor response must retain the public advisories array before schema validation"
                 .to_owned(),
         );
     }
