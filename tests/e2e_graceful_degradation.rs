@@ -6,15 +6,20 @@ use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ee::db::{CreateMemoryInput, DbConnection};
+use ee::db::{CreateMemoryInput, CreateSearchIndexJobInput, DbConnection, SearchIndexJobType};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
 const EXIT_SUCCESS: i32 = 0;
+const SNAPSHOT_RACE_MEMORY_ID: &str = "mem_00000000000000000000007901";
+const SNAPSHOT_RACE_JOB_ID: &str = "sidx_00000000000000000000007901";
+const SNAPSHOT_RACE_CONTENT: &str =
+    "snapshotrace zircon unique second phrase committed by a separate writer process";
 
 struct EeOutput {
     exit_code: Option<i32>,
@@ -82,6 +87,10 @@ where
     S: AsRef<OsStr>,
 {
     let output = run_ee(workspace, args)?;
+    parse_ee_output(output, context)
+}
+
+fn parse_ee_output(output: Output, context: &str) -> Result<EeOutput, String> {
     let stdout =
         String::from_utf8(output.stdout).map_err(|error| format!("{context} stdout: {error}"))?;
     let stderr =
@@ -94,6 +103,25 @@ where
         stderr,
         json,
     })
+}
+
+fn spawn_ee<I, S>(workspace: &Path, args: I) -> Result<Child, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    Command::new(env!("CARGO_BIN_EXE_ee"))
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("--json")
+        .args(args)
+        .env_remove("EE_WORKSPACE")
+        .env_remove("EE_WORKSPACE_REGISTRY")
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to spawn ee: {error}"))
 }
 
 fn assert_success(output: &EeOutput, context: &str) -> TestResult {
@@ -186,6 +214,126 @@ fn insert_unindexed_memory(workspace: &Path, content: &str) -> Result<String, St
     Ok(memory_id)
 }
 
+fn seed_snapshot_race_corpus(workspace: &Path, document_count: u32) -> TestResult {
+    let database_path = workspace.join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+    let workspace_id = connection
+        .list_workspaces()
+        .map_err(|error| error.to_string())?
+        .first()
+        .map(|stored| stored.id.clone())
+        .ok_or_else(|| "workspace row missing after ee init".to_owned())?;
+    let padding = " deterministic baseline retrieval corpus".repeat(48);
+    for ordinal in 0..document_count {
+        let memory_id = format!("mem_{:026}", 80_000_u64 + u64::from(ordinal));
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: format!(
+                        "snapshotrace baseline document {ordinal} captured before publication{padding}"
+                    ),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("test://snapshot-race/baseline".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: Some("multiprocess source-snapshot fixture".to_owned()),
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    connection.close().map_err(|error| error.to_string())
+}
+
+fn wait_for_index_publish_window(workspace: &Path, child: &mut Child) -> TestResult {
+    let database_path = workspace.join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+    let workspace_id = connection
+        .list_workspaces()
+        .map_err(|error| error.to_string())?
+        .first()
+        .map(|stored| stored.id.clone())
+        .ok_or_else(|| "workspace row missing while waiting for index publisher".to_owned())?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let lock_visible = connection
+            .list_active_advisory_locks()
+            .map_err(|error| error.to_string())?
+            .iter()
+            .any(|lock| {
+                lock.id.resource_type() == "index" && lock.id.resource_id() == workspace_id.as_str()
+            });
+        let staging_visible = fs::read_dir(workspace.join(".ee"))
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(".index.publish-"))
+            });
+        if lock_visible || staging_visible {
+            connection.close().map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+        if child
+            .try_wait()
+            .map_err(|error| format!("failed to inspect rebuild child: {error}"))?
+            .is_some()
+        {
+            return Err(
+                "index rebuild exited before its post-snapshot publish window was observable"
+                    .to_owned(),
+            );
+        }
+        if Instant::now() >= deadline {
+            return Err("timed out waiting for index rebuild publish window".to_owned());
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn spawn_snapshot_writer_process(workspace: &Path) -> Result<Output, String> {
+    let current_test_binary =
+        env::current_exe().map_err(|error| format!("failed to resolve test binary: {error}"))?;
+    Command::new(current_test_binary)
+        .arg("--exact")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .arg("multiprocess_snapshot_writer_helper")
+        .env("EE_SNAPSHOT_WRITER_WORKSPACE", workspace)
+        .env("NO_COLOR", "1")
+        .output()
+        .map_err(|error| format!("failed to spawn snapshot writer process: {error}"))
+}
+
+fn pack_memory_ids(pack_json: &Value) -> Vec<String> {
+    pack_json
+        .pointer("/data/pack/items")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.get("memoryId")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn result_doc_ids(search_json: &Value) -> Result<Vec<String>, String> {
     let results = search_json
         .pointer("/data/results")
@@ -225,6 +373,56 @@ fn derived_asset_status(status_json: &Value, name: &str) -> Option<String> {
         .and_then(|asset| asset.get("status"))
         .and_then(Value::as_str)
         .map(str::to_owned)
+}
+
+#[test]
+#[ignore = "spawned by the multiprocess source-snapshot regression"]
+fn multiprocess_snapshot_writer_helper() -> TestResult {
+    let workspace = env::var_os("EE_SNAPSHOT_WRITER_WORKSPACE")
+        .map(PathBuf::from)
+        .ok_or_else(|| "EE_SNAPSHOT_WRITER_WORKSPACE is required".to_owned())?;
+    let database_path = workspace.join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+    let workspace_id = connection
+        .list_workspaces()
+        .map_err(|error| error.to_string())?
+        .first()
+        .map(|stored| stored.id.clone())
+        .ok_or_else(|| "writer process could not resolve workspace row".to_owned())?;
+    connection
+        .with_transaction(|| {
+            connection.insert_memory(
+                SNAPSHOT_RACE_MEMORY_ID,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: SNAPSHOT_RACE_CONTENT.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.99,
+                    utility: 0.75,
+                    importance: 0.8,
+                    provenance_uri: Some("test://snapshot-race/second-process".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: Some("multiprocess writer".to_owned()),
+                    tags: vec!["snapshot-race".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )?;
+            connection.insert_search_index_job(
+                SNAPSHOT_RACE_JOB_ID,
+                &CreateSearchIndexJobInput {
+                    workspace_id: workspace_id.clone(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(SNAPSHOT_RACE_MEMORY_ID.to_owned()),
+                    documents_total: 1,
+                },
+            )
+        })
+        .map_err(|error| error.to_string())?;
+    connection.close().map_err(|error| error.to_string())
 }
 
 #[test]
@@ -421,6 +619,197 @@ fn stale_index_search_degrades_to_lexical_fallback_and_recovers_after_rebuild() 
     ensure(
         degraded_codes(&recovered_search.json).is_empty(),
         "recovered search should not report stale-index degradation after rebuild",
+    )
+}
+
+#[test]
+fn multiprocess_write_after_source_snapshot_is_present_or_explicitly_stale() -> TestResult {
+    let artifact_dir = unique_artifact_dir("multiprocess-source-snapshot")?;
+    let workspace = artifact_dir.join("workspace");
+    fs::create_dir_all(&workspace)
+        .map_err(|error| format!("failed to create workspace: {error}"))?;
+
+    let init = run_ee_json(&workspace, ["init"], "snapshot race init")?;
+    assert_success(&init, "snapshot race init")?;
+    seed_snapshot_race_corpus(&workspace, 256)?;
+
+    let mut rebuild_child = spawn_ee(&workspace, ["index", "rebuild"])?;
+    wait_for_index_publish_window(&workspace, &mut rebuild_child)?;
+
+    let writer = spawn_snapshot_writer_process(&workspace)?;
+    ensure(
+        writer.status.success(),
+        format!(
+            "separate writer process failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&writer.stdout),
+            String::from_utf8_lossy(&writer.stderr)
+        ),
+    )?;
+
+    let rebuild = parse_ee_output(
+        rebuild_child
+            .wait_with_output()
+            .map_err(|error| format!("failed waiting for index rebuild: {error}"))?,
+        "snapshot race rebuild",
+    )?;
+    assert_success(&rebuild, "snapshot race rebuild")?;
+    ensure_equal(
+        &rebuild.json.pointer("/data/documents_total"),
+        &Some(&Value::from(256)),
+        "rebuild must publish exactly the captured pre-writer corpus",
+    )?;
+
+    let stale = run_ee_json(
+        &workspace,
+        ["index", "status"],
+        "post-snapshot index status",
+    )?;
+    assert_success(&stale, "post-snapshot index status")?;
+    ensure_equal(
+        &stale.json.pointer("/data/health"),
+        &Some(&Value::String("stale".to_owned())),
+        "post-snapshot writer must make the older publication explicitly stale",
+    )?;
+    let database_generation = stale
+        .json
+        .pointer("/data/dbGeneration")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("index status missing dbGeneration: {}", stale.stdout))?;
+    let index_generation = stale
+        .json
+        .pointer("/data/indexGeneration")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("index status missing indexGeneration: {}", stale.stdout))?;
+    ensure(
+        database_generation > index_generation,
+        format!(
+            "the manifest must retain its captured watermark: db={database_generation} index={index_generation}"
+        ),
+    )?;
+    ensure_equal(
+        &stale.json.pointer("/data/repairHint"),
+        &Some(&Value::String("ee index rebuild --workspace .".to_owned())),
+        "stale index exposes an actionable repair",
+    )?;
+
+    let pending_connection = DbConnection::open_file(workspace.join(".ee").join("ee.db"))
+        .map_err(|error| error.to_string())?;
+    let pending_job = pending_connection
+        .get_search_index_job(SNAPSHOT_RACE_JOB_ID)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "second writer's index job is missing".to_owned())?;
+    ensure_equal(
+        &pending_job.status.as_str(),
+        &"pending",
+        "second writer leaves a durable repair job",
+    )?;
+    pending_connection
+        .close()
+        .map_err(|error| error.to_string())?;
+
+    let stale_search = run_ee_json(
+        &workspace,
+        ["search", SNAPSHOT_RACE_CONTENT, "--limit", "10"],
+        "stale unique-phrase search",
+    )?;
+    assert_success(&stale_search, "stale unique-phrase search")?;
+    let stale_result_ids = result_doc_ids(&stale_search.json)?;
+    ensure(
+        !stale_result_ids
+            .iter()
+            .any(|doc_id| doc_id == SNAPSHOT_RACE_MEMORY_ID),
+        format!(
+            "pre-writer snapshot must not silently claim the second memory is indexed: {stale_result_ids:?}"
+        ),
+    )?;
+    ensure(
+        degraded_codes(&stale_search.json)
+            .iter()
+            .any(|code| code == "search_index_stale" || code == "stale_index"),
+        format!(
+            "missing second memory must be paired with stale-index degradation: {}",
+            stale_search.stdout
+        ),
+    )?;
+
+    let stale_pack = run_ee_json(
+        &workspace,
+        ["pack", SNAPSHOT_RACE_CONTENT, "--max-tokens", "2048"],
+        "stale unique-phrase pack",
+    )?;
+    assert_success(&stale_pack, "stale unique-phrase pack")?;
+    let stale_pack_ids = pack_memory_ids(&stale_pack.json);
+    let stale_pack_degraded = degraded_codes(&stale_pack.json);
+    ensure(
+        stale_pack_ids
+            .iter()
+            .any(|memory_id| memory_id == SNAPSHOT_RACE_MEMORY_ID)
+            || stale_pack_degraded
+                .iter()
+                .any(|code| code.contains("stale")),
+        format!(
+            "pack must either carry the committed memory or disclose stale retrieval: ids={stale_pack_ids:?} degraded={stale_pack_degraded:?}"
+        ),
+    )?;
+
+    let coalesce = run_ee_json(
+        &workspace,
+        ["job", "run", "index_coalesce"],
+        "snapshot repair coalesce",
+    )?;
+    assert_success(&coalesce, "snapshot repair coalesce")?;
+
+    let ready = run_ee_json(
+        &workspace,
+        ["index", "status"],
+        "repaired snapshot index status",
+    )?;
+    assert_success(&ready, "repaired snapshot index status")?;
+    ensure_equal(
+        &ready.json.pointer("/data/health"),
+        &Some(&Value::String("ready".to_owned())),
+        "bounded repair converges to a truthful ready index",
+    )?;
+    ensure_equal(
+        &ready.json.pointer("/data/indexGeneration"),
+        &ready.json.pointer("/data/dbGeneration"),
+        "ready requires equal source and manifest generations",
+    )?;
+
+    let recovered_search = run_ee_json(
+        &workspace,
+        ["search", SNAPSHOT_RACE_CONTENT, "--limit", "10"],
+        "recovered unique-phrase search",
+    )?;
+    assert_success(&recovered_search, "recovered unique-phrase search")?;
+    let recovered_ids = result_doc_ids(&recovered_search.json)?;
+    ensure(
+        recovered_ids
+            .iter()
+            .any(|doc_id| doc_id == SNAPSHOT_RACE_MEMORY_ID),
+        format!(
+            "repaired current index must contain the second writer's memory: {recovered_ids:?}"
+        ),
+    )?;
+    ensure(
+        degraded_codes(&recovered_search.json).is_empty(),
+        "recovered search must not retain stale-index degradation",
+    )?;
+
+    let recovered_pack = run_ee_json(
+        &workspace,
+        ["pack", SNAPSHOT_RACE_CONTENT, "--max-tokens", "2048"],
+        "recovered unique-phrase pack",
+    )?;
+    assert_success(&recovered_pack, "recovered unique-phrase pack")?;
+    ensure(
+        pack_memory_ids(&recovered_pack.json)
+            .iter()
+            .any(|memory_id| memory_id == SNAPSHOT_RACE_MEMORY_ID),
+        format!(
+            "recovered pack must include the second writer's memory: {}",
+            recovered_pack.stdout
+        ),
     )
 }
 

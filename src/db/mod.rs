@@ -1027,6 +1027,51 @@ impl DbConnection {
         }
     }
 
+    /// Execute a closure in the same write-owner transaction while preserving
+    /// a caller-specific error type.
+    ///
+    /// Index source snapshots use this form because corpus projection can fail
+    /// with a richer domain error than [`DbError`]. The transaction is
+    /// `BEGIN IMMEDIATE` for file databases, so the first generation read and
+    /// every subsequent source query describe one writer-fenced snapshot.
+    pub(crate) fn with_transaction_error<T, E, F>(&self, f: F) -> std::result::Result<T, E>
+    where
+        E: From<DbError>,
+        F: FnOnce() -> std::result::Result<T, E>,
+    {
+        let _write_owner = self.begin_write_transaction().map_err(E::from)?;
+
+        struct TransactionGuard<'a> {
+            conn: &'a DbConnection,
+            completed: bool,
+        }
+
+        impl Drop for TransactionGuard<'_> {
+            fn drop(&mut self) {
+                if !self.completed {
+                    let _ = self.conn.rollback();
+                }
+            }
+        }
+
+        let mut guard = TransactionGuard {
+            conn: self,
+            completed: false,
+        };
+        match f() {
+            Ok(result) => {
+                self.commit().map_err(E::from)?;
+                guard.completed = true;
+                Ok(result)
+            }
+            Err(error) => {
+                guard.completed = true;
+                let _ = self.rollback();
+                Err(error)
+            }
+        }
+    }
+
     fn begin_write_transaction(&self) -> Result<Option<FileWriteOwnerGuard>> {
         self.reject_read_only_write(DbOperation::BeginTransaction)?;
         match self.location {
@@ -7202,6 +7247,196 @@ UPDATE workspace_generations
     "blake3:v085_evidence_security_posture_2026_07_28",
 );
 
+/// V086: make procedural-rule state part of the workspace generation.
+///
+/// Rules are first-class search documents. Their row, tags, and source-memory
+/// provenance all affect the canonical projection, so every committed
+/// mutation must invalidate an older derived index. The null-safe UPDATE
+/// predicates deliberately suppress true no-ops. Junction triggers resolve
+/// the owning workspace through the rule instead of trusting the linked
+/// memory's workspace.
+///
+/// Existing databases never counted this source family. The final repair adds
+/// each pre-existing rule and junction row exactly once without lowering (or
+/// resetting) an already higher live generation.
+pub const V086_RULE_INDEX_GENERATIONS: Migration = Migration::new(
+    86,
+    "rule_index_generations",
+    r#"
+CREATE TRIGGER trg_workspace_generations_procedural_rules_insert
+AFTER INSERT ON procedural_rules
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.updated_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_procedural_rules_update
+AFTER UPDATE ON procedural_rules
+WHEN OLD.id IS NOT NEW.id
+  OR OLD.workspace_id IS NOT NEW.workspace_id
+  OR OLD.content IS NOT NEW.content
+  OR OLD.confidence IS NOT NEW.confidence
+  OR OLD.utility IS NOT NEW.utility
+  OR OLD.importance IS NOT NEW.importance
+  OR OLD.trust_class IS NOT NEW.trust_class
+  OR OLD.scope IS NOT NEW.scope
+  OR OLD.scope_pattern IS NOT NEW.scope_pattern
+  OR OLD.maturity IS NOT NEW.maturity
+  OR OLD.protected IS NOT NEW.protected
+  OR OLD.positive_feedback_count IS NOT NEW.positive_feedback_count
+  OR OLD.negative_feedback_count IS NOT NEW.negative_feedback_count
+  OR OLD.validation_passes IS NOT NEW.validation_passes
+  OR OLD.validation_contradictions IS NOT NEW.validation_contradictions
+  OR OLD.last_applied_at IS NOT NEW.last_applied_at
+  OR OLD.last_validated_at IS NOT NEW.last_validated_at
+  OR OLD.superseded_by IS NOT NEW.superseded_by
+  OR OLD.created_at IS NOT NEW.created_at
+  OR OLD.updated_at IS NOT NEW.updated_at
+  OR OLD.tombstoned_at IS NOT NEW.tombstoned_at
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.updated_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = NEW.workspace_id;
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = OLD.workspace_id
+       AND OLD.workspace_id <> NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_procedural_rules_delete
+AFTER DELETE ON procedural_rules
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id = OLD.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_rule_tags_insert
+AFTER INSERT ON rule_tags
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    SELECT r.workspace_id, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      FROM procedural_rules r
+     WHERE r.id = NEW.rule_id;
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id IN (
+        SELECT r.workspace_id FROM procedural_rules r WHERE r.id = NEW.rule_id
+     );
+END;
+
+CREATE TRIGGER trg_workspace_generations_rule_tags_update
+AFTER UPDATE ON rule_tags
+WHEN OLD.rule_id IS NOT NEW.rule_id OR OLD.tag IS NOT NEW.tag
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    SELECT DISTINCT r.workspace_id, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      FROM procedural_rules r
+     WHERE r.id IN (OLD.rule_id, NEW.rule_id);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id IN (
+        SELECT DISTINCT r.workspace_id
+          FROM procedural_rules r
+         WHERE r.id IN (OLD.rule_id, NEW.rule_id)
+     );
+END;
+
+CREATE TRIGGER trg_workspace_generations_rule_tags_delete
+AFTER DELETE ON rule_tags
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id IN (
+        SELECT r.workspace_id FROM procedural_rules r WHERE r.id = OLD.rule_id
+     );
+END;
+
+CREATE TRIGGER trg_workspace_generations_rule_source_memories_insert
+AFTER INSERT ON rule_source_memories
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    SELECT r.workspace_id, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      FROM procedural_rules r
+     WHERE r.id = NEW.rule_id;
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id IN (
+        SELECT r.workspace_id FROM procedural_rules r WHERE r.id = NEW.rule_id
+     );
+END;
+
+CREATE TRIGGER trg_workspace_generations_rule_source_memories_update
+AFTER UPDATE ON rule_source_memories
+WHEN OLD.rule_id IS NOT NEW.rule_id OR OLD.memory_id IS NOT NEW.memory_id
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    SELECT DISTINCT r.workspace_id, 0, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      FROM procedural_rules r
+     WHERE r.id IN (OLD.rule_id, NEW.rule_id);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id IN (
+        SELECT DISTINCT r.workspace_id
+          FROM procedural_rules r
+         WHERE r.id IN (OLD.rule_id, NEW.rule_id)
+     );
+END;
+
+CREATE TRIGGER trg_workspace_generations_rule_source_memories_delete
+AFTER DELETE ON rule_source_memories
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id IN (
+        SELECT r.workspace_id FROM procedural_rules r WHERE r.id = OLD.rule_id
+     );
+END;
+
+INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+SELECT id, 0, updated_at FROM workspaces;
+
+UPDATE workspace_generations
+   SET generation = generation
+       + (SELECT COUNT(*) FROM procedural_rules r
+           WHERE r.workspace_id = workspace_generations.workspace_id)
+       + (SELECT COUNT(*) FROM rule_tags rt
+           JOIN procedural_rules r ON r.id = rt.rule_id
+          WHERE r.workspace_id = workspace_generations.workspace_id)
+       + (SELECT COUNT(*) FROM rule_source_memories rsm
+           JOIN procedural_rules r ON r.id = rsm.rule_id
+          WHERE r.workspace_id = workspace_generations.workspace_id),
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+ WHERE EXISTS (
+    SELECT 1 FROM procedural_rules r
+     WHERE r.workspace_id = workspace_generations.workspace_id
+ );
+"#,
+    "blake3:v086_rule_index_generations_2026_07_28",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -7289,6 +7524,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V083_ERROR_FINGERPRINT_GENERATION_TRIGGERS,
     V084_PACK_RECORD_PROFILE_DOMAIN,
     V085_EVIDENCE_SECURITY_POSTURE,
+    V086_RULE_INDEX_GENERATIONS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -17452,6 +17688,28 @@ impl DbConnection {
             .collect()
     }
 
+    /// Bulk-load every rule tag in one workspace for index projection.
+    ///
+    /// The stable `(rule_id, tag)` ordering and `BTreeMap` output let callers
+    /// build the complete rule corpus with one query instead of one query per
+    /// rule. The table primary key already enforces uniqueness; the explicit
+    /// deduplication is defensive against malformed legacy stores.
+    pub fn list_rule_tags_for_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Result<BTreeMap<String, Vec<String>>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT rt.rule_id, rt.tag
+               FROM rule_tags rt
+               JOIN procedural_rules r ON r.id = rt.rule_id
+              WHERE r.workspace_id = ?1
+              ORDER BY rt.rule_id ASC, rt.tag ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+        grouped_rule_strings(&rows, "rule_tags.rule_id", "rule_tags.tag")
+    }
+
     /// Get source memory IDs for a procedural rule in stable order.
     pub fn get_rule_source_memory_ids(&self, rule_id: &str) -> Result<Vec<String>> {
         let rows = self.query_for(
@@ -17464,6 +17722,49 @@ impl DbConnection {
             .map(|row| required_text(row, 0, DbOperation::Query, "memory_id").map(str::to_string))
             .collect()
     }
+
+    /// Bulk-load every source-memory provenance edge in one workspace.
+    ///
+    /// Source memory IDs are provenance, not replacement rule identities.
+    /// Keeping this query separate from the rule row scan avoids Cartesian
+    /// multiplication between tags and sources while still preventing N+1
+    /// projection reads.
+    pub fn list_rule_source_memory_ids_for_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Result<BTreeMap<String, Vec<String>>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT rsm.rule_id, rsm.memory_id
+               FROM rule_source_memories rsm
+               JOIN procedural_rules r ON r.id = rsm.rule_id
+              WHERE r.workspace_id = ?1
+              ORDER BY rsm.rule_id ASC, rsm.memory_id ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+        grouped_rule_strings(
+            &rows,
+            "rule_source_memories.rule_id",
+            "rule_source_memories.memory_id",
+        )
+    }
+}
+
+fn grouped_rule_strings(
+    rows: &[Row],
+    key_column: &str,
+    value_column: &str,
+) -> Result<BTreeMap<String, Vec<String>>> {
+    let mut grouped = BTreeMap::<String, Vec<String>>::new();
+    for row in rows {
+        let key = required_text(row, 0, DbOperation::Query, key_column)?.to_owned();
+        let value = required_text(row, 1, DbOperation::Query, value_column)?.to_owned();
+        let values = grouped.entry(key).or_default();
+        if values.last() != Some(&value) {
+            values.push(value);
+        }
+    }
+    Ok(grouped)
 }
 
 fn stored_procedural_rule_from_row(row: &Row) -> Result<StoredProceduralRule> {
@@ -27309,6 +27610,291 @@ mod tests {
         ensure(
             generation_after > generation_before,
             "V085 must invalidate pre-migration index generations",
+        )
+    }
+
+    #[test]
+    fn v086_rule_projection_mutations_advance_generation_transactionally() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 85)?;
+        let workspace_id = "wsp_gen00000000000000000000000";
+        let other_workspace_id = "wsp_11111111111111111111111111";
+        for (id, path) in [
+            (workspace_id, "/tmp/v086-rule-generation"),
+            (other_workspace_id, "/tmp/v086-rule-generation-other"),
+        ] {
+            connection.insert_workspace(
+                id,
+                &CreateWorkspaceInput {
+                    path: path.to_owned(),
+                    name: Some("V086 rule generation".to_owned()),
+                },
+            )?;
+        }
+        for (id, content) in [
+            (
+                "mem_gen00000000000000000000001",
+                "Primary V086 rule evidence.",
+            ),
+            (
+                "mem_gen00000000000000000000002",
+                "Secondary V086 rule evidence.",
+            ),
+            (
+                "mem_gen00000000000000000000003",
+                "Replacement V086 rule evidence.",
+            ),
+        ] {
+            connection.insert_memory(id, &test_memory_input(workspace_id, content))?;
+        }
+
+        let rule_id = "rule_01234567890123456789012345";
+        connection.insert_procedural_rule(
+            rule_id,
+            &CreateProceduralRuleInput {
+                workspace_id: workspace_id.to_owned(),
+                content: "Run the release verifier before publishing.".to_owned(),
+                confidence: 0.812_345,
+                utility: 0.623_456,
+                importance: 0.734_567,
+                trust_class: "human_explicit".to_owned(),
+                scope: "workspace".to_owned(),
+                scope_pattern: None,
+                maturity: "candidate".to_owned(),
+                protected: false,
+                source_memory_ids: vec!["mem_gen00000000000000000000001".to_owned()],
+                tags: vec!["release".to_owned()],
+            },
+        )?;
+        let generation_before = workspace_generation(&connection, workspace_id)?;
+        ensure_equal(
+            &generation_before,
+            &3,
+            "pre-V086 rule and junction writes do not advance generation",
+        )?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE workspace_generations SET generation = 100 WHERE workspace_id = ?1",
+            &[Value::Text(other_workspace_id.to_owned())],
+        )?;
+        connection.insert_procedural_rule(
+            "rule_11111111111111111111111111",
+            &CreateProceduralRuleInput {
+                workspace_id: other_workspace_id.to_owned(),
+                content: "Keep the other workspace isolated.".to_owned(),
+                confidence: 0.5,
+                utility: 0.5,
+                importance: 0.5,
+                trust_class: "agent_assertion".to_owned(),
+                scope: "workspace".to_owned(),
+                scope_pattern: None,
+                maturity: "candidate".to_owned(),
+                protected: false,
+                source_memory_ids: Vec::new(),
+                tags: vec!["isolation".to_owned()],
+            },
+        )?;
+
+        let outcome = connection
+            .apply_migration(&super::V086_RULE_INDEX_GENERATIONS, "2026-07-28T00:00:00Z")?;
+        ensure(
+            outcome == super::ApplyOutcome::Applied,
+            "V086 migration must apply",
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &(generation_before + 3),
+            "V086 invalidates one legacy rule, tag, and source-memory join",
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, other_workspace_id)?,
+            &102,
+            "V086 advances rather than rewinds an already higher generation",
+        )?;
+
+        let other_generation = workspace_generation(&connection, other_workspace_id)?;
+        let before_noop = workspace_generation(&connection, workspace_id)?;
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE procedural_rules SET protected = protected, updated_at = updated_at WHERE id = ?1",
+            &[Value::Text(rule_id.to_owned())],
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &before_noop,
+            "null-safe V086 predicate suppresses a true no-op update",
+        )?;
+
+        ensure(
+            connection.update_procedural_rule_protected(rule_id, workspace_id, true)?,
+            "protect update must find the active rule",
+        )?;
+        let after_protect = before_noop + 1;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &after_protect,
+            "protect advances generation",
+        )?;
+
+        let rollback_result: std::result::Result<(), DbError> = connection.with_transaction(|| {
+            connection.execute_for(
+                DbOperation::Execute,
+                "UPDATE procedural_rules SET protected = 0, updated_at = ?1 WHERE id = ?2",
+                &[
+                    Value::Text("2026-07-28T00:00:01Z".to_owned()),
+                    Value::Text(rule_id.to_owned()),
+                ],
+            )?;
+            Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "intentional V086 rollback".to_owned(),
+            })
+        });
+        ensure(
+            rollback_result.is_err(),
+            "intentional V086 mutation failure must surface",
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &after_protect,
+            "rolled-back rule mutation also rolls back its generation bump",
+        )?;
+        ensure(
+            connection
+                .get_procedural_rule(rule_id)?
+                .is_some_and(|rule| rule.protected),
+            "rolled-back protect mutation leaves the rule unchanged",
+        )?;
+
+        let superseding_rule_id = "rule_22222222222222222222222222";
+        connection.insert_procedural_rule(
+            superseding_rule_id,
+            &CreateProceduralRuleInput {
+                workspace_id: workspace_id.to_owned(),
+                content: "Use the replacement release verifier.".to_owned(),
+                confidence: 0.9,
+                utility: 0.8,
+                importance: 0.7,
+                trust_class: "agent_validated".to_owned(),
+                scope: "workspace".to_owned(),
+                scope_pattern: None,
+                maturity: "validated".to_owned(),
+                protected: false,
+                source_memory_ids: Vec::new(),
+                tags: Vec::new(),
+            },
+        )?;
+        let after_insert = after_protect + 1;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &after_insert,
+            "rule insert advances generation",
+        )?;
+        connection.update_procedural_rule_lifecycle(
+            rule_id,
+            &UpdateProceduralRuleLifecycleInput {
+                workspace_id: workspace_id.to_owned(),
+                maturity: "superseded".to_owned(),
+                confidence: 0.82,
+                utility: 0.61,
+                positive_feedback_delta: 1,
+                negative_feedback_delta: 0,
+                validation_passes_delta: 1,
+                validation_contradictions_delta: 0,
+                last_validated_at: Some("2026-07-28T00:00:02Z".to_owned()),
+                superseded_by: Some(superseding_rule_id.to_owned()),
+                updated_at: "2026-07-28T00:00:02Z".to_owned(),
+            },
+        )?;
+        let after_lifecycle = after_insert + 1;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &after_lifecycle,
+            "lifecycle and supersession update advances generation once",
+        )?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO rule_tags (rule_id, tag) VALUES (?1, ?2)",
+            &[
+                Value::Text(rule_id.to_owned()),
+                Value::Text("verification".to_owned()),
+            ],
+        )?;
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE rule_tags SET tag = ?1 WHERE rule_id = ?2 AND tag = ?3",
+            &[
+                Value::Text("verification-updated".to_owned()),
+                Value::Text(rule_id.to_owned()),
+                Value::Text("verification".to_owned()),
+            ],
+        )?;
+        connection.execute_for(
+            DbOperation::Execute,
+            "DELETE FROM rule_tags WHERE rule_id = ?1 AND tag = ?2",
+            &[
+                Value::Text(rule_id.to_owned()),
+                Value::Text("verification-updated".to_owned()),
+            ],
+        )?;
+        let after_tag_mutations = after_lifecycle + 3;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &after_tag_mutations,
+            "tag insert, update, and delete each advance generation",
+        )?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO rule_source_memories (rule_id, memory_id) VALUES (?1, ?2)",
+            &[
+                Value::Text(rule_id.to_owned()),
+                Value::Text("mem_gen00000000000000000000002".to_owned()),
+            ],
+        )?;
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE rule_source_memories SET memory_id = ?1 WHERE rule_id = ?2 AND memory_id = ?3",
+            &[
+                Value::Text("mem_gen00000000000000000000003".to_owned()),
+                Value::Text(rule_id.to_owned()),
+                Value::Text("mem_gen00000000000000000000002".to_owned()),
+            ],
+        )?;
+        connection.execute_for(
+            DbOperation::Execute,
+            "DELETE FROM rule_source_memories WHERE rule_id = ?1 AND memory_id = ?2",
+            &[
+                Value::Text(rule_id.to_owned()),
+                Value::Text("mem_gen00000000000000000000003".to_owned()),
+            ],
+        )?;
+        let after_source_mutations = after_tag_mutations + 3;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &after_source_mutations,
+            "source-memory insert, update, and delete each advance generation",
+        )?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE procedural_rules SET tombstoned_at = ?1, updated_at = ?1 WHERE id = ?2",
+            &[
+                Value::Text("2026-07-28T00:00:03Z".to_owned()),
+                Value::Text(rule_id.to_owned()),
+            ],
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, workspace_id)?,
+            &(after_source_mutations + 1),
+            "rule tombstone advances generation",
+        )?;
+        ensure_equal(
+            &workspace_generation(&connection, other_workspace_id)?,
+            &other_generation,
+            "rule mutations remain isolated to the owning workspace",
         )
     }
 

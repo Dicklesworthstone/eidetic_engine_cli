@@ -13,7 +13,7 @@ use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DbConnection, DbError,
     DbOperation, EVIDENCE_SECURITY_POLICY_EPOCH, EvidenceAdmissionReport,
-    ModelRegistryUpsertOutcome, SearchIndexJobType, StoredSearchIndexJob,
+    ModelRegistryUpsertOutcome, SearchIndexJobStatus, SearchIndexJobType, StoredSearchIndexJob,
 };
 use crate::models::MemoryId;
 use crate::models::model_registry::{
@@ -25,9 +25,10 @@ use crate::models::{
     EMBEDDING_POSTURE_MODE_NEURAL_LOCAL_PENDING, EMBEDDING_POSTURE_SCHEMA_V1,
 };
 use crate::search::{
-    CanonicalSearchDocument, EmbedderStack, HashEmbedder, IndexBuilder, artifact_to_document,
-    evidence_span_to_document, memory_to_document_with_context_anchors_and_typed_fields,
-    rule_to_document, session_to_document,
+    CanonicalSearchDocument, EmbedderStack, HashEmbedder, IndexBuilder, RuleIndexProjection,
+    artifact_to_document, evidence_span_to_document,
+    memory_to_document_with_context_anchors_and_typed_fields, rule_to_document,
+    session_to_document,
 };
 #[cfg(feature = "lexical-bm25")]
 use crate::search::{LexicalSearch, TantivyIndex};
@@ -933,39 +934,18 @@ pub fn rebuild_index(
 
     let db = DbConnection::open_file(&database_path)?;
     let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
-    let (_, _, db_generation) = get_db_stats(&db)?;
-    let source_generation = db
-        .get_workspace_generation(&workspace_id)?
-        .or(db_generation);
-
-    let memories = db.list_memories_for_retrieval_with_global(&workspace_id, None, false)?;
-    let sessions = db.list_sessions(&workspace_id)?;
-    let artifacts = db.list_artifacts(&workspace_id, None)?;
-
-    let memory_docs = memory_documents_with_anchors(&db, &memories)?;
-    let session_docs: Vec<CanonicalSearchDocument> =
-        sessions.iter().map(session_to_document).collect();
-    let artifact_docs: Vec<CanonicalSearchDocument> =
-        artifacts.iter().map(artifact_to_document).collect();
-    let rule_docs = rule_documents(&db, &workspace_id)?;
-    let evidence_selection = evidence_documents(&db, &workspace_id)?;
-    let evidence_admission = evidence_selection.admission;
-    let evidence_docs = evidence_selection.documents;
-
-    let (
+    let WorkspaceIndexSourceSnapshot {
+        generation: source_generation,
         memories_indexed,
         sessions_indexed,
         artifacts_indexed,
-        _rules_indexed,
-        _evidence_indexed,
+        rules_indexed: _,
+        evidence_indexed: _,
         documents_total,
-    ) = checked_document_counts(
-        memory_docs.len(),
-        session_docs.len(),
-        artifact_docs.len(),
-        rule_docs.len(),
-        evidence_docs.len(),
-    )?;
+        documents: indexable_docs,
+        evidence_admission,
+        open_job_ids: _,
+    } = collect_workspace_index_source_snapshot(&db, &workspace_id)?;
 
     if options.dry_run {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -984,23 +964,6 @@ pub fn rebuild_index(
         });
     }
 
-    if documents_total == 0 {
-        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        return Ok(IndexRebuildReport {
-            status: IndexRebuildStatus::NoDocuments,
-            memories_indexed: 0,
-            sessions_indexed: 0,
-            artifacts_indexed: 0,
-            documents_total: 0,
-            index_dir,
-            elapsed_ms,
-            dry_run: false,
-            evidence_admission,
-            errors: Vec::new(),
-            runtime_profile,
-        });
-    }
-
     // Acquire index publish lock to prevent concurrent publish races.
     let holder_id = generate_index_holder_id();
     acquire_index_publish_lock(&db, &workspace_id, &holder_id)?;
@@ -1009,38 +972,31 @@ pub fn rebuild_index(
         let _recovery_action = recover_interrupted_publish(&index_dir)?;
         let staging_dir = create_publish_staging_dir(&index_dir)?;
 
-        let indexable_docs: Vec<_> = memory_docs
-            .into_iter()
-            .chain(session_docs)
-            .chain(artifact_docs)
-            .chain(rule_docs)
-            .chain(evidence_docs)
-            .map(|doc| doc.into_indexable())
-            .collect();
-
         let stack = default_embedder_stack();
         let registry_stack = stack.clone();
 
-        let build_result = build_index_sync(&staging_dir, stack, indexable_docs);
+        let build_result = build_index_generation_sync(&staging_dir, stack, indexable_docs);
 
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         match build_result {
             Ok(stats) => {
                 ensure_active_embedding_registry_record(&db, &workspace_id, &registry_stack)?;
-                let published_generation =
-                    source_generation.unwrap_or_else(|| u64::from(documents_total));
                 let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&registry_stack);
                 write_index_metadata(
                     &staging_dir,
-                    published_generation,
+                    source_generation,
                     documents_total,
                     embedder_fingerprint.as_ref(),
                 )?;
                 publish_staged_index(&index_dir, &staging_dir)?;
 
                 Ok(IndexRebuildReport {
-                    status: IndexRebuildStatus::Success,
+                    status: if documents_total == 0 {
+                        IndexRebuildStatus::NoDocuments
+                    } else {
+                        IndexRebuildStatus::Success
+                    },
                     memories_indexed,
                     sessions_indexed,
                     artifacts_indexed,
@@ -1087,40 +1043,19 @@ pub fn reembed_index(
 
     let db = DbConnection::open_file(&database_path)?;
     let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
-    let (_, _, db_generation) = get_db_stats(&db)?;
-    let source_generation = db
-        .get_workspace_generation(&workspace_id)?
-        .or(db_generation);
-
-    let memories = db.list_memories_for_retrieval_with_global(&workspace_id, None, false)?;
-    let sessions = db.list_sessions(&workspace_id)?;
-    let artifacts = db.list_artifacts(&workspace_id, None)?;
     let stack = default_embedder_stack();
-
-    let memory_docs = memory_documents_with_anchors(&db, &memories)?;
-    let session_docs: Vec<CanonicalSearchDocument> =
-        sessions.iter().map(session_to_document).collect();
-    let artifact_docs: Vec<CanonicalSearchDocument> =
-        artifacts.iter().map(artifact_to_document).collect();
-    let rule_docs = rule_documents(&db, &workspace_id)?;
-    let evidence_selection = evidence_documents(&db, &workspace_id)?;
-    let evidence_admission = evidence_selection.admission;
-    let evidence_docs = evidence_selection.documents;
-
-    let (
+    let WorkspaceIndexSourceSnapshot {
+        generation: source_generation,
         memories_indexed,
         sessions_indexed,
         artifacts_indexed,
-        _rules_indexed,
-        _evidence_indexed,
+        rules_indexed: _,
+        evidence_indexed: _,
         documents_total,
-    ) = checked_document_counts(
-        memory_docs.len(),
-        session_docs.len(),
-        artifact_docs.len(),
-        rule_docs.len(),
-        evidence_docs.len(),
-    )?;
+        documents: indexable_docs,
+        evidence_admission,
+        open_job_ids: _,
+    } = collect_workspace_index_source_snapshot(&db, &workspace_id)?;
     let current_vector_coverage =
         embedding_vector_coverage(&index_dir, documents_total, read_fast_vector_record_count);
     let embedding = reembed_embedding_summary(&db, &workspace_id, &stack, current_vector_coverage)?;
@@ -1172,32 +1107,6 @@ pub fn reembed_index(
         )));
     }
 
-    if documents_total == 0 {
-        db.complete_search_index_job(&job_id, 0)?;
-        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        return Ok(IndexReembedReport {
-            status: IndexReembedStatus::NoDocuments,
-            job_id: Some(job_id),
-            job_status: "completed".to_owned(),
-            job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
-            document_source: None,
-            embedding_scope: "all_documents".to_owned(),
-            embedding,
-            memories_indexed: 0,
-            sessions_indexed: 0,
-            artifacts_indexed: 0,
-            documents_embedded: 0,
-            documents_total: 0,
-            index_dir,
-            elapsed_ms,
-            dry_run: false,
-            idempotency_key,
-            evidence_admission,
-            errors: Vec::new(),
-            runtime_profile,
-        });
-    }
-
     // Acquire index publish lock to prevent concurrent publish races.
     let holder_id = generate_index_holder_id();
     acquire_index_publish_lock(&db, &workspace_id, &holder_id)?;
@@ -1205,29 +1114,19 @@ pub fn reembed_index(
     let result = (|| -> Result<IndexReembedReport, IndexRebuildError> {
         let _recovery_action = recover_interrupted_publish(&index_dir)?;
         let staging_dir = create_publish_staging_dir(&index_dir)?;
-        let indexable_docs: Vec<_> = memory_docs
-            .into_iter()
-            .chain(session_docs)
-            .chain(artifact_docs)
-            .chain(rule_docs)
-            .chain(evidence_docs)
-            .map(|doc| doc.into_indexable())
-            .collect();
 
         let registry_stack = stack.clone();
-        let build_result = build_index_sync(&staging_dir, stack, indexable_docs);
+        let build_result = build_index_generation_sync(&staging_dir, stack, indexable_docs);
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         match build_result {
             Ok(stats) => {
                 ensure_active_embedding_registry_record(&db, &workspace_id, &registry_stack)?;
                 db.update_search_index_job_progress(&job_id, documents_total)?;
-                let published_generation =
-                    source_generation.unwrap_or_else(|| u64::from(documents_total));
                 let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&registry_stack);
                 write_index_metadata(
                     &staging_dir,
-                    published_generation,
+                    source_generation,
                     documents_total,
                     embedder_fingerprint.as_ref(),
                 )
@@ -1246,7 +1145,11 @@ pub fn reembed_index(
                 let documents_embedded = published_embedding.documents_embedded();
 
                 Ok(IndexReembedReport {
-                    status: IndexReembedStatus::Success,
+                    status: if documents_total == 0 {
+                        IndexReembedStatus::NoDocuments
+                    } else {
+                        IndexReembedStatus::Success
+                    },
                     job_id: Some(job_id),
                     job_status: "completed".to_owned(),
                     job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
@@ -1432,6 +1335,25 @@ pub(crate) fn process_pending_index_jobs_coalesced(
     index_dir: &Path,
     job_limit: Option<u32>,
 ) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError> {
+    process_pending_index_jobs_coalesced_after_snapshot(
+        db,
+        workspace_id,
+        index_dir,
+        job_limit,
+        || Ok(()),
+    )
+}
+
+fn process_pending_index_jobs_coalesced_after_snapshot<F>(
+    db: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+    job_limit: Option<u32>,
+    after_snapshot: F,
+) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError>
+where
+    F: FnOnce() -> Result<(), IndexRebuildError>,
+{
     const COALESCED_MODE: &str = "coalesced_full_rebuild";
     // bd-d67os.7: mode reported when the coalesced batch applied its K touched
     // docs as a single incremental merge step instead of a full rebuild.
@@ -1461,35 +1383,17 @@ pub(crate) fn process_pending_index_jobs_coalesced(
         return Ok(reports);
     }
 
-    let (_memories_indexed, _sessions_indexed, documents_total, indexable_docs) =
-        collect_workspace_indexable_documents(db, workspace_id)?;
+    let WorkspaceIndexSourceSnapshot {
+        generation: published_generation,
+        documents_total,
+        documents: indexable_docs,
+        open_job_ids,
+        ..
+    } = collect_workspace_index_source_snapshot(db, workspace_id)?;
+    after_snapshot()?;
     for job in &claimed {
         db.update_search_index_job_total(&job.id, documents_total)?;
     }
-
-    if documents_total == 0 {
-        for job in &claimed {
-            db.complete_search_index_job(&job.id, 0)?;
-            reports.push(IndexProcessingJobReport {
-                job_id: job.id.clone(),
-                job_type: job.job_type.clone(),
-                document_source: job.document_source.clone(),
-                document_id: job.document_id.clone(),
-                outcome: "completed_no_documents".to_owned(),
-                processing_mode: COALESCED_MODE.to_owned(),
-                fallback_to_full: None,
-                documents_total: 0,
-                documents_indexed: 0,
-                error: None,
-            });
-        }
-        return Ok(reports);
-    }
-
-    let published_generation = db
-        .get_workspace_generation(workspace_id)?
-        .or(get_db_stats(db)?.2)
-        .unwrap_or_else(|| u64::from(documents_total));
 
     // bd-d67os.7: when every coalesced job is a simple single-document upsert to
     // a doc that is currently present, and the index already exists, apply the K
@@ -1498,8 +1402,22 @@ pub(crate) fn process_pending_index_jobs_coalesced(
     // Any FullRebuild job, deleted/missing target, absent index, or incremental
     // error falls back to the proven full-rebuild path, so the published index
     // state is always correct; only the all-upsert case takes the merge path.
-    let incremental_batch = coalesced_incremental_batch(&claimed, &indexable_docs);
+    let claimed_ids = claimed
+        .iter()
+        .map(|job| job.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let uncovered_open_job = open_job_ids
+        .iter()
+        .any(|job_id| !claimed_ids.contains(job_id.as_str()));
+    let incremental_batch = if uncovered_open_job {
+        None
+    } else {
+        coalesced_incremental_batch(&claimed, &indexable_docs)
+    };
     let mut processing_mode = COALESCED_MODE.to_owned();
+    if uncovered_open_job {
+        processing_mode.push_str("_open_sibling_full_rebuild");
+    }
     let mut fallback_to_full = None;
     let holder_id = generate_index_holder_id();
     acquire_index_publish_lock(db, workspace_id, &holder_id)?;
@@ -1541,7 +1459,7 @@ pub(crate) fn process_pending_index_jobs_coalesced(
                 create_publish_staging_dir(index_dir).map_err(|error| error.to_string())?;
             let stack = default_embedder_stack();
             let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
-            build_index_sync(&staging_dir, stack, indexable_docs).and_then(|_stats| {
+            build_index_generation_sync(&staging_dir, stack, indexable_docs).and_then(|_stats| {
                 write_index_metadata(
                     &staging_dir,
                     published_generation,
@@ -1617,6 +1535,18 @@ fn process_one_index_job(
     job: &StoredSearchIndexJob,
     index_dir: &Path,
 ) -> Result<IndexProcessingJobReport, IndexRebuildError> {
+    process_one_index_job_after_snapshot(db, job, index_dir, || Ok(()))
+}
+
+fn process_one_index_job_after_snapshot<F>(
+    db: &DbConnection,
+    job: &StoredSearchIndexJob,
+    index_dir: &Path,
+    after_snapshot: F,
+) -> Result<IndexProcessingJobReport, IndexRebuildError>
+where
+    F: FnOnce() -> Result<(), IndexRebuildError>,
+{
     let mut processing_mode = processing_mode_for_job(job).to_owned();
     if !db.start_search_index_job(&job.id)? {
         return Ok(IndexProcessingJobReport {
@@ -1633,8 +1563,14 @@ fn process_one_index_job(
         });
     }
 
-    let (_memories_indexed, _sessions_indexed, documents_total, indexable_docs) =
-        collect_workspace_indexable_documents(db, &job.workspace_id)?;
+    let WorkspaceIndexSourceSnapshot {
+        generation: published_generation,
+        documents_total,
+        documents: indexable_docs,
+        open_job_ids,
+        ..
+    } = collect_workspace_index_source_snapshot(db, &job.workspace_id)?;
+    after_snapshot()?;
     db.update_search_index_job_total(&job.id, documents_total)?;
 
     let incremental_target = incremental_document_id_for_job(job);
@@ -1654,14 +1590,11 @@ fn process_one_index_job(
     // then publish a current-generation-but-INCOMPLETE index, and a concurrent
     // `ee search` would read index_gen == db_gen, see `Ready`, and silently
     // miss the sibling document (the bd-d67os.6 regression). When other index
-    // jobs are still pending for this workspace we rebuild the COMPLETE
+    // jobs are still open for this workspace we rebuild the COMPLETE
     // indexable set instead, so the published generation truthfully reflects
-    // every committed document. The coalesced batch path already applies all
-    // touched documents together and is unaffected.
-    let sibling_index_jobs_pending = db
-        .list_pending_search_index_jobs(&job.workspace_id, None)?
-        .iter()
-        .any(|pending| pending.id != job.id);
+    // every committed document. The coalesced path uses the same snapshot and
+    // applies incrementally only when every open job belongs to its claim set.
+    let sibling_index_jobs_pending = open_job_ids.iter().any(|job_id| job_id != &job.id);
     let job_is_single_document = matches!(
         job.job_type_enum(),
         Some(SearchIndexJobType::Incremental | SearchIndexJobType::SingleDocument)
@@ -1671,22 +1604,6 @@ fn process_one_index_job(
     }
     let should_try_incremental = job_is_single_document && !sibling_index_jobs_pending;
 
-    if documents_total == 0 && (!should_try_incremental || incremental_target.is_none()) {
-        db.complete_search_index_job(&job.id, 0)?;
-        return Ok(IndexProcessingJobReport {
-            job_id: job.id.clone(),
-            job_type: job.job_type.clone(),
-            document_source: job.document_source.clone(),
-            document_id: job.document_id.clone(),
-            outcome: "completed_no_documents".to_owned(),
-            processing_mode,
-            fallback_to_full: None,
-            documents_total: 0,
-            documents_indexed: 0,
-            error: None,
-        });
-    }
-
     // Publish the index at the database generation (the audit-inclusive
     // max of source-document and audited-mutation counts), matching the
     // full-rebuild path at write_index_metadata above. Writing only
@@ -1694,11 +1611,6 @@ fn process_one_index_job(
     // behind db_generation after `ee remember` wrote its audit rows, which
     // falsely tripped `search_index_stale` on the very next search even
     // though the job had already applied synchronously. (agent-UX item 5)
-    let published_generation = db
-        .get_workspace_generation(&job.workspace_id)?
-        .or(get_db_stats(db)?.2)
-        .unwrap_or_else(|| u64::from(documents_total));
-
     // Acquire index publish lock to prevent concurrent publish races.
     let holder_id = generate_index_holder_id();
     acquire_index_publish_lock(db, &job.workspace_id, &holder_id)?;
@@ -1936,7 +1848,7 @@ fn publish_full_index_generation(
     let staging_dir = create_publish_staging_dir(index_dir).map_err(|error| error.to_string())?;
     let stack = default_embedder_stack();
     let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
-    build_index_sync(&staging_dir, stack, indexable_docs).and_then(|stats| {
+    build_index_generation_sync(&staging_dir, stack, indexable_docs).and_then(|stats| {
         write_index_metadata(
             &staging_dir,
             generation,
@@ -2517,48 +2429,93 @@ fn open_lexical_index(index_dir: &Path) -> Result<TantivyIndex, IncrementalFallb
     })
 }
 
-fn collect_workspace_indexable_documents(
+struct WorkspaceIndexSourceSnapshot {
+    generation: u64,
+    memories_indexed: u32,
+    sessions_indexed: u32,
+    artifacts_indexed: u32,
+    rules_indexed: u32,
+    evidence_indexed: u32,
+    documents_total: u32,
+    documents: Vec<crate::search::IndexableDocument>,
+    evidence_admission: EvidenceAdmissionReport,
+    open_job_ids: BTreeSet<String>,
+}
+
+/// Capture one writer-fenced source snapshot for every index publisher.
+///
+/// Generation is read before any corpus table. The surrounding
+/// `BEGIN IMMEDIATE` prevents a source writer from committing midway through
+/// the multi-table projection, while still releasing the database before
+/// expensive embedding and filesystem publication. A writer that commits
+/// after this function returns necessarily advances beyond `generation`, so
+/// the just-published manifest is truthfully stale rather than falsely ready.
+fn collect_workspace_index_source_snapshot(
     db: &DbConnection,
     workspace_id: &str,
-) -> Result<(u32, u32, u32, Vec<crate::search::IndexableDocument>), IndexRebuildError> {
-    let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false)?;
-    let sessions = db.list_sessions(workspace_id)?;
-    let artifacts = db.list_artifacts(workspace_id, None)?;
-    let memory_docs = memory_documents_with_anchors(db, &memories)?;
-    let session_docs: Vec<CanonicalSearchDocument> =
-        sessions.iter().map(session_to_document).collect();
-    let artifact_docs: Vec<CanonicalSearchDocument> =
-        artifacts.iter().map(artifact_to_document).collect();
-    let rule_docs = rule_documents(db, workspace_id)?;
-    let evidence_docs = evidence_documents(db, workspace_id)?.documents;
-    let (
-        memories_indexed,
-        sessions_indexed,
-        _artifacts_indexed,
-        _rules_indexed,
-        _evidence_indexed,
-        documents_total,
-    ) = checked_document_counts(
-        memory_docs.len(),
-        session_docs.len(),
-        artifact_docs.len(),
-        rule_docs.len(),
-        evidence_docs.len(),
-    )?;
-    let indexable_docs = memory_docs
-        .into_iter()
-        .chain(session_docs)
-        .chain(artifact_docs)
-        .chain(rule_docs)
-        .chain(evidence_docs)
-        .map(|doc| doc.into_indexable())
-        .collect();
-    Ok((
-        memories_indexed,
-        sessions_indexed,
-        documents_total,
-        indexable_docs,
-    ))
+) -> Result<WorkspaceIndexSourceSnapshot, IndexRebuildError> {
+    db.with_transaction_error(|| {
+        let captured_generation = db
+            .get_workspace_generation(workspace_id)?
+            .or(get_db_stats(db)?.2);
+        let memories = db.list_memories_for_retrieval_with_global(workspace_id, None, false)?;
+        let sessions = db.list_sessions(workspace_id)?;
+        let artifacts = db.list_artifacts(workspace_id, None)?;
+        let memory_docs = memory_documents_with_anchors(db, &memories)?;
+        let session_docs: Vec<CanonicalSearchDocument> =
+            sessions.iter().map(session_to_document).collect();
+        let artifact_docs: Vec<CanonicalSearchDocument> =
+            artifacts.iter().map(artifact_to_document).collect();
+        let rule_docs = rule_documents(db, workspace_id)?;
+        let evidence_selection = evidence_documents(db, workspace_id)?;
+        let evidence_admission = evidence_selection.admission;
+        let evidence_docs = evidence_selection.documents;
+        let (
+            memories_indexed,
+            sessions_indexed,
+            artifacts_indexed,
+            rules_indexed,
+            evidence_indexed,
+            documents_total,
+        ) = checked_document_counts(
+            memory_docs.len(),
+            session_docs.len(),
+            artifact_docs.len(),
+            rule_docs.len(),
+            evidence_docs.len(),
+        )?;
+        let documents = memory_docs
+            .into_iter()
+            .chain(session_docs)
+            .chain(artifact_docs)
+            .chain(rule_docs)
+            .chain(evidence_docs)
+            .map(CanonicalSearchDocument::into_indexable)
+            .collect();
+        let open_job_ids = db
+            .list_search_index_jobs(workspace_id, None)?
+            .into_iter()
+            .filter(|job| {
+                matches!(
+                    job.status_enum(),
+                    Some(SearchIndexJobStatus::Pending | SearchIndexJobStatus::Running)
+                )
+            })
+            .map(|job| job.id)
+            .collect();
+        Ok(WorkspaceIndexSourceSnapshot {
+            generation: captured_generation.unwrap_or_else(|| u64::from(documents_total)),
+            memories_indexed,
+            sessions_indexed,
+            artifacts_indexed,
+            rules_indexed,
+            evidence_indexed,
+            documents_total,
+            documents,
+            evidence_admission,
+            open_job_ids,
+        })
+    })
 }
 
 fn memory_documents_with_anchors(
@@ -3221,11 +3178,23 @@ fn rule_documents(
     db: &DbConnection,
     workspace_id: &str,
 ) -> Result<Vec<CanonicalSearchDocument>, IndexRebuildError> {
+    let workspace = db.get_workspace(workspace_id)?.ok_or_else(|| {
+        IndexRebuildError::Index(format!(
+            "Workspace {workspace_id} disappeared while projecting procedural rules."
+        ))
+    })?;
     let rules = db.list_procedural_rules(workspace_id, None, None, false)?;
+    let mut tags_by_rule = db.list_rule_tags_for_workspace(workspace_id)?;
+    let mut sources_by_rule = db.list_rule_source_memory_ids_for_workspace(workspace_id)?;
     Ok(rules
-        .iter()
-        .filter(|rule| rule.superseded_by.is_none())
-        .map(rule_to_document)
+        .into_iter()
+        .map(|rule| {
+            let tags = tags_by_rule.remove(&rule.id).unwrap_or_default();
+            let sources = sources_by_rule.remove(&rule.id).unwrap_or_default();
+            RuleIndexProjection::new(rule, workspace.path.as_str(), tags, sources)
+        })
+        .filter(RuleIndexProjection::is_search_indexable)
+        .map(|projection| rule_to_document(&projection))
         .collect())
 }
 
@@ -3288,6 +3257,79 @@ struct BuildStats {
     #[expect(dead_code)]
     doc_count: usize,
     errors: Vec<(String, String)>,
+}
+
+/// Build a complete index generation, including the zero-document generation.
+///
+/// Frankensearch intentionally rejects an empty [`IndexBuilder`] input. An
+/// empty source corpus is nevertheless a real derived-asset state: publishing
+/// it is what removes the last tombstoned/superseded document and advances the
+/// manifest to the captured database generation. The empty path creates the
+/// same fast/quality/lexical tiers as a normal build, just without records.
+fn build_index_generation_sync(
+    index_dir: &Path,
+    stack: EmbedderStack,
+    documents: Vec<crate::search::IndexableDocument>,
+) -> Result<BuildStats, String> {
+    if documents.is_empty() {
+        build_empty_index_sync(index_dir, stack)
+    } else {
+        build_index_sync(index_dir, stack, documents)
+    }
+}
+
+fn build_empty_index_sync(index_dir: &Path, stack: EmbedderStack) -> Result<BuildStats, String> {
+    std::fs::create_dir_all(index_dir).map_err(|error| {
+        format!(
+            "failed to create empty index directory {}: {error}",
+            index_dir.display()
+        )
+    })?;
+
+    let fast_embedder = stack.fast_arc();
+    let fast_writer = VectorIndex::create(
+        &index_dir.join(VECTOR_INDEX_FAST_FILE),
+        fast_embedder.id(),
+        fast_embedder.dimension(),
+    )
+    .map_err(|error| format!("failed to create empty fast vector tier: {error}"))?;
+    fast_writer
+        .finish()
+        .map_err(|error| format!("failed to finish empty fast vector tier: {error}"))?;
+
+    if let Some(quality_embedder) = stack.quality_arc() {
+        let quality_writer = VectorIndex::create(
+            &index_dir.join(VECTOR_INDEX_QUALITY_FILE),
+            quality_embedder.id(),
+            quality_embedder.dimension(),
+        )
+        .map_err(|error| format!("failed to create empty quality vector tier: {error}"))?;
+        quality_writer
+            .finish()
+            .map_err(|error| format!("failed to finish empty quality vector tier: {error}"))?;
+    }
+
+    #[cfg(feature = "lexical-bm25")]
+    {
+        let lexical_path = index_dir.join(LEXICAL_INDEX_SUBDIR);
+        let lexical_result = crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::current()
+                .ok_or_else(|| "empty lexical index runtime context is unavailable".to_owned())?;
+            let lexical = TantivyIndex::create(&lexical_path)
+                .map_err(|error| format!("failed to create empty lexical tier: {error}"))?;
+            lexical
+                .commit(&cx)
+                .await
+                .map_err(|error| format!("failed to commit empty lexical tier: {error}"))
+        })
+        .map_err(|error| format!("empty lexical index runtime failed: {error}"))?;
+        lexical_result?;
+    }
+
+    Ok(BuildStats {
+        doc_count: 0,
+        errors: Vec::new(),
+    })
 }
 
 fn build_index_sync(
@@ -6392,6 +6434,48 @@ mod tests {
             .with_metadata("fixture", "incremental-index")
     }
 
+    fn insert_snapshot_test_memory_job(
+        connection: &DbConnection,
+        workspace_id: &str,
+        memory_id: &str,
+        job_id: &str,
+        content: &str,
+    ) -> TestResult {
+        connection
+            .insert_memory(
+                memory_id,
+                &crate::db::CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: content.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("test://index-source-snapshot".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_search_index_job(
+                job_id,
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: workspace_id.to_owned(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(memory_id.to_owned()),
+                    documents_total: 1,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
     fn deterministic_incremental_doc(
         slot: u8,
         term: u8,
@@ -7029,6 +7113,317 @@ mod tests {
         )?;
 
         Ok(())
+    }
+
+    #[test]
+    fn single_processor_never_stamps_post_snapshot_commit_current() -> TestResult {
+        let root = unique_test_dir("single-source-snapshot-race");
+        std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let root = std::fs::canonicalize(&root).map_err(|error| error.to_string())?;
+        let index_dir = root.join("index");
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_012345678901234567890123r1";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: root.to_string_lossy().into_owned(),
+                    name: Some("single source snapshot race".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        insert_snapshot_test_memory_job(
+            &connection,
+            workspace_id,
+            "mem_012345678901234567890123r1",
+            "sidx_012345678901234567890123r1",
+            "snapshot seed alpha",
+        )?;
+        process_index_job_for_connection(
+            &connection,
+            "sidx_012345678901234567890123r1",
+            &index_dir,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let beta_job_id = "sidx_012345678901234567890123r2";
+        insert_snapshot_test_memory_job(
+            &connection,
+            workspace_id,
+            "mem_012345678901234567890123r2",
+            beta_job_id,
+            "snapshot beta captured before publication",
+        )?;
+        let beta_job = connection
+            .get_search_index_job(beta_job_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "beta job missing".to_owned())?;
+        let gamma_memory_id = "mem_012345678901234567890123r3";
+        let gamma_job_id = "sidx_012345678901234567890123r3";
+        let beta_report =
+            process_one_index_job_after_snapshot(&connection, &beta_job, &index_dir, || {
+                insert_snapshot_test_memory_job(
+                    &connection,
+                    workspace_id,
+                    gamma_memory_id,
+                    gamma_job_id,
+                    "post snapshot gamma unique phrase",
+                )
+                .map_err(IndexRebuildError::Index)
+            })
+            .map_err(|error| error.to_string())?;
+        ensure(
+            beta_report.outcome == "completed",
+            format!("beta snapshot publication failed: {beta_report:?}"),
+        )?;
+
+        let published_generation = read_index_metadata(&index_dir)
+            .0
+            .ok_or_else(|| "published snapshot generation missing".to_owned())?;
+        let live_generation = connection
+            .get_workspace_generation(workspace_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "live snapshot generation missing".to_owned())?;
+        ensure(
+            published_generation < live_generation,
+            format!(
+                "post-snapshot commit must leave an explicitly stale manifest: published={published_generation:?} live={live_generation:?}"
+            ),
+        )?;
+        ensure(
+            vector_index_snapshot(&index_dir)?.len() == 2,
+            "the captured corpus must contain seed and beta only",
+        )?;
+        ensure(
+            !search_result_snapshot(&index_dir, "post snapshot gamma unique phrase", 10)?
+                .iter()
+                .any(|row| row.doc_id == gamma_memory_id),
+            "gamma must not be mislabeled as represented by the older snapshot",
+        )?;
+
+        process_index_job_for_connection(&connection, gamma_job_id, &index_dir)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            read_index_metadata(&index_dir).0 == Some(live_generation),
+            "draining the post-snapshot job converges the manifest generation",
+        )?;
+        ensure(
+            search_result_snapshot(&index_dir, "post snapshot gamma unique phrase", 10)?
+                .iter()
+                .any(|row| row.doc_id == gamma_memory_id),
+            "gamma must be searchable after its own job is processed",
+        )
+    }
+
+    #[test]
+    fn limited_coalesced_processor_fences_unclaimed_and_post_snapshot_jobs() -> TestResult {
+        let root = unique_test_dir("coalesced-source-snapshot-race");
+        std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let root = std::fs::canonicalize(&root).map_err(|error| error.to_string())?;
+        let index_dir = root.join("index");
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_012345678901234567890123c1";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: root.to_string_lossy().into_owned(),
+                    name: Some("coalesced source snapshot race".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        insert_snapshot_test_memory_job(
+            &connection,
+            workspace_id,
+            "mem_012345678901234567890123c1",
+            "sidx_012345678901234567890123c1",
+            "coalesced snapshot seed",
+        )?;
+        process_index_job_for_connection(
+            &connection,
+            "sidx_012345678901234567890123c1",
+            &index_dir,
+        )
+        .map_err(|error| error.to_string())?;
+        insert_snapshot_test_memory_job(
+            &connection,
+            workspace_id,
+            "mem_012345678901234567890123c2",
+            "sidx_012345678901234567890123c2",
+            "coalesced beta claimed",
+        )?;
+        let delta_memory_id = "mem_012345678901234567890123c3";
+        insert_snapshot_test_memory_job(
+            &connection,
+            workspace_id,
+            delta_memory_id,
+            "sidx_012345678901234567890123c3",
+            "coalesced delta unclaimed but captured",
+        )?;
+        let gamma_memory_id = "mem_012345678901234567890123c4";
+        let reports = process_pending_index_jobs_coalesced_after_snapshot(
+            &connection,
+            workspace_id,
+            &index_dir,
+            Some(1),
+            || {
+                insert_snapshot_test_memory_job(
+                    &connection,
+                    workspace_id,
+                    gamma_memory_id,
+                    "sidx_012345678901234567890123c4",
+                    "coalesced gamma committed after snapshot",
+                )
+                .map_err(IndexRebuildError::Index)
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            reports.len() == 1
+                && reports[0]
+                    .processing_mode
+                    .contains("open_sibling_full_rebuild"),
+            format!("limited coalescing must full-rebuild for an unclaimed open job: {reports:?}"),
+        )?;
+        ensure(
+            vector_index_snapshot(&index_dir)?.len() == 3,
+            "full snapshot must include the unclaimed delta row",
+        )?;
+        let stale_generation = read_index_metadata(&index_dir)
+            .0
+            .ok_or_else(|| "coalesced published generation missing".to_owned())?;
+        let live_generation = connection
+            .get_workspace_generation(workspace_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "coalesced live generation missing".to_owned())?;
+        ensure(
+            stale_generation < live_generation,
+            format!(
+                "post-snapshot gamma commit must remain visibly stale: published={stale_generation:?} live={live_generation:?}"
+            ),
+        )?;
+        let stale_results =
+            search_result_snapshot(&index_dir, "coalesced delta gamma captured", 10)?;
+        ensure(
+            stale_results
+                .iter()
+                .any(|row| row.doc_id == delta_memory_id)
+                && !stale_results
+                    .iter()
+                    .any(|row| row.doc_id == gamma_memory_id),
+            format!("captured delta and post-snapshot gamma posture drifted: {stale_results:?}"),
+        )?;
+
+        let drained =
+            process_pending_index_jobs_coalesced(&connection, workspace_id, &index_dir, None)
+                .map_err(|error| error.to_string())?;
+        ensure(
+            drained.iter().all(|report| report.outcome == "completed"),
+            format!("remaining coalesced jobs did not converge: {drained:?}"),
+        )?;
+        ensure(
+            read_index_metadata(&index_dir).0 == Some(live_generation),
+            "draining remaining jobs must publish the live generation",
+        )?;
+        ensure(
+            search_result_snapshot(&index_dir, "coalesced gamma committed after snapshot", 10)?
+                .iter()
+                .any(|row| row.doc_id == gamma_memory_id),
+            "gamma must be searchable after the bounded queue converges",
+        )
+    }
+
+    #[test]
+    fn coalesced_processor_publishes_empty_generation_after_last_document_tombstone() -> TestResult
+    {
+        let root = unique_test_dir("coalesced-empty-generation");
+        std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let root = std::fs::canonicalize(&root).map_err(|error| error.to_string())?;
+        let index_dir = root.join("index");
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_012345678901234567890123e1";
+        let memory_id = "mem_012345678901234567890123e1";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: root.to_string_lossy().into_owned(),
+                    name: Some("coalesced empty generation".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        insert_snapshot_test_memory_job(
+            &connection,
+            workspace_id,
+            memory_id,
+            "sidx_012345678901234567890123e1",
+            "last searchable document before tombstone",
+        )?;
+        process_index_job_for_connection(
+            &connection,
+            "sidx_012345678901234567890123e1",
+            &index_dir,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            vector_index_snapshot(&index_dir)?.len() == 1,
+            "seed generation must contain the live document",
+        )?;
+
+        ensure(
+            connection
+                .tombstone_memory(memory_id)
+                .map_err(|error| error.to_string())?,
+            "the final live document must be tombstoned",
+        )?;
+        connection
+            .insert_search_index_job(
+                "sidx_012345678901234567890123e2",
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: workspace_id.to_owned(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("memory".to_owned()),
+                    document_id: Some(memory_id.to_owned()),
+                    documents_total: 0,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let reports =
+            process_pending_index_jobs_coalesced(&connection, workspace_id, &index_dir, None)
+                .map_err(|error| error.to_string())?;
+        ensure(
+            reports.len() == 1
+                && reports[0].outcome == "completed"
+                && reports[0].documents_total == 0,
+            format!("empty-corpus coalesced publication did not complete: {reports:?}"),
+        )?;
+        let published_generation = read_index_metadata(&index_dir)
+            .0
+            .ok_or_else(|| "empty published generation missing".to_owned())?;
+        let live_generation = connection
+            .get_workspace_generation(workspace_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "empty live generation missing".to_owned())?;
+        ensure(
+            published_generation == live_generation,
+            format!(
+                "empty index manifest must represent the tombstone generation: published={published_generation:?} live={live_generation:?}"
+            ),
+        )?;
+        ensure(
+            vector_index_snapshot(&index_dir)?.is_empty(),
+            "empty generation must remove the final vector document",
+        )?;
+        ensure(
+            search_result_snapshot(&index_dir, "last searchable document", 10)?.is_empty(),
+            "empty generation must remove the final lexical document",
+        )
     }
 
     #[test]

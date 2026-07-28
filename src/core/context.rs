@@ -102,6 +102,7 @@ use crate::pack::{
     redact_pack_provenance_text,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
+use crate::search::RuleIndexProjection;
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 static PACK_HASH_LOG_RUN_INDEX: AtomicU64 = AtomicU64::new(0);
@@ -6497,7 +6498,9 @@ fn candidates_from_search_with_metrics(
                     // Procedural-rule hits hydrate through their source
                     // memories the same way artifact hits hydrate through
                     // their memory links (bd-3h6bz).
-                    .or_else(|| rule_linked_memory_id(connection, hit, degraded))
+                    .or_else(|| {
+                        rule_linked_memory_id(connection, workspace_path, hit, degraded)
+                    })
                     // Imported evidence hits hydrate through the memory the
                     // span was distilled into, when one exists (bd-16imy).
                     .or_else(|| {
@@ -9887,6 +9890,7 @@ fn artifact_linked_memory_id(
 /// silently dropped: the rule stays retrievable via `ee search`.
 fn rule_linked_memory_id(
     connection: &DbConnection,
+    workspace_path: &Path,
     hit: &crate::core::search::SearchHit,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<(MemoryId, Option<String>)> {
@@ -9914,9 +9918,18 @@ fn rule_linked_memory_id(
         }
     };
 
-    match connection.get_procedural_rule(&rule_id) {
-        Ok(Some(_)) => {}
-        Ok(None) => return None,
+    let rule = match connection.get_procedural_rule(&rule_id) {
+        Ok(Some(rule)) => rule,
+        Ok(None) => {
+            push_degradation(
+                degraded,
+                "context_rule_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                format!("Rule {rule_id} matched a stale index but no live source row exists."),
+                Some("ee index rebuild --json".to_owned()),
+            );
+            return None;
+        }
         Err(error) => {
             push_degradation(
                 degraded,
@@ -9930,9 +9943,64 @@ fn rule_linked_memory_id(
             );
             return None;
         }
+    };
+
+    let workspace = match connection.get_workspace(&rule.workspace_id) {
+        Ok(Some(workspace)) => workspace,
+        Ok(None) => {
+            push_degradation(
+                degraded,
+                "context_rule_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                format!("Rule {rule_id} has no live workspace for context admission."),
+                Some("ee doctor --json".to_owned()),
+            );
+            return None;
+        }
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_rule_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                format!("Rule {rule_id} workspace admission failed: {error}"),
+                Some("ee doctor --json".to_owned()),
+            );
+            return None;
+        }
+    };
+    let stored_workspace_path = Path::new(&workspace.path);
+    let same_workspace = match (
+        std::fs::canonicalize(stored_workspace_path),
+        std::fs::canonicalize(workspace_path),
+    ) {
+        (Ok(stored), Ok(requested)) => stored == requested,
+        _ => stored_workspace_path == workspace_path,
+    };
+    if !same_workspace {
+        push_degradation(
+            degraded,
+            "context_rule_hit_unhydrated",
+            ContextResponseSeverity::Low,
+            format!("Rule {rule_id} belongs to a different workspace and was excluded."),
+            Some("ee index rebuild --json".to_owned()),
+        );
+        return None;
     }
 
-    let mut source_memory_ids = match connection.get_rule_source_memory_ids(&rule_id) {
+    let tags = match connection.get_rule_tags(&rule_id) {
+        Ok(tags) => tags,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_rule_hit_unhydrated",
+                ContextResponseSeverity::Low,
+                format!("Tags for rule {rule_id} could not be loaded: {error}"),
+                Some(format!("ee rule show {rule_id} --json")),
+            );
+            return None;
+        }
+    };
+    let source_memory_ids = match connection.get_rule_source_memory_ids(&rule_id) {
         Ok(ids) => ids,
         Err(error) => {
             push_degradation(
@@ -9948,9 +10016,26 @@ fn rule_linked_memory_id(
             return None;
         }
     };
-    source_memory_ids.sort();
+    let projection = RuleIndexProjection::new(rule, stored_workspace_path, tags, source_memory_ids);
+    let indexed_revision = hit
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("entity_revision"))
+        .and_then(serde_json::Value::as_str);
+    if !projection.is_pack_admissible() || indexed_revision != Some(projection.entity_revision()) {
+        push_degradation(
+            degraded,
+            "context_rule_hit_unhydrated",
+            ContextResponseSeverity::Low,
+            format!(
+                "Rule {rule_id} is no longer pack-admissible or its derived index revision is stale."
+            ),
+            Some("ee index rebuild --json".to_owned()),
+        );
+        return None;
+    }
 
-    for source_memory_id in &source_memory_ids {
+    for source_memory_id in projection.source_memory_ids() {
         match MemoryId::from_str(source_memory_id) {
             Ok(memory_id) => return Some((memory_id, Some(rule_id.clone()))),
             Err(_) => push_degradation(

@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
+use std::fmt;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::cache::{CacheBudget, MemoryPressure, assess_pressure};
 use crate::models::{
-    CapabilityStatus, INDEX_MANIFEST_SCHEMA_V1, MEMORY_ANCHOR_SCHEMA_V1, SEARCH_DOCUMENT_SCHEMA_V1,
-    SEARCH_MODULE_SCHEMA_V1, StoredMemoryAnchor,
+    CapabilityStatus, INDEX_MANIFEST_SCHEMA_V1, MEMORY_ANCHOR_SCHEMA_V1, RuleMaturity, RuleScope,
+    SEARCH_DOCUMENT_SCHEMA_V1, SEARCH_MODULE_SCHEMA_V1, StoredMemoryAnchor,
 };
 
 pub mod bloom_prefilter;
@@ -645,37 +647,428 @@ pub fn session_to_document_with_context(
     builder.build(session)
 }
 
-/// Convert a stored procedural rule to a canonical search document.
+const RULE_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.rule_index_projection.v1";
+
+/// Stable validation failure for a workspace-relative rule scope pattern.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuleScopePatternError {
+    MissingRequired,
+    Unexpected,
+    ContainsNul,
+    Absolute,
+    Traversal,
+    WorkspaceUnavailable,
+    SymlinkEscape,
+    PathInspectionFailed,
+}
+
+impl RuleScopePatternError {
+    /// Stable machine-facing code used in rule projection metadata and hashes.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::MissingRequired => "missing_required",
+            Self::Unexpected => "unexpected",
+            Self::ContainsNul => "contains_nul",
+            Self::Absolute => "absolute",
+            Self::Traversal => "traversal",
+            Self::WorkspaceUnavailable => "workspace_unavailable",
+            Self::SymlinkEscape => "symlink_escape",
+            Self::PathInspectionFailed => "path_inspection_failed",
+        }
+    }
+}
+
+impl fmt::Display for RuleScopePatternError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::MissingRequired => "scope requires a non-empty workspace-relative pattern",
+            Self::Unexpected => "scope does not accept a pattern",
+            Self::ContainsNul => "scope pattern contains a NUL byte",
+            Self::Absolute => "scope pattern must be workspace-relative",
+            Self::Traversal => "scope pattern must not contain parent traversal",
+            Self::WorkspaceUnavailable => "workspace root could not be resolved",
+            Self::SymlinkEscape => "scope pattern escapes the workspace through a symbolic link",
+            Self::PathInspectionFailed => "scope pattern path could not be inspected safely",
+        };
+        formatter.write_str(message)
+    }
+}
+
+impl std::error::Error for RuleScopePatternError {}
+
+/// Normalize and validate a rule scope pattern against its workspace root.
 ///
-/// Rules are the procedural memory tier: `ee rule add` and `curate apply`
-/// enqueue `document_source=rule` index jobs, so the derived corpus must
-/// contain a deterministic projection of the rule row or the
-/// Learn -> Retrieve -> Pack loop dead-ends with rules that can never be
-/// found by `ee search` or hydrated into packs (bd-3h6bz). Tombstoned and
-/// superseded rules are excluded at the collection site, not here, so the
-/// builder stays a pure row projection.
+/// Stored and public patterns use `/` separators on every platform. Absolute
+/// paths, Windows drive prefixes, parent traversal, and existing symlink
+/// prefixes that resolve outside the workspace are rejected. A missing suffix
+/// is allowed because patterns commonly describe files that do not exist yet.
+pub fn normalize_rule_scope_pattern(
+    workspace_root: &Path,
+    scope: RuleScope,
+    raw: Option<&str>,
+) -> Result<Option<String>, RuleScopePatternError> {
+    let pattern = raw.map(str::trim).filter(|value| !value.is_empty());
+    if scope.requires_pattern() && pattern.is_none() {
+        return Err(RuleScopePatternError::MissingRequired);
+    }
+    if !scope.requires_pattern() && pattern.is_some() {
+        return Err(RuleScopePatternError::Unexpected);
+    }
+    let Some(pattern) = pattern else {
+        return Ok(None);
+    };
+    if pattern.contains('\0') {
+        return Err(RuleScopePatternError::ContainsNul);
+    }
+
+    let portable = pattern.replace('\\', "/");
+    let first_segment = portable.split('/').next().unwrap_or_default();
+    let has_windows_drive_prefix = first_segment.as_bytes().get(1) == Some(&b':')
+        && first_segment
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic);
+    if portable.starts_with('/') || has_windows_drive_prefix {
+        return Err(RuleScopePatternError::Absolute);
+    }
+
+    let mut segments = Vec::new();
+    for segment in portable.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => return Err(RuleScopePatternError::Traversal),
+            value => segments.push(value),
+        }
+    }
+    if segments.is_empty() {
+        return Err(RuleScopePatternError::MissingRequired);
+    }
+
+    let canonical_root = std::fs::canonicalize(workspace_root)
+        .map_err(|_| RuleScopePatternError::WorkspaceUnavailable)?;
+    let mut inspected = canonical_root.clone();
+    for segment in segments
+        .iter()
+        .take_while(|segment| !contains_glob_metacharacter(segment))
+    {
+        inspected.push(segment);
+        match std::fs::symlink_metadata(&inspected) {
+            Ok(_) => {
+                let resolved = std::fs::canonicalize(&inspected)
+                    .map_err(|_| RuleScopePatternError::PathInspectionFailed)?;
+                if !resolved.starts_with(&canonical_root) {
+                    return Err(RuleScopePatternError::SymlinkEscape);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(_) => return Err(RuleScopePatternError::PathInspectionFailed),
+        }
+    }
+
+    Ok(Some(segments.join("/")))
+}
+
+fn contains_glob_metacharacter(segment: &str) -> bool {
+    segment
+        .bytes()
+        .any(|byte| matches!(byte, b'*' | b'?' | b'[' | b']' | b'{' | b'}'))
+}
+
+/// Complete, deterministic procedural-rule projection used by search and pack
+/// admission.
+///
+/// The rule row is the searchable body. Tags are searchable filter metadata;
+/// source-memory IDs and lifecycle counters are provenance-only metadata. The
+/// revision covers every stored rule field plus both junction sets, so a
+/// derived document can be compared with live storage without trusting search
+/// metadata as authorization.
+#[derive(Clone, Debug)]
+pub struct RuleIndexProjection {
+    rule: crate::db::StoredProceduralRule,
+    workspace_path: PathBuf,
+    tags: Vec<String>,
+    source_memory_ids: Vec<String>,
+    normalized_scope_pattern: Option<String>,
+    scope_pattern_posture: &'static str,
+    scope_pattern_error: Option<&'static str>,
+    entity_revision: String,
+}
+
+impl RuleIndexProjection {
+    /// Build a canonical rule projection from a row and its joined metadata.
+    #[must_use]
+    pub fn new(
+        rule: crate::db::StoredProceduralRule,
+        workspace_path: impl Into<PathBuf>,
+        mut tags: Vec<String>,
+        mut source_memory_ids: Vec<String>,
+    ) -> Self {
+        tags.sort();
+        tags.dedup();
+        source_memory_ids.sort();
+        source_memory_ids.dedup();
+        let workspace_path = workspace_path.into();
+        let (normalized_scope_pattern, scope_pattern_posture, scope_pattern_error) =
+            match RuleScope::from_str(&rule.scope) {
+                Ok(scope) => match normalize_rule_scope_pattern(
+                    &workspace_path,
+                    scope,
+                    rule.scope_pattern.as_deref(),
+                ) {
+                    Ok(pattern) => (
+                        pattern,
+                        if scope.requires_pattern() {
+                            "valid"
+                        } else {
+                            "not_applicable"
+                        },
+                        None,
+                    ),
+                    Err(error) => (None, "invalid", Some(error.code())),
+                },
+                Err(_) => (None, "invalid", Some("invalid_scope")),
+            };
+        let entity_revision = rule_entity_revision(
+            &rule,
+            &tags,
+            &source_memory_ids,
+            normalized_scope_pattern.as_deref(),
+            scope_pattern_posture,
+            scope_pattern_error,
+        );
+        Self {
+            rule,
+            workspace_path,
+            tags,
+            source_memory_ids,
+            normalized_scope_pattern,
+            scope_pattern_posture,
+            scope_pattern_error,
+            entity_revision,
+        }
+    }
+
+    #[must_use]
+    pub const fn rule(&self) -> &crate::db::StoredProceduralRule {
+        &self.rule
+    }
+
+    #[must_use]
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
+
+    #[must_use]
+    pub fn source_memory_ids(&self) -> &[String] {
+        &self.source_memory_ids
+    }
+
+    #[must_use]
+    pub fn entity_revision(&self) -> &str {
+        &self.entity_revision
+    }
+
+    #[must_use]
+    pub fn normalized_scope_pattern(&self) -> Option<&str> {
+        self.normalized_scope_pattern.as_deref()
+    }
+
+    #[must_use]
+    pub const fn scope_pattern_posture(&self) -> &'static str {
+        self.scope_pattern_posture
+    }
+
+    /// Whether this projection belongs in the derived search corpus.
+    #[must_use]
+    pub fn is_search_indexable(&self) -> bool {
+        self.rule.tombstoned_at.is_none()
+            && self.rule.superseded_by.is_none()
+            && self.rule.maturity != RuleMaturity::Superseded.as_str()
+    }
+
+    /// Fail-closed rule eligibility at the current pack hydration boundary.
+    #[must_use]
+    pub fn is_pack_admissible(&self) -> bool {
+        self.is_search_indexable()
+            && matches!(
+                RuleMaturity::from_str(&self.rule.maturity),
+                Ok(RuleMaturity::Candidate | RuleMaturity::Validated)
+            )
+            && self.scope_pattern_posture != "invalid"
+    }
+}
+
+fn rule_entity_revision(
+    rule: &crate::db::StoredProceduralRule,
+    tags: &[String],
+    source_memory_ids: &[String],
+    normalized_scope_pattern: Option<&str>,
+    scope_pattern_posture: &str,
+    scope_pattern_error: Option<&str>,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(RULE_INDEX_PROJECTION_SCHEMA_V1.as_bytes());
+    hash_rule_bytes(&mut hasher, "id", rule.id.as_bytes());
+    hash_rule_bytes(&mut hasher, "workspace_id", rule.workspace_id.as_bytes());
+    hash_rule_bytes(&mut hasher, "content", rule.content.as_bytes());
+    hash_rule_bytes(
+        &mut hasher,
+        "confidence",
+        &rule.confidence.to_bits().to_le_bytes(),
+    );
+    hash_rule_bytes(
+        &mut hasher,
+        "utility",
+        &rule.utility.to_bits().to_le_bytes(),
+    );
+    hash_rule_bytes(
+        &mut hasher,
+        "importance",
+        &rule.importance.to_bits().to_le_bytes(),
+    );
+    hash_rule_bytes(&mut hasher, "trust_class", rule.trust_class.as_bytes());
+    hash_rule_bytes(&mut hasher, "scope", rule.scope.as_bytes());
+    hash_rule_optional_str(&mut hasher, "scope_pattern", rule.scope_pattern.as_deref());
+    hash_rule_bytes(&mut hasher, "maturity", rule.maturity.as_bytes());
+    hash_rule_bytes(&mut hasher, "protected", &[u8::from(rule.protected)]);
+    hash_rule_bytes(
+        &mut hasher,
+        "positive_feedback_count",
+        &rule.positive_feedback_count.to_le_bytes(),
+    );
+    hash_rule_bytes(
+        &mut hasher,
+        "negative_feedback_count",
+        &rule.negative_feedback_count.to_le_bytes(),
+    );
+    hash_rule_bytes(
+        &mut hasher,
+        "validation_passes",
+        &rule.validation_passes.to_le_bytes(),
+    );
+    hash_rule_bytes(
+        &mut hasher,
+        "validation_contradictions",
+        &rule.validation_contradictions.to_le_bytes(),
+    );
+    hash_rule_optional_str(
+        &mut hasher,
+        "last_applied_at",
+        rule.last_applied_at.as_deref(),
+    );
+    hash_rule_optional_str(
+        &mut hasher,
+        "last_validated_at",
+        rule.last_validated_at.as_deref(),
+    );
+    hash_rule_optional_str(&mut hasher, "superseded_by", rule.superseded_by.as_deref());
+    hash_rule_bytes(&mut hasher, "created_at", rule.created_at.as_bytes());
+    hash_rule_bytes(&mut hasher, "updated_at", rule.updated_at.as_bytes());
+    hash_rule_optional_str(&mut hasher, "tombstoned_at", rule.tombstoned_at.as_deref());
+    hash_rule_optional_str(
+        &mut hasher,
+        "normalized_scope_pattern",
+        normalized_scope_pattern,
+    );
+    hash_rule_bytes(
+        &mut hasher,
+        "scope_pattern_posture",
+        scope_pattern_posture.as_bytes(),
+    );
+    hash_rule_optional_str(&mut hasher, "scope_pattern_error", scope_pattern_error);
+    hash_rule_string_list(&mut hasher, "tags", tags);
+    hash_rule_string_list(&mut hasher, "source_memory_ids", source_memory_ids);
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn hash_rule_bytes(hasher: &mut blake3::Hasher, label: &str, value: &[u8]) {
+    hasher.update(&(label.len() as u64).to_le_bytes());
+    hasher.update(label.as_bytes());
+    hasher.update(&(value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn hash_rule_optional_str(hasher: &mut blake3::Hasher, label: &str, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hash_rule_bytes(hasher, label, &[1]);
+            hash_rule_bytes(hasher, "value", value.as_bytes());
+        }
+        None => hash_rule_bytes(hasher, label, &[0]),
+    }
+}
+
+fn hash_rule_string_list(hasher: &mut blake3::Hasher, label: &str, values: &[String]) {
+    hash_rule_bytes(hasher, label, &(values.len() as u64).to_le_bytes());
+    for value in values {
+        hash_rule_bytes(hasher, "item", value.as_bytes());
+    }
+}
+
+/// Convert a complete procedural-rule projection to a search document.
 #[must_use]
-pub fn rule_to_document(rule: &crate::db::StoredProceduralRule) -> CanonicalSearchDocument {
-    let mut doc = CanonicalSearchDocument::new(&rule.id, rule.content.clone(), DocumentSource::Rule)
-            .with_title(format!("Procedural rule {}", rule.id))
-            .with_level("procedural")
-            .with_kind("rule")
-            .with_created_at(&rule.created_at)
-            .with_metadata_entry("workspace_id", &rule.workspace_id)
-            .with_metadata_entry("maturity", &rule.maturity)
-            .with_metadata_entry("scope", &rule.scope)
-            .with_metadata_entry("trust_class", &rule.trust_class)
-            // Fixed-precision formatting keeps the derived document (and
-            // therefore index bytes and pack hashes) byte-stable across
-            // rebuilds of the same row.
-            .with_metadata_entry("confidence", format!("{:.2}", rule.confidence))
-            .with_metadata_entry("utility", format!("{:.2}", rule.utility))
-            .with_metadata_entry("protected", if rule.protected { "true" } else { "false" });
-    if let Some(pattern) = rule.scope_pattern.as_deref() {
+pub fn rule_to_document(projection: &RuleIndexProjection) -> CanonicalSearchDocument {
+    let rule = projection.rule();
+    let mut doc = CanonicalSearchDocument::new(&rule.id, &rule.content, DocumentSource::Rule)
+        .with_title(format!("Procedural rule {}", rule.id))
+        .with_workspace(projection.workspace_path.display().to_string())
+        .with_level("procedural")
+        .with_kind("rule")
+        .with_created_at(&rule.created_at)
+        .with_tags(projection.tags().iter().cloned())
+        .with_metadata_entry("workspace_id", &rule.workspace_id)
+        .with_metadata_entry("maturity", &rule.maturity)
+        .with_metadata_entry("scope", &rule.scope)
+        .with_metadata_entry("trust_class", &rule.trust_class)
+        .with_metadata_entry("confidence", rule.confidence.to_string())
+        .with_metadata_entry("utility", rule.utility.to_string())
+        .with_metadata_entry("importance", rule.importance.to_string())
+        .with_metadata_entry("protected", rule.protected.to_string())
+        .with_metadata_entry(
+            "positive_feedback_count",
+            rule.positive_feedback_count.to_string(),
+        )
+        .with_metadata_entry(
+            "negative_feedback_count",
+            rule.negative_feedback_count.to_string(),
+        )
+        .with_metadata_entry("validation_passes", rule.validation_passes.to_string())
+        .with_metadata_entry(
+            "validation_contradictions",
+            rule.validation_contradictions.to_string(),
+        )
+        .with_metadata_entry("updated_at", &rule.updated_at)
+        .with_metadata_entry("entity_revision", projection.entity_revision())
+        .with_metadata_entry("projection_schema", RULE_INDEX_PROJECTION_SCHEMA_V1)
+        .with_metadata_entry("scope_pattern_posture", projection.scope_pattern_posture())
+        .with_metadata_entry(
+            "source_memory_count",
+            projection.source_memory_ids().len().to_string(),
+        );
+    if !projection.source_memory_ids().is_empty() {
+        doc = doc.with_metadata_entry(
+            "source_memory_ids",
+            projection.source_memory_ids().join(","),
+        );
+    }
+    if let Some(pattern) = projection.normalized_scope_pattern() {
         doc = doc.with_metadata_entry("scope_pattern", pattern);
+    }
+    if let Some(error) = projection.scope_pattern_error {
+        doc = doc.with_metadata_entry("scope_pattern_error", error);
+    }
+    if let Some(last_applied_at) = rule.last_applied_at.as_deref() {
+        doc = doc.with_metadata_entry("last_applied_at", last_applied_at);
+    }
+    if let Some(last_validated_at) = rule.last_validated_at.as_deref() {
+        doc = doc.with_metadata_entry("last_validated_at", last_validated_at);
     }
     if let Some(superseded_by) = rule.superseded_by.as_deref() {
         doc = doc.with_metadata_entry("superseded_by", superseded_by);
+    }
+    if let Some(tombstoned_at) = rule.tombstoned_at.as_deref() {
+        doc = doc.with_metadata_entry("tombstoned_at", tombstoned_at);
     }
     doc
 }
@@ -3197,15 +3590,17 @@ mod tests {
         MEMORY_ANCHOR_COUNT_METADATA_KEY, MEMORY_ANCHOR_FRESHNESS_METADATA_KEY,
         MEMORY_ANCHOR_HASHES_METADATA_KEY, MEMORY_ANCHOR_KINDS_METADATA_KEY,
         MEMORY_ANCHOR_REDACTED_VALUES_METADATA_KEY, MEMORY_ANCHOR_SCHEMA_METADATA_KEY,
-        REQUIRED_RETRIEVAL_ENGINE, ScoreComponentSource, ScoreSource, ScoredResult,
-        SearchCacheGovernor, SearchCacheStatus, SearchCapabilityName, SearchHotset,
-        SearchHotsetEntry, SearchHotsetEntryKind, SearchSurface, explain_scored_result,
-        module_readiness, prewarm_search_hotset, score_source_name, subsystem_name,
+        REQUIRED_RETRIEVAL_ENGINE, RuleIndexProjection, RuleScopePatternError,
+        ScoreComponentSource, ScoreSource, ScoredResult, SearchCacheGovernor, SearchCacheStatus,
+        SearchCapabilityName, SearchHotset, SearchHotsetEntry, SearchHotsetEntryKind,
+        SearchSurface, explain_scored_result, module_readiness, normalize_rule_scope_pattern,
+        prewarm_search_hotset, rule_to_document, score_source_name, subsystem_name,
     };
     use crate::cache::{CacheBudget, MemoryPressure};
+    use crate::db::StoredProceduralRule;
     use crate::models::{
         CapabilityStatus, MEMORY_ANCHOR_SCHEMA_V1, MemoryAnchorFreshnessState, MemoryAnchorKind,
-        MemoryAnchorSource, StoredMemoryAnchor,
+        MemoryAnchorSource, RuleScope, StoredMemoryAnchor,
     };
     use serde_json::json;
 
@@ -3556,6 +3951,182 @@ mod tests {
         assert_eq!(
             DocumentSource::CurationCandidate.as_str(),
             "curation_candidate"
+        );
+    }
+
+    fn stored_rule_fixture() -> StoredProceduralRule {
+        StoredProceduralRule {
+            id: "rule_01234567890123456789012345".to_owned(),
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            content: "Run the exact release verifier before publishing.".to_owned(),
+            confidence: 0.812_345,
+            utility: 0.623_456,
+            importance: 0.734_567,
+            trust_class: "human_explicit".to_owned(),
+            scope: "workspace".to_owned(),
+            scope_pattern: None,
+            maturity: "candidate".to_owned(),
+            protected: false,
+            positive_feedback_count: 7,
+            negative_feedback_count: 2,
+            validation_passes: 3,
+            validation_contradictions: 1,
+            last_applied_at: Some("2026-07-27T10:00:00Z".to_owned()),
+            last_validated_at: Some("2026-07-27T11:00:00Z".to_owned()),
+            superseded_by: None,
+            created_at: "2026-07-27T09:00:00Z".to_owned(),
+            updated_at: "2026-07-27T11:00:00Z".to_owned(),
+            tombstoned_at: None,
+        }
+    }
+
+    #[test]
+    fn rule_projection_preserves_exact_metadata_and_revision_inputs() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let rule = stored_rule_fixture();
+        let projection = RuleIndexProjection::new(
+            rule.clone(),
+            workspace.path(),
+            vec!["zeta".to_owned(), "alpha".to_owned(), "alpha".to_owned()],
+            vec![
+                "mem_22222222222222222222222222".to_owned(),
+                "mem_11111111111111111111111111".to_owned(),
+                "mem_11111111111111111111111111".to_owned(),
+            ],
+        );
+        assert!(projection.is_search_indexable());
+        assert!(projection.is_pack_admissible());
+        assert_eq!(projection.tags(), &["alpha".to_owned(), "zeta".to_owned()]);
+        assert_eq!(
+            projection.source_memory_ids(),
+            &[
+                "mem_11111111111111111111111111".to_owned(),
+                "mem_22222222222222222222222222".to_owned(),
+            ]
+        );
+        assert_eq!(projection.entity_revision().len(), 71);
+        assert!(projection.entity_revision().starts_with("blake3:"));
+
+        let indexable = rule_to_document(&projection).into_indexable();
+        assert_eq!(
+            indexable.metadata.get("confidence"),
+            Some(&rule.confidence.to_string())
+        );
+        assert_eq!(
+            indexable.metadata.get("utility"),
+            Some(&rule.utility.to_string())
+        );
+        assert_eq!(
+            indexable.metadata.get("importance"),
+            Some(&rule.importance.to_string())
+        );
+        assert_eq!(
+            indexable.metadata.get("tags"),
+            Some(&"alpha,zeta".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("source_memory_ids"),
+            Some(&"mem_11111111111111111111111111,mem_22222222222222222222222222".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("entity_revision"),
+            Some(&projection.entity_revision().to_owned())
+        );
+
+        let reordered = RuleIndexProjection::new(
+            rule.clone(),
+            workspace.path(),
+            vec!["alpha".to_owned(), "zeta".to_owned()],
+            vec![
+                "mem_11111111111111111111111111".to_owned(),
+                "mem_22222222222222222222222222".to_owned(),
+            ],
+        );
+        assert_eq!(
+            projection.entity_revision(),
+            reordered.entity_revision(),
+            "junction input order must not change the canonical revision"
+        );
+
+        let mut protected_rule = rule;
+        protected_rule.protected = true;
+        let protected = RuleIndexProjection::new(
+            protected_rule,
+            workspace.path(),
+            reordered.tags().to_vec(),
+            reordered.source_memory_ids().to_vec(),
+        );
+        assert_ne!(
+            projection.entity_revision(),
+            protected.entity_revision(),
+            "an indexed rule field mutation must change the entity revision"
+        );
+    }
+
+    #[test]
+    fn rule_scope_patterns_are_normalized_and_fail_closed() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        assert_eq!(
+            normalize_rule_scope_pattern(
+                workspace.path(),
+                RuleScope::FilePattern,
+                Some("src//./**/*.rs"),
+            ),
+            Ok(Some("src/**/*.rs".to_owned()))
+        );
+        assert_eq!(
+            normalize_rule_scope_pattern(
+                workspace.path(),
+                RuleScope::Directory,
+                Some("../outside"),
+            ),
+            Err(RuleScopePatternError::Traversal)
+        );
+        assert_eq!(
+            normalize_rule_scope_pattern(
+                workspace.path(),
+                RuleScope::FilePattern,
+                Some("/tmp/*.rs"),
+            ),
+            Err(RuleScopePatternError::Absolute)
+        );
+
+        let mut legacy_rule = stored_rule_fixture();
+        legacy_rule.scope = "file_pattern".to_owned();
+        legacy_rule.scope_pattern = Some("../outside/*.rs".to_owned());
+        let projection =
+            RuleIndexProjection::new(legacy_rule, workspace.path(), Vec::new(), Vec::new());
+        assert!(projection.is_search_indexable());
+        assert!(!projection.is_pack_admissible());
+        let indexable = rule_to_document(&projection).into_indexable();
+        assert_eq!(
+            indexable.metadata.get("scope_pattern_posture"),
+            Some(&"invalid".to_owned())
+        );
+        assert_eq!(
+            indexable.metadata.get("scope_pattern_error"),
+            Some(&"traversal".to_owned())
+        );
+        assert!(
+            !indexable.metadata.contains_key("scope_pattern"),
+            "unsafe legacy patterns must not leave the database projection"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rule_scope_pattern_rejects_existing_symlink_escape() {
+        let workspace = tempfile::tempdir().expect("workspace tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("escape"))
+            .expect("symlink fixture");
+        assert_eq!(
+            normalize_rule_scope_pattern(
+                workspace.path(),
+                RuleScope::FilePattern,
+                Some("escape/*.rs"),
+            ),
+            Err(RuleScopePatternError::SymlinkEscape)
         );
     }
 

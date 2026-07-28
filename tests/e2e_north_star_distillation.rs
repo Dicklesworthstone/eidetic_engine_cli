@@ -720,6 +720,158 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
         format!("search should return applied rule {rule_id} by its own content: {results:?}"),
     )?;
 
+    let ready_before_protect = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "status"])?;
+    ensure_equal(
+        &ready_before_protect
+            .pointer("/data/health")
+            .and_then(JsonValue::as_str),
+        &Some("ready"),
+        "rule index is ready before protection mutation",
+    )?;
+
+    let protect = run_ee_json(&[
+        "--workspace",
+        &ws_arg,
+        "--json",
+        "rule",
+        "protect",
+        &rule_id,
+        "--actor",
+        "north-star-e2e",
+    ])?;
+    ensure_equal(
+        &protect
+            .pointer("/data/changed")
+            .and_then(JsonValue::as_bool),
+        &Some(true),
+        "rule protect mutates the indexed projection",
+    )?;
+    ensure(
+        protect
+            .pointer("/data/indexJobId")
+            .is_some_and(JsonValue::is_string),
+        format!("rule protect must queue a rule index job: {protect}"),
+    )?;
+
+    let stale_after_protect = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "status"])?;
+    ensure_equal(
+        &stale_after_protect
+            .pointer("/data/health")
+            .and_then(JsonValue::as_str),
+        &Some("stale"),
+        "rule protect makes the older published index stale",
+    )?;
+
+    let coalesce = run_ee_json(&[
+        "--workspace",
+        &ws_arg,
+        "--json",
+        "job",
+        "run",
+        "index_coalesce",
+    ])?;
+    ensure_equal(
+        &coalesce.pointer("/success").and_then(JsonValue::as_bool),
+        &Some(true),
+        "public index coalesce processes the rule mutation",
+    )?;
+    let ready_after_coalesce = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "status"])?;
+    ensure_equal(
+        &ready_after_coalesce
+            .pointer("/data/health")
+            .and_then(JsonValue::as_str),
+        &Some("ready"),
+        "index becomes ready only after truthful rule publication",
+    )?;
+
+    let refreshed_search = run_ee_json(&[
+        "--workspace",
+        &ws_arg,
+        "--json",
+        "search",
+        &rule_content,
+        "--limit",
+        "20",
+    ])?;
+    let refreshed_hit = refreshed_search
+        .pointer("/data/results")
+        .and_then(JsonValue::as_array)
+        .and_then(|hits| {
+            hits.iter()
+                .find(|hit| hit.get("docId").and_then(JsonValue::as_str) == Some(rule_id.as_str()))
+        })
+        .ok_or_else(|| format!("refreshed search missing rule {rule_id}: {refreshed_search}"))?;
+    ensure_equal(
+        &refreshed_hit
+            .pointer("/metadata/protected")
+            .and_then(JsonValue::as_str),
+        &Some("true"),
+        "refreshed rule metadata contains protected state",
+    )?;
+    ensure(
+        refreshed_hit
+            .pointer("/metadata/source_memory_ids")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|ids| ids.split(',').any(|id| id == failure_memory_id.as_str())),
+        format!("refreshed rule metadata missing source provenance: {refreshed_hit}"),
+    )?;
+    ensure(
+        refreshed_hit
+            .pointer("/metadata/entity_revision")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|revision| revision.len() == 71 && revision.starts_with("blake3:")),
+        format!("refreshed rule metadata missing canonical revision: {refreshed_hit}"),
+    )?;
+    for exact_numeric in ["confidence", "utility", "importance"] {
+        let expected = rule
+            .pointer(&format!("/data/rule/{exact_numeric}"))
+            .and_then(JsonValue::as_f64)
+            .map(|value| (value as f32).to_string())
+            .ok_or_else(|| format!("rule show missing numeric {exact_numeric}: {rule}"))?;
+        ensure_equal(
+            &refreshed_hit
+                .pointer(&format!("/metadata/{exact_numeric}"))
+                .and_then(JsonValue::as_str),
+            &Some(expected.as_str()),
+            &format!("refreshed rule metadata preserves exact {exact_numeric}"),
+        )?;
+    }
+
+    let protect_noop = run_ee_json(&[
+        "--workspace",
+        &ws_arg,
+        "--json",
+        "rule",
+        "protect",
+        &rule_id,
+        "--actor",
+        "north-star-e2e",
+    ])?;
+    ensure_equal(
+        &protect_noop
+            .pointer("/data/status")
+            .and_then(JsonValue::as_str),
+        &Some("unchanged"),
+        "repeated protect is idempotent",
+    )?;
+    ensure(
+        protect_noop
+            .pointer("/data/auditId")
+            .is_some_and(JsonValue::is_null)
+            && protect_noop
+                .pointer("/data/indexJobId")
+                .is_some_and(JsonValue::is_null),
+        format!("no-op protect must not audit or enqueue: {protect_noop}"),
+    )?;
+    let ready_after_noop = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "status"])?;
+    ensure_equal(
+        &ready_after_noop
+            .pointer("/data/health")
+            .and_then(JsonValue::as_str),
+        &Some("ready"),
+        "no-op protect leaves the published index ready",
+    )?;
+
     let memory = run_ee_json(&[
         "--workspace",
         &ws_arg,

@@ -29,6 +29,7 @@ use crate::models::{
     RuleLifecycleTransition, RuleLifecycleTrigger, RuleMaturity, RuleScope, Tag, TrustClass,
     UnitScore, WorkspaceId,
 };
+use crate::search::normalize_rule_scope_pattern;
 
 /// Stable schema for `ee rule add` response data.
 pub const RULE_ADD_SCHEMA_V1: &str = "ee.rule.add.v1";
@@ -756,6 +757,7 @@ pub struct RuleProtectReport {
     pub changed: bool,
     pub dry_run: bool,
     pub audit_id: Option<String>,
+    pub index_job_id: Option<String>,
     #[serde(serialize_with = "serialize_rule_protect_degradations")]
     pub degraded: Vec<RuleAddDegradation>,
 }
@@ -1130,10 +1132,11 @@ impl RuleProtectReport {
             )
         } else {
             format!(
-                "{verb} procedural rule\n  ID: {}\n  Changed: {}\n  Audit: {}\n",
+                "{verb} procedural rule\n  ID: {}\n  Changed: {}\n  Audit: {}\n  Index job: {}\n",
                 self.rule_id,
                 self.changed,
-                self.audit_id.as_deref().unwrap_or("none")
+                self.audit_id.as_deref().unwrap_or("none"),
+                self.index_job_id.as_deref().unwrap_or("none")
             )
         }
     }
@@ -1520,20 +1523,33 @@ pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectRepor
             changed,
             true,
             None,
+            None,
+        ));
+    }
+
+    if !changed {
+        return Ok(rule_protect_report(
+            &prepared,
+            &rule_id,
+            options.protected,
+            previous_protected,
+            false,
+            false,
+            None,
+            None,
         ));
     }
 
     let audit_id = generate_audit_id();
+    let index_job_id = generate_search_index_job_id();
     let details = rule_protect_audit_details(&rule_id, previous_protected, options.protected);
     connection
         .with_transaction(|| {
-            if changed {
-                connection.update_procedural_rule_protected(
-                    &rule_id,
-                    &prepared.workspace_id,
-                    options.protected,
-                )?;
-            }
+            connection.update_procedural_rule_protected(
+                &rule_id,
+                &prepared.workspace_id,
+                options.protected,
+            )?;
             connection.insert_audit(
                 &audit_id,
                 &CreateAuditInput {
@@ -1546,6 +1562,16 @@ pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectRepor
                     target_type: Some("rule".to_owned()),
                     target_id: Some(rule_id.clone()),
                     details: Some(details.clone()),
+                },
+            )?;
+            connection.insert_search_index_job(
+                &index_job_id,
+                &CreateSearchIndexJobInput {
+                    workspace_id: prepared.workspace_id.clone(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("rule".to_owned()),
+                    document_id: Some(rule_id.clone()),
+                    documents_total: 1,
                 },
             )
         })
@@ -1562,6 +1588,7 @@ pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectRepor
         changed,
         false,
         Some(audit_id),
+        Some(index_job_id),
     ))
 }
 
@@ -3477,7 +3504,12 @@ fn prepare_rule_update(
     } else {
         previous.scope_pattern.clone()
     };
-    let scope_pattern = prepare_scope_pattern(scope, candidate_scope_pattern.as_deref())?;
+    let scope_pattern = prepare_scope_pattern(
+        &prepared.workspace_path,
+        scope,
+        candidate_scope_pattern.as_deref(),
+        "ee rule update --help",
+    )?;
     let trust_class = options
         .trust_class
         .map(TrustClass::from_str)
@@ -3701,7 +3733,12 @@ fn prepare_rule_add(options: &RuleAddOptions<'_>) -> Result<PreparedRuleAdd, Dom
 
     let scope =
         RuleScope::from_str(options.scope).map_err(|error| rule_usage_error(error.to_string()))?;
-    let scope_pattern = prepare_scope_pattern(scope, options.scope_pattern)?;
+    let scope_pattern = prepare_scope_pattern(
+        &workspace_path,
+        scope,
+        options.scope_pattern,
+        "ee rule add --help",
+    )?;
     let maturity = RuleMaturity::from_str(options.maturity)
         .map_err(|error| rule_usage_error(error.to_string()))?;
     if maturity.is_terminal() {
@@ -3763,23 +3800,20 @@ fn prepare_rule_add(options: &RuleAddOptions<'_>) -> Result<PreparedRuleAdd, Dom
 }
 
 fn prepare_scope_pattern(
+    workspace_path: &Path,
     scope: RuleScope,
     raw: Option<&str>,
+    repair: &str,
 ) -> Result<Option<String>, DomainError> {
-    let pattern = raw.map(str::trim).filter(|value| !value.is_empty());
-    if scope.requires_pattern() && pattern.is_none() {
-        return Err(rule_usage_error(format!(
-            "scope `{}` requires --scope-pattern",
-            scope.as_str()
-        )));
-    }
-    if !scope.requires_pattern() && pattern.is_some() {
-        return Err(rule_usage_error(format!(
-            "scope `{}` does not accept --scope-pattern",
-            scope.as_str()
-        )));
-    }
-    Ok(pattern.map(str::to_owned))
+    normalize_rule_scope_pattern(workspace_path, scope, raw).map_err(|error| {
+        rule_read_usage_error(
+            format!(
+                "invalid --scope-pattern for scope `{}`: {error}",
+                scope.as_str()
+            ),
+            repair,
+        )
+    })
 }
 
 fn parse_tags(raw_tags: &[String]) -> Result<Vec<String>, DomainError> {
@@ -4091,6 +4125,7 @@ fn rule_protect_report(
     changed: bool,
     dry_run: bool,
     audit_id: Option<String>,
+    index_job_id: Option<String>,
 ) -> RuleProtectReport {
     RuleProtectReport {
         schema: RULE_PROTECT_SCHEMA_V1,
@@ -4112,6 +4147,7 @@ fn rule_protect_report(
         changed,
         dry_run,
         audit_id,
+        index_job_id,
         degraded: Vec::new(),
     }
 }
@@ -4349,6 +4385,144 @@ mod tests {
             validation_contradictions_delta(RuleLifecycleTrigger::OutcomeHelpful, &outcome_helpful)
                 == 0,
             "outcome_helpful must not bump validation contradictions",
+        )
+    }
+
+    #[test]
+    fn protect_rule_is_noop_safe_and_rolls_back_when_index_enqueue_fails() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(workspace_path);
+        let rule_id = "rule_01234567890123456789012345";
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("rule-protect-rollback".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_procedural_rule(
+                rule_id,
+                &CreateProceduralRuleInput {
+                    workspace_id: workspace_id.clone(),
+                    content: "Keep index metadata synchronized with rule protection.".to_owned(),
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.6,
+                    trust_class: "human_explicit".to_owned(),
+                    scope: "workspace".to_owned(),
+                    scope_pattern: None,
+                    maturity: "candidate".to_owned(),
+                    protected: false,
+                    source_memory_ids: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let generation_before = connection
+            .get_workspace_generation(&workspace_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "workspace generation missing".to_owned())?;
+        connection
+            .execute_raw(
+                "CREATE TRIGGER fail_rule_index_enqueue
+                 BEFORE INSERT ON search_index_jobs
+                 WHEN NEW.document_source = 'rule'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'intentional rule index enqueue failure');
+                 END",
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let unchanged = protect_rule(&RuleProtectOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            rule_id,
+            protected: false,
+            dry_run: false,
+            actor: Some("test"),
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(
+            unchanged.status == "unchanged"
+                && !unchanged.changed
+                && unchanged.audit_id.is_none()
+                && unchanged.index_job_id.is_none(),
+            format!("true no-op must not audit or enqueue: {unchanged:?}"),
+        )?;
+
+        let error = protect_rule(&RuleProtectOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            rule_id,
+            protected: true,
+            dry_run: false,
+            actor: Some("test"),
+        })
+        .expect_err("index enqueue failure must fail the whole protect mutation");
+        ensure(
+            matches!(error, DomainError::Storage { .. }),
+            format!("expected storage failure, got {error:?}"),
+        )?;
+
+        let verification =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let stored = verification
+            .get_procedural_rule(rule_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "rule missing after rollback".to_owned())?;
+        ensure(
+            !stored.protected,
+            "failed index enqueue must roll back the protected marker",
+        )?;
+        ensure(
+            verification
+                .get_workspace_generation(&workspace_id)
+                .map_err(|error| error.to_string())?
+                == Some(generation_before),
+            "failed index enqueue must roll back the generation trigger",
+        )?;
+        ensure(
+            verification
+                .list_audit_by_target("rule", rule_id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            "failed and no-op protect paths must not leave audit rows",
+        )
+    }
+
+    #[test]
+    fn prepare_scope_pattern_normalizes_public_rule_writes() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let normalized = prepare_scope_pattern(
+            workspace.path(),
+            RuleScope::FilePattern,
+            Some("src//./**/*.rs"),
+            "ee rule add --help",
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            normalized.as_deref() == Some("src/**/*.rs"),
+            format!("unexpected normalized scope pattern: {normalized:?}"),
+        )?;
+        let traversal = prepare_scope_pattern(
+            workspace.path(),
+            RuleScope::Directory,
+            Some("../outside"),
+            "ee rule update --help",
+        )
+        .expect_err("parent traversal must fail");
+        ensure(
+            traversal.message().contains("parent traversal"),
+            format!("unexpected traversal error: {traversal:?}"),
         )
     }
 
