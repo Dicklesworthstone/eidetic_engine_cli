@@ -244,7 +244,7 @@ use crate::core::search::{
     SearchDedupMode, SearchDegradation, SearchOptions, SearchReport,
     SearchScoreRecalibrationReport, SearchSourceMode, SimilarError, SimilarOptions, SimilarReport,
     TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
-    recalibrate_search_score_calibration, run_diag_search, run_search_with_filters,
+    recalibrate_search_score_calibration, run_diag_search, run_search, run_search_with_filters,
     run_search_with_performance_and_filters, run_similar,
 };
 use crate::core::sentinel::{SentinelCheckContext, observe_sentinel_explicit};

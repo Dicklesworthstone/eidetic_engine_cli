@@ -1977,10 +1977,56 @@ pub struct ScaleEnvelopeReport {
 impl ScaleEnvelopeReport {
     #[must_use]
     pub fn gather_for_workspace(workspace_path: &Path) -> Self {
-        let status_report = StatusReport::gather_for_workspace(workspace_path);
-        let status_connection = open_status_connection(Some(workspace_path));
-        let store_probe =
-            ScaleEnvelopeStoreProbe::gather(Some(workspace_path), status_connection.as_ref());
+        let options = StatusOptions {
+            workspace_path: Some(workspace_path.to_path_buf()),
+        };
+        let database_path = workspace_database_path(workspace_path);
+        if database_path.exists() {
+            let read_pool = registered_process_read_pool(
+                DatabaseConfig::file(database_path.clone()),
+                PoolConfig::default_single(),
+            );
+            match read_pool.pin_snapshot() {
+                Ok(snapshot) => match snapshot.checked_connection() {
+                    Ok(connection) => {
+                        let status_report =
+                            StatusReport::gather_with_connection(&options, Some(connection));
+                        let store_probe =
+                            ScaleEnvelopeStoreProbe::gather(Some(workspace_path), Some(connection));
+                        let report =
+                            Self::from_status_report(&status_report, &store_probe, Utc::now());
+                        if let Err(error) = snapshot.commit() {
+                            tracing::warn!(
+                                target: "ee::status",
+                                database_path = %database_path.display(),
+                                error = %error,
+                                "scale-envelope read snapshot release failed"
+                            );
+                        }
+                        return report;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "ee::status",
+                            database_path = %database_path.display(),
+                            error = %error,
+                            "scale-envelope read snapshot became unavailable"
+                        );
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        target: "ee::status",
+                        database_path = %database_path.display(),
+                        error = %error,
+                        "scale-envelope read snapshot could not be acquired"
+                    );
+                }
+            }
+        }
+
+        let status_report = StatusReport::gather_with_connection(&options, None);
+        let store_probe = ScaleEnvelopeStoreProbe::gather(Some(workspace_path), None);
         Self::from_status_report(&status_report, &store_probe, Utc::now())
     }
 
