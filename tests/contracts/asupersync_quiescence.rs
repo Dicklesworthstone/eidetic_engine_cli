@@ -127,13 +127,15 @@ fn run_cancelled_cleanup_probe(seed: u64) -> Result<CancelledCleanupReport, Stri
     )?;
 
     let reason = CancelReason::timeout().with_message("EE-209 cleanup cancellation");
-    let tasks_to_cancel = lab.state.cancel_request(root, &reason, None);
+    let (tasks_to_cancel, cancellation_wakes) =
+        lab.state.cancel_request(root, &reason, None).into_parts();
     {
         let mut scheduler = lab.scheduler.lock();
         for (task_id, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(task_id, priority);
         }
     }
+    cancellation_wakes.dispatch();
 
     let report = lab.run_until_quiescent_with_report();
     Ok(CancelledCleanupReport {

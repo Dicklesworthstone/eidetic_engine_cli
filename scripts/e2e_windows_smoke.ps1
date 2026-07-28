@@ -8,6 +8,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 
 function Write-TestEvent {
     param(
@@ -46,18 +47,38 @@ function Invoke-Ee {
     $stderrPath = Join-Path $artifactDir "$Name.stderr.txt"
     $allArgs = @("--workspace", $WorkspaceRoot, "--json") + $Arguments
     $commandText = "$EeBinary $($allArgs -join ' ')"
+    if ((Test-Path $stdoutPath) -or (Test-Path $stderrPath)) {
+        throw "refusing to overwrite stale command artifacts for $Name under $artifactDir"
+    }
     Write-TestEvent -Phase "input" -Command $commandText -ExitCode 0 -StdoutPath $stdoutPath -StderrPath $stderrPath
 
-    $output = & $EeBinary @allArgs 2>&1
+    & $EeBinary @allArgs 1> $stdoutPath 2> $stderrPath
     $exitCode = $LASTEXITCODE
-    $stdout = $output | Out-String
-    Set-Content -Path $stdoutPath -Value $stdout -Encoding utf8
-    Set-Content -Path $stderrPath -Value "" -Encoding utf8
     if ($exitCode -ne 0) {
-        Write-TestEvent -Phase "response" -Command $commandText -ExitCode $exitCode -StdoutPath $stdoutPath -StderrPath $stderrPath -Diagnosis "command returned nonzero"
+        $stderrSummary = [string](Get-Content -Raw -Path $stderrPath)
+        $stderrSummary = $stderrSummary.Trim() -replace "\s+", " "
+        if ($stderrSummary.Length -gt 512) {
+            $stderrSummary = $stderrSummary.Substring(0, 512)
+        }
+        $diagnosis = "command returned nonzero"
+        if (-not [string]::IsNullOrWhiteSpace($stderrSummary)) {
+            $diagnosis = "$diagnosis; stderr: $stderrSummary"
+        }
+        Write-TestEvent -Phase "response" -Command $commandText -ExitCode $exitCode -StdoutPath $stdoutPath -StderrPath $stderrPath -Diagnosis $diagnosis
         throw "ee command failed: $commandText"
     }
-    $json = Get-Content -Raw -Path $stdoutPath | ConvertFrom-Json
+
+    try {
+        $json = Get-Content -Raw -Path $stdoutPath | ConvertFrom-Json
+    }
+    catch {
+        Write-TestEvent -Phase "response" -Command $commandText -ExitCode $exitCode -StdoutPath $stdoutPath -StderrPath $stderrPath -Diagnosis "stdout was not valid JSON"
+        throw
+    }
+    if ($json.schema -ne "ee.response.v2" -or $json.success -ne $true) {
+        Write-TestEvent -Phase "response" -Command $commandText -ExitCode $exitCode -StdoutPath $stdoutPath -StderrPath $stderrPath -Diagnosis "stdout was not a successful ee.response.v2 envelope"
+        throw "ee command returned an unexpected response envelope: $commandText"
+    }
     Write-TestEvent -Phase "response" -Command $commandText -ExitCode $exitCode -StdoutPath $stdoutPath -StderrPath $stderrPath
     return $json
 }
@@ -70,7 +91,14 @@ if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
 }
 
 New-Item -ItemType Directory -Force -Path $WorkspaceRoot | Out-Null
-Remove-Item -Force -ErrorAction SilentlyContinue $LogPath
+$logParent = Split-Path -Parent $LogPath
+if (-not [string]::IsNullOrWhiteSpace($logParent)) {
+    New-Item -ItemType Directory -Force -Path $logParent | Out-Null
+}
+if (Test-Path $LogPath) {
+    throw "refusing to overwrite stale smoke log: $LogPath"
+}
+New-Item -ItemType File -Path $LogPath | Out-Null
 
 Invoke-Ee -Name "01-init" -Arguments @("init") | Out-Null
 $remember = Invoke-Ee -Name "02-remember" -Arguments @(
@@ -82,8 +110,11 @@ $remember = Invoke-Ee -Name "02-remember" -Arguments @(
     "rule"
 )
 $memoryId = $remember.data.memory_id
+if ([string]::IsNullOrWhiteSpace($memoryId)) {
+    throw "remember response did not contain data.memory_id"
+}
 Invoke-Ee -Name "03-search" -Arguments @("search", "Windows release fmt") | Out-Null
-Invoke-Ee -Name "04-context" -Arguments @("context", "prepare Windows release") | Out-Null
+Invoke-Ee -Name "04-pack" -Arguments @("pack", "prepare Windows release") | Out-Null
 Invoke-Ee -Name "05-why" -Arguments @("why", $memoryId) | Out-Null
 Invoke-Ee -Name "06-status" -Arguments @("status") | Out-Null
 Invoke-Ee -Name "07-doctor" -Arguments @("doctor") | Out-Null

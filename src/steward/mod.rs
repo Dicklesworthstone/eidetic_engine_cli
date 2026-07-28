@@ -10559,9 +10559,14 @@ mod tests {
         )?;
 
         let reason = CancelReason::user("daemon cancellation test");
-        for (cancelled_task, priority) in lab.state.cancel_request(root, &reason, None) {
-            lab.scheduler.lock().schedule(cancelled_task, priority);
+        let (tasks_to_cancel, cancellation_wakes) =
+            lab.state.cancel_request(root, &reason, None).into_parts();
+        for (cancelled_task, priority) in tasks_to_cancel {
+            lab.scheduler
+                .lock()
+                .schedule_cancel(cancelled_task, priority);
         }
+        cancellation_wakes.dispatch();
         lab.scheduler.lock().schedule(task_id, 0);
         lab.advance_time(1_000_000_000);
         lab.run_until_quiescent();
