@@ -30,6 +30,11 @@ Evidence scale:
   under `set -u` on Apple's stock Bash 3.2, so proxy-free macOS installs can
   resolve the latest release instead of reporting the misleading
   `Could not resolve latest release` error.
+- The Unix release installer now retries the compatible GNU archive when an
+  x86_64 Linux release does not include the preferred musl artifact, avoiding
+  an unexpected nightly Rust source build. Explicit artifact/checksum inputs
+  remain bound to their original archive, and the network preflight now probes
+  one byte instead of downloading the release archive twice.
 
 ## [0.3.9] - 2026-06-01
 

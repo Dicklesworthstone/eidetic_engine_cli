@@ -312,6 +312,128 @@ ee_curl https://example.invalid/proxied
     )
 }
 
+#[cfg(unix)]
+#[test]
+fn installer_retries_compatible_linux_archive_without_crossing_trust_inputs() -> TestResult {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+    let installer = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    ensure(
+        installer.contains("--connect-timeout 3 --max-time 5 --range 0-0 -o /dev/null \"$URL\""),
+        "installer network preflight should probe one byte instead of downloading the archive",
+    )?;
+    ensure(
+        installer.contains(
+            "explicit artifact/checksum inputs forbid automatic retargeting or source fallback",
+        ),
+        "installer should fail closed when a caller-pinned artifact cannot be downloaded",
+    )?;
+
+    let platform_start = installer
+        .find("OS=\"\"\nARCH=\"\"\nTARGET=\"\"")
+        .ok_or_else(|| "installer platform section start is missing".to_owned())?;
+    let platform_end = installer[platform_start..]
+        .find("# Version resolution and artifact URL")
+        .map(|offset| platform_start + offset)
+        .ok_or_else(|| "installer platform section end is missing".to_owned())?;
+    let artifact_start = installer
+        .find("TAR=\"\"\nURL=\"\"")
+        .ok_or_else(|| "installer artifact section start is missing".to_owned())?;
+    let artifact_end = installer[artifact_start..]
+        .find("# Preflight checks")
+        .map(|offset| artifact_start + offset)
+        .ok_or_else(|| "installer artifact section end is missing".to_owned())?;
+    let platform_section = &installer[platform_start..platform_end];
+    let artifact_section = &installer[artifact_start..artifact_end];
+
+    let harness = format!(
+        r#"set -euo pipefail
+FROM_SOURCE=0
+ARTIFACT_URL=""
+CHECKSUM=""
+CHECKSUM_URL=""
+VERSION="v0.12.0"
+OWNER="Dicklesworthstone"
+REPO="eidetic_engine_cli"
+TMP="/tmp/ee-installer-fallback-harness"
+info() {{ :; }}
+warn() {{ printf 'warning=%s\n' "$*"; }}
+uname() {{
+  case "$1" in
+    -s) printf 'Linux\n' ;;
+    -m) printf 'x86_64\n' ;;
+    *) return 1 ;;
+  esac
+}}
+ee_curl() {{
+  case "$1" in
+    *x86_64-unknown-linux-musl*) printf 'attempt=musl\n'; return 22 ;;
+    *x86_64-unknown-linux-gnu*) printf 'attempt=gnu\n'; return 0 ;;
+    *) printf 'attempt=unexpected:%s\n' "$1"; return 23 ;;
+  esac
+}}
+
+{platform_section}
+{artifact_section}
+
+detect_platform
+set_artifact_url
+download_release_artifact
+printf 'selected=%s tar=%s\n' "$TARGET" "$TAR"
+
+printf '%s\n' '-- explicit-checksum --'
+OS=""
+ARCH=""
+TARGET=""
+FALLBACK_TARGET=""
+CHECKSUM="caller-pinned-checksum"
+detect_platform
+set_artifact_url
+if download_release_artifact; then
+  printf 'explicit-checksum=unexpected-success\n'
+  exit 1
+fi
+printf 'explicit-checksum=failed-closed selected=%s\n' "$TARGET"
+"#
+    );
+    let output = Command::new("/bin/bash")
+        .arg("-c")
+        .arg(harness)
+        .env_remove("BASH_ENV")
+        .output()
+        .map_err(|error| format!("failed to run installer target-fallback harness: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        output.status.success(),
+        &format!(
+            "installer target-fallback harness failed with status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status.code()
+        ),
+    )?;
+    ensure(
+        stdout.contains("attempt=musl\n")
+            && stdout.contains("attempt=gnu\n")
+            && stdout.contains(
+                "selected=x86_64-unknown-linux-gnu tar=ee-x86_64-unknown-linux-gnu.tar.xz",
+            ),
+        "installer should retry and select the compatible GNU release archive",
+    )?;
+
+    let explicit_checksum = stdout
+        .split("-- explicit-checksum --\n")
+        .nth(1)
+        .ok_or_else(|| "explicit-checksum harness output is missing".to_owned())?;
+    ensure(
+        explicit_checksum.contains("attempt=musl\n")
+            && !explicit_checksum.contains("attempt=gnu\n")
+            && explicit_checksum
+                .contains("explicit-checksum=failed-closed selected=x86_64-unknown-linux-musl"),
+        "installer must not retarget a caller-pinned checksum to the GNU fallback",
+    )
+}
+
 #[test]
 fn franken_stack_lock_is_complete_full_sha_and_ci_proven() -> TestResult {
     const EXPECTED: &[(&str, &str)] = &[
@@ -385,6 +507,11 @@ fn all_build_and_install_paths_use_the_locked_franken_stack() -> TestResult {
     ensure(
         CI_WORKFLOW.contains("./scripts/checkout-franken-stack.ps1"),
         "CI Windows lanes should use the locked PowerShell checkout helper",
+    )?;
+    ensure(
+        CI_WORKFLOW.matches("bash -s -- --verify").count() >= 2
+            && !CI_WORKFLOW.contains(r#"| EE_VERSION="${EE_RELEASE_TAG}" sh"#),
+        "CI Unix installer smokes must invoke Bash rather than piping a Bash installer to sh",
     )?;
     ensure(
         RELEASE_WORKFLOW.contains("./scripts/checkout-franken-stack.ps1"),

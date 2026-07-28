@@ -560,10 +560,13 @@ is_agent_detected() {
 OS=""
 ARCH=""
 TARGET=""
+FALLBACK_TARGET=""
 
 detect_platform() {
   OS=$(uname -s | tr 'A-Z' 'a-z')
   ARCH=$(uname -m)
+  TARGET=""
+  FALLBACK_TARGET=""
   case "$ARCH" in
     x86_64|amd64) ARCH="x86_64" ;;
     arm64|aarch64) ARCH="aarch64" ;;
@@ -577,9 +580,12 @@ detect_platform() {
 
   case "${OS}-${ARCH}" in
     linux-x86_64)
-      # Release pipeline builds both gnu and musl; musl is statically linked
-      # and works on every glibc generation we care about. Prefer musl.
+      # Prefer the portable musl artifact, but retain the glibc build as a
+      # compatible release fallback. Some historical releases (including
+      # v0.12.0) shipped only the GNU archive; those installs must not turn
+      # into an unexpected local Rust build.
       TARGET="x86_64-unknown-linux-musl"
+      FALLBACK_TARGET="x86_64-unknown-linux-gnu"
       ;;
     linux-aarch64)
       # Release pipeline ships only gnu for aarch64-linux.
@@ -656,6 +662,39 @@ set_artifact_url() {
   URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${TAR}"
 }
 
+select_compatible_fallback_target() {
+  [ -n "$FALLBACK_TARGET" ] || return 1
+
+  # A caller-provided URL or checksum is bound to one exact artifact. Never
+  # silently retarget those trust inputs to a different release archive.
+  if [ -n "$ARTIFACT_URL" ] || [ -n "$CHECKSUM" ] || [ -n "$CHECKSUM_URL" ]; then
+    return 1
+  fi
+
+  local failed_target="$TARGET"
+  TARGET="$FALLBACK_TARGET"
+  FALLBACK_TARGET=""
+  set_artifact_url
+  warn "Release artifact for ${failed_target} was unavailable; trying compatible ${TARGET} artifact"
+  return 0
+}
+
+download_release_artifact() {
+  info "Downloading $URL"
+  if ee_curl "$URL" -o "$TMP/$TAR"; then
+    return 0
+  fi
+
+  if select_compatible_fallback_target; then
+    info "Downloading $URL"
+    if ee_curl "$URL" -o "$TMP/$TAR"; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 # ───────────────────────────────────────────────────────────────────────────
 # Preflight checks
 # ───────────────────────────────────────────────────────────────────────────
@@ -706,7 +745,10 @@ check_network() {
   [ "$FROM_SOURCE" -eq 1 ] && return 0
   [ -z "$URL" ] && return 0
   command -v curl >/dev/null 2>&1 || { warn "curl not found; skipping network check"; return 0; }
-  if ! ee_curl --connect-timeout 3 --max-time 5 -o /dev/null "$URL" 2>/dev/null; then
+  # Probe a single byte rather than downloading the full release archive once
+  # here and then again during installation. GitHub Release assets honor range
+  # requests; mirrors that ignore the range still remain bounded by max-time.
+  if ! ee_curl --connect-timeout 3 --max-time 5 --range 0-0 -o /dev/null "$URL" 2>/dev/null; then
     warn "Network check failed for $URL — continuing; download may fail"
   fi
 }
@@ -1285,10 +1327,13 @@ TMP=$(mktemp -d)
 # ───────────────────────────────────────────────────────────────────────────
 
 if [ "$FROM_SOURCE" -eq 0 ]; then
-  info "Downloading $URL"
-  if ! ee_curl "$URL" -o "$TMP/$TAR"; then
+  if ! download_release_artifact; then
     if [ "$REQUIRE_PROVENANCE" = "1" ]; then
       err "Artifact download failed and --require-provenance forbids source fallback"
+      exit 1
+    fi
+    if [ -n "$ARTIFACT_URL" ] || [ -n "$CHECKSUM" ] || [ -n "$CHECKSUM_URL" ]; then
+      err "Artifact download failed; explicit artifact/checksum inputs forbid automatic retargeting or source fallback"
       exit 1
     fi
     warn "Artifact download failed; falling back to build-from-source"

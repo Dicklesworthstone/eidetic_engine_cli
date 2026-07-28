@@ -314,8 +314,10 @@ the artifact signature and a verified SLSA provenance attestation; without that
 flag, a missing bundle is reported and the checksum-verified install continues.
 
 [Release binaries](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest)
-are published across macOS (`aarch64`, `x86_64`), Linux
-(`aarch64`, `x86_64` gnu + musl), and Windows (`x86_64`).
+cover macOS (`aarch64`, `x86_64`), Linux (`aarch64` and `x86_64` GNU,
+with musl where published), and Windows (`x86_64`). On x86_64 Linux the
+installer prefers the portable musl build, then automatically retries the
+compatible GNU build when that release does not include musl.
 
 **Windows (PowerShell):**
 
@@ -2158,7 +2160,7 @@ Boundaries to know:
 | Retention model | Forgetting and decay are product features. Export JSONL into git when you need sealed long-term records. |
 | Model choice | Embeddings are delegated to Frankensearch. Default installs use the pinned local `potion-multilingual-128M` fast tier; semantic quality follows that model and the derived index unless the operator explicitly changes Frankensearch posture. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
-| Release distribution | Signed multi-platform release binaries ship on every GitHub release (macOS, Linux gnu+musl, Windows) via the `curl | bash` installer; Homebrew and crates.io publication are still planned. |
+| Release distribution | Multi-platform GitHub release binaries use mandatory SHA-256 verification via the `curl | bash` installer. Sigstore/provenance verification is enforced when published or explicitly required; asset coverage can vary by release. Homebrew and crates.io publication are still planned. |
 | Mesh | Mesh exchanges redaction-safe rows and posture under policy. FrankenSQLite remains the local source of truth. |
 | Reserved adapters | `serve` and `science-analytics` report capability gaps until their adapters mature. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |

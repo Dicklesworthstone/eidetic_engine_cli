@@ -610,7 +610,7 @@ jobs:
               apt-get update
               apt-get install -y curl ca-certificates xz-utils
               curl -fsSL "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/${EE_RELEASE_TAG}/install.sh" \
-                | EE_VERSION="${EE_RELEASE_TAG}" sh
+                | EE_VERSION="${EE_RELEASE_TAG}" bash -s -- --verify
               export PATH="$HOME/.local/bin:$PATH"
               EE_EXPECTED_VERSION="${EE_RELEASE_TAG#v}"
               ee --version | grep -F "$EE_EXPECTED_VERSION"
@@ -624,7 +624,8 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/${{ steps.audit.outputs.latest_tag }}/install.sh \
-            | EE_VERSION="${{ steps.audit.outputs.latest_tag }}" EE_INSTALL_DIR="$RUNNER_TEMP/ee-bin" sh
+            | EE_VERSION="${{ steps.audit.outputs.latest_tag }}" EE_INSTALL_DIR="$RUNNER_TEMP/ee-bin" \
+                /bin/bash -s -- --verify
           export PATH="$RUNNER_TEMP/ee-bin:$PATH"
           EE_EXPECTED_VERSION="${{ steps.audit.outputs.latest_tag }}"
           EE_EXPECTED_VERSION="${EE_EXPECTED_VERSION#v}"
