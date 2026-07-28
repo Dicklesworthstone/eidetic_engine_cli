@@ -126,6 +126,21 @@ fn schema_field_presets_match_runtime_matrix() -> TestResult {
 }
 
 #[test]
+fn deprecated_context_alias_shares_canonical_pack_presets() -> TestResult {
+    for (_, profile) in PRESETS {
+        let canonical = field_preset_names_for_command("pack", *profile);
+        let alias = field_preset_names_for_command("context", *profile);
+        if canonical != alias {
+            return Err(format!(
+                "deprecated context alias diverged from canonical pack {profile:?} fields: \
+                 pack={canonical:?} context={alias:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn field_selector_presets_apply_to_every_matrix_row() -> TestResult {
     for surface in matrix_surfaces()? {
         let schema = read_json(schema_path(&surface.schema_file))?;

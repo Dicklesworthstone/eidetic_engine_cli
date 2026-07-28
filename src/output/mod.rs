@@ -1545,6 +1545,7 @@ fn command_name_from_schema(schema: &str) -> String {
     // underscores. Accept both forms; the production emit values are what
     // matters.
     match schema {
+        "ee.learn.gaps.v1" => "learn gaps".to_string(),
         "ee.swarm.brief.v1" | "ee.swarm_brief.v1" => "swarm brief".to_string(),
         "ee.swarm.next_action.v1" | "ee.swarm.next-action.v1" | "ee.swarm_next_action.v1" => {
             "swarm next-action".to_string()
@@ -1611,6 +1612,33 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "items",
                 "pagination",
                 "degraded",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "learn gaps" => match preset {
+            FieldProfile::Minimal => &["schema", "workspaceId", "clusterCount"],
+            FieldProfile::Summary => &[
+                "schema",
+                "workspaceId",
+                "retentionDays",
+                "effectiveSince",
+                "scannedMissCount",
+                "clusterCount",
+                "gaps",
+                "degraded",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "success",
+                "workspaceId",
+                "retentionDays",
+                "requestedSince",
+                "effectiveSince",
+                "scannedMissCount",
+                "clusterCount",
+                "gaps",
+                "degraded",
+                "generatedAt",
             ],
             FieldProfile::Full => &["*"],
         },

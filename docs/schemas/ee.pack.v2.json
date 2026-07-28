@@ -2,9 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.pack.v2.json",
   "title": "ee.pack.v2",
-  "description": "Full ee context response envelope. The outer schema uses ee.response.v2; this schema pins the command-specific context pack payload.",
+  "description": "Full canonical ee pack response envelope. The outer schema uses ee.response.v2; this schema pins the command-specific context-pack payload. The soft-deprecated ee context alias emits the same data.command value (pack) and adds a deprecated_alias degradation.",
   "type": "object",
-  "required": ["schema", "success", "data"],
+  "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
     "schema": {"type": "string", "const": "ee.response.v2"},
@@ -15,7 +15,7 @@
       "required": ["command", "request", "pack", "degraded"],
       "additionalProperties": false,
       "properties": {
-        "command": {"type": "string", "const": "context"},
+        "command": {"type": "string", "const": "pack"},
         "request": {
           "type": "object",
           "required": [
@@ -33,6 +33,7 @@
             "profile": {"type": "string"},
             "maxTokens": {"type": "integer"},
             "candidatePool": {"type": "integer"},
+            "maxResults": {"type": "integer", "minimum": 0},
             "memoryScope": {"type": "string"},
             "strictScope": {"type": "boolean"},
             "sections": {"type": "array", "items": {"type": "string"}}
@@ -97,10 +98,13 @@
                   "memoryId": {"type": "string"},
                   "section": {"type": "string"},
                   "content": {"type": "string"},
+                  "contentRedacted": {"type": "boolean"},
                   "estimatedTokens": {"type": "integer"},
                   "scores": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
                   "why": {"type": "string"},
                   "provenance": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+                  "freshnessFacets": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+                  "redactions": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
                   "trust": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
                   "selection": {
                     "type": "object",
@@ -124,13 +128,20 @@
             "provenanceFooter": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
             "selectionAudit": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
             "coordination": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+            "mesh": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+            "packDna": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+            "agentProfile": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+            "deprecation": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
+            "selectionCertificate": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
             "quality": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
             "advisoryBanner": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
           }
         },
+        "redaction": {"$ref": "#/$defs/redaction"},
         "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
       }
-    }
+    },
+    "degraded": {"type": "array", "items": {"$ref": "#/$defs/degradation"}}
   },
   "field_presets": {
     "minimal": ["command", "query", "hash"],
@@ -147,7 +158,27 @@
         "code": {"type": "string"},
         "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
         "message": {"type": "string"},
-        "repair": {"type": ["string", "null"]}
+        "repair": {"type": ["string", "null"]},
+        "repairKind": {
+          "type": "string",
+          "enum": ["actionable", "template", "placeholder", "unknown", "empty"]
+        },
+        "sources": {"type": "array", "items": {"type": "string"}},
+        "details": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+        }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "required": ["level_applied", "level_source", "fields_redacted", "patterns_matched"],
+      "additionalProperties": false,
+      "properties": {
+        "level_applied": {"type": "string"},
+        "level_source": {"type": "string"},
+        "fields_redacted": {"type": "array", "items": {"type": "string"}},
+        "patterns_matched": {"type": "array", "items": {"type": "string"}}
       }
     },
     "jsonValue": {

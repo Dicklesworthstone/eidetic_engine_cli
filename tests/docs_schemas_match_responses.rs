@@ -2155,6 +2155,34 @@ fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn pack_schema_preserves_canonical_command_for_deprecated_context_alias() -> TestResult {
+    let schema = schema_doc("ee.pack.v2")?;
+    ensure_json_str(&schema, "/properties/data/properties/command/const", "pack")?;
+
+    let mut alias_response = read_json(&fixture_path("golden/agent/context_pack.json.golden"))?;
+    let alias_degradation = json!({
+        "code": "deprecated_alias",
+        "severity": "info",
+        "message": "`ee context` is a soft-deprecated compatibility alias for canonical `ee pack`; both run the same context-pack engine.",
+        "repair": "Use `ee pack \"<task>\" --workspace . --json`.",
+        "repairKind": "template",
+        "sources": ["context"]
+    });
+    alias_response["data"]["degraded"]
+        .as_array_mut()
+        .ok_or("alias fixture data.degraded must be an array")?
+        .push(alias_degradation.clone());
+    alias_response["degraded"]
+        .as_array_mut()
+        .ok_or("alias fixture degraded must be an array")?
+        .push(alias_degradation);
+
+    ensure_json_str(&alias_response, "/data/command", "pack")?;
+    validate_json_schema(&alias_response, &schema, &schema, "$")
+        .map_err(|error| format!("deprecated context alias response: {error}"))
+}
+
 struct MachineSurfaceConformanceCase {
     surface: &'static str,
     schema_id: &'static str,
