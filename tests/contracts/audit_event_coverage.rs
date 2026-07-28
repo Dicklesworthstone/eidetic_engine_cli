@@ -31,7 +31,10 @@ type TestResult = Result<(), String>;
 
 fn build_workspace() -> Result<(TempDir, PathBuf, PathBuf, String), String> {
     let dir = tempfile::tempdir().map_err(|error| format!("tempdir failed: {error}"))?;
-    let workspace = dir.path().to_path_buf();
+    let workspace = dir
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize temp workspace failed: {error}"))?;
     let database = workspace.join(".ee").join("ee.db");
     std::fs::create_dir_all(database.parent().expect("db parent"))
         .map_err(|error| format!("mkdir parent failed: {error}"))?;
