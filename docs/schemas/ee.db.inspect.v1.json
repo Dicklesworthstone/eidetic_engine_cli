@@ -9,6 +9,7 @@
   "properties": {
     "schema": {"type": "string", "const": "ee.response.v2"},
     "success": {"type": "boolean"},
+    "fields": {"type": "string"},
     "data": {
       "type": "object",
       "required": ["command", "report"],

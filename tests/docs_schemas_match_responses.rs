@@ -239,6 +239,14 @@ fn docs_schema_files_are_strict_draft_2020_12_documents() -> TestResult {
         ensure_json_str(&schema, "/title", schema_id)?;
         ensure_json_bool(&schema, "/additionalProperties", false)?;
         ensure_field_presets(schema_id, &schema)?;
+        if schema
+            .pointer("/properties/schema/const")
+            .and_then(Value::as_str)
+            == Some(RESPONSE_SCHEMA_V2)
+        {
+            ensure_json_str(&schema, "/properties/fields/type", "string")?;
+            ensure_json_str(&schema, "/properties/degraded/type", "array")?;
+        }
     }
     Ok(())
 }

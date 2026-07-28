@@ -9,6 +9,8 @@
   "properties": {
     "schema": {"type": "string", "const": "ee.response.v2"},
     "success": {"type": "boolean", "const": true},
+    "fields": {"type": "string"},
+    "degraded": {"type": "array", "items": {"type": "object"}},
     "data": {
       "type": "object",
       "required": [
