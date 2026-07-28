@@ -335,11 +335,21 @@ The Windows installer conformance contract is tracked in
 **From source** (nightly Rust toolchain):
 
 ```bash
+mkdir ee-source
+cd ee-source
 git clone https://github.com/Dicklesworthstone/eidetic_engine_cli
 cd eidetic_engine_cli
+./scripts/checkout-franken-stack.sh ..
 cargo build --release
 ./target/release/ee --version
 ```
+
+`ee` uses sibling path dependencies during early development. The checkout
+helper reads [`franken-stack.lock`](franken-stack.lock), fetches the exact
+compatible revisions next to the `eidetic_engine_cli` checkout, verifies every
+result, and refuses to modify an unrelated or dirty existing repository.
+`install.sh --from-source` and `install.ps1 -FromSource` run the same locked
+setup automatically.
 
 ### Verify
 

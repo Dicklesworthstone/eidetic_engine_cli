@@ -102,14 +102,7 @@ jobs:
           # keeps the siblings visible to cross, which only mounts the
           # workspace into its build container.
           project_root="$GITHUB_WORKSPACE/.ci/franken-stack/projects"
-          mkdir -p "$project_root"
-          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$project_root/asupersync"
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git "$project_root/franken_agent_detection"
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git "$project_root/franken_networkx"
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git "$project_root/frankensearch"
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git "$project_root/frankensqlite"
-          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git "$project_root/sqlmodel_rust"
-          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$project_root/toon_rust"
+          ./scripts/checkout-franken-stack.sh "$project_root"
           # Accept both ../<sibling> (current) and /data/projects/<sibling>
           # (legacy) so the workflow keeps working through revert/rewrite
           # of the canonical local checkout convention.
@@ -267,14 +260,7 @@ jobs:
           # Same rewrite-rule pair as the gates job; see that step's
           # comment for the ../sibling vs /data/projects/sibling rationale.
           project_root="$GITHUB_WORKSPACE/.ci/franken-stack/projects"
-          mkdir -p "$project_root"
-          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$project_root/asupersync"
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git "$project_root/franken_agent_detection"
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git "$project_root/franken_networkx"
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git "$project_root/frankensearch"
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git "$project_root/frankensqlite"
-          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git "$project_root/sqlmodel_rust"
-          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$project_root/toon_rust"
+          ./scripts/checkout-franken-stack.sh "$project_root"
           CARGO_PATH_ROOT="$project_root" perl -0pi -e '
             s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
             s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
@@ -286,14 +272,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $projectRoot = Join-Path $env:GITHUB_WORKSPACE ".ci\franken-stack\projects"
-          New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
-          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git (Join-Path $projectRoot "asupersync")
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git (Join-Path $projectRoot "franken_agent_detection")
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git (Join-Path $projectRoot "franken_networkx")
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git (Join-Path $projectRoot "frankensearch")
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git (Join-Path $projectRoot "frankensqlite")
-          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git (Join-Path $projectRoot "sqlmodel_rust")
-          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git (Join-Path $projectRoot "toon_rust")
+          & ./scripts/checkout-franken-stack.ps1 -DestinationRoot $projectRoot
           $cargoPathRoot = $projectRoot -replace "\\", "/"
           $cargoText = Get-Content Cargo.toml -Raw
           foreach ($repo in @("asupersync","franken_agent_detection","franken_networkx","frankensearch","frankensqlite","sqlmodel_rust","toon_rust")) {

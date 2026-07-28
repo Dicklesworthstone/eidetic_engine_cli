@@ -47,6 +47,12 @@ a later ADR explicitly quarantines a feature with a removal plan:
 
 - A dependency row changes only when the corresponding owner updates the golden
   JSON and this Markdown file in the same bead or commit.
+- The sibling path-dependency repositories used by source builds, CI, and
+  release artifacts are locked by full commit ID in `franken-stack.lock`.
+  `scripts/checkout-franken-stack.sh` and
+  `scripts/checkout-franken-stack.ps1` are the only supported clean-checkout
+  materializers. Workflows must not clone mutually dependent upstream default
+  branches at moving HEAD.
 - Path dependencies are local-development decisions. Before release, each row
   must either move to a registry pin or record an ADR-backed local source policy.
 - `cargo update --dry-run` is advisory. It should fail CI only when the simulated

@@ -1318,6 +1318,9 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
     git clone --depth 1 "https://github.com/${OWNER}/${REPO}.git" "$TMP/src"
   fi
 
+  info "Checking out locked Franken-stack source dependencies"
+  "$TMP/src/scripts/checkout-franken-stack.sh" "$TMP"
+
   (cd "$TMP/src" && run_with_spinner "Building $BINARY (release profile)" cargo build --release)
 
   # CARGO_TARGET_DIR may have redirected the build output (e.g., this project

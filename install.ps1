@@ -729,25 +729,34 @@ function Invoke-FromSource {
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
         Write-ErrorExit "cargo not found — install Rust nightly via https://rustup.rs/ before using -FromSource"
     }
-    $src = Join-Path $env:TEMP "ee-src-$([guid]::NewGuid().ToString('N'))"
+    $sourceRoot = Join-Path $env:TEMP "ee-source-$([guid]::NewGuid().ToString('N'))"
+    $src = Join-Path $sourceRoot "eidetic_engine_cli"
+    New-Item -ItemType Directory -Path $sourceRoot | Out-Null
     try {
         Write-Info "Cloning $Script:RepoOwner/$Script:RepoName ..."
         if ($VersionTag) {
-            & git clone --depth 1 --branch $VersionTag "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
+            & git -c core.longpaths=true clone --depth 1 --branch $VersionTag "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) {
                 # Git refuses to clone into a non-empty directory. The pinned
                 # clone may have partially populated $src before failing
                 # (e.g., wrong tag); wipe it before the fallback so the
                 # default-branch retry has somewhere to go.
                 Remove-Item -Recurse -Force $src -ErrorAction SilentlyContinue
-                & git clone --depth 1 "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
+                & git -c core.longpaths=true clone --depth 1 "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
             }
         } else {
-            & git clone --depth 1 "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
+            & git -c core.longpaths=true clone --depth 1 "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
         }
         if ($LASTEXITCODE -ne 0) {
             Write-ErrorExit "git clone failed."
         }
+        Write-Info "Checking out locked Franken-stack source dependencies ..."
+        $checkoutHelper = Join-Path $src "scripts\checkout-franken-stack.ps1"
+        if (-not (Test-Path -LiteralPath $checkoutHelper -PathType Leaf)) {
+            Write-ErrorExit "Source checkout is missing $checkoutHelper"
+        }
+        & $checkoutHelper -DestinationRoot $sourceRoot
+
         Write-Info "Building ee (release profile)…"
         Push-Location $src
         try {
@@ -781,7 +790,7 @@ function Invoke-FromSource {
         Copy-Item $built (Join-Path $DestDir $BinaryName) -Force
         Write-Ok "Installed to $DestDir\$BinaryName (built from source)"
     } finally {
-        Remove-Item -Recurse -Force $src -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $sourceRoot -ErrorAction SilentlyContinue
     }
 }
 

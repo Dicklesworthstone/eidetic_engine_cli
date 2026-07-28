@@ -7,6 +7,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 type TestResult = Result<(), String>;
 
+const FRANKEN_STACK_LOCK: &str = include_str!("../franken-stack.lock");
+const FRANKEN_STACK_BASH: &str = include_str!("../scripts/checkout-franken-stack.sh");
+const FRANKEN_STACK_POWERSHELL: &str = include_str!("../scripts/checkout-franken-stack.ps1");
+const CI_WORKFLOW: &str = include_str!("../.github/workflows/ci.yml");
+const RELEASE_WORKFLOW: &str = include_str!("../.github/workflows/release.yml");
+const MACOS_ARTIFACT_WORKFLOW: &str = include_str!("../.github/workflows/macos-ee-artifact.yml");
+
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
@@ -303,6 +310,136 @@ ee_curl https://example.invalid/proxied
         ),
         "installer proxy forwarding",
     )
+}
+
+#[test]
+fn franken_stack_lock_is_complete_full_sha_and_ci_proven() -> TestResult {
+    const EXPECTED: &[(&str, &str)] = &[
+        ("asupersync", "e464a484cb65c1a55be0d9c925e6e9c20318edcb"),
+        (
+            "franken_agent_detection",
+            "6d24c532667aebdf31ecac8a9ddb457bef32b3f7",
+        ),
+        (
+            "franken_networkx",
+            "8b7dff824838baf0c1cd4277254ef43be6284501",
+        ),
+        ("frankensearch", "4fb891b2838cd3880324e25bafbc0c9e3851be7c"),
+        ("frankensqlite", "6a86c07176830dcab0fd845a71a3dd070694ea28"),
+        ("sqlmodel_rust", "173592d5e5ab0c7adfc8d8b2f83b4aec4e9b6fa4"),
+        ("toon_rust", "48f185768cdfb30b865a3e19a3c040e92519baeb"),
+    ];
+
+    ensure(
+        FRANKEN_STACK_LOCK.contains("GitHub Actions run 29846907389"),
+        "lock should record the CI run that compiled the complete dependency stack",
+    )?;
+    ensure(
+        FRANKEN_STACK_LOCK.contains("verify job 88689705551"),
+        "lock should record the proving CI job",
+    )?;
+
+    let rows = FRANKEN_STACK_LOCK
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let (repository, revision) = line
+                .split_once('\t')
+                .ok_or_else(|| format!("lock row is not tab-delimited: {line:?}"))?;
+            ensure(
+                !revision.contains('\t'),
+                &format!("lock row has extra fields: {line:?}"),
+            )?;
+            ensure(
+                revision.len() == 40
+                    && revision
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                &format!("{repository} is not locked to a full lowercase commit ID"),
+            )?;
+            Ok((repository, revision))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    ensure_equal(rows, EXPECTED.to_vec(), "locked Franken-stack revisions")
+}
+
+#[test]
+fn all_build_and_install_paths_use_the_locked_franken_stack() -> TestResult {
+    for (name, workflow) in [
+        ("CI", CI_WORKFLOW),
+        ("release", RELEASE_WORKFLOW),
+        ("macOS artifact", MACOS_ARTIFACT_WORKFLOW),
+    ] {
+        ensure(
+            !workflow.contains(
+                "git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git",
+            ),
+            &format!("{name} workflow must not clone moving Franken-stack HEADs"),
+        )?;
+        ensure(
+            workflow.contains("./scripts/checkout-franken-stack.sh"),
+            &format!("{name} workflow should use the locked Bash checkout helper"),
+        )?;
+    }
+    ensure(
+        CI_WORKFLOW.contains("./scripts/checkout-franken-stack.ps1"),
+        "CI Windows lanes should use the locked PowerShell checkout helper",
+    )?;
+    ensure(
+        RELEASE_WORKFLOW.contains("./scripts/checkout-franken-stack.ps1"),
+        "release Windows lanes should use the locked PowerShell checkout helper",
+    )?;
+
+    let unix_installer =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh"))
+            .map_err(|error| format!("failed to read install.sh: {error}"))?;
+    ensure(
+        unix_installer.contains(r#""$TMP/src/scripts/checkout-franken-stack.sh" "$TMP""#),
+        "install.sh --from-source should provision locked sibling dependencies",
+    )?;
+
+    let windows_installer =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.ps1"))
+            .map_err(|error| format!("failed to read install.ps1: {error}"))?;
+    ensure(
+        windows_installer.contains(r#"& $checkoutHelper -DestinationRoot $sourceRoot"#),
+        "install.ps1 -FromSource should provision locked sibling dependencies",
+    )
+}
+
+#[test]
+fn franken_stack_helpers_refuse_to_overwrite_existing_work() -> TestResult {
+    for (name, helper) in [
+        ("Bash", FRANKEN_STACK_BASH),
+        ("PowerShell", FRANKEN_STACK_POWERSHELL),
+    ] {
+        ensure(
+            helper.contains("franken-stack.lock"),
+            &format!("{name} helper should consume the central lock"),
+        )?;
+        ensure(
+            helper.contains("status") && helper.contains("--porcelain"),
+            &format!("{name} helper should verify existing checkout cleanliness"),
+        )?;
+        ensure(
+            helper.contains("rev-parse") && helper.contains("HEAD"),
+            &format!("{name} helper should verify the checked-out commit"),
+        )?;
+        ensure(
+            helper.contains("refusing to modify"),
+            &format!("{name} helper should fail closed on an existing mismatch"),
+        )?;
+        ensure(
+            !helper.contains("reset --hard"),
+            &format!("{name} helper must not rewrite an existing checkout"),
+        )?;
+        ensure(
+            !helper.contains("Remove-Item") && !helper.contains("rm -"),
+            &format!("{name} helper must not delete an existing checkout"),
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

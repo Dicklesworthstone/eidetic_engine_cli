@@ -1,0 +1,13 @@
+# ee.franken-stack.lock.v1
+#
+# Full commit IDs are mandatory. This set is the dependency checkout observed
+# in GitHub Actions run 29846907389, verify job 88689705551, where the entire
+# FrankenSQLite + Frankensearch + SQLModel stack compiled before Cargo reached
+# ee's own cancellation contract errors.
+asupersync	e464a484cb65c1a55be0d9c925e6e9c20318edcb
+franken_agent_detection	6d24c532667aebdf31ecac8a9ddb457bef32b3f7
+franken_networkx	8b7dff824838baf0c1cd4277254ef43be6284501
+frankensearch	4fb891b2838cd3880324e25bafbc0c9e3851be7c
+frankensqlite	6a86c07176830dcab0fd845a71a3dd070694ea28
+sqlmodel_rust	173592d5e5ab0c7adfc8d8b2f83b4aec4e9b6fa4
+toon_rust	48f185768cdfb30b865a3e19a3c040e92519baeb
