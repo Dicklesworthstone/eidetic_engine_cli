@@ -26,6 +26,7 @@ db.sqlite
 bd.db
 
 # Merge artifacts (temporary files from 3-way merge)
+*.tmp
 beads.base.jsonl
 beads.base.meta.json
 beads.left.jsonl
