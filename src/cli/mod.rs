@@ -48171,8 +48171,9 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "verificationEvidence": verification_evidence,
             "coordinationFallbackEvidence": coordination_fallback_evidence,
             "attestationBundle": report.attestation_manifest.clone(),
-            "degraded": degraded,
-        }
+            "degraded": degraded.clone(),
+        },
+        "degraded": degraded,
     });
     if let Some(load_bearing) = load_bearing
         && let Some(data) = json
@@ -59170,11 +59171,12 @@ fn render_swarm_work_packet_json(
         message: format!("Failed to serialize swarm work-packet: {error}."),
         repair: Some("Fix the swarm work-packet serializer before emitting JSON.".to_string()),
     })?;
+    let degraded = aggregate_swarm_work_packet_degraded_json(&packet.degraded);
     let response = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
-        "degraded": &packet.degraded,
+        "degraded": degraded,
     });
     serde_json::to_string_pretty(&response).map_err(|error| DomainError::Storage {
         message: format!("Failed to serialize swarm work-packet response: {error}."),
@@ -59187,16 +59189,31 @@ fn render_swarm_repair_plan_json(plan: &SwarmRepairPlan) -> Result<String, Domai
         message: format!("Failed to serialize swarm repair-plan: {error}."),
         repair: Some("Fix the swarm repair-plan serializer before emitting JSON.".to_string()),
     })?;
+    let degraded = aggregate_swarm_work_packet_degraded_json(&plan.degraded);
     let response = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
-        "degraded": &plan.degraded,
+        "degraded": degraded,
     });
     serde_json::to_string_pretty(&response).map_err(|error| DomainError::Storage {
         message: format!("Failed to serialize swarm repair-plan response: {error}."),
         repair: Some("Fix the swarm repair-plan response serializer.".to_string()),
     })
+}
+
+fn aggregate_swarm_work_packet_degraded_json(
+    degraded: &[crate::core::swarm_next_action::SwarmWorkPacketDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_cli_degraded_json(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            entry.source.clone(),
+            entry.code.clone(),
+            entry.severity,
+            entry.message.clone(),
+            entry.repair.clone().unwrap_or_default(),
+        )
+    }))
 }
 
 fn render_swarm_repair_plan_markdown(plan: &SwarmRepairPlan) -> String {
@@ -59343,29 +59360,24 @@ fn swarm_work_packet_claim_gate_degraded_json(
         .iter()
         .map(|degradation| degradation.code.as_str())
         .collect::<BTreeSet<_>>();
-    let mut degraded = packet
-        .degraded
+    let packet_degraded = packet.degraded.iter().map(|degradation| {
+        DegradationAggregationInput::new(
+            degradation.source.clone(),
+            degradation.code.clone(),
+            degradation.severity,
+            degradation.message.clone(),
+            degradation.repair.clone().unwrap_or_default(),
+        )
+    });
+    let gate_only_degraded = gate
+        .degraded_codes
         .iter()
-        .map(|degradation| {
-            serde_json::json!({
-                "code": &degradation.code,
-                "source": &degradation.source,
-                "severity": degradation.severity,
-                "message": &degradation.message,
-                "repair": &degradation.repair,
-            })
-        })
-        .collect::<Vec<_>>();
-    degraded.extend(
-        gate.degraded_codes
-            .iter()
-            .filter(|code| !packet_codes.contains(code.as_str()))
-            .map(|code| claim_gate_only_degraded_code_json(code)),
-    );
-    degraded
+        .filter(|code| !packet_codes.contains(code.as_str()))
+        .map(|code| claim_gate_only_degraded_input(code));
+    aggregate_cli_degraded_json(packet_degraded.chain(gate_only_degraded))
 }
 
-fn claim_gate_only_degraded_code_json(code: &str) -> serde_json::Value {
+fn claim_gate_only_degraded_input(code: &str) -> DegradationAggregationInput {
     let (source, severity, message, repair) = match code {
         "actionable_queue_unavailable" => (
             "beads",
@@ -59406,13 +59418,7 @@ fn claim_gate_only_degraded_code_json(code: &str) -> serde_json::Value {
             Some("Inspect data.degradedCodes and claim-gate evidence before claiming work."),
         ),
     };
-    serde_json::json!({
-        "code": code,
-        "source": source,
-        "severity": severity,
-        "message": message,
-        "repair": repair,
-    })
+    DegradationAggregationInput::new(source, code, severity, message, repair.unwrap_or_default())
 }
 
 fn render_swarm_work_packet_claim_gate_markdown(gate: &SwarmWorkPacketClaimGate) -> String {
@@ -63335,6 +63341,46 @@ mod tests {
     }
 
     #[test]
+    fn swarm_work_packet_degraded_entries_use_canonical_root_shape() -> TestResult {
+        let degraded = super::aggregate_swarm_work_packet_degraded_json(&[
+            crate::core::swarm_next_action::SwarmWorkPacketDegradation {
+                code: "swarm_source_unavailable".to_string(),
+                source: "beads".to_string(),
+                severity: "warning",
+                message: "Beads state is unavailable.".to_string(),
+                repair: Some("br ready --json".to_string()),
+            },
+            crate::core::swarm_next_action::SwarmWorkPacketDegradation {
+                code: "swarm_source_unavailable".to_string(),
+                source: "agent_mail".to_string(),
+                severity: "medium",
+                message: "Agent Mail is unavailable.".to_string(),
+                repair: Some("am status".to_string()),
+            },
+        ]);
+
+        ensure_equal(
+            &degraded.len(),
+            &1usize,
+            "duplicate work-packet degraded count",
+        )?;
+        ensure_equal(
+            &degraded[0]["severity"],
+            &serde_json::json!("medium"),
+            "work-packet degraded severity escalates",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["agent_mail", "beads"]),
+            "work-packet degraded sources",
+        )?;
+        ensure(
+            degraded[0].get("source").is_none(),
+            "work-packet root degradation must not expose command-specific source",
+        )
+    }
+
+    #[test]
     fn swarm_work_packet_claim_gate_json_includes_gate_only_degraded_codes() -> TestResult {
         let brief = crate::core::swarm_brief::SwarmBriefReport::empty(Path::new(
             "/tmp/ee-swarm-claim-gate",
@@ -63451,9 +63497,13 @@ mod tests {
             "claim-gate top-level degraded code",
         )?;
         ensure_equal(
-            &degraded[0]["source"],
-            &serde_json::json!("beads"),
-            "claim-gate top-level degraded source",
+            &degraded[0]["sources"],
+            &serde_json::json!(["beads"]),
+            "claim-gate top-level degraded sources",
+        )?;
+        ensure(
+            degraded[0].get("source").is_none(),
+            "claim-gate root degradation must use canonical sources array",
         )
     }
 
@@ -64769,6 +64819,11 @@ mod tests {
             &degraded[0]["sources"],
             &serde_json::json!(["why"]),
             "top-level why records source",
+        )?;
+        ensure_equal(
+            &value["degraded"],
+            &value["data"]["degraded"],
+            "root why degraded mirrors semantic data degraded",
         )?;
 
         let graph_degraded = value["data"]["graphRetrievalFeatures"]["degraded"]
