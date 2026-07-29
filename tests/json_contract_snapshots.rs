@@ -45,6 +45,7 @@ impl JsonContractFixture {
             )
         })?;
         seed_workspace(&workspace, &database)?;
+        write_operating_profile_config(&workspace)?;
 
         let canonical_workspace = canonical_fixture_path(&workspace, "workspace")?;
         let canonical_database = canonical_fixture_path(&database, "database")?;
@@ -84,6 +85,14 @@ impl JsonContractFixture {
 
     fn index_dir_arg(&self) -> String {
         self.canonical_index_dir.to_string_lossy().into_owned()
+    }
+
+    fn profile_config_arg(&self) -> String {
+        self.canonical_workspace
+            .join(".ee")
+            .join("profile-contract.toml")
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -228,6 +237,16 @@ fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
     connection.close().map_err(|error| error.to_string())
 }
 
+fn write_operating_profile_config(workspace: &Path) -> TestResult {
+    let path = workspace.join(".ee").join("config.toml");
+    fs::write(&path, "profile = { selected = \"portable\" }\n").map_err(|error| {
+        format!(
+            "failed to write fixture profile {}: {error}",
+            path.display()
+        )
+    })
+}
+
 fn stable_workspace_id(workspace: &Path) -> String {
     let canonical_workspace = workspace
         .canonicalize()
@@ -282,6 +301,8 @@ fn build_search_index(workspace: &Path, database: &Path, index_dir: &Path) -> Te
 fn run_ee(fixture: &JsonContractFixture, args: &[String]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
+        .env_remove("EE_PROFILE")
+        .env_remove("EE_WORKSPACE")
         .env("PATH", "/usr/bin:/bin")
         .env(
             "XDG_RUNTIME_DIR",
@@ -606,6 +627,8 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "plan".to_string(),
             "--profile".to_string(),
             "portable".to_string(),
+            "--config".to_string(),
+            fixture.profile_config_arg(),
         ],
     )?;
     assert_json_snapshot!("profile_config_plan_json_contract", profile_config_plan);
@@ -622,6 +645,8 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "--dry-run".to_string(),
             "--profile".to_string(),
             "portable".to_string(),
+            "--config".to_string(),
+            fixture.profile_config_arg(),
         ],
     )?;
     ensure_profile_apply_dry_run_shape(&missing_config_apply, false, true)?;
@@ -637,6 +662,8 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "apply".to_string(),
             "--profile".to_string(),
             "portable".to_string(),
+            "--config".to_string(),
+            fixture.profile_config_arg(),
         ],
     )?;
     ensure_json_bool(&applied_config, "/data/applied", true)?;
@@ -653,6 +680,8 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "--dry-run".to_string(),
             "--profile".to_string(),
             "portable".to_string(),
+            "--config".to_string(),
+            fixture.profile_config_arg(),
         ],
     )?;
     ensure_profile_apply_dry_run_shape(&existing_config_apply, true, false)?;
