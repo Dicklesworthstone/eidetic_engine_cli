@@ -2814,6 +2814,7 @@ fn import_cass_sample() -> Value {
         "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report.data_json(),
+        "degraded": [],
     })
 }
 
@@ -2852,7 +2853,8 @@ fn export_sample() -> Value {
             "verificationStatus": "not_run",
             "artifacts": [],
             "degraded": []
-        }
+        },
+        "degraded": []
     })
 }
 
@@ -2902,6 +2904,7 @@ fn graph_export_sample() -> Value {
         "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report.data_json(),
+        "degraded": [],
     })
 }
 
