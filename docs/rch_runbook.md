@@ -19,8 +19,9 @@ RCH invocation, re-execs from an in-memory copy so long proofs keep running
 even if the checkout script changes, and emits an `ee.rch.verify.v1` JSON proof:
 
 ```bash
-scripts/rch_verify.sh --bead-id bd-XXXX --summary -- \
-  cargo test --lib my_focused_unit_test -- --nocapture
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --bead-id bd-XXXX --summary -- \
+  cargo test --locked --lib my_focused_unit_test -- --nocapture
 ```
 
 Do not bypass this with a bare or hand-written `rch exec` command from the
@@ -32,8 +33,9 @@ If you are debugging RCH itself and must inspect the low-level shape, start with
 `--dry-run`:
 
 ```bash
-scripts/rch_verify.sh --dry-run --skip-build-admission --summary -- \
-  cargo test --lib my_focused_unit_test -- --nocapture
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --dry-run --skip-build-admission --summary -- \
+  cargo test --locked --lib my_focused_unit_test -- --nocapture
 ```
 
 Only then compare against an explicit remote-required low-level command. This
@@ -97,6 +99,7 @@ Before launching RCH, decide what source tree the proof should mean:
 | You are intentionally verifying the current shared checkout, including dirty files. | Live checkout | `scripts/rch_verify.sh --bead-id bd-XXXX -- cargo test --lib my_test -- --nocapture` |
 | You need closeout evidence that no dirty source, Beads churn, or scratch artifacts influenced the run. | Strict clean checkout | `scripts/rch_verify.sh --bead-id bd-XXXX --summary --require-clean-tree -- cargo test --lib my_test -- --nocapture` |
 | You need to verify committed source while other agents have dirty files. | Committed-tree export | `scripts/rch_verify.sh --bead-id bd-XXXX --summary --committed-tree --treeish HEAD -- cargo test --lib my_test -- --nocapture` |
+| You need closeout-grade proof for this repository's sibling path dependencies. | Pinned Franken-stack bundle | `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --bead-id bd-XXXX --summary -- cargo test --locked --lib my_test -- --nocapture` |
 
 Committed-tree mode is deliberately conservative: it resolves `--treeish`,
 records the commit/tree and manifest hash, then materializes that committed tree
@@ -104,7 +107,10 @@ into a generated source export when it can be represented safely. If it reports
 `rch_verify_committed_tree_unsupported`, the ref was unresolved or the committed
 tree could not be exported safely. If it reports
 `rch_verify_committed_tree_path_deps_unsupported`, the committed tree has path
-dependencies that cannot be represented safely by the export alone.
+dependencies that cannot be represented safely by the export alone. For this
+repository, use `--pinned-franken-stack`: it archives all seven
+`franken-stack.lock` revisions beside the committed `ee` export and leaves the
+live sibling checkouts untouched.
 
 Never use source-proof modes as permission to run `git worktree`, `git stash`,
 `git reset`, `git checkout`, `git clean`, deletion cleanup, or local Cargo. The correct
@@ -129,21 +135,27 @@ response to an ambiguous proof is coordination, not mutation.
 
 ## Allowed Cargo subcommands and their wrapper variants
 
-The wrapper script `scripts/rch_verify.sh` accepts five subcommands:
+The wrapper script `scripts/rch_verify.sh` accepts six subcommands. Rust
+compile/test/bench examples use the pinned source-authority lane; formatting is
+source-local and does not need the dependency bundle:
 
 ```bash
 # Focused unit test (single test by name)
-scripts/rch_verify.sh -- cargo test --lib has_active_owner_conflict_ -- --nocapture
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+  cargo test --locked --lib has_active_owner_conflict_ -- --nocapture
 
 # Integration test (one --test target, optional name filter)
-scripts/rch_verify.sh -- cargo test --test closure_lint_harness -- --nocapture \
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+  cargo test --locked --test closure_lint_harness -- --nocapture \
   closure_lint_requires_inline_unit_tests_for_part_ii_implementations
 
 # Library-only compile check
-scripts/rch_verify.sh -- cargo check --lib
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+  cargo check --locked --lib
 
 # Clippy with -D warnings
-scripts/rch_verify.sh -- cargo clippy --all-targets -- -D warnings
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+  cargo clippy --locked --all-targets -- -D warnings
 
 # Format check (proof.would_offload=false because RCH may decline non-compile)
 scripts/rch_verify.sh -- cargo fmt --check
@@ -153,8 +165,9 @@ For criterion benches, use the compare-only mode rather than a full run:
 
 ```bash
 EE_BENCH_COMPARE_ONLY=1 \
-scripts/rch_verify.sh --bead-id bd-3usjw.46 -- \
-  cargo bench --bench graph_minhash_rank -- --nocapture
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --bead-id bd-3usjw.46 -- \
+  cargo bench --locked --bench graph_minhash_rank -- --nocapture
 ```
 
 ## Shell-only / static verification (no cargo)
@@ -224,7 +237,8 @@ ee preflight check --cmd 'br comment bd-XXXX --message "$(cargo test --lib foo)"
 
 That command exits with policy-denied status and cites
 `builtin:rust_verifier_command_substitution`. Direct wrapper invocations like
-`scripts/rch_verify.sh --bead-id bd-XXXX -- cargo test --lib foo` remain allowed;
+`scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --bead-id bd-XXXX -- cargo test --locked --lib foo`
+remain allowed;
 only shell substitution used as evidence transport is blocked.
 
 If `--probe-processes` returns `status:"bypass_detected"`, do not launch a
@@ -288,8 +302,9 @@ hand-curated prose. Typical closeout flow:
 
 ```bash
 # 1. Generate the proof
-scripts/rch_verify.sh --bead-id bd-XXXX --summary -- \
-  cargo test --test my_harness -- --nocapture > /tmp/proof.json
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --bead-id bd-XXXX --summary -- \
+  cargo test --locked --test my_harness -- --nocapture > /tmp/proof.json
 
 # 2. Pretty-print the human summary and paste into Agent Mail
 jq -r '.summary_markdown' /tmp/proof.json
@@ -298,7 +313,8 @@ jq -r '.summary_markdown' /tmp/proof.json
 br close bd-XXXX --reason "RCH proof: command_hash=<hash>; status=<status>; verification_attribution=<mode>; see /tmp/proof.json"
 
 # 4. Optional: ledger the proof for swarm-wide reuse (bd-1h8ji.3)
-scripts/rch_verify.sh --ledger .ee/derived/rch/runs.jsonl -- <cmd>
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --ledger .ee/derived/rch/runs.jsonl -- <locked-cargo-command>
 
 # 5. Durable verifier ledger: store/query proof rows without running Cargo/RCH
 ee verify rch ingest --workspace . --from-json /tmp/proof.json --json
@@ -505,8 +521,8 @@ for health-score decay:
 rch workers capabilities --refresh --json
 RCH_WORKERS=vmi1149989 \
 RCH_VERIFY_ATTEMPT_TIMEOUT_MS=1200000 \
-scripts/rch_verify.sh --summary -- \
-  cargo test --lib blind_spots -- --nocapture
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --summary -- \
+  cargo test --locked --lib blind_spots -- --nocapture
 ```
 
 The retry produced `status=remote_pass`, `worker_id=vmi1149989`, `exit_code=0`,
@@ -658,16 +674,16 @@ bash and dash. Confirmed by repro on this Mac (`dash` is installed at
 
 | Task | Command |
 |---|---|
-| Verify one unit test | `scripts/rch_verify.sh -- cargo test --lib <name> -- --nocapture` |
-| Verify one integration test | `scripts/rch_verify.sh -- cargo test --test <crate> -- --nocapture <name>` |
-| Library compile check | `scripts/rch_verify.sh -- cargo check --lib` |
-| Clippy gate | `scripts/rch_verify.sh -- cargo clippy --all-targets -- -D warnings` |
+| Verify one unit test | `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo test --locked --lib <name> -- --nocapture` |
+| Verify one integration test | `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo test --locked --test <crate> -- --nocapture <name>` |
+| Library compile check | `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo check --locked --lib` |
+| Clippy gate | `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo clippy --locked --all-targets -- -D warnings` |
 | Format check | `scripts/rch_verify.sh -- cargo fmt --check` |
-| Compare-only bench | `EE_BENCH_COMPARE_ONLY=1 scripts/rch_verify.sh -- cargo bench --bench <name>` |
+| Compare-only bench | `EE_BENCH_COMPARE_ONLY=1 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo bench --locked --bench <name>` |
 | Detect local-cargo bypass | `scripts/check-local-cargo-tripwire.sh --cmd '<cmd>' --json` |
 | Scan active local Cargo processes | `scripts/check-local-cargo-tripwire.sh --probe-processes --json` |
 | Detect Mac-leak in transcript | `scripts/check-rch-portability.sh --json /path/to/transcript` |
-| Generate closeout proof | `scripts/rch_verify.sh --bead-id <id> --summary --ledger .ee/derived/rch/runs.jsonl -- <cmd>` |
+| Generate closeout proof | `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --bead-id <id> --summary --ledger .ee/derived/rch/runs.jsonl -- <locked-cargo-command>` |
 | Ingest verifier proof | `ee verify rch ingest --from-json proof.json --json` |
 | Query active RCH blockers | `ee verify rch blockers --bead-id <id> --json` |
 | Query RCH verifier run history | `ee verify rch runs --bead-id <id> --json` |

@@ -2012,13 +2012,12 @@ Codex hook as not installed. Until that local installation is upgraded, keep
 using the repo wrapper and pass the current RCH client as the wrapper binary:
 
 ```bash
-TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp \
 RCH_VISIBILITY=summary \
-RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects \
-RCH_ALIAS_PROJECT_ROOT=/data/projects \
-scripts/rch_verify.sh --summary --no-write \
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --summary --no-write \
   --rch-bin /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 -- \
-  cargo test --lib search_sync_attaches_rebuilt_lexical_index_for_literal_queries -- --nocapture
+  cargo test --locked --lib \
+  search_sync_attaches_rebuilt_lexical_index_for_literal_queries -- --nocapture
 ```
 
 Do not use `/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch`

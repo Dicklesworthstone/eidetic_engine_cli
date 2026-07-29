@@ -1224,20 +1224,19 @@ to remote execution and avoids direct `rch exec -- cargo ...` fallback paths
 that can inherit the Mac USB `TMPDIR` or run local Cargo.
 
 ```bash
-TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp \
 RCH_VISIBILITY=summary \
-RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects \
-RCH_ALIAS_PROJECT_ROOT=/data/projects \
-scripts/rch_verify.sh --summary --no-write \
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --summary --no-write \
   --rch-bin /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 -- \
-  cargo test --lib
+  cargo test --locked --lib
 ```
 
 Do not call `/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch`
 directly from this Mac; that path can contain a Linux worker artifact and fail
-with `exec format error`. Prefer `scripts/rch_verify.sh -- cargo ...`, or the
-current Mach-O sidecar above when a low-level RCH incident/debug command is
-needed.
+with `exec format error`. Prefer the pinned
+`scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo
+... --locked` lane, or the current Mach-O sidecar above when a low-level RCH
+incident/debug command is needed.
 
 Quick commands:
 ```bash
