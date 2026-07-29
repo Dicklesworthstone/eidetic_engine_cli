@@ -788,8 +788,8 @@ the daemon-side codes onto the canonical `degraded[]` array on fallback.
 bounded-pool `daemon_overloaded` and peer-credential
 `daemon_peer_unauthorized` codes are catalogued under their own concurrency
 and security rows respectively. `daemon_ann_warmload_not_yet_implemented`
-is the historical bd-oja31 context-stub code retained only in the failure-mode
-catalog for archived daemon traces and older clients; current
+is the historical bd-oja31 context-stub code retained as an explicitly retired
+failure-mode fixture for archived daemon traces and older clients; current
 `ee.daemon.context` dispatch executes the canonical pack path instead, and no
 production source should declare a `*_NOT_YET_IMPLEMENTED_CODE` sentinel for
 the closed daemon hot-mode surface.

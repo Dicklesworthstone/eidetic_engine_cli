@@ -11,6 +11,11 @@
   ],
   "severity": "medium",
   "repair_present": false,
+  "retired": true,
+  "retired_by": {
+    "bead": "bd-16pwc.1",
+    "reason": "bd-16pwc.1 replaced the daemon context stub with canonical pack execution, and c46eea06 removed the obsolete sentinel from production; the fixture remains only to decode archived daemon traces."
+  },
   "trigger": {
     "description": "Historical entry for the original ee.daemon.context skeleton: before bd-16pwc.1 replaced the stub with canonical pack execution, the dispatcher returned a stub error envelope and tagged it with daemon_ann_warmload_not_yet_implemented so the CLI client knew to fall back to the in-process ee context path. Current daemon dispatch should not emit this code for live context requests; the literal remains decodable for archived traces and older clients.",
     "setup_commands": [
