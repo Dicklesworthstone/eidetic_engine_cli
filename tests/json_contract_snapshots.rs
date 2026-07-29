@@ -444,14 +444,14 @@ fn scrub_string(text: &str, fixture: &JsonContractFixture) -> String {
 
     let mut scrubbed = text.to_string();
     for (path, replacement) in [
-        (&fixture.database, "[DATABASE]"),
-        (&fixture.canonical_database, "[DATABASE]"),
-        (&fixture.index_dir, "[INDEX]"),
-        (&fixture.canonical_index_dir, "[INDEX]"),
-        (&fixture.workspace, "[WORKSPACE]"),
-        (&fixture.canonical_workspace, "[WORKSPACE]"),
+        (fixture.database.as_path(), "[DATABASE]"),
+        (fixture.canonical_database.as_path(), "[DATABASE]"),
+        (fixture.index_dir.as_path(), "[INDEX]"),
+        (fixture.canonical_index_dir.as_path(), "[INDEX]"),
+        (fixture.workspace.as_path(), "[WORKSPACE]"),
+        (fixture.canonical_workspace.as_path(), "[WORKSPACE]"),
         (Path::new(env!("CARGO_MANIFEST_DIR")), "[REPO]"),
-        (&fixture.canonical_repo, "[REPO]"),
+        (fixture.canonical_repo.as_path(), "[REPO]"),
     ] {
         scrubbed = scrubbed.replace(path.to_string_lossy().as_ref(), replacement);
     }
