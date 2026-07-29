@@ -26,6 +26,8 @@ struct JsonContractFixture {
     canonical_database: PathBuf,
     canonical_index_dir: PathBuf,
     canonical_repo: PathBuf,
+    binary: PathBuf,
+    canonical_binary: PathBuf,
 }
 
 impl JsonContractFixture {
@@ -34,11 +36,12 @@ impl JsonContractFixture {
         let workspace = artifact_dir.join("workspace");
         let database = workspace.join(".ee").join("ee.db");
         let index_dir = workspace.join(".ee").join("index");
+        let runtime_dir = workspace.join(".runtime");
 
-        fs::create_dir_all(&workspace).map_err(|error| {
+        fs::create_dir_all(&runtime_dir).map_err(|error| {
             format!(
-                "failed to create fixture workspace {}: {error}",
-                workspace.display()
+                "failed to create fixture runtime directory {}: {error}",
+                runtime_dir.display()
             )
         })?;
         seed_workspace(&workspace, &database)?;
@@ -49,6 +52,8 @@ impl JsonContractFixture {
         let canonical_index_dir = canonical_fixture_path(&index_dir, "index directory")?;
         let canonical_repo =
             canonical_fixture_path(Path::new(env!("CARGO_MANIFEST_DIR")), "repository")?;
+        let binary = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
+        let canonical_binary = canonical_fixture_path(&binary, "ee binary")?;
 
         Ok(Self {
             workspace,
@@ -58,6 +63,8 @@ impl JsonContractFixture {
             canonical_database,
             canonical_index_dir,
             canonical_repo,
+            binary,
+            canonical_binary,
         })
     }
 
@@ -266,15 +273,17 @@ fn build_search_index(workspace: &Path, database: &Path, index_dir: &Path) -> Te
     Ok(())
 }
 
-fn run_ee(args: &[String]) -> Result<Output, String> {
+fn run_ee(fixture: &JsonContractFixture, args: &[String]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
+        .env("PATH", "/usr/bin:/bin")
+        .env("XDG_RUNTIME_DIR", fixture.workspace.join(".runtime"))
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn run_json_command(fixture: &JsonContractFixture, args: Vec<String>) -> Result<Value, String> {
-    let output = run_ee(&args)?;
+    let output = run_ee(fixture, &args)?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("stdout was not UTF-8 for ee {}: {error}", args.join(" ")))?;
     let stderr = String::from_utf8(output.stderr)
@@ -444,6 +453,8 @@ fn scrub_string(text: &str, fixture: &JsonContractFixture) -> String {
 
     let mut scrubbed = text.to_string();
     for (path, replacement) in [
+        (fixture.binary.as_path(), "[EE_BINARY]"),
+        (fixture.canonical_binary.as_path(), "[EE_BINARY]"),
         (fixture.database.as_path(), "[DATABASE]"),
         (fixture.canonical_database.as_path(), "[DATABASE]"),
         (fixture.index_dir.as_path(), "[INDEX]"),
