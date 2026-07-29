@@ -2213,6 +2213,8 @@ printf '[RCH] remote trj (0.1s)\n'
             ("RCH_SOCKET_PATH", "/tmp/rch-alt-test.sock"),
             ("RCH_BUILD_TIMEOUT_SEC", "1200"),
             ("RCH_TEST_TIMEOUT_SEC", "1500"),
+            ("RCH_CANONICAL_PROJECT_ROOT", "/data/projects"),
+            ("RCH_ALIAS_PROJECT_ROOT", "/data"),
             ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
             ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
         ],
@@ -2253,14 +2255,7 @@ printf '[RCH] remote trj (0.1s)\n'
             "first invocation did not receive RCH_TEST_TIMEOUT_SEC: {report}"
         ));
     }
-    let expected_canonical_root = repo_root()
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| "repo root has no parent".to_owned())?
-        .display()
-        .to_string();
-    let expected_canonical_line = format!("RCH_CANONICAL_PROJECT_ROOT={expected_canonical_root}");
-    if !stdout_tail.contains(&expected_canonical_line) {
+    if !stdout_tail.contains("RCH_CANONICAL_PROJECT_ROOT=/data/projects") {
         return Err(format!(
             "first invocation did not receive project-root topology: {report}"
         ));
