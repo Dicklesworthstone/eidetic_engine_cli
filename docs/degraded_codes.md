@@ -7280,24 +7280,27 @@ ee journal append 'deploy failed with API_KEY=sk-ant-api03-FAKEFAKE retry later'
 
 **Severity:** low
 
-**Surfaces:** context
+**Surfaces:** pack
 
 **Introduced by:** bd-ndzfg.4 (epic L)
 
-**Trigger.** ee context finds an L2 cache entry for the canonical context key, but the entry payload is malformed, has the wrong schema, mismatches the key, or fails body-hash validation. The corrupt entry is ignored and fresh context assembly proceeds.
+**Trigger.** ee pack finds an L2 cache entry for the canonical pack key, but the entry payload is malformed, has the wrong schema, mismatches the key, or fails body-hash validation. The corrupt entry is ignored and fresh pack assembly proceeds.
 
 **Setup.**
 
 ```bash
 ee init --workspace .
 ee remember 'Run cargo fmt before release.' --workspace . --level procedural --kind rule
-printf '{"schema":"wrong"}' > "$EE_L2_PACK_CACHE_DIR/<workspace>/bad.json"
+export EE_L2_PACK_CACHE_DIR="$PWD/.ee/test-l2-corrupt-cache"; export EE_L2_PACK_CACHE_DISABLE=0
+ee pack 'prepare release' --workspace . --json >/dev/null
+CACHE_ENTRY="$(find "$EE_L2_PACK_CACHE_DIR" -type f -name '*.json' 2>/dev/null | LC_ALL=C sort | sed -n '1p')"; test -n "$CACHE_ENTRY"
+printf '{"schema":"wrong"}' > "$CACHE_ENTRY"
 ```
 
 **Invocation.**
 
 ```bash
-ee context 'prepare release' --workspace . --json
+ee pack 'prepare release' --workspace . --json
 ```
 
 **Expected emission.** Message contains: `L2 pack cache ... rejected`
@@ -7312,24 +7315,25 @@ ee context 'prepare release' --workspace . --json
 
 **Severity:** low
 
-**Surfaces:** context
+**Surfaces:** pack
 
 **Introduced by:** bd-ndzfg.4 (epic L)
 
-**Trigger.** ee context is configured to use the L2 pack cache, but the cache key or cache directory cannot be read or written. The command assembles a fresh context pack instead of failing.
+**Trigger.** ee pack is configured to use the L2 pack cache, but the cache key or cache directory cannot be read or written. The command assembles a fresh context pack instead of failing.
 
 **Setup.**
 
 ```bash
 ee init --workspace .
 ee remember 'Run cargo fmt before release.' --workspace . --level procedural --kind rule
-ee config set cache.pack_l2.directory /root/ee-pack-cache
+printf 'not a directory\n' > "$PWD/.ee/l2-cache-root-is-file"
+export EE_L2_PACK_CACHE_DIR="$PWD/.ee/l2-cache-root-is-file"; export EE_L2_PACK_CACHE_DISABLE=0
 ```
 
 **Invocation.**
 
 ```bash
-ee context 'prepare release' --workspace . --json
+ee pack 'prepare release' --workspace . --json
 ```
 
 **Expected emission.** Message contains: `L2 pack cache ... assembled fresh context`

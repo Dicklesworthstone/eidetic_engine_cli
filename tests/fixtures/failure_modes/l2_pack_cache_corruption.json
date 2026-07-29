@@ -2,17 +2,20 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "l2_pack_cache_corruption",
   "introduced_by": {"bead": "bd-ndzfg.4", "epic_letter": "L"},
-  "surfaces": ["context"],
+  "surfaces": ["pack"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
-    "description": "ee context finds an L2 cache entry for the canonical context key, but the entry payload is malformed, has the wrong schema, mismatches the key, or fails body-hash validation. The corrupt entry is ignored and fresh context assembly proceeds.",
+    "description": "ee pack finds an L2 cache entry for the canonical pack key, but the entry payload is malformed, has the wrong schema, mismatches the key, or fails body-hash validation. The corrupt entry is ignored and fresh pack assembly proceeds.",
     "setup_commands": [
       "ee init --workspace .",
       "ee remember 'Run cargo fmt before release.' --workspace . --level procedural --kind rule",
-      "printf '{\"schema\":\"wrong\"}' > \"$EE_L2_PACK_CACHE_DIR/<workspace>/bad.json\""
+      "export EE_L2_PACK_CACHE_DIR=\"$PWD/.ee/test-l2-corrupt-cache\"; export EE_L2_PACK_CACHE_DISABLE=0",
+      "ee pack 'prepare release' --workspace . --json >/dev/null",
+      "CACHE_ENTRY=\"$(find \"$EE_L2_PACK_CACHE_DIR\" -type f -name '*.json' 2>/dev/null | LC_ALL=C sort | sed -n '1p')\"; test -n \"$CACHE_ENTRY\"",
+      "printf '{\"schema\":\"wrong\"}' > \"$CACHE_ENTRY\""
     ],
-    "invocation": "ee context 'prepare release' --workspace . --json"
+    "invocation": "ee pack 'prepare release' --workspace . --json"
   },
   "expected_emission": {
     "code": "l2_pack_cache_corruption",

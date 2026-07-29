@@ -279,7 +279,7 @@ for index in $(seq 1 8); do
         --level procedural \
         --kind rule \
         --no-auto-link \
-        "zstd pack dictionary cache replay fixture ${index}: repeated release context cache ledger hash pack hash markdown parity data for compression." \
+        "zstd pack dictionary cache replay fixture ${index}: repeated release pack cache ledger hash pack hash markdown parity data for compression." \
         --json >/dev/null 2>&1 || true
 done
 
@@ -288,14 +288,18 @@ assert_jq "$INDEX_JSON" '.success // false' "true" "zstd_pack_dictionary_index_r
 
 FRESH_JSON_PATH="$ARTIFACT_DIR/fresh.json"
 EE_L2_PACK_CACHE_DIR="$SEED_CACHE_ROOT" \
-    "$EE_BINARY" context "$QUERY" \
+    "$EE_BINARY" pack "$QUERY" \
         --workspace "$EPIC_WORKSPACE" \
         --max-tokens 1600 \
         --json >"$FRESH_JSON_PATH" 2>"$ARTIFACT_DIR/fresh.stderr"
 FRESH_JSON="$(cat "$FRESH_JSON_PATH")"
-assert_jq "$FRESH_JSON" '.success // false' "true" "zstd_pack_dictionary_fresh_context_success"
+assert_jq "$FRESH_JSON" '.success // false' "true" "zstd_pack_dictionary_fresh_pack_success"
 
-SEED_ENTRY="$(find "$SEED_CACHE_ROOT" -type f -name '*.json' 2>/dev/null | head -n 1)"
+SEED_ENTRY="$(
+    find "$SEED_CACHE_ROOT" -type f -name '*.json' 2>/dev/null \
+        | LC_ALL=C sort \
+        | sed -n '1p'
+)"
 assert_jq "$(printf '{"path":%s}\n' "$(jq -Rs . <<<"$SEED_ENTRY")")" '.path | length > 0' \
     "true" "zstd_pack_dictionary_seed_cache_entry_found"
 CACHE_KEY="$(jq -r '.key' "$SEED_ENTRY")"
@@ -332,12 +336,12 @@ assert_jq "$(cat "$DICT_ENTRY_PATH")" '.compression.dictionary.dictionaryId | st
 
 DICT_HIT_JSON_PATH="$ARTIFACT_DIR/dictionary-hit.json"
 EE_L2_PACK_CACHE_DIR="$DICT_CACHE_ROOT" \
-    "$EE_BINARY" context "$QUERY" \
+    "$EE_BINARY" pack "$QUERY" \
         --workspace "$EPIC_WORKSPACE" \
         --max-tokens 1600 \
         --json >"$DICT_HIT_JSON_PATH" 2>"$ARTIFACT_DIR/dictionary-hit.stderr"
 DICT_HIT_JSON="$(cat "$DICT_HIT_JSON_PATH")"
-assert_jq "$DICT_HIT_JSON" '.success // false' "true" "zstd_pack_dictionary_hit_context_success"
+assert_jq "$DICT_HIT_JSON" '.success // false' "true" "zstd_pack_dictionary_hit_pack_success"
 if cmp -s "$FRESH_JSON_PATH" "$DICT_HIT_JSON_PATH"; then
     e2e_log_assert_eq "byte_identical" "byte_identical" "zstd_pack_dictionary_cached_json_byte_identical"
 else
@@ -351,12 +355,12 @@ e2e_log_assert_eq "$DICT_PACK_HASH" "$FRESH_PACK_HASH" "zstd_pack_dictionary_pac
 FRESH_MARKDOWN_PATH="$ARTIFACT_DIR/fresh.md"
 DICT_MARKDOWN_PATH="$ARTIFACT_DIR/dictionary.md"
 EE_L2_PACK_CACHE_DIR="$SEED_CACHE_ROOT" \
-    "$EE_BINARY" context "$QUERY" \
+    "$EE_BINARY" pack "$QUERY" \
         --workspace "$EPIC_WORKSPACE" \
         --max-tokens 1600 \
         --format markdown >"$FRESH_MARKDOWN_PATH" 2>"$ARTIFACT_DIR/fresh-md.stderr"
 EE_L2_PACK_CACHE_DIR="$DICT_CACHE_ROOT" \
-    "$EE_BINARY" context "$QUERY" \
+    "$EE_BINARY" pack "$QUERY" \
         --workspace "$EPIC_WORKSPACE" \
         --max-tokens 1600 \
         --format markdown >"$DICT_MARKDOWN_PATH" 2>"$ARTIFACT_DIR/dict-md.stderr"
@@ -370,7 +374,7 @@ fi
 for index in 1 2 3; do
     sample_start="$(python3 -c 'import time; print(time.monotonic())')"
     EE_L2_PACK_CACHE_DIR="$DICT_CACHE_ROOT" \
-        "$EE_BINARY" context "$QUERY" \
+        "$EE_BINARY" pack "$QUERY" \
             --workspace "$EPIC_WORKSPACE" \
             --max-tokens 1600 \
             --json >"$ARTIFACT_DIR/dictionary-hit-${index}.json" \
@@ -406,12 +410,12 @@ assert_jq "$(cat "$MISSING_ENTRY_PATH")" '.schema // empty' \
     "ee.pack.l2_cache.entry.v2" "zstd_pack_dictionary_missing_fixture_written"
 MISSING_JSON="$(
     EE_L2_PACK_CACHE_DIR="$MISSING_CACHE_ROOT" \
-        "$EE_BINARY" context "$QUERY" \
+        "$EE_BINARY" pack "$QUERY" \
             --workspace "$EPIC_WORKSPACE" \
             --max-tokens 1600 \
             --json 2>/dev/null || true
 )"
-assert_jq "$MISSING_JSON" '.success // false' "true" "zstd_pack_dictionary_missing_dictionary_context_success"
+assert_jq "$MISSING_JSON" '.success // false' "true" "zstd_pack_dictionary_missing_dictionary_pack_success"
 MISSING_OK=false
 if degraded_has_code "$MISSING_JSON" "l2_pack_cache_corruption" \
     && degraded_message_contains "$MISSING_JSON" "compression_dictionary_missing"; then
@@ -425,12 +429,12 @@ assert_jq "$(cat "$CORRUPT_ENTRY_PATH")" '.schema // empty' \
     "ee.pack.l2_cache.entry.v2" "zstd_pack_dictionary_corrupt_fixture_written"
 CORRUPT_JSON="$(
     EE_L2_PACK_CACHE_DIR="$CORRUPT_CACHE_ROOT" \
-        "$EE_BINARY" context "$QUERY" \
+        "$EE_BINARY" pack "$QUERY" \
             --workspace "$EPIC_WORKSPACE" \
             --max-tokens 1600 \
             --json 2>/dev/null || true
 )"
-assert_jq "$CORRUPT_JSON" '.success // false' "true" "zstd_pack_dictionary_corrupt_dictionary_context_success"
+assert_jq "$CORRUPT_JSON" '.success // false' "true" "zstd_pack_dictionary_corrupt_dictionary_pack_success"
 CORRUPT_OK=false
 if degraded_has_code "$CORRUPT_JSON" "l2_pack_cache_corruption" \
     && degraded_message_contains "$CORRUPT_JSON" "compression_dictionary_corrupt"; then

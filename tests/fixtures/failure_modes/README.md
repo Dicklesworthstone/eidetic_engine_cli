@@ -167,8 +167,8 @@ in the same commit, keeping the catalog complete by construction.
 | `memory_tier_metadata_stale` | cache prewarm | medium | bd-1prrl.6.4 (Swarm-X) |
 | `derived_asset_hash_mismatch` | support bundle | high | bd-1nxz4.2 |
 | `derived_asset_schema_mismatch` | support bundle | high | bd-1nxz4.2 |
-| `l2_pack_cache_unavailable` | context | low | bd-ndzfg.4 (L) |
-| `l2_pack_cache_corruption` | context | low | bd-ndzfg.4 (L) |
+| `l2_pack_cache_unavailable` | pack | low | bd-ndzfg.4 (L) |
+| `l2_pack_cache_corruption` | pack | low | bd-ndzfg.4 (L) |
 | `audit_backpressure` | audit lane | warning | bd-wp5ac.1 |
 | `audit_lane_batch_commit_failed` | audit lane | high | bd-2kzk9 |
 | `audit_lane_shutdown_drain_timeout` | audit lane | medium | bd-wp5ac.1 |
