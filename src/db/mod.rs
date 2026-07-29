@@ -10070,28 +10070,25 @@ fn stored_evidence_security_state_hash(span: &StoredEvidenceSpan) -> String {
     )
 }
 
-fn prepared_evidence_security_state_hash(
-    evidence_id: &str,
+fn stored_evidence_security_matches_prepared(
+    span: &StoredEvidenceSpan,
     prepared: &PreparedEvidenceSecurity,
-) -> String {
-    canonical_evidence_hash(
-        serde_json::json!({
-            "id": evidence_id,
-            "contentHash": prepared.canonical_excerpt_hash,
-            "producerKind": prepared.producer_kind.as_str(),
-            "screeningVersion": EVIDENCE_SCREENING_VERSION,
-            "secretRedactionStatus": prepared.secret_redaction_status,
-            "instructionRisk": prepared.instruction_risk,
-            "searchEligibility": prepared.search_eligibility,
-            "packEligibility": prepared.pack_eligibility,
-            "canonicalProvenanceRevision": EVIDENCE_CANONICAL_PROVENANCE_REVISION,
-            "canonicalExcerptHash": prepared.canonical_excerpt_hash,
-            "securityPolicyEpoch": EVIDENCE_SECURITY_POLICY_EPOCH,
-            "upstreamRefHash": prepared.upstream_ref_hash,
-        })
-        .to_string()
-        .as_str(),
-    )
+) -> bool {
+    span.cass_span_id == prepared.upstream_ref_hash
+        && span.excerpt == prepared.excerpt
+        && span.content_hash == prepared.canonical_excerpt_hash
+        && span.metadata_json.as_deref() == Some(prepared.safe_metadata_json.as_str())
+        && span.producer_kind == prepared.producer_kind.as_str()
+        && span.screening_version == EVIDENCE_SCREENING_VERSION
+        && span.secret_redaction_status == prepared.secret_redaction_status
+        && span.redaction_classes_json == prepared.redaction_classes_json
+        && span.instruction_risk == prepared.instruction_risk
+        && span.search_eligibility == prepared.search_eligibility
+        && span.pack_eligibility == prepared.pack_eligibility
+        && span.canonical_provenance_revision == EVIDENCE_CANONICAL_PROVENANCE_REVISION
+        && span.canonical_excerpt_hash.as_deref() == Some(prepared.canonical_excerpt_hash.as_str())
+        && span.security_policy_epoch == EVIDENCE_SECURITY_POLICY_EPOCH
+        && span.upstream_ref_hash.as_deref() == Some(prepared.upstream_ref_hash.as_str())
 }
 
 impl DbConnection {
@@ -10242,10 +10239,9 @@ impl DbConnection {
         actor: Option<&str>,
     ) -> Result<String> {
         let before_hash = stored_evidence_security_state_hash(span);
-        let after_hash = prepared_evidence_security_state_hash(&span.id, &decision.prepared);
         let now = Utc::now().to_rfc3339();
         let prepared = &decision.prepared;
-        let affected_rows = self.execute_for(
+        let persisted_rows = self.query_for(
             DbOperation::Execute,
             "UPDATE evidence_spans
              SET cass_span_id = ?1,
@@ -10275,7 +10271,15 @@ impl DbConnection {
                     OR upstream_ref_hash IS NULL
                     OR search_eligibility <> 'quarantined'
                     OR pack_eligibility <> 'quarantined'
-               )",
+               )
+             RETURNING id, workspace_id, session_id, memory_id, cass_span_id,
+                       span_kind, start_line, end_line, start_byte, end_byte, role,
+                       excerpt, content_hash, metadata_json, producer_kind,
+                       screening_version, secret_redaction_status,
+                       redaction_classes_json, instruction_risk, search_eligibility,
+                       pack_eligibility, canonical_provenance_revision,
+                       canonical_excerpt_hash, security_policy_epoch,
+                       upstream_ref_hash, created_at, updated_at",
             &[
                 Value::Text(prepared.upstream_ref_hash.clone()),
                 Value::Text(prepared.excerpt.clone()),
@@ -10300,32 +10304,23 @@ impl DbConnection {
                 Value::BigInt(i64::from(EVIDENCE_CANONICAL_PROVENANCE_REVISION)),
             ],
         )?;
-        if affected_rows > 1 {
+        if persisted_rows.len() != 1 {
             return Err(malformed_evidence_input(format!(
-                "legacy evidence rescreen updated {affected_rows} rows for {}",
+                "legacy evidence rescreen lost ownership of {} (returned_rows={})",
                 span.id,
+                persisted_rows.len(),
             )));
         }
-        // FrankenSQLite adapters do not all report the outer UPDATE row count
-        // consistently when AFTER UPDATE triggers also mutate generation
-        // state. Verify the durable row itself while the rescreen transaction
-        // still owns the write boundary instead of treating a zero count as
-        // proof that ownership was lost.
-        let persisted = self.get_evidence_span(&span.id)?.ok_or_else(|| {
-            malformed_evidence_input(format!(
-                "legacy evidence rescreen lost ownership of {}",
-                span.id
-            ))
-        })?;
+        let persisted = stored_evidence_span_from_row(&persisted_rows[0])?;
         if persisted.workspace_id != span.workspace_id
-            || stored_evidence_security_state_hash(&persisted) != after_hash
+            || !stored_evidence_security_matches_prepared(&persisted, prepared)
         {
             return Err(malformed_evidence_input(format!(
-                "legacy evidence rescreen post-update verification failed for {} \
-                 (affected_rows={affected_rows})",
+                "legacy evidence rescreen post-update verification failed for {}",
                 span.id
             )));
         }
+        let after_hash = stored_evidence_security_state_hash(&persisted);
 
         let audit_id = generate_audit_id();
         let details = serde_json::json!({
@@ -33746,7 +33741,7 @@ mod tests {
                 Err(DbError::MalformedRow {
                     operation: DbOperation::Execute,
                     message,
-                }) if message.contains("metadata_json must be valid JSON")
+                }) if message.contains("evidence metadata must be valid JSON")
             ),
             "invalid metadata_json must fail at the canonical evidence boundary",
         )?;
