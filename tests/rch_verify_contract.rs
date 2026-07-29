@@ -2928,6 +2928,12 @@ printf '[RCH] remote trj (0.1s)\n'
         || stack["remote_source_verified"] != true
         || stack["cargo_lock_unchanged"] != true
         || stack["blocking_codes"] != serde_json::json!([])
+        || stack["bundle_cache"]["schema"] != "ee.rch.pinned_bundle_cache.v1"
+        || stack["bundle_cache"]["status"] != "created"
+        || stack["bundle_cache"]["validation"] != "full_content_hash"
+        || stack["bundle_cache"]["content_hash"]
+            .as_str()
+            .is_none_or(|hash| !hash.starts_with("sha256:"))
         || cargo_provenance["status"] != "clean"
         || cargo_provenance["external_resolution_sources"] != serde_json::json!([])
     {
@@ -2966,6 +2972,67 @@ printf '[RCH] remote trj (0.1s)\n'
                 "pinned dependency source attribution is incomplete: {repository}"
             ));
         }
+    }
+
+    let (second_status, second_stdout, second_stderr) = run_script_with_env_in_dir(
+        &[
+            "--pinned-franken-stack",
+            "--treeish",
+            "HEAD",
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "pinned_franken_stack_smoke",
+        ],
+        &[
+            ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1"),
+            ("RCH_VERIFY_COMMITTED_TREE_BASE", export_base_arg),
+            ("CARGO_HOME", cargo_home_arg),
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
+        &fixture.project,
+    )?;
+    if !second_status.success() {
+        return Err(format!(
+            "validated pinned bundle reuse should pass\nstdout:\n{second_stdout}\nstderr:\n{second_stderr}"
+        ));
+    }
+    let second_report: Value = serde_json::from_str(&second_stdout)
+        .map_err(|error| format!("parse reused pinned Franken report: {error}"))?;
+    let second_stack = &second_report["franken_stack"];
+    if second_report["status"] != "remote_pass"
+        || second_report["source_bundle_hash"] != report["source_bundle_hash"]
+        || second_stack["manifest_hash"] != stack["manifest_hash"]
+        || second_stack["bundle_cache"]["status"] != "reused"
+        || second_stack["bundle_cache"]["content_hash"] != stack["bundle_cache"]["content_hash"]
+    {
+        return Err(format!(
+            "content-addressed pinned bundle reuse proof drifted:\nfirst={report}\nsecond={second_report}"
+        ));
+    }
+    if remote_exec_invocation_lines(&invocation_log)?.len() != 2 {
+        return Err(format!(
+            "created and reused pinned bundles should each reach fake RCH exactly once: {:?}",
+            read_invocation_lines(&invocation_log)?
+        ));
+    }
+    for (name, path) in &fixture.repositories {
+        let before = before_repositories
+            .get(name)
+            .ok_or_else(|| format!("missing before status for {name}"))?;
+        assert_git_status_unchanged(path, before, "reused pinned Franken bundle")?;
     }
     Ok(())
 }

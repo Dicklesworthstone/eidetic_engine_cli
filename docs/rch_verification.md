@@ -291,14 +291,21 @@ which sibling trees already exist on a worker. The proof carries
 closeout-grade source attribution.
 
 `--pinned-franken-stack` implies `--committed-tree` and refuses unless the
-Cargo command contains `--locked`. It creates a fresh retained bundle with
-`eidetic_engine_cli` and its seven siblings as peers. Each dependency is
-exported by the locked commit ID from a canonical sibling object when
-available, otherwise from a verifier-managed bare cache populated from the
-canonical origin. The lane uses `git archive`; it never changes a live sibling,
-creates a worktree, switches a branch, or runs cleanup against an existing
-checkout. An unknown or mismatched cache path is refused instead of repaired in
-place.
+Cargo command contains `--locked`. The first invocation for a commit creates a
+fresh content-addressed retained bundle with `eidetic_engine_cli` and its seven
+siblings as peers. Later gates reuse that exact source identity only after a
+full path, executable-bit, symlink-target, and file-content hash validates.
+`franken_stack.bundle_cache` reports `created` or `reused`, the content hash,
+and `validation=full_content_hash`; an incomplete or changed entry is never
+trusted as the requested commit. This stable identity also lets RCH reuse its
+remote build cache across focused tests, check, and Clippy.
+
+Each dependency is exported by the locked commit ID from a canonical sibling
+object when available, otherwise from a verifier-managed bare cache populated
+from the canonical origin. The lane uses `git archive`; it never changes a live
+sibling, creates a worktree, switches a branch, or runs cleanup against an
+existing checkout. An unknown or mismatched cache path is refused instead of
+repaired in place.
 
 After materialization, the verifier reads package versions from the archived
 trees, recomputes the complete dependency manifest, and records

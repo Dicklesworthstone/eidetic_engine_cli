@@ -110,7 +110,10 @@ tree could not be exported safely. If it reports
 dependencies that cannot be represented safely by the export alone. For this
 repository, use `--pinned-franken-stack`: it archives all seven
 `franken-stack.lock` revisions beside the committed `ee` export and leaves the
-live sibling checkouts untouched.
+live sibling checkouts untouched. The first gate creates a content-addressed
+bundle; subsequent gates reuse the same RCH project identity only after a full
+content-hash validation. Inspect `franken_stack.bundle_cache.status` and
+`.content_hash` when diagnosing unexpected cache behavior.
 
 Never use source-proof modes as permission to run `git worktree`, `git stash`,
 `git reset`, `git checkout`, `git clean`, deletion cleanup, or local Cargo. The correct

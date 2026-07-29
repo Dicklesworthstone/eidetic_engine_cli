@@ -137,6 +137,10 @@ RCH_RUNTIME_JSON='{"status":"not_checked","client_path":null,"client_version":nu
 LOCAL_CARGO_PROCESSES_JSON='{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"not_run","count":0,"processes":[],"detectedLocalBuilds":[],"reason":"not requested"}'
 CARGO_CONFIG_PROVENANCE_JSON='{"schema":"ee.rch.cargo_config_provenance.v1","status":"not_computed","source_attested":false,"command_locked":false,"sources":[],"external_resolution_sources":[],"blocking_sources":[],"provenance_hash":null,"refusal_reason":null,"repair":null}'
 FRANKEN_STACK_JSON='{"schema":"ee.rch.franken_stack.v1","status":"not_computed","mode":"live","applicable":false,"command_locked":false,"remote_source_verified":false,"repositories":[],"blocking_codes":[],"manifest_hash":null,"repair":null}'
+PINNED_BUNDLE_CACHE_STATUS="not_applicable"
+PINNED_BUNDLE_CONTENT_HASH=""
+PINNED_BUNDLE_FINAL_ROOT=""
+PINNED_BUNDLE_REUSED=0
 host_can_run_executable() {
     local candidate="${1:-}"
     [ -n "$candidate" ] || return 1
@@ -2294,6 +2298,104 @@ print("" if value is None else str(value))
 PY
 }
 
+pinned_bundle_content_hash() {
+    PINNED_BUNDLE_ROOT_PATH="${1:?pinned bundle root required}" \
+    python3 - <<'PY'
+import hashlib
+import os
+import stat
+from pathlib import Path
+
+root = Path(os.environ["PINNED_BUNDLE_ROOT_PATH"])
+excluded = {
+    ".ee-rch-franken-stack.tsv",
+    ".ee-rch-pinned-bundle.json",
+}
+entries = []
+for current, directory_names, file_names in os.walk(root, followlinks=False):
+    directory_names.sort()
+    file_names.sort()
+    current_path = Path(current)
+    for name in [*directory_names, *file_names]:
+        path = current_path / name
+        relative = path.relative_to(root).as_posix()
+        if relative in excluded:
+            continue
+        try:
+            metadata = path.lstat()
+        except OSError as error:
+            raise SystemExit(f"could not stat pinned bundle entry {relative}: {error}")
+        executable = stat.S_IMODE(metadata.st_mode) & 0o111
+        if stat.S_ISLNK(metadata.st_mode):
+            entries.append(("L", relative, executable, os.readlink(path)))
+        elif stat.S_ISDIR(metadata.st_mode):
+            entries.append(("D", relative, executable, None))
+        elif stat.S_ISREG(metadata.st_mode):
+            entries.append(("F", relative, executable, path))
+        else:
+            raise SystemExit(f"unsupported pinned bundle entry type: {relative}")
+
+digest = hashlib.sha256()
+for entry_kind, relative, executable, value in sorted(
+    entries,
+    key=lambda item: (item[1], item[0]),
+):
+    digest.update(entry_kind.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(relative.encode("utf-8", "surrogateescape"))
+    digest.update(b"\0")
+    digest.update(str(executable).encode("ascii"))
+    digest.update(b"\0")
+    if entry_kind == "L":
+        digest.update(value.encode("utf-8", "surrogateescape"))
+    elif entry_kind == "F":
+        with value.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+    digest.update(b"\0")
+print("sha256:" + digest.hexdigest())
+PY
+}
+
+pinned_bundle_is_valid() {
+    local candidate_root="${1:?pinned bundle candidate required}"
+    local ready_path expected_content_hash observed_content_hash
+    ready_path="$candidate_root/.ee-rch-pinned-bundle.json"
+    [ -f "$ready_path" ] || return 1
+    expected_content_hash="$(
+        PINNED_BUNDLE_READY_PATH="$ready_path" \
+        SOURCE_STATE_JSON_INPUT="$SOURCE_STATE_JSON" \
+        python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+try:
+    ready = json.loads(
+        Path(os.environ["PINNED_BUNDLE_READY_PATH"]).read_text(encoding="utf-8")
+    )
+    source = json.loads(os.environ["SOURCE_STATE_JSON_INPUT"])
+except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+if (
+    ready.get("schema") != "ee.rch.pinned_bundle.v1"
+    or ready.get("resolved_commit") != source.get("resolved_commit")
+    or ready.get("git_tree") != source.get("git_tree")
+    or ready.get("source_manifest_hash") != source.get("source_manifest_hash")
+):
+    raise SystemExit(1)
+content_hash = ready.get("content_hash")
+if not isinstance(content_hash, str) or not content_hash.startswith("sha256:"):
+    raise SystemExit(1)
+print(content_hash)
+PY
+    )" || return 1
+    observed_content_hash="$(pinned_bundle_content_hash "$candidate_root")" || return 1
+    [ "$observed_content_hash" = "$expected_content_hash" ] || return 1
+    PINNED_BUNDLE_CONTENT_HASH="$observed_content_hash"
+}
+
 materialize_committed_tree() {
     local commit export_base export_root short_commit
     commit="$(json_field_string "$SOURCE_STATE_JSON" "resolved_commit")"
@@ -2306,10 +2408,39 @@ materialize_committed_tree() {
     export_base="${RCH_VERIFY_COMMITTED_TREE_BASE:-${TMPDIR:-/tmp}/ee-rch-committed-tree}"
     mkdir -p "$export_base"
     if [ "$PINNED_FRANKEN_STACK" -eq 1 ]; then
-        local bundle_root
-        bundle_root="$(mktemp -d "$export_base/$short_commit.pinned.XXXXXX")"
+        local bundle_cache_root bundle_index bundle_root
+        bundle_cache_root="$export_base/pinned-v1"
+        mkdir -p "$bundle_cache_root"
+        bundle_index=0
+        while [ "$bundle_index" -lt 32 ]; do
+            if [ "$bundle_index" -eq 0 ]; then
+                bundle_root="$bundle_cache_root/$commit"
+            else
+                bundle_root="$bundle_cache_root/$commit.recovery-$bundle_index"
+            fi
+            if [ -d "$bundle_root" ] && pinned_bundle_is_valid "$bundle_root"; then
+                PINNED_BUNDLE_CACHE_STATUS="reused"
+                PINNED_BUNDLE_FINAL_ROOT="$bundle_root"
+                PINNED_BUNDLE_REUSED=1
+                PROJECT_ROOT="$bundle_root/eidetic_engine_cli"
+                REMOTE_PROJECT_ROOT="/data/projects/$(basename "$PROJECT_ROOT")"
+                REMOTE_PROJECT_ROOT_JSON="$(json_quote "$REMOTE_PROJECT_ROOT")"
+                return 0
+            fi
+            if [ ! -e "$bundle_root" ]; then
+                PINNED_BUNDLE_FINAL_ROOT="$bundle_root"
+                break
+            fi
+            bundle_index=$((bundle_index + 1))
+        done
+        if [ -z "$PINNED_BUNDLE_FINAL_ROOT" ]; then
+            echo "rch_verify: no trustworthy pinned bundle cache slot is available" >&2
+            return 1
+        fi
+        bundle_root="$(mktemp -d "$export_base/.pinned-staging.$short_commit.XXXXXX")"
         export_root="$bundle_root/eidetic_engine_cli"
         mkdir "$export_root"
+        PINNED_BUNDLE_CACHE_STATUS="materializing"
     else
         export_root="$(mktemp -d "$export_base/$short_commit.XXXXXX")"
     fi
@@ -2776,7 +2907,16 @@ manifest_material = {
             "head": item["head"],
             "tree": item["tree"],
             "dirty_status_hash": item["dirty_status_hash"],
-            "packages": item["packages"],
+            "packages": [
+                {
+                    "name": package["name"],
+                    "manifest": package["manifest"],
+                    "expected_versions": package["expected_versions"],
+                    "actual_version": package["actual_version"],
+                    "matches": package["matches"],
+                }
+                for package in item["packages"]
+            ],
         }
         for item in repositories
     ],
@@ -2961,6 +3101,9 @@ for repository in payload.get("repositories") or []:
     if record is None:
         blocking.append("rch_verify_franken_stack_materialization_incomplete")
         continue
+    if record["revision"] != repository.get("expected_revision"):
+        blocking.append("rch_verify_franken_stack_materialization_incomplete")
+        blocking.append("rch_verify_franken_stack_revision_mismatch")
     checkout = dependency_root / name
     materialized_packages = []
     for package in repository.get("packages") or []:
@@ -2983,11 +3126,21 @@ for repository in payload.get("repositories") or []:
         "source": record["source"],
         "packages": materialized_packages,
     }
+    identity_packages = [
+        {
+            "name": package["name"],
+            "manifest": package["manifest"],
+            "expected_versions": package["expected_versions"],
+            "actual_version": package["actual_version"],
+            "matches": package["matches"],
+        }
+        for package in materialized_packages
+    ]
     manifest_repositories.append({
         "name": name,
         "revision": record["revision"],
         "tree": record["tree"],
-        "packages": materialized_packages,
+        "packages": identity_packages,
     })
 
 payload["blocking_codes"] = sorted(set(blocking))
@@ -3010,12 +3163,145 @@ print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 PY
 }
 
+attach_pinned_bundle_cache_json() {
+    FRANKEN_STACK_JSON_INPUT="$FRANKEN_STACK_JSON" \
+    PINNED_BUNDLE_CACHE_STATUS_VALUE="$PINNED_BUNDLE_CACHE_STATUS" \
+    PINNED_BUNDLE_CONTENT_HASH_VALUE="$PINNED_BUNDLE_CONTENT_HASH" \
+    python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["FRANKEN_STACK_JSON_INPUT"])
+payload["bundle_cache"] = {
+    "schema": "ee.rch.pinned_bundle_cache.v1",
+    "status": os.environ.get("PINNED_BUNDLE_CACHE_STATUS_VALUE") or "unknown",
+    "content_hash": os.environ.get("PINNED_BUNDLE_CONTENT_HASH_VALUE") or None,
+    "validation": "full_content_hash",
+}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+pinned_bundle_ready_matches_franken_stack() {
+    PINNED_BUNDLE_READY_PATH="$PINNED_BUNDLE_FINAL_ROOT/.ee-rch-pinned-bundle.json" \
+    PINNED_BUNDLE_CONTENT_HASH_VALUE="$PINNED_BUNDLE_CONTENT_HASH" \
+    FRANKEN_STACK_JSON_INPUT="$FRANKEN_STACK_JSON" \
+    python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+try:
+    ready = json.loads(
+        Path(os.environ["PINNED_BUNDLE_READY_PATH"]).read_text(encoding="utf-8")
+    )
+    stack = json.loads(os.environ["FRANKEN_STACK_JSON_INPUT"])
+except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+if (
+    ready.get("dependency_manifest_hash") != stack.get("manifest_hash")
+    or ready.get("cargo_lock_hash") != stack.get("cargo_lock_hash")
+    or ready.get("content_hash")
+        != os.environ.get("PINNED_BUNDLE_CONTENT_HASH_VALUE")
+):
+    raise SystemExit(1)
+PY
+}
+
+publish_pinned_bundle() {
+    local staging_root ready_path publish_result
+    staging_root="$(dirname "$PROJECT_ROOT")"
+    ready_path="$staging_root/.ee-rch-pinned-bundle.json"
+    PINNED_BUNDLE_CONTENT_HASH="$(pinned_bundle_content_hash "$staging_root")" || return 1
+    PINNED_BUNDLE_READY_PATH="$ready_path" \
+    PINNED_BUNDLE_CONTENT_HASH_VALUE="$PINNED_BUNDLE_CONTENT_HASH" \
+    SOURCE_STATE_JSON_INPUT="$SOURCE_STATE_JSON" \
+    FRANKEN_STACK_JSON_INPUT="$FRANKEN_STACK_JSON" \
+    python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+source = json.loads(os.environ["SOURCE_STATE_JSON_INPUT"])
+stack = json.loads(os.environ["FRANKEN_STACK_JSON_INPUT"])
+payload = {
+    "schema": "ee.rch.pinned_bundle.v1",
+    "resolved_commit": source.get("resolved_commit"),
+    "git_tree": source.get("git_tree"),
+    "source_manifest_hash": source.get("source_manifest_hash"),
+    "dependency_manifest_hash": stack.get("manifest_hash"),
+    "cargo_lock_hash": stack.get("cargo_lock_hash"),
+    "content_hash": os.environ["PINNED_BUNDLE_CONTENT_HASH_VALUE"],
+}
+Path(os.environ["PINNED_BUNDLE_READY_PATH"]).write_text(
+    json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+    publish_result="$(
+        PINNED_BUNDLE_STAGING_ROOT="$staging_root" \
+        PINNED_BUNDLE_FINAL_ROOT_VALUE="$PINNED_BUNDLE_FINAL_ROOT" \
+        python3 - <<'PY'
+import errno
+import os
+
+source = os.environ["PINNED_BUNDLE_STAGING_ROOT"]
+destination = os.environ["PINNED_BUNDLE_FINAL_ROOT_VALUE"]
+try:
+    os.rename(source, destination)
+except OSError as error:
+    if error.errno in {errno.EEXIST, errno.ENOTEMPTY}:
+        print("destination_exists")
+    else:
+        raise
+else:
+    print("published")
+PY
+    )" || return 1
+    case "$publish_result" in
+        published)
+            PINNED_BUNDLE_CACHE_STATUS="created"
+            ;;
+        destination_exists)
+            if ! pinned_bundle_is_valid "$PINNED_BUNDLE_FINAL_ROOT"; then
+                return 1
+            fi
+            PINNED_BUNDLE_CACHE_STATUS="reused_after_race"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    PROJECT_ROOT="$PINNED_BUNDLE_FINAL_ROOT/eidetic_engine_cli"
+    REMOTE_PROJECT_ROOT="/data/projects/$(basename "$PROJECT_ROOT")"
+    REMOTE_PROJECT_ROOT_JSON="$(json_quote "$REMOTE_PROJECT_ROOT")"
+}
+
 materialize_pinned_franken_stack() {
     local bundle_root cache_root metadata_path repository revision expected_origin
     local source_repository archive_repository destination tree file_count byte_count source_kind
     bundle_root="$(dirname "$PROJECT_ROOT")"
     cache_root="${RCH_VERIFY_PINNED_STACK_CACHE:-${RCH_VERIFY_COMMITTED_TREE_BASE:-${TMPDIR:-/tmp}/ee-rch-committed-tree}/git-cache}"
-    metadata_path="$(mktemp "$bundle_root/.ee-rch-franken-stack.XXXXXX.tsv")"
+    metadata_path="$bundle_root/.ee-rch-franken-stack.tsv"
+
+    if [ "$PINNED_BUNDLE_REUSED" -eq 1 ]; then
+        if [ ! -f "$metadata_path" ]; then
+            FRANKEN_STACK_JSON="$(mark_franken_stack_materialization_failed "reused pinned bundle metadata is missing")"
+            return 1
+        fi
+        FRANKEN_STACK_JSON="$(finalize_franken_stack_json "$metadata_path")"
+        if [ "$(json_text_field "$FRANKEN_STACK_JSON" status)" != "pinned" ] \
+            || ! pinned_bundle_ready_matches_franken_stack; then
+            FRANKEN_STACK_JSON="$(mark_franken_stack_materialization_failed "reused pinned bundle evidence does not match the requested source graph")"
+            return 1
+        fi
+        FRANKEN_STACK_JSON="$(attach_pinned_bundle_cache_json)"
+        [ "$(json_text_field "$FRANKEN_STACK_JSON" status)" = "pinned" ]
+        return
+    fi
+    [ ! -e "$metadata_path" ] || return 1
+    : > "$metadata_path"
 
     while IFS=$'\t' read -r repository revision expected_origin; do
         [ -n "$repository" ] || continue
@@ -3094,6 +3380,14 @@ materialize_pinned_franken_stack() {
     done < <(franken_stack_rows)
 
     FRANKEN_STACK_JSON="$(finalize_franken_stack_json "$metadata_path")"
+    if [ "$(json_text_field "$FRANKEN_STACK_JSON" status)" != "pinned" ]; then
+        return 1
+    fi
+    if ! publish_pinned_bundle; then
+        FRANKEN_STACK_JSON="$(mark_franken_stack_materialization_failed "could not publish content-addressed pinned bundle")"
+        return 1
+    fi
+    FRANKEN_STACK_JSON="$(attach_pinned_bundle_cache_json)"
     [ "$(json_text_field "$FRANKEN_STACK_JSON" status)" = "pinned" ]
 }
 
@@ -5355,12 +5649,15 @@ if cargo_config_provenance.get("status") not in (None, "not_computed"):
     )
 franken_stack = proof.get("franken_stack") or {}
 if franken_stack.get("status") not in (None, "not_computed", "not_applicable"):
+    pinned_bundle_cache = franken_stack.get("bundle_cache") or {}
     summary_lines.append(
         f"- franken_stack: `{franken_stack.get('status')}`"
         f" mode=`{franken_stack.get('mode') or 'unknown'}`"
         f" remote_source_verified=`{str(bool(franken_stack.get('remote_source_verified'))).lower()}`"
         f" repositories=`{len(franken_stack.get('repositories') or [])}`"
         f" manifest_hash=`{franken_stack.get('manifest_hash') or 'unknown'}`"
+        f" bundle_cache=`{pinned_bundle_cache.get('status') or 'none'}`"
+        f" bundle_content_hash=`{pinned_bundle_cache.get('content_hash') or 'none'}`"
     )
 if build_admission.get("status") not in (None, "not_run"):
     admitted = build_admission.get("admitted")
@@ -5607,6 +5904,12 @@ if event_log_path:
             "franken_stack_manifest_hash": franken_stack.get("manifest_hash"),
             "franken_stack_remote_source_verified": franken_stack.get(
                 "remote_source_verified"
+            ),
+            "pinned_bundle_cache_status": (
+                (franken_stack.get("bundle_cache") or {}).get("status")
+            ),
+            "pinned_bundle_content_hash": (
+                (franken_stack.get("bundle_cache") or {}).get("content_hash")
             ),
             "stdout_artifact_path": artifact_path("stdout"),
             "stderr_artifact_path": artifact_path("stderr"),
