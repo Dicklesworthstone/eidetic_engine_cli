@@ -676,7 +676,7 @@ fn run_profile_json_command(
     fixture: &JsonContractFixture,
     args: Vec<String>,
 ) -> Result<Value, String> {
-    let output = run_ee(&args)?;
+    let output = run_ee(fixture, &args)?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("stdout was not UTF-8 for ee {}: {error}", args.join(" ")))?;
     let stderr = String::from_utf8(output.stderr)
