@@ -24,7 +24,7 @@ pub mod binary;
 pub mod budget_classifier;
 
 pub const SUBSYSTEM: &str = "pack";
-pub const CONTEXT_COMMAND: &str = "context";
+pub const PACK_COMMAND: &str = "pack";
 pub const DEFAULT_CONTEXT_MAX_TOKENS: u32 = 4_000;
 pub const DEFAULT_CANDIDATE_POOL: u32 = 64;
 pub const DEFAULT_MMR_RELEVANCE_WEIGHT: f32 = 0.75;
@@ -4056,7 +4056,7 @@ pub struct ContextResponse {
 }
 
 impl ContextResponse {
-    /// Build a stable successful `ee context` response.
+    /// Build a stable successful `ee pack` response.
     ///
     /// # Errors
     ///
@@ -4080,7 +4080,7 @@ impl ContextResponse {
             success: true,
             cached_json: None,
             data: ContextResponseData {
-                command: CONTEXT_COMMAND,
+                command: PACK_COMMAND,
                 request,
                 pack,
                 agent_profile: None,
@@ -4100,7 +4100,7 @@ impl ContextResponse {
 
     #[must_use]
     pub fn from_cached_json(request: ContextRequest, cached_json: String) -> Self {
-        Self::from_cached_json_with_command(request, cached_json, CONTEXT_COMMAND)
+        Self::from_cached_json_with_command(request, cached_json, PACK_COMMAND)
     }
 
     #[must_use]
@@ -9172,14 +9172,14 @@ mod tests {
 
     use super::{
         CHARACTER_HEURISTIC_CHARS_PER_TOKEN_DENOMINATOR,
-        CHARACTER_HEURISTIC_CHARS_PER_TOKEN_NUMERATOR, CONTEXT_COMMAND, CandidateSignature,
-        ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
-        ContextResponseDegradation, ContextResponseSeverity, DEFAULT_CHARS_PER_TOKEN,
-        DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR, FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR,
-        PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE, PACK_ASSEMBLY_SLOW_CODE, PACK_REVISION_TOKEN_SCHEMA_V1,
-        PackArenaWorkspace, PackArenaWorkspaceKey, PackAssemblyOptions, PackAssemblySlo,
-        PackAssemblySloActuals, PackAssemblySloStatus, PackCacheGovernor, PackCacheStatus,
-        PackCandidate, PackCandidateInput, PackDraft, PackDraftItem, PackHotset, PackHotsetEntry,
+        CHARACTER_HEURISTIC_CHARS_PER_TOKEN_NUMERATOR, CandidateSignature, ContextPackProfile,
+        ContextRequest, ContextRequestInput, ContextResponse, ContextResponseDegradation,
+        ContextResponseSeverity, DEFAULT_CHARS_PER_TOKEN, DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR,
+        FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR, PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE,
+        PACK_ASSEMBLY_SLOW_CODE, PACK_COMMAND, PACK_REVISION_TOKEN_SCHEMA_V1, PackArenaWorkspace,
+        PackArenaWorkspaceKey, PackAssemblyOptions, PackAssemblySlo, PackAssemblySloActuals,
+        PackAssemblySloStatus, PackCacheGovernor, PackCacheStatus, PackCandidate,
+        PackCandidateInput, PackDraft, PackDraftItem, PackHotset, PackHotsetEntry,
         PackHotsetEntryKind, PackItemRedaction, PackOmissionReason, PackProvenance,
         PackRejectionStage, PackResourceProfile, PackRevisionMeshMetadata, PackScoreBreakdown,
         PackSection, PackSelectedItem, PackSelectionAudit, PackSelectionObjective,
@@ -14384,8 +14384,8 @@ mod tests {
         ensure(response.success, "context response success flag")?;
         ensure_equal(
             &response.data.command,
-            &CONTEXT_COMMAND,
-            "context response command",
+            &PACK_COMMAND,
+            "pack response command",
         )?;
         ensure_equal(
             &response.data.pack.items.len(),

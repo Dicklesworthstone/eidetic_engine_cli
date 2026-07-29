@@ -8,6 +8,7 @@ expression: expected_conformance_matrix(&base_cases)
 | remember | success | ee.response.v2.json | no | required |
 | search | success | ee.response.v2.json | no | required |
 | pack | success | ee.response.v2.json | no | required |
+| context | success | ee.response.v2.json | no | required |
 | why | success | ee.response.v2.json | no | required |
 | status | success | ee.response.v2.json | no | required |
 | doctor | success | ee.response.v2.json | no | required |

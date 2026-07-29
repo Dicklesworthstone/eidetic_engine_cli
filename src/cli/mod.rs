@@ -320,7 +320,7 @@ use crate::models::{
 use crate::output;
 use crate::pack::{
     ContextPackProfile, ContextRequest, ContextResponse, ContextResponseDegradation,
-    ContextResponseSeverity, PackResourceProfile, PackRevisionMeshMetadata,
+    ContextResponseSeverity, PACK_COMMAND, PackResourceProfile, PackRevisionMeshMetadata,
 };
 use crate::search::plan_cache::{
     DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, process_plan_cache_diag_report,
@@ -12667,7 +12667,7 @@ where
             ClaimCommand::Verify(args) => handle_claim_verify(&cli, args, stdout, stderr),
         },
         Some(Command::Context(ref args)) => {
-            handle_context_pack_query(&cli, args, "context", true, stdout, stderr)
+            handle_context_pack_query(&cli, args, PACK_COMMAND, true, stdout, stderr)
         }
         Some(Command::Demo(ref demo_cmd)) => match demo_cmd {
             DemoCommand::List(args) => handle_demo_list(&cli, args, stdout, stderr),
@@ -39609,7 +39609,7 @@ where
             no_baseline_write: args.no_baseline_write,
             max_delta_bytes: None,
         };
-        return handle_context_pack_query(cli, &context_args, "pack", false, stdout, stderr);
+        return handle_context_pack_query(cli, &context_args, PACK_COMMAND, false, stdout, stderr);
     }
 
     match &args.command {
@@ -39817,7 +39817,7 @@ where
     let renderer = effective_pack_renderer(cli, request.renderer);
 
     if args.explain_performance {
-        return match run_context_pack_with_performance(&options, "pack") {
+        return match run_context_pack_with_performance(&options, PACK_COMMAND) {
             Ok(run) => write_stdout(stdout, &(run.performance.to_string() + "\n")),
             Err(error) => {
                 let domain_error = context_error_to_domain(&error);
@@ -39826,7 +39826,7 @@ where
         };
     }
 
-    match run_context_pack_with_performance(&options, "pack").map(|run| run.response) {
+    match run_context_pack_with_performance(&options, PACK_COMMAND).map(|run| run.response) {
         Ok(mut response) => {
             response.data.degraded.extend(request.degraded);
             if args.explain_gaps {

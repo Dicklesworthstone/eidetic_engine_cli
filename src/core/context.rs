@@ -91,12 +91,12 @@ use crate::models::{
 use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
     ContextRequest, ContextRequestInput, ContextResponse, ContextResponseDegradation,
-    ContextResponsePagination, ContextResponseSeverity, PackAdmissionPosture, PackAssemblySlo,
-    PackAssemblySloActuals, PackCandidate, PackCandidateInput, PackCoordinationSnapshot, PackDraft,
-    PackFreshnessAnchorFacet, PackFreshnessFacet, PackItemLifecycle, PackOmission,
-    PackOmissionReason, PackProvenance, PackRejectionStage, PackResourceProfile,
-    PackScoreBreakdown, PackSection, PackTrustSignal, TokenBudget, WhyNotSelectedInput,
-    WhyNotSelectedReport, assemble_draft_with_profile_and_options_seeded,
+    ContextResponsePagination, ContextResponseSeverity, PACK_COMMAND, PackAdmissionPosture,
+    PackAssemblySlo, PackAssemblySloActuals, PackCandidate, PackCandidateInput,
+    PackCoordinationSnapshot, PackDraft, PackFreshnessAnchorFacet, PackFreshnessFacet,
+    PackItemLifecycle, PackOmission, PackOmissionReason, PackProvenance, PackRejectionStage,
+    PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal, TokenBudget,
+    WhyNotSelectedInput, WhyNotSelectedReport, assemble_draft_with_profile_and_options_seeded,
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
     estimate_tokens_default, explain_why_not_selected, pack_item_provenance_json,
     redact_pack_provenance_text,
@@ -1097,14 +1097,14 @@ fn context_pack_persist_error_is_contention(persist_error: &str) -> bool {
 }
 
 pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse, ContextPackError> {
-    run_context_pack_with_performance(options, "context").map(|run| run.response)
+    run_context_pack_with_performance(options, PACK_COMMAND).map(|run| run.response)
 }
 
 pub fn run_context_pack_seeded(
     options: &ContextPackOptions,
     determinism: &Deterministic<Seed>,
 ) -> Result<ContextResponse, ContextPackError> {
-    run_context_pack_with_performance_seeded(options, "context", determinism)
+    run_context_pack_with_performance_seeded(options, PACK_COMMAND, determinism)
         .map(|run| run.response)
 }
 

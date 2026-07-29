@@ -222,6 +222,7 @@ fn response_envelope_harness_uses_shared_command_inventory() -> TestResult {
         "remember",
         "search",
         "pack",
+        "context",
         "why",
         "status",
         "doctor",
@@ -399,6 +400,7 @@ fn validate_envelope(case: &CommandCase, value: &Value, exit_code: Option<i32>) 
                 .get("degraded")
                 .ok_or_else(|| format!("{}: success envelope must include degraded", case.id))?;
             ensure_degraded_array(degraded, case.id)?;
+            validate_pack_command_identity(case, value)?;
         }
         EnvelopeKind::Error => {
             if exit_code == Some(EXIT_SUCCESS) {
@@ -429,6 +431,46 @@ fn validate_envelope(case: &CommandCase, value: &Value, exit_code: Option<i32>) 
         }
     }
     Ok(())
+}
+
+fn validate_pack_command_identity(case: &CommandCase, value: &Value) -> TestResult {
+    if !matches!(case.id, "ENV-PACK" | "ENV-CONTEXT-ALIAS") {
+        return Ok(());
+    }
+    if string_at(value, "/data/command", case.id)? != "pack" {
+        return Err(format!(
+            "{}: canonical and alias pack responses must set data.command=pack",
+            case.id
+        ));
+    }
+
+    let root_has_alias = degradation_has_code(value, "/degraded", "deprecated_alias", case.id)?;
+    let data_has_alias =
+        degradation_has_code(value, "/data/degraded", "deprecated_alias", case.id)?;
+    match case.id {
+        "ENV-CONTEXT-ALIAS" if root_has_alias && data_has_alias => Ok(()),
+        "ENV-CONTEXT-ALIAS" => Err(format!(
+            "{}: deprecated context alias must mirror deprecated_alias in data.degraded and top-level degraded",
+            case.id
+        )),
+        "ENV-PACK" if !root_has_alias && !data_has_alias => Ok(()),
+        "ENV-PACK" => Err(format!(
+            "{}: canonical pack response must not emit deprecated_alias",
+            case.id
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn degradation_has_code(
+    value: &Value,
+    pointer: &str,
+    code: &str,
+    case_id: &str,
+) -> Result<bool, String> {
+    Ok(array_at(value, pointer, case_id)?
+        .iter()
+        .any(|entry| entry.get("code").and_then(Value::as_str) == Some(code)))
 }
 
 fn ensure_degraded_array(value: &Value, case_id: &str) -> TestResult {
@@ -661,6 +703,20 @@ fn cli_json_envelopes_conform_to_response_v2_and_error_v2() -> TestResult {
                 "--workspace".to_owned(),
                 workspace.clone(),
                 "pack".to_owned(),
+                "conformance response envelope".to_owned(),
+                "--max-tokens".to_owned(),
+                "1200".to_owned(),
+            ],
+            Enforcement::Required,
+        ),
+        success_case(
+            "ENV-CONTEXT-ALIAS",
+            "context",
+            vec![
+                "--json".to_owned(),
+                "--workspace".to_owned(),
+                workspace.clone(),
+                "context".to_owned(),
                 "conformance response envelope".to_owned(),
                 "--max-tokens".to_owned(),
                 "1200".to_owned(),

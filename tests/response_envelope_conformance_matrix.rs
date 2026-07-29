@@ -242,7 +242,12 @@ fn schema_cases() -> Result<Vec<SchemaCase>, String> {
         SchemaCase {
             requirement_id: "BD-1WTSB-CONTEXT",
             schema_file: "ee.pack.v2.json",
-            value: context_pack_sample(),
+            value: pack_response_sample(true),
+        },
+        SchemaCase {
+            requirement_id: "BD-1WTSB-PACK",
+            schema_file: "ee.pack.v2.json",
+            value: pack_response_sample(false),
         },
         SchemaCase {
             requirement_id: "BD-1WTSB-SEARCH",
@@ -309,12 +314,22 @@ fn schema_cases() -> Result<Vec<SchemaCase>, String> {
     ])
 }
 
-fn context_pack_sample() -> Value {
+fn pack_response_sample(deprecated_alias: bool) -> Value {
+    let degraded = if deprecated_alias {
+        vec![json!({
+            "code": "deprecated_alias",
+            "severity": "info",
+            "message": "`ee context` is a soft-deprecated compatibility alias for canonical `ee pack`; both run the same context-pack engine.",
+            "repair": "Use `ee pack \"<task>\" --workspace . --json`."
+        })]
+    } else {
+        Vec::new()
+    };
     json!({
         "schema": "ee.response.v2",
         "success": true,
         "data": {
-            "command": "context",
+            "command": "pack",
             "request": {
                 "query": "response envelope conformance",
                 "profile": "balanced",
@@ -357,9 +372,9 @@ fn context_pack_sample() -> Value {
                 "quality": {},
                 "advisoryBanner": {}
             },
-            "degraded": []
+            "degraded": degraded.clone()
         },
-        "degraded": []
+        "degraded": degraded
     })
 }
 

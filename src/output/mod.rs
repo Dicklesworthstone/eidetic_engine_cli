@@ -20998,12 +20998,12 @@ mod tests {
     }
 
     #[test]
-    fn context_response_json_renders_provenance() -> TestResult {
+    fn pack_response_json_renders_provenance() -> TestResult {
         let response = context_response_fixture()?;
         let json = render_context_response_json(&response);
 
         ensure_starts_with(&json, "{\"schema\":\"ee.response.v2\"", "schema")?;
-        ensure_contains(&json, "\"command\":\"context\"", "command")?;
+        ensure_contains(&json, "\"command\":\"pack\"", "command")?;
         ensure_contains(
             &json,
             "\"provenance\":[{\"uri\":\"file://AGENTS.md#L42\",\"scheme\":\"file\",\"label\":\"AGENTS.md:L42\",\"locator\":\"L42\",\"note\":\"source evidence\"}]",

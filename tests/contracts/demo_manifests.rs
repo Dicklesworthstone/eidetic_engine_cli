@@ -63,7 +63,7 @@ fn release_context_demo_file() -> Result<DemoFile, String> {
         .with_command(
             DemoCommand::new("ee context \"prepare release\" --workspace . --json")
                 .with_stdout_schema("ee.response.v2")
-                .with_stdout_contains("\"command\":\"context\"")
+                .with_stdout_contains("\"command\":\"pack\"")
                 .with_artifact_output(
                     DemoArtifactOutput::new("stdout.json").with_blake3_hash(stdout_hash),
                 ),
@@ -108,7 +108,7 @@ demos:
       - command: 'ee context \"prepare release\" --workspace . --json'
         expected_stdout_schema: ee.response.v2
         expected_stdout_contains:
-          - '\"command\":\"context\"'
+          - '\"command\":\"pack\"'
         artifact_outputs:
           - path: stdout.json
             blake3_hash: {stdout_hash}

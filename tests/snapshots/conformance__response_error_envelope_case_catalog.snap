@@ -69,6 +69,23 @@ expression: case_catalog(&base_cases)
     "requireRecovery": false
   },
   {
+    "id": "ENV-CONTEXT-ALIAS",
+    "surface": "context",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "context",
+      "conformance response envelope",
+      "--max-tokens",
+      "1200"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
     "id": "ENV-WHY",
     "surface": "why",
     "args": [
