@@ -300,6 +300,17 @@ and `validation=full_content_hash`; an incomplete or changed entry is never
 trusted as the requested commit. This stable identity also lets RCH reuse its
 remote build cache across focused tests, check, and Clippy.
 
+Pinned bundles default to `.ee-rch-committed-tree/` beside the canonical
+checkout, not below `TMPDIR`. Keeping the bundle beneath the writable project
+parent gives root and non-root workers the same narrow path namespace without
+syncing all of the developer's home directory. For each physical bundle root,
+the wrapper derives a privacy-safe `/tmp/ee-rch-pinned-<path-hash>` alias.
+RCH's topology preflight creates that missing alias on the selected worker;
+commit- and path-specific aliases prevent concurrent pinned proofs from
+retargeting one another. `RCH_VERIFY_COMMITTED_TREE_BASE`,
+`RCH_CANONICAL_PROJECT_ROOT`, and `RCH_ALIAS_PROJECT_ROOT` remain explicit
+diagnostic overrides.
+
 Each dependency is exported by the locked commit ID from a canonical sibling
 object when available, otherwise from a verifier-managed bare cache populated
 from the canonical origin. The lane uses `git archive`; it never changes a live

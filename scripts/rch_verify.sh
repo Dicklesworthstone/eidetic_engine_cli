@@ -141,6 +141,7 @@ PINNED_BUNDLE_CACHE_STATUS="not_applicable"
 PINNED_BUNDLE_CONTENT_HASH=""
 PINNED_BUNDLE_FINAL_ROOT=""
 PINNED_BUNDLE_REUSED=0
+COMMITTED_TREE_EXPORT_BASE=""
 host_can_run_executable() {
     local candidate="${1:-}"
     [ -n "$candidate" ] || return 1
@@ -1544,8 +1545,12 @@ try:
         timeout=10,
     )
     if version.returncode == 0:
-        words = version.stdout.strip().split()
-        base["client_version"] = words[-1] if words else None
+        version_text = "\n".join((version.stdout, version.stderr))
+        match = re.search(
+            r"(?:^|\s)v?(\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?)",
+            version_text,
+        )
+        base["client_version"] = match.group(1) if match else None
         base["client_compat"] = compat(base["client_version"])
 except Exception as error:
     base["status"] = "unavailable"
@@ -2397,7 +2402,7 @@ PY
 }
 
 materialize_committed_tree() {
-    local commit export_base export_root short_commit
+    local commit export_base export_root project_parent short_commit
     commit="$(json_field_string "$SOURCE_STATE_JSON" "resolved_commit")"
     if [ -z "$commit" ]; then
         echo "rch_verify: committed-tree materialization missing resolved commit" >&2
@@ -2405,8 +2410,23 @@ materialize_committed_tree() {
     fi
 
     short_commit="${commit:0:12}"
-    export_base="${RCH_VERIFY_COMMITTED_TREE_BASE:-${TMPDIR:-/tmp}/ee-rch-committed-tree}"
+    if [ -n "${RCH_VERIFY_COMMITTED_TREE_BASE:-}" ]; then
+        export_base="$RCH_VERIFY_COMMITTED_TREE_BASE"
+    elif [ "$PINNED_FRANKEN_STACK" -eq 1 ]; then
+        project_parent="$(
+            cd "$(dirname "$SOURCE_PROJECT_ROOT")"
+            pwd -P
+        )"
+        export_base="$project_parent/.ee-rch-committed-tree"
+    else
+        export_base="${TMPDIR:-/tmp}/ee-rch-committed-tree"
+    fi
     mkdir -p "$export_base"
+    COMMITTED_TREE_EXPORT_BASE="$(
+        cd "$export_base"
+        pwd -P
+    )"
+    export_base="$COMMITTED_TREE_EXPORT_BASE"
     if [ "$PINNED_FRANKEN_STACK" -eq 1 ]; then
         local bundle_cache_root bundle_index bundle_root
         bundle_cache_root="$export_base/pinned-v1"
@@ -3282,7 +3302,7 @@ materialize_pinned_franken_stack() {
     local bundle_root cache_root metadata_path repository revision expected_origin
     local source_repository archive_repository destination tree file_count byte_count source_kind
     bundle_root="$(dirname "$PROJECT_ROOT")"
-    cache_root="${RCH_VERIFY_PINNED_STACK_CACHE:-${RCH_VERIFY_COMMITTED_TREE_BASE:-${TMPDIR:-/tmp}/ee-rch-committed-tree}/git-cache}"
+    cache_root="${RCH_VERIFY_PINNED_STACK_CACHE:-$COMMITTED_TREE_EXPORT_BASE/git-cache}"
     metadata_path="$bundle_root/.ee-rch-franken-stack.tsv"
 
     if [ "$PINNED_BUNDLE_REUSED" -eq 1 ]; then
@@ -4168,6 +4188,31 @@ rch_canonical_project_root() {
     fi
 }
 
+rch_alias_project_root() {
+    local configured_root="${RCH_ALIAS_PROJECT_ROOT:-}"
+    local topology_hash topology_root
+    if [ -n "$configured_root" ]; then
+        printf '%s\n' "$configured_root"
+        return
+    fi
+    if [ "$PINNED_FRANKEN_STACK" -ne 1 ]; then
+        printf '%s\n' "$DEFAULT_RCH_ALIAS_PROJECT_ROOT"
+        return
+    fi
+
+    topology_root="$(rch_canonical_project_root)"
+    topology_hash="$(
+        RCH_PINNED_TOPOLOGY_ROOT="$topology_root" python3 - <<'PY'
+import hashlib
+import os
+
+root = os.environ["RCH_PINNED_TOPOLOGY_ROOT"].encode("utf-8")
+print(hashlib.sha256(root).hexdigest()[:16])
+PY
+    )"
+    printf '/tmp/ee-rch-pinned-%s\n' "$topology_hash"
+}
+
 run_rch_invocation_once() {
     if [ -n "${RCH_VERIFY_FAKE_OUTPUT:-}" ]; then
         printf '%s' "$RCH_VERIFY_FAKE_OUTPUT"
@@ -4192,7 +4237,7 @@ run_rch_invocation_once() {
         "RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
         "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
         "RCH_CANONICAL_PROJECT_ROOT=$(rch_canonical_project_root)" \
-        "RCH_ALIAS_PROJECT_ROOT=${RCH_ALIAS_PROJECT_ROOT:-$DEFAULT_RCH_ALIAS_PROJECT_ROOT}" \
+        "RCH_ALIAS_PROJECT_ROOT=$(rch_alias_project_root)" \
         "RCH_VISIBILITY=${RCH_VISIBILITY:-summary}" \
         "${RCH_INVOCATION[@]}"
     local status=$?
@@ -4226,7 +4271,7 @@ run_rch_invocation_retry() {
         "RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
         "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
         "RCH_CANONICAL_PROJECT_ROOT=$(rch_canonical_project_root)" \
-        "RCH_ALIAS_PROJECT_ROOT=${RCH_ALIAS_PROJECT_ROOT:-$DEFAULT_RCH_ALIAS_PROJECT_ROOT}" \
+        "RCH_ALIAS_PROJECT_ROOT=$(rch_alias_project_root)" \
         "RCH_VISIBILITY=${RCH_VISIBILITY:-summary}" \
         "${RCH_INVOCATION[@]}"
     local status=$?

@@ -2809,7 +2809,11 @@ fn pinned_franken_stack_materializes_locked_bundle_without_mutating_siblings() -
         .map(|(name, path)| Ok((name.clone(), git_status_porcelain_v2(path)?)))
         .collect::<Result<BTreeMap<_, _>, String>>()?;
     let invocation_log = unique_tmp_path("rch-franken-pinned-invocations");
-    let export_base = unique_tmp_path("rch-franken-pinned-export");
+    let expected_export_base = fixture
+        .project
+        .parent()
+        .ok_or_else(|| "pinned fixture project has no parent".to_owned())?
+        .join(".ee-rch-committed-tree");
     let cargo_home = unique_tmp_path("rch-franken-pinned-cargo-home");
     fs::create_dir_all(&cargo_home)
         .map_err(|error| format!("create pinned fallback Cargo home: {error}"))?;
@@ -2825,7 +2829,16 @@ set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
 case " $* " in
   *" exec -- "*)
-    test "$RCH_CANONICAL_PROJECT_ROOT" = "$(cd .. && pwd -P)"
+    bundle_root="$(cd .. && pwd -P)"
+    test "$RCH_CANONICAL_PROJECT_ROOT" = "$bundle_root"
+    case "$RCH_ALIAS_PROJECT_ROOT" in
+      /tmp/ee-rch-pinned-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+      *) printf 'unexpected pinned alias: %s\n' "$RCH_ALIAS_PROJECT_ROOT" >&2; exit 1 ;;
+    esac
+    case "$PWD" in
+      "$EXPECTED_PINNED_EXPORT_BASE"/pinned-v1/*/eidetic_engine_cli) ;;
+      *) printf 'pinned bundle escaped project-adjacent cache: %s\n' "$PWD" >&2; exit 1 ;;
+    esac
     test -f ../asupersync/Cargo.toml
     test -f ../franken_agent_detection/Cargo.toml
     test -f ../franken_networkx/crates/fnx-runtime/Cargo.toml
@@ -2847,9 +2860,9 @@ printf '[RCH] remote trj (0.1s)\n'
     let invocation_log_arg = invocation_log
         .to_str()
         .ok_or_else(|| "pinned invocation log path is not utf-8".to_owned())?;
-    let export_base_arg = export_base
+    let expected_export_base_arg = expected_export_base
         .to_str()
-        .ok_or_else(|| "pinned export base path is not utf-8".to_owned())?;
+        .ok_or_else(|| "expected pinned export base path is not utf-8".to_owned())?;
     let cargo_home_arg = cargo_home
         .to_str()
         .ok_or_else(|| "pinned Cargo home path is not utf-8".to_owned())?;
@@ -2873,7 +2886,7 @@ printf '[RCH] remote trj (0.1s)\n'
         &[
             ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1"),
             ("RCH_VERIFY_FORCE_TOML_FALLBACK", "1"),
-            ("RCH_VERIFY_COMMITTED_TREE_BASE", export_base_arg),
+            ("EXPECTED_PINNED_EXPORT_BASE", expected_export_base_arg),
             ("CARGO_HOME", cargo_home_arg),
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
             ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
@@ -2992,7 +3005,7 @@ printf '[RCH] remote trj (0.1s)\n'
         ],
         &[
             ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1"),
-            ("RCH_VERIFY_COMMITTED_TREE_BASE", export_base_arg),
+            ("EXPECTED_PINNED_EXPORT_BASE", expected_export_base_arg),
             ("CARGO_HOME", cargo_home_arg),
             ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
             ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
@@ -3555,7 +3568,7 @@ fn client_daemon_version_skew_refuses_before_rch() -> TestResult {
         r#"#!/usr/bin/env bash
 set -euo pipefail
 if [ "${1:-}" = "--version" ]; then
-  printf 'rch 1.0.24\n'
+  printf 'rch 1.0.24 (commit 40beb520c1f3)\n'
   exit 0
 fi
 if [ "${1:-}" = "status" ]; then

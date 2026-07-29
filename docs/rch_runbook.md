@@ -128,11 +128,11 @@ response to an ambiguous proof is coordination, not mutation.
 | `RCH_QUEUE_WHEN_BUSY=1` | Wait when all workers are busy rather than refusing. |
 | `RCH_TEST_SLOTS=2` | Bound concurrent test slots so heavy benches don't starve focused tests. |
 | `RCH_DAEMON_{WAIT_,}RESPONSE_TIMEOUT_SECS=900` | The full project metadata is large; the 30s default times out and triggers the manifest-fallback path that produces `RCH-E327`. 900s avoids the timeout. |
-| `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel` + `RCH_ALIAS_PROJECT_ROOT=/data` | Current Mac wrapper default for the bd-3opmx E327 unblock. Requires `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5` or a newer RCH with the fixed worker preflight and manifest path rewrite; older release binaries apply the local `/data` alias on workers and fail before Cargo. |
+| Pinned bundle topology | `--pinned-franken-stack` retains its content-addressed bundle beside the checkout under `.ee-rch-committed-tree/`, uses that bundle as the narrow canonical root, and derives a unique `/tmp/ee-rch-pinned-<path-hash>` worker alias. This avoids unwritable macOS `TMPDIR` paths, broad home-directory synchronization, and cross-commit alias races. The three topology environment variables remain explicit diagnostic overrides. |
 | `RCH_BUILD_TIMEOUT_SEC=1200` | Large `cargo check` proofs can exceed the default 300s build timeout after remote Cargo starts. The bd-3tmeg proof passed with 1200s; the 300s run failed closed with `RCH-E104` and no local fallback. |
 | `RCH_VISIBILITY=summary` | Less log noise; full transcripts when something goes wrong. |
 | `RCH_COMPRESSION=0` | Compression on the sync pipe occasionally corrupts the manifest header during topology preflight. Disabling has zero throughput cost on the local-network workers. |
-| Absolute RCH binary path | `~/.local/bin/rch` may be stale. The wrapper prefers `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5`, then newer sidecars or source-built clients known to handle this checkout's path topology. |
+| Absolute RCH binary path | The wrapper prefers the currently installed `~/.local/bin/rch`, then the `PATH` client and known local/source or sidecar fallbacks. Runtime evidence parses semantic versions even when `rch --version` also prints a commit identifier. |
 | Worker-scoped `CARGO_TARGET_DIR` | RCH rewrites this to a worker-scoped path automatically; agents should not bake `/Volumes/USBNVME16TB/...` into remote command argv. |
 | Build-admission preflight | Stops before RCH when local workspace/target/tmp/artifact paths are below threshold. This is why an external `CARGO_TARGET_DIR` is necessary but not sufficient when `/System/Volumes/Data` is critically full. |
 
