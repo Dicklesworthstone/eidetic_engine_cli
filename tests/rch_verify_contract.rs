@@ -4899,6 +4899,62 @@ fn selector_admission_probe_classifies_active_project_exclusion() -> TestResult 
 }
 
 #[test]
+fn selector_admission_probe_classifies_explicit_worker_pressure() -> TestResult {
+    let (status, stdout, stderr) = run_script_with_env(
+        &["--summary", "--no-write", "--", "cargo", "test", "--lib"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "[RCH] local (no admissible workers: critical_pressure=1)\n\
+                 [RCH] remote required; refusing local fallback (no worker assigned)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "11"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1149989"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "vmi1149989"),
+        ],
+    )?;
+    if status.success() {
+        return Err("critical-pressure selector refusal should preserve non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout).map_err(|error| {
+        format!("parse critical-pressure selector report: {error}\nstderr:\n{stderr}")
+    })?;
+    if report["status"] != "capacity_or_timeout" {
+        return Err(format!(
+            "critical-pressure refusal should be worker capacity: {report}"
+        ));
+    }
+    for expected in [
+        "rch_verify_remote_command_failed",
+        "rch_verify_capacity_or_timeout",
+        "rch_verify_local_fallback_refused",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!(
+                "missing {expected} in critical-pressure proof: {report}"
+            ));
+        }
+    }
+    if degraded_contains(&report, "rch_verify_remote_marker_missing")? {
+        return Err(format!(
+            "explicit critical-pressure refusal should not claim a missing marker: {report}"
+        ));
+    }
+    let probe = selector_probe(&report)?;
+    if probe["status"] != "selection_failed"
+        || probe["selection_failure_reason"] != "capacity_or_timeout"
+        || probe["workers_vs_selection_contradiction"] != false
+        || probe["local_fallback_refused"] != true
+    {
+        return Err(format!(
+            "selector probe did not preserve critical-pressure capacity: {probe}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn active_project_known_blocker_refusal_keeps_selector_evidence() -> TestResult {
     let store =
         unique_tmp_path("rch-active-project-known-blocker-store").join("known_blockers.jsonl");
@@ -5281,14 +5337,14 @@ fn synthetic_remote_test_failure_with_timeout_env_is_remote_failure() -> TestRes
 }
 
 #[test]
-fn selected_remote_failure_ignores_nested_active_project_fixture() -> TestResult {
+fn selected_remote_failure_ignores_nested_selector_fixtures() -> TestResult {
     let (status, stdout, _stderr) = run_script_with_env(
         &["--", "cargo", "test", "--test", "rch_verify_contract"],
         &[
             (
                 "RCH_VERIFY_FAKE_OUTPUT",
                 "test selector_admission_probe_classifies_active_project_exclusion ... FAILED\n\
-                 Error: \"fixture: {\\\"evidence\\\":\\\"[RCH] selection blocked: active_project_exclusion=1\\\"}\"\n\
+                 Error: \"fixture: {\\\"evidence\\\":\\\"[RCH] selection blocked: active_project_exclusion=1; [RCH] local (no admissible workers: critical_pressure=1)\\\"}\"\n\
                  [RCH] remote trj failed (exit 101)\n",
             ),
             ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
@@ -5307,7 +5363,7 @@ fn selected_remote_failure_ignores_nested_active_project_fixture() -> TestResult
     }
     if degraded_contains(&report, "rch_verify_capacity_or_timeout")? {
         return Err(format!(
-            "nested fixture text created capacity degradation: {report}"
+            "nested selector fixture text created capacity degradation: {report}"
         ));
     }
     let probe = selector_probe(&report)?;

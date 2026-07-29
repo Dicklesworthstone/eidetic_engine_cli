@@ -1400,6 +1400,10 @@ is_active_project_exclusion_output() {
     grep -Eiq '^[[:space:]]*\[RCH\][[:space:]]+.*(active_project_exclusion[[:space:]]*[=:]|active project exclusion([[:space:]]*[=:]|[[:space:]]|$))'
 }
 
+is_explicit_capacity_admission_output() {
+    grep -Eiq '^[[:space:]]*\[RCH\][[:space:]]+local[[:space:]]+\(no admissible workers:[^)]*(critical_pressure|insufficient_slots)[[:space:]]*='
+}
+
 is_client_daemon_unknown_variant_output() {
     grep -Eiq "Failed to parse daemon response: unknown variant"
 }
@@ -6371,6 +6375,7 @@ else
     stderr_tail=""
 fi
 degraded=("${build_admission_degraded[@]}" "${proof_broker_degraded[@]}")
+explicit_capacity_refusal=0
 if [ "$exit_code" -ne 0 ]; then
     degraded+=("rch_verify_remote_command_failed")
 fi
@@ -6418,6 +6423,11 @@ if [ "$exit_code" -ne 0 ] && [ -z "$worker_id" ] &&
     degraded+=("rch_verify_capacity_or_timeout")
     RCH_QUEUE_SNAPSHOT_JSON="$(rch_queue_snapshot_json)"
 fi
+if [ "$exit_code" -ne 0 ] && [ -z "$worker_id" ] &&
+    printf '%s' "$combined_output" | is_explicit_capacity_admission_output; then
+    degraded+=("rch_verify_capacity_or_timeout")
+    explicit_capacity_refusal=1
+fi
 if printf '%s' "$combined_output" | is_client_daemon_unknown_variant_output; then
     degraded+=("rch_verify_client_daemon_version_skew")
 fi
@@ -6429,7 +6439,7 @@ if [ "$exit_code" -ne 0 ] && [ -z "$worker_id" ] && printf '%s' "$combined_outpu
 fi
 if printf '%s' "$combined_output" | grep -q "non-compilation command"; then
     degraded+=("rch_verify_not_offloaded")
-elif [ "$WOULD_OFFLOAD" = true ] && [ -z "$worker_id" ]; then
+elif [ "$WOULD_OFFLOAD" = true ] && [ -z "$worker_id" ] && [ "$explicit_capacity_refusal" -eq 0 ]; then
     degraded+=("rch_verify_remote_marker_missing")
 fi
 
