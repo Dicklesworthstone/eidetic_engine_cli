@@ -7,10 +7,34 @@ use ee::db::DbConnection;
 type TestResult = Result<(), String>;
 
 fn run_ee(workspace: &Path, args: &[&str]) -> Result<Output, String> {
+    let runtime_dir = workspace.join(".test-runtime");
+    let data_home = workspace.join(".test-data");
+    let cache_home = workspace.join(".test-cache");
+    for path in [&runtime_dir, &data_home, &cache_home] {
+        fs::create_dir_all(path)
+            .map_err(|error| format!("failed to create {}: {error}", path.display()))?;
+    }
+
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .arg("--workspace")
         .arg(workspace)
         .args(args)
+        .env_remove("EE_WORKSPACE")
+        .env_remove("EE_WORKSPACE_REGISTRY")
+        .env_remove("EE_PROFILE")
+        .env_remove("EE_MAX_TOKENS")
+        .env_remove("EE_DATABASE")
+        .env_remove("EE_INDEX_DIR")
+        .env_remove("EE_AGENT_NAME")
+        .env_remove("EE_OUTPUT_FORMAT")
+        .env_remove("EE_JSON")
+        .env_remove("EE_HOOK_MODE")
+        .env_remove("EE_MAX_OUTPUT_TOKENS")
+        .env("EE_EMBED_DOWNLOAD", "off")
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env("XDG_DATA_HOME", &data_home)
+        .env("XDG_CACHE_HOME", &cache_home)
+        .env("TMPDIR", &runtime_dir)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
@@ -28,8 +52,9 @@ fn ensure_success(output: &Output, context: &str) -> TestResult {
         Ok(())
     } else {
         Err(format!(
-            "{context} failed with status {:?}\nstderr:\n{}",
+            "{context} failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
             output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ))
     }
