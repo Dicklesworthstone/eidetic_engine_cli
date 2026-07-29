@@ -257,6 +257,107 @@ fn seed_script_exists_and_is_executable() -> TestResult {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn seed_script_separates_json_stdout_from_stderr_and_preserves_rejections() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let tempdir = tempfile::tempdir().map_err(|error| format!("create tempdir: {error}"))?;
+    let fake_ee = tempdir.path().join("fake-ee");
+    std::fs::write(
+        &fake_ee,
+        r#"#!/usr/bin/env bash
+printf '%s\n' 'fake-ee diagnostic on stderr' >&2
+if [ "${FAKE_EE_MODE:-success}" = "failure" ]; then
+    printf '%s\n' '{"schema":"ee.error.v2","error":{"code":"fake_rejection","message":"intentional rejection"}}'
+    exit 5
+fi
+printf '%s\n' '{"schema":"ee.response.v2","success":true,"data":{}}'
+"#,
+    )
+    .map_err(|error| format!("write fake ee: {error}"))?;
+    let mut permissions = std::fs::metadata(&fake_ee)
+        .map_err(|error| format!("stat fake ee: {error}"))?
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_ee, permissions)
+        .map_err(|error| format!("chmod fake ee: {error}"))?;
+
+    let seed_script = corpus_dir().join("corpus_2026_05_10_seed.sh");
+    let success_workspace = tempdir.path().join("success-workspace");
+    std::fs::create_dir(&success_workspace)
+        .map_err(|error| format!("create success workspace: {error}"))?;
+    let success_output = Command::new(&seed_script)
+        .arg(&success_workspace)
+        .env("EE_BINARY", &fake_ee)
+        .env(
+            "EE_TEST_LOG_PATH",
+            tempdir.path().join("success-events.jsonl"),
+        )
+        .env_remove("CORPUS_TOLERATE_REJECT")
+        .output()
+        .map_err(|error| format!("run success seed fixture: {error}"))?;
+    if !success_output.status.success() {
+        return Err(format!(
+            "success fixture exited {:?}: stdout={} stderr={}",
+            success_output.status.code(),
+            String::from_utf8_lossy(&success_output.stdout),
+            String::from_utf8_lossy(&success_output.stderr)
+        ));
+    }
+    let success_stdout = String::from_utf8_lossy(&success_output.stdout);
+    if !success_stdout.contains("seeded=15  rejected=0  total=15") {
+        return Err(format!(
+            "success fixture reported the wrong counts: {success_stdout}"
+        ));
+    }
+    let success_diagnostics =
+        std::fs::read_to_string(success_workspace.join("corpus_seed.stderr.log"))
+            .map_err(|error| format!("read success stderr log: {error}"))?;
+    if success_diagnostics
+        .matches("fake-ee diagnostic on stderr")
+        .count()
+        != 15
+    {
+        return Err("success fixture did not retain all 15 stderr diagnostics".to_string());
+    }
+
+    let failure_workspace = tempdir.path().join("failure-workspace");
+    std::fs::create_dir(&failure_workspace)
+        .map_err(|error| format!("create failure workspace: {error}"))?;
+    let failure_events = tempdir.path().join("failure-events.jsonl");
+    let failure_output = Command::new(&seed_script)
+        .arg(&failure_workspace)
+        .env("EE_BINARY", &fake_ee)
+        .env("EE_TEST_LOG_PATH", &failure_events)
+        .env("FAKE_EE_MODE", "failure")
+        .env_remove("CORPUS_TOLERATE_REJECT")
+        .output()
+        .map_err(|error| format!("run failure seed fixture: {error}"))?;
+    if failure_output.status.code() != Some(3) {
+        return Err(format!(
+            "failure fixture exited {:?}, expected 3: stdout={} stderr={}",
+            failure_output.status.code(),
+            String::from_utf8_lossy(&failure_output.stdout),
+            String::from_utf8_lossy(&failure_output.stderr)
+        ));
+    }
+    let failure_stdout = String::from_utf8_lossy(&failure_output.stdout);
+    if !failure_stdout.contains("seeded=0  rejected=15  total=15") {
+        return Err(format!(
+            "failure fixture reported the wrong counts: {failure_stdout}"
+        ));
+    }
+    let failure_event_log = std::fs::read_to_string(&failure_events)
+        .map_err(|error| format!("read failure event log: {error}"))?;
+    if failure_event_log.matches("code=fake_rejection").count() != 15 {
+        return Err("failure fixture did not retain all 15 rejection codes".to_string());
+    }
+
+    Ok(())
+}
+
 #[test]
 fn policy_tag_acceptance_covers_required_categories() -> TestResult {
     let expected = read_expected()?;
