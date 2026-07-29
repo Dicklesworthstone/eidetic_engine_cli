@@ -145,10 +145,10 @@ fn arena_workspace_reuse_context_benchmark_is_registered() -> TestResult {
     }
 
     for expected in [
-        "run_context_arena_mode_bench",
-        "cargo bench --bench \"$bench\" -- ee_context_arena_mode",
+        "run_context_arena_mode_bench()",
+        "filter=\"/workspace_reuse\"",
+        "cargo bench --bench \"$bench\" -- \"$filter\" $BENCH_ARGS",
         "append_result \"$key\" \"measured\"",
-        "run_context_arena_mode_bench",
     ] {
         if !BENCH_SCRIPT.contains(expected) {
             return Err(format!("scripts/bench.sh missing `{expected}`"));
