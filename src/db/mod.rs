@@ -10245,7 +10245,7 @@ impl DbConnection {
         let after_hash = prepared_evidence_security_state_hash(&span.id, &decision.prepared);
         let now = Utc::now().to_rfc3339();
         let prepared = &decision.prepared;
-        let updated = self.execute_for(
+        let affected_rows = self.execute_for(
             DbOperation::Execute,
             "UPDATE evidence_spans
              SET cass_span_id = ?1,
@@ -10300,9 +10300,29 @@ impl DbConnection {
                 Value::BigInt(i64::from(EVIDENCE_CANONICAL_PROVENANCE_REVISION)),
             ],
         )?;
-        if updated != 1 {
+        if affected_rows > 1 {
             return Err(malformed_evidence_input(format!(
+                "legacy evidence rescreen updated {affected_rows} rows for {}",
+                span.id,
+            )));
+        }
+        // FrankenSQLite adapters do not all report the outer UPDATE row count
+        // consistently when AFTER UPDATE triggers also mutate generation
+        // state. Verify the durable row itself while the rescreen transaction
+        // still owns the write boundary instead of treating a zero count as
+        // proof that ownership was lost.
+        let persisted = self.get_evidence_span(&span.id)?.ok_or_else(|| {
+            malformed_evidence_input(format!(
                 "legacy evidence rescreen lost ownership of {}",
+                span.id
+            ))
+        })?;
+        if persisted.workspace_id != span.workspace_id
+            || stored_evidence_security_state_hash(&persisted) != after_hash
+        {
+            return Err(malformed_evidence_input(format!(
+                "legacy evidence rescreen post-update verification failed for {} \
+                 (affected_rows={affected_rows})",
                 span.id
             )));
         }
@@ -33723,12 +33743,12 @@ mod tests {
         ensure(
             matches!(
                 invalid_json_result,
-                Err(DbError::SqlModel {
+                Err(DbError::MalformedRow {
                     operation: DbOperation::Execute,
-                    ..
-                })
+                    message,
+                }) if message.contains("metadata_json must be valid JSON")
             ),
-            "metadata_json must be valid JSON when present",
+            "invalid metadata_json must fail at the canonical evidence boundary",
         )?;
 
         connection.close()?;
