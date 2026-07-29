@@ -4,7 +4,7 @@
   "title": "ee.doctor.v1",
   "description": "ee doctor response envelope.",
   "type": "object",
-  "required": ["schema", "success", "data"],
+  "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
     "schema": {"type": "string", "const": "ee.response.v2"},

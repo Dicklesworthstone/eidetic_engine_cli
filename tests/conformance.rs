@@ -325,9 +325,10 @@ fn validate_envelope(case: &CommandCase, value: &Value, exit_code: Option<i32>) 
                     case.id
                 ));
             }
-            if let Some(degraded) = value.get("degraded") {
-                ensure_degraded_array(degraded, case.id)?;
-            }
+            let degraded = value
+                .get("degraded")
+                .ok_or_else(|| format!("{}: success envelope must include degraded", case.id))?;
+            ensure_degraded_array(degraded, case.id)?;
         }
         EnvelopeKind::Error => {
             if exit_code == Some(EXIT_SUCCESS) {

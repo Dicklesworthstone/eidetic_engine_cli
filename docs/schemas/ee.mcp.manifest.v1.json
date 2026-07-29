@@ -4,7 +4,7 @@
   "title": "ee.mcp.manifest.v1",
   "description": "ee mcp manifest response envelope.",
   "type": "object",
-  "required": ["schema", "success", "data"],
+  "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
     "schema": {"type": "string", "const": "ee.response.v2"},

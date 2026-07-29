@@ -121,6 +121,7 @@ fn lens_explain_bugfix_matches_golden_projection() -> TestResult {
     let projection = serde_json::json!({
         "schema": json_pointer(&value, "/schema")?,
         "success": json_pointer(&value, "/success")?,
+        "degraded": json_pointer(&value, "/degraded")?,
         "command": json_pointer(&value, "/data/command")?,
         "requestedLens": json_pointer(&value, "/data/requestedLens")?,
         "lens": {

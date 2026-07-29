@@ -1,6 +1,7 @@
 {
   "schema": "ee.response.v2",
   "success": true,
+  "degraded": [],
   "data": {
     "command": "search",
     "status": "success",

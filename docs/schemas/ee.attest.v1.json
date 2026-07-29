@@ -4,11 +4,12 @@
   "title": "ee.attest.v1",
   "description": "Response payload for `ee attest memory|pack|query --json` (bd-1n0np.22.4). The ee.response.v2 envelope wraps an ee.attest.v1 payload that surfaces a redaction-safe provenance attestation: a blake3 bundleHash over the canonical AttestationBundle (ee.attestation.bundle.v1, bd-1n0np.22.1) plus the subject, the redaction posture, and the local trust statement. The attestation attests LOCAL ee evidence custody and hash consistency — NOT objective truth. Deterministic: the same subject and database reproduce the identical bundleHash.",
   "type": "object",
-  "required": ["schema", "success", "data"],
+  "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": true,
   "properties": {
     "schema": {"type": "string", "const": "ee.response.v2"},
     "success": {"type": "boolean", "const": true},
+    "degraded": {"type": "array", "items": {"type": "object"}},
     "data": {
       "type": "object",
       "required": [

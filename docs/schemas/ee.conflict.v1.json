@@ -4,11 +4,12 @@
   "title": "ee.conflict.v1",
   "description": "Read-only contradiction surface emitted by `ee conflict list|explain|cluster --json` (bd-1n0np.7.3). The ee.response.v2 envelope wraps an ee.conflict.v1 surface assembled from the explicit-evidence detector (bd-1n0np.7.2): ranked conflicting memory pairs carrying both bodies, the higher-trust/fresher preferred side, and the load-bearing signal weight, plus the detected contradiction clusters. Read-only: never mutates. Deferred explicit-signal kinds are reported (no silent omission).",
   "type": "object",
-  "required": ["schema", "success", "data"],
+  "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": true,
   "properties": {
     "schema": {"type": "string", "const": "ee.response.v2"},
     "success": {"type": "boolean", "const": true},
+    "degraded": {"type": "array", "items": {"type": "object"}},
     "data": {
       "type": "object",
       "required": [

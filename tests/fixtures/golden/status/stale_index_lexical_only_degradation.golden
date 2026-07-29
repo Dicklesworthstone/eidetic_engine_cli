@@ -1,6 +1,16 @@
 {
   "schema": "ee.response.v2",
   "success": true,
+  "degraded": [
+    {
+      "code": "search_index_degraded",
+      "severity": "medium",
+      "message": "Search is compiled but the selected workspace index is missing, stale, corrupt, or unreadable.",
+      "repair": "Run `ee index status --workspace . --json`.",
+      "repairKind": "unknown",
+      "sources": ["status"]
+    }
+  ],
   "data": {
     "command": "status",
     "capabilities": {

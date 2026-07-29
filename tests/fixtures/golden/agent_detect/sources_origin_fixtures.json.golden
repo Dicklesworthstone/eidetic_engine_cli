@@ -1,6 +1,7 @@
 {
   "schema": "ee.response.v2",
   "success": true,
+  "degraded": [],
   "data": {
     "schema": "ee.agent.sources.v1",
     "command": "agent sources",

@@ -358,7 +358,8 @@ fn context_pack_sample() -> Value {
                 "advisoryBanner": {}
             },
             "degraded": []
-        }
+        },
+        "degraded": []
     })
 }
 
@@ -632,12 +633,83 @@ fn replay_schema_validation_enforces_public_scalar_and_collection_constraints() 
 }
 
 #[test]
+fn every_response_v2_schema_requires_top_level_degraded() -> TestResult {
+    let schemas_dir = repo_root().join("docs").join("schemas");
+    let mut response_schema_count = 0_usize;
+
+    for entry in fs::read_dir(&schemas_dir)
+        .map_err(|error| format!("read {}: {error}", schemas_dir.display()))?
+    {
+        let path = entry
+            .map_err(|error| format!("read schema directory entry: {error}"))?
+            .path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let schema = read_json(path.clone())?;
+        if schema
+            .pointer("/properties/schema/const")
+            .and_then(Value::as_str)
+            != Some("ee.response.v2")
+        {
+            continue;
+        }
+        response_schema_count += 1;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("<unknown>");
+        let required = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{file_name}: top-level required must be an array"))?;
+        if !required.iter().any(|field| field == "degraded") {
+            return Err(format!(
+                "{file_name}: ee.response.v2 schema must require top-level degraded"
+            ));
+        }
+        if schema
+            .pointer("/properties/degraded/type")
+            .and_then(Value::as_str)
+            != Some("array")
+        {
+            return Err(format!(
+                "{file_name}: ee.response.v2 degraded property must be an array"
+            ));
+        }
+    }
+
+    if response_schema_count == 0 {
+        return Err("no ee.response.v2 schemas were discovered".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn response_v2_field_presets_retain_required_degraded_array() -> TestResult {
+    let schema = schema_doc("ee.response.v2.json")?;
+    for preset in ["minimal", "summary", "standard"] {
+        let fields = schema
+            .pointer(&format!("/field_presets/{preset}"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("ee.response.v2 {preset} preset must be an array"))?;
+        if !fields.iter().any(|field| field == "degraded") {
+            return Err(format!(
+                "ee.response.v2 {preset} preset must retain required degraded"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn bd_1wtsb_validator_rejects_unexpected_envelope_fields() -> TestResult {
     let schema = schema_doc("ee.response.v2.json")?;
     let mut value = json!({
         "schema": "ee.response.v2",
         "success": true,
-        "data": {"command": "status"}
+        "data": {"command": "status"},
+        "degraded": []
     });
     value
         .as_object_mut()

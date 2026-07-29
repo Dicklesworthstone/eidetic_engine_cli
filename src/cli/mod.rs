@@ -15294,7 +15294,8 @@ where
                 "data": {
                     "command": "eval run",
                     "report": reports.first()
-                }
+                },
+                "degraded": [],
             })
         } else {
             serde_json::json!({
@@ -15304,7 +15305,8 @@ where
                     "command": "eval run",
                     "reports": reports,
                     "fixtureCount": reports.len()
-                }
+                },
+                "degraded": [],
             })
         };
         let _ = stdout.write_all(json.to_string().as_bytes());
@@ -15705,7 +15707,8 @@ where
         let json = serde_json::json!({
             "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": passed,
-            "data": data
+            "data": data,
+            "degraded": [],
         });
         let _ = stdout.write_all(json.to_string().as_bytes());
         let _ = stdout.write_all(b"\n");
@@ -17077,17 +17080,12 @@ fn init_report_exit_code(report: &InitReport, write_exit: ProcessExitCode) -> Pr
 
 fn init_response_json(report: &InitReport) -> serde_json::Value {
     let degraded = init_degraded_json(report);
-    let mut response = serde_json::json!({
+    serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": report.status.is_success(),
         "data": report.data_json(),
-    });
-    if !degraded.is_empty()
-        && let Some(object) = response.as_object_mut()
-    {
-        object.insert("degraded".to_string(), serde_json::Value::Array(degraded));
-    }
-    response
+        "degraded": degraded,
+    })
 }
 
 fn init_degraded_json(report: &InitReport) -> Vec<serde_json::Value> {
@@ -18835,11 +18833,7 @@ where
 }
 
 fn top_level_degraded_from_data(data: &serde_json::Value) -> serde_json::Value {
-    data.get("degraded")
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .map(serde_json::Value::Array)
-        .unwrap_or_else(|| serde_json::json!([]))
+    output::response_degraded_from_data(data)
 }
 
 fn response_v2_json_from_data(data: serde_json::Value) -> serde_json::Value {
@@ -24650,16 +24644,12 @@ where
             {
                 object.insert("degraded".to_string(), serde_json::json!(degraded.clone()));
             }
-            let mut rendered = serde_json::json!({
+            let rendered = serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": !report.has_conflicts(),
                 "data": data,
+                "degraded": degraded,
             });
-            if !degraded.is_empty()
-                && let Some(object) = rendered.as_object_mut()
-            {
-                object.insert("degraded".to_string(), serde_json::json!(degraded));
-            }
             write_stdout(stdout, &(rendered.to_string() + "\n"))
         }
     };
@@ -33307,6 +33297,7 @@ where
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": report.passed,
                     "data": report.data_json(),
+                    "degraded": [],
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"));
             }
@@ -35612,6 +35603,8 @@ where
         .get("degraded")
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
+    let top_level_degraded =
+        output::response_degraded_from_data(&serde_json::json!({"degraded": &degraded}));
     let created_by_hash = public_ledger
         .get("createdByHash")
         .and_then(serde_json::Value::as_str)
@@ -35639,9 +35632,10 @@ where
                 "createdByHash": created_by_hash,
                 "items": items_json,
                 "omitted": omitted_json,
-                "degraded": degraded,
+                "degraded": degraded.clone(),
             },
         },
+        "degraded": top_level_degraded,
     });
 
     match cli.renderer() {
@@ -48903,6 +48897,7 @@ impl RememberMemoryReport {
         let near_duplicates_json = self.near_duplicates_json();
         let policy_bypass_json = self.policy_bypass_json();
         let degraded_json = self.remember_degraded_json();
+        let response_degraded_json = self.remember_response_degraded_json();
 
         let mut json = format!(
             r#"{{"schema":"ee.response.v2","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","memoryId":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"producer":{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"near_duplicates":{},"redaction_status":"{}","policy_bypass_used":{},"policy_bypass":{},"degraded":{}}}"#,
@@ -48946,6 +48941,8 @@ impl RememberMemoryReport {
             policy_bypass_json,
             degraded_json
         );
+        json.push_str(",\"degraded\":");
+        json.push_str(&response_degraded_json);
         json.push('}');
         json
     }
@@ -49172,6 +49169,23 @@ impl RememberMemoryReport {
         self.policy_bypass.as_ref().map_or_else(
             || "[]".to_owned(),
             |bypass| format!("[{}]", self.policy_bypass_json_for_degraded(bypass)),
+        )
+    }
+
+    fn remember_response_degraded_json(&self) -> String {
+        self.policy_bypass.as_ref().map_or_else(
+            || "[]".to_owned(),
+            |bypass| {
+                use crate::output::escape_json_string;
+
+                format!(
+                    r#"[{{"code":"{}","severity":"{}","message":"{}","repair":"{}"}}]"#,
+                    escape_json_string(&bypass.code),
+                    escape_json_string(&bypass.severity),
+                    escape_json_string(&bypass.message),
+                    escape_json_string(&bypass.repair),
+                )
+            },
         )
     }
 

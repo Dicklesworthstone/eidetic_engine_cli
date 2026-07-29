@@ -1,5 +1,6 @@
 {
   "command": "lens explain",
+  "degraded": [],
   "explanation": {
     "determinism": "lensHash is a stable blake3 hash over schema, id, version, description, and normalized overlay fields.",
     "override": "Explicit CLI flags and --no-lens can override lens-derived defaults when pack integration is enabled.",

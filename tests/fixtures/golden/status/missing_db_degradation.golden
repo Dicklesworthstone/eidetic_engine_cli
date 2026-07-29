@@ -1,6 +1,32 @@
 {
   "schema": "ee.response.v2",
   "success": true,
+  "degraded": [
+    {
+      "code": "search_waiting_for_storage",
+      "severity": "medium",
+      "message": "Search readiness is pending until workspace storage is initialized.",
+      "repair": "Run `ee init --workspace .`.",
+      "repairKind": "unknown",
+      "sources": ["status"]
+    },
+    {
+      "code": "storage_not_initialized",
+      "severity": "medium",
+      "message": "Workspace storage is unavailable because .ee/ee.db is missing.",
+      "repair": "Run `ee init --workspace .`.",
+      "repairKind": "unknown",
+      "sources": ["status"]
+    },
+    {
+      "code": "memory_health_unavailable",
+      "severity": "low",
+      "message": "Memory health is unavailable because the workspace database is missing.",
+      "repair": "Run `ee init --workspace .` before inspecting memory health.",
+      "repairKind": "unknown",
+      "sources": ["status"]
+    }
+  ],
   "data": {
     "command": "status",
     "capabilities": {

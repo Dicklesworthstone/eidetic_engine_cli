@@ -1,6 +1,14 @@
 {
   "schema": "ee.response.v2",
   "success": false,
+  "degraded": [
+    {
+      "code": "preflight_evidence_unavailable",
+      "severity": "warning",
+      "message": "Preflight risk briefs are unavailable until preflight commands are backed by persisted evidence matches and stored run records instead of task-text heuristics.",
+      "repair": "ee status --json"
+    }
+  ],
   "data": {
     "command": "preflight show",
     "code": "preflight_evidence_unavailable",

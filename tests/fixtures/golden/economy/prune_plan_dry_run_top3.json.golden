@@ -1,6 +1,7 @@
 {
   "schema": "ee.response.v2",
   "success": true,
+  "degraded": [],
   "data": {
     "schema": "ee.economy.prune_plan.v1",
     "generatedAt": "1970-01-01T00:00:00+00:00",

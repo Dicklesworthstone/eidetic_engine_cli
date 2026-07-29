@@ -22,7 +22,7 @@
 //!
 //! 4. `ResponseEnvelope::success()` / `failure()` emit a stable
 //!    prefix that downstream consumers can detect without parsing, and
-//!    success envelopes always carry a top-level `degraded` array.
+//!    every response envelope carries a top-level `degraded` array.
 //!
 //! 5. Numeric field writers (`field_bool`, `field_u32`, `field_i32`)
 //!    emit unquoted JSON literals that re-parse to the original value.
@@ -340,9 +340,12 @@ fn response_envelope_success_appends_clean_degraded_array() {
 fn response_envelope_success_does_not_duplicate_explicit_degraded_array() {
     let degradations = [("index_stale", "Search index is stale.")];
     let output = ResponseEnvelope::success()
-        .data_raw(r#"{"command":"search"}"#)
+        .data_raw(
+            r#"{"command":"search","degraded":[{"code":"inferred","severity":"low","message":"Inferred degradation."}]}"#,
+        )
         .degraded_array(&degradations, |obj, (code, message)| {
             obj.field_str("code", code);
+            obj.field_str("severity", "warning");
             obj.field_str("message", message);
         })
         .finish();
@@ -350,10 +353,11 @@ fn response_envelope_success_does_not_duplicate_explicit_degraded_array() {
     assert_eq!(output.matches("\"degraded\":").count(), 1);
     let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
     assert_eq!(parsed["degraded"][0]["code"], "index_stale");
+    assert_eq!(parsed["degraded"][0]["severity"], "warning");
 }
 
 /// `ResponseEnvelope::failure` emits the parallel failure prefix with
-/// `success: false`.
+/// `success: false` and the same required clean degradation array.
 #[test]
 fn response_envelope_failure_emits_stable_prefix() {
     let output = ResponseEnvelope::failure().finish();
@@ -364,6 +368,7 @@ fn response_envelope_failure_emits_stable_prefix() {
     let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
     assert_eq!(parsed["schema"], "ee.response.v2");
     assert_eq!(parsed["success"], false);
+    assert_eq!(parsed["degraded"], serde_json::json!([]));
 }
 
 /// `ResponseEnvelope` round-trips a `data_raw` payload byte-for-byte
@@ -375,6 +380,97 @@ fn response_envelope_data_raw_round_trips() {
     let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
     assert_eq!(parsed["data"]["foo"], 42);
     assert_eq!(parsed["data"]["bar"], serde_json::json!(["a", "b"]));
+}
+
+/// Standard degradations serialized inside report data are mirrored to the
+/// response root. Unknown report-only fields are omitted so the mirrored
+/// entries remain valid against `ee.response.v2`.
+#[test]
+fn response_envelope_data_raw_mirrors_schema_compatible_degraded_entries() {
+    let raw = r#"{
+        "degraded":[{
+            "code":"index_stale",
+            "severity":"warning",
+            "message":"Search index is stale.",
+            "repair":"ee index rebuild",
+            "sources":["search"],
+            "reportOnlyField":"not part of the response schema"
+        }]
+    }"#;
+    let output = ResponseEnvelope::success().data_raw(raw).finish();
+    let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
+
+    assert_eq!(parsed["degraded"][0]["code"], "index_stale");
+    assert_eq!(parsed["degraded"][0]["severity"], "warning");
+    assert_eq!(parsed["degraded"][0]["message"], "Search index is stale.");
+    assert_eq!(parsed["degraded"][0]["repair"], "ee index rebuild");
+    assert_eq!(
+        parsed["degraded"][0]["sources"],
+        serde_json::json!(["search"])
+    );
+    assert!(
+        parsed["degraded"][0].get("reportOnlyField").is_none(),
+        "report-only fields must not leak into the closed response schema"
+    );
+}
+
+/// A malformed report-local degradation cannot be copied into the strict
+/// response schema. The envelope still satisfies the contract with an empty
+/// top-level array while preserving the original report data for diagnosis.
+#[test]
+fn response_envelope_data_raw_rejects_nonconforming_degraded_entries() {
+    let raw =
+        r#"{"degraded":[{"code":"custom","severity":"unknown","message":"Report-local value."}]}"#;
+    let output = ResponseEnvelope::success().data_raw(raw).finish();
+    let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
+
+    assert_eq!(parsed["degraded"], serde_json::json!([]));
+    assert_eq!(parsed["data"]["degraded"][0]["severity"], "unknown");
+}
+
+/// A malformed report-local entry cannot suppress valid sibling degradations
+/// from the response root.
+#[test]
+fn response_envelope_data_raw_retains_valid_degraded_siblings() {
+    let raw = r#"{"degraded":[
+        {"code":"valid","severity":"medium","message":"Valid degradation."},
+        {"code":"invalid","severity":"unknown","message":"Report-local value."}
+    ]}"#;
+    let output = ResponseEnvelope::success().data_raw(raw).finish();
+    let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
+
+    assert_eq!(parsed["degraded"].as_array().map(Vec::len), Some(1));
+    assert_eq!(parsed["degraded"][0]["code"], "valid");
+    assert_eq!(parsed["data"]["degraded"].as_array().map(Vec::len), Some(2));
+}
+
+/// Nullable report-only repair fields remain available under data but are
+/// omitted from the stricter mirrored entry.
+#[test]
+fn response_envelope_data_raw_omits_nullable_optional_fields_from_mirror() {
+    let raw = r#"{"degraded":[{"code":"source_missing","severity":"info","message":"Source is absent.","repair":null}]}"#;
+    let output = ResponseEnvelope::success().data_raw(raw).finish();
+    let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
+
+    assert!(parsed["degraded"][0].get("repair").is_none());
+    assert!(parsed["data"]["degraded"][0]["repair"].is_null());
+}
+
+/// Builder-produced data follows the same mirroring path as pre-serialized
+/// reports, so callers do not need a second explicit degradation write.
+#[test]
+fn response_envelope_data_builder_mirrors_degraded_entries() {
+    let output = ResponseEnvelope::success()
+        .data(|data| {
+            data.field_raw(
+                "degraded",
+                r#"[{"code":"storage_unavailable","severity":"high","message":"Storage is unavailable."}]"#,
+            );
+        })
+        .finish();
+    let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
+
+    assert_eq!(parsed["degraded"], parsed["data"]["degraded"]);
 }
 
 /// Field-order check on the envelope shape: when `data` is set via
