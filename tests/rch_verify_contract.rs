@@ -2825,6 +2825,7 @@ set -euo pipefail
 printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
 case " $* " in
   *" exec -- "*)
+    test "$RCH_CANONICAL_PROJECT_ROOT" = "$(cd .. && pwd -P)"
     test -f ../asupersync/Cargo.toml
     test -f ../franken_agent_detection/Cargo.toml
     test -f ../franken_networkx/crates/fnx-runtime/Cargo.toml

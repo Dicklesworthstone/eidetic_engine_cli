@@ -3854,6 +3854,26 @@ print(",".join(missing))
 PY
 }
 
+rch_canonical_project_root() {
+    local configured_root="${RCH_CANONICAL_PROJECT_ROOT:-}"
+    local topology_root
+    if [ -n "$configured_root" ]; then
+        topology_root="$configured_root"
+    elif [ "$PINNED_FRANKEN_STACK" -eq 1 ]; then
+        topology_root="$(dirname "$PROJECT_ROOT")"
+    else
+        topology_root="$(dirname "$(dirname "$PROJECT_ROOT")")"
+    fi
+    if [ -d "$topology_root" ]; then
+        (
+            cd "$topology_root"
+            pwd -P
+        )
+    else
+        printf '%s\n' "$topology_root"
+    fi
+}
+
 run_rch_invocation_once() {
     if [ -n "${RCH_VERIFY_FAKE_OUTPUT:-}" ]; then
         printf '%s' "$RCH_VERIFY_FAKE_OUTPUT"
@@ -3877,7 +3897,7 @@ run_rch_invocation_once() {
         "RCH_TEST_TIMEOUT_SEC=${RCH_TEST_TIMEOUT_SEC:-}" \
         "RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
         "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
-        "RCH_CANONICAL_PROJECT_ROOT=${RCH_CANONICAL_PROJECT_ROOT:-$(dirname "$(dirname "$PROJECT_ROOT")")}" \
+        "RCH_CANONICAL_PROJECT_ROOT=$(rch_canonical_project_root)" \
         "RCH_ALIAS_PROJECT_ROOT=${RCH_ALIAS_PROJECT_ROOT:-$DEFAULT_RCH_ALIAS_PROJECT_ROOT}" \
         "RCH_VISIBILITY=${RCH_VISIBILITY:-summary}" \
         "${RCH_INVOCATION[@]}"
@@ -3911,7 +3931,7 @@ run_rch_invocation_retry() {
         "RCH_TEST_TIMEOUT_SEC=${RCH_TEST_TIMEOUT_SEC:-}" \
         "RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
         "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
-        "RCH_CANONICAL_PROJECT_ROOT=${RCH_CANONICAL_PROJECT_ROOT:-$(dirname "$(dirname "$PROJECT_ROOT")")}" \
+        "RCH_CANONICAL_PROJECT_ROOT=$(rch_canonical_project_root)" \
         "RCH_ALIAS_PROJECT_ROOT=${RCH_ALIAS_PROJECT_ROOT:-$DEFAULT_RCH_ALIAS_PROJECT_ROOT}" \
         "RCH_VISIBILITY=${RCH_VISIBILITY:-summary}" \
         "${RCH_INVOCATION[@]}"
