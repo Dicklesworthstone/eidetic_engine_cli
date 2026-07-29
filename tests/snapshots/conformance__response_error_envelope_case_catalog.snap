@@ -52,13 +52,13 @@ expression: case_catalog(&base_cases)
     "requireRecovery": false
   },
   {
-    "id": "ENV-CONTEXT",
-    "surface": "context",
+    "id": "ENV-PACK",
+    "surface": "pack",
     "args": [
       "--json",
       "--workspace",
       "[WORKSPACE]",
-      "context",
+      "pack",
       "conformance response envelope",
       "--max-tokens",
       "1200"
@@ -113,13 +113,13 @@ expression: case_catalog(&base_cases)
     "requireRecovery": false
   },
   {
-    "id": "ENV-CONTEXT-STORAGE-ERROR",
-    "surface": "context missing database",
+    "id": "ENV-PACK-STORAGE-ERROR",
+    "surface": "pack missing database",
     "args": [
       "--json",
       "--workspace",
       "[WORKSPACE]",
-      "context",
+      "pack",
       "missing database recovery contract"
     ],
     "expected": "error",

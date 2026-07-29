@@ -584,8 +584,8 @@ fn cli_json_envelopes_conform_to_response_v2_and_error_v2() -> TestResult {
             Enforcement::Required,
         ),
         success_case(
-            "ENV-CONTEXT",
-            "context",
+            "ENV-PACK",
+            "pack",
             vec![
                 "--json".to_owned(),
                 "--workspace".to_owned(),
@@ -633,8 +633,8 @@ fn cli_json_envelopes_conform_to_response_v2_and_error_v2() -> TestResult {
             Enforcement::Required,
         ),
         error_case(
-            "ENV-CONTEXT-STORAGE-ERROR",
-            "context missing database",
+            "ENV-PACK-STORAGE-ERROR",
+            "pack missing database",
             vec![
                 "--json".to_owned(),
                 "--workspace".to_owned(),
