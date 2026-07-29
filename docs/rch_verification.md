@@ -240,6 +240,65 @@ scripts/rch_verify.sh --bead-id bd-XXXX --summary --committed-tree --treeish HEA
   cargo test --test rch_verify_contract committed_tree_ -- --nocapture
 ```
 
+### Cargo config provenance for locked source proofs
+
+Cargo merges configuration discovered from the invocation directory through
+all parent directories, then from `CARGO_HOME`; an extensionless
+`.cargo/config` wins over `.cargo/config.toml` when both exist. Config files may
+also recursively include other TOML files. This means a source archive plus
+`Cargo.lock` is not, by itself, proof of the dependency graph: a host-global
+patch, path override, or source replacement can still change resolution.
+
+After any committed-tree materialization, `scripts/rch_verify.sh` fingerprints
+the effective Cargo config search path without invoking Cargo. The top-level
+`cargo_config_provenance` object uses schema
+`ee.rch.cargo_config_provenance.v1` and records:
+
+- `status`: `not_computed`, `not_applicable`, `clean`, `observed`,
+  `indeterminate`, or `blocked`;
+- whether the command is source-attested and contains `--locked`;
+- each discovered or included source with privacy-safe path and content hashes,
+  precedence, legacy-file shadowing, parse status, and project/external origin;
+- `external_resolution_sources` that contain a patch, `paths`, replacement, or
+  source definition capable of changing dependency resolution;
+- `blocking_sources`, the subset that caused the current proof to refuse; and
+- one stable `provenance_hash` for the complete observation.
+
+Physical paths below the project, Cargo home, or user home are rendered as
+`<project>`, `<cargo_home>`, or `<home>` rather than exposing the account name.
+The detector recognizes `paths`, `[patch.*]`, `[replace]`, and source
+replacement/registry/directory/Git controls. A required external include that
+is missing, unreadable, or invalid is indeterminate and therefore also fails
+closed when the proof boundary requires certainty.
+
+The refusal boundary is deliberately narrow. Both of these conditions must be
+true:
+
+1. the verifier is using `--require-clean-tree` or `--committed-tree`; and
+2. the Cargo verifier command contains `--locked`.
+
+An ordinary non-attested run reports an external resolution override as
+`status=observed` and continues. A committed project-owned config is recorded
+but does not count as an external source. When the boundary is crossed,
+verification stops before any RCH client/daemon probe or remote dispatch,
+returns `status=rch_environment_failure`, and emits
+`rch_verify_cargo_config_provenance_blocked`. This code is verifier-environment
+state, not worker state, and is not persisted as a reusable worker
+known-blocker.
+
+The repair is an isolated `CARGO_HOME` plus a project or export ancestry that
+contains no resolution-altering Cargo config. Registry and Git cache
+directories may remain accessible or be linked into that isolated home; the
+config file itself must not be copied or linked. Remember that a checkout below
+the user home may still discover `<home>/.cargo/config.toml` through Cargo's
+parent-directory walk even when `CARGO_HOME` points elsewhere. In that case,
+committed-tree mode can materialize the source under the verifier's temporary
+export root outside the home hierarchy.
+
+Proof ledgers retain the complete `cargo_config_provenance` object. Test-event
+rows retain its status, hash, and blocking-source count so later automation can
+distinguish a config refusal from a worker outage without replaying raw output.
+
 These modes never authorize `git worktree`, `git stash`, `git reset`,
 `git checkout`, destructive cleanup, or local Cargo fallback. If the proof is
 blocked by dirty state, record that state and coordinate; do not "clean it up"
@@ -256,10 +315,10 @@ Ledger rows include `verifier_id`, optional `bead_id`, `command`,
 `remote_project_root`, `remote_target_dir`, `rch_location`, `exit_code`,
 `status`, `first_error_file`, `first_error_line`, `stdout_tail`, `stderr_tail`,
 `transcript_path`, `source_state_degraded_codes`, `worker_state_degraded_codes`,
-and known-blocker fields when a circuit-breaker refusal applies. Retained tails
-redact private `/Users/<name>` prefixes and obvious `token=...` / `secret=...` /
-`password=...` fragments while preserving remote `/data/projects/...` and local
-`/Volumes/...` evidence.
+`cargo_config_provenance`, and known-blocker fields when a circuit-breaker
+refusal applies. Retained tails redact private `/Users/<name>` prefixes and
+obvious `token=...` / `secret=...` / `password=...` fragments while preserving
+remote `/data/projects/...` and local `/Volumes/...` evidence.
 
 `status` is one of `dry_run`, `remote_pass`, `pass_without_remote_marker`,
 `remote_failure`, `rch_environment_failure`, `capacity_or_timeout`,

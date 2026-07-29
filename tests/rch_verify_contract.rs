@@ -148,12 +148,20 @@ Caused by:
 "#
 }
 
-fn unique_tmp_path(label: &str) -> PathBuf {
+fn unique_path_under(base: &Path, label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    target_tmp_dir().join(format!("{label}-{}-{nanos}", std::process::id()))
+    base.join(format!("{label}-{}-{nanos}", std::process::id()))
+}
+
+fn unique_tmp_path(label: &str) -> PathBuf {
+    unique_path_under(&target_tmp_dir(), label)
+}
+
+fn unique_system_tmp_path(label: &str) -> PathBuf {
+    unique_path_under(Path::new("/tmp"), label)
 }
 
 fn git(workspace: &Path, args: &[&str]) -> Result<String, String> {
@@ -200,8 +208,7 @@ fn assert_git_status_unchanged(
     Ok(())
 }
 
-fn seed_git_workspace(label: &str) -> Result<PathBuf, String> {
-    let workspace = unique_tmp_path(label);
+fn seed_git_workspace_at(workspace: PathBuf) -> Result<PathBuf, String> {
     fs::create_dir_all(&workspace)
         .map_err(|error| format!("create workspace {}: {error}", workspace.display()))?;
     git(&workspace, &["init"])?;
@@ -217,6 +224,14 @@ fn seed_git_workspace(label: &str) -> Result<PathBuf, String> {
     git(&workspace, &["add", ".gitignore", "tracked.txt"])?;
     git(&workspace, &["commit", "-m", "seed"])?;
     Ok(workspace)
+}
+
+fn seed_git_workspace(label: &str) -> Result<PathBuf, String> {
+    seed_git_workspace_at(unique_tmp_path(label))
+}
+
+fn seed_system_tmp_git_workspace(label: &str) -> Result<PathBuf, String> {
+    seed_git_workspace_at(unique_system_tmp_path(label))
 }
 
 fn write_fake_rch(name: &str, body: &str) -> Result<PathBuf, String> {
@@ -1475,6 +1490,438 @@ printf '[RCH] remote trj (0.1s)\n'
     if second_report["source_manifest_hash"] != first_manifest_hash {
         return Err(format!(
             "committed-tree manifest changed when only dirty live checkout changed:\nfirst={report}\nsecond={second_report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn cargo_config_provenance_refuses_external_patch_before_source_attested_locked_rch() -> TestResult
+{
+    let workspace = seed_system_tmp_git_workspace("rch-cargo-config-blocked")?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+    let cargo_home = unique_system_tmp_path("rch-cargo-home-patched");
+    fs::create_dir_all(&cargo_home)
+        .map_err(|error| format!("create patched Cargo home: {error}"))?;
+    fs::write(
+        cargo_home.join("config.toml"),
+        "[patch.crates-io]\nserde = { path = \"../fixture-serde\" }\n",
+    )
+    .map_err(|error| format!("write patched Cargo config: {error}"))?;
+
+    let export_base = unique_system_tmp_path("rch-cargo-config-export");
+    let invocation_log = unique_system_tmp_path("rch-cargo-config-blocked-invocations");
+    let ledger_path = unique_system_tmp_path("rch-cargo-config-blocked-ledger.jsonl");
+    let event_log_path = unique_system_tmp_path("rch-cargo-config-blocked-events.jsonl");
+    let fake_rch = write_fake_rch(
+        "fake-rch-cargo-config-must-not-run.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+
+    let cargo_home_arg = cargo_home
+        .to_str()
+        .ok_or_else(|| "Cargo home path is not utf-8".to_owned())?;
+    let export_base_arg = export_base
+        .to_str()
+        .ok_or_else(|| "export base path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let ledger_path_arg = ledger_path
+        .to_str()
+        .ok_or_else(|| "ledger path is not utf-8".to_owned())?;
+    let event_log_path_arg = event_log_path
+        .to_str()
+        .ok_or_else(|| "event log path is not utf-8".to_owned())?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake RCH path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--skip-known-blocker",
+            "--summary",
+            "--ledger",
+            ledger_path_arg,
+            "--event-log",
+            event_log_path_arg,
+            "--committed-tree",
+            "--treeish",
+            "HEAD",
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "cargo_config_provenance_blocked_smoke",
+        ],
+        &[
+            ("CARGO_HOME", cargo_home_arg),
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_COMMITTED_TREE_BASE", export_base_arg),
+        ],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(
+        &workspace,
+        &before_status,
+        "blocked Cargo config provenance preflight",
+    )?;
+    if status.success() || status.code() != Some(1) {
+        return Err(format!(
+            "patched Cargo home should fail closed with exit 1, got {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code()
+        ));
+    }
+    if !remote_exec_invocation_lines(&invocation_log)?.is_empty()
+        || !read_invocation_lines(&invocation_log)?.is_empty()
+    {
+        return Err("Cargo config refusal must occur before any fake RCH probe".to_owned());
+    }
+    if stdout.contains(cargo_home_arg) {
+        return Err(format!(
+            "Cargo config proof leaked the physical Cargo home path: {stdout}"
+        ));
+    }
+
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse blocked Cargo config report: {error}"))?;
+    let provenance = &report["cargo_config_provenance"];
+    if report["status"] != "rch_environment_failure"
+        || report["verification_attribution"] != "committed_tree"
+        || report["rch_invocation"] != serde_json::json!([])
+        || provenance["schema"] != "ee.rch.cargo_config_provenance.v1"
+        || provenance["status"] != "blocked"
+        || provenance["source_attested"] != true
+        || provenance["command_locked"] != true
+        || provenance["cargo_home"] != "<cargo_home>"
+        || provenance["cargo_home_explicit"] != true
+    {
+        return Err(format!(
+            "unexpected blocked Cargo config provenance: {report}"
+        ));
+    }
+    if !degraded_contains(&report, "rch_verify_cargo_config_provenance_blocked")?
+        || worker_degraded_contains(&report, "rch_verify_cargo_config_provenance_blocked")?
+    {
+        return Err(format!(
+            "Cargo config refusal must be a verifier-environment code, not worker state: {report}"
+        ));
+    }
+
+    let sources = provenance["sources"]
+        .as_array()
+        .ok_or_else(|| format!("missing Cargo config sources: {provenance}"))?;
+    let source = sources
+        .iter()
+        .find(|item| item["path"] == "<cargo_home>/config.toml")
+        .ok_or_else(|| format!("missing redacted Cargo home config source: {provenance}"))?;
+    if source["external"] != true
+        || source["effective"] != true
+        || source["parse_status"] != "ok"
+        || source["resolution_controls"] != serde_json::json!(["patch.crates-io"])
+    {
+        return Err(format!("unexpected Cargo home source record: {source}"));
+    }
+    let external_sources = provenance["external_resolution_sources"]
+        .as_array()
+        .ok_or_else(|| format!("missing external resolution sources: {provenance}"))?;
+    let blocking_sources = provenance["blocking_sources"]
+        .as_array()
+        .ok_or_else(|| format!("missing blocking Cargo sources: {provenance}"))?;
+    if external_sources.len() != 1 || blocking_sources.len() != 1 {
+        return Err(format!(
+            "expected exactly one external blocking source: {provenance}"
+        ));
+    }
+    for pointer in [
+        "/cargo_config_provenance/provenance_hash",
+        "/cargo_config_provenance/sources/0/path_hash",
+        "/cargo_config_provenance/sources/0/content_hash",
+    ] {
+        let hash = report
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("missing provenance hash at {pointer}: {report}"))?;
+        if !hash.starts_with("sha256:") || hash.len() != 71 {
+            return Err(format!("invalid provenance hash at {pointer}: {hash}"));
+        }
+    }
+    if !provenance["repair"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("isolated CARGO_HOME")
+    {
+        return Err(format!(
+            "missing actionable Cargo config repair: {provenance}"
+        ));
+    }
+
+    let ledger_text = fs::read_to_string(&ledger_path)
+        .map_err(|error| format!("read Cargo config proof ledger: {error}"))?;
+    let ledger_rows: Vec<&str> = ledger_text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect();
+    if ledger_rows.len() != 1 {
+        return Err(format!(
+            "expected one Cargo config ledger row: {ledger_text}"
+        ));
+    }
+    let ledger: Value = serde_json::from_str(ledger_rows[0])
+        .map_err(|error| format!("parse Cargo config ledger row: {error}"))?;
+    if ledger["status"] != "rch_environment_failure"
+        || ledger["cargo_config_provenance"]["status"] != "blocked"
+        || ledger["cargo_config_provenance"]["provenance_hash"] != provenance["provenance_hash"]
+    {
+        return Err(format!(
+            "ledger did not retain Cargo config provenance: {ledger}"
+        ));
+    }
+
+    let event_text = fs::read_to_string(&event_log_path)
+        .map_err(|error| format!("read Cargo config event log: {error}"))?;
+    let event_rows: Vec<&str> = event_text.lines().filter(|line| !line.is_empty()).collect();
+    if event_rows.len() != 1 {
+        return Err(format!("expected one Cargo config event row: {event_text}"));
+    }
+    let event: Value = serde_json::from_str(event_rows[0])
+        .map_err(|error| format!("parse Cargo config event row: {error}"))?;
+    let fields = &event["fields"];
+    if fields["status"] != "rch_environment_failure"
+        || fields["fake_rch_invoked"] != false
+        || fields["fake_rch_invocation_count"] != 0
+        || fields["cargo_config_provenance_status"] != "blocked"
+        || fields["cargo_config_provenance_hash"] != provenance["provenance_hash"]
+        || fields["cargo_config_blocking_source_count"] != 1
+    {
+        return Err(format!(
+            "event did not retain compact Cargo config provenance: {event}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn cargo_config_provenance_accepts_isolated_home_and_committed_project_patch() -> TestResult {
+    let workspace = seed_system_tmp_git_workspace("rch-cargo-config-isolated")?;
+    fs::create_dir_all(workspace.join(".cargo"))
+        .map_err(|error| format!("create project Cargo config directory: {error}"))?;
+    fs::write(
+        workspace.join(".cargo/config.toml"),
+        "[patch.crates-io]\nserde = { path = \"../fixture-serde\" }\n",
+    )
+    .map_err(|error| format!("write project Cargo config: {error}"))?;
+    git(&workspace, &["add", ".cargo/config.toml"])?;
+    git(&workspace, &["commit", "-m", "add project Cargo config"])?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+
+    let cargo_home = unique_system_tmp_path("rch-cargo-home-isolated");
+    fs::create_dir_all(&cargo_home)
+        .map_err(|error| format!("create isolated Cargo home: {error}"))?;
+    let export_base = unique_system_tmp_path("rch-cargo-config-clean-export");
+    let invocation_log = unique_system_tmp_path("rch-cargo-config-clean-invocations");
+    let fake_rch = write_fake_rch(
+        "fake-rch-cargo-config-isolated.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+
+    let cargo_home_arg = cargo_home
+        .to_str()
+        .ok_or_else(|| "isolated Cargo home path is not utf-8".to_owned())?;
+    let export_base_arg = export_base
+        .to_str()
+        .ok_or_else(|| "export base path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake RCH path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--skip-known-blocker",
+            "--committed-tree",
+            "--treeish",
+            "HEAD",
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "cargo_config_provenance_isolated_smoke",
+        ],
+        &[
+            ("CARGO_HOME", cargo_home_arg),
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_COMMITTED_TREE_BASE", export_base_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(
+        &workspace,
+        &before_status,
+        "isolated Cargo config provenance preflight",
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "isolated Cargo home should permit source-attested locked RCH\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let remote_invocations = remote_exec_invocation_lines(&invocation_log)?;
+    if remote_invocations.len() != 1
+        || !remote_invocations[0]
+            .contains("exec -- cargo test --locked --lib cargo_config_provenance_isolated_smoke")
+    {
+        return Err(format!(
+            "isolated Cargo config run should invoke fake RCH exactly once: {remote_invocations:?}"
+        ));
+    }
+
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse isolated Cargo config report: {error}"))?;
+    let provenance = &report["cargo_config_provenance"];
+    if report["status"] != "remote_pass"
+        || report["verification_attribution"] != "committed_tree"
+        || provenance["status"] != "clean"
+        || provenance["source_attested"] != true
+        || provenance["command_locked"] != true
+        || provenance["external_resolution_sources"] != serde_json::json!([])
+        || provenance["blocking_sources"] != serde_json::json!([])
+    {
+        return Err(format!(
+            "unexpected isolated Cargo config provenance: {report}"
+        ));
+    }
+    let project_config = provenance["sources"]
+        .as_array()
+        .ok_or_else(|| format!("missing project Cargo config sources: {provenance}"))?
+        .iter()
+        .find(|item| item["path"] == "<project>/.cargo/config.toml")
+        .ok_or_else(|| format!("missing committed project Cargo config: {provenance}"))?;
+    if project_config["external"] != false
+        || project_config["parse_status"] != "ok"
+        || project_config["resolution_controls"] != serde_json::json!(["patch.crates-io"])
+    {
+        return Err(format!(
+            "committed project config was not classified correctly: {project_config}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn cargo_config_provenance_observes_unattested_external_patch_without_blocking() -> TestResult {
+    let workspace = seed_system_tmp_git_workspace("rch-cargo-config-observed")?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+    let cargo_home = unique_system_tmp_path("rch-cargo-home-observed");
+    fs::create_dir_all(&cargo_home)
+        .map_err(|error| format!("create observed Cargo home: {error}"))?;
+    fs::write(
+        cargo_home.join("config.toml"),
+        "[patch.crates-io]\nserde = { path = \"../fixture-serde\" }\n",
+    )
+    .map_err(|error| format!("write observed Cargo config: {error}"))?;
+
+    let invocation_log = unique_system_tmp_path("rch-cargo-config-observed-invocations");
+    let fake_rch = write_fake_rch(
+        "fake-rch-cargo-config-observed.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+    let cargo_home_arg = cargo_home
+        .to_str()
+        .ok_or_else(|| "observed Cargo home path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake RCH path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--skip-known-blocker",
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "cargo_config_provenance_observed_smoke",
+        ],
+        &[
+            ("CARGO_HOME", cargo_home_arg),
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(
+        &workspace,
+        &before_status,
+        "unattested Cargo config provenance observation",
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "unattested external patch should remain observable without refusal\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    if remote_exec_invocation_lines(&invocation_log)?.len() != 1 {
+        return Err(format!(
+            "unattested external patch should still invoke fake RCH: {:?}",
+            read_invocation_lines(&invocation_log)?
+        ));
+    }
+
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse observed Cargo config report: {error}"))?;
+    let provenance = &report["cargo_config_provenance"];
+    if report["status"] != "remote_pass"
+        || provenance["status"] != "observed"
+        || provenance["source_attested"] != false
+        || provenance["command_locked"] != true
+        || provenance["external_resolution_sources"]
+            .as_array()
+            .map(Vec::len)
+            != Some(1)
+        || provenance["blocking_sources"] != serde_json::json!([])
+    {
+        return Err(format!(
+            "unexpected unattested Cargo config observation: {report}"
+        ));
+    }
+    if degraded_contains(&report, "rch_verify_cargo_config_provenance_blocked")? {
+        return Err(format!(
+            "unattested external patch must not emit a refusal code: {report}"
         ));
     }
     Ok(())

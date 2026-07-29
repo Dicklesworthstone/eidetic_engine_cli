@@ -130,6 +130,7 @@ RCH_ATTEMPT_STDERR_FILE=""
 RCH_ATTEMPT_META_FILE=""
 RCH_RUNTIME_JSON='{"status":"not_checked","client_path":null,"client_version":null,"client_compat":null,"daemon_version":null,"daemon_compat":null,"daemon_socket_path":null,"message":null}'
 LOCAL_CARGO_PROCESSES_JSON='{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"not_run","count":0,"processes":[],"detectedLocalBuilds":[],"reason":"not requested"}'
+CARGO_CONFIG_PROVENANCE_JSON='{"schema":"ee.rch.cargo_config_provenance.v1","status":"not_computed","source_attested":false,"command_locked":false,"sources":[],"external_resolution_sources":[],"blocking_sources":[],"provenance_hash":null,"refusal_reason":null,"repair":null}'
 host_can_run_executable() {
     local candidate="${1:-}"
     [ -n "$candidate" ] || return 1
@@ -306,6 +307,20 @@ classify_command() {
             ;;
         *) printf 'rejected' ;;
     esac
+}
+
+command_uses_locked() {
+    local index arg
+    for ((index = 2; index < ${#COMMAND[@]}; index++)); do
+        arg="${COMMAND[$index]}"
+        if [ "$arg" = "--" ]; then
+            break
+        fi
+        if [ "$arg" = "--locked" ]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 json_array() {
@@ -2284,6 +2299,389 @@ materialize_committed_tree() {
     REMOTE_PROJECT_ROOT_JSON="$(json_quote "$REMOTE_PROJECT_ROOT")"
 }
 
+compute_cargo_config_provenance_json() {
+    local command_locked=0
+    local source_attested=0
+    if command_uses_locked; then
+        command_locked=1
+    fi
+    if [ "$COMMITTED_TREE" -eq 1 ] || [ "$REQUIRE_CLEAN_TREE" -eq 1 ]; then
+        source_attested=1
+    fi
+
+    PROJECT_ROOT_PATH="$PROJECT_ROOT" \
+    CARGO_HOME_VALUE="${CARGO_HOME:-}" \
+    HOME_VALUE="${HOME:-}" \
+    COMMAND_KIND_VALUE="$COMMAND_KIND" \
+    COMMAND_JSON="$(json_array "${COMMAND[@]}")" \
+    COMMAND_LOCKED="$command_locked" \
+    SOURCE_ATTESTED="$source_attested" \
+    python3 - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
+
+project_root = Path(os.environ["PROJECT_ROOT_PATH"]).resolve(strict=False)
+home_value = os.environ.get("HOME_VALUE", "")
+home = Path(home_value).expanduser().resolve(strict=False) if home_value else None
+cargo_home_value = os.environ.get("CARGO_HOME_VALUE", "")
+if cargo_home_value:
+    cargo_home_candidate = Path(cargo_home_value).expanduser()
+    if not cargo_home_candidate.is_absolute():
+        cargo_home_candidate = project_root / cargo_home_candidate
+    cargo_home = cargo_home_candidate.resolve(strict=False)
+elif home is not None:
+    cargo_home = (home / ".cargo").resolve(strict=False)
+else:
+    cargo_home = (project_root / ".cargo").resolve(strict=False)
+
+command_kind = os.environ.get("COMMAND_KIND_VALUE", "")
+command_locked = os.environ.get("COMMAND_LOCKED") == "1"
+source_attested = os.environ.get("SOURCE_ATTESTED") == "1"
+command = json.loads(os.environ.get("COMMAND_JSON") or "[]")
+sources = []
+seen_effective = {}
+
+def is_within(path, root):
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+def display_path(path):
+    path = path.resolve(strict=False)
+    if is_within(path, project_root):
+        relative = path.relative_to(project_root)
+        return "<project>" if not relative.parts else f"<project>/{relative.as_posix()}"
+    if is_within(path, cargo_home):
+        relative = path.relative_to(cargo_home)
+        return "<cargo_home>" if not relative.parts else f"<cargo_home>/{relative.as_posix()}"
+    if home is not None and is_within(path, home):
+        relative = path.relative_to(home)
+        return "<home>" if not relative.parts else f"<home>/{relative.as_posix()}"
+    return str(path)
+
+def path_hash(path):
+    return "sha256:" + hashlib.sha256(
+        display_path(path).encode("utf-8", "replace")
+    ).hexdigest()
+
+def resolution_controls(payload):
+    controls = []
+    paths = payload.get("paths")
+    if isinstance(paths, list) and paths:
+        controls.append("paths")
+
+    patch = payload.get("patch")
+    if isinstance(patch, dict):
+        for source_name, entries in patch.items():
+            if entries:
+                controls.append(f"patch.{source_name}")
+
+    replace = payload.get("replace")
+    if isinstance(replace, dict) and replace:
+        controls.append("replace")
+
+    source = payload.get("source")
+    if isinstance(source, dict):
+        for source_name, settings in source.items():
+            if not isinstance(settings, dict):
+                continue
+            for key in (
+                "replace-with",
+                "registry",
+                "local-registry",
+                "directory",
+                "git",
+                "branch",
+                "tag",
+                "rev",
+            ):
+                if settings.get(key):
+                    controls.append(f"source.{source_name}.{key}")
+    return sorted(set(controls))
+
+def include_specs(payload):
+    raw = payload.get("include")
+    if raw is None:
+        return []
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    specs = []
+    for item in raw:
+        if isinstance(item, str):
+            specs.append((item, False))
+        elif isinstance(item, dict) and isinstance(item.get("path"), str):
+            specs.append((item["path"], bool(item.get("optional"))))
+    return specs
+
+def shadowed_record(path, origin, precedence):
+    resolved = path.resolve(strict=False)
+    record = {
+        "path": display_path(resolved),
+        "path_hash": path_hash(resolved),
+        "origin": origin,
+        "precedence": precedence,
+        "effective": False,
+        "external": not is_within(resolved, project_root),
+        "included_by": None,
+        "optional": False,
+        "parse_status": "shadowed_by_legacy_config",
+        "content_hash": None,
+        "byte_count": None,
+        "resolution_controls": [],
+    }
+    try:
+        raw = resolved.read_bytes()
+    except OSError:
+        pass
+    else:
+        record["content_hash"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+        record["byte_count"] = len(raw)
+    sources.append(record)
+
+def process_config(
+    path,
+    origin,
+    precedence,
+    *,
+    included_by=None,
+    optional=False,
+    inherited_external=False,
+):
+    resolved = path.resolve(strict=False)
+    key = str(resolved)
+    external = inherited_external or not is_within(resolved, project_root)
+    if key in seen_effective:
+        record = sources[seen_effective[key]]
+        if external:
+            record["external"] = True
+        return
+
+    record = {
+        "path": display_path(resolved),
+        "path_hash": path_hash(resolved),
+        "origin": origin,
+        "precedence": precedence,
+        "effective": True,
+        "external": external,
+        "included_by": included_by,
+        "optional": optional,
+        "parse_status": "not_read",
+        "content_hash": None,
+        "byte_count": None,
+        "resolution_controls": [],
+    }
+    seen_effective[key] = len(sources)
+    sources.append(record)
+
+    if not resolved.exists():
+        record["parse_status"] = "optional_missing" if optional else "required_missing"
+        return
+    try:
+        raw = resolved.read_bytes()
+    except OSError:
+        record["parse_status"] = "unreadable"
+        return
+    record["content_hash"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+    record["byte_count"] = len(raw)
+    if tomllib is None:
+        record["parse_status"] = "parser_unavailable"
+        return
+    try:
+        payload = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        record["parse_status"] = "invalid_toml"
+        return
+    record["parse_status"] = "ok"
+    record["resolution_controls"] = resolution_controls(payload)
+
+    for include_path, include_optional in include_specs(payload):
+        candidate = Path(include_path).expanduser()
+        if not candidate.is_absolute():
+            candidate = resolved.parent / candidate
+        process_config(
+            candidate,
+            "include",
+            precedence,
+            included_by=record["path"],
+            optional=include_optional,
+            inherited_external=external,
+        )
+
+def select_config(config_dir, origin, precedence):
+    legacy = config_dir / "config"
+    preferred = config_dir / "config.toml"
+    if legacy.exists():
+        process_config(legacy, origin, precedence)
+        if preferred.exists():
+            shadowed_record(preferred, origin, precedence)
+    elif preferred.exists():
+        process_config(preferred, origin, precedence)
+
+cursor = project_root
+depth = 0
+while True:
+    origin = "project" if depth == 0 else "ancestor"
+    select_config(cursor / ".cargo", origin, f"hierarchy:{depth}")
+    if cursor.parent == cursor:
+        break
+    cursor = cursor.parent
+    depth += 1
+
+select_config(cargo_home, "cargo_home", "cargo_home:lowest")
+
+config_values = []
+index = 2
+while index < len(command):
+    argument = command[index]
+    if argument == "--":
+        break
+    if argument == "--config" and index + 1 < len(command):
+        config_values.append(command[index + 1])
+        index += 2
+        continue
+    if isinstance(argument, str) and argument.startswith("--config="):
+        config_values.append(argument.split("=", 1)[1])
+    index += 1
+
+for config_index, value in enumerate(config_values, start=1):
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = project_root / candidate
+    if candidate.exists():
+        process_config(candidate, "command_file", f"command:{config_index}")
+        continue
+
+    raw = value.encode("utf-8", "replace")
+    record = {
+        "path": f"<command-line:{config_index}>",
+        "path_hash": None,
+        "origin": "command_inline",
+        "precedence": f"command:{config_index}",
+        "effective": True,
+        "external": False,
+        "included_by": None,
+        "optional": False,
+        "parse_status": "parser_unavailable" if tomllib is None else "not_read",
+        "content_hash": "sha256:" + hashlib.sha256(raw).hexdigest(),
+        "byte_count": len(raw),
+        "resolution_controls": [],
+    }
+    if tomllib is not None:
+        try:
+            payload = tomllib.loads(value)
+        except tomllib.TOMLDecodeError:
+            record["parse_status"] = "invalid_toml"
+        else:
+            record["parse_status"] = "ok"
+            record["resolution_controls"] = resolution_controls(payload)
+    sources.append(record)
+
+external_controls = [
+    source
+    for source in sources
+    if source["effective"]
+    and source["external"]
+    and source["resolution_controls"]
+]
+indeterminate_statuses = {
+    "required_missing",
+    "unreadable",
+    "invalid_toml",
+    "parser_unavailable",
+}
+external_indeterminate = [
+    source
+    for source in sources
+    if source["effective"]
+    and source["external"]
+    and source["parse_status"] in indeterminate_statuses
+]
+should_block = (
+    source_attested
+    and command_locked
+    and bool(external_controls or external_indeterminate)
+)
+if not command_kind.startswith("cargo_"):
+    status = "not_applicable"
+elif should_block:
+    status = "blocked"
+elif external_indeterminate:
+    status = "indeterminate"
+elif external_controls:
+    status = "observed"
+else:
+    status = "clean"
+
+external_resolution_sources = []
+for source in [*external_controls, *external_indeterminate]:
+    summary = {
+        "path": source["path"],
+        "path_hash": source["path_hash"],
+        "content_hash": source["content_hash"],
+        "parse_status": source["parse_status"],
+        "resolution_controls": source["resolution_controls"],
+    }
+    if summary not in external_resolution_sources:
+        external_resolution_sources.append(summary)
+blocking_sources = external_resolution_sources if should_block else []
+
+provenance_material = json.dumps(
+    {
+        "project_root": "<project>",
+        "cargo_home": display_path(cargo_home),
+        "sources": sources,
+        "source_attested": source_attested,
+        "command_locked": command_locked,
+    },
+    sort_keys=True,
+    separators=(",", ":"),
+)
+provenance_hash = "sha256:" + hashlib.sha256(
+    provenance_material.encode("utf-8")
+).hexdigest()
+refusal_reason = None
+repair = None
+if should_block:
+    refusal_reason = (
+        "source-attested --locked verification depends on external Cargo "
+        "configuration that can alter dependency resolution"
+    )
+    repair = (
+        "Use an isolated CARGO_HOME and project/export ancestry with registry/git "
+        "cache access but no resolution-altering Cargo config, then rerun. For a "
+        "checkout below HOME, committed-tree mode can materialize outside HOME."
+    )
+
+payload = {
+    "schema": "ee.rch.cargo_config_provenance.v1",
+    "status": status,
+    "source_attested": source_attested,
+    "command_locked": command_locked,
+    "project_root": "<project>",
+    "cargo_home": display_path(cargo_home),
+    "cargo_home_explicit": bool(cargo_home_value),
+    "sources": sources,
+    "external_resolution_sources": external_resolution_sources,
+    "blocking_sources": blocking_sources,
+    "provenance_hash": provenance_hash,
+    "refusal_reason": refusal_reason,
+    "repair": repair,
+}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
 remote_checkout_missing_tracked_paths() {
     CHECKOUT_OUTPUT="${1:-}" \
     CRITICAL_MANIFEST="$(critical_checkout_manifest)" \
@@ -2771,7 +3169,7 @@ emit_json() {
     shift 5
     local degraded_codes_json
     degraded_codes_json="$(json_array "$@")"
-    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json requested_workers_json configured_workers_json daemon_workers_json build_admission_json rch_runtime_json known_blocker_json local_cargo_processes_json proof_broker_json
+    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json requested_workers_json configured_workers_json daemon_workers_json build_admission_json rch_runtime_json known_blocker_json local_cargo_processes_json proof_broker_json cargo_config_provenance_json
     command_json="$(json_array "${COMMAND[@]}")"
     rch_invocation_json="$(json_array "${RCH_INVOCATION[@]}")"
     remote_env_json="$(json_array "${ENV_OVERRIDES[@]}")"
@@ -2790,6 +3188,7 @@ emit_json() {
     fi
     known_blocker_json="${KNOWN_BLOCKER_JSON:-null}"
     proof_broker_json="${PROOF_BROKER_JSON:-null}"
+    cargo_config_provenance_json="$CARGO_CONFIG_PROVENANCE_JSON"
     local source_state_json
     if [ -n "${SOURCE_STATE_JSON:-}" ]; then
         source_state_json="$SOURCE_STATE_JSON"
@@ -2807,7 +3206,7 @@ emit_json() {
     done
     artifacts_json="$(attempt_artifacts_json "${artifact_args[@]}")"
     json_payload="$(cat <<EOF
-{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"attempt_timeout_ms":$RCH_VERIFY_ATTEMPT_TIMEOUT_MS,"timed_out":$RCH_ATTEMPT_TIMED_OUT,"stdout_bytes":$RCH_STDOUT_BYTES,"stderr_bytes":$RCH_STDERR_BYTES,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"artifacts":$artifacts_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"known_blocker":$known_blocker_json,"proof_broker":$proof_broker_json,"local_cargo_processes":$local_cargo_processes_json,"source_state":$source_state_json}
+{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"attempt_timeout_ms":$RCH_VERIFY_ATTEMPT_TIMEOUT_MS,"timed_out":$RCH_ATTEMPT_TIMED_OUT,"stdout_bytes":$RCH_STDOUT_BYTES,"stderr_bytes":$RCH_STDERR_BYTES,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"artifacts":$artifacts_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"known_blocker":$known_blocker_json,"proof_broker":$proof_broker_json,"local_cargo_processes":$local_cargo_processes_json,"cargo_config_provenance":$cargo_config_provenance_json,"source_state":$source_state_json}
 EOF
 )"
     JSON_PAYLOAD="$json_payload" \
@@ -3713,6 +4112,7 @@ elif (
     "rch_verify_topology_blocked" in degraded
     or "rch_verify_cargo_workspace_inheritance_blocked" in degraded
     or "rch_verify_cargo_path_dependency_version_blocked" in degraded
+    or "rch_verify_cargo_config_provenance_blocked" in degraded
     or "rch_verify_client_daemon_version_skew" in degraded
     or "rch_verify_local_fallback_refused" in degraded
     or "rch_verify_all_workers_preflight_failed" in degraded
@@ -3771,6 +4171,15 @@ summary_lines = [
     f"- elapsed_ms: `{proof.get('elapsed_ms')}`",
     f"- command_hash: `{command_hash}`",
 ]
+cargo_config_provenance = proof.get("cargo_config_provenance") or {}
+if cargo_config_provenance.get("status") not in (None, "not_computed"):
+    summary_lines.append(
+        f"- cargo_config_provenance: `{cargo_config_provenance.get('status')}`"
+        f" source_attested=`{str(bool(cargo_config_provenance.get('source_attested'))).lower()}`"
+        f" command_locked=`{str(bool(cargo_config_provenance.get('command_locked'))).lower()}`"
+        f" blocking_sources=`{len(cargo_config_provenance.get('blocking_sources') or [])}`"
+        f" provenance_hash=`{cargo_config_provenance.get('provenance_hash') or 'unknown'}`"
+    )
 if build_admission.get("status") not in (None, "not_run"):
     admitted = build_admission.get("admitted")
     if isinstance(admitted, bool):
@@ -3932,6 +4341,7 @@ if ledger_path:
             "degraded_codes": proof.get("degraded_codes") or [],
             "source_state_degraded_codes": proof.get("source_state_degraded_codes") or [],
             "worker_state_degraded_codes": proof.get("worker_state_degraded_codes") or [],
+            "cargo_config_provenance": proof.get("cargo_config_provenance"),
             "known_blocker": proof.get("known_blocker"),
             "proof_broker": proof.get("proof_broker"),
             "error_codes": codes,
@@ -3997,6 +4407,11 @@ if event_log_path:
             "source_manifest_hash": proof.get("source_manifest_hash"),
             "known_blocker": proof.get("known_blocker"),
             "proof_broker": proof.get("proof_broker"),
+            "cargo_config_provenance_status": cargo_config_provenance.get("status"),
+            "cargo_config_provenance_hash": cargo_config_provenance.get("provenance_hash"),
+            "cargo_config_blocking_source_count": len(
+                cargo_config_provenance.get("blocking_sources") or []
+            ),
             "stdout_artifact_path": artifact_path("stdout"),
             "stderr_artifact_path": artifact_path("stderr"),
             "schema_validation_status": "not_run",
@@ -4103,6 +4518,16 @@ RCH_INVOCATION=(
     "${ENV_OVERRIDES[@]}"
     "${COMMAND[@]}"
 )
+
+CARGO_CONFIG_PROVENANCE_JSON="$(compute_cargo_config_provenance_json)"
+if [ "$(json_text_field "$CARGO_CONFIG_PROVENANCE_JSON" status)" = "blocked" ]; then
+    RCH_INVOCATION=()
+    emit_json true 1 0 \
+        "Cargo config provenance preflight refused source-attested --locked verification before RCH" \
+        "" \
+        "rch_verify_cargo_config_provenance_blocked"
+    exit 1
+fi
 
 if [ "$DRY_RUN" -eq 0 ]; then
     RCH_RUNTIME_JSON="$(rch_runtime_json)"
