@@ -1752,6 +1752,7 @@ printf '[RCH] remote trj (0.1s)\n'
     let (status, stdout, stderr) = run_script_with_env_in_dir(
         &[
             "--skip-known-blocker",
+            "--skip-build-admission",
             "--committed-tree",
             "--treeish",
             "HEAD",
@@ -1864,6 +1865,7 @@ printf '[RCH] remote trj (0.1s)\n'
     let (status, stdout, stderr) = run_script_with_env_in_dir(
         &[
             "--skip-known-blocker",
+            "--skip-build-admission",
             "--rch-bin",
             fake_rch_arg,
             "--",
