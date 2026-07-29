@@ -7,6 +7,9 @@ use ee::db::DbConnection;
 type TestResult = Result<(), String>;
 
 fn run_ee(workspace: &Path, args: &[&str]) -> Result<Output, String> {
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|error| format!("failed to canonicalize {}: {error}", workspace.display()))?;
     let runtime_dir = workspace.join(".test-runtime");
     let data_home = workspace.join(".test-data");
     let cache_home = workspace.join(".test-cache");
@@ -17,7 +20,7 @@ fn run_ee(workspace: &Path, args: &[&str]) -> Result<Output, String> {
 
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .arg("--workspace")
-        .arg(workspace)
+        .arg(&workspace)
         .args(args)
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
