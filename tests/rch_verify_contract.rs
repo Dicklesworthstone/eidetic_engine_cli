@@ -3502,6 +3502,52 @@ fn synthetic_remote_transcript_extracts_worker_id() -> TestResult {
 }
 
 #[test]
+fn successful_test_name_does_not_trigger_active_project_exclusion() -> TestResult {
+    let (status, stdout, stderr) = run_script_with_env(
+        &["--summary", "--no-write", "--", "cargo", "test", "--lib"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "running 1 test\ntest selector_admission_probe_classifies_active_project_exclusion ... ok\n\n\
+                 test result: ok. 1 passed; 0 failed\n[RCH] remote trj (0.1s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "100"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "successful transcript containing the test name failed with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code()
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout).map_err(|error| {
+        format!("parse successful active-project-name transcript: {error}\nstderr:\n{stderr}")
+    })?;
+    if report["status"] != "remote_pass" {
+        return Err(format!(
+            "successful transcript should remain a remote pass: {report}"
+        ));
+    }
+    if degraded_contains(&report, "rch_verify_capacity_or_timeout")? {
+        return Err(format!(
+            "test-name text was misclassified as capacity pressure: {report}"
+        ));
+    }
+    let probe = selector_probe(&report)?;
+    if probe["status"] != "selected"
+        || probe["selected_worker"] != "trj"
+        || !probe["selection_failure_reason"].is_null()
+        || !probe["admission_blocker"].is_null()
+    {
+        return Err(format!(
+            "selected worker gained a false admission blocker: {probe}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn client_daemon_version_skew_refuses_before_rch() -> TestResult {
     let invocation_log = unique_tmp_path("rch-version-skew-invocations");
     let fake_rch = write_fake_rch(
@@ -5217,6 +5263,48 @@ fn synthetic_remote_test_failure_with_timeout_env_is_remote_failure() -> TestRes
         .any(|code| code == "rch_verify_capacity_or_timeout")
     {
         return Err(format!("remote test failure was misclassified: {report}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn selected_remote_failure_ignores_nested_active_project_fixture() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &["--", "cargo", "test", "--test", "rch_verify_contract"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "test selector_admission_probe_classifies_active_project_exclusion ... FAILED\n\
+                 Error: \"fixture: {\\\"evidence\\\":\\\"[RCH] selection blocked: active_project_exclusion=1\\\"}\"\n\
+                 [RCH] remote trj failed (exit 101)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "200"),
+        ],
+    )?;
+    if status.success() {
+        return Err("selected remote test failure should preserve non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse nested active-project fixture failure: {error}"))?;
+    if report["status"] != "remote_failure" || report["worker_id"] != "trj" {
+        return Err(format!(
+            "selected Rust failure was misclassified as worker capacity: {report}"
+        ));
+    }
+    if degraded_contains(&report, "rch_verify_capacity_or_timeout")? {
+        return Err(format!(
+            "nested fixture text created capacity degradation: {report}"
+        ));
+    }
+    let probe = selector_probe(&report)?;
+    if probe["status"] != "selected"
+        || probe["selected_worker"] != "trj"
+        || !probe["admission_blocker"].is_null()
+    {
+        return Err(format!(
+            "selected Rust failure gained a false admission blocker: {probe}"
+        ));
     }
     Ok(())
 }

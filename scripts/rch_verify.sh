@@ -1396,7 +1396,7 @@ is_no_workers_passed_health_output() {
 }
 
 is_active_project_exclusion_output() {
-    grep -Eiq "active_project_exclusion|active project exclusion"
+    grep -Eiq '^[[:space:]]*\[RCH\][[:space:]]+.*(active_project_exclusion[[:space:]]*[=:]|active project exclusion([[:space:]]*[=:]|[[:space:]]|$))'
 }
 
 is_client_daemon_unknown_variant_output() {
@@ -5072,29 +5072,22 @@ def selector_admission_probe(proof, degraded_codes, combined_tail):
         "rch_verify_local_fallback_refused" in degraded_codes
         or "remote required; refusing local fallback" in combined_tail
     )
+    active_project_match = re.search(
+        r"(?im)^\s*(?:\x1b\[[0-9;]*m)*\[RCH\].*(?:active_project_exclusion\s*[=:]|active project exclusion(?:\s*[=:]|\s|$)).*$",
+        combined_tail,
+    )
     active_project_exclusion = (
-        "active_project_exclusion" in lowered_tail
-        or "active project exclusion" in lowered_tail
+        proof.get("exit_code") not in (None, 0)
+        and not selected_worker
+        and active_project_match is not None
     )
     admission_blocker = None
     if active_project_exclusion:
-        evidence_line = None
-        for line in combined_tail.splitlines():
-            lowered = line.lower()
-            if (
-                "active_project_exclusion" in lowered
-                or "active project exclusion" in lowered
-                or (
-                    "active build" in lowered
-                    and ("stale" in lowered or "progress" in lowered or "running" in lowered)
-                )
-            ):
-                evidence_line = redact(line.strip())[:320]
-                break
+        evidence_line = redact(active_project_match.group(0).strip())[:320]
         admission_blocker = {
             "kind": "active_project_exclusion",
             "retry_guidance": "wait_for_active_build_or_coordinate_with_owner",
-            "evidence": evidence_line or "active_project_exclusion observed",
+            "evidence": evidence_line,
             "retry_after_hint": "after_active_build_completes",
             "next_action": "wait_for_active_build_or_contact_owner_before_retry",
             "owner_escalation": "identify_or_contact_active_build_owner_before_cancelling_or_retrying",
@@ -6375,7 +6368,8 @@ fi
 if printf '%s' "$combined_output" | is_no_workers_passed_health_output; then
     degraded+=("rch_verify_worker_health_threshold_blocked")
 fi
-if printf '%s' "$combined_output" | is_active_project_exclusion_output; then
+if [ "$exit_code" -ne 0 ] && [ -z "$worker_id" ] &&
+    printf '%s' "$combined_output" | is_active_project_exclusion_output; then
     degraded+=("rch_verify_capacity_or_timeout")
     RCH_QUEUE_SNAPSHOT_JSON="$(rch_queue_snapshot_json)"
 fi
