@@ -22,6 +22,10 @@ struct JsonContractFixture {
     workspace: PathBuf,
     database: PathBuf,
     index_dir: PathBuf,
+    canonical_workspace: PathBuf,
+    canonical_database: PathBuf,
+    canonical_index_dir: PathBuf,
+    canonical_repo: PathBuf,
 }
 
 impl JsonContractFixture {
@@ -40,10 +44,20 @@ impl JsonContractFixture {
         seed_workspace(&workspace, &database)?;
         build_search_index(&workspace, &database, &index_dir)?;
 
+        let canonical_workspace = canonical_fixture_path(&workspace, "workspace")?;
+        let canonical_database = canonical_fixture_path(&database, "database")?;
+        let canonical_index_dir = canonical_fixture_path(&index_dir, "index directory")?;
+        let canonical_repo =
+            canonical_fixture_path(Path::new(env!("CARGO_MANIFEST_DIR")), "repository")?;
+
         Ok(Self {
             workspace,
             database,
             index_dir,
+            canonical_workspace,
+            canonical_database,
+            canonical_index_dir,
+            canonical_repo,
         })
     }
 
@@ -58,6 +72,15 @@ impl JsonContractFixture {
     fn index_dir_arg(&self) -> String {
         self.index_dir.to_string_lossy().into_owned()
     }
+}
+
+fn canonical_fixture_path(path: &Path, label: &str) -> Result<PathBuf, String> {
+    fs::canonicalize(path).map_err(|error| {
+        format!(
+            "failed to canonicalize fixture {label} {}: {error}",
+            path.display()
+        )
+    })
 }
 
 fn unique_artifact_dir(prefix: &str) -> Result<PathBuf, String> {
@@ -288,6 +311,9 @@ fn scrub_json_contract(value: &mut Value, fixture: &JsonContractFixture) {
         Value::Object(object) => {
             for (key, child) in object.iter_mut() {
                 scrub_json_contract(child, fixture);
+                if key == "hostCalibration" {
+                    scrub_host_calibration(child);
+                }
                 scrub_value_for_key(key, child);
             }
             let mut entries: Vec<_> = std::mem::take(object).into_iter().collect();
@@ -303,6 +329,39 @@ fn scrub_json_contract(value: &mut Value, fixture: &JsonContractFixture) {
             *text = scrub_string(text, fixture);
         }
         Value::Number(_) | Value::Bool(_) | Value::Null => {}
+    }
+}
+
+fn scrub_host_calibration(value: &mut Value) {
+    const HOST_DEPENDENT: &str = "[HOST_DEPENDENT]";
+
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    for key in [
+        "calibrationFreshness",
+        "confidence",
+        "configuredProfile",
+        "effectiveProfile",
+        "hostClass",
+        "profileCeiling",
+        "recommendedProfile",
+        "targetDirPosture",
+    ] {
+        if let Some(field @ (Value::String(_) | Value::Null)) = object.get_mut(key) {
+            *field = Value::String(HOST_DEPENDENT.to_string());
+        }
+    }
+    for key in [
+        "budgetDeltas",
+        "degraded",
+        "reasonCodes",
+        "repairActions",
+        "topologyWarnings",
+    ] {
+        if let Some(field @ Value::Array(_)) = object.get_mut(key) {
+            *field = json!([HOST_DEPENDENT]);
+        }
     }
 }
 
@@ -383,14 +442,19 @@ fn scrub_string(text: &str, fixture: &JsonContractFixture) -> String {
         return "[TIMESTAMP]".to_string();
     }
 
-    let database = fixture.database.to_string_lossy();
-    let index_dir = fixture.index_dir.to_string_lossy();
-    let workspace = fixture.workspace.to_string_lossy();
-    let scrubbed = text
-        .replace(database.as_ref(), "[DATABASE]")
-        .replace(index_dir.as_ref(), "[INDEX]")
-        .replace(workspace.as_ref(), "[WORKSPACE]")
-        .replace(env!("CARGO_MANIFEST_DIR"), "[REPO]");
+    let mut scrubbed = text.to_string();
+    for (path, replacement) in [
+        (&fixture.database, "[DATABASE]"),
+        (&fixture.canonical_database, "[DATABASE]"),
+        (&fixture.index_dir, "[INDEX]"),
+        (&fixture.canonical_index_dir, "[INDEX]"),
+        (&fixture.workspace, "[WORKSPACE]"),
+        (&fixture.canonical_workspace, "[WORKSPACE]"),
+        (Path::new(env!("CARGO_MANIFEST_DIR")), "[REPO]"),
+        (&fixture.canonical_repo, "[REPO]"),
+    ] {
+        scrubbed = scrubbed.replace(path.to_string_lossy().as_ref(), replacement);
+    }
     scrub_pack_hash_comments(&scrubbed)
 }
 
