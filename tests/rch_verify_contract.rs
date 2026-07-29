@@ -45,6 +45,8 @@ fn run_script_with_env_in_dir(
         .args(args)
         .env("RCH_VERIFY_NOW", "2026-05-16T04:40:00.000000Z")
         .env("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "0")
+        .env_remove("CARGO_INCREMENTAL")
+        .env_remove("RCH_ENV_ALLOWLIST")
         .current_dir(cwd);
     for (key, value) in envs {
         command.env(key, value);
@@ -3140,6 +3142,8 @@ printf 'RCH_BUILD_TIMEOUT_SEC=%s\n' "${RCH_BUILD_TIMEOUT_SEC:-}"
 printf 'RCH_TEST_TIMEOUT_SEC=%s\n' "${RCH_TEST_TIMEOUT_SEC:-}"
 printf 'RCH_CANONICAL_PROJECT_ROOT=%s\n' "${RCH_CANONICAL_PROJECT_ROOT:-}"
 printf 'RCH_ALIAS_PROJECT_ROOT=%s\n' "${RCH_ALIAS_PROJECT_ROOT:-}"
+printf 'CARGO_INCREMENTAL=%s\n' "${CARGO_INCREMENTAL:-}"
+printf 'RCH_ENV_ALLOWLIST=%s\n' "${RCH_ENV_ALLOWLIST:-}"
 printf '[RCH] remote trj (0.1s)\n'
 "#,
     )?;
@@ -3163,6 +3167,7 @@ printf '[RCH] remote trj (0.1s)\n'
             ("RCH_TEST_TIMEOUT_SEC", "1500"),
             ("RCH_CANONICAL_PROJECT_ROOT", "/data/projects"),
             ("RCH_ALIAS_PROJECT_ROOT", "/data"),
+            ("RCH_ENV_ALLOWLIST", "RUST_BACKTRACE"),
             ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
             ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
         ],
@@ -3213,9 +3218,70 @@ printf '[RCH] remote trj (0.1s)\n'
             "first invocation did not receive worker alias topology: {report}"
         ));
     }
+    if !stdout_tail.contains("CARGO_INCREMENTAL=0") {
+        return Err(format!(
+            "first invocation did not disable cold incremental state: {report}"
+        ));
+    }
+    if !stdout_tail
+        .contains("RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,CARGO_INCREMENTAL,RUST_BACKTRACE")
+    {
+        return Err(format!(
+            "first invocation did not forward required and caller env: {report}"
+        ));
+    }
     if degraded_contains(&report, "rch_verify_worker_filter_ignored")? {
         return Err(format!(
             "requested worker should not trip filter ignored: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn remote_compile_preserves_explicit_incremental_override() -> TestResult {
+    let fake_rch = write_fake_rch(
+        "fake-rch-incremental-override.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'CARGO_INCREMENTAL=%s\n' "${CARGO_INCREMENTAL:-}"
+printf 'RCH_ENV_ALLOWLIST=%s\n' "${RCH_ENV_ALLOWLIST:-}"
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "check",
+            "--all-targets",
+        ],
+        &[
+            ("CARGO_INCREMENTAL", "1"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "explicit incremental override failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse incremental override proof: {error}"))?;
+    let stdout_tail = report["stdout_tail"]
+        .as_str()
+        .ok_or_else(|| "missing stdout_tail".to_owned())?;
+    if !stdout_tail.contains("CARGO_INCREMENTAL=1")
+        || !stdout_tail.contains("RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,CARGO_INCREMENTAL")
+    {
+        return Err(format!(
+            "explicit incremental override was not forwarded: {report}"
         ));
     }
     Ok(())

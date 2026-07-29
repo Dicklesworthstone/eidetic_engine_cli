@@ -37,8 +37,10 @@ The wrapper sets these remote-safe defaults:
 - `RCH_REQUIRE_REMOTE=1`
 - `RCH_QUEUE_WHEN_BUSY=1`
 - `RCH_COMPRESSION=0`
-- `RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,...` so RCH can rewrite worker
-  target/tmp paths without hiding `cargo` behind a leading `env` argv
+- `CARGO_INCREMENTAL=0` unless the caller explicitly overrides it
+- `RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,CARGO_INCREMENTAL,...` so RCH can
+  rewrite worker target/tmp paths and forward the reproducibility control
+  without hiding `cargo` behind a leading `env` argv
 - RCH binary `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5` when present, then `/Users/jemanuel/.local/bin/rch-33720a8`, then `/Volumes/USBNVME16TB/temp_agent_space/rch-macos-target/debug/rch`, then any host-runnable source-built fallback, then `rch`
 - `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel`
 - `RCH_ALIAS_PROJECT_ROOT=/data`
@@ -299,6 +301,14 @@ full path, executable-bit, symlink-target, and file-content hash validates.
 and `validation=full_content_hash`; an incomplete or changed entry is never
 trusted as the requested commit. This stable identity also lets RCH reuse its
 remote build cache across focused tests, check, and Clippy.
+
+The verifier defaults `CARGO_INCREMENTAL=0` for this proof lane. A new
+content-addressed commit is a cold project identity, so retaining Cargo's
+incremental dependency graphs can consume far more worker disk than it saves.
+Non-incremental mode still reuses ordinary compiled dependencies and artifacts
+within the same pinned target pool. An explicit caller value is forwarded for
+diagnostics, but `CARGO_INCREMENTAL=1` should only be used when the selected
+worker has enough measured disk headroom for the additional retained state.
 
 Pinned bundles default to `.ee-rch-committed-tree/` beside the canonical
 checkout, not below `TMPDIR`. Keeping the bundle beneath the writable project

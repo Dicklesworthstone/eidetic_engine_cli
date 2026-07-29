@@ -4232,6 +4232,7 @@ run_rch_invocation_once() {
         "RCH_WORKER=${RCH_WORKER:-}" \
         "RCH_WORKERS=${RCH_WORKERS:-}" \
         "RCH_COMPRESSION=${RCH_COMPRESSION:-0}" \
+        "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0}" \
         "RCH_ENV_ALLOWLIST=$(rch_env_allowlist)" \
         "RCH_REQUIRE_REMOTE=1" \
         "RCH_QUEUE_WHEN_BUSY=${RCH_QUEUE_WHEN_BUSY:-1}" \
@@ -4266,6 +4267,7 @@ run_rch_invocation_retry() {
         "RCH_WORKER=" \
         "RCH_WORKERS=$preferred_workers" \
         "RCH_COMPRESSION=${RCH_COMPRESSION:-0}" \
+        "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0}" \
         "RCH_ENV_ALLOWLIST=$(rch_env_allowlist)" \
         "RCH_REQUIRE_REMOTE=1" \
         "RCH_QUEUE_WHEN_BUSY=${RCH_QUEUE_WHEN_BUSY:-1}" \
@@ -4654,7 +4656,7 @@ PY
 }
 
 rch_env_allowlist() {
-    local required="CARGO_TARGET_DIR,TMPDIR"
+    local required="CARGO_TARGET_DIR,TMPDIR,CARGO_INCREMENTAL"
     if [ -n "${RCH_ENV_ALLOWLIST:-}" ]; then
         printf '%s,%s' "$required" "$RCH_ENV_ALLOWLIST"
     else
@@ -5510,6 +5512,18 @@ def persist_proof_broker_ledger(proof, status, command_hash):
 raw_stdout_tail = proof.get("stdout_tail") or ""
 raw_stderr_tail = proof.get("stderr_tail") or ""
 combined_tail = "\n".join(part for part in [raw_stdout_tail, raw_stderr_tail] if part)
+explicit_capacity_match = re.search(
+    r"(?im)^\s*(?:\x1b\[[0-9;]*m)*\[RCH\]\s+local\s+\(no admissible workers:[^)]*(?:critical_pressure|insufficient_slots)\s*=.*$",
+    combined_tail,
+)
+explicit_capacity_refusal = bool(
+    explicit_capacity_match
+    and not re.search(
+        r"active_project_exclusion\s*[=:]|active project exclusion(?:\s*[=:]|\s|$)",
+        explicit_capacity_match.group(0),
+        re.IGNORECASE,
+    )
+)
 proof["stdout_tail"] = redact(raw_stdout_tail)
 proof["stderr_tail"] = redact(raw_stderr_tail)
 first_error_file, first_error_line = first_error_location(combined_tail)
@@ -5617,6 +5631,8 @@ elif (
     or any(code.startswith("rch_verify_franken_stack_") for code in degraded)
 ):
     status = "source_state_refused"
+elif explicit_capacity_refusal and "rch_verify_capacity_or_timeout" in degraded:
+    status = "capacity_or_timeout"
 elif (
     "rch_verify_topology_blocked" in degraded
     or "rch_verify_cargo_workspace_inheritance_blocked" in degraded
@@ -6425,8 +6441,10 @@ if [ "$exit_code" -ne 0 ] && [ -z "$worker_id" ] &&
 fi
 if [ "$exit_code" -ne 0 ] && [ -z "$worker_id" ] &&
     printf '%s' "$combined_output" | is_explicit_capacity_admission_output; then
-    degraded+=("rch_verify_capacity_or_timeout")
-    explicit_capacity_refusal=1
+    if ! printf '%s' "$combined_output" | is_active_project_exclusion_output; then
+        degraded+=("rch_verify_capacity_or_timeout")
+        explicit_capacity_refusal=1
+    fi
 fi
 if printf '%s' "$combined_output" | is_client_daemon_unknown_variant_output; then
     degraded+=("rch_verify_client_daemon_version_skew")

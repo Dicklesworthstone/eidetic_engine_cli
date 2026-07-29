@@ -53,7 +53,8 @@ RCH_ALIAS_PROJECT_ROOT=/data \
 RCH_VISIBILITY=summary \
 RCH_COMPRESSION=0 \
 RCH_BUILD_TIMEOUT_SEC=1200 \
-RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR \
+CARGO_INCREMENTAL=0 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,CARGO_INCREMENTAL \
 /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 exec -- \
   cargo <your-cargo-subcommand-here> -- --nocapture
 ```
@@ -123,7 +124,8 @@ response to an ambiguous proof is coordination, not mutation.
 
 | Env var | Why |
 |---|---|
-| `TMPDIR=/tmp` / `RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR` | Mac `~/.zshenv` points TMPDIR at `/Volumes/USBNVME16TB/...`. That path does not exist on Linux workers; Rust's `tempfile::tempdir()` inherits it and panics with `os error 2`. The wrapper lets RCH rewrite target/tmp values for the worker instead of hiding Cargo behind a leading `env` argv. |
+| `TMPDIR=/tmp` / `RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,CARGO_INCREMENTAL` | Mac `~/.zshenv` points TMPDIR at `/Volumes/USBNVME16TB/...`. That path does not exist on Linux workers; Rust's `tempfile::tempdir()` inherits it and panics with `os error 2`. The wrapper lets RCH rewrite target/tmp values and forward the incremental policy instead of hiding Cargo behind a leading `env` argv. |
+| `CARGO_INCREMENTAL=0` | Exact-commit bundles are cold project identities. Disabling incremental state prevents one proof from retaining a very large commit-specific dependency graph while preserving normal dependency/artifact reuse within the pinned target pool. The wrapper honors an explicit override, which should be used only with measured worker disk headroom. |
 | `RCH_REQUIRE_REMOTE=1` | Fail-closed when topology preflight fails. Bare `rch exec -- cargo ...` can fall back to **local** Cargo, which burns the Mac SSD and produces unsafe evidence. The repo tripwire denies bare `rch exec` Cargo commands unless this env var is present. |
 | `RCH_QUEUE_WHEN_BUSY=1` | Wait when all workers are busy rather than refusing. |
 | `RCH_TEST_SLOTS=2` | Bound concurrent test slots so heavy benches don't starve focused tests. |
@@ -543,6 +545,23 @@ Symptom: RCH says it's waiting for a slot for >5 minutes.
 - Reduce slot demand: `RCH_TEST_SLOTS=1` for one slice at a time.
 - Check via `rch workers probe --all` to see which workers are saturated.
 - Don't fan out 4 parallel verifications when one bead at a time would work.
+
+### Pinned proof consumes excessive worker disk
+
+**Symptom:** a first proof for a new commit leaves a disproportionately large
+`.rch-target-*` directory, and the worker later refuses selection with
+`no admissible workers: critical_pressure=<n>`.
+
+**Root cause:** each content-addressed pinned bundle has a distinct project
+identity. Cargo incremental state from a cold debug build can therefore become
+large, commit-specific retained data rather than a useful cross-commit cache.
+
+**Fix:** use the repository wrapper, which defaults `CARGO_INCREMENTAL=0` and
+forwards it through `RCH_ENV_ALLOWLIST`. Refresh capability telemetry before
+retrying on a worker with adequate headroom. Treat the top-level
+`critical_pressure` or `insufficient_slots` refusal as
+`status=capacity_or_timeout`; it is not a source or Rust-test failure. Do not
+clean worker storage without the required human authorization.
 
 ### Remote compile error in another agent's reserved file
 
