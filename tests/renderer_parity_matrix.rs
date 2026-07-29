@@ -992,12 +992,39 @@ fn context_pack_degraded_renderers_aggregate_duplicate_codes() -> TestResult {
     let hook = ee::output::render_context_response_hook(&response);
     let jsonl = ee::output::render_context_response_jsonl(&response);
 
-    if json.matches("\"code\":\"renderer_parity_fixture\"").count() != 1 {
-        return Err(format!("json degraded code was not aggregated: {json}"));
-    }
-    if !json.contains("\"sources\":[\"context\"]") {
+    let json_value: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|error| format!("json renderer emitted invalid JSON: {error}"))?;
+    let data_degraded = json_value
+        .pointer("/data/degraded")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "json data.degraded must be an array".to_string())?;
+    let envelope_degraded = json_value
+        .pointer("/degraded")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "json envelope degraded must be an array".to_string())?;
+    if data_degraded != envelope_degraded {
         return Err(format!(
-            "json degraded sources missing aggregation label: {json}"
+            "json degradation mirrors diverged: data={data_degraded:?}, envelope={envelope_degraded:?}"
+        ));
+    }
+    if data_degraded.len() != 1 {
+        return Err(format!(
+            "json degraded entries were not aggregated: {data_degraded:?}"
+        ));
+    }
+    let degradation = &data_degraded[0];
+    if degradation.get("code").and_then(serde_json::Value::as_str)
+        != Some("renderer_parity_fixture")
+    {
+        return Err(format!("json degraded code is incorrect: {degradation}"));
+    }
+    let sources = degradation
+        .get("sources")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "json degraded sources must be an array".to_string())?;
+    if sources.as_slice() != [serde_json::Value::String("context".to_string())] {
+        return Err(format!(
+            "json degraded sources missing aggregation label: {sources:?}"
         ));
     }
     if hook.matches("\"code\":\"renderer_parity_fixture\"").count() != 1 {
