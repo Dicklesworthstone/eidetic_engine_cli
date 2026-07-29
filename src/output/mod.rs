@@ -2195,6 +2195,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "resourcePressure",
                 "hostProfile",
                 "agentInventory",
+                "toolchainProvenance",
                 "recommendations",
                 "degraded",
             ],

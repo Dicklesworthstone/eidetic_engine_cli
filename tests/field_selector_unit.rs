@@ -376,6 +376,7 @@ fn explicit_list_and_preset_additions_are_precise() -> TestResult {
             "workspace",
             "posture",
             "singleFlight",
+            "writeGroupCommit",
             "flightRecorder",
             "qos",
             "rchWorkerPressure",
