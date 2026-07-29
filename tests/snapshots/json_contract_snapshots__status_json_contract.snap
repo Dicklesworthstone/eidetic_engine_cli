@@ -158,7 +158,9 @@ expression: status
         }
       ],
       "thisOperation": {
-        "degradationsApplied": [],
+        "degradationsApplied": [
+          "graph_feature_disabled"
+        ],
         "status": "ok",
         "subsystemsSkipped": [
           "pack"
@@ -325,7 +327,18 @@ expression: status
       "writesCoalesced": 0
     }
   },
-  "degraded": [],
+  "degraded": [
+    {
+      "code": "graph_feature_disabled",
+      "message": "Knowledge skyline status is disabled by graph.feature.skyline.enabled.",
+      "repair": "ee config set graph.feature.skyline.enabled true",
+      "repairKind": "actionable",
+      "severity": "medium",
+      "sources": [
+        "status"
+      ]
+    }
+  ],
   "fields": "summary",
   "schema": "ee.response.v2",
   "success": true

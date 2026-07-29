@@ -13,7 +13,7 @@ expression: profile_config_plan
       },
       "diagnostics": {
         "redaction": "strict",
-        "supportBundleProfile": "minimal"
+        "supportBundleProfile": "standard"
       },
       "pack": {
         "explanationVerbosity": "standard",
@@ -31,10 +31,10 @@ expression: profile_config_plan
         "maintenanceWindowMs": 0
       },
       "verification": {
-        "heavyStrategy": "manual",
-        "recipe": "quick",
-        "targetDirPosture": "shared",
-        "timeoutClass": "short"
+        "heavyStrategy": "rch_preferred",
+        "recipe": "workspace",
+        "targetDirPosture": "isolated",
+        "timeoutClass": "standard"
       },
       "writeSpool": {
         "batchCap": 0,
@@ -44,38 +44,32 @@ expression: profile_config_plan
     },
     "command": "profile config plan",
     "configExists": false,
-    "configPath": "[WORKSPACE]/.ee/config.toml",
+    "configPath": "[WORKSPACE]/.ee/profile-contract.toml",
     "conflicts": [],
     "degraded": [
       {
         "code": "heavy_gates_skipped",
-        "message": "3 heavy verification gate(s) skipped by profile: property_tests, integration_tests, e2e_tests",
+        "message": "2 heavy verification gate(s) skipped by profile: integration_tests, e2e_tests",
         "repair": "Run skipped gates manually or upgrade to a higher-resource profile.",
         "severity": "info"
-      },
-      {
-        "code": "manual_heavy_strategy",
-        "message": "Heavy tests require manual invocation on this profile.",
-        "repair": "Use `rch exec -- cargo test` for heavy gates, or configure rch_preferred.",
-        "severity": "warning"
       }
     ],
     "dryRun": true,
     "edits": [
       {
-        "after": "constrained",
+        "after": "portable",
         "before": null,
         "key": "profile.selected",
         "status": "planned"
       },
       {
-        "after": "48",
+        "after": "96",
         "before": null,
         "key": "profile.budgets.search_candidate_limit",
         "status": "planned"
       },
       {
-        "after": "1",
+        "after": "2",
         "before": null,
         "key": "profile.budgets.search_concurrent_index_readers",
         "status": "planned"
@@ -87,13 +81,13 @@ expression: profile_config_plan
         "status": "planned"
       },
       {
-        "after": "3000",
+        "after": "4500",
         "before": null,
         "key": "profile.budgets.pack_max_tokens",
         "status": "planned"
       },
       {
-        "after": "24",
+        "after": "48",
         "before": null,
         "key": "profile.budgets.pack_max_candidate_memories",
         "status": "planned"
@@ -105,49 +99,49 @@ expression: profile_config_plan
         "status": "planned"
       },
       {
-        "after": "128",
+        "after": "512",
         "before": null,
         "key": "profile.budgets.cache_memory_cap_mb",
         "status": "planned"
       },
       {
-        "after": "512",
+        "after": "1024",
         "before": null,
         "key": "profile.budgets.cache_entry_cap",
         "status": "planned"
       },
       {
-        "after": "0",
+        "after": "64",
         "before": null,
         "key": "profile.budgets.cache_hotset_prewarm_limit",
         "status": "planned"
       },
       {
-        "after": "512",
+        "after": "1024",
         "before": null,
         "key": "profile.budgets.write_spool_queue_cap",
         "status": "planned"
       },
       {
-        "after": "32",
+        "after": "64",
         "before": null,
         "key": "profile.budgets.write_spool_batch_cap",
         "status": "planned"
       },
       {
-        "after": "3",
+        "after": "5",
         "before": null,
         "key": "profile.budgets.write_spool_retry_budget",
         "status": "planned"
       },
       {
-        "after": "500",
+        "after": "1000",
         "before": null,
         "key": "profile.budgets.steward_maintenance_window_ms",
         "status": "planned"
       },
       {
-        "after": "128",
+        "after": "256",
         "before": null,
         "key": "profile.budgets.steward_graph_refresh_budget",
         "status": "planned"
@@ -159,31 +153,31 @@ expression: profile_config_plan
         "status": "planned"
       },
       {
-        "after": "quick",
+        "after": "workspace",
         "before": null,
         "key": "profile.budgets.verification_recipe",
         "status": "planned"
       },
       {
-        "after": "shared",
+        "after": "isolated",
         "before": null,
         "key": "profile.budgets.verification_target_dir_posture",
         "status": "planned"
       },
       {
-        "after": "short",
+        "after": "standard",
         "before": null,
         "key": "profile.budgets.verification_timeout_class",
         "status": "planned"
       },
       {
-        "after": "manual",
+        "after": "rch_preferred",
         "before": null,
         "key": "profile.budgets.verification_heavy_strategy",
         "status": "planned"
       },
       {
-        "after": "minimal",
+        "after": "standard",
         "before": null,
         "key": "profile.budgets.diagnostics_support_bundle_profile",
         "status": "planned"
@@ -195,9 +189,15 @@ expression: profile_config_plan
         "status": "planned"
       }
     ],
-    "overrides": [],
+    "overrides": [
+      {
+        "key": "profile.effective",
+        "source": "cli",
+        "value": "portable"
+      }
+    ],
     "pathRedaction": "operator_requested_config_path",
-    "plannedToml": "profile = { selected = \"constrained\", budgets = { search_candidate_limit = 48, search_concurrent_index_readers = 1, search_stale_index_tolerance = \"strict\", pack_max_tokens = 3000, pack_max_candidate_memories = 24, pack_explanation_verbosity = \"standard\", cache_memory_cap_mb = 128, cache_entry_cap = 512, cache_hotset_prewarm_limit = 0, write_spool_queue_cap = 512, write_spool_batch_cap = 32, write_spool_retry_budget = 3, steward_maintenance_window_ms = 500, steward_graph_refresh_budget = 128, steward_daemon_prewarm = false, verification_recipe = \"quick\", verification_target_dir_posture = \"shared\", verification_timeout_class = \"short\", verification_heavy_strategy = \"manual\", diagnostics_support_bundle_profile = \"minimal\", diagnostics_redaction = \"strict\" } }\n",
+    "plannedToml": "profile = { selected = \"portable\", budgets = { search_candidate_limit = 96, search_concurrent_index_readers = 2, search_stale_index_tolerance = \"strict\", pack_max_tokens = 4500, pack_max_candidate_memories = 48, pack_explanation_verbosity = \"standard\", cache_memory_cap_mb = 512, cache_entry_cap = 1024, cache_hotset_prewarm_limit = 64, write_spool_queue_cap = 1024, write_spool_batch_cap = 64, write_spool_retry_budget = 5, steward_maintenance_window_ms = 1000, steward_graph_refresh_budget = 256, steward_daemon_prewarm = false, verification_recipe = \"workspace\", verification_target_dir_posture = \"isolated\", verification_timeout_class = \"standard\", verification_heavy_strategy = \"rch_preferred\", diagnostics_support_bundle_profile = \"standard\", diagnostics_redaction = \"strict\" } }\n",
     "probe": {
       "complete": false,
       "cpu": {
@@ -205,95 +205,88 @@ expression: profile_config_plan
         "physicalCores": null,
         "source": "std_thread_available_parallelism"
       },
-      "degraded": [
-        {
-          "code": "memory_probe_unavailable",
-          "message": "Host memory totals could not be inspected.",
-          "repair": "Run on a platform with /proc/meminfo or provide explicit profile config.",
-          "severity": "warning"
-        }
-      ],
+      "degraded": [],
       "environment": {
-        "cargoTargetDirConfigured": true,
+        "cargoTargetDirConfigured": false,
         "rchHintConfigured": false,
         "redaction": "presence_only",
-        "tmpdirConfigured": true
+        "tmpdirConfigured": false
       },
       "memory": {
-        "availableBytes": null,
+        "availableBytes": 0,
         "cgroupLimitBytes": null,
-        "source": "unavailable",
-        "totalBytes": null
+        "source": "[HOST_MEMORY_SOURCE]",
+        "totalBytes": 0
       },
       "paths": [
         {
           "availableBytes": 0,
-          "exists": true,
+          "exists": false,
           "label": "workspace",
           "nearestExistingAncestor": false,
           "redaction": "path_not_emitted",
           "role": "workspace_root",
-          "sameFilesystemAsWorkspace": true,
+          "sameFilesystemAsWorkspace": false,
           "totalBytes": 0
         },
         {
           "availableBytes": 0,
-          "exists": true,
+          "exists": false,
           "label": "ee_state",
           "nearestExistingAncestor": false,
           "redaction": "path_not_emitted",
           "role": "workspace_state_dir",
-          "sameFilesystemAsWorkspace": true,
+          "sameFilesystemAsWorkspace": false,
           "totalBytes": 0
         },
         {
           "availableBytes": 0,
-          "exists": true,
+          "exists": false,
           "label": "database",
           "nearestExistingAncestor": false,
           "redaction": "path_not_emitted",
           "role": "frankensqlite_database",
-          "sameFilesystemAsWorkspace": true,
+          "sameFilesystemAsWorkspace": false,
           "totalBytes": 0
         },
         {
           "availableBytes": 0,
-          "exists": true,
+          "exists": false,
           "label": "index",
           "nearestExistingAncestor": false,
           "redaction": "path_not_emitted",
           "role": "frankensearch_index",
-          "sameFilesystemAsWorkspace": true,
+          "sameFilesystemAsWorkspace": false,
           "totalBytes": 0
         },
         {
           "availableBytes": 0,
           "exists": false,
           "label": "cache",
-          "nearestExistingAncestor": true,
+          "nearestExistingAncestor": false,
           "redaction": "path_not_emitted",
           "role": "derived_cache",
-          "sameFilesystemAsWorkspace": true,
+          "sameFilesystemAsWorkspace": false,
           "totalBytes": 0
         },
         {
           "availableBytes": 0,
-          "exists": true,
+          "exists": false,
           "label": "temp",
           "nearestExistingAncestor": false,
           "redaction": "path_not_emitted",
           "role": "temporary_directory",
-          "sameFilesystemAsWorkspace": true,
+          "sameFilesystemAsWorkspace": false,
           "totalBytes": 0
         },
         {
           "availableBytes": 0,
-          "exists": true,
+          "exists": false,
           "label": "cargo_target",
           "nearestExistingAncestor": false,
           "redaction": "path_not_emitted",
           "role": "build_cache_directory",
-          "sameFilesystemAsWorkspace": true,
+          "sameFilesystemAsWorkspace": false,
           "totalBytes": 0
         }
       ],
@@ -302,12 +295,12 @@ expression: profile_config_plan
       "sideEffectFree": true,
       "tools": [
         {
-          "available": true,
+          "available": false,
           "name": "cargo",
           "source": "path_lookup_presence_only"
         },
         {
-          "available": true,
+          "available": false,
           "name": "rustfmt",
           "source": "path_lookup_presence_only"
         },
@@ -317,34 +310,34 @@ expression: profile_config_plan
           "source": "path_lookup_presence_only"
         },
         {
-          "available": true,
+          "available": false,
           "name": "br",
           "source": "path_lookup_presence_only"
         },
         {
-          "available": true,
+          "available": false,
           "name": "bv",
           "source": "path_lookup_presence_only"
         },
         {
-          "available": true,
+          "available": false,
           "name": "rch",
           "source": "path_lookup_presence_only"
         },
         {
-          "available": true,
+          "available": false,
           "name": "gh",
           "source": "path_lookup_presence_only"
         }
       ],
       "topology": {
         "rch": {
-          "available": true,
-          "message": "RCH binary is present on PATH; worker health is checked by RCH-specific diagnostics.",
-          "posture": "ok",
-          "repair": null,
+          "available": false,
+          "message": "[HOST_RCH_MESSAGE]",
+          "posture": "[HOST_RCH_POSTURE]",
+          "repair": "[HOST_RCH_REPAIR]",
           "source": "path_lookup_presence_only",
-          "status": "available_not_queried"
+          "status": "[HOST_RCH_STATUS]"
         }
       },
       "workspace": {
@@ -354,7 +347,7 @@ expression: profile_config_plan
       }
     },
     "profile": {
-      "confidence": "medium",
+      "confidence": "[HOST_CONFIDENCE]",
       "effective": "[PROFILE]",
       "reasons": [
         "[HOST_REASON]"
@@ -368,15 +361,9 @@ expression: profile_config_plan
   "degraded": [
     {
       "code": "heavy_gates_skipped",
-      "message": "3 heavy verification gate(s) skipped by profile: property_tests, integration_tests, e2e_tests",
+      "message": "2 heavy verification gate(s) skipped by profile: integration_tests, e2e_tests",
       "repair": "Run skipped gates manually or upgrade to a higher-resource profile.",
       "severity": "info"
-    },
-    {
-      "code": "manual_heavy_strategy",
-      "message": "Heavy tests require manual invocation on this profile.",
-      "repair": "Use `rch exec -- cargo test` for heavy gates, or configure rch_preferred.",
-      "severity": "warning"
     }
   ],
   "schema": "ee.response.v2",

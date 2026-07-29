@@ -4,20 +4,24 @@ expression: doctor
 ---
 {
   "data": {
-    "advisories": [
-      {
-        "message": "CASS binary not found in trusted locations.",
-        "name": "cass",
-        "severity": "warning",
-        "tier": "advisory"
-      }
-    ],
     "checks": [
       {
         "message": "Asupersync runtime initialized successfully.",
         "name": "runtime",
         "severity": "ok",
         "tier": "core"
+      },
+      {
+        "message": "Advisory-only ee install posture needs attention: binary_not_on_path: no 'ee' binary was found in PATH; binary_not_on_path: running ee binary is not available through PATH. running version 0.13.0; local source version 0.13.0 via cargo_toml at [REPO]/Cargo.toml; installed/current version 0.13.0 via running_process at [EE_BINARY]; freshness path_binary_missing; PATH status missing; No ee binary was found on PATH. This check uses only local PATH/source evidence and performs no network lookup.",
+        "name": "ee_install_path",
+        "severity": "warning",
+        "tier": "advisory"
+      },
+      {
+        "message": "Semantic retrieval: deterministic-hash fallback (non-semantic) — the bundled neural model is not active (mode=deterministic_hash, fnv1a-256, 256d). Degraded code: embed_model_unavailable.",
+        "name": "embedding_posture",
+        "severity": "warning",
+        "tier": "advisory"
       },
       {
         "message": "Workspace inspected at [WORKSPACE].",
@@ -32,10 +36,52 @@ expression: doctor
         "tier": "core"
       },
       {
+        "message": "Shard fan-out is disabled; legacy workspace database routing remains authoritative.",
+        "name": "shard_fanout",
+        "severity": "ok",
+        "tier": "advisory"
+      },
+      {
+        "message": "Flight recorder is disabled by default; posture=disabled; retentionDays=7; maxBytes=268435456; redaction=strict; directory=[WORKSPACE]/obs/flight_recorder.",
+        "name": "flight_recorder",
+        "severity": "ok",
+        "tier": "advisory"
+      },
+      {
         "message": "Search index is ready at [INDEX].",
         "name": "search_index",
         "severity": "ok",
         "tier": "core"
+      },
+      {
+        "message": "Lexical RAM-tier pinning is disabled for [INDEX]/lexical.",
+        "name": "lexical_ram_tier",
+        "severity": "ok",
+        "tier": "advisory"
+      },
+      {
+        "message": "Graph NUMA pinning is not implemented on this Linux platform yet for [WORKSPACE]/.ee/graph; no effect on ee memory storage or retrieval. The graph loader falls back without functional regression. Degraded code: numa_pin_linux_not_implemented.",
+        "name": "graph_numa_pin",
+        "severity": "ok",
+        "tier": "advisory"
+      },
+      {
+        "message": "Optional daemon socket is not present at [WORKSPACE]/.runtime/ee/daemon.sock; in-process CLI execution remains authoritative.",
+        "name": "daemon_socket_reachable",
+        "severity": "ok",
+        "tier": "advisory"
+      },
+      {
+        "message": "RCH worker pressure telemetry is unavailable; no RCH pressure blocker was inferred.",
+        "name": "rch_worker_pressure",
+        "severity": "ok",
+        "tier": "advisory"
+      },
+      {
+        "message": "RCH verifier ledger has no active blockers.",
+        "name": "verification_ledger",
+        "severity": "ok",
+        "tier": "advisory"
       },
       {
         "message": "CASS binary not found in trusted locations.",
@@ -47,8 +93,22 @@ expression: doctor
     "command": "doctor",
     "healthy": true,
     "posture": "ok",
-    "version": "0.1.0"
+    "qos": {
+      "backgroundActiveCount": 0,
+      "backgroundWorkActive": false,
+      "degraded": [],
+      "foregroundActiveCount": 0,
+      "foregroundPressure": false,
+      "maintenanceActiveCount": 0,
+      "registryHealthy": true,
+      "schema": "ee.qos.active_lane_summary.v1",
+      "staleIgnoredCount": 0,
+      "verificationActiveCount": 0,
+      "workspaceHash": "[HASH]"
+    },
+    "version": "0.13.0"
   },
+  "degraded": [],
   "fields": "standard",
   "schema": "ee.response.v2",
   "success": true

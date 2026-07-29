@@ -7,7 +7,70 @@ expression: search
     "command": "search",
     "conflicts": [],
     "consensus": [],
-    "degraded": [],
+    "degraded": [
+      {
+        "code": "embed_model_unavailable",
+        "details": {
+          "featureFlag": "embed-fast",
+          "lexicalAvailable": true,
+          "modelId": "EE_EMBED_MODEL_PATH",
+          "recovery": [
+            {
+              "command": "ee index reembed --workspace .",
+              "evidence": [
+                "derived_asset_refresh_command"
+              ],
+              "kind": "rebuild",
+              "mutatesExternalState": false,
+              "mutatesTrackerState": false,
+              "preconditions": [
+                "workspace_must_be_explicit",
+                "toolchain_or_feature_profile_must_match_request"
+              ],
+              "priority": 1,
+              "privacyClass": "bounded_command_no_raw_state",
+              "rationale": "The embedder model is unloadable; re-embed forces a fresh initialization.",
+              "requiresHumanApproval": false,
+              "resultsIn": "Rebuilds the embedding index against the current embed-fast feature and model configuration.",
+              "riskClass": "idempotent_refresh"
+            },
+            {
+              "command": "cargo build --features embed-fast",
+              "evidence": [
+                "local_toolchain_or_install_command"
+              ],
+              "kind": "rebuild",
+              "mutatesExternalState": false,
+              "mutatesTrackerState": false,
+              "preconditions": [
+                "use_rch_for_cargo_when_applicable",
+                "toolchain_or_feature_profile_must_match_request"
+              ],
+              "priority": 2,
+              "privacyClass": "bounded_command_no_raw_state",
+              "rationale": "If this binary was built without the dense embedder, rebuild with the supported embed-fast feature.",
+              "requiresHumanApproval": false,
+              "riskClass": "mutating_local_repair"
+            }
+          ]
+        },
+        "message": "Embedding model unavailable (active embedder source frankensearch_hash_fallback reports semantic=false); semantic similarity is disabled and lexical search remains available.",
+        "repair": "ee index reembed --workspace .",
+        "severity": "warning",
+        "sources": [
+          "search"
+        ]
+      },
+      {
+        "code": "rerank_model_unavailable",
+        "message": "Search rerank is in auto mode, but the local reranker is unavailable; returning fusion-only ranking. No reranker model is registered. Read-only search never auto-registers cached artifacts; run the explicit model fetch command first.",
+        "repair": "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst",
+        "severity": "low",
+        "sources": [
+          "search"
+        ]
+      }
+    ],
     "elapsedMs": 0,
     "errors": [],
     "metrics": {
@@ -18,27 +81,27 @@ expression: search
       "fallbackApplied": false,
       "fieldCoverage": {
         "explanationCount": 0,
-        "fastScoreCount": 1,
+        "fastScoreCount": 0,
         "lexicalScoreCount": 1,
         "metadataCount": 1,
         "qualityScoreCount": 0,
         "rerankScoreCount": 0
       },
-      "honestQualityScore": 0.7292900085449219,
+      "honestQualityScore": 0.7299950122833252,
       "memoryScope": "swarm",
       "qualityAssessment": "good",
-      "relevanceFloor": 0.004999999888241291,
+      "relevanceFloor": 0.05000000074505806,
       "requestedLimit": 10,
       "returnedCount": 1,
       "scoreDistribution": {
-        "max": 0.03278699889779091,
-        "mean": 0.03278699889779091,
-        "min": 0.03278699889779091,
-        "top": 0.03278699889779091
+        "max": 0.5753639936447144,
+        "mean": 0.5753639936447144,
+        "min": 0.5753639936447144,
+        "top": 0.5753639936447144
       },
       "sourceCounts": {
-        "hybrid": 1,
-        "lexical": 0,
+        "hybrid": 0,
+        "lexical": 1,
         "reranked": 0,
         "semanticFast": 0,
         "semanticQuality": 0
@@ -49,46 +112,46 @@ expression: search
       "strictSourceMode": false
     },
     "profileRuntime": {
-      "activeProfile": "constrained",
+      "activeProfile": "portable",
       "budgets": {
         "cache": {
-          "entryCap": 512,
-          "hotsetPrewarmLimit": 0,
-          "memoryCapMb": 128
+          "entryCap": 1024,
+          "hotsetPrewarmLimit": 64,
+          "memoryCapMb": 512
         },
         "diagnostics": {
           "redaction": "strict",
-          "supportBundleProfile": "minimal"
+          "supportBundleProfile": "standard"
         },
         "pack": {
           "explanationVerbosity": "standard",
-          "maxCandidateMemories": 24,
-          "maxTokens": 3000
+          "maxCandidateMemories": 48,
+          "maxTokens": 4500
         },
         "search": {
-          "candidateLimit": 48,
-          "concurrentIndexReaders": 1,
+          "candidateLimit": 96,
+          "concurrentIndexReaders": 2,
           "staleIndexTolerance": "strict"
         },
         "steward": {
           "daemonPrewarm": false,
-          "graphRefreshBudget": 128,
+          "graphRefreshBudget": 256,
           "maintenanceWindowMs": 0
         },
         "verification": {
-          "heavyStrategy": "manual",
-          "recipe": "quick",
-          "targetDirPosture": "shared",
-          "timeoutClass": "short"
+          "heavyStrategy": "rch_preferred",
+          "recipe": "workspace",
+          "targetDirPosture": "isolated",
+          "timeoutClass": "standard"
         },
         "writeSpool": {
-          "batchCap": 32,
-          "queueCap": 512,
-          "retryBudget": 3
+          "batchCap": 64,
+          "queueCap": 1024,
+          "retryBudget": 5
         }
       },
       "schema": "ee.profile.runtime.v1",
-      "source": "host_probe"
+      "source": "workspace_config"
     },
     "query": "format before release",
     "request": {
@@ -97,23 +160,72 @@ expression: search
       "strictScope": false,
       "strictSourceMode": false
     },
+    "rerank": {
+      "available": false,
+      "configured": "auto",
+      "degradedCode": "rerank_model_unavailable",
+      "mode": "fusion_only_degraded",
+      "rerankScoreCount": 0,
+      "schema": "ee.rerank_posture.v1",
+      "scoreKind": "rrf_fused",
+      "topK": 50
+    },
     "resultCount": 1,
     "results": [
       {
+        "calibrated": false,
+        "content": "Run cargo fmt --check before release.",
+        "coverageGuarantee": null,
         "docId": "mem_00000000000000000000000001",
-        "fastScore": 0.40820467472076416,
         "lexicalScore": 0.5753642320632935,
+        "memoryId": "mem_00000000000000000000000001",
         "metadata": {
+          "calibrated": false,
+          "content": "Run cargo fmt --check before release.",
+          "content_truncated": false,
+          "coverageGuarantee": null,
           "created_at": "[TIMESTAMP]",
           "kind": "rule",
           "level": "procedural",
           "memory_scope": "swarm",
+          "provenanceChainHash": "[HASH]",
+          "provenanceVerificationStatus": "unverified",
           "schema": "ee.search.document.v1",
+          "scoreCalibration": {
+            "corruptLineNumbers": [],
+            "corruptRowCount": 0,
+            "coverage": 0.949999988079071,
+            "method": "scaled_split_conformal",
+            "minimumSamples": 20,
+            "provenance": {
+              "feedbackEventIds": [],
+              "feedbackEventIdsTruncated": false,
+              "jsonlHash": null,
+              "jsonlPath": ".ee/search/calibration.jsonl"
+            },
+            "residualQuantile": null,
+            "sampleCount": 0,
+            "schema": "ee.search.score_calibration.v1",
+            "sourceBreakdown": {
+              "feedbackEvents": 0,
+              "feedbackEventsMalformed": 0,
+              "feedbackEventsReadStatus": "ok",
+              "feedbackEventsUnavailableReason": null,
+              "jsonl": 0
+            },
+            "status": "absent",
+            "unreadableReason": null
+          },
+          "scoreInterval": [
+            0.0,
+            1.0
+          ],
           "source": "memory",
           "trust_class": "human_explicit",
           "trust_subclass": "project-rule",
-          "validity_status": "unknown",
-          "validity_window_kind": "unbounded"
+          "valid_from": "[TIMESTAMP]",
+          "validity_status": "current",
+          "validity_window_kind": "starts_at"
         },
         "provenance": [
           {
@@ -121,11 +233,18 @@ expression: search
             "kind": "search_document"
           }
         ],
-        "score": 0.032786883413791656,
-        "source": "hybrid",
-        "validityStatus": "unknown",
-        "validityWindowKind": "unbounded",
-        "why": "Selected by hybrid retrieval with score 0.0328."
+        "relevanceScore": 0.5753639936447144,
+        "score": 0.5753642320632935,
+        "scoreInterval": [
+          0.0,
+          1.0
+        ],
+        "scoreKind": "unit_normalized",
+        "source": "lexical",
+        "validFrom": "[TIMESTAMP]",
+        "validityStatus": "current",
+        "validityWindowKind": "starts_at",
+        "why": "Selected by lexical retrieval with score 0.5754."
       }
     ],
     "scopeStats": {
@@ -141,6 +260,70 @@ expression: search
     },
     "status": "success"
   },
+  "degraded": [
+    {
+      "code": "embed_model_unavailable",
+      "details": {
+        "featureFlag": "embed-fast",
+        "lexicalAvailable": true,
+        "modelId": "EE_EMBED_MODEL_PATH",
+        "recovery": [
+          {
+            "command": "ee index reembed --workspace .",
+            "evidence": [
+              "derived_asset_refresh_command"
+            ],
+            "kind": "rebuild",
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "preconditions": [
+              "workspace_must_be_explicit",
+              "toolchain_or_feature_profile_must_match_request"
+            ],
+            "priority": 1,
+            "privacyClass": "bounded_command_no_raw_state",
+            "rationale": "The embedder model is unloadable; re-embed forces a fresh initialization.",
+            "requiresHumanApproval": false,
+            "resultsIn": "Rebuilds the embedding index against the current embed-fast feature and model configuration.",
+            "riskClass": "idempotent_refresh"
+          },
+          {
+            "command": "cargo build --features embed-fast",
+            "evidence": [
+              "local_toolchain_or_install_command"
+            ],
+            "kind": "rebuild",
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "preconditions": [
+              "use_rch_for_cargo_when_applicable",
+              "toolchain_or_feature_profile_must_match_request"
+            ],
+            "priority": 2,
+            "privacyClass": "bounded_command_no_raw_state",
+            "rationale": "If this binary was built without the dense embedder, rebuild with the supported embed-fast feature.",
+            "requiresHumanApproval": false,
+            "riskClass": "mutating_local_repair"
+          }
+        ]
+      },
+      "message": "Embedding model unavailable (active embedder source frankensearch_hash_fallback reports semantic=false); semantic similarity is disabled and lexical search remains available.",
+      "repair": "ee index reembed --workspace .",
+      "severity": "warning",
+      "sources": [
+        "search"
+      ]
+    },
+    {
+      "code": "rerank_model_unavailable",
+      "message": "Search rerank is in auto mode, but the local reranker is unavailable; returning fusion-only ranking. No reranker model is registered. Read-only search never auto-registers cached artifacts; run the explicit model fetch command first.",
+      "repair": "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst",
+      "severity": "low",
+      "sources": [
+        "search"
+      ]
+    }
+  ],
   "schema": "ee.response.v2",
   "success": true
 }
