@@ -833,6 +833,49 @@ fn dry_run_accepts_focused_cargo_test_and_builds_cargo_argv() -> TestResult {
 }
 
 #[test]
+fn dry_run_wraps_explicit_remote_env_before_cargo_argv() -> TestResult {
+    let report = run_json(&[
+        "--dry-run",
+        "--env",
+        "EE_EMBED_DOWNLOAD=off",
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "remote_env_smoke",
+    ])?;
+
+    if report["command"] != serde_json::json!(["cargo", "test", "--lib", "remote_env_smoke"])
+        || report["remote_env"] != serde_json::json!(["EE_EMBED_DOWNLOAD=off"])
+    {
+        return Err(format!(
+            "explicit remote env must remain separate from canonical command identity: {report}"
+        ));
+    }
+    let invocation = report["rch_invocation"]
+        .as_array()
+        .ok_or_else(|| "missing rch invocation".to_owned())?;
+    let invocation_text = invocation
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !invocation_text
+        .contains("rch exec -- env EE_EMBED_DOWNLOAD=off cargo test --lib remote_env_smoke")
+    {
+        return Err(format!(
+            "explicit remote env must use the env executable before Cargo: {invocation_text}"
+        ));
+    }
+    if invocation_text.contains("exec -- EE_EMBED_DOWNLOAD=off cargo") {
+        return Err(format!(
+            "bare assignment argv would be executed as a command remotely: {invocation_text}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn dry_run_reports_worker_inventory_without_selector_failure() -> TestResult {
     let (status, stdout, stderr) = run_script_with_env(
         &[

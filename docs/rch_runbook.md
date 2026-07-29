@@ -125,6 +125,7 @@ response to an ambiguous proof is coordination, not mutation.
 | Env var | Why |
 |---|---|
 | `TMPDIR=/tmp` / `RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,CARGO_INCREMENTAL` | Mac `~/.zshenv` points TMPDIR at `/Volumes/USBNVME16TB/...`. That path does not exist on Linux workers; Rust's `tempfile::tempdir()` inherits it and panics with `os error 2`. The wrapper lets RCH rewrite target/tmp values and forward the incremental policy instead of hiding Cargo behind a leading `env` argv. |
+| `scripts/rch_verify.sh --env NAME=VALUE -- cargo ...` | Explicit command-scoped overrides are different from inherited allowlisted values: the wrapper emits `rch exec -- env NAME=VALUE cargo ...`. The literal `env` executable survives RCH's shell quoting; a bare `NAME=VALUE` argv would be treated as the remote executable and fail with exit 127. |
 | `CARGO_INCREMENTAL=0` | Exact-commit bundles are cold project identities. Disabling incremental state prevents one proof from retaining a very large commit-specific dependency graph while preserving normal dependency/artifact reuse within the pinned target pool. The wrapper honors an explicit override, which should be used only with measured worker disk headroom. |
 | `RCH_REQUIRE_REMOTE=1` | Fail-closed when topology preflight fails. Bare `rch exec -- cargo ...` can fall back to **local** Cargo, which burns the Mac SSD and produces unsafe evidence. The repo tripwire denies bare `rch exec` Cargo commands unless this env var is present. |
 | `RCH_QUEUE_WHEN_BUSY=1` | Wait when all workers are busy rather than refusing. |

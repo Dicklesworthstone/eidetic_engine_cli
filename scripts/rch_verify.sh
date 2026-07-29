@@ -6126,11 +6126,23 @@ if [ "$COMMAND_KIND" = "raw" ] || [ "$COMMAND_KIND" = "cargo_fmt_check" ]; then
 else
     WOULD_OFFLOAD=true
 fi
-RCH_INVOCATION=(
-    "$RCH_BIN" "exec" "--"
-    "${ENV_OVERRIDES[@]}"
-    "${COMMAND[@]}"
-)
+if [ "${#ENV_OVERRIDES[@]}" -gt 0 ]; then
+    # Keep overrides behind the explicit `env` executable. Passing bare
+    # NAME=VALUE argv entries makes the worker shell try to execute the first
+    # assignment as a command after RCH applies its quoting/timeout wrapper.
+    # RCH recognizes this argv prefix and still classifies the nested Cargo
+    # command for remote execution.
+    RCH_INVOCATION=(
+        "$RCH_BIN" "exec" "--" "env"
+        "${ENV_OVERRIDES[@]}"
+        "${COMMAND[@]}"
+    )
+else
+    RCH_INVOCATION=(
+        "$RCH_BIN" "exec" "--"
+        "${COMMAND[@]}"
+    )
+fi
 
 CARGO_CONFIG_PROVENANCE_JSON="$(compute_cargo_config_provenance_json)"
 if [ "$(json_text_field "$CARGO_CONFIG_PROVENANCE_JSON" status)" = "blocked" ]; then

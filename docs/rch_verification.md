@@ -41,6 +41,10 @@ The wrapper sets these remote-safe defaults:
 - `RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,CARGO_INCREMENTAL,...` so RCH can
   rewrite worker target/tmp paths and forward the reproducibility control
   without hiding `cargo` behind a leading `env` argv
+- explicit `--env NAME=VALUE` overrides use
+  `rch exec -- env NAME=VALUE cargo ...`; the literal `env` executable keeps
+  assignment semantics intact through RCH's shell quoting while RCH still
+  classifies and offloads the nested Cargo command
 - RCH binary `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5` when present, then `/Users/jemanuel/.local/bin/rch-33720a8`, then `/Volumes/USBNVME16TB/temp_agent_space/rch-macos-target/debug/rch`, then any host-runnable source-built fallback, then `rch`
 - `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel`
 - `RCH_ALIAS_PROJECT_ROOT=/data`
