@@ -334,8 +334,9 @@ fn response_envelope_success_appends_clean_degraded_array() {
     assert_eq!(parsed["degraded"], serde_json::json!([]));
 }
 
-/// Explicit degradations must not be followed by a second clean
-/// default array at finish time.
+/// Explicit root degradations must not be followed by a second clean default
+/// array at finish time. A semantic `data.degraded` mirror is a separate,
+/// required field and must remain intact.
 #[test]
 fn response_envelope_success_does_not_duplicate_explicit_degraded_array() {
     let degradations = [("index_stale", "Search index is stale.")];
@@ -350,8 +351,8 @@ fn response_envelope_success_does_not_duplicate_explicit_degraded_array() {
         })
         .finish();
 
-    assert_eq!(output.matches("\"degraded\":").count(), 1);
     let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
+    assert_eq!(parsed["data"]["degraded"][0]["code"], "inferred");
     assert_eq!(parsed["degraded"][0]["code"], "index_stale");
     assert_eq!(parsed["degraded"][0]["severity"], "warning");
 }
