@@ -406,10 +406,16 @@ fn case_catalog(cases: &[CommandCase]) -> Value {
 }
 
 fn scrub_arg(arg: &str) -> String {
-    let repo = env!("CARGO_MANIFEST_DIR");
+    scrub_arg_with_temp_root(arg, &std::env::temp_dir())
+}
+
+fn scrub_arg_with_temp_root(arg: &str, temp_root: &Path) -> String {
+    let arg_path = Path::new(arg);
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     if arg.starts_with("mem_") {
         "[MEMORY_ID]".to_owned()
-    } else if arg.starts_with(repo)
+    } else if arg_path.starts_with(repo)
+        || arg_path.starts_with(temp_root)
         || arg.starts_with("/var/folders/")
         || arg.starts_with("/tmp/")
         || arg.starts_with("/private/tmp/")
@@ -418,6 +424,22 @@ fn scrub_arg(arg: &str) -> String {
     } else {
         arg.to_owned()
     }
+}
+
+#[test]
+fn scrub_arg_uses_runtime_temp_root_without_hiding_unrelated_paths() {
+    let runtime_temp = Path::new("/worker/project/.rch-tmp");
+    assert_eq!(
+        scrub_arg_with_temp_root(
+            "/worker/project/.rch-tmp/.tmp-response-envelope",
+            runtime_temp,
+        ),
+        "[WORKSPACE]"
+    );
+    assert_eq!(
+        scrub_arg_with_temp_root("/opt/ee/fixtures/config.toml", runtime_temp),
+        "/opt/ee/fixtures/config.toml"
+    );
 }
 
 fn expected_conformance_matrix(cases: &[CommandCase]) -> String {
