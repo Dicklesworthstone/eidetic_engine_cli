@@ -41,6 +41,7 @@ use frankensearch::embed::{
     ModelManifest,
 };
 use frankensearch::{Model2VecEmbedder, ModelCategory, ModelTier, SearchError, VectorIndex};
+use sqlmodel_core::Value as SqlValue;
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 const INDEX_METADATA_FILE: &str = "meta.json";
@@ -3800,8 +3801,8 @@ fn resolve_index_workspace_id(
 struct BuildStats {
     source_count: usize,
     doc_count: usize,
-    quality_indexed: Option<usize>,
-    lexical_indexed: Option<usize>,
+    error_count: usize,
+    has_quality_index: bool,
     errors: Vec<(String, String)>,
 }
 
@@ -3876,8 +3877,8 @@ fn build_empty_index_sync(index_dir: &Path, stack: EmbedderStack) -> Result<Buil
     Ok(BuildStats {
         source_count: 0,
         doc_count: 0,
-        quality_indexed: has_quality_index.then_some(0),
-        lexical_indexed: cfg!(feature = "lexical-bm25").then_some(0),
+        error_count: 0,
+        has_quality_index,
         errors: Vec::new(),
     })
 }
@@ -3898,6 +3899,7 @@ fn build_index_sync(
             #[allow(clippy::expect_used)]
             let cx = asupersync::Cx::current()
                 .expect("run_cli_future's block_on installs an ambient runtime Cx");
+            let source_count = documents.len();
             let builder = IndexBuilder::new(&index_dir_owned)
                 .with_embedder_stack(stack)
                 .add_documents(documents);
@@ -3905,31 +3907,16 @@ fn build_index_sync(
             let build_result = builder.build(&cx).await;
             let converted = match build_result {
                 Ok(stats) => {
-                    let mut errors = stats
+                    let errors = stats
                         .errors
                         .into_iter()
                         .map(|(id, error)| (id, format!("fast tier: {error}")))
                         .collect::<Vec<_>>();
-                    errors.extend(
-                        stats
-                            .quality_errors
-                            .into_iter()
-                            .map(|(id, error)| (id, format!("quality tier: {error}"))),
-                    );
-                    let lexical_indexed = stats.lexical.as_ref().map(|receipt| receipt.indexed);
-                    if let Some(receipt) = stats.lexical {
-                        errors.extend(
-                            receipt
-                                .errors
-                                .into_iter()
-                                .map(|(id, error)| (id, format!("lexical tier: {error}"))),
-                        );
-                    }
                     Ok(BuildStats {
-                        source_count: stats.source_count,
+                        source_count,
                         doc_count: stats.doc_count,
-                        quality_indexed: stats.has_quality_index.then_some(stats.quality_indexed),
-                        lexical_indexed,
+                        error_count: stats.error_count,
+                        has_quality_index: stats.has_quality_index,
                         errors,
                     })
                 }
@@ -3980,24 +3967,28 @@ fn validate_built_generation(
             stats.doc_count
         ));
     }
-    if let Some(quality_indexed) = stats.quality_indexed
-        && quality_indexed != expected
-    {
+    if stats.error_count != stats.errors.len() {
         violations.push(format!(
-            "quality-tier document count mismatch: expected {expected}, built {quality_indexed}"
+            "fast-tier error accounting mismatch: build reported {}, preserved {}",
+            stats.error_count,
+            stats.errors.len()
         ));
     }
-    if cfg!(feature = "lexical-bm25") && stats.lexical_indexed != Some(expected) {
+    if stats
+        .doc_count
+        .checked_add(stats.error_count)
+        .is_none_or(|accounted| accounted != stats.source_count)
+    {
         violations.push(format!(
-            "lexical-tier document count mismatch: expected {expected}, built {:?}",
-            stats.lexical_indexed
+            "fast-tier source accounting mismatch: received {}, indexed {}, failed {}",
+            stats.source_count, stats.doc_count, stats.error_count
         ));
     }
     if violations.is_empty()
         && let Err(error) = verify_published_tier_counts(
             index_dir,
             document_counts.total(),
-            stats.quality_indexed.is_some(),
+            stats.has_quality_index,
         )
     {
         violations.push(error);
@@ -10191,8 +10182,8 @@ mod tests {
             BuildStats {
                 source_count: 2,
                 doc_count: 1,
-                quality_indexed: Some(2),
-                lexical_indexed: cfg!(feature = "lexical-bm25").then_some(2),
+                error_count: 1,
+                has_quality_index: true,
                 errors: vec![("doc-beta".to_owned(), "fast tier: rejected".to_owned())],
             },
             counts,
