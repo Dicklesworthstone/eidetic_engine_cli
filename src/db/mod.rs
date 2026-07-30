@@ -9890,6 +9890,7 @@ struct LegacyEvidenceRescreenDecision {
     prepared: PreparedEvidenceSecurity,
     disposition: &'static str,
     reason_codes: Vec<String>,
+    requires_in_place_rewrite: bool,
 }
 
 fn infer_legacy_evidence_producer(role: Option<&str>) -> Option<EvidenceProducerKind> {
@@ -9975,6 +9976,7 @@ fn legacy_evidence_rescreen_decision(
             prepared: prepare_quarantined_legacy_evidence(span),
             disposition: "quarantined",
             reason_codes: vec!["legacy_producer_unrecognized".to_owned()],
+            requires_in_place_rewrite: false,
         });
     };
 
@@ -10000,6 +10002,7 @@ fn legacy_evidence_rescreen_decision(
             prepared: prepare_quarantined_legacy_evidence(span),
             disposition: "quarantined",
             reason_codes: integrity_reasons.into_iter().map(str::to_owned).collect(),
+            requires_in_place_rewrite: true,
         });
     }
 
@@ -10027,6 +10030,7 @@ fn legacy_evidence_rescreen_decision(
                 prepared: prepare_quarantined_legacy_evidence(span),
                 disposition: "quarantined",
                 reason_codes: vec!["canonical_screening_failed".to_owned()],
+                requires_in_place_rewrite: false,
             });
         }
     };
@@ -10046,6 +10050,7 @@ fn legacy_evidence_rescreen_decision(
         prepared,
         disposition,
         reason_codes,
+        requires_in_place_rewrite: false,
     })
 }
 
@@ -10264,6 +10269,120 @@ impl DbConnection {
         rows.iter().map(stored_evidence_span_from_row).collect()
     }
 
+    fn rewrite_legacy_evidence_security_fields_in_place(
+        &self,
+        rowid: i64,
+        evidence_id: &str,
+        prepared: &PreparedEvidenceSecurity,
+        updated_at: &str,
+    ) -> Result<()> {
+        // Integrity-invalid legacy rows cannot be deleted and reinserted:
+        // V085's INSERT trigger would correctly reject their stale session or
+        // memory reference before the quarantined row could be preserved for
+        // operator inspection. Pinned FrankenSQLite also cannot reliably
+        // execute this ALTER-expanded row's wide UPDATE. Use independently
+        // verified single-field statements for this rare, bounded quarantine
+        // lane. The caller performs one full persisted-state readback, and
+        // the enclosing transaction rolls every statement back on mismatch.
+        let field_updates = [
+            (
+                "cass_span_id",
+                "UPDATE evidence_spans SET cass_span_id = ?2 WHERE rowid = ?1",
+                Value::Text(prepared.upstream_ref_hash.clone()),
+            ),
+            (
+                "excerpt",
+                "UPDATE evidence_spans SET excerpt = ?2 WHERE rowid = ?1",
+                Value::Text(prepared.excerpt.clone()),
+            ),
+            (
+                "content_hash",
+                "UPDATE evidence_spans SET content_hash = ?2 WHERE rowid = ?1",
+                Value::Text(prepared.canonical_excerpt_hash.clone()),
+            ),
+            (
+                "metadata_json",
+                "UPDATE evidence_spans SET metadata_json = ?2 WHERE rowid = ?1",
+                Value::Text(prepared.safe_metadata_json.clone()),
+            ),
+            (
+                "producer_kind",
+                "UPDATE evidence_spans SET producer_kind = ?2 WHERE rowid = ?1",
+                Value::Text(prepared.producer_kind.as_str().to_owned()),
+            ),
+            (
+                "screening_version",
+                "UPDATE evidence_spans SET screening_version = ?2 WHERE rowid = ?1",
+                Value::BigInt(i64::from(EVIDENCE_SCREENING_VERSION)),
+            ),
+            (
+                "secret_redaction_status",
+                "UPDATE evidence_spans SET secret_redaction_status = ?2 WHERE rowid = ?1",
+                Value::Text(prepared.secret_redaction_status.to_owned()),
+            ),
+            (
+                "redaction_classes_json",
+                "UPDATE evidence_spans SET redaction_classes_json = ?2 WHERE rowid = ?1",
+                Value::Text(prepared.redaction_classes_json.clone()),
+            ),
+            (
+                "instruction_risk",
+                "UPDATE evidence_spans SET instruction_risk = ?2 WHERE rowid = ?1",
+                Value::Text(prepared.instruction_risk.to_owned()),
+            ),
+            (
+                "search_eligibility",
+                "UPDATE evidence_spans SET search_eligibility = ?2 WHERE rowid = ?1",
+                Value::Text(prepared.search_eligibility.to_owned()),
+            ),
+            (
+                "pack_eligibility",
+                "UPDATE evidence_spans SET pack_eligibility = ?2 WHERE rowid = ?1",
+                Value::Text(prepared.pack_eligibility.to_owned()),
+            ),
+            (
+                "canonical_provenance_revision",
+                "UPDATE evidence_spans SET canonical_provenance_revision = ?2 WHERE rowid = ?1",
+                Value::BigInt(i64::from(EVIDENCE_CANONICAL_PROVENANCE_REVISION)),
+            ),
+            (
+                "canonical_excerpt_hash",
+                "UPDATE evidence_spans SET canonical_excerpt_hash = ?2 WHERE rowid = ?1",
+                Value::Text(prepared.canonical_excerpt_hash.clone()),
+            ),
+            (
+                "security_policy_epoch",
+                "UPDATE evidence_spans SET security_policy_epoch = ?2 WHERE rowid = ?1",
+                Value::BigInt(i64::from(EVIDENCE_SECURITY_POLICY_EPOCH)),
+            ),
+            (
+                "upstream_ref_hash",
+                "UPDATE evidence_spans SET upstream_ref_hash = ?2 WHERE rowid = ?1",
+                Value::Text(prepared.upstream_ref_hash.clone()),
+            ),
+            (
+                "updated_at",
+                "UPDATE evidence_spans SET updated_at = ?2 WHERE rowid = ?1",
+                Value::Text(updated_at.to_owned()),
+            ),
+        ];
+
+        for (field, statement, value) in field_updates {
+            let affected_rows = self.execute_for(
+                DbOperation::Execute,
+                statement,
+                &[Value::BigInt(rowid), value],
+            )?;
+            if affected_rows > 1 {
+                return Err(malformed_evidence_input(format!(
+                    "legacy evidence rescreen {field} update matched {affected_rows} rows for \
+                     {evidence_id}",
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn apply_legacy_evidence_rescreen(
         &self,
         span: &StoredEvidenceSpan,
@@ -10301,29 +10420,32 @@ impl DbConnection {
             )));
         }
 
-        // The enclosing transaction owns the writer boundary, and the exact
-        // selected row plus its database-local rowid were just revalidated.
-        // Pinned FrankenSQLite can silently leave this trigger-heavy,
-        // ALTER-expanded row unchanged for a wide UPDATE, even when targeted
-        // by rowid. Rewrite the same logical row through its independently
-        // reliable DELETE/INSERT paths instead. No table references
-        // evidence_spans, every identity and immutable field is preserved,
-        // and the transaction rolls both statements plus the audit back
-        // together on any error. The rowid remains transaction-local.
-        let deleted_rows = self.execute_for(
-            DbOperation::Execute,
-            "DELETE FROM evidence_spans WHERE rowid = ?1",
-            &[Value::BigInt(rowid)],
-        )?;
-        if deleted_rows != 1 {
-            return Err(malformed_evidence_input(format!(
-                "legacy evidence rescreen deleted {deleted_rows} rows for {}",
-                span.id,
-            )));
-        }
-        let inserted_rows = self.execute_for(
-            DbOperation::Execute,
-            "INSERT INTO evidence_spans (
+        if decision.requires_in_place_rewrite {
+            self.rewrite_legacy_evidence_security_fields_in_place(rowid, &span.id, prepared, &now)?;
+        } else {
+            // The enclosing transaction owns the writer boundary, and the
+            // exact selected row plus its database-local rowid were just
+            // revalidated. Pinned FrankenSQLite can silently leave this
+            // trigger-heavy, ALTER-expanded row unchanged for a wide UPDATE,
+            // even when targeted by rowid. Rewrite referentially valid rows
+            // through their independently reliable DELETE/INSERT paths
+            // instead. No table references evidence_spans, every identity and
+            // immutable field is preserved, and the transaction rolls both
+            // statements plus the audit back together on any error.
+            let deleted_rows = self.execute_for(
+                DbOperation::Execute,
+                "DELETE FROM evidence_spans WHERE rowid = ?1",
+                &[Value::BigInt(rowid)],
+            )?;
+            if deleted_rows != 1 {
+                return Err(malformed_evidence_input(format!(
+                    "legacy evidence rescreen deleted {deleted_rows} rows for {}",
+                    span.id,
+                )));
+            }
+            let inserted_rows = self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO evidence_spans (
                  id, workspace_id, session_id, memory_id, cass_span_id,
                  span_kind, start_line, end_line, start_byte, end_byte, role,
                  excerpt, content_hash, metadata_json, producer_kind,
@@ -10337,47 +10459,48 @@ impl DbConnection {
                  ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24,
                  ?25, ?26, ?27
              )",
-            &[
-                Value::Text(span.id.clone()),
-                Value::Text(span.workspace_id.clone()),
-                Value::Text(span.session_id.clone()),
-                span.memory_id
-                    .as_ref()
-                    .map_or(Value::Null, |memory_id| Value::Text(memory_id.clone())),
-                Value::Text(prepared.upstream_ref_hash.clone()),
-                Value::Text(span.span_kind.clone()),
-                Value::BigInt(i64::from(span.start_line)),
-                Value::BigInt(i64::from(span.end_line)),
-                span.start_byte
-                    .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
-                span.end_byte
-                    .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
-                span.role
-                    .as_ref()
-                    .map_or(Value::Null, |role| Value::Text(role.clone())),
-                Value::Text(prepared.excerpt.clone()),
-                Value::Text(prepared.canonical_excerpt_hash.clone()),
-                Value::Text(prepared.safe_metadata_json.clone()),
-                Value::Text(prepared.producer_kind.as_str().to_owned()),
-                Value::BigInt(i64::from(EVIDENCE_SCREENING_VERSION)),
-                Value::Text(prepared.secret_redaction_status.to_owned()),
-                Value::Text(prepared.redaction_classes_json.clone()),
-                Value::Text(prepared.instruction_risk.to_owned()),
-                Value::Text(prepared.search_eligibility.to_owned()),
-                Value::Text(prepared.pack_eligibility.to_owned()),
-                Value::BigInt(i64::from(EVIDENCE_CANONICAL_PROVENANCE_REVISION)),
-                Value::Text(prepared.canonical_excerpt_hash.clone()),
-                Value::BigInt(i64::from(EVIDENCE_SECURITY_POLICY_EPOCH)),
-                Value::Text(prepared.upstream_ref_hash.clone()),
-                Value::Text(span.created_at.clone()),
-                Value::Text(now),
-            ],
-        )?;
-        if inserted_rows != 1 {
-            return Err(malformed_evidence_input(format!(
-                "legacy evidence rescreen inserted {inserted_rows} rows for {}",
-                span.id,
-            )));
+                &[
+                    Value::Text(span.id.clone()),
+                    Value::Text(span.workspace_id.clone()),
+                    Value::Text(span.session_id.clone()),
+                    span.memory_id
+                        .as_ref()
+                        .map_or(Value::Null, |memory_id| Value::Text(memory_id.clone())),
+                    Value::Text(prepared.upstream_ref_hash.clone()),
+                    Value::Text(span.span_kind.clone()),
+                    Value::BigInt(i64::from(span.start_line)),
+                    Value::BigInt(i64::from(span.end_line)),
+                    span.start_byte
+                        .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
+                    span.end_byte
+                        .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
+                    span.role
+                        .as_ref()
+                        .map_or(Value::Null, |role| Value::Text(role.clone())),
+                    Value::Text(prepared.excerpt.clone()),
+                    Value::Text(prepared.canonical_excerpt_hash.clone()),
+                    Value::Text(prepared.safe_metadata_json.clone()),
+                    Value::Text(prepared.producer_kind.as_str().to_owned()),
+                    Value::BigInt(i64::from(EVIDENCE_SCREENING_VERSION)),
+                    Value::Text(prepared.secret_redaction_status.to_owned()),
+                    Value::Text(prepared.redaction_classes_json.clone()),
+                    Value::Text(prepared.instruction_risk.to_owned()),
+                    Value::Text(prepared.search_eligibility.to_owned()),
+                    Value::Text(prepared.pack_eligibility.to_owned()),
+                    Value::BigInt(i64::from(EVIDENCE_CANONICAL_PROVENANCE_REVISION)),
+                    Value::Text(prepared.canonical_excerpt_hash.clone()),
+                    Value::BigInt(i64::from(EVIDENCE_SECURITY_POLICY_EPOCH)),
+                    Value::Text(prepared.upstream_ref_hash.clone()),
+                    Value::Text(span.created_at.clone()),
+                    Value::Text(now),
+                ],
+            )?;
+            if inserted_rows != 1 {
+                return Err(malformed_evidence_input(format!(
+                    "legacy evidence rescreen inserted {inserted_rows} rows for {}",
+                    span.id,
+                )));
+            }
         }
         let persisted = self.get_evidence_span(&span.id)?.ok_or_else(|| {
             malformed_evidence_input(format!(
@@ -28509,6 +28632,16 @@ mod tests {
             &mismatched.search_eligibility,
             &"quarantined".to_owned(),
             "cross-workspace evidence quarantine",
+        )?;
+        ensure_equal(
+            &mismatched.workspace_id,
+            &"wsp_01234567890123456789012345".to_owned(),
+            "quarantine preserves the legacy evidence workspace",
+        )?;
+        ensure_equal(
+            &mismatched.session_id,
+            &mismatched_session_id.to_owned(),
+            "quarantine preserves the invalid session reference for inspection",
         )?;
 
         let (admitted, _) = connection
