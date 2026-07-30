@@ -20,6 +20,7 @@
 //!    `ee audit timeline`, `ee audit verify`, `ee procedure list`, and
 //!    `ee learn agenda`.
 
+use std::collections::BTreeSet;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -518,12 +519,42 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
         &review
             .pointer("/data/candidateCount")
             .and_then(JsonValue::as_u64),
-        &Some(1),
-        "review session proposed one linting candidate",
+        &Some(4),
+        "review session proposed the linked, bootstrap, and paired arc candidates",
     )?;
-    let candidate = review
-        .pointer("/data/candidates/0")
-        .ok_or_else(|| "review missing first candidate".to_owned())?;
+    let review_candidates = review
+        .pointer("/data/candidates")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| "review missing /data/candidates".to_owned())?;
+    let candidate_kinds = review_candidates
+        .iter()
+        .filter_map(|candidate| candidate.get("candidateKind").and_then(JsonValue::as_str))
+        .collect::<BTreeSet<_>>();
+    ensure_equal(
+        &candidate_kinds,
+        &BTreeSet::from([
+            "failure",
+            "propose_new_memory",
+            "session_arc_anti_pattern",
+            "session_arc_rule",
+        ]),
+        "review session candidate kinds",
+    )?;
+    let candidate = review_candidates
+        .iter()
+        .find(|candidate| {
+            candidate.get("topicKey").and_then(JsonValue::as_str) == Some("linting")
+                && candidate.get("candidateType").and_then(JsonValue::as_str) == Some("rule")
+                && candidate.get("candidateKind").and_then(JsonValue::as_str) == Some("failure")
+                && candidate.get("targetMemoryId").and_then(JsonValue::as_str)
+                    == Some(failure_memory_id.as_str())
+        })
+        .ok_or_else(|| {
+            format!(
+                "review missing linked linting failure candidate for {failure_memory_id}: \
+                 {review_candidates:?}"
+            )
+        })?;
     let candidate_id = candidate
         .get("candidateId")
         .and_then(JsonValue::as_str)
@@ -569,15 +600,19 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
         &queued
             .pointer("/data/totalCount")
             .and_then(JsonValue::as_u64),
-        &Some(1),
-        "curate candidates lists the proposed rule candidate",
+        &Some(4),
+        "curate candidates lists every review proposal",
     )?;
-    ensure_equal(
-        &queued
-            .pointer("/data/candidates/0/id")
-            .and_then(JsonValue::as_str),
-        &Some(candidate_id.as_str()),
-        "curate candidates surfaces review candidate",
+    ensure(
+        queued
+            .pointer("/data/candidates")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|candidates| {
+                candidates.iter().any(|candidate| {
+                    candidate.get("id").and_then(JsonValue::as_str) == Some(candidate_id.as_str())
+                })
+            }),
+        format!("curate candidates must surface linked review candidate {candidate_id}: {queued}"),
     )?;
 
     let validate = run_ee_json(&[
