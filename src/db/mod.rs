@@ -10303,32 +10303,58 @@ impl DbConnection {
 
         // The enclosing transaction owns the writer boundary, and the exact
         // selected row plus its database-local rowid were just revalidated.
-        // Target that rowid directly: pinned FrankenSQLite's trigger fallback
-        // can miss this table's equivalent TEXT-primary-key full-scan UPDATE.
-        // The rowid is never persisted or exposed beyond this transaction.
-        let affected_rows = self.execute_for(
+        // Pinned FrankenSQLite can silently leave this trigger-heavy,
+        // ALTER-expanded row unchanged for a wide UPDATE, even when targeted
+        // by rowid. Rewrite the same logical row through its independently
+        // reliable DELETE/INSERT paths instead. No table references
+        // evidence_spans, every identity and immutable field is preserved,
+        // and the transaction rolls both statements plus the audit back
+        // together on any error. The rowid remains transaction-local.
+        let deleted_rows = self.execute_for(
             DbOperation::Execute,
-            "UPDATE evidence_spans
-             SET cass_span_id = ?2,
-                 excerpt = ?3,
-                 content_hash = ?4,
-                 metadata_json = ?5,
-                 producer_kind = ?6,
-                 screening_version = ?7,
-                 secret_redaction_status = ?8,
-                 redaction_classes_json = ?9,
-                 instruction_risk = ?10,
-                 search_eligibility = ?11,
-                 pack_eligibility = ?12,
-                 canonical_provenance_revision = ?13,
-                 canonical_excerpt_hash = ?14,
-                 security_policy_epoch = ?15,
-                 upstream_ref_hash = ?16,
-                 updated_at = ?17
-             WHERE rowid = ?1",
+            "DELETE FROM evidence_spans WHERE rowid = ?1",
+            &[Value::BigInt(rowid)],
+        )?;
+        if deleted_rows != 1 {
+            return Err(malformed_evidence_input(format!(
+                "legacy evidence rescreen deleted {deleted_rows} rows for {}",
+                span.id,
+            )));
+        }
+        let inserted_rows = self.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO evidence_spans (
+                 id, workspace_id, session_id, memory_id, cass_span_id,
+                 span_kind, start_line, end_line, start_byte, end_byte, role,
+                 excerpt, content_hash, metadata_json, producer_kind,
+                 screening_version, secret_redaction_status,
+                 redaction_classes_json, instruction_risk, search_eligibility,
+                 pack_eligibility, canonical_provenance_revision,
+                 canonical_excerpt_hash, security_policy_epoch,
+                 upstream_ref_hash, created_at, updated_at
+             ) VALUES (
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24,
+                 ?25, ?26, ?27
+             )",
             &[
-                Value::BigInt(rowid),
+                Value::Text(span.id.clone()),
+                Value::Text(span.workspace_id.clone()),
+                Value::Text(span.session_id.clone()),
+                span.memory_id
+                    .as_ref()
+                    .map_or(Value::Null, |memory_id| Value::Text(memory_id.clone())),
                 Value::Text(prepared.upstream_ref_hash.clone()),
+                Value::Text(span.span_kind.clone()),
+                Value::BigInt(i64::from(span.start_line)),
+                Value::BigInt(i64::from(span.end_line)),
+                span.start_byte
+                    .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
+                span.end_byte
+                    .map_or(Value::Null, |offset| Value::BigInt(i64::from(offset))),
+                span.role
+                    .as_ref()
+                    .map_or(Value::Null, |role| Value::Text(role.clone())),
                 Value::Text(prepared.excerpt.clone()),
                 Value::Text(prepared.canonical_excerpt_hash.clone()),
                 Value::Text(prepared.safe_metadata_json.clone()),
@@ -10343,12 +10369,13 @@ impl DbConnection {
                 Value::Text(prepared.canonical_excerpt_hash.clone()),
                 Value::BigInt(i64::from(EVIDENCE_SECURITY_POLICY_EPOCH)),
                 Value::Text(prepared.upstream_ref_hash.clone()),
+                Value::Text(span.created_at.clone()),
                 Value::Text(now),
             ],
         )?;
-        if affected_rows > 1 {
+        if inserted_rows != 1 {
             return Err(malformed_evidence_input(format!(
-                "legacy evidence rescreen updated {affected_rows} rows for {}",
+                "legacy evidence rescreen inserted {inserted_rows} rows for {}",
                 span.id,
             )));
         }
