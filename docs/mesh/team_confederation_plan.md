@@ -612,7 +612,10 @@ look like a fork to peers. New migration: `mesh_origin_events`
 (`origin_seq` contiguous per (workspace, origin stream), event hash chained
 via `prev_event_hash`, event kind, material lane, payload reference,
 authored_at), plus the append rules: which local mutations emit events
-(memory create/update/tombstone/shareWithdraw within shared scope; manifest
+(memory `create`/`revise`/`tombstone`/`shareWithdraw` within shared scope —
+`revise` is the schema's revision kind, there is no `update` kind; the
+schema's `trust`/`validity`/`bodyAvailable` kinds are explicitly deferred
+per ADR 0086 TC-D3; manifest
 operations in §7.4 P3.1), written in the same transaction as the mutation, and
 an immutability contract (rows are never updated or deleted; corrections are
 new events). This lands before any wire work and is also what the manifest
@@ -1038,9 +1041,13 @@ to peer_human_verified because…").
 (counts + titles/kinds + members + recency), answering US-4's "how will I know
 what a teammate ran" without full-text search. Metadata-lane data only.
 
-**P4.4 — Precedence and conflicts.** Pinned chain: **local workspace beats
-team beats global** on contradiction, mirroring bd-1bfwa's
-workspace-beats-global rule so the three lanes compose associatively. The
+**P4.4 — Precedence and conflicts.** Pinned chain (ADR 0086 TC-D16): **local
+workspace beats team beats global on *overlap*** (same/near-duplicate
+content — more-specific context wins, decision recorded); **on
+contradiction, neither silently wins** — the pair routes to the conflict
+surface labeled by lane, and pack assembly never resolves cross-lane
+contradictions by rank. This mirrors bd-1bfwa's rule exactly, so the three
+lanes compose associatively. The
 SRR6.37 peer duplicate/near-duplicate/contradiction detector (wire shape
 pinned in `ee.peer_conflict.v1`, detector never implemented) is implemented
 here for team-synced rows; conflicts appear in `ee insights` and pack DNA-style
@@ -1055,11 +1062,13 @@ already enqueues; verify incremental-intake behavior at team scale (500-row
 sync bursts) and cap per-round index amplification at the existing 16-job
 budget.
 
-**P4.6 — Body-lane transport.** The lane that makes US-6 real: body events /
-`body_fetch` frames over the signed transport, gated per event by outbound
-policy + redaction + secret scan on the serving side (P1.3b machinery), with
-the byte policy from T1.1 enforcing a streaming `max_bytes+1` cap on the
-fetch side. This finally gives `remote_evidence.rs` (fetch planning),
+**P4.6 — Body-lane transport.** The lane that makes US-6 real: `body_fetch`
+frames over the signed transport, keyed off the `create`/`revise` metadata
+events' `content_hash` (there is **no body event kind** — ADR 0086 TC-D12;
+fetch eligibility is decided serve-side at fetch time), gated per fetch by
+outbound policy + redaction + secret scan on the serving side (P1.3b
+machinery), with the byte policy from T1.1 enforcing a streaming
+`max_bytes+1` cap on the fetch side. This finally gives `remote_evidence.rs` (fetch planning),
 `cache.rs` (retention/quota/eviction), and the `mesh_body_cache_metadata`
 table their production callers — the eager-metadata / policy-gated-lazy-body
 architecture SRR6.11 specified. `ee team share bodies` (P3.4) is gated on
@@ -1305,7 +1314,7 @@ alternatives, verification hooks). ← nothing. Blocks everything else.
 - T5.6 Peer conflict detector (SRR6.37 completion) + insights surfacing. ← T5.2
 - T5.7 Index-intake integration + amplification budget verification at team scale. ← T2.4
 - T5.8 Team retrieval determinism (absolute-timestamp attribution rule) + eval fixture. ← T5.3
-- T5.9 Body-lane transport (P4.6): body events / `body_fetch` frames, serving-side policy+redaction+secret scan, streaming byte cap, `remote_evidence.rs` + `cache.rs` + `mesh_body_cache_metadata` wiring. ← T2.4b, T1.1
+- T5.9 Body-lane transport (P4.6): `body_fetch` frames keyed off metadata events (no body event kind — TC-D12), serving-side policy+redaction+secret scan, streaming byte cap, `remote_evidence.rs` + `cache.rs` + `mesh_body_cache_metadata` wiring. ← T2.4b, T1.1
 - T5.10 US-6 E2E: `ee team share bodies` end-to-end over the harness (grant ⇒ bodies flow; deny ⇒ they don't). ← T5.9, T4.5
 
 **Sub-epic T6 — M5 Operations**

@@ -36,8 +36,9 @@ ADR wins and the plan gets corrected.
 
 All ee↔ee traffic (hello, anti-entropy, body fetch) runs over a single
 daemon-hosted TCP listener bound to the tailnet IP on `EE_MESH_HELLO_PORT`
-(default 41888), speaking length-prefixed signed frames via the existing
-codec (`src/mesh/tailscale_transport.rs`: blake3-keyed signatures, capability
+(default 41888). All **post-enrollment** traffic speaks length-prefixed
+signed frames via the existing codec (pre-key bootstrap traffic is the
+TC-D2 exception) (`src/mesh/tailscale_transport.rs`: blake3-keyed signatures, capability
 allowlist `hello`/`summary`/`event_fetch`/`body_fetch`, 64 KiB frame /
 32 KiB payload budgets, constant-time compare). Implementation is std::net +
 asupersync supervision — the forbidden-dependency rule bans HTTP *stacks*
@@ -66,9 +67,15 @@ Each node keeps a durable, append-only, per-origin sequence of its **own**
 events in a new `mesh_origin_events` table: `origin_seq` contiguous per
 (workspace, origin stream), hash-chained via `prevEventHash` per
 `docs/mesh/event_schema.md`, rows never updated or deleted (corrections are
-new events). Shared-scope memory mutations (create/update/tombstone/
-shareWithdraw) and team-manifest operations append events **in the same
-transaction** as the mutation. This is what tips advertise, ranges address,
+new events). Shared-scope memory mutations and team-manifest operations
+append events **in the same transaction** as the mutation. Event-kind
+vocabulary follows `docs/mesh/event_schema.md`: v1 emits `create`, `revise`
+(the schema's revision kind — there is no `update` kind), `tombstone`, and
+`shareWithdraw`, plus the manifest operation kinds; the schema's `trust`,
+`validity`, and `bodyAvailable` kinds are **explicitly deferred** — trust
+and validity propagation are post-v1 tracks, and body-fetch eligibility is
+computed serve-side at fetch time (TC-D12) rather than signaled by a
+`bodyAvailable` event. This is what tips advertise, ranges address,
 and fork rejection chains over; deriving events on demand from mutable tables
 is rejected because any later edit would present as a fork to peers.
 
@@ -87,8 +94,11 @@ authority (peer impersonation by construction).
 
 Per-pair long-term keys are derived during join with fresh 32-byte nonces
 from **both** sides:
-`k_AB = blake3::derive_key("ee.team.pair.v1", invite_secret ‖ nonce_A ‖ nonce_B ‖ nodekey_A ‖ nodekey_B)`.
-The invite secret authenticates the exchange but does not determine the key:
+`k_AB = blake3::derive_key("ee.team.pair.v1", invite_secret ‖ nonce_A ‖ nonce_B ‖ nodekey_A ‖ nodekey_B)`,
+where `‖` denotes a canonical concatenation with each variable-length field
+length-prefixed (u32-LE), so field boundaries are unambiguous in the
+derivation input. The invite secret authenticates the exchange but does not
+determine the key:
 an attacker holding the old invite message (chat history is forever) must
 actively MITM the WireGuard path at join time. Secrets and nonces are
 destroyed after derivation. Keys live in a 0600 keychain file under the user
@@ -157,9 +167,15 @@ the member themself; self-removal = leave. Events from a locally-removed
 member's stream are rejected (`team_member_removed_stream_rejected`);
 applying a removal event revokes the removed member's peer records **in the
 same transaction**; remove-vs-add races surface as manifest conflicts for
-explicit `ee team members reconcile`. Removal propagation is bounded by sync
-contact with the remover (v1 has no relay) — stated, surfaced as manifest
-staleness, and accepted. **Rejected:** CRDT membership (ADR 0041's rejection
+explicit `ee team members reconcile`. **Removal also quarantines the removed
+member's concurrent authority:** member-add events authored by the removed
+member that are concurrent with (not causally before) the removal are
+quarantined as manifest conflicts rather than silently retained — otherwise
+a member anticipating removal could pre-author a sock-puppet member that
+outlives them. `reconcile` and `ee team status` flag any active member whose
+adder has since been removed, so even causally-earlier adds get operator
+eyes. Removal propagation is bounded by sync contact with the remover (v1
+has no relay) — stated, surfaced as manifest staleness, and accepted. **Rejected:** CRDT membership (ADR 0041's rejection
 of merge semantics stands); remover-machine-only revocation (unbounded
 exposure); role hierarchies in v1 (a ≤20-member trusted team does not need
 them yet; revisit with v2 signatures).
@@ -175,9 +191,12 @@ hashed-at-rest, revocable; `ee team invite --wait` runs a foreground accept
 loop so joining never requires a daemon install. Deferred pairings (offline
 members) are owned by the steward and retried by every `ee team sync`,
 surfaced as `unpaired`. Inviter compromise at join time (including manifest
-fabrication toward the joiner) is inside the threat model: fabricated members
-can never complete the direct nonce-mixed pairing; v2 signatures remove the
-residual window.
+fabrication toward the joiner) is inside the threat model, stated precisely:
+fabricated member bindings to nodes the inviter does **not** control can
+never complete the direct nonce-mixed pairing; a sock-puppet member bound to
+an inviter-controlled node **can** pair normally, and is caught by manifest
+divergence against other members (`reconcile`) rather than by the pairing
+itself — v2 signatures close the window.
 
 ### TC-D11 — Pull-only transport; listener asymmetry stated, not hidden
 
@@ -192,10 +211,14 @@ works" prose; making any core command daemon-required.
 
 ### TC-D12 — Bodies travel out-of-band via `body_fetch`, never in origin events
 
-Origin events carry metadata shapes only (create/update/tombstone/
-shareWithdraw + manifest ops). Body material moves as **policy-gated lazy
-fetches** (`body_fetch` frames) keyed off metadata events, verified against
-the origin event's `content_hash`, chunked within the 32 KiB payload budget,
+Origin events carry metadata shapes only (create/revise/tombstone/
+shareWithdraw + manifest ops — TC-D3). Body material moves as **policy-gated
+lazy fetches** (`body_fetch` frames) keyed off the `create`/`revise` events'
+`content_hash`; fetch *eligibility* is decided serve-side at fetch time by
+the outbound policy (no `bodyAvailable` signal event in v1 — a peer whose
+fetch is denied simply retries lazily after later sync rounds). Fetched
+bodies are verified against the origin event's `content_hash`, chunked
+within the 32 KiB payload budget,
 capped by the streaming `max_bytes+1` policy, landed in the body cache
 (`mesh_body_cache_metadata` + `cache.rs` retention/eviction), and admitted
 through the same import policy chokepoint. Rationale: (a) anti-entropy
@@ -205,8 +228,12 @@ changes affect future fetches without rewriting streams; (c) **immutable
 ledger bodies would contradict `shareWithdraw` purge semantics** — a
 withdrawal cannot purge what an append-only origin stream permanently
 embeds; (d) it is the SRR6.11 eager-metadata/lazy-body architecture the
-cache modules were built for. **Rejected:** a body event kind in
-`mesh_origin_events` (reasons a–c); widening the frame codec budgets.
+cache modules were built for. Named residual: the `content_hash` of a
+withdrawn body persists forever in the append-only stream, so a peer who
+already holds (or later guesses byte-exactly) the content can confirm it
+post-purge — purge removes bodies, not the ability to recognize them.
+**Rejected:** a body event kind in `mesh_origin_events` (reasons a–c);
+widening the frame codec budgets.
 
 ### TC-D13 — SSO member identity in two tiers
 
@@ -270,7 +297,8 @@ module cited by both the team and global lanes.
 |---|---|
 | Forged event origin | TC-D4 direct-from-origin + pairwise MACs; v2 signatures |
 | Invite interception / chat-history replay | Single-use, TTL, hashed at rest, revocable; TC-D5 nonce mixing keeps old codes from determining keys |
-| Compromised member | Per-member revocation, per-member lanes and elevation toggle, harmful-feedback demotion, `ee team pause` |
+| Compromised member | Data-lane blast radius is the member's grants (per-member lanes, elevation toggle, harmful-feedback demotion, revocation). Manifest authority (lane profile, idp policy, removals) is any-active-member in v1 — mitigated by audit + conflict surfacing + `ee team pause`; roles are a v2 question |
+| Removed member's pre-authored sock-puppet add | TC-D9: concurrent adds by the removed member quarantined; `reconcile`/`status` flag members whose adder was removed |
 | Removal propagation latency | TC-D9 same-transaction enforcement on application; staleness surfaced; bound documented |
 | Local `human_explicit` minting amplified team-wide | TC-D7 controls: basis in `why`, per-member counts, velocity cap + burst code |
 | Inviter fabricates manifest at join | Direct nonce-mixed pairing defeats fabricated members; conflicts surface; v2 signatures close the window |
@@ -304,13 +332,25 @@ subscriptions stay display-only; no IdP round-trip in any core command.
   the same commit (J6 validator); the 19 uncovered legacy mesh codes are
   backfilled first.
 - Fuzz/property: frame decode, bootstrap envelope, invite codec.
+- Import authentication (TC-D14): a teammate's export cannot inject
+  `human_explicit`; an artifact with a correct store UUID but no valid MAC
+  is refused; own backup restore round-trips at full trust (M0 gate).
+- Project identity (TC-D8): two clones at different paths derive equal keys;
+  shallow-clone fallback annotated; non-git mint + adopt round-trips.
+- Precedence and conflicts (TC-D16): planted cross-lane contradictions are
+  surfaced, never resolved by rank; the precedence constant is imported by
+  both team- and global-lane tests.
+- Elevation controls (TC-D7): harness matrix covers elevation on/off, the
+  per-member velocity cap tripping `team_member_elevation_burst`, and the
+  three `human_explicit` rejection points asserted unchanged.
 - Opt-in real-tailnet smokes assert real rounds/joins when enabled, exit-78
   skip-clean otherwise.
 - Fake IdP harness covers every tier-2 scenario offline.
 
 ## Consequences
 
-Positive: the ~8.4k LOC of dead mesh modules gain production callers; the
+Positive: the ~8.4k LOC of dead mesh modules gain production callers (all
+except `anti_entropy_model.rs`, which stays an executable spec); the
 mesh's consent/audit machinery becomes the team product's foundation instead
 of shelf-ware; non-technical teams get a three-command setup with a
 compliance-grade audit trail. Costs: new migrations including multi-table
