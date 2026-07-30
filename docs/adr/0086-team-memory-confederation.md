@@ -12,8 +12,9 @@ audit pass — feature-gate pinning, validity-field carry-forward, cutoff-model
 emitter for team_member_removed_stream_rejected, not-a-CRDT and
 absolute-timestamp rules reinstated, rematerialization pinned with an owning
 bead, RSA policy pinned, and the Ed25519-in-v1 reversal split into plan §13
-item 1b as RATIFICATION PENDING — the operator has not yet approved that
-dependency change)
+item 1b — RATIFIED by the operator 2026-07-30, so the signature/relay
+dependencies are approved and every TC-D that builds on them is fully
+decided)
 
 ## Context
 
@@ -622,20 +623,55 @@ explicit reconciliation; nothing merges.
 
 **Deterministic rematerialization, pinned** (this ADR's amendments invoke it
 for fork rollback and removal cutoffs; without a definition it is the
-largest unimplemented mechanism, so): rematerialization is a pure function
-of the accepted-event ledger after dispositions. Scope of reversal when a
-disposition changes (fork block, cutoff quarantine): the derived memory rows
-materialized from the affected events, any `peer_human_attested` elevations
-they produced (reverted to the capped class with an audit row — elevation
-velocity counters are not refunded), derived-index entries (re-enqueued
-through the normal index-job path, within the existing amplification
-budget), and body-cache rows for affected content hashes (dropped via the
-cache's normal eviction path). It never touches local source-of-truth
-memories, never deletes ledger or audit rows (dispositions are new records),
-and replays in deterministic order (per-origin `seq`, then the pinned stable
-cross-origin order), so two nodes with the same ledger + dispositions reach
-byte-identical derived state. Owned by its own bead under M1; T2.4/T4.1
-consume it.
+largest unimplemented mechanism, so): the core is a pure, versioned reducer
+over immutable signed events plus their current durable dispositions. An
+`applied` disposition records the local policy generation and immutable
+admission result needed for replay (including the resulting local trust
+class once T3.4 lands); replay never reruns a rolling velocity window or
+silently changes an earlier local policy decision.
+
+The total traversal order is exact. Within one team, streams sort by the raw
+UTF-8 bytes of `(origin_workspace_id, origin_node_id)`, then numeric
+signing-key generation; events within a stream sort by numeric `origin_seq`.
+A duplicate `(stream, generation, seq)` with different hashes is
+equivocation and is fork-blocked before reduction, never tie-broken by event
+hash. Cross-origin authorization, predecessor conflicts, removal cycles, and
+capacity conflicts are computed from the complete accepted set/fixed point;
+the traversal order is only deterministic execution order and never an
+authority winner.
+
+The reducer returns a canonical desired projection and idempotent action
+plan; it does not perform I/O. A bounded executor first transactionally makes
+newly invalid material non-retrievable, then applies the plan in resumable
+generation-fenced batches. Derived-row changes, audit records, index jobs,
+and cache-eviction outbox entries use deterministic idempotency keys. Cache
+metadata closes the retrieval path in the transaction; physical eviction is
+idempotent after commit, so a crash cannot leave invalid bytes readable.
+Large reversals checkpoint without exceeding the existing 16-index-jobs-per-
+While a rebuild is incomplete, affected reads carry
+`mesh_rematerialization_pending` (warning) rather than silently presenting
+the thinner fail-closed corpus as complete. An executor/invariant failure is
+`mesh_rematerialization_failed` (high) with structured status/doctor repair;
+neither condition re-exposes the invalid generation.
+
+The eventual reversal scope is: derived memory rows from affected events;
+their `peer_human_attested` projection (reverted to the recorded capped class
+with audit); derived-index entries; and body-cache rows for affected content
+hashes. Historical elevation-attempt counters are safety accounting, not
+projection state, and are not refunded; because the original admission
+decision is durable, replay neither consumes another slot nor changes the
+old result. The M1 owner ships the reducer/executor, current memory/index
+behavior, and versioned integration contract. T3.4 owns the new trust-class
+arm; T5.9 owns body-cache publication/eviction integration. It never touches
+local source-of-truth memories and never deletes ledger or audit rows
+(disposition changes append evidence).
+
+Two nodes with the same materializer version, signed ledger, payloads, and
+durable disposition/admission records produce the same canonical projection
+hash. This guarantee intentionally excludes local surrogate row IDs, audit
+timestamps, filesystem paths, velocity counters, and locally different
+policy/admission records; those are not retrieval bytes. Owned by T2.8 under
+M1; T2.4 and T4.1 consume it.
 
 A `nodeRevoked` payload similarly names the exact ee node and the revoker's
 last accepted frontier for that node. It immediately closes local sessions
@@ -1257,6 +1293,14 @@ not an ordinary member slot with manifest authority.
   an arbitrary remote, and multiple distinct raw local `origin` URLs remain
   ambiguous; explicit alias/separation reconcile and Git-without-origin/
   non-git mint/adopt round-trip.
+- Rematerialization (TC-D4/D9): exact stream traversal vectors and
+  complete-set conflict fixtures produce one canonical projection hash;
+  same-sequence divergent hashes fork-block before reduction; invalid rows
+  become non-retrievable before a crash at every bounded checkpoint; resume
+  never duplicates audit/index/cache-outbox effects or publishes a partial
+  generation. Recorded local trust decisions replay without refunding or
+  double-consuming velocity, and later T3.4/T5.9 integration arms preserve
+  the same reducer contract.
 - Precedence and conflicts (TC-D16): planted cross-lane contradictions are
   surfaced, never resolved by rank; the precedence constant is imported by
   both team- and global-lane tests.
