@@ -88,3 +88,4 @@ including rejected alternatives and verification hooks.
 - [ADR 0083: User-Global Memory Store (Separate Local Store)](0083-user-global-memory-store.md)
 - [ADR 0084: Read-Only Hotset Manifest Contract](0084-hotset-manifest-contract.md)
 - [ADR 0085: Typed Pack Entity Identity](0085-typed-pack-entity-identity.md)
+- [ADR 0086: Team Memory Confederation](0086-team-memory-confederation.md)

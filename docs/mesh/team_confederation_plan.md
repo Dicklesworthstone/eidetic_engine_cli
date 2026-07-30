@@ -1,7 +1,7 @@
 # Team Memory Confederation Plan
 
-Status: draft plan (pre-ADR)
-Owning ADR (to be written as first work item): ADR 0086 — team memory confederation
+Status: active plan
+Owning ADR: [ADR 0086 — team memory confederation](../adr/0086-team-memory-confederation.md) (decisions TC-D1…TC-D16; where plan and ADR conflict, the ADR wins and the plan gets corrected)
 Related ADRs: 0037 (optional mesh), 0038 (auto-enrollment), 0041 (anti-entropy), 0009 (trust classes), 0069 (global knowledge lane), 0083 (user-global store)
 Related open beads: bd-30o6g, bd-3mw86, bd-2gvgw, bd-1bfwa (epic + .2/.3/.4/.5)
 Date: 2026-07-30
@@ -1156,11 +1156,13 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
   schema per remaining `ee team` subcommand** — `ee.team.projects.v1`
   (T4.8), `ee.team.share.v1` (T4.5), `ee.team.sync.v1` and
   `ee.team.pause.v1`/`resume` (T4.6), `ee.team.idp.v1` and
-  `ee.team.revalidate.v1` (T7.2/T7.4) — or an explicit ADR statement of
-  which are subsumed by `ee.team.members.v1`/`ee.team.status.v1`. The
-  reserved `ee.mesh.peer_status.v1` question (subsumed by team status?) is
-  decided in ADR 0086; the `ee.mesh.import_ledger.v1` inspection surface is
-  owned by T1.3 (which writes the ledger decision columns).
+  `ee.team.revalidate.v1` (T7.2/T7.4) — **per ADR 0086 TC-D15 every `ee
+  team` subcommand emits its own schema; no subsumption.** The
+  reserved-never-published `ee.mesh.peer_status.v1` name is retired
+  (mechanism posture stays on `ee.mesh.auto_status.v1`/foreground status;
+  team posture is `ee.team.status.v1`); the `ee.mesh.import_ledger.v1`
+  inspection surface is owned by T1.3 (which writes the ledger decision
+  columns), shipped with it or explicitly deferred in its closeout.
 - **New degraded codes** (each with fixture + taxonomy entry, same commit):
   `mesh_relay_origin_rejected`, `mesh_transport_unreachable`,
   `mesh_frame_auth_failed`, `team_invite_expired`, `team_invite_replayed`,
