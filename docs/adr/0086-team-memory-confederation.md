@@ -6,7 +6,14 @@ Plan: [`docs/mesh/team_confederation_plan.md`](../mesh/team_confederation_plan.m
 Related: ADR 0037 (optional mesh), 0038 (auto-enrollment), 0041 (anti-entropy),
 0009 (trust classes), 0069 (global knowledge lane), 0083 (user-global store)
 Date: 2026-07-30
-Last amended: 2026-07-30 (independent implementation-readiness review)
+Last amended: 2026-07-30 (independent implementation-readiness review,
+landed as b34bacbd + the Git-probe hardening delta; then the post-amendment
+audit pass — feature-gate pinning, validity-field carry-forward, cutoff-model
+emitter for team_member_removed_stream_rejected, not-a-CRDT and
+absolute-timestamp rules reinstated, rematerialization pinned with an owning
+bead, RSA policy pinned, and the Ed25519-in-v1 reversal split into plan §13
+item 1b as RATIFICATION PENDING — the operator has not yet approved that
+dependency change)
 
 ## Context
 
@@ -164,15 +171,19 @@ rejected; an operator who wants to build on it creates a new locally owned
 memory with explicit provenance. This prevents echo storms and signature
 laundering.
 
-The current `ee.mesh.event.v1` cannot be reused for manifests: it requires a
-`logicalMemoryId` matching `^mem_`, carries memory-only fields, and has a
-closed memory `eventKind` enum. T2.0 therefore introduces a generic
-`ee.mesh.origin_event.v1` envelope plus two typed payload contracts:
+The current `ee.mesh.event.v1` cannot be reused for manifests: it carries
+memory-only required fields and a closed memory `eventKind` enum. (Its
+`^mem_` ID pattern is *not* the blocker — the pattern's character class
+admits `mem_team:*` spellings — the honest rationale is fields and enum.)
+T2.0 therefore introduces a generic `ee.mesh.origin_event.v1` envelope plus
+two typed payload contracts:
 
 - `ee.mesh.memory_event.v1`: `create`, `revise`, `tombstone`, and
-  `shareWithdraw` for a real logical memory. `trust`, `validity`, and
-  `bodyAvailable` remain deferred; body eligibility is serve-time policy
-  (TC-D12).
+  `shareWithdraw` for a real logical memory, carrying the optional
+  `validFrom`/`validUntil` validity-window fields forward from
+  `ee.mesh.event.v1` so validity *filtering* (ADR 0041 scenarios) survives
+  the supersession. `trust`, `validity`, and `bodyAvailable` event kinds
+  remain deferred; body eligibility is serve-time policy (TC-D12).
 - `ee.team.manifest_event.v1`: explicit `teamCreated`, `memberAdded`,
   `memberRemoved`, `nodeBound`, `nodeRevoked`, `projectRegistered`,
   `signingKeyRotated`, `laneProfileSet`, `idpPolicySet`, and
@@ -180,7 +191,11 @@ closed memory `eventKind` enum. T2.0 therefore introduces a generic
   `identityAttested` is schema-pinned from v1 even though its emitter and
   semantics land in the tier-2 identity milestone; pre-feature binaries
   disposition it as unsupported through `requiredFeatures` rather than
-  misparse it. Manifest payloads are small, inline metadata and never depend
+  misparse it. The concrete gate string is pinned:
+  `requiredFeatures: ["mesh.team.manifest.v1"]` on every manifest-payload
+  event (the `mesh.` feature namespace rule from `docs/mesh/event_schema.md`
+  carries over to the new envelope). Manifest payloads are small, inline
+  metadata and never depend
   on body-lane grants.
 
 The outer envelope carries the origin/team/workspace/sequence/hash-chain
@@ -472,7 +487,12 @@ forbidden. Probes use `--no-replace-objects`, `--no-lazy-fetch`, and
 `--no-optional-locks`, so local replacement refs cannot rewrite identity and
 derivation never performs an implicit promisor-network fetch. A nonempty
 resolved `$GIT_COMMON_DIR/info/grafts` makes root derivation explicitly
-unusable rather than silently honoring a local-only graft.
+unusable rather than silently honoring a local-only graft. Required-option
+support is capability-probed: if the installed Git rejects any safety option
+(notably pre-2.45 Git without `--no-lazy-fetch`), ee never retries a weaker
+root command. Root derivation is then unavailable, `git_unavailable` gives
+upgrade guidance, and only the safe remote fallback or a minted/adopted key
+may proceed.
 
 A non-shallow, non-grafted repo derives `prj_git_*` from all validated, sorted
 non-empty `git rev-list --max-parents=0 HEAD` lines. The
@@ -592,7 +612,30 @@ later-discovered node/stream survives the removal. Events through explicit
 cutoffs remain valid. Active members added by the removed member through an
 accepted cutoff remain active but carry the persistent
 `addedByRemovedMember` review flag until each local operator explicitly
-confirms it. Rejoining always mints a new member ID and signing-key lineage.
+confirms it — confirmation is a local per-node action, never replicated (a
+replicated clear would let one member silently vouch for everyone).
+Rejoining always mints a new member ID and signing-key lineage. And to keep
+the vocabulary honest against the unchanged "no CRDTs" non-goal: the
+manifest is still **not** a CRDT — remove-wins cutoffs are a fixed
+precedence rule applied to signed evidence, and conflicting writes block for
+explicit reconciliation; nothing merges.
+
+**Deterministic rematerialization, pinned** (this ADR's amendments invoke it
+for fork rollback and removal cutoffs; without a definition it is the
+largest unimplemented mechanism, so): rematerialization is a pure function
+of the accepted-event ledger after dispositions. Scope of reversal when a
+disposition changes (fork block, cutoff quarantine): the derived memory rows
+materialized from the affected events, any `peer_human_attested` elevations
+they produced (reverted to the capped class with an audit row — elevation
+velocity counters are not refunded), derived-index entries (re-enqueued
+through the normal index-job path, within the existing amplification
+budget), and body-cache rows for affected content hashes (dropped via the
+cache's normal eviction path). It never touches local source-of-truth
+memories, never deletes ledger or audit rows (dispositions are new records),
+and replays in deterministic order (per-origin `seq`, then the pinned stable
+cross-origin order), so two nodes with the same ledger + dispositions reach
+byte-identical derived state. Owned by its own bead under M1; T2.4/T4.1
+consume it.
 
 A `nodeRevoked` payload similarly names the exact ee node and the revoker's
 last accepted frontier for that node. It immediately closes local sessions
@@ -885,7 +928,8 @@ when required, expiry/not-before with bounded skew, `iat`/`auth_time`
 freshness, verified email whenever email participates in identity/policy,
 configured group-claim shape, and `jti`-or-token-hash single use in an atomic
 replay ledger scoped to issuer/client until token expiry. RSA keys must meet
-the pinned minimum modulus/exponent policy; EC keys must be P-256 signing keys
+the pinned minimum policy (modulus ≥ 2048 bits, public exponent exactly
+65537); EC keys must be P-256 signing keys
 and match the declared algorithm. Discovery, JWKS, JOSE headers, and claims
 use a bounded duplicate-member-rejecting JSON decoder; last-key-wins parsing
 is forbidden. JWT segments require canonical unpadded base64url. Unknown or
@@ -1029,8 +1073,10 @@ name is **retired**: mechanism-level posture stays on the existing
 `ee.team.status.v1`. The `ee.mesh.import_ledger.v1` inspection surface is
 owned by the import-policy bead (bd-tc-epic-qzk7o.2.1) — shipped with it or
 explicitly deferred in its closeout, never silent. Deterministic retrieval
-surfaces use immutable origin `producedAt` (or omit a time field); local
-`receivedAt`/`syncedAt` never participates in pack/search hashes or
+surfaces use immutable origin `producedAt` (or omit a time field), rendered
+as absolute RFC 3339 only — relative phrasing ("2h ago") is allowed solely
+in non-deterministic human surfaces (`team status`/`activity` human mode);
+local `receivedAt`/`syncedAt` never participates in pack/search hashes or
 cross-node equality. Receipt times remain available in `why`, status, and
 audit diagnostics. A signature authenticates who asserted `producedAt`, not
 that their clock was correct: machine provenance labels it
@@ -1070,6 +1116,7 @@ module cited by both the team and global lanes.
 | Network request selects a local workspace/path | TC-D1 user-scoped broker routes only exact pre-registered team/workspace or invite IDs, never accepts a path from the wire, and revalidates owner-safe database identity/genesis before serving |
 | One workspace daemon monopolizes the shared port | TC-D1 listener owner multiplexes validated routes through a same-EUID bounded local control channel; startup and route ambiguity fail closed rather than spawning another listener |
 | Multiple OS users or incompatible team ports contend on one node | TC-D1 roots/invites commit one v1 port, all broker routes must agree, one OS user owns the host-wide listener, and other users/mismatches are explicitly client-only with doctor repair; no scan/fallback |
+| Ambient or repository-local Git state rewrites project identity | TC-D8 runs canonical Git directly with bounded/reaped execution, a minimal cleared environment, replacement/lazy-fetch/optional-lock behavior disabled, and nonempty grafts rejected; an installed Git lacking a required safety option is never retried weakly. Fallback reads exactly one raw local `origin` URL with includes and nonlocal config disabled, so aliases, prompts, rewrites, ambient object alternates, or multiple URLs cannot choose a project key |
 | Wrong process answers the inviter port first | TC-D2 requires the invite-pinned Ed25519 challenge over root/identity/nonces/port before the joiner releases the secret |
 | Invite interception / local secret exposure | Single-use leased redemption, TTL, hashed at rest, zeroizing buffers, no argv/env/log ingestion, explicit secret re-entry before key confirmation, and mutual key confirmation; an unbound code remains a bearer credential whose one redemption can be stolen, so the UI names that residual and recommends short TTL/`--wait`/identity policy |
 | Invite locator redirects, goes stale, or breaks on routine key rotation | TC-D10 binds the exact inviter Tailscale stable node ID, ee identity, and team root; fresh local status resolves its current key/IP, treats embedded key/MagicDNS/IP as observations only, accepts rotation only within that stable binding, and requires reissue when the stable ID disappears/changes |
@@ -1202,12 +1249,14 @@ not an ordinary member slot with manifest authority.
   object-format-tagged multi-root sets agree independent of order; shallow
   repositories are detected before boundary commits can masquerade as roots;
   replacement refs are ignored, local grafts fail closed, lazy promisor fetch
-  and ambient Git relocation/config/trace variables cannot affect identity,
-  fallback never silently changes after unshallow, root-set addition, history
-  rewrite, object-format conversion, or remote rename; missing `origin` never
-  selects an arbitrary remote, and multiple distinct raw local `origin` URLs
-  remain ambiguous; explicit alias/separation reconcile and
-  Git-without-origin/non-git mint/adopt round-trip.
+  and ambient Git relocation/config/trace variables cannot affect identity; a
+  fake/old Git missing a required safety option is not retried without it and
+  reaches only the explicit degraded fallback/mint path. Fallback never
+  silently changes after unshallow, root-set addition, history rewrite,
+  object-format conversion, or remote rename; missing `origin` never selects
+  an arbitrary remote, and multiple distinct raw local `origin` URLs remain
+  ambiguous; explicit alias/separation reconcile and Git-without-origin/
+  non-git mint/adopt round-trip.
 - Precedence and conflicts (TC-D16): planted cross-lane contradictions are
   surfaced, never resolved by rank; the precedence constant is imported by
   both team- and global-lane tests.

@@ -1134,7 +1134,11 @@ New identity `project_key` decoupling "the same body of work" from local paths:
   `--no-replace-objects --no-lazy-fetch --no-optional-locks`. A nonempty
   resolved common-dir `info/grafts` makes root derivation unusable; a local
   replace ref is ignored and recorded in evidence, never allowed to rewrite
-  the root set. The canonical preimage
+  the root set. Required-option support is capability-probed: if the installed
+  Git rejects any safety option (notably pre-2.45 Git without
+  `--no-lazy-fetch`), ee never retries a weaker root command. It emits the
+  existing `git_unavailable` warning with upgrade guidance and proceeds only
+  through the safe remote fallback or minted/adopted key path. The canonical preimage
   length-prefixes the object-format tag and every ID. A shallow boundary can
   therefore never masquerade as a root, and SHA-1/SHA-256 or multi-root
   concatenations cannot alias. Stable across clones and intentionally shared
@@ -1795,6 +1799,7 @@ Threat-model deltas on top of ADR 0037's ten rows (each new row keeps the
 | Authenticated member fills the append-only ledger with valid small batches | Cumulative transactional intake accounting charges the signed origin across relays/key rotations, enforces per-origin/team/free-space ceilings, offers only a bounded control-only reserve, coalesces denial posture instead of auditing each retry, and never charges local source truth. |
 | Invite interception, locator redirection, wrong local process, or local secret capture | Codes are 256-bit, single-use leased, TTL-bound, secret-hashed at rest, exact-inviter-stable-node/ee-identity/team-root/committed-port-bound, revocable, and require mutual transcript/key confirmation. Fresh local Tailscale status resolves the current key/IP for that exact stable ID; embedded key/MagicDNS/IP values are observations only, routine key rotation inside the stable binding is accepted, and a missing/changed stable ID requires reissue. Before the secret is sent, the inviter must answer an invite-ID/nonce request with an Ed25519 challenge over root, identities, nonces, and port; a process that merely won the port race cannot harvest it. Join accepts the secret only into zeroizing buffers from a no-echo TTY or stdin—never argv/env/log/audit/error text—and a pre-key resume requires safe re-entry. An unbound code is still a bearer credential whose redemption can be stolen; `--for` never pretends otherwise. |
 | Multiple OS users or mismatched custom ports on one Tailscale node | The root commits one immutable v1 port; all responder routes behind a broker agree, clients never scan/fallback, and status/doctor label a mismatched member client-only. One responder-capable OS user owns the host-wide address/port; another user must remain client-only or use another Tailscale node. |
+| Ambient or repository-local Git state rewrites project identity | Canonical Git runs directly with bounded/reaped execution, a minimal cleared environment, replacement/lazy-fetch/optional-lock behavior disabled, and nonempty grafts rejected; an installed Git lacking a required safety option is never retried weakly. Fallback reads exactly one raw local `origin` URL with includes and nonlocal config disabled, so aliases, prompts, rewrites, ambient object alternates, or multiple URLs cannot choose a project key. |
 | Malicious/compromised member | Per-member revocation (US-7); sensitive lane grants remain per-node so blast radius is the explicitly granted nodes; trust elevation is per-member togglable; harmful-feedback demotion applies to synced rows like any other; emergency `ee team pause`. |
 | Compromised member widens lane profile or relaxes IdP policy | Manifest policy is coordination input: effective serving still intersects local policy + exact node grant + redaction/secret scan, and each node retains its explicitly accepted IdP floor until its operator accepts the exact relaxation generation. |
 | Compromised member narrows lanes or tightens IdP policy | This is an explicit availability authority in v1: it can pause sharing but cannot widen disclosure. Status/audit expose author + generation; another active member can revoke the attacker and reconcile policy. Quorum/roles remain deferred. |
@@ -1886,7 +1891,9 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
   `identity_revalidation_overdue` (warning), `team_idp_unreachable`,
   `team_identity_clock_rollback` (warning),
   `team_idp_provider_unsupported`, `team_idp_token_invalid`,
-  `team_member_removed_stream_rejected`,
+  `team_member_removed_stream_rejected` (emitter under the cutoff model:
+  events quarantined above a signed removal cutoff or from a removed
+  lineage's stream),
   `team_member_capacity_conflict`,
   `team_node_capacity_conflict`,
   `team_member_elevation_burst`, `mesh_lane_transport_unavailable`,
@@ -1941,7 +1948,9 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
   override);
   `[mesh] sync_interval_seconds`; `[mesh.admission]`
   `max_inbound_origin_bytes = 67108864`,
-  `max_inbound_event_bytes = 268435456`,
+  `max_inbound_team_bytes = 268435456` (the per-team-workspace total —
+  renamed from the review's `max_inbound_event_bytes`, which misleadingly
+  suggested a per-event limit),
   `control_reserve_bytes_per_member = 1048576`, and
   `min_free_bytes = 1073741824` (local-only, checked/positive, peer and
   manifest cannot change them); fix the documented-but-unread
@@ -1987,6 +1996,7 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
 | Contract | Schema drift tests for every `ee.team.*` and changed mesh schema; degraded-code catalog ↔ fixture ↔ taxonomy sync (extends the J6 failure-mode catalog validator, `tests/contracts/failure_mode_fixtures.rs`). |
 | Golden | `ee team status`/`members`/`activity` JSON goldens (server-path regen only, per the golden workflow); refreshed mesh status goldens after P0.5 de-hardcoding. |
 | Integration (the centerpiece) | **Two-node loopback harness (P1.5)**: real binaries, real sockets, distinct bound 127/8 source addresses, fake Tailscale WhoIs keyed only by accepted source. Scenario matrix: one outbound connection exchanges missing ranges in both directions without an initiator listener; pair → sync → attribute; two client-only nodes cannot connect; partition → rejoin; ordinary fork/signature rejection; signing-key rotation and generation-gap rejection; same-stable-ID Tailscale key rotation preserves the ee binding/session and exact-node grant while a changed/missing stable ID fails closed; peer IDs remain opaque handles and an unverifiable legacy key-derived peer is blocked with upgrade guidance rather than auto-bound; relay-mutated event IDs fail deterministic recomputation; wrong-endpoint-workspace + frame replay rejection; removal fanout uses tip/range exchange and no event-push frame; spoofed bootstrap headers and bucket rotation fail without growing durable DB/audit rows; withheld payload at N does not block N+1; a later policy denial cannot withhold tombstone/shareWithdraw control or strand previously admitted material; daemon/foreground listener ownership races, unrelated/other-EUID port conflicts, root/local port mismatch, and multiple teams with different committed ports all fail without scan/fallback; two local workspace DBs multiplex through one responder while stale/moved/symlinked/cross-workspace/wrong-genesis/different-EUID/replayed/network-path routes fail closed; invite stale-IP and same-stable-ID current-key rotation succeed, while hint-to-wrong-stable-ID and missing/changed stable identity fail before secret transmission; a wrong process on the right host/port cannot receive the secret because its signed challenge fails first; plain invite without a daemon waits usefully, daemon-backed/default/explicit-wait correlate correctly, no-wait requires a confirmed broker route, and interrupted wait resumes by invite ID; invite genesis-hash/port mismatch plus replay/crash-resume with required pre-key secret re-entry and no secret in argv/env/log/audit/error captures; missing/duplicate/conflicting genesis blocks; remote lane widening mints no grant and IdP relaxation/incomparability stays locally pending until exact-generation acceptance; unbound-invite bearer residual is printed; peer-import/index/curation never re-emits; future-only activation plus history preview/revision-change/live-race/crash-resume; a later joiner receives confirmed durable history but not origin-withdrawn history; new nodes do not inherit body grants; node-revocation cutoff and lost-last-node recovery fail closed; mutual removals conflict without orphaning the team; complete-set membership overflow produces the same capacity conflict under arrival permutations; elevation on/off/overflow/origin-time/clock-rollback/concurrency; Git SHA-1/SHA-256/multi-root/shallow project identity and aliasing; planted memory secret never crosses. Three-node variant: intact signed relay succeeds, forged relay fails, a valid origin equivocates to two peers and both later retain both proofs/roll back to the common fork-blocked prefix, remover goes offline after one acknowledgement and removal propagates, unacknowledged exposure remains visible, a target's later-revealed origin omitted from the removal cutoff map retains no authority, and introductions/deferred pairing complete. |
+| Project identity probe hardening | Replacement refs are ignored; nonempty grafts fail closed; absent promisor objects cannot trigger lazy network fetch; a fake/old Git missing a required global safety option is never retried without it and reaches only the explicit degraded fallback/mint path. Ambient `GIT_*` repository/object/config/prompt/trace state, ambient object alternates, global/system config, includes, rewrite rules, and optional locks cannot influence a key or leak. Raw local `origin` is accepted only when exactly one distinct usable canonical URL remains; multiple values are ambiguous. |
 | Manifest capacity | Starting from three active nodes, every arrival permutation of two valid concurrent `nodeBound` successors from the same predecessor root yields the same `team_node_capacity_conflict`, preserves the three-node predecessor set, and grants neither successor; revoke-then-add succeeds. Member overflow retains the analogous complete-set test at 20. |
 | Ingress storage | Repeated individually valid under-limit batches cross per-origin, team, control-reserve, and simulated free-space ceilings at exact charged-byte boundaries. Whole-batch rollback leaves event/disposition/audit/index/frontier counts unchanged; relay and signing-key rotation cannot reset origin accounting; retries coalesce; another origin and local `ee remember` continue; only safe headers/mandatory controls consume reserve. |
 | Trust elevation | At the default 100-event rolling boundary, unique eligible `create` and `revise` events each consume exactly one slot after idempotence; replay consumes zero; the 101st revision makes the resulting current local revision `agent_validated` rather than retaining a prior elevation. Permuted/concurrent batches, restart, forged origin time, and local clock rollback cannot overrun or reopen the window. |
@@ -2112,7 +2122,23 @@ alternatives, verification hooks). ← nothing. Blocks everything else.
   consumes once after event-id idempotence, replay consumes zero, and an
   over-cap revision becomes `agent_validated` rather than inheriting old
   elevation; burst code/status counts). ← T3.3, T3.1, T2.4
-- T3.5 Project identity: require non-shallow history before root derivation; validate/sort the complete root set for `git rev-parse --show-object-format`; length-prefix object format + full IDs; use only explicitly named `origin` for canonical credential-free remote fallback and never choose by remote iteration order; mint/adopt when Git has no safe origin or is non-Git; persist full derivation evidence/aliases/override; no silent rekey after unshallow, root-set addition, history rewrite, object-format conversion, or origin rename; structured hello bindings and policy matching. ← T3.1
+- T3.5 Project identity: invoke canonical Git directly through the bounded/reaped
+  runner with a minimal cleared environment; reject ambient `GIT_*`
+  repository/object/config/prompt/trace controls and run with
+  `--no-replace-objects --no-lazy-fetch --no-optional-locks`; reject nonempty
+  common-dir grafts. Capability-probe those safety options and never retry a
+  weaker root command; unsupported Git emits `git_unavailable` with upgrade
+  guidance and can use only the safe fallback/mint path. Require non-shallow
+  history before root derivation;
+  validate/sort the complete root set for
+  `git rev-parse --show-object-format`; length-prefix object format + full
+  IDs. For fallback, read exactly one distinct usable raw local `origin` URL
+  with includes/system/global config disabled, reject secret-bearing or
+  control-byte URLs, and never choose through rewrite rules, multiple values,
+  or remote iteration. Mint/adopt when Git has no safe origin or is non-Git;
+  persist full derivation evidence/aliases/override; no silent rekey after
+  unshallow, root-set addition, history rewrite, object-format conversion, or
+  origin rename; structured hello bindings and policy matching. ← T3.1
 - T3.6 Origin-signature/key-lifecycle hardening: exact feature/dependency audit, `verify_strict`, dual-signed/hash-linked signing-key rotation, staged-next routine recovery, explicit other-member revocation/fresh-consent compromise recovery, pending-invite invalidation on node/member revocation or fork-block, bounded public transition-chain verification for still-valid pre-rotation invites, relay and key-generation security review. ← T2.0, T3.2
 
 **Sub-epic T4 — M3 Team UX**
@@ -2230,15 +2256,24 @@ justification.
    `p256`** (added to the tree when T7.4/T7.5 start, listed in the
    dependency-contract matrix then); **`rustls` is deferred entirely** (the
    `EE_TEAM_IDP_HTTP_BACKEND` env var stays registered with `curl` as its only
-   shipped value, reserving `native` for a future decision). Origin signatures
-   and relay are now a v1 requirement: pin
-   **`ed25519-dalek = "=3.0.0"`**, `default-features = false`, audited
-   `features = ["fast", "zeroize"]` only; add direct
-   **`zeroize = "=1.8.2"`** with `default-features = false`; generate from a
-   `Zeroizing<[u8; 32]>` filled by fallible `getrandom::fill`; require
-   `verify_strict`; forbid `rand_core`, `hazmat`, and
-   `legacy_compatibility`. T2.0 adds both dependency-contract entries and
-   T3.6 hardens the lifecycle.
+   shipped value, reserving `native` for a future decision).
+1b. **Ed25519 origin signatures + relay in v1** — **RATIFICATION PENDING
+   (operator has NOT yet approved this item).** The 2026-07-30
+   implementation-readiness review reversed the earlier
+   direct-from-origin-only v1 decision, making per-origin Ed25519 stream
+   signatures and peer-assisted relay v1 requirements (rationale: security
+   removals must propagate even when the remover is offline; equivocation
+   handling and removal cutoff fan-out are built on signatures). This
+   reversal is now load-bearing across TC-D3/D4/D9 and the rewritten bead
+   graph, and the recommendation is to ratify it — but it adds direct
+   dependencies (**`ed25519-dalek = "=3.0.0"`**, `default-features = false`,
+   audited `features = ["fast", "zeroize"]` only; direct
+   **`zeroize = "=1.8.2"`**, `default-features = false`; generation from a
+   `Zeroizing<[u8; 32]>` via fallible `getrandom::fill`; `verify_strict`
+   required; `rand_core`/`hazmat`/`legacy_compatibility` forbidden; T2.0
+   adds the dependency-contract entries and T3.6 hardens the lifecycle),
+   and dependency additions are reserved to the operator. Until this line
+   reads DECIDED with an operator date, no signature-dependency code lands.
 2. **Default for `elevate_member_human_explicit`** — **DECIDED 2026-07-30
    (operator adopted the recommendation): ON** for invite-ceremony members
    (the ceremony is the consent), with the T3.4 amplification controls
@@ -2256,7 +2291,9 @@ justification.
 5. **SSO default posture** — `ee team create` prints a suggestion for
    `idp require --tailnet-attested` when the probe shows a corporate tailnet;
    it never auto-enables identity policy.
-6. **Private-key backup posture** — the current redacted `ee backup` format
+6. **Private-key backup posture** — **proposed by the 2026-07-30 review
+   (no operator marker; low-risk posture statement, adopt-by-default unless
+   objected):** the current redacted `ee backup` format
    remains credential-free: it never gains MAC, pair, signing, or OIDC key
    material in this program. Data restored from it cannot silently recover
    native trust or mesh identity. Whole-user-data key recovery is an external,
