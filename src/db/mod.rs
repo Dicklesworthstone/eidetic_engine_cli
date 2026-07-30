@@ -10241,7 +10241,25 @@ impl DbConnection {
         let before_hash = stored_evidence_security_state_hash(span);
         let now = Utc::now().to_rfc3339();
         let prepared = &decision.prepared;
-        let persisted_rows = self.query_for(
+        let current = self.get_evidence_span(&span.id)?.ok_or_else(|| {
+            malformed_evidence_input(format!(
+                "legacy evidence rescreen lost ownership of {}",
+                span.id
+            ))
+        })?;
+        if current != *span {
+            return Err(malformed_evidence_input(format!(
+                "legacy evidence rescreen source row changed for {}",
+                span.id
+            )));
+        }
+
+        // The enclosing BEGIN IMMEDIATE transaction owns the writer boundary,
+        // and the exact selected row was just revalidated above. Keep the DML
+        // predicate deliberately simple: the pinned FrankenSQLite planner can
+        // report zero rows for the equivalent parameterized OR/IS NULL pending
+        // predicate when generation triggers are present.
+        let affected_rows = self.execute_for(
             DbOperation::Execute,
             "UPDATE evidence_spans
              SET cass_span_id = ?1,
@@ -10262,24 +10280,7 @@ impl DbConnection {
                  updated_at = ?16
              WHERE id = ?17
                AND workspace_id = ?18
-               AND producer_kind = 'legacy_unknown'
-               AND (
-                    screening_version <> ?19
-                    OR security_policy_epoch <> ?20
-                    OR canonical_provenance_revision <> ?21
-                    OR canonical_excerpt_hash IS NULL
-                    OR upstream_ref_hash IS NULL
-                    OR search_eligibility <> 'quarantined'
-                    OR pack_eligibility <> 'quarantined'
-               )
-             RETURNING id, workspace_id, session_id, memory_id, cass_span_id,
-                       span_kind, start_line, end_line, start_byte, end_byte, role,
-                       excerpt, content_hash, metadata_json, producer_kind,
-                       screening_version, secret_redaction_status,
-                       redaction_classes_json, instruction_risk, search_eligibility,
-                       pack_eligibility, canonical_provenance_revision,
-                       canonical_excerpt_hash, security_policy_epoch,
-                       upstream_ref_hash, created_at, updated_at",
+               AND producer_kind = 'legacy_unknown'",
             &[
                 Value::Text(prepared.upstream_ref_hash.clone()),
                 Value::Text(prepared.excerpt.clone()),
@@ -10299,19 +10300,20 @@ impl DbConnection {
                 Value::Text(now),
                 Value::Text(span.id.clone()),
                 Value::Text(span.workspace_id.clone()),
-                Value::BigInt(i64::from(EVIDENCE_SCREENING_VERSION)),
-                Value::BigInt(i64::from(EVIDENCE_SECURITY_POLICY_EPOCH)),
-                Value::BigInt(i64::from(EVIDENCE_CANONICAL_PROVENANCE_REVISION)),
             ],
         )?;
-        if persisted_rows.len() != 1 {
+        if affected_rows > 1 {
             return Err(malformed_evidence_input(format!(
-                "legacy evidence rescreen lost ownership of {} (returned_rows={})",
+                "legacy evidence rescreen updated {affected_rows} rows for {}",
                 span.id,
-                persisted_rows.len(),
             )));
         }
-        let persisted = stored_evidence_span_from_row(&persisted_rows[0])?;
+        let persisted = self.get_evidence_span(&span.id)?.ok_or_else(|| {
+            malformed_evidence_input(format!(
+                "legacy evidence rescreen lost ownership of {}",
+                span.id
+            ))
+        })?;
         if persisted.workspace_id != span.workspace_id
             || !stored_evidence_security_matches_prepared(&persisted, prepared)
         {
