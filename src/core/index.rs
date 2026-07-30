@@ -8154,20 +8154,18 @@ mod tests {
             process_pending_index_jobs_coalesced(&connection, workspace_id, &index_dir, None)
                 .map_err(|error| error.to_string())?;
         ensure(
-            reports.len() == 1,
-            format!("expected one coalesced report, got {reports:?}"),
-        )?;
-        let report = &reports[0];
-        ensure(
-            report.outcome == "completed"
-                && report.fallback_to_full.as_deref()
-                    == Some(IncrementalFallbackReason::CorpusRevisionMismatch.as_str()),
-            format!("legacy index must fall back once to a full rebuild: {report:?}"),
+            reports.len() == 2,
+            format!("expected one report per coalesced job, got {reports:?}"),
         )?;
         ensure(
-            report.documents_indexed == 6,
+            reports.iter().all(|report| {
+                report.outcome == "completed"
+                    && report.fallback_to_full.as_deref()
+                        == Some(IncrementalFallbackReason::CorpusRevisionMismatch.as_str())
+                    && report.documents_indexed == 6
+            }),
             format!(
-                "full corpus must include 3 memories, 1 session, 1 rule, and 1 evidence document: {report:?}"
+                "legacy index must satisfy every claimed job with one complete fallback rebuild: {reports:?}"
             ),
         )?;
 
@@ -10451,7 +10449,7 @@ mod tests {
         ensure(
             report.last_check_error.as_deref().is_some_and(|error| {
                 error.contains("persisted-tier verification")
-                    && error.contains("fast-tier")
+                    && error.contains("no fast vector tier found")
                     && error.contains("full index rebuild is required")
             }),
             format!(
