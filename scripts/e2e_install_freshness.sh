@@ -179,7 +179,7 @@ assert_jq "$stale_gate_json" '.data.safeToClaim == false' "stale install freshne
 assert_jq "$stale_gate_json" '.data.sourceAuthority.installFreshnessAuthoritative == false' "stale install freshness is not authoritative"
 assert_jq "$stale_gate_json" '.data.sourceAuthority.installFreshnessVerdict == "shadowed_binary"' "shadowed binary is the claim-gate freshness verdict"
 assert_jq "$stale_gate_json" '(.data.degradedCodes // []) | index("stale_binary_suspected") != null' "stale binary degradation code is emitted"
-assert_jq "$stale_gate_json" 'any(.degraded[]?; .source == "install-freshness")' "install-freshness degradation is attached"
+assert_jq "$stale_gate_json" 'any(.degraded[]?; ((.sources // []) | index("install-freshness")) != null)' "install-freshness degradation is attached"
 assert_jq "$stale_gate_json" '.data.claimCommandAction == null' "stale claim gate never returns a claim command"
 assert_jq "$stale_gate_json" 'any(.data.recoveryActions[]?; .kind == "verify_source_version")' "claim gate suggests non-mutating install verification"
 
@@ -190,7 +190,7 @@ assert_jq "$fresh_gate_json" '.success == true' "fresh claim-gate command return
 assert_jq "$fresh_gate_json" '.data.sourceAuthority.installFreshnessAuthoritative == true' "fresh install freshness is authoritative"
 assert_jq "$fresh_gate_json" '.data.sourceAuthority.installFreshnessVerdict == "fresh"' "fresh control path reports a fresh binary"
 assert_jq "$fresh_gate_json" '((.data.degradedCodes // []) | index("stale_binary_suspected")) == null' "fresh path does not emit stale binary degradation"
-assert_jq "$fresh_gate_json" 'all(.degraded[]?; .source != "install-freshness")' "fresh path has no install-freshness degradation"
+assert_jq "$fresh_gate_json" 'all(.degraded[]?; ((.sources // []) | index("install-freshness")) == null)' "fresh path has no install-freshness degradation"
 assert_jq "$fresh_gate_json" '((.data.unsafeReasons // []) | index("claim_gate_install_freshness_not_authoritative")) == null' "fresh path leaves downstream gates to decide"
 
 harness_summary
