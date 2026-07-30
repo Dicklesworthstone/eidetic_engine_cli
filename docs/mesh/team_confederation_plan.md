@@ -2229,6 +2229,9 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
   `identity_revalidation_overdue` (warning), `team_idp_unreachable`,
   `team_identity_clock_rollback` (warning),
   `team_idp_provider_unsupported`, `team_idp_token_invalid`,
+  `team_idp_device_flow_expired` (T7.4/T7.6 device-ceremony
+  provider/local-deadline/poll-budget expiry; machine reason + explicit
+  restart action),
   `team_member_removed_stream_rejected` (emitter under the cutoff model:
   events quarantined above a signed removal cutoff or from a removed
   lineage's stream),
@@ -2410,9 +2413,14 @@ logging conventions; RCH-remote for cargo-backed stages per repo policy.
 | **M6 — SSO identity** | §7.3.4 both tiers | Tier 1 owner mismatch suspends + audits. Tier 2 accepts only capability-compatible secretless public device clients and rejects providers requiring a distributed client secret; the distinct verifier hosts the flow, receives and zeroizes bearer tokens locally, and sends only bounded ceremony metadata/status over version-negotiated `identity_attest`. Fresh discovery/JWKS per presentation, minimal-environment constrained curl, duplicate-key-rejecting bounded JSON/JWT parsing, exact-original-input signature verification, issuer-JWKS-only key selection, and strict token verification reject stale retired keys, token-controlled/embedded keys, ambiguous `kid`, unsupported critical headers/noncanonical encoding, unsupported providers, DNS-rebinding/private-address/ambient-proxy/config/CA/keylog/redirect leaks, credential-POST redirects, unbounded or unreaped subprocess I/O, weak or mismatched keys, bad issuer/audience/`azp`/algorithm/time/verified-email/group claims, and replay races. Durable/team-visible evidence is limited to the previewed subject/optional-email/configured-group-match decision and verification provenance; full groups, unrelated claims, tokens, and ceremony ephemera never persist or replicate. Nondecreasing local authorization time makes lease/token expiry rollback-safe and forward-jump repair cannot reactivate old leases. Nonce extension is used when present and weaker fallback is explicit; finite attestation leases reject self-renewal, commute under concurrent arrival, conflict duplicate issuer/subject bindings, bootstrap without instant one-member lockout, expire through cadence + grace without background IdP HTTP, and make the offboarding latency honest. |
 
 M0 → M1 → M2 → M3 → M4 → M5 is the spine; §12 marks the safe parallelism
-inside each. M6 tier 1 can start alongside M3 (it needs member records + join,
-not retrieval); M6 tier 2 is sequenced last (its crate additions land when it
-starts, per §13 item 1).
+inside each. Exception (2026-07-30 hardening): the M1 gate's
+authorized-relay and P1.5 E2E items are gated on T4.1 (manifest
+authorization), which is pulled forward together with its T3.1/T3.2/T3.6
+prerequisites — pre-gate M1 transport work ships with the base team features
+registered but never advertised, and M1 cannot fully close before that
+pulled-forward slice lands. M6 tier 1 can start alongside M3 (it needs
+member records + join, not retrieval); M6 tier 2 is sequenced last (its
+crate additions land when it starts, per §13 item 1).
 
 ---
 
@@ -2725,9 +2733,14 @@ justification.
 5. **SSO default posture** — `ee team create` prints a suggestion for
    `idp require --tailnet-attested` when the probe shows a corporate tailnet;
    it never auto-enables identity policy.
-6. **Private-key backup posture** — **DECIDED for v1 by accepted ADR 0086
-   TC-D5/TC-D14 (architectural consequence, not separately
-   operator-ratified):**
+6. **Private-key backup posture** — **proposed by the 2026-07-30 review;
+   posture carried by accepted ADR 0086 TC-D5/TC-D14 (no separate operator
+   marker; adopt-by-default unless objected):**
+   <!-- marker-rule: items in this section lead with DECIDED only when an
+   operator explicitly ratified that numbered item; "architectural
+   consequence" does not confer the marker. This wording has been reverted
+   twice by review — do not escalate it again. -->
+   
    the current redacted `ee backup` format
    remains credential-free: it never gains MAC, pair, signing, or OIDC key
    material in this program. Data restored from it cannot silently recover
