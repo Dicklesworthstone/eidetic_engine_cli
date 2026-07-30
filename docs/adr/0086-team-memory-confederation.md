@@ -104,10 +104,10 @@ listener, and `EE_MESH_HELLO_RESPONDER_DISABLED=1` remains the user-wide kill
 switch.
 The broker also revalidates its local Tailscale address set at startup and on
 network-map/interface changes. Loss of every verified tailnet address closes
-the listener and reports transport-unavailable posture; a changed set drops
+the listener and reports `mesh_transport_unreachable`; a changed set drops
 stale sockets before binding only the newly verified addresses. Startup while
-`tailscaled` is unavailable retries under supervision without ever binding a
-wildcard or stale invite hint.
+`tailscaled` is unavailable retries under supervision with the same
+coalesced posture, without ever binding a wildcard or stale invite hint.
 
 All **post-enrollment** traffic speaks length-prefixed,
 session-authenticated frames (pre-key bootstrap traffic is the TC-D2
@@ -200,15 +200,18 @@ The current `ee.mesh.event.v1` cannot be reused for manifests: it carries
 memory-only required fields and a closed memory `eventKind` enum. (Its
 `^mem_` ID pattern is *not* the blocker — the pattern's character class
 admits `mem_team:*` spellings — the honest rationale is fields and enum.)
-T2.0 therefore introduces a generic `ee.mesh.origin_event.v1` envelope plus
-two typed payload contracts:
+T2.0 therefore introduces a generic `ee.mesh.origin_event.v1` envelope
+(mandatory feature `mesh.origin_event.v1`) plus two typed payload contracts:
 
 - `ee.mesh.memory_event.v1`: `create`, `revise`, `tombstone`, and
   `shareWithdraw` for a real logical memory, carrying the optional
   `validFrom`/`validUntil` validity-window fields forward from
   `ee.mesh.event.v1` so validity *filtering* (ADR 0041 scenarios) survives
   the supersession. `trust`, `validity`, and `bodyAvailable` event kinds
-  remain deferred; body eligibility is serve-time policy (TC-D12).
+  remain deferred; body eligibility is serve-time policy (TC-D12). Every
+  memory event requires `mesh.team.memory.v1`; content-bearing events sign
+  TC-D12's body representation and redaction-provenance fields alongside
+  `content_hash`, so fetch integrity never depends on mutable serving policy.
 - `ee.team.manifest_event.v1`: explicit `teamCreated`, `memberAdded`,
   `memberRemoved`, `nodeBound`, `nodeRevoked`, `projectRegistered`,
   `signingKeyRotated`, `laneProfileSet`, `idpPolicySet`, and
@@ -216,10 +219,27 @@ two typed payload contracts:
   `identityAttested` is schema-pinned from v1 even though its emitter and
   semantics land in the tier-2 identity milestone. Every manifest event
   requires `mesh.team.manifest.v1`; `identityAttested` additionally requires
-  `mesh.team.identity_attested.v1`. A pre-M6 binary therefore dispositions
-  that operation as `unsupported` even though it understands the base
-  manifest schema—the generic feature bit alone would be an ineffective
-  gate. The `mesh.` feature namespace rule from
+  `mesh.team.identity_attested.v1`. T2.0 registers the memory and manifest
+  schema/features but production advertises neither base team feature until
+  T4.1 installs the active-member/node/key authorizer and manifest
+  materializer. T2.4 therefore depends on T4.1: no incrementally shipped M1
+  binary may apply or relay a team event merely because its pair/session and
+  signature verify. Once enabled, an event whose cross-origin membership
+  predecessor has not arrived is durably quarantined for deterministic
+  re-evaluation, not accepted by arrival order. The sole pre-membership
+  exception is T4.1's self-authenticating `teamCreated` genesis. A pre-M6
+  binary dispositions `identityAttested` as `unsupported` even though it
+  understands the base manifest schema—the generic feature bit alone would
+  be an ineffective gate. Receivers derive the mandatory feature and
+  authorization set from the outer payload schema plus operation; an
+  origin-supplied `requiredFeatures[]` can add forward-compatibility
+  requirements but can never disable a handler check. The list is bounded,
+  sorted, and duplicate-free (at most 32 entries and 64 UTF-8 bytes per
+  entry). Omitting a mandatory base/operation feature is
+  a quarantined protocol violation (`mesh_event_feature_contract_invalid`)
+  and the event is never applied or relayed; an otherwise valid event with an
+  unknown additional feature is durably `unsupported` for replay after
+  upgrade. The `mesh.` feature namespace rule from
   `docs/mesh/event_schema.md` carries over to the new envelope. Manifest
   payloads are small, inline metadata and never depend
   on body-lane grants.
@@ -238,10 +258,18 @@ not a free unsigned field: it must equal
 `mesh_evt_<64-lowercase-hex-event-digest>`, derived from `eventHash` exactly
 as in the existing mesh contract, and receivers reject a mismatch before
 idempotence or storage. Omitting it from the preimage avoids self-reference;
-it does not let a relay rename an event. The old `ee.mesh.event.v1` is
-superseded before it gets a production emitter; it is not stretched with
-synthetic `mem_team:*` IDs. This typed envelope is what tips advertise,
-ranges address, relays preserve, and fork rejection chains over.
+it does not let a relay rename an event. The existing
+`ee.mesh.event.v1` remains the registered transport-independent **file
+replay/import-ledger** memory contract used by `ee mesh export|import`; it has
+no local signed-origin producer and cannot represent manifests. T2.0
+supersedes it only for live team origin streams—it is not stretched with
+synthetic `mem_team:*` IDs, re-signed, or promoted to team authority.
+Legacy file events continue through T1.3's local policy/trust cap as
+non-origin-authoritative evidence and can never be relayed as a signed team
+stream. Any later file-artifact migration to the typed envelope requires an
+explicit versioned schema change, not reinterpretation. The typed envelope is
+what team tips advertise, ranges address, relays preserve, and fork rejection
+chains over.
 
 Every admitted peer receives the immutable safe header sequence contiguously.
 Policy may omit a `create` or `revise` memory payload, producing a durable
@@ -421,6 +449,9 @@ file identity, and provides write-through atomic replacement. It may not
 shell out to `icacls` or add project-owned unsafe code. If those guarantees
 are unavailable, credential-bearing team commands fail closed with
 `mesh_key_store_unavailable`; ordinary non-team ee commands remain usable.
+The adapter is a narrow secure-local-file primitive rather than a key-store
+special case so TC-D12 can apply the same path, identity, ACL, durability,
+and atomic-publication rules to sensitive body-cache objects.
 
 Pair-key rotation is a
 generation-bound, crash-resumable two-phase state machine—not a fictitious
@@ -879,6 +910,15 @@ and 256-bit secret. Invite IDs and durable ceremony IDs each contain at least
 128 independent OS-CSPRNG bits; neither is a counter, hash prefix, display
 name, or truncation of the secret. Invites are
 single-use, TTL-bound (default 72 h), hashed-at-rest, and revocable. The
+inviter persists a nondecreasing invite-authorization wall-time floor and
+advances it transactionally on mint, lease, redeem/resume, revoke, expiry,
+and introduction-secret authorization; a live process also enforces the
+corresponding monotonic elapsed deadline. A wall clock observed below the
+persisted floor after restart or correction blocks mint/redemption/resume
+with high `team_invite_clock_rollback` instead of extending a bearer
+credential. A forward jump may expire credentials early (fail-safe). Doctor
+may lower the floor only in the same transaction that revokes every pending
+invite, lease, and introduction secret; repair never reactivates one. The
 joiner resolves the exact stable node ID through fresh local Tailscale status
 and connects only to a current IP and current node key associated with it.
 The embedded current key, MagicDNS, and IPs are observations/hints, never
@@ -977,6 +1017,18 @@ Origin memory payloads carry metadata only. Body material moves as
 **policy-gated lazy fetches** (`body_fetch` frames) keyed by the signed
 `create`/`revise` origin event and its `content_hash`; fetch eligibility is
 decided serve-side at fetch time (no `bodyAvailable` event in v1).
+The event also signs `bodyRepresentation = "exact" | "already_redacted"`;
+the latter includes a bounded redaction-profile/scanner-version identifier
+and redaction-evidence hash, never the removed text. V1 never rewrites body
+bytes during fetch: the final bytes must hash exactly to the event's
+`content_hash`. A policy posture of `redact` may therefore serve only an
+event already signed as `already_redacted`; requesting redaction of an
+`exact` body is a policy denial/metadata-only result, not an in-flight
+transformation with an unverifiable hash. The current secret scan still runs
+immediately before serving and may newly deny the exact bytes, but never
+mutates them. A future transformed derivative would require a separately
+versioned, origin-authenticated derivative descriptor; v1 does not invent
+one.
 `tombstone` and `shareWithdraw` are mandatory minimal control metadata under
 TC-D3, not body events and not policy-withholdable content; otherwise a
 later-denied peer could retain material it had already received.
@@ -994,24 +1046,57 @@ at most 5 attempts, one attempt per event per round) and records
 Every fetch request names the exact signed origin event, requester member and
 node, project/workspace binding, and grant/policy generation. The server
 re-authorizes that tuple before serving; content hash alone is never an
-oracle. Chunks carry transfer ID, sequence, declared final length, and final
-hash; aggregate bytes are bounded by the streaming `max_bytes+1` policy and
-the codec's 32 KiB per-payload limit. Incoming bytes stream first into a
-private, no-symlink temporary cache object under the existing 0700 user-data
-boundary; the object is never published to retrieval until final
-length/hash/event verification and import-policy admission all succeed.
-Published body objects are 0600, atomically named by an opaque cache key,
+oracle. Only the event's owning origin workspace/node may serve from its
+local source truth in v1; a relayer's cached copy is never a new serving
+authority. Tombstoned/withdrawn events and a source that no longer retains
+the exact revision return unavailable rather than substituting current or
+cached bytes. Chunks carry transfer ID, sequence, declared final length, and
+final hash; the receiver requires that hash and the streamed bytes to equal
+the signed event `content_hash`. Aggregate bytes are bounded by the streaming
+`max_bytes+1` policy and the codec's 32 KiB per-payload limit. Incoming bytes
+stream first into a
+private temporary cache object under the secure user-data boundary; the
+object is never published to retrieval until final length/hash/event
+verification and import-policy admission all succeed. On Unix the complete
+path is owner-checked and no-symlink under a 0700 directory, and published
+body objects are 0600. On Windows the same reviewed safe adapter as TC-D5
+rejects reparse-point components, pins opened-file identity, applies a
+non-inherited current-user-plus-SYSTEM DACL, and performs write-through
+atomic publication. Objects are atomically named by an opaque cache key,
 quota/retention governed, and excluded from support bundles (including raw
 paths). Failed, quarantined, evicted, expired, and withdrawn objects cannot
-remain retrieval-addressable; metadata state changes only after the
-corresponding object lifecycle action succeeds or records an explicit
+remain retrieval-addressable. Publication and invalidation intentionally use
+opposite crash-safe orderings:
+
+1. **Publication is object first, visibility last.** A transaction creates a
+   `staging` metadata row with an opaque transfer ID. The receiver writes and
+   verifies the private temporary object, atomically publishes it, and fsyncs
+   the file and containing directory before a second transaction changes the
+   row to `available`. Retrieval addresses only `available` rows. A crash
+   before that final transaction can therefore leave an inaccessible staged
+   object, never a visible unverified body.
+2. **Invalidation is visibility first, object purge last.** Withdrawal,
+   eviction, expiry, quarantine, or policy reversal transactionally changes
+   an `available` row to `invalidated_pending_purge`, removes its retrieval
+   and index eligibility, and enqueues an idempotent purge. Only after the
+   object removal and directory fsync succeed does metadata advance to
+   `purged` or `evicted`. A crash can therefore retain inaccessible bytes,
+   never retrieval-addressable invalid bytes.
+
+Startup, steward, and doctor reconciliation resume both state machines,
+remove or report orphaned staged objects, retry pending purges, and validate
+that no object is addressable outside `available`; they never infer
+availability from filesystem presence alone. If a platform cannot prove the
+cache contract, body hydration remains metadata-only and records high,
 repairable `mesh_body_cache_lifecycle_failed` posture with the filesystem
-path redacted.
+path redacted; it never publishes under weaker permissions. Absence of the
+Windows credential adapter already blocks team traffic under TC-D5.
 
 Rationale: (a) anti-entropy stays bounded — bodies would blow the 512-event
 batch and payload budgets; (b) serve-time policy/redaction/secret-scan
-applies to every fetch, so policy changes affect future fetches without
-rewriting streams; (c) **immutable ledger bodies would contradict
+eligibility applies to every fetch, so policy changes can deny future fetches
+without rewriting streams, while redaction remains hash-honest by requiring
+an already-redacted signed representation; (c) **immutable ledger bodies would contradict
 `shareWithdraw` purge semantics** — a withdrawal cannot purge what an
 append-only origin stream permanently embeds; (d) it is the SRR6.11
 eager-metadata/lazy-body architecture the cache modules were built for.
@@ -1140,6 +1225,32 @@ hosts the device client over the post-key `identity_attest` session. It starts
 the provider flow, returns only the bounded verification URL/user code to the
 subject, polls and receives the tokens locally, refreshes discovery/JWKS,
 verifies the ID token, and immediately reduces/zeroizes the bearer material.
+Polling follows RFC 8628 without granting a provider an unbounded process:
+`expires_in` is a required positive integer and `interval` is a positive
+integer (default 5 seconds when absent). A same-process monotonic deadline is
+the earlier of provider expiry and 1800 seconds from ceremony start, and the
+client also stops after 300 token requests. It waits at least the advertised
+interval before each request; every `slow_down` adds 5 seconds to the current
+interval for all later requests, and connection timeouts use checked
+exponential backoff. Wait arithmetic is overflow-checked and limited by the
+remaining monotonic deadline—an interval longer than the remaining lifetime
+expires the ceremony rather than being shortened in violation of the
+provider minimum. Only `authorization_pending` and `slow_down` continue
+polling; denial, provider expiry, malformed values, cancellation, and every
+other error terminate without an automatic fresh ceremony. Provider expiry,
+the local deadline, and the poll budget return
+`team_idp_device_flow_expired` with a machine-readable reason and an explicit
+restart action. Cancellation terminates/reaps the curl process and zeroizes
+the device code and any partial token response.
+
+The surrounding join/renewal workflow is crash-resumable; the OAuth device
+sub-ceremony is intentionally not. A process loss leaves the outer workflow
+at `identity_pending` with its non-secret checkpoint, destroys the device
+code/poll state, and requires the user to explicitly start a fresh provider
+ceremony. It never persists bearer-like ephemera merely to make polling
+resume automatically, and it never treats the interrupted ceremony as a
+successful identity gate.
+
 Verification URLs, user/device codes, and polling state are ceremony-TTL
 ephemera excluded from audit logs, support bundles, and the manifest (only a
 redacted terminal status may persist). No raw token traverses the ee mesh. The verifier then authors
@@ -1250,27 +1361,53 @@ explicitly deferred in its closeout, never silent. Mechanism contracts also
 register
 `ee.mesh.tailscale_transport_frame.v2`, `ee.mesh.pair_rotation.v1`, and
 `ee.mesh.rotate_pair.v1`; dead frame v1 is a rejected input, not a
-compatibility alias. Deterministic retrieval
+compatibility alias. The existing `ee.mesh.event.v1` registry entry remains
+file replay/import-ledger evidence only and is never advertised as a live
+team origin-stream capability. Deterministic retrieval
 surfaces use immutable origin `producedAt` (or omit a time field), rendered
 as absolute RFC 3339 only — relative phrasing ("2h ago") is allowed solely
 in non-deterministic human surfaces (`team status`/`activity` human mode);
 local `receivedAt`/`syncedAt` never participates in pack/search hashes or
-cross-node equality. Receipt times remain available in `why`, status, and
-audit diagnostics. A signature authenticates who asserted `producedAt`, not
-that their clock was correct: machine provenance labels it
+cross-node equality once the canonical materialized corpus and local
+maintenance state are held fixed. Receipt times remain available in `why`,
+status, and audit diagnostics. A signature authenticates who asserted
+`producedAt`, not that their clock was correct: machine provenance labels it
 `originTimeAssurance = "member_attested"`. It is provenance/display data and
 never drives authorization, trust/elevation caps, retention or decay,
 lifecycle mutation, or search/pack relevance ranking. Peer material keeps a
 separate local first-receipt/lifecycle clock for those local-only operations;
 the origin claim is not copied into an authoritative local `created_at`.
-JSON activity queries require an absolute cutoff and explicit `--as-of`;
-relative `--since 2h` is normalized only in human output and the resolved
-cutoff/as-of are printed. Activity orders ordinary rows by
+Default search and pack assign every team-synced candidate the same neutral
+temporal multiplier; neither the asserted origin time nor a local
+receipt/sync time may enter the relevance score, tie-break, or selection.
+Canonical team output does render the signed `producedAt`, so changing that
+signed claim legitimately changes provenance bytes and any hash over those
+bytes even though selected IDs, ordering, and relevance scores stay fixed.
+An explicit user-requested time-window filter may compare the
+member-attested `producedAt`, but its response must return the resolved
+cutoff/as-of and `originTimeAssurance`; this is attributed filtering, not a
+freshness or lifecycle authority. Local decay/expiry may independently use
+the first-receipt clock, so nodes whose maintenance has materialized
+different corpora are not valid byte-equality fixtures; the differing local
+maintenance state must be surfaced rather than mislabeled as ranking
+nondeterminism.
+JSON activity queries require an explicit `--as-of`; when `--since` is
+present it must be an absolute cutoff. Relative `--since 2h` is normalized
+only in human output and the resolved cutoff/as-of are printed. Activity is
+paged with a positive `--limit` (default 100, hard maximum 1000) and the
+shared generation- and parameter-bound `ee.cursor.v1` codec; an invalid or
+stale cursor returns the existing empty-page `cursor_invalid`/`cursor_stale`
+posture rather than silently restarting. Activity orders ordinary rows by
 `(producedAt DESC, eventId ASC)`, but a claim later than
 `as_of + MAX_ORIGIN_CLOCK_SKEW_SECONDS` (pinned at 600 in v1) is excluded from
 the recent-time bucket and reported in a deterministic `clockAnomalies`
 collection until wall time catches up. This limits clock-skew ranking abuse
-without pretending the member-attested clock is authoritative.
+without pretending the member-attested clock is authoritative. A member can
+also backdate an event out of an explicit time window; the schema therefore
+labels the filter basis `member_attested` and warns that a time-window page is
+not sequence-complete. Draining pages without `--since`, or using the
+origin-sequence-based team audit surface, remains the completeness path for
+all admitted events.
 
 ### TC-D16 — Overlap precedence: local workspace > team > global;
 contradictions surface
@@ -1286,6 +1423,7 @@ module cited by both the team and global lanes.
 | Threat | Control |
 |---|---|
 | Forged event origin or relay | TC-D4 domain-separated Ed25519 origin signatures with strict verification and TC-D5 dual-signed generation continuity; pairwise session MACs authenticate transport, not authorship |
+| Existing unsigned file-replay event is mistaken for team origin authority | TC-D3 keeps `ee.mesh.event.v1` on the separate non-origin-authoritative export/import-ledger surface. It may inform local policy-capped evidence but is never re-signed, relayed, or reinterpreted as a typed team origin event |
 | Relay mutates an unsigned event identifier | TC-D3 requires `eventId` to be the exact full-digest derivation of the signed `eventHash`; mismatch is rejected before idempotence/storage |
 | A valid origin key equivocates | TC-D4 retains both signed branches, rolls materialization back to the common prefix, suspends the origin, relays fork evidence, and requires another member to revoke/rebind; no first-arrival winner |
 | Frame replay, key-identity downgrade, or wrong-target/cross-workspace forwarding | TC-D1/D5 reject dead frame v1 and use frame v2 random ee-node IDs, team/endpoint-workspace/session/direction/counter/request binding under directional keys. Stable Tailscale IDs live in the handshake and current public keys remain observations; producer-owned `origin_workspace_id` is provenance and can never select either receiving database |
@@ -1296,11 +1434,13 @@ module cited by both the team and global lanes.
 | One workspace daemon monopolizes the shared port | TC-D1 listener owner multiplexes validated routes through a same-EUID bounded local control channel; startup and route ambiguity fail closed rather than spawning another listener |
 | Multiple OS users or incompatible team ports contend on one node | TC-D1 roots/invites commit one v1 port, all broker routes must agree, one OS user owns the host-wide listener, and other users/mismatches are explicitly client-only with doctor repair; no scan/fallback |
 | Windows client-only mode weakens credential storage | TC-D5 requires DACL/reparse-point/opened-identity/write-through parity through a reviewed safe adapter. If unavailable, `mesh_key_store_unavailable` blocks team key operations; no listener does not mean best-effort secrets |
+| Windows body hydration publishes sensitive bytes with Unix-only assumptions | TC-D12 reuses the reviewed secure-local-file adapter for reparse-point rejection, pinned file identity, narrow non-inherited DACLs, and write-through atomic publication. If proof fails, the body lane stays metadata-only with high `mesh_body_cache_lifecycle_failed`; weaker cache storage is never accepted |
 | Ambient or repository-local Git state rewrites project identity | TC-D8 runs canonical Git directly with bounded/reaped execution, a minimal cleared environment, replacement/lazy-fetch/optional-lock behavior disabled, and nonempty grafts rejected; an installed Git lacking a required safety option is never retried weakly. Fallback reads exactly one raw local `origin` URL with includes and nonlocal config disabled, so aliases, prompts, rewrites, ambient object alternates, or multiple URLs cannot choose a project key |
 | Wrong process answers the inviter port first | TC-D2 requires the invite-pinned Ed25519 challenge over root/identity/nonces/port before the joiner releases the secret |
 | Invite interception / local secret exposure | Single-use leased redemption, TTL, hashed at rest, zeroizing buffers, no argv/env/log ingestion, explicit secret re-entry before key confirmation, and mutual key confirmation; an unbound code remains a bearer credential whose one redemption can be stolen, so the UI names that residual and recommends short TTL/`--wait`/identity policy |
 | Invite locator redirects, goes stale, or breaks on routine key rotation | TC-D10 binds the exact inviter Tailscale stable node ID, ee identity, and team root; fresh local status resolves its current key/IP, treats embedded key/MagicDNS/IP as observations only, accepts rotation only within that stable binding, and requires reissue when the stable ID disappears/changes |
 | Pair rotation crashes, clock rolls back, or a peer forces old-key fallback | TC-D5 uses an explicit control-only capability and two-phase generation record. The prior key can authenticate only the exact pending rotation for 86400 seconds; persisted wall-time high-water plus same-process monotonic elapsed make rollback fail closed, and expired/unverifiable state requires fresh pairing |
+| Clock rollback extends an invite or per-pair introduction bearer credential | TC-D10 advances a persisted invite-authorization floor on every credential decision and uses same-process monotonic deadlines. Rollback blocks mint/redeem/resume with `team_invite_clock_rollback`; repair atomically revokes every pending invite/lease/introduction before lowering the floor, so no credential can reactivate |
 | Compromised member | Data-lane blast radius is the member's node-scoped grants (per-node lanes, elevation toggle, harmful-feedback demotion, revocation). Manifest authority (lane profile, idp policy, removals) is any-active-member in v1 — mitigated by audit + conflict surfacing + `ee team pause`; roles are a v2 question |
 | Compromised member widens lane or relaxes IdP policy | TC-D9 treats manifest policy as coordination input: lane widening cannot mint local grants, and every node retains its explicitly accepted IdP floor until that operator accepts the exact relaxation generation |
 | Compromised member narrows lanes or tightens IdP policy | This remains an availability authority in v1: narrowing/tightening may pause sharing but cannot exfiltrate data. Status/audit identify the author and generation; another active member can revoke the attacker and reconcile policy. Roles/quorum are deferred, so the residual is explicit |
@@ -1317,16 +1457,21 @@ module cited by both the team and global lanes.
 | Self-attested, duplicate, or stale tier-2 identity | TC-D9/D13 make the distinct verifier host the device flow, reject self/same-subject renewal, conflict duplicate subjects, deterministically combine concurrent policy-generation-bound finite leases, perform no steward IdP HTTP, and suspend after cadence plus grace if interactive renewal cannot complete |
 | Clock rollback extends an identity lease | TC-D9/D13 use a persisted nondecreasing local authorization-time floor on every identity-dependent decision; forward-jump recovery suppresses every current tier-2 lease before lowering the floor and requires fresh interactive attestations |
 | IdP discovery SSRF / token theft | Secretless public-device-client preflight; verifier-hosted flow so raw tokens never cross ee; fresh discovery/JWKS per presentation; HTTPS-only constrained canonical curl from a minimal allowlisted environment with ambient config/proxy/netrc/CA/keylog state disabled, no redirects for credential-bearing POSTs, manually validated GET redirects, validated-and-pinned DNS answers, exact issuer, bounded/reaped subprocess I/O, redacted responses, raw token zeroization/non-persistence, key/algorithm/verified-email/group-claim checks, atomic replay ledger, grace-then-suspend |
+| Malicious or malformed IdP keeps a device ceremony polling | RFC 8628 interval/`slow_down` semantics run under the earlier of provider expiry and a 1800-second monotonic deadline plus a 300-request ceiling; checked backoff, cancellation/reap, terminal-error handling, and explicit non-automatic restart bound network/process use |
 | Trust laundering via file import | TC-D14 store-local MAC |
 | Peer rows echo or acquire local authorship | TC-D3 emits only origin-owned local rows; inbound materialization never re-emits and in-place peer edits are rejected |
+| A paired/signed peer reaches team materialization before membership authorization exists | TC-D3 registers but does not advertise `mesh.team.memory.v1` or `mesh.team.manifest.v1` until T4.1 installs the active-member/node/key authorizer; T2.4 depends on that gate. Pair/session proof alone can never apply or relay team authority, and cross-origin predecessor gaps quarantine for deterministic re-evaluation |
+| A signed origin omits a required feature bit to bypass a stricter operation handler | TC-D3 derives mandatory features and authorization from payload schema + operation, never from the origin's list alone. Missing mandatory bits quarantine under `mesh_event_feature_contract_invalid`; unknown additional bits remain replayable `unsupported` state |
 | Join silently publishes old local history | TC-D3 starts future live projection only; `ee team share history` uses a revision-pinned preview, explicit consent, revalidation, and an idempotent projection ledger |
 | New node inherits a member's sensitive grant | TC-D6 grants current nodes only; later bindings return to metadata-only until a fresh per-node preview and consent |
 | Inbound abuse on the open port | TC-D2 bootstrap caps at listener birth; full admission control in operations |
 | Policy-denied event stalls later sync | TC-D3 contiguous receipt/disposition-scan frontiers + sparse audited per-event dispositions; materialization reads only explicit applied rows |
 | Policy denial suppresses a later purge | TC-D3 makes minimal opaque `tombstone`/`shareWithdraw` controls mandatory for active members, so current content policy cannot strand previously admitted derived material |
 | Body hash used as an oracle | TC-D12 exact event/requester/grant authorization and bounded sequenced chunks |
+| Serve-time redaction changes bytes while claiming the signed source hash | TC-D12 performs no in-flight body transformation in v1. `redact` serves only an `already_redacted` representation whose exact bytes/hash and redaction provenance were signed in the event; an `exact` body that now requires redaction stays metadata-only. Both streamed and declared hashes must equal the signed `content_hash` |
+| A relayer turns its cached body into a new serving authority | TC-D12 permits body serving only by the event's owning origin workspace/node from local source truth. Relays carry signed metadata/events but never re-serve cached bodies; missing old revisions return unavailable rather than substitution |
 | Body-lane grant is revoked after bytes were fetched or on only one source node | Revocation stops future serving from the named local source and advances the node-scoped grant generation, but cached/copied bytes cannot be remotely erased and other source nodes are unaffected. Command/audit output says both; origin-wide `shareWithdraw` is a cooperative purge control, not proof of deletion on an offline or malicious peer |
-| Member lies about origin time to stay fresh | TC-D15 makes `producedAt` provenance-only for trust/ranking/lifecycle, requires explicit activity `as_of`, and isolates claims beyond the pinned future-skew window in deterministic clock anomalies |
+| Member lies about origin time to stay fresh or backdates out of a recent-activity window | TC-D15 makes `producedAt` provenance-only for trust/default ranking/lifecycle, requires explicit activity `as_of`, and isolates claims beyond the pinned future-skew window in deterministic clock anomalies. A member-attested time filter is explicitly not an audit-completeness boundary: output names the basis/backdating residual, while an unfiltered cursor drain and origin-sequence audit retain every admitted event |
 
 ## Non-goals (v1)
 
@@ -1394,6 +1539,12 @@ not an ordinary member slot with manifest authority.
   With no daemon, plain `ee team invite` waits by default; `--no-wait` without
   a broker is refused, and interruption/resume preserves only the hashed
   invite.
+- Invite-time safety: rollback at every mint/lease/redeem/resume/revoke and
+  introduction-secret authorization boundary, including restart, cannot
+  extend a credential. Same-process monotonic expiry wins over wall rollback;
+  a forward jump may expire early; doctor repair revokes all pending
+  invites/leases/introductions atomically before lowering the persisted floor,
+  and none reactivates.
 - Three-node scenarios: a signed event relays unchanged; forged relays fail;
   one origin signs different branches to two peers, direct reconciliation
   leaves both at the same fork-blocked prefix with both proofs retained;
@@ -1427,9 +1578,19 @@ not an ordinary member slot with manifest authority.
   rebuilds.
 - Determinism: J7 harness extended with team-attributed packs using immutable
   origin time as provenance only; byte-identical output on both nodes given
-  equal admitted state regardless of local receipt timestamps. Forged future
-  origin times do not alter relevance/lifecycle and land in deterministic
-  activity `clockAnomalies` until the explicit as-of window reaches them.
+  equal signed origin events, canonical materialized corpus, materializer
+  version, local disposition/admission decisions, maintenance state, config,
+  and indexes, regardless of diagnostic receipt/sync timestamps. Changing a
+  signed origin claim changes rendered provenance bytes but not selected IDs,
+  ordering, or default relevance scores. Local first receipt may affect a
+  later maintenance decision and therefore the materialized corpus; that
+  state difference is explicit and outside a fixed-corpus comparison. Forged
+  future origin times do not alter default relevance/lifecycle and land in
+  deterministic activity `clockAnomalies` until the explicit as-of window
+  reaches them. Activity tests also prove a backdated event may be omitted
+  from an explicitly member-attested time window, remains present in an
+  unfiltered cursor drain and origin-sequence audit, and is never falsely
+  described as absent from the admitted stream.
 - Degraded-code discipline: every new code lands with fixture + taxonomy in
   the same commit (J6 validator); the 19 uncovered legacy mesh codes are
   backfilled first.
@@ -1441,8 +1602,19 @@ not an ordinary member slot with manifest authority.
   event/payload and dual-signed signing-key transition known-answer vectors
   are stable across encode/decode and field insertion order; changing
   `eventId` without changing the signed digest is always rejected.
-  A base-manifest-only feature set dispositions `identityAttested` as
-  unsupported because its additional feature bit is absent.
+  A pre-authorizer feature set advertises neither base team feature and
+  cannot apply/relay memory or manifest events; after T4.1, a
+  base-memory/manifest feature set dispositions `identityAttested` as
+  unsupported because its additional feature bit is absent. Out-of-order
+  member authority quarantines and later re-evaluates without an arrival
+  winner. Removing any mandatory feature from a signed operation yields
+  `mesh_event_feature_contract_invalid` and never downgrades dispatch;
+  unknown extra features remain durable `unsupported` state.
+- File/live schema boundary: existing unsigned `ee.mesh.event.v1` artifact
+  rows remain non-origin-authoritative and locally policy-capped; typed signed
+  events reuse the normalized admission decision without reserialization.
+  Re-signing, relaying, or reinterpreting a legacy file row as team authority
+  is rejected, and both schema purposes remain explicit in inventory tests.
 - Import authentication (TC-D14): a teammate's export cannot inject
   `human_explicit`; an artifact with a correct store UUID but no valid MAC
   is refused; context-matched same-store reimport restores missing rows or
@@ -1524,11 +1696,26 @@ not an ordinary member slot with manifest authority.
   rematerialize for the joiner.
 - Body-cache lifecycle (TC-D12): interrupted, oversized, hash-mismatched,
   policy-denied, quarantined, evicted, expired, and withdrawn cases prove no
-  unverified object becomes retrieval-addressable; permissions/symlink and
-  support-bundle leak tests cover bytes and paths; withdrawal removes only
+  unverified object becomes retrieval-addressable; Unix owner/mode/no-symlink
+  and Windows SID/DACL/reparse/opened-identity/write-through vectors cover
+  temporary and published objects, crash boundaries, and hostile parents.
+  Crash injection at every transition proves publication remains invisible
+  through `staging` until object rename + fsync complete, while invalidation
+  closes retrieval/index eligibility in `invalidated_pending_purge` before
+  physical removal. Restart/steward/doctor reconciliation handles staged
+  orphans and pending purges idempotently, and filesystem presence alone can
+  never resurrect availability.
+  Failure to prove the platform contract leaves metadata retrieval usable,
+  emits high `mesh_body_cache_lifecycle_failed`, and publishes no body.
+  Support-bundle leak tests cover bytes and paths; withdrawal removes only
   derived objects and never origin-owned source truth. A peer that previously
   admitted content still receives and applies its minimal withdrawal control
-  after the content lane is denied.
+  after later content denial. Exact and `already_redacted` signed
+  representations both require streamed/declared hash equality with the event;
+  an exact body under a redact-only policy remains metadata-only, no in-flight
+  transformed bytes can masquerade under the source hash, a new scanner denial
+  sends nothing, relayers cannot serve cache copies, and an unavailable old
+  source revision is never replaced by current bytes.
   Per-recipient `revoke-lane`/`team unshare bodies` advances the exact-node
   grant generation and stops future fetches, invalidates stale previews, and
   never claims already-cached/copied bytes were erased or emits an
@@ -1550,7 +1737,13 @@ not an ordinary member slot with manifest authority.
   reactivate an old lease, ambient proxy/`.curlrc`/netrc/CA-bundle/TLS-keylog
   traps, unverified-email and malformed-group claims, credential-POST
   redirects, oversized pipes, timeout/descendant-pipe escape, process reap,
-  response redaction, duplicate JSON member names, noncanonical JWT segments,
+  response redaction, missing/zero/overflowing `expires_in`/`interval`,
+  omitted-interval default 5, no-early-poll timing, cumulative `slow_down`
+  increments, connection-timeout backoff, provider/local/poll-budget expiry,
+  cancellation with process reap/zeroization, no automatic ceremony restart,
+  process loss returning the outer join/renewal to `identity_pending` without
+  persisting or reusing device ephemera,
+  duplicate JSON member names, noncanonical JWT segments,
   unsupported critical headers, token-controlled/embedded key references,
   and missing/duplicate/ambiguous `kid` selection.
   Synthetic unrelated claims and oversized group membership prove that only
