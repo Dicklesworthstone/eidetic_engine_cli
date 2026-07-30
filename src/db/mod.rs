@@ -857,7 +857,7 @@ impl DbConnection {
             }
             (DatabaseLocation::File(path), DatabaseOpenMode::ReadOnly) => {
                 let path = database_path_string(path, DbOperation::OpenReadOnly)?;
-                FrankenConnection::open_schema_only(path)
+                FrankenConnection::open_file_read_only(path)
                     .map_err(|source| DbError::sqlmodel(DbOperation::OpenReadOnly, source))?
             }
             (DatabaseLocation::File(path), DatabaseOpenMode::SchemaOnly) => {
@@ -7436,6 +7436,224 @@ UPDATE workspace_generations
     "blake3:v086_rule_index_generations_workspace_invalidation_2026_07_28",
 );
 
+/// V087: materialize the full evidence row shape for reliable atomic updates.
+///
+/// V085 introduced the evidence-security posture with `ALTER TABLE ... ADD
+/// COLUMN` so existing databases could fail closed before rescreening.  The
+/// pinned FrankenSQLite generation can read that logical shape correctly but
+/// does not reliably persist UPDATEs to pre-ALTER rows when the evidence
+/// generation trigger is present.  Rebuilding the table from its canonical
+/// schema removes that backend-specific physical ambiguity while preserving
+/// every row and constraint.
+pub const V087_EVIDENCE_STORAGE_REBUILD: Migration = Migration::new(
+    87,
+    "evidence_storage_rebuild",
+    r#"
+ALTER TABLE evidence_spans RENAME TO evidence_spans_v086;
+
+DROP INDEX IF EXISTS idx_evidence_spans_workspace;
+DROP INDEX IF EXISTS idx_evidence_spans_session;
+DROP INDEX IF EXISTS idx_evidence_spans_memory;
+DROP INDEX IF EXISTS idx_evidence_spans_kind;
+DROP INDEX IF EXISTS idx_evidence_spans_content_hash;
+DROP INDEX IF EXISTS idx_evidence_spans_security_admission;
+DROP TRIGGER IF EXISTS trg_evidence_spans_workspace_integrity_insert;
+DROP TRIGGER IF EXISTS trg_evidence_spans_workspace_integrity_update;
+DROP TRIGGER IF EXISTS trg_workspace_generations_evidence_spans_insert;
+DROP TRIGGER IF EXISTS trg_workspace_generations_evidence_spans_update;
+DROP TRIGGER IF EXISTS trg_workspace_generations_evidence_spans_delete;
+
+CREATE TABLE evidence_spans (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'ev_*' AND length(id) = 29),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    memory_id TEXT REFERENCES memories(id) ON DELETE SET NULL,
+    cass_span_id TEXT NOT NULL CHECK (length(trim(cass_span_id)) > 0),
+    span_kind TEXT NOT NULL CHECK (span_kind IN (
+        'message', 'tool_call', 'tool_result', 'file', 'summary'
+    )),
+    start_line INTEGER NOT NULL CHECK (start_line > 0),
+    end_line INTEGER NOT NULL CHECK (end_line >= start_line),
+    start_byte INTEGER CHECK (start_byte IS NULL OR start_byte >= 0),
+    end_byte INTEGER CHECK (end_byte IS NULL OR (
+        end_byte >= 0 AND (start_byte IS NULL OR end_byte >= start_byte)
+    )),
+    role TEXT CHECK (role IS NULL OR length(trim(role)) > 0),
+    excerpt TEXT NOT NULL CHECK (length(trim(excerpt)) > 0 AND length(excerpt) <= 65536),
+    content_hash TEXT NOT NULL CHECK (length(trim(content_hash)) > 0),
+    metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+    producer_kind TEXT NOT NULL DEFAULT 'legacy_unknown' CHECK (
+        producer_kind IN (
+            'cass_import',
+            'agentsmd_import',
+            'docs_bootstrap',
+            'journal_distill',
+            'remember_reinforcement',
+            'legacy_unknown'
+        )
+    ),
+    screening_version INTEGER NOT NULL DEFAULT 0 CHECK (screening_version >= 0),
+    secret_redaction_status TEXT NOT NULL DEFAULT 'unknown' CHECK (
+        secret_redaction_status IN ('clean', 'redacted', 'unknown')
+    ),
+    redaction_classes_json TEXT NOT NULL DEFAULT '[]' CHECK (
+        json_valid(redaction_classes_json)
+        AND json_type(redaction_classes_json) = 'array'
+    ),
+    instruction_risk TEXT NOT NULL DEFAULT 'unknown' CHECK (
+        instruction_risk IN ('none', 'low', 'medium', 'high', 'unknown')
+    ),
+    search_eligibility TEXT NOT NULL DEFAULT 'denied' CHECK (
+        search_eligibility IN ('admitted', 'quarantined', 'denied')
+    ),
+    pack_eligibility TEXT NOT NULL DEFAULT 'denied' CHECK (
+        pack_eligibility IN ('admitted', 'quarantined', 'denied')
+    ),
+    canonical_provenance_revision INTEGER NOT NULL DEFAULT 0 CHECK (
+        canonical_provenance_revision >= 0
+    ),
+    canonical_excerpt_hash TEXT CHECK (
+        canonical_excerpt_hash IS NULL
+        OR (
+            canonical_excerpt_hash GLOB 'blake3:*'
+            AND length(canonical_excerpt_hash) = 71
+        )
+    ),
+    security_policy_epoch INTEGER NOT NULL DEFAULT 0 CHECK (
+        security_policy_epoch >= 0
+    ),
+    upstream_ref_hash TEXT CHECK (
+        upstream_ref_hash IS NULL
+        OR (
+            upstream_ref_hash GLOB 'blake3:*'
+            AND length(upstream_ref_hash) = 71
+        )
+    ),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    UNIQUE (session_id, cass_span_id)
+);
+
+INSERT INTO evidence_spans (
+    id, workspace_id, session_id, memory_id, cass_span_id, span_kind,
+    start_line, end_line, start_byte, end_byte, role, excerpt, content_hash,
+    metadata_json, producer_kind, screening_version, secret_redaction_status,
+    redaction_classes_json, instruction_risk, search_eligibility,
+    pack_eligibility, canonical_provenance_revision, canonical_excerpt_hash,
+    security_policy_epoch, upstream_ref_hash, created_at, updated_at
+)
+SELECT
+    id, workspace_id, session_id, memory_id, cass_span_id, span_kind,
+    start_line, end_line, start_byte, end_byte, role, excerpt, content_hash,
+    metadata_json, producer_kind, screening_version, secret_redaction_status,
+    redaction_classes_json, instruction_risk, search_eligibility,
+    pack_eligibility, canonical_provenance_revision, canonical_excerpt_hash,
+    security_policy_epoch, upstream_ref_hash, created_at, updated_at
+FROM evidence_spans_v086
+ORDER BY rowid ASC;
+
+DROP TABLE evidence_spans_v086;
+
+CREATE INDEX idx_evidence_spans_workspace ON evidence_spans(workspace_id);
+CREATE INDEX idx_evidence_spans_session ON evidence_spans(session_id);
+CREATE INDEX idx_evidence_spans_memory
+    ON evidence_spans(memory_id) WHERE memory_id IS NOT NULL;
+CREATE INDEX idx_evidence_spans_kind ON evidence_spans(span_kind);
+CREATE INDEX idx_evidence_spans_content_hash ON evidence_spans(content_hash);
+CREATE INDEX idx_evidence_spans_security_admission
+    ON evidence_spans(workspace_id, search_eligibility, producer_kind, session_id);
+
+CREATE TRIGGER trg_evidence_spans_workspace_integrity_insert
+BEFORE INSERT ON evidence_spans
+WHEN NOT EXISTS (
+        SELECT 1
+        FROM sessions s
+        WHERE s.id = NEW.session_id
+          AND s.workspace_id = NEW.workspace_id
+    )
+    OR (
+        NEW.memory_id IS NOT NULL
+        AND NOT EXISTS (
+            SELECT 1
+            FROM memories m
+            WHERE m.id = NEW.memory_id
+              AND m.workspace_id = NEW.workspace_id
+        )
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'evidence_span_workspace_integrity');
+END;
+
+CREATE TRIGGER trg_evidence_spans_workspace_integrity_update
+BEFORE UPDATE OF workspace_id, session_id, memory_id ON evidence_spans
+WHEN NOT EXISTS (
+        SELECT 1
+        FROM sessions s
+        WHERE s.id = NEW.session_id
+          AND s.workspace_id = NEW.workspace_id
+    )
+    OR (
+        NEW.memory_id IS NOT NULL
+        AND NOT EXISTS (
+            SELECT 1
+            FROM memories m
+            WHERE m.id = NEW.memory_id
+              AND m.workspace_id = NEW.workspace_id
+        )
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'evidence_span_workspace_integrity');
+END;
+
+CREATE TRIGGER trg_workspace_generations_evidence_spans_insert
+AFTER INSERT ON evidence_spans
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.updated_at);
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_evidence_spans_update
+AFTER UPDATE ON evidence_spans
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.updated_at);
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = NEW.workspace_id;
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = OLD.workspace_id
+       AND OLD.workspace_id <> NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_evidence_spans_delete
+AFTER DELETE ON evidence_spans
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id = OLD.workspace_id;
+END;
+
+INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+SELECT id, 0, updated_at FROM workspaces;
+
+UPDATE workspace_generations
+   SET generation = generation + 1,
+       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+ WHERE workspace_id IN (
+    SELECT DISTINCT workspace_id FROM evidence_spans
+ );
+"#,
+    "blake3:v087_evidence_storage_rebuild_2026_07_30",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -7524,6 +7742,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V084_PACK_RECORD_PROFILE_DOMAIN,
     V085_EVIDENCE_SECURITY_POSTURE,
     V086_RULE_INDEX_GENERATIONS,
+    V087_EVIDENCE_STORAGE_REBUILD,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -10271,108 +10490,54 @@ impl DbConnection {
         prepared: &PreparedEvidenceSecurity,
         updated_at: &str,
     ) -> Result<()> {
-        // Pinned FrankenSQLite can silently leave a wide UPDATE or a
-        // DELETE/INSERT replacement unchanged on this trigger-heavy,
-        // ALTER-expanded table even while reporting matched rows. Update each
-        // security field independently through the backend's reliable narrow
-        // rowid lane. This maintenance operation is explicitly bounded to 500
-        // rows; the caller performs one full persisted-state readback, and the
-        // enclosing transaction rolls every statement back on mismatch.
-        let field_updates = [
-            (
-                "cass_span_id",
-                "UPDATE evidence_spans SET cass_span_id = ?2 WHERE rowid = ?1",
+        // V087 materializes the complete evidence row shape, so the security
+        // posture can change as one atomic row update. Target the transaction-
+        // local rowid to avoid a secondary TEXT-primary-key scan, then verify
+        // the full persisted row before appending its audit entry.
+        let affected_rows = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE evidence_spans
+             SET cass_span_id = ?2,
+                 excerpt = ?3,
+                 content_hash = ?4,
+                 metadata_json = ?5,
+                 producer_kind = ?6,
+                 screening_version = ?7,
+                 secret_redaction_status = ?8,
+                 redaction_classes_json = ?9,
+                 instruction_risk = ?10,
+                 search_eligibility = ?11,
+                 pack_eligibility = ?12,
+                 canonical_provenance_revision = ?13,
+                 canonical_excerpt_hash = ?14,
+                 security_policy_epoch = ?15,
+                 upstream_ref_hash = ?16,
+                 updated_at = ?17
+             WHERE rowid = ?1",
+            &[
+                Value::BigInt(rowid),
                 Value::Text(prepared.upstream_ref_hash.clone()),
-            ),
-            (
-                "excerpt",
-                "UPDATE evidence_spans SET excerpt = ?2 WHERE rowid = ?1",
                 Value::Text(prepared.excerpt.clone()),
-            ),
-            (
-                "content_hash",
-                "UPDATE evidence_spans SET content_hash = ?2 WHERE rowid = ?1",
                 Value::Text(prepared.canonical_excerpt_hash.clone()),
-            ),
-            (
-                "metadata_json",
-                "UPDATE evidence_spans SET metadata_json = ?2 WHERE rowid = ?1",
                 Value::Text(prepared.safe_metadata_json.clone()),
-            ),
-            (
-                "producer_kind",
-                "UPDATE evidence_spans SET producer_kind = ?2 WHERE rowid = ?1",
                 Value::Text(prepared.producer_kind.as_str().to_owned()),
-            ),
-            (
-                "screening_version",
-                "UPDATE evidence_spans SET screening_version = ?2 WHERE rowid = ?1",
                 Value::BigInt(i64::from(EVIDENCE_SCREENING_VERSION)),
-            ),
-            (
-                "secret_redaction_status",
-                "UPDATE evidence_spans SET secret_redaction_status = ?2 WHERE rowid = ?1",
                 Value::Text(prepared.secret_redaction_status.to_owned()),
-            ),
-            (
-                "redaction_classes_json",
-                "UPDATE evidence_spans SET redaction_classes_json = ?2 WHERE rowid = ?1",
                 Value::Text(prepared.redaction_classes_json.clone()),
-            ),
-            (
-                "instruction_risk",
-                "UPDATE evidence_spans SET instruction_risk = ?2 WHERE rowid = ?1",
                 Value::Text(prepared.instruction_risk.to_owned()),
-            ),
-            (
-                "search_eligibility",
-                "UPDATE evidence_spans SET search_eligibility = ?2 WHERE rowid = ?1",
                 Value::Text(prepared.search_eligibility.to_owned()),
-            ),
-            (
-                "pack_eligibility",
-                "UPDATE evidence_spans SET pack_eligibility = ?2 WHERE rowid = ?1",
                 Value::Text(prepared.pack_eligibility.to_owned()),
-            ),
-            (
-                "canonical_provenance_revision",
-                "UPDATE evidence_spans SET canonical_provenance_revision = ?2 WHERE rowid = ?1",
                 Value::BigInt(i64::from(EVIDENCE_CANONICAL_PROVENANCE_REVISION)),
-            ),
-            (
-                "canonical_excerpt_hash",
-                "UPDATE evidence_spans SET canonical_excerpt_hash = ?2 WHERE rowid = ?1",
                 Value::Text(prepared.canonical_excerpt_hash.clone()),
-            ),
-            (
-                "security_policy_epoch",
-                "UPDATE evidence_spans SET security_policy_epoch = ?2 WHERE rowid = ?1",
                 Value::BigInt(i64::from(EVIDENCE_SECURITY_POLICY_EPOCH)),
-            ),
-            (
-                "upstream_ref_hash",
-                "UPDATE evidence_spans SET upstream_ref_hash = ?2 WHERE rowid = ?1",
                 Value::Text(prepared.upstream_ref_hash.clone()),
-            ),
-            (
-                "updated_at",
-                "UPDATE evidence_spans SET updated_at = ?2 WHERE rowid = ?1",
                 Value::Text(updated_at.to_owned()),
-            ),
-        ];
-
-        for (field, statement, value) in field_updates {
-            let affected_rows = self.execute_for(
-                DbOperation::Execute,
-                statement,
-                &[Value::BigInt(rowid), value],
-            )?;
-            if affected_rows > 1 {
-                return Err(malformed_evidence_input(format!(
-                    "legacy evidence rescreen {field} update matched {affected_rows} rows for \
-                     {evidence_id}",
-                )));
-            }
+            ],
+        )?;
+        if affected_rows > 1 {
+            return Err(malformed_evidence_input(format!(
+                "legacy evidence rescreen update matched {affected_rows} rows for {evidence_id}",
+            )));
         }
         Ok(())
     }
@@ -10422,8 +10587,41 @@ impl DbConnection {
             ))
         })?;
         let mut mismatches = stored_evidence_security_mismatches(&persisted, prepared);
+        if persisted.id != span.id {
+            mismatches.push("id");
+        }
         if persisted.workspace_id != span.workspace_id {
             mismatches.push("workspace_id");
+        }
+        if persisted.session_id != span.session_id {
+            mismatches.push("session_id");
+        }
+        if persisted.memory_id != span.memory_id {
+            mismatches.push("memory_id");
+        }
+        if persisted.span_kind != span.span_kind {
+            mismatches.push("span_kind");
+        }
+        if persisted.start_line != span.start_line {
+            mismatches.push("start_line");
+        }
+        if persisted.end_line != span.end_line {
+            mismatches.push("end_line");
+        }
+        if persisted.start_byte != span.start_byte {
+            mismatches.push("start_byte");
+        }
+        if persisted.end_byte != span.end_byte {
+            mismatches.push("end_byte");
+        }
+        if persisted.role != span.role {
+            mismatches.push("role");
+        }
+        if persisted.created_at != span.created_at {
+            mismatches.push("created_at");
+        }
+        if persisted.updated_at != now {
+            mismatches.push("updated_at");
         }
         if !mismatches.is_empty() {
             return Err(malformed_evidence_input(format!(
@@ -28365,6 +28563,11 @@ mod tests {
         connection.apply_migration(
             &super::V085_EVIDENCE_SECURITY_POSTURE,
             "2026-07-28T00:00:00Z",
+        )?;
+        connection.apply_migration(&super::V086_RULE_INDEX_GENERATIONS, "2026-07-28T00:00:01Z")?;
+        connection.apply_migration(
+            &super::V087_EVIDENCE_STORAGE_REBUILD,
+            "2026-07-30T00:00:00Z",
         )?;
         ensure(
             matches!(
