@@ -42,12 +42,14 @@ const FORBIDDEN_CRATES: &[&str] = &[
 /// update the audit before it can land, so forbidden transitive dependencies
 /// pulled by new algorithm modules are reviewed through the same gate.
 const AUDITED_FNX_ALGORITHM_CALLS: &[&str] = &[
+    "all_pairs_lowest_common_ancestor",
     "articulation_points",
     "betweenness_centrality_directed",
     "dominance_frontiers",
     "ego_graph",
     "find_cycle_directed",
     "gomory_hu_tree",
+    "hits_centrality",
     "hits_centrality_directed",
     "immediate_dominators",
     "k_core",
@@ -55,6 +57,7 @@ const AUDITED_FNX_ALGORITHM_CALLS: &[&str] = &[
     "label_propagation_communities",
     "louvain_communities",
     "min_cost_flow",
+    "number_connected_components",
     "onion_layers",
     "pagerank_directed",
     "pagerank_with_params",
