@@ -10273,6 +10273,21 @@ impl DbConnection {
         let before_hash = stored_evidence_security_state_hash(span);
         let now = Utc::now().to_rfc3339();
         let prepared = &decision.prepared;
+        let rowid_rows = self.query_for(
+            DbOperation::Query,
+            "SELECT rowid FROM evidence_spans WHERE id = ?1",
+            &[Value::Text(span.id.clone())],
+        )?;
+        let rowid = rowid_rows
+            .first()
+            .map(|row| required_i64(row, 0, DbOperation::Query, "rowid"))
+            .transpose()?
+            .ok_or_else(|| {
+                malformed_evidence_input(format!(
+                    "legacy evidence rescreen lost ownership of {}",
+                    span.id
+                ))
+            })?;
         let current = self.get_evidence_span(&span.id)?.ok_or_else(|| {
             malformed_evidence_input(format!(
                 "legacy evidence rescreen lost ownership of {}",
@@ -10286,34 +10301,33 @@ impl DbConnection {
             )));
         }
 
-        // The enclosing BEGIN IMMEDIATE transaction owns the writer boundary,
-        // and the exact selected row was just revalidated above. Keep the DML
-        // predicate deliberately simple: the pinned FrankenSQLite planner can
-        // report zero rows for the equivalent parameterized OR/IS NULL pending
-        // predicate when generation triggers are present.
+        // The enclosing transaction owns the writer boundary, and the exact
+        // selected row plus its database-local rowid were just revalidated.
+        // Target that rowid directly: pinned FrankenSQLite's trigger fallback
+        // can miss this table's equivalent TEXT-primary-key full-scan UPDATE.
+        // The rowid is never persisted or exposed beyond this transaction.
         let affected_rows = self.execute_for(
             DbOperation::Execute,
             "UPDATE evidence_spans
-             SET cass_span_id = ?1,
-                 excerpt = ?2,
-                 content_hash = ?3,
-                 metadata_json = ?4,
-                 producer_kind = ?5,
-                 screening_version = ?6,
-                 secret_redaction_status = ?7,
-                 redaction_classes_json = ?8,
-                 instruction_risk = ?9,
-                 search_eligibility = ?10,
-                 pack_eligibility = ?11,
-                 canonical_provenance_revision = ?12,
-                 canonical_excerpt_hash = ?13,
-                 security_policy_epoch = ?14,
-                 upstream_ref_hash = ?15,
-                 updated_at = ?16
-             WHERE id = ?17
-               AND workspace_id = ?18
-               AND producer_kind = 'legacy_unknown'",
+             SET cass_span_id = ?2,
+                 excerpt = ?3,
+                 content_hash = ?4,
+                 metadata_json = ?5,
+                 producer_kind = ?6,
+                 screening_version = ?7,
+                 secret_redaction_status = ?8,
+                 redaction_classes_json = ?9,
+                 instruction_risk = ?10,
+                 search_eligibility = ?11,
+                 pack_eligibility = ?12,
+                 canonical_provenance_revision = ?13,
+                 canonical_excerpt_hash = ?14,
+                 security_policy_epoch = ?15,
+                 upstream_ref_hash = ?16,
+                 updated_at = ?17
+             WHERE rowid = ?1",
             &[
+                Value::BigInt(rowid),
                 Value::Text(prepared.upstream_ref_hash.clone()),
                 Value::Text(prepared.excerpt.clone()),
                 Value::Text(prepared.canonical_excerpt_hash.clone()),
@@ -10330,8 +10344,6 @@ impl DbConnection {
                 Value::BigInt(i64::from(EVIDENCE_SECURITY_POLICY_EPOCH)),
                 Value::Text(prepared.upstream_ref_hash.clone()),
                 Value::Text(now),
-                Value::Text(span.id.clone()),
-                Value::Text(span.workspace_id.clone()),
             ],
         )?;
         if affected_rows > 1 {
