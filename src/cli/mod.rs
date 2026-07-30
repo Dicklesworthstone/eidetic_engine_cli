@@ -20849,33 +20849,44 @@ where
     };
 
     match rebuild_index(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &format!(
-                    "INDEX_REBUILD|{}|{}|{}|{}\n",
-                    report.status.as_str(),
-                    report.memories_indexed,
-                    report.sessions_indexed,
-                    report.documents_total
+        Ok(report) => {
+            let evidence = crate::core::index::EvidenceAdmissionTotals::from_report(
+                &report.evidence_admission,
+            );
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &report.human_summary())
+                }
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &format!(
+                        "INDEX_REBUILD|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
+                        report.status.as_str(),
+                        report.memories_indexed,
+                        report.sessions_indexed,
+                        report.artifacts_indexed,
+                        report.rules_indexed,
+                        report.evidence_indexed,
+                        evidence.admitted,
+                        evidence.quarantined,
+                        evidence.denied,
+                        report.documents_total
+                    ),
                 ),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V2,
-                    "success": true,
-                    "degraded": [],
-                    "data": report.data_json(),
-                });
-                write_stdout(stdout, &(json.to_string() + "\n"))
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    let json = serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
+                        "success": true,
+                        "degraded": [],
+                        "data": report.data_json(),
+                    });
+                    write_stdout(stdout, &(json.to_string() + "\n"))
+                }
             }
-        },
+        }
         Err(error) => write_index_rebuild_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -20899,33 +20910,46 @@ where
     };
 
     match reembed_index(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &format!(
-                    "INDEX_REEMBED|{}|{}|{}|{}\n",
-                    report.status.as_str(),
-                    report.job_status,
-                    report.documents_total,
-                    report.embedding.fast_model_id
+        Ok(report) => {
+            let evidence = crate::core::index::EvidenceAdmissionTotals::from_report(
+                &report.evidence_admission,
+            );
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &report.human_summary())
+                }
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &format!(
+                        "INDEX_REEMBED|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
+                        report.status.as_str(),
+                        report.job_status,
+                        report.memories_indexed,
+                        report.sessions_indexed,
+                        report.artifacts_indexed,
+                        report.rules_indexed,
+                        report.evidence_indexed,
+                        evidence.admitted,
+                        evidence.quarantined,
+                        evidence.denied,
+                        report.documents_total,
+                        report.embedding.fast_model_id
+                    ),
                 ),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V2,
-                    "success": true,
-                    "degraded": [],
-                    "data": report.data_json(),
-                });
-                write_stdout(stdout, &(json.to_string() + "\n"))
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    let json = serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
+                        "success": true,
+                        "degraded": [],
+                        "data": report.data_json(),
+                    });
+                    write_stdout(stdout, &(json.to_string() + "\n"))
+                }
             }
-        },
+        }
         Err(error) => write_index_rebuild_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -20955,11 +20979,17 @@ where
             output::Renderer::Toon => write_stdout(
                 stdout,
                 &format!(
-                    "INDEX_STATUS|{}|{}|{}|{}\n",
+                    "INDEX_STATUS|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
                     report.health.as_str(),
                     report.index_exists,
                     report.db_memory_count,
-                    report.db_session_count
+                    report.db_session_count,
+                    report.db_artifact_count,
+                    report.db_rule_count,
+                    report.db_evidence_count,
+                    report.db_evidence_admitted_count,
+                    report.db_evidence_quarantined_count,
+                    report.db_evidence_denied_count
                 ),
             ),
             output::Renderer::Json
@@ -38723,11 +38753,21 @@ fn migration_index_rebuild_audit_details(
     error: Option<&str>,
 ) -> serde_json::Value {
     let report_json = report.map(|report| {
+        let evidence =
+            crate::core::index::EvidenceAdmissionTotals::from_report(&report.evidence_admission);
         serde_json::json!({
             "indexDir": report.index_dir.display().to_string(),
             "memoriesIndexed": report.memories_indexed,
             "sessionsIndexed": report.sessions_indexed,
             "artifactsIndexed": report.artifacts_indexed,
+            "rulesIndexed": report.rules_indexed,
+            "evidenceIndexed": report.evidence_indexed,
+            "evidenceAdmission": &report.evidence_admission,
+            "evidenceAdmissionTotals": {
+                "admitted": evidence.admitted,
+                "quarantined": evidence.quarantined,
+                "denied": evidence.denied,
+            },
             "documentsTotal": report.documents_total,
             "elapsedMs": report.elapsed_ms,
             "dryRun": report.dry_run,
@@ -38801,6 +38841,8 @@ fn migration_index_rebuild_report_json(
     report: &IndexRebuildReport,
     audit_id: &str,
 ) -> serde_json::Value {
+    let evidence =
+        crate::core::index::EvidenceAdmissionTotals::from_report(&report.evidence_admission);
     serde_json::json!({
         "stepId": POST_MIGRATION_INDEX_REBUILD_STEP_ID,
         "required": true,
@@ -38810,6 +38852,14 @@ fn migration_index_rebuild_report_json(
         "memoriesIndexed": report.memories_indexed,
         "sessionsIndexed": report.sessions_indexed,
         "artifactsIndexed": report.artifacts_indexed,
+        "rulesIndexed": report.rules_indexed,
+        "evidenceIndexed": report.evidence_indexed,
+        "evidenceAdmission": &report.evidence_admission,
+        "evidenceAdmissionTotals": {
+            "admitted": evidence.admitted,
+            "quarantined": evidence.quarantined,
+            "denied": evidence.denied,
+        },
         "documentsTotal": report.documents_total,
         "indexDir": report.index_dir.display().to_string(),
         "elapsedMs": report.elapsed_ms,
@@ -38985,6 +39035,8 @@ fn run_post_migration_index_rebuild(
         applied_count = applied.len(),
         documents_total = report.documents_total,
         memories_indexed = report.memories_indexed,
+        rules_indexed = report.rules_indexed,
+        evidence_indexed = report.evidence_indexed,
         index_dir = %report.index_dir.display(),
         "post-migration index rebuild completed"
     );

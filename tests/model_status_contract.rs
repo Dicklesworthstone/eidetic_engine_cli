@@ -6,11 +6,14 @@
 use std::fs;
 use std::path::Path;
 
+use ee::core::index::{INDEX_METADATA_SCHEMA_V2, expected_index_corpus_revision};
 use ee::core::model::{
     BUNDLED_EMBEDDING_MODEL_ID, MODEL_LIST_SCHEMA_V1, MODEL_STATUS_SCHEMA_V2, ModelListOptions,
     ModelStatusOptions, build_model_list_report, build_model_status_report,
 };
-use ee::db::{CreateModelRegistryInput, CreateWorkspaceInput, DbConnection};
+use ee::db::{
+    CreateModelRegistryInput, CreateWorkspaceInput, DbConnection, EVIDENCE_SECURITY_POLICY_EPOCH,
+};
 use ee::models::model_registry::{
     EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
 };
@@ -269,7 +272,23 @@ fn model_lifecycle_reports_dimension_mismatch_with_repair_guidance() -> TestResu
     write_index_metadata(
         &workspace_path,
         serde_json::json!({
+            "schema": INDEX_METADATA_SCHEMA_V2,
             "sourceGeneration": 999999_u64,
+            "corpusRevision": expected_index_corpus_revision().as_str(),
+            "evidenceSecurityPolicyEpoch": EVIDENCE_SECURITY_POLICY_EPOCH,
+            "documentCount": 0,
+            "documentCounts": {
+                "memories": 0,
+                "sessions": 0,
+                "artifacts": 0,
+                "rules": 0,
+                "evidence": 0
+            },
+            "tierDocumentCounts": {
+                "fast": 0,
+                "quality": null,
+                "lexical": cfg!(feature = "lexical-bm25").then_some(0)
+            },
             "storedModelId": "mdl_01HQ3K5Z000000000000000040",
             "storedModelRevision": "v1",
             "storedModelHash": valid_blake3_hash(b"index-model"),

@@ -11,8 +11,8 @@ writes when an active index already exists. The path updates the persisted
 Frankensearch tiers directly: vector rows are appended or soft-deleted through
 the vector tier, and lexical rows are upserted or deleted through Tantivy. A full
 rebuild remains the safe fallback for first build, generation skew, missing
-index files, unavailable tiers, forced reindex, or deltas that exceed the
-bounded incremental threshold.
+index files, corpus-revision mismatch, unavailable tiers, forced reindex, or
+deltas that exceed the bounded incremental threshold.
 
 `ee.index_intake.v1` is the redaction-safe telemetry contract for this behavior.
 It records modes and counts only: no memory content, query text, or provenance
@@ -33,6 +33,13 @@ The equivalence requirement covers:
 - same rounded scores,
 - tombstone and update handling,
 - fallback-to-full reason stability.
+
+Each active `meta.json` uses `ee.index_metadata.v2` and records a deterministic
+`corpusRevision`, exact memory/session/artifact/rule/evidence counts, and
+per-tier counts. Missing legacy revisions fail closed as stale. Full rebuild,
+re-embed, incremental intake, and interrupted-publish recovery verify those
+counts before publishing a current generation; a per-document build failure can
+never be published as a complete corpus.
 
 ## E2E And Perf Proof
 

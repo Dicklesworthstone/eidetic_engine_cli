@@ -82,6 +82,8 @@ pub const INDEX_INTAKE_MODE_SEGMENT_MERGE: &str = "segment_merge";
 pub const INDEX_INTAKE_FALLBACK_INDEX_ABSENT: &str = "index_absent";
 /// Index-intake fallback-to-full reason: index vs DB generation skew.
 pub const INDEX_INTAKE_FALLBACK_GENERATION_SKEW: &str = "generation_skew";
+/// Index-intake fallback-to-full reason: the active index uses different corpus semantics.
+pub const INDEX_INTAKE_FALLBACK_CORPUS_REVISION_MISMATCH: &str = "corpus_revision_mismatch";
 /// Index-intake fallback-to-full reason: a persisted tier could not be reopened.
 pub const INDEX_INTAKE_FALLBACK_TIER_UNAVAILABLE: &str = "tier_unavailable";
 /// Index-intake fallback-to-full reason: a forced reindex was requested.

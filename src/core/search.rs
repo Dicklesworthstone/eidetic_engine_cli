@@ -6576,7 +6576,7 @@ fn run_search_inner_with_performance(
         trace.record_elapsed("search::indexExists", index_exists_start);
         return Err(SearchError::NoIndex);
     }
-    if !crate::core::index::index_evidence_security_policy_is_current(&index_dir) {
+    if !crate::core::index::index_corpus_compatibility_is_current(&index_dir) {
         trace.record_elapsed("search::indexExists", index_exists_start);
         return Err(SearchError::NoIndex);
     }
@@ -7079,7 +7079,7 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
     if !index_dir.exists() {
         return Err(SearchError::NoIndex);
     }
-    if !crate::core::index::index_evidence_security_policy_is_current(&index_dir) {
+    if !crate::core::index::index_corpus_compatibility_is_current(&index_dir) {
         return Err(SearchError::NoIndex);
     }
 
@@ -10182,19 +10182,9 @@ mod tests {
         ))
     }
 
-    fn write_current_evidence_security_epoch_metadata(index_dir: &Path) -> TestResult {
-        std::fs::write(
-            index_dir.join("meta.json"),
-            serde_json::json!({
-                "schema": "ee.index_metadata.v1",
-                "generation": 0,
-                "sourceGeneration": 0,
-                "evidenceSecurityPolicyEpoch": crate::db::EVIDENCE_SECURITY_POLICY_EPOCH,
-                "documentCount": 0,
-            })
-            .to_string(),
-        )
-        .map_err(|error| error.to_string())
+    fn write_current_index_metadata(index_dir: &Path, documents_total: u32) -> TestResult {
+        crate::core::index::write_memory_eval_index_metadata(index_dir, documents_total)
+            .map_err(|error| error.to_string())
     }
 
     fn seeded_search_audit_ids(seed: u64) -> Result<Vec<String>, String> {
@@ -10687,7 +10677,7 @@ mod tests {
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
-        write_current_evidence_security_epoch_metadata(&index_dir)?;
+        write_current_index_metadata(&index_dir, 3)?;
 
         let similar = run_similar(&SimilarOptions {
             workspace_path: workspace.clone(),
@@ -13893,7 +13883,7 @@ mod tests {
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
-        write_current_evidence_security_epoch_metadata(&index_dir)?;
+        write_current_index_metadata(&index_dir, 2)?;
 
         let initially_admitted = run_search(&SearchOptions {
             workspace_path: workspace.clone(),
@@ -14029,7 +14019,7 @@ mod tests {
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
-        write_current_evidence_security_epoch_metadata(&index_dir)?;
+        write_current_index_metadata(&index_dir, 3)?;
 
         let report = run_diag_search(&SearchOptions {
             workspace_path: workspace.clone(),

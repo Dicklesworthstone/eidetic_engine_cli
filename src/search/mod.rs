@@ -37,6 +37,11 @@ pub use scoring::{
 
 pub const SUBSYSTEM: &str = "search";
 pub const CANONICAL_DOCUMENT_SCHEMA: &str = SEARCH_DOCUMENT_SCHEMA_V1;
+pub(crate) const MEMORY_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.memory_index_projection.v1";
+pub(crate) const SESSION_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.session_index_projection.v1";
+pub(crate) const ARTIFACT_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.artifact_index_projection.v1";
+pub(crate) const RULE_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.rule_index_projection.v1";
+pub(crate) const EVIDENCE_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.evidence_index_projection.v1";
 pub const MEMORY_ANCHOR_SCHEMA_METADATA_KEY: &str = "memory_anchor_schema";
 pub const MEMORY_ANCHOR_COUNT_METADATA_KEY: &str = "memory_anchor_count";
 pub const MEMORY_ANCHOR_KINDS_METADATA_KEY: &str = "memory_anchor_kinds";
@@ -646,8 +651,6 @@ pub fn session_to_document_with_context(
 
     builder.build(session)
 }
-
-const RULE_INDEX_PROJECTION_SCHEMA_V1: &str = "ee.rule_index_projection.v1";
 
 /// Stable validation failure for a workspace-relative rule scope pattern.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

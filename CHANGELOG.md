@@ -26,6 +26,14 @@ Evidence scale:
 
 ### Fixed
 
+- Search-index publication now stamps a deterministic corpus revision and exact
+  per-source/per-tier document counts. Legacy memory-only generations cannot be
+  incrementally relabeled as current after rule/evidence corpus expansion;
+  rebuild, re-embed, search, status, incremental intake, and crash recovery all
+  fail closed or perform one atomic full rebuild when corpus semantics differ.
+  Rules and positively admitted evidence now participate in re-embedding,
+  coverage, idempotency, and public count reporting, while denied evidence
+  remains excluded.
 - The Unix release installer now expands every possibly empty array safely
   under `set -u` on Apple's stock Bash 3.2, including proxy forwarding,
   agent detection, box rendering, and archive candidate handling. Proxy-free
