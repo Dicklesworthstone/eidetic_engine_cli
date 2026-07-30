@@ -6,21 +6,8 @@ Plan: [`docs/mesh/team_confederation_plan.md`](../mesh/team_confederation_plan.m
 Related: ADR 0037 (optional mesh), 0038 (auto-enrollment), 0041 (anti-entropy),
 0009 (trust classes), 0069 (global knowledge lane), 0083 (user-global store)
 Date: 2026-07-30
-Last amended: 2026-07-30 (independent implementation-readiness review,
-landed as b34bacbd + the Git-probe hardening delta; then the post-amendment
-audit pass — feature-gate pinning, validity-field carry-forward, cutoff-model
-emitter for team_member_removed_stream_rejected, not-a-CRDT and
-absolute-timestamp rules reinstated, rematerialization pinned with an owning
-bead, RSA policy pinned, and the Ed25519-in-v1 reversal split into plan §13
-item 1b — RATIFIED by the operator 2026-07-30, so the signature/relay
-dependencies are approved and every TC-D that builds on them is fully
-decided; recorded by bd-tc-epic-qzk7o.9 and commit 54ee80b8. The subsequent
-audit pinned crash-safe non-downgrading pair rotation, invite/ceremony ID
-entropy, symmetric lane revocation, delegated-member review truthfulness, and
-the rematerialization publication fence; the final pass superseded the
-rotating-key frame-v1 identity, added operation-specific feature gating,
-durable revocation fences, rollback-safe rotation grace, and honest
-local-source unshare scope)
+Last amended: 2026-07-30 (operator-ratified implementation-readiness,
+security, consistency, and task-graph review; decisions remain final)
 
 ## Context
 
@@ -209,9 +196,18 @@ T2.0 therefore introduces a generic `ee.mesh.origin_event.v1` envelope
   `ee.mesh.event.v1` so validity *filtering* (ADR 0041 scenarios) survives
   the supersession. `trust`, `validity`, and `bodyAvailable` event kinds
   remain deferred; body eligibility is serve-time policy (TC-D12). Every
-  memory event requires `mesh.team.memory.v1`; content-bearing events sign
-  TC-D12's body representation and redaction-provenance fields alongside
-  `content_hash`, so fetch integrity never depends on mutable serving policy.
+  memory event requires `mesh.team.memory.v1`. The typed metadata contract is
+  deliberately closed: it contains logical/revision/predecessor IDs, level,
+  kind, validity, project binding, the origin's bounded trust claim,
+  provenance-safe opaque IDs, and, for content-bearing events, TC-D12's body
+  representation, redaction-provenance fields, and salted
+  `bodyCommitment`. It does **not** contain body text,
+  first-line/title/preview text, tags, provenance URIs, raw paths, evidence
+  bodies, or the commitment nonce. Metadata-lane consumers may search/filter
+  the admitted fields and render an attributed missing-body placeholder; they
+  cannot claim substantive full-text recall until an authorized body is
+  locally available. This exact allowlist is schema- and golden-tested so a
+  model-field addition cannot silently widen disclosure.
 - `ee.team.manifest_event.v1`: explicit `teamCreated`, `memberAdded`,
   `memberRemoved`, `nodeBound`, `nodeRevoked`, `projectRegistered`,
   `signingKeyRotated`, `laneProfileSet`, `idpPolicySet`, and
@@ -288,19 +284,26 @@ generation and reason. Materialized state is derived only from explicit
 `applied` dispositions, never from a scalar "application cursor." Hydrating a
 withheld event audits and changes that event's disposition without rewinding
 either frontier. This sparse disposition ledger is what permits N+1 to apply
-while N remains withheld. The safe header leaks event
-existence, origin, time, kind, and payload hash to an already-enrolled peer;
-that metadata disclosure is explicit in the sharing preview.
+while N remains withheld. The safe header leaks event existence, origin,
+time, kind, and payload hash to an already-enrolled peer; an admitted memory
+payload additionally discloses only the closed metadata allowlist above.
+Both disclosure sets are explicit in the sharing preview.
 
 Per-request admission limits do not bound an append-only ledger. Inbound
 signed events, dispositions, and fork proofs therefore also consume a
 transactional **cumulative ingress budget** charged to the signed origin
 lineage (not the relayer or current connection, and not reset by signing-key
 rotation). V1 defaults are 64 MiB per origin lineage and 256 MiB total per
-local team workspace, with 1 MiB of separate control reserve per active
-member/origin for safe headers plus mandatory manifest, `tombstone`, and
-`shareWithdraw` payloads. Normal `create`/`revise` payloads cannot consume the
-reserve. Charged size rounds each durable row's encoded bytes up to a 4 KiB
+local team workspace. Mandatory safe headers, manifest operations,
+`tombstone`, and `shareWithdraw` payloads use a separately checked control
+reserve: at most 1 MiB per authenticated random ee node-ID lineage and
+80 MiB per local team workspace. The charge key is the stable ee node ID,
+never an origin workspace/stream, signing generation, current member binding,
+or relayer; rotation, workspace churn, removal/rebinding, and reconnects do
+not reset it. Node IDs are never recycled. The team-wide cap is therefore the
+hard backstop even across historical or adversarial lineages. Normal
+`create`/`revise` payloads cannot consume either control reserve. Charged size
+rounds each durable row's encoded bytes up to a 4 KiB
 page and adds one 4 KiB row/index-overhead unit; arithmetic is checked. Intake
 also stops before commit when the filesystem would fall below a 1 GiB
 free-space floor. These are conservative local defaults under
@@ -312,10 +315,17 @@ disposition, audit-per-attempt, index job, or frontier movement; only one
 coalesced bounded posture record/counter per origin is updated. Near the
 normal ceiling the range planner requests header/control-only continuation so
 an honest remover can still reach a mandatory control through preceding safe
-headers. Exhausting the origin's bounded control reserve or crossing the
-free-space floor stops that origin entirely and reports
+headers. Exhausting the authenticated node's or team's bounded control
+reserve, or crossing the free-space floor, stops that origin entirely and
+reports
 `mesh_inbound_storage_budget_exhausted`; unrelated origins continue while
-their own and the team normal budgets permit. Local origin rows and local
+their own and the team normal budgets permit. Team-cap exhaustion is named
+for what it is — an explicit availability incident: when the *team-wide*
+control reserve is exhausted (possible via accumulated never-recycled
+historical lineages), mandatory-control intake (including removal fan-out
+and `shareWithdraw`) pauses for honest origins too, until the operator
+raises the local `[mesh.admission]` bound or prunes state; it never widens
+disclosure. Local origin rows and local
 source-of-truth mutations are not charged to this remote-ingress budget, so a
 peer cannot make `ee remember` fail by filling it. Body objects remain under
 TC-D12's separate evictable cache quotas. No automatic ledger deletion is
@@ -330,7 +340,7 @@ emits `create` for its current state, not an orphan `revise`.
 confirmation pin the exact origin-owned memory IDs plus entity revisions and
 state the real audience: metadata enters durable team history and is
 available to current **and future** active members until an origin-wide
-`shareWithdraw` (subject to the same cache/hash residuals as TC-D12). It is
+`shareWithdraw` (subject to the same cache/commitment residuals as TC-D12). It is
 not a current-recipient-only grant. A bounded resumable job then emits
 missing `create` events in stable order. Each
 item is revalidated against the pinned revision immediately before emission;
@@ -414,10 +424,14 @@ counter. Pair keys remain team/node-scoped, but each connection handshake
 authenticates this exact endpoint-workspace pair; neither peer may select a
 different database after the handshake. Event `origin_workspace_id` remains
 producer provenance and may differ for an intact relayed event; it never
-chooses either receiving database. Target/route mismatch, counter
-replay/regression, direction confusion, missing key confirmation, and
-response/request mismatch are hard failures. A bounded replay window permits
-only explicitly specified retransmission, never arbitrary duplicate mutation.
+chooses either receiving database. Target/route mismatch, direction
+confusion, missing key confirmation, and response/request mismatch are hard
+failures. Each receiver accepts exactly the next per-direction counter;
+duplicate, skipped, or regressed frame counters terminate the session. TCP
+already supplies ordered delivery, so v1 has no frame replay window. An
+application retry opens or uses a valid session and sends a new frame with
+the next counter while retaining the immutable event ID or operation
+idempotency key; it never replays authenticated frame bytes.
 
 Tailscale's current node public key is a rotating transport credential, not
 the durable ee member identity: Tailscale documents that reauthentication
@@ -546,8 +560,18 @@ generation. A current-key observation update for the same binding therefore
 does not mint a peer, change the target principal, or inherit a grant.
 Member identity is machine-anchored (verified stable-node bindings + ee
 signing keys + pair keys), never env-var-anchored; `EE_AGENT_NAME` remains an
-unauthenticated agent label within one member's swarm. Producer metadata gains
-an optional `memberId` so synced rows attribute to people. A machine belongs
+unauthenticated agent label within one member's swarm. A signed memory payload
+does not choose its authoritative member attribution. On admission, the
+receiver derives `producerMemberId` from the verified origin node/signing
+generation and the membership authorization position that made that event
+eligible, then persists it in the local projection. Missing, ambiguous, or
+payload-mismatched attribution is quarantined rather than accepted as local
+or assigned to a different member, under the named degraded code
+`team_attribution_unresolved` (registered in the plan §9 list; fixture +
+taxonomy in the same commit as the emitter). Project attribution is likewise resolved
+from the authorized origin workspace/project registry; display labels in a
+payload are non-authoritative. Local-origin ownership is explicit source
+provenance and is never inferred from a null member field. A machine belongs
 to at most one team per workspace in v1. Lane grants are ee-node-scoped even
 when the product command is
 member-shaped: `--with <member>` previews and grants the member's currently
@@ -556,7 +580,24 @@ default and never inherits an existing body grant without a new preview and
 consent. `ee mesh revoke-lane` and the member-shaped
 `ee team unshare bodies` advance each exact node's grant generation and stop
 future serving; a stale preview cannot re-enable the lane, and a later grant
-needs a fresh preview. Status exposes partially granted members.
+needs a fresh preview. A body request's requester member is derived from its
+authenticated session node and must match the active manifest binding; a
+request field cannot impersonate another member. Status exposes partially
+granted members.
+
+Exposure-increasing grants use an authenticated `--preview-token`, not a
+public digest of preview content. The token is a domain-separated,
+store-local keyed MAC over one canonical approval snapshot from which both
+human and JSON output are rendered. That snapshot binds the store/workspace,
+surface/schema and copy versions, target identity and grant generation,
+current/proposed policy generations, the complete revision-pinned candidate
+set, sample strategy/limit, the exact ordered redacted samples, and caution
+codes. The token is opaque and never contains or exposes a raw body/content
+hash; another store, workspace, command surface, or retired key cannot verify
+it. Apply recomputes the snapshot and compares in constant time before any
+mutation. Drift returns a fresh preview with zero grant/audit effects. The
+preview remains read-only, and a successful mutation records only a
+non-replayable token identifier—not the token or sample bytes.
 
 ### TC-D7 — Trust class `peer_human_attested`; `human_explicit` stays local
 
@@ -583,9 +624,11 @@ as `agent_validated` (demoting a previously elevated revision if necessary),
 never disappears or silently elevates, and emits
 `team_member_elevation_burst`. The cap is an atomic, persistent
 **local-admission** rolling window; it never trusts member-supplied
-`producedAt` for rate accounting. A persisted nondecreasing accounting
-high-water mark prevents wall-clock rollback from reopening a bucket, and a
-batch is evaluated in canonical origin/key-generation/sequence order.
+`producedAt` for rate accounting. The bucket key is the receiver-derived
+producer member from TC-D6, never a payload claim. A persisted nondecreasing
+accounting high-water mark prevents wall-clock rollback from reopening a
+bucket, and a batch is evaluated in canonical
+origin/key-generation/sequence order.
 Because elevation is local policy, two members may deliberately make
 different elevation decisions while preserving the same signed provenance.
 The three existing rejection points
@@ -674,25 +717,41 @@ cannot extend their own tier-2 identity lease. Attestations are an append-only
 lease set, not an arrival-winner singleton: all eligible leases are retained
 in canonical event-hash order, and the subject is currently attested when at
 least one unexpired lease satisfies the locally effective policy floor. The
-derived effective deadline is the maximum eligible deadline, capped when each
-lease is authored by the policy cadence. Concurrent renewals therefore
-commute. "Unexpired" is evaluated against a local, persisted, nondecreasing
-identity-authorization time floor, transactionally advanced to at least the
-current wall clock before every token-verification, grant/serve, sync-import,
-status, and steward decision that depends on identity. Peer `producedAt`,
-token timestamps, and attestation claims never advance that floor. A local
-clock rollback therefore cannot revive or extend a lease and surfaces
-`team_identity_clock_rollback`. A forward jump simply advances the floor and
-may expire leases early, which is fail-safe; if the system clock is then
-corrected backward, the rollback posture appears. The explicit local repair
-lowers the floor only after suppressing every currently eligible tier-2 lease
-and requiring fresh interactive attestations, so reset cannot reactivate old
-evidence. Two active member IDs cannot claim the same exact
-(`issuer`, `subject`) under one policy generation; all such bindings enter a
-complete-set `manifest_conflict` and sharing for the affected members pauses
-until reconciliation/removal rather than selecting the first arrival. A
-verifier whose own current subject matches the target subject is not distinct
-and cannot authorize the lease.
+derived effective deadline is the maximum eligible deadline. On first
+admission, a receiver checks the signed `verifiedAt` and `validUntil` against
+its local effective authorization time: `verifiedAt` may not be more than
+`MAX_IDENTITY_ATTESTATION_CLOCK_SKEW_SECONDS = 600` in the future;
+`validUntil` must be later than `verifiedAt`, no later than
+`verifiedAt + policy_cadence`, and no later than the verified token/evidence
+expiry. A late-delivered lease already expired at admission is ineligible;
+receipt time never revives or extends it. Concurrent renewals therefore
+commute without allowing an origin clock or compromised verifier to mint an
+unbounded deadline. A compromised active verifier may still lie within this
+bounded window; v1 records that attributed authority rather than claiming
+independent directory proof.
+
+"Unexpired" is evaluated against a local, persisted, nondecreasing
+identity-authorization time floor. Identity-dependent operations that can
+authorize, mutate, import, or serve—token verification, grant/serve,
+sync-import, steward suspension/renewal, and explicit revalidation—advance
+that floor transactionally to at least the current wall clock before acting.
+Read-only status, doctor, activity, and audit surfaces instead calculate
+`max(persisted_floor, current_wall_clock)` without persisting it; observation
+does not turn a read command into a writer or permanently poison the floor
+after a bad local clock. Peer `producedAt`, token timestamps, attestation
+claims, and receipt times never advance that floor. A local clock rollback on
+an identity-dependent operation therefore cannot revive or extend a lease
+and surfaces `team_identity_clock_rollback`. A forward jump during such an
+operation advances the floor and may expire leases early, which is fail-safe;
+if the system clock is then corrected backward, the rollback posture appears.
+The explicit local repair lowers the floor only after suppressing every
+currently eligible tier-2 lease and requiring fresh interactive attestations,
+so reset cannot reactivate old evidence. Two active member IDs cannot claim
+the same exact (`issuer`, `subject`) under one policy generation; all such
+bindings enter a complete-set `manifest_conflict` and sharing for the
+affected members pauses until reconciliation/removal rather than selecting
+the first arrival. A verifier whose own current subject matches the target
+subject is not distinct and cannot authorize the lease.
 
 V1 has a hard `MAX_ACTIVE_TEAM_MEMBERS = 20` protocol limit (the creator-only
 bootstrap state may temporarily contain one). If the complete admitted event
@@ -1001,7 +1060,21 @@ A member whose machine never runs the daemon cannot be contacted, but
 foreground `ee team sync` still both sends and receives while that member is
 the initiator. Two members with no responder cannot exchange at all, and
 other peers cannot trigger freshness on a client-only member; `ee team
-status` says so plainly. The daemon is `#[cfg(unix)]`; Windows members are
+status` says so plainly.
+
+`ee team pause` is a durable local emergency barrier, not merely a daemon
+toggle. Its transaction commits a new workspace/team pause generation and
+audit record before routes are unregistered, sessions are cancelled, and the
+steward is stopped. Every frame handler, serve/import boundary, and round
+start rechecks the current generation, so a session established before the
+commit cannot import or disclose data afterward. Resume requires explicit
+confirmation, revalidates the team root, key store, identity, and policy,
+advances the generation, and never reuses a stale session. Pause blocks future
+network sharing, fetch, and import; it does not delete local cached material
+or copies already received by peers. Status, doctor, and audit remain
+read-only and available while paused, and output states those limits.
+
+The daemon is `#[cfg(unix)]`; Windows members are
 client-only in v1, but a scheduled/manual outbound round can contribute as
 well as receive only after TC-D5 key-store parity passes; otherwise
 credential-bearing team commands fail with `mesh_key_store_unavailable`.
@@ -1015,15 +1088,24 @@ adding a separate `event_push` protocol; hiding listener asymmetry behind
 
 Origin memory payloads carry metadata only. Body material moves as
 **policy-gated lazy fetches** (`body_fetch` frames) keyed by the signed
-`create`/`revise` origin event and its `content_hash`; fetch eligibility is
-decided serve-side at fetch time (no `bodyAvailable` event in v1).
+`create`/`revise` origin event and its `bodyCommitment`; fetch eligibility is
+decided serve-side at fetch time (no `bodyAvailable` event in v1). For every
+content-bearing revision, the origin generates a fresh 32-byte CSPRNG
+commitment nonce and signs
+`blake3("ee.team.body.commitment.v1" || lp(nonce) || lp(exact_body_bytes))`.
+The nonce is stored atomically with the local origin event but is absent from
+the metadata payload, safe header, status, audit, diagnostics, and support
+bundles. It is released only inside an authenticated, authorized body-fetch
+response. Replaying the same immutable event reuses its stored nonce;
+different revisions, including byte-identical bodies, use fresh nonces and
+therefore have unlinkable public commitments.
 The event also signs `bodyRepresentation = "exact" | "already_redacted"`;
 the latter includes a bounded redaction-profile/scanner-version identifier
 and redaction-evidence hash, never the removed text. V1 never rewrites body
-bytes during fetch: the final bytes must hash exactly to the event's
-`content_hash`. A policy posture of `redact` may therefore serve only an
-event already signed as `already_redacted`; requesting redaction of an
-`exact` body is a policy denial/metadata-only result, not an in-flight
+bytes during fetch: the returned nonce and final bytes must reproduce the
+signed `bodyCommitment`. A policy posture of `redact` may therefore serve
+only an event already signed as `already_redacted`; requesting redaction of
+an `exact` body is a policy denial/metadata-only result, not an in-flight
 transformation with an unverifiable hash. The current secret scan still runs
 immediately before serving and may newly deny the exact bytes, but never
 mutates them. A future transformed derivative would require a separately
@@ -1043,16 +1125,21 @@ operator refresh. Transient unavailability uses capped retry (1 s → 60 s,
 at most 5 attempts, one attempt per event per round) and records
 `retry_after` in `mesh_body_cache_metadata`.
 
-Every fetch request names the exact signed origin event, requester member and
-node, project/workspace binding, and grant/policy generation. The server
-re-authorizes that tuple before serving; content hash alone is never an
-oracle. Only the event's owning origin workspace/node may serve from its
+Every fetch request names the exact signed origin event, requester node,
+project/workspace binding, and grant/policy generation. The authenticated
+session node—not a request field—resolves the requester member, and the
+server re-authorizes that tuple before releasing either nonce or body bytes.
+Commitment bytes alone do not permit an offline content guess. Only the
+event's owning origin workspace/node may serve from its
 local source truth in v1; a relayer's cached copy is never a new serving
 authority. Tombstoned/withdrawn events and a source that no longer retains
 the exact revision return unavailable rather than substituting current or
-cached bytes. Chunks carry transfer ID, sequence, declared final length, and
-final hash; the receiver requires that hash and the streamed bytes to equal
-the signed event `content_hash`. Aggregate bytes are bounded by the streaming
+cached bytes. The authorized response carries the commitment nonce; chunks
+carry transfer ID, sequence, declared final length, and a transfer hash. The
+receiver verifies streamed length/hash and recomputes the signed
+`bodyCommitment` from nonce plus exact bytes before publication. It may then
+compute an ordinary content hash for its private local index; that derivative
+never enters team metadata. Aggregate bytes are bounded by the streaming
 `max_bytes+1` policy and the codec's 32 KiB per-payload limit. Incoming bytes
 stream first into a
 private temporary cache object under the secure user-data boundary; the
@@ -1092,6 +1179,20 @@ repairable `mesh_body_cache_lifecycle_failed` posture with the filesystem
 path redacted; it never publishes under weaker permissions. Absence of the
 Windows credential adapter already blocks team traffic under TC-D5.
 
+`ee team share bodies` consumes TC-D6's authenticated preview token. Its
+canonical approval snapshot additionally binds the team root/materializer
+generation, exact serving workspace/node, body lane and future-serving
+semantics, exact recipient nodes and grant generations, outbound
+policy/scanner generation, the complete candidate
+ID/revision/representation/commitment digest, sample parameters, exact
+ordered locally redacted samples, and every non-erasure/later-node/source
+caution code. Both renderers consume that same snapshot; copy or renderer
+changes require a version bump and invalidate old tokens. Apply recomputes
+the snapshot immediately before the grant transaction. Any mismatch returns
+a fresh preview and leaves grants, audit, outbox, fetch, and cache untouched.
+Sample bytes and commitment nonces never enter the token output, durable
+audit, manifest, wire, or support bundle.
+
 Rationale: (a) anti-entropy stays bounded — bodies would blow the 512-event
 batch and payload budgets; (b) serve-time policy/redaction/secret-scan
 eligibility applies to every fetch, so policy changes can deny future fetches
@@ -1104,10 +1205,11 @@ eager-metadata/lazy-body architecture the cache modules were built for.
 purges eligible **derived peer material and body-cache objects** for that
 memory on observing nodes; it never deletes the origin's local
 source-of-truth memory and is never a per-member revocation primitive. Named
-residual: the `content_hash` of a withdrawn body
-persists forever in the append-only stream, so a peer who already holds (or
-later guesses byte-exactly) the content can confirm it post-purge — purge
-removes bodies, not the ability to recognize them.
+residual: a peer that was previously authorized and received the nonce/body
+cannot be made to forget either and can continue recognizing those exact
+bytes after purge. A metadata-only peer cannot test guesses from the salted
+commitment alone. Purge removes managed bodies, not knowledge or copies
+already disclosed.
 Likewise, revoking one recipient's body-lane grant prevents future serving
 but cannot erase a body that recipient already cached or copied. The
 recipient-facing command and audit output state that limitation; a later
@@ -1255,7 +1357,10 @@ Verification URLs, user/device codes, and polling state are ceremony-TTL
 ephemera excluded from audit logs, support bundles, and the manifest (only a
 redacted terminal status may persist). No raw token traverses the ee mesh. The verifier then authors
 `identityAttested`, binding subject member, verifier, policy generation,
-assurance/evidence hash, and a policy-capped finite renewal deadline. Other
+assurance/evidence hash, signed verification time, verified token/evidence
+expiry, and a policy-capped finite renewal deadline. Receivers enforce
+TC-D9's future-skew, positive-duration, policy-cadence, and evidence-expiry
+bounds independently; receipt time cannot refresh a delayed assertion. Other
 members trust that attributed verifier assertion (named trust link);
 self-attestation and self-renewal are rejected. In ordinary renewal the
 verifier must itself have a current eligible exact-policy-generation lease;
@@ -1268,9 +1373,11 @@ If no distinct verifier is reachable, renewal stays pending and the ordinary
 grace/suspension rules apply. Tier-2 revalidation is interactive and occurs
 only in explicit identity commands. The steward performs no IdP HTTP: it
 marks leases due/overdue and suspends after the configured grace when no fresh
-attestation arrives. Every identity-dependent authorization path uses the
-TC-D9 persisted local time floor; checking status only in the steward would
-leave a rollback window on a quiet or disabled daemon. A
+attestation arrives. Every identity-dependent operation that can authorize,
+mutate, import, or serve uses and advances the TC-D9 persisted local time
+floor; read-only status/doctor/activity/audit use its non-persisting effective
+view. Checking the floor only in the steward would leave a rollback window on
+a quiet or disabled daemon. A
 `members revalidate` local clock-floor repair is audited, requires explicit
 confirmation after the system clock is corrected, suppresses all currently
 eligible tier-2 leases, and leaves members pending until new ceremonies
@@ -1290,10 +1397,17 @@ member can verify the creator. The `idp set` preview names this bootstrap
 sequence and refuses a zero-grace activation that would suspend every current
 member before a distinct verifier can exist.
 
-### TC-D14 — Import trust is authenticated by a store-local MAC
+### TC-D14 — A store-local authentication root protects native trust and consent
 
-`ee export` artifacts are MAC'd (blake3-keyed, store-local secret in the
-hardened key store) over a constant-size versioned canonical header containing
+One hardened store-local authentication root derives purpose-specific BLAKE3
+keys under fixed domains. Raw root/subkeys never enter the database, logs,
+support bundles, normal backups, command output, or audit. Cross-domain use is
+rejected. T1.6 owns the key lifecycle, hardened storage, known-answer check,
+and derivation API before either import authentication or exposure approval
+consumes it.
+
+`ee export` artifacts are MAC'd with the native-import subkey over a
+constant-size versioned canonical header containing
 the artifact family/schema and canonical record-encoding version, source
 store-key namespace, exact source workspace/scope, key ID, record count, and a
 domain-separated ordered `records_root`. `ee export` and playbook artifacts
@@ -1339,10 +1453,21 @@ system backup, ee may recognize the original key ID only after hardened
 owner/type/path checks and a known-answer MAC self-check. That external
 recovery is not represented as an `ee backup` capability. Rotation retains a
 bounded verification window for same-store artifacts and rejects retired key
-IDs outside it. **Rejected:** store-UUID comparison (identifiers leak via
+IDs outside it. Consent-preview tokens deliberately accept only the current
+key: key rotation invalidates every outstanding approval and requires a fresh
+read-only preview. T1.4 and T5.9 use separate surface-specific approval
+subkeys and MAC the complete canonical approval snapshot described in TC-D6
+and TC-D12. This prevents cross-surface replay and keeps sample/body digests
+out of durable audit. Token construction is fallible; serialization,
+key-store, or canonicalization failure returns `ee.error.v2`, never a
+string-shaped fallback token.
+
+**Rejected:** store-UUID comparison (identifiers leak via
 support bundles; a leak reopens the bypass verbatim); adding private keys to
 the current redacted backup; claiming full-trust restore from any data
-artifact that does not independently recover its authentication key.
+artifact that does not independently recover its authentication key; public
+unkeyed hashes of secret findings, previews, or preview samples (offline
+equality/dictionary oracles).
 
 ### TC-D15 — Schema and status-surface policy
 
@@ -1351,7 +1476,21 @@ Every executable `ee team` **leaf command** emits its own versioned schema
 leaves may reuse shared `$defs` but never share a top-level schema ID; flags
 on one leaf may select explicitly tagged variants inside that leaf's schema.
 This is the meaning of no subsumption, and a command-inventory contract test
-fails when a new leaf lacks a schema mapping. The reserved-never-published
+fails when a new leaf lacks a schema mapping. This is an output contract, not
+permission to mutate: status, doctor diagnosis, members/project/activity
+list, audit, and preview leaves are read-only and append no durable audit or
+time-floor row — explicit doctor *repair* actions are distinct mutating
+leaves under the doctor-runtime mutation rules (backup, audit, undo) and are
+not covered by this read-only claim. Mutating or network-state-changing leaves append the required bounded
+audit record in the same transaction as their state change. A failed or
+preview-only command has no durable side effect unless its specific contract
+explicitly names a coalesced security posture counter. The existing
+`ee share preview --record-consent` shape is removed directly: recording
+consent without applying the reviewed exposure is misleading and violates
+the read-only preview contract. Consent is recorded only by the later
+mutation/export operation that consumes the exact approval token or by an
+independently explicit action with its own effect contract.
+The reserved-never-published
 `ee.mesh.peer_status.v1`
 name is **retired**: mechanism-level posture stays on the existing
 `ee.mesh.auto_status.v1` / foreground status surfaces; team-level posture is
@@ -1377,9 +1516,15 @@ never drives authorization, trust/elevation caps, retention or decay,
 lifecycle mutation, or search/pack relevance ranking. Peer material keeps a
 separate local first-receipt/lifecycle clock for those local-only operations;
 the origin claim is not copied into an authoritative local `created_at`.
-Default search and pack assign every team-synced candidate the same neutral
-temporal multiplier; neither the asserted origin time nor a local
-receipt/sync time may enter the relevance score, tie-break, or selection.
+Under `--memory-scope team`, default search and pack assign **every**
+candidate the same neutral temporal multiplier, including an origin's local
+shared row and another node's projection of that same event. Neither the
+asserted origin time nor a local created/receipt/sync time may enter the
+relevance score, tie-break, or selection. Given the same admitted event/body
+corpus and maintenance state, producer and receiver therefore select the
+same event IDs and order. A node's additional local-private rows make the
+corpus different and are labeled as such; workspace-scope temporal behavior
+is unchanged.
 Canonical team output does render the signed `producedAt`, so changing that
 signed claim legitimately changes provenance bytes and any hash over those
 bytes even though selected IDs, ordering, and relevance scores stay fixed.
@@ -1426,10 +1571,10 @@ module cited by both the team and global lanes.
 | Existing unsigned file-replay event is mistaken for team origin authority | TC-D3 keeps `ee.mesh.event.v1` on the separate non-origin-authoritative export/import-ledger surface. It may inform local policy-capped evidence but is never re-signed, relayed, or reinterpreted as a typed team origin event |
 | Relay mutates an unsigned event identifier | TC-D3 requires `eventId` to be the exact full-digest derivation of the signed `eventHash`; mismatch is rejected before idempotence/storage |
 | A valid origin key equivocates | TC-D4 retains both signed branches, rolls materialization back to the common prefix, suspends the origin, relays fork evidence, and requires another member to revoke/rebind; no first-arrival winner |
-| Frame replay, key-identity downgrade, or wrong-target/cross-workspace forwarding | TC-D1/D5 reject dead frame v1 and use frame v2 random ee-node IDs, team/endpoint-workspace/session/direction/counter/request binding under directional keys. Stable Tailscale IDs live in the handshake and current public keys remain observations; producer-owned `origin_workspace_id` is provenance and can never select either receiving database |
+| Frame replay, key-identity downgrade, or wrong-target/cross-workspace forwarding | TC-D1/D5 reject dead frame v1 and use frame v2 random ee-node IDs, team/endpoint-workspace/session/direction/counter/request binding under directional keys. Receivers require the exact next counter and application retries use new frames plus stable idempotency keys; there is no TCP frame replay window. Stable Tailscale IDs live in the handshake and current public keys remain observations; producer-owned `origin_workspace_id` is provenance and can never select either receiving database |
 | Spoofed bootstrap identity / rate-limit evasion | TC-D2 derives identity from accepted source IP via LocalAPI WhoIs; pre-auth source-IP + global buckets ignore claimed headers |
 | Unauthenticated traffic amplifies durable audit/storage | TC-D2 permits no durable mutation before invite proof; unknown-node and malformed bootstrap traffic affects only bounded in-memory source-IP/global counters and aggregate status metrics, never one durable row per attempt |
-| Authenticated peer fills the append-only ledger with small valid batches | TC-D3 charges cumulative inbound storage to the signed origin across relays/key rotations, enforces per-origin/team/free-space ceilings transactionally, reserves only bounded control capacity, and never charges local source truth |
+| Authenticated peer fills the append-only ledger with small valid batches or multiplies control reserve through origin churn | TC-D3 charges ordinary intake to the signed origin across relays/key rotations and control intake to a non-recycled authenticated ee node lineage, with independent 1 MiB/node and 80 MiB/team control caps. Workspace streams, signing generations, reconnects, and member rebinding cannot reset reserve; per-origin/team/free-space ceilings remain transactional and local source truth is never charged |
 | Network request selects a local workspace/path | TC-D1 user-scoped broker routes only exact pre-registered team/workspace or invite IDs, never accepts a path from the wire, and revalidates owner-safe database identity/genesis before serving |
 | One workspace daemon monopolizes the shared port | TC-D1 listener owner multiplexes validated routes through a same-EUID bounded local control channel; startup and route ambiguity fail closed rather than spawning another listener |
 | Multiple OS users or incompatible team ports contend on one node | TC-D1 roots/invites commit one v1 port, all broker routes must agree, one OS user owns the host-wide listener, and other users/mismatches are explicitly client-only with doctor repair; no scan/fallback |
@@ -1442,6 +1587,7 @@ module cited by both the team and global lanes.
 | Pair rotation crashes, clock rolls back, or a peer forces old-key fallback | TC-D5 uses an explicit control-only capability and two-phase generation record. The prior key can authenticate only the exact pending rotation for 86400 seconds; persisted wall-time high-water plus same-process monotonic elapsed make rollback fail closed, and expired/unverifiable state requires fresh pairing |
 | Clock rollback extends an invite or per-pair introduction bearer credential | TC-D10 advances a persisted invite-authorization floor on every credential decision and uses same-process monotonic deadlines. Rollback blocks mint/redeem/resume with `team_invite_clock_rollback`; repair atomically revokes every pending invite/lease/introduction before lowering the floor, so no credential can reactivate |
 | Compromised member | Data-lane blast radius is the member's node-scoped grants (per-node lanes, elevation toggle, harmful-feedback demotion, revocation). Manifest authority (lane profile, idp policy, removals) is any-active-member in v1 — mitigated by audit + conflict surfacing + `ee team pause`; roles are a v2 question |
+| An already-open session races `ee team pause` | TC-D11 commits a durable pause generation before cancellation/unregistration, and every frame handler plus import/serve boundary rechecks it. Resume advances the generation after root/key/identity/policy validation and never reuses stale sessions |
 | Compromised member widens lane or relaxes IdP policy | TC-D9 treats manifest policy as coordination input: lane widening cannot mint local grants, and every node retains its explicitly accepted IdP floor until that operator accepts the exact relaxation generation |
 | Compromised member narrows lanes or tightens IdP policy | This remains an availability authority in v1: narrowing/tightening may pause sharing but cannot exfiltrate data. Status/audit identify the author and generation; another active member can revoke the attacker and reconcile policy. Roles/quorum are deferred, so the residual is explicit |
 | Compromised member floods membership | TC-D9 hard-caps active membership at 20 and turns a complete-set overflow into a sharing-blocking capacity conflict; no attacker-grindable event/hash winner is selected. A valid member can still cause an availability incident, consistent with its other v1 manifest authority |
@@ -1454,12 +1600,12 @@ module cited by both the team and global lanes.
 | Local `human_explicit` minting amplified team-wide | TC-D7 controls: basis in `why`, per-member counts, atomic local-admission velocity cap independent of untrusted origin time, clock-rollback high-water mark, canonical batch order, and burst code |
 | Inviter omits/fabricates manifest at join | Root/origin signatures prevent alteration and false authorship; direct sync/reconcile exposes omission, but an inviter-controlled sock puppet remains possible and is stated |
 | Stolen/reassigned node or routine Tailscale key rotation | Stable node ID + ee pair/signing continuity distinguishes normal current-key rotation from a new device; tier-1 attestation additionally suspends on owner mismatch |
-| Self-attested, duplicate, or stale tier-2 identity | TC-D9/D13 make the distinct verifier host the device flow, reject self/same-subject renewal, conflict duplicate subjects, deterministically combine concurrent policy-generation-bound finite leases, perform no steward IdP HTTP, and suspend after cadence plus grace if interactive renewal cannot complete |
-| Clock rollback extends an identity lease | TC-D9/D13 use a persisted nondecreasing local authorization-time floor on every identity-dependent decision; forward-jump recovery suppresses every current tier-2 lease before lowering the floor and requires fresh interactive attestations |
+| Self-attested, duplicate, stale, future-dated, or overlong tier-2 identity | TC-D9/D13 make the distinct verifier host the device flow, reject self/same-subject renewal, conflict duplicate subjects, and independently cap signed verification/deadline fields by 600-second future skew, policy cadence, and verified evidence expiry. Late receipt never renews a lease; the steward performs no IdP HTTP and suspends after cadence plus grace if interactive renewal cannot complete |
+| Clock rollback extends an identity lease | TC-D9/D13 advance a persisted nondecreasing local authorization-time floor on identity-dependent authorizing/mutating/import/serve operations; read-only status/doctor/activity/audit use a non-persisting effective view. Forward-jump recovery suppresses every current tier-2 lease before lowering the floor and requires fresh interactive attestations |
 | IdP discovery SSRF / token theft | Secretless public-device-client preflight; verifier-hosted flow so raw tokens never cross ee; fresh discovery/JWKS per presentation; HTTPS-only constrained canonical curl from a minimal allowlisted environment with ambient config/proxy/netrc/CA/keylog state disabled, no redirects for credential-bearing POSTs, manually validated GET redirects, validated-and-pinned DNS answers, exact issuer, bounded/reaped subprocess I/O, redacted responses, raw token zeroization/non-persistence, key/algorithm/verified-email/group-claim checks, atomic replay ledger, grace-then-suspend |
 | Malicious or malformed IdP keeps a device ceremony polling | RFC 8628 interval/`slow_down` semantics run under the earlier of provider expiry and a 1800-second monotonic deadline plus a 300-request ceiling; checked backoff, cancellation/reap, terminal-error handling, and explicit non-automatic restart bound network/process use |
 | Trust laundering via file import | TC-D14 store-local MAC |
-| Peer rows echo or acquire local authorship | TC-D3 emits only origin-owned local rows; inbound materialization never re-emits and in-place peer edits are rejected |
+| Peer rows echo, impersonate another member, or acquire local authorship by omitting `memberId` | TC-D3/D6 emit only explicitly origin-owned local rows. Receivers derive producer member/project attribution from the verified node/key/authorization position, quarantine missing/ambiguous/mismatched bindings, never treat a null member as local, and never re-emit or edit inbound material in place |
 | A paired/signed peer reaches team materialization before membership authorization exists | TC-D3 registers but does not advertise `mesh.team.memory.v1` or `mesh.team.manifest.v1` until T4.1 installs the active-member/node/key authorizer; T2.4 depends on that gate. Pair/session proof alone can never apply or relay team authority, and cross-origin predecessor gaps quarantine for deterministic re-evaluation |
 | A signed origin omits a required feature bit to bypass a stricter operation handler | TC-D3 derives mandatory features and authorization from payload schema + operation, never from the origin's list alone. Missing mandatory bits quarantine under `mesh_event_feature_contract_invalid`; unknown additional bits remain replayable `unsupported` state |
 | Join silently publishes old local history | TC-D3 starts future live projection only; `ee team share history` uses a revision-pinned preview, explicit consent, revalidation, and an idempotent projection ledger |
@@ -1467,8 +1613,10 @@ module cited by both the team and global lanes.
 | Inbound abuse on the open port | TC-D2 bootstrap caps at listener birth; full admission control in operations |
 | Policy-denied event stalls later sync | TC-D3 contiguous receipt/disposition-scan frontiers + sparse audited per-event dispositions; materialization reads only explicit applied rows |
 | Policy denial suppresses a later purge | TC-D3 makes minimal opaque `tombstone`/`shareWithdraw` controls mandatory for active members, so current content policy cannot strand previously admitted derived material |
-| Body hash used as an oracle | TC-D12 exact event/requester/grant authorization and bounded sequenced chunks |
-| Serve-time redaction changes bytes while claiming the signed source hash | TC-D12 performs no in-flight body transformation in v1. `redact` serves only an `already_redacted` representation whose exact bytes/hash and redaction provenance were signed in the event; an `exact` body that now requires redaction stays metadata-only. Both streamed and declared hashes must equal the signed `content_hash` |
+| Preview or secret-scan hashes become offline content or equality oracles | TC-D6/D14 remove public unkeyed body/secret/sample hashes. Read-only exposure previews show locally redacted samples, while surface-specific store-local MACs authenticate the complete canonical approval snapshot; errors and durable audit expose only opaque, non-replayable identifiers |
+| Exposure inputs or the exact approval presentation change after preview | TC-D6/D12 bind target/source/grant/policy/scanner/candidate state plus sample parameters, exact ordered redacted samples, cautions, and copy/schema versions into the authenticated token. Apply recomputes before mutation; drift yields a fresh preview and zero grant/audit/outbox/fetch/cache effects |
+| Team metadata or a body commitment is used as a content oracle | TC-D3 excludes title/preview/tags/URIs/raw paths and body text from the closed metadata allowlist. TC-D12 signs a fresh-nonce salted commitment per revision and withholds its nonce until authenticated, authorized fetch; byte-identical revisions are unlinkable to metadata-only peers |
+| Serve-time redaction changes bytes while claiming the signed source commitment | TC-D12 performs no in-flight body transformation in v1. `redact` serves only an `already_redacted` representation whose exact commitment and redaction provenance were signed in the event; an `exact` body that now requires redaction stays metadata-only. Returned nonce plus streamed bytes must reproduce the signed `bodyCommitment` |
 | A relayer turns its cached body into a new serving authority | TC-D12 permits body serving only by the event's owning origin workspace/node from local source truth. Relays carry signed metadata/events but never re-serve cached bodies; missing old revisions return unavailable rather than substitution |
 | Body-lane grant is revoked after bytes were fetched or on only one source node | Revocation stops future serving from the named local source and advances the node-scoped grant generation, but cached/copied bytes cannot be remotely erased and other source nodes are unaffected. Command/audit output says both; origin-wide `shareWithdraw` is a cooperative purge control, not proof of deletion on an offline or malicious peer |
 | Member lies about origin time to stay fresh or backdates out of a recent-activity window | TC-D15 makes `producedAt` provenance-only for trust/default ranking/lifecycle, requires explicit activity `as_of`, and isolates claims beyond the pinned future-skew window in deterministic clock anomalies. A member-attested time filter is explicitly not an audit-completeness boundary: output names the basis/backdating residual, while an unfiltered cursor drain and origin-sequence audit retain every admitted event |
@@ -1493,7 +1641,8 @@ not an ordinary member slot with manifest authority.
   pre-provisioned only through the production hardened key-store API as test
   setup, then real fresh-session handshake, sync, attribution,
   partition/rejoin, fork rejection, withheld-payload cursor progress, removal
-  cutoffs, replay/target rejection, flood caps,
+  cutoffs, exact-next counter/target rejection, application retry
+  idempotence, flood caps,
   policy-denied lane and planted secret never cross; invite ingestion tests
   assert the secret is absent from argv, environment, logs, audit, and
   structured errors. Nodes bind distinct loopback source addresses so fake
@@ -1505,7 +1654,9 @@ not an ordinary member slot with manifest authority.
   Authenticated small-batch flooding crosses the cumulative signed-origin
   ceiling atomically: no partial batch/frontier/index/audit side effects land,
   relaying or key rotation does not reset accounting, other origins continue,
-  control-only reserve is bounded, and local `ee remember` still succeeds.
+  and workspace/origin/signing-generation/member-binding churn cannot enlarge
+  the per-node or 80 MiB team control reserve; local `ee remember` still
+  succeeds.
 - Responder ownership: daemon already running, foreground-only, simultaneous
   daemon/`invite --wait` start, and unrelated-port-occupant cases prove one
   listener owner, correct control-channel delegation, and no alternate-port
@@ -1557,6 +1708,12 @@ not an ordinary member slot with manifest authority.
   and receives in its manual round, two client-only nodes cannot connect, and
   removal fanout succeeds through tip advertisement plus a peer range request
   without any `event_push` frame.
+- Emergency pause: a planted open session cannot import, fetch, or serve after
+  the durable pause-generation commit even if cancellation is delayed or the
+  process crashes. Resume revalidates root/key/identity/policy state, advances
+  the generation, and rejects stale sessions. Status/doctor/audit remain
+  usable without changing database, audit, or time-floor rows; output never
+  claims cached or remote copies were erased.
 - Pair-key rotation: crash/restart at every stage/accept/commit/promote
   boundary converges through the exact rotation record initiated by
   `ee mesh rotate-pair`; a key-store
@@ -1580,17 +1737,19 @@ not an ordinary member slot with manifest authority.
   origin time as provenance only; byte-identical output on both nodes given
   equal signed origin events, canonical materialized corpus, materializer
   version, local disposition/admission decisions, maintenance state, config,
-  and indexes, regardless of diagnostic receipt/sync timestamps. Changing a
-  signed origin claim changes rendered provenance bytes but not selected IDs,
-  ordering, or default relevance scores. Local first receipt may affect a
-  later maintenance decision and therefore the materialized corpus; that
-  state difference is explicit and outside a fixed-corpus comparison. Forged
-  future origin times do not alter default relevance/lifecycle and land in
-  deterministic activity `clockAnomalies` until the explicit as-of window
-  reaches them. Activity tests also prove a backdated event may be omitted
-  from an explicitly member-attested time window, remains present in an
-  unfiltered cursor drain and origin-sequence audit, and is never falsely
-  described as absent from the admitted stream.
+  and indexes, regardless of which node owns the local source row or of
+  diagnostic receipt/sync timestamps. Under team scope local shared and
+  projected candidates receive the same neutral temporal multiplier;
+  changing a signed origin claim changes rendered provenance bytes but not
+  selected IDs, ordering, or default relevance scores. Local first receipt
+  may affect a later maintenance decision and therefore the materialized
+  corpus; that state difference is explicit and outside a fixed-corpus
+  comparison. Forged future origin times do not alter default
+  relevance/lifecycle and land in deterministic activity `clockAnomalies`
+  until the explicit as-of window reaches them. Activity tests also prove a
+  backdated event may be omitted from an explicitly member-attested time
+  window, remains present in an unfiltered cursor drain and origin-sequence
+  audit, and is never falsely described as absent from the admitted stream.
 - Degraded-code discipline: every new code lands with fixture + taxonomy in
   the same commit (J6 validator); the 19 uncovered legacy mesh codes are
   backfilled first.
@@ -1627,6 +1786,15 @@ not an ordinary member slot with manifest authority.
   truncated, reordered, duplicated, wrong-count, and final ordered-root
   mismatch artifacts leave zero native-trust rows, audit entries, or index
   jobs; the authenticated preamble stays constant-size.
+- Consent/authentication privacy (TC-D6/D12/D14/D15): `ee share preview` is
+  side-effect-free and emits no unkeyed content/secret/sample hash;
+  `--record-consent` is absent. Cross-store/workspace/surface/key-generation
+  token replay fails. Mutating each canonical approval field—including
+  exact redacted samples, cautions, and copy/schema version—makes grant/body
+  apply return a fresh preview with zero state/audit/outbox/fetch/cache
+  effects. Audit and support bundles contain neither token nor sample bytes,
+  and serialization/key-store failures return errors rather than token-shaped
+  strings.
 - Project identity (TC-D8): two clones at different paths derive equal keys;
   object-format-tagged multi-root sets agree independent of order; shallow
   repositories are detected before boundary commits can masquerade as roots;
@@ -1693,8 +1861,17 @@ not an ordinary member slot with manifest authority.
   new-node-no-grant-inheritance are exercised end to end. A member joining
   after confirmed history projection receives that durable metadata, while
   history already covered by an origin-wide `shareWithdraw` does not
-  rematerialize for the joiner.
-- Body-cache lifecycle (TC-D12): interrupted, oversized, hash-mismatched,
+  rematerialize for the joiner. Receiver-derived member/project attribution
+  is pinned to the verified origin authorization position; spoofed payload
+  member IDs, ambiguous bindings, missing attribution, and legacy peer rows
+  with null member fields quarantine and never acquire local ownership.
+- Metadata disclosure (TC-D3): schema/golden tests enumerate the exact
+  metadata allowlist and prove content, first-line/title/preview text, tags,
+  provenance URIs, raw paths, evidence bodies, and commitment nonces never
+  enter safe headers, metadata payloads, activity, audit, or support bundles.
+  Metadata-only search returns only field filters and an attributed
+  missing-body placeholder, never fabricated full-text recall.
+- Body-cache lifecycle (TC-D12): interrupted, oversized, commitment-mismatched,
   policy-denied, quarantined, evicted, expired, and withdrawn cases prove no
   unverified object becomes retrieval-addressable; Unix owner/mode/no-symlink
   and Windows SID/DACL/reparse/opened-identity/write-through vectors cover
@@ -1711,11 +1888,16 @@ not an ordinary member slot with manifest authority.
   derived objects and never origin-owned source truth. A peer that previously
   admitted content still receives and applies its minimal withdrawal control
   after later content denial. Exact and `already_redacted` signed
-  representations both require streamed/declared hash equality with the event;
+  representations both require transfer integrity and recomputation of the
+  event's salted `bodyCommitment`;
   an exact body under a redact-only policy remains metadata-only, no in-flight
-  transformed bytes can masquerade under the source hash, a new scanner denial
-  sends nothing, relayers cannot serve cache copies, and an unavailable old
-  source revision is never replaced by current bytes.
+  transformed bytes can masquerade under the source commitment, a new scanner
+  denial sends nothing, relayers cannot serve cache copies, and an
+  unavailable old source revision is never replaced by current bytes.
+  Metadata-only peers cannot verify dictionary guesses or link
+  byte-identical revisions; an authorized response releases the nonce only
+  after session-node-derived member/grant checks, and nonce/body mismatch
+  never publishes.
   Per-recipient `revoke-lane`/`team unshare bodies` advances the exact-node
   grant generation and stops future fetches, invalidates stale previews, and
   never claims already-cached/copied bytes were erased or emits an
@@ -1731,9 +1913,12 @@ not an ordinary member slot with manifest authority.
   concurrent replay-ledger claims, self/same-subject attestation rejection,
   concurrent lease arrival permutations, duplicate-subject conflict,
   one-member activation bootstrap and zero-grace refusal, distinct verifier
-  loss, finite-lease expiry, cadence-plus-grace suspension with zero
+  loss, future-dated/overlong/late-delivered lease rejection, verified-token
+  expiry bounds, finite-lease expiry, cadence-plus-grace suspension with zero
   background IdP HTTP, clock rollback at every identity-dependent
-  authorization path, fail-safe forward jump, clock-floor repair that cannot
+  authorizing/mutating/import/serve path, fail-safe forward jump, read-only
+  status/doctor/activity/audit leaving the persisted floor and audit-row count
+  unchanged, clock-floor repair that cannot
   reactivate an old lease, ambient proxy/`.curlrc`/netrc/CA-bundle/TLS-keylog
   traps, unverified-email and malformed-group claims, credential-POST
   redirects, oversized pipes, timeout/descendant-pipe escape, process reap,
