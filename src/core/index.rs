@@ -3798,6 +3798,7 @@ fn resolve_index_workspace_id(
     get_default_workspace_id(db)
 }
 
+#[derive(Debug)]
 struct BuildStats {
     source_count: usize,
     doc_count: usize,
@@ -9072,7 +9073,7 @@ mod tests {
         let job_id = report
             .job_id
             .ok_or_else(|| "job id should be present".to_string())?;
-        let connection = DbConnection::open_file(database).map_err(|e| e.to_string())?;
+        let connection = DbConnection::open_file(&database).map_err(|e| e.to_string())?;
         let job = connection
             .get_search_index_job(&job_id)
             .map_err(|e| e.to_string())?
