@@ -663,8 +663,9 @@ implementation the seam was built for. One `contact_peer` call runs one
 bounded round: TipAdvertise ⇄, `MeshRangePlanner::plan` (first production
 caller), at most one RangeRequest per origin per round, EventBatch replay
 through `decide_mesh_import` + ledger insert + cursor advance
-(contiguous-replay-only, fork-rejecting — the 13 ADR 0041 scenarios become
-integration-tested behavior), RevisionNotice emission. Metadata lane only in
+(contiguous-replay-only, fork-rejecting — the v1-applicable ADR 0041
+scenarios become integration-tested behavior; validity-update and
+trust-propagation scenarios wait on their deferred event kinds per TC-D3), RevisionNotice emission. Metadata lane only in
 this milestone; bodies/embeddings remain policy-denied by default anyway.
 Event **origin authentication (v1): direct-from-origin only** — a connection
 authenticated (by pairwise frame key) as peer X may only deliver events whose
@@ -946,8 +947,25 @@ ADR 0086):
 
 Events authored by a member whose local state is `removed` are rejected at
 import with `team_member_removed_stream_rejected` (their pre-removal history
-remains valid). Remove-vs-remove races are idempotent; remove-vs-add races
-surface as manifest conflicts for `reconcile`. **Revocation latency is real
+remains valid). Applying a removal additionally flags every active member
+whose member-add was authored by the removed member
+(`added_by_removed_member`, surfaced in `ee team status` and `reconcile`
+with an audit row, cleared only by an explicit local per-node operator
+confirmation via `ee team members reconcile` — never replicated, so no one
+member can vouch for everyone; grants
+are not auto-suspended — an ordinary member exit must not break that
+member's legitimate invitees). Removed-stream events are terminally skipped
+via the shipped SRR6.32 quarantine machinery (cursor advances with audit;
+recoverable by quarantine replay after reconcile), and a removed member's
+node re-joining via fresh invite mints a new `member_id` with acceptance
+resuming only from the post-rejoin frontier (ADR 0086 TC-D9 mechanics).
+Manifest events are encoded inside the existing `ee.mesh.event.v1` envelope
+as `create`/`revise` over `mem_team:<kind>:<id>` logical IDs with **inline**
+`ee.team.manifest.v1` payloads (metadata lane, never `body_fetch`-dependent
+— the default-deny body lane must not block manifest replication) and
+`requiredFeatures:["mesh.team.manifest.v1"]` (TC-D3) — the closed
+`eventKind` enum is not extended. Remove-vs-remove races are idempotent;
+remove-vs-add races surface as manifest conflicts for `reconcile`. **Revocation latency is real
 and stated:** under direct-from-origin acceptance, a removal event reaches
 member C only when C syncs with the remover (v1 has no relay, so no other
 member can forward it), so until then C keeps accepting the removed
@@ -1068,7 +1086,13 @@ events' `content_hash` (there is **no body event kind** — ADR 0086 TC-D12;
 fetch eligibility is decided serve-side at fetch time), gated per fetch by
 outbound policy + redaction + secret scan on the serving side (P1.3b
 machinery), with the byte policy from T1.1 enforcing a streaming
-`max_bytes+1` cap on the fetch side. This finally gives `remote_evidence.rs` (fetch planning),
+`max_bytes+1` cap on the fetch side. Fetches execute in the sync path only
+(foreground sync or steward rounds — retrieval never fetches synchronously
+and never blocks a read on an in-flight fetch); denied/unavailable outcomes
+are recorded in `mesh_body_cache_metadata` with the anti-entropy-shaped
+retry-after posture (1 s → 60 s cap, max 5 attempts, then blocked with
+`retry_after`; at most one attempt per `content_hash` per round) per
+TC-D12. This finally gives `remote_evidence.rs` (fetch planning),
 `cache.rs` (retention/quota/eviction), and the `mesh_body_cache_metadata`
 table their production callers — the eager-metadata / policy-gated-lazy-body
 architecture SRR6.11 specified. `ee team share bodies` (P3.4) is gated on

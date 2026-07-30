@@ -71,11 +71,27 @@ new events). Shared-scope memory mutations and team-manifest operations
 append events **in the same transaction** as the mutation. Event-kind
 vocabulary follows `docs/mesh/event_schema.md`: v1 emits `create`, `revise`
 (the schema's revision kind — there is no `update` kind), `tombstone`, and
-`shareWithdraw`, plus the manifest operation kinds; the schema's `trust`,
+`shareWithdraw`; the schema's `trust`,
 `validity`, and `bodyAvailable` kinds are **explicitly deferred** — trust
 and validity propagation are post-v1 tracks, and body-fetch eligibility is
 computed serve-side at fetch time (TC-D12) rather than signaled by a
-`bodyAvailable` event. This is what tips advertise, ranges address,
+`bodyAvailable` event. **Manifest operations do not extend the envelope:**
+`ee.mesh.event.v1` has a closed `eventKind` enum and it stays closed.
+Manifest ops are encoded as ordinary `create`/`revise` events over
+manifest-scoped logical IDs spelled `mem_team:<kind>:<id>` (satisfying the
+schema's `^mem_` pattern — one logical document per member record, node
+binding, project record, and the lane-profile document), with `contentHash`
+over an `ee.team.manifest.v1` payload that travels **inline in the event**
+(manifest records are small; they ride the metadata lane within the event
+payload budget and never depend on `body_fetch` or body-lane grants —
+otherwise the default-deny body lane would block manifest replication);
+member removal is a `revise` of the member record to `state=removed` (a
+payload-level operation — `tombstone` keeps its memory semantics). Every
+manifest event carries `requiredFeatures: ["mesh.team.manifest.v1"]`
+(inside the schema's mandatory `mesh.` feature namespace), so pre-team
+peers structurally quarantine them via the existing forward-compat gate
+instead of misapplying them; the wire schema and its drift tests are
+untouched. This is what tips advertise, ranges address,
 and fork rejection chains over; deriving events on demand from mutable tables
 is rejected because any later edit would present as a fork to peers.
 
@@ -167,14 +183,35 @@ the member themself; self-removal = leave. Events from a locally-removed
 member's stream are rejected (`team_member_removed_stream_rejected`);
 applying a removal event revokes the removed member's peer records **in the
 same transaction**; remove-vs-add races surface as manifest conflicts for
-explicit `ee team members reconcile`. **Removal also quarantines the removed
-member's concurrent authority:** member-add events authored by the removed
-member that are concurrent with (not causally before) the removal are
-quarantined as manifest conflicts rather than silently retained — otherwise
-a member anticipating removal could pre-author a sock-puppet member that
-outlives them. `reconcile` and `ee team status` flag any active member whose
-adder has since been removed, so even causally-earlier adds get operator
-eyes. Removal propagation is bounded by sync contact with the remover (v1
+explicit `ee team members reconcile`. **Removal also disarms the removed member's
+granted authority, operationally** (there is deliberately no cross-stream
+causality in this design — per-origin sequences only — so the rule avoids
+"concurrent" entirely): member-add events from the removed member's stream
+that arrive *after* the removal has been applied locally are already
+rejected by the removed-stream rule above; for member-adds that were applied
+*before* the removal arrived, applying the removal flags every active member
+whose add was authored by the removed member (`added_by_removed_member`) in
+`ee team status` and `reconcile`, with an audit row, requiring explicit
+operator confirmation to clear. Grants are **not** auto-suspended — a
+departed founder's legitimate invitees must not break the team on an
+ordinary departure — so the residual sock-puppet window is "operator ignores
+a loud, persistent flag," which is the honest v1 posture without signatures;
+v2 signatures close it. Three mechanics pinned so this is implementable as
+written: (a) **rejected-event cursor disposition** — removed-stream events
+are terminally skipped per the shipped SRR6.32 quarantine semantics
+(`mesh_event_quarantined` + `SkipWithAudit` in the executable model; the
+implementation persists the disposition, and the cursor advances past
+skipped events with an audit trail), so remaining members never re-request
+dead ranges (ADR 0041's
+bounded-retry invariant holds) while a mistaken removal remains recoverable
+by quarantine replay after reconcile; (b) **re-join** — a removed member's
+node re-joining via a fresh invite mints a **new** `member_id`, and event
+acceptance resumes only from the post-rejoin frontier; removed-window events
+stay terminally skipped in quarantine; (c) **flag clearing** — confirming an
+`added_by_removed_member` flag is a local per-node operator action via
+`ee team members reconcile`, recorded in the local audit log and **not
+replicated** (each operator vouches for their own node's view; a replicated
+clear would let one member silently vouch for everyone). Removal propagation is bounded by sync contact with the remover (v1
 has no relay) — stated, surfaced as manifest staleness, and accepted. **Rejected:** CRDT membership (ADR 0041's rejection
 of merge semantics stands); remover-machine-only revocation (unbounded
 exposure); role hierarchies in v1 (a ≤20-member trusted team does not need
@@ -215,8 +252,17 @@ Origin events carry metadata shapes only (create/revise/tombstone/
 shareWithdraw + manifest ops — TC-D3). Body material moves as **policy-gated
 lazy fetches** (`body_fetch` frames) keyed off the `create`/`revise` events'
 `content_hash`; fetch *eligibility* is decided serve-side at fetch time by
-the outbound policy (no `bodyAvailable` signal event in v1 — a peer whose
-fetch is denied simply retries lazily after later sync rounds). Fetched
+the outbound policy (no `bodyAvailable` signal event in v1). **Fetch
+execution and retry are bounded and local-first:** fetches run in the sync
+path (foreground `ee team sync` or the steward's rounds), never
+synchronously inside pack/search — retrieval only consumes already-cached
+bodies and never blocks a read on an in-flight fetch. Denied or unavailable
+outcomes are recorded in `mesh_body_cache_metadata` with a retry-after
+posture in the same capped shape as anti-entropy ranges (1 s → 60 s, max
+5 attempts, then blocked-with-`retry_after` until the next operator refresh
+or policy change), and at most one attempt per `content_hash` per sync
+round — a permanently-denied body costs one bounded probe per round, not
+one per retrieval. Fetched
 bodies are verified against the origin event's `content_hash`, chunked
 within the 32 KiB payload budget,
 capped by the streaming `max_bytes+1` policy, landed in the body cache
@@ -298,7 +344,7 @@ module cited by both the team and global lanes.
 | Forged event origin | TC-D4 direct-from-origin + pairwise MACs; v2 signatures |
 | Invite interception / chat-history replay | Single-use, TTL, hashed at rest, revocable; TC-D5 nonce mixing keeps old codes from determining keys |
 | Compromised member | Data-lane blast radius is the member's grants (per-member lanes, elevation toggle, harmful-feedback demotion, revocation). Manifest authority (lane profile, idp policy, removals) is any-active-member in v1 — mitigated by audit + conflict surfacing + `ee team pause`; roles are a v2 question |
-| Removed member's pre-authored sock-puppet add | TC-D9: concurrent adds by the removed member quarantined; `reconcile`/`status` flag members whose adder was removed |
+| Removed member's pre-authored sock-puppet add | TC-D9: post-removal arrivals rejected by the removed-stream rule; pre-removal-applied adds flagged `added_by_removed_member` in status/reconcile pending explicit confirmation (no auto-suspend — ordinary departures must not break their invitees); v2 signatures close the window |
 | Removal propagation latency | TC-D9 same-transaction enforcement on application; staleness surfaced; bound documented |
 | Local `human_explicit` minting amplified team-wide | TC-D7 controls: basis in `why`, per-member counts, velocity cap + burst code |
 | Inviter fabricates manifest at join | Direct nonce-mixed pairing defeats fabricated members; conflicts surface; v2 signatures close the window |
