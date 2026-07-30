@@ -1204,6 +1204,10 @@ fn apply_memory_kind_and_typed_field_filters_to_report_with_connection(
     kind_filter: Option<&str>,
     typed_field_filters: &[TypedMemoryFieldFilter],
 ) -> Result<(), SearchError> {
+    if kind_filter.is_none() && typed_field_filters.is_empty() {
+        return Ok(());
+    }
+
     let mut filtered = Vec::with_capacity(report.results.len());
     for hit in std::mem::take(&mut report.results) {
         if typed_memory_hit_matches(connection, &hit, kind_filter, typed_field_filters)? {
@@ -15091,6 +15095,38 @@ mod tests {
         assert!(TypedMemoryFieldFilter::parse("Family=cache").is_err());
         assert!(TypedMemoryFieldFilter::parse("family=").is_err());
         Ok(())
+    }
+
+    #[test]
+    fn typed_memory_filter_noop_preserves_evidence_results() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        let evidence_id = "ev_00000000000000000000009W02";
+        let memory_id = "mem_11000000000000000000000001";
+        let mut report = rerank_test_report(
+            vec![
+                synthetic_hit(evidence_id, 0.9),
+                synthetic_hit(memory_id, 0.8),
+            ],
+            Vec::new(),
+        );
+
+        apply_memory_kind_and_typed_field_filters_to_report_with_connection(
+            &connection,
+            &mut report,
+            None,
+            &[],
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            report
+                .results
+                .iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![evidence_id, memory_id]
+        );
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]
