@@ -28616,10 +28616,9 @@ mod tests {
         )?;
         evidence_ids.push(mismatched_evidence_id);
         let migration = connection.migrate()?;
-        ensure_equal(
-            migration.applied(),
-            &[85, 86, 87],
-            "legacy evidence upgrade migrations",
+        ensure(
+            migration.applied() == [85, 86, 87],
+            "legacy evidence upgrade must apply V085, V086, and V087 in order",
         )?;
         ensure(
             matches!(
