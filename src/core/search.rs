@@ -13863,6 +13863,11 @@ mod tests {
                 },
             )
             .map_err(|error| error.to_string())?;
+        // Public search commands acquire their own read-only snapshot. Close
+        // the setup writer before crossing that boundary so the regression
+        // observes durable storage rather than a backend-specific live
+        // connection view.
+        connection.close().map_err(|error| error.to_string())?;
 
         let build_index_dir = index_dir.clone();
         let documents = vec![
@@ -13915,11 +13920,19 @@ mod tests {
             "live admission must resolve the actual canonical workspace row rather than synthesize its id"
         );
 
-        connection
+        let mutation_connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        mutation_connection
             .execute_raw(&format!(
                 "UPDATE evidence_spans SET search_eligibility = 'denied' WHERE id = '{}'",
                 evidence_id
             ))
+            .map_err(|error| error.to_string())?;
+        // The stale-index checks below are public command invocations, each
+        // with an independent read snapshot. Make the denial durable before
+        // any of them revalidates the indexed evidence row.
+        mutation_connection
+            .close()
             .map_err(|error| error.to_string())?;
 
         let base_options = SearchOptions {
