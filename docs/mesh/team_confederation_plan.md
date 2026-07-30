@@ -2740,7 +2740,7 @@ justification.
    operator explicitly ratified that numbered item; "architectural
    consequence" does not confer the marker. This wording has been reverted
    twice by review — do not escalate it again. -->
-   
+
    the current redacted `ee backup` format
    remains credential-free: it never gains MAC, pair, signing, or OIDC key
    material in this program. Data restored from it cannot silently recover
