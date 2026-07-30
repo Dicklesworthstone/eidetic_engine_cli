@@ -82,7 +82,10 @@ A team of 2–20 humans, each with `ee` installed locally, should be able to:
   truth on each machine; nothing blocks on the network.
 - **Automatically see teammates' shared memories** in `ee search` / `ee pack` /
   `ee ask` results, clearly attributed ("from Priya · project acme-analysis ·
-  synced 2h ago"), within the lanes each member consented to share.
+  synced 2026-07-30T14:02Z" — absolute timestamps in retrieval surfaces per
+  the determinism rule in §7.5 P4.2; relative phrasing like "2h ago" appears
+  only in `ee team status`/`activity` human output), within the lanes each
+  member consented to share.
 - **Ask the team-shaped questions**: "has anyone on the team looked at Acme
   Corp?" → `ee search "Acme" --memory-scope team` or `ee team activity
   --project acme-analysis` shows who captured what, when.
@@ -159,7 +162,7 @@ map, design docs/ADRs, trust/identity surfaces, beads inventory).
 | Fake-Tailscale harness (Rust + bash fixtures + python socket responder) | `tests/support/fake_tailscale.rs`, `scripts/e2e_overhaul/lib/fake_tailscale.sh` + fixtures | Real; the behavioral E2E backbone to extend. |
 | Mesh-off guarantees: byte-stability, no sockets, no degraded noise | `tests/mesh_off_no_network.rs` (494 LOC, uses `lsof`) | Real regression gate. Must stay green throughout. |
 
-### 3.2 Dead or unwired modules (~5.4k LOC waiting for callers)
+### 3.2 Dead or unwired modules (~8.4k LOC waiting for callers)
 
 `admission.rs` (931, zero refs anywhere), `steward_decision.rs` (1135),
 `peer_state.rs` (471), `tailscale_transport.rs` (794), `anti_entropy_model.rs`
@@ -191,7 +194,7 @@ and `cache.rs` get theirs in the body-lane milestone (P4.6), not before.
    and is unwired. `audit_log.actor` is free text.
 4. **No cross-machine project identity.** Workspace IDs and fingerprints are
    blake3 hashes of the **absolute local path**
-   (`src/config/workspace.rs:1239–1243`, `src/cli/mod.rs:3670–3675`). Two
+   (`src/config/workspace.rs:1239–1243`, `src/cli/mod.rs:33670–33675`). Two
    teammates cloning the same repo can never agree they share a project.
    Nothing derives identity from git root-commit or remote URL. The mesh
    design's answer is a manually configured n×n `origin_workspace_ids`
@@ -489,7 +492,7 @@ long-lived listener home is the daemon. A member whose machine never runs the
 daemon can pull from others but never be pulled from — effectively read-mostly
 to the team until their daemon runs. `ee team status` surfaces this per
 member; the join ceremony provides a foreground accept path
-(`ee team invite --wait`, §7.4.2) so M3 never depends on daemon install
+(`ee team invite --wait`, §7.4 P3.2) so M3 never depends on daemon install
 (M5). The existing daemon is `#[cfg(unix)]` (`src/daemon/server.rs:25`);
 Windows members are client-only in v1 and documented as such (§7.6 P5.2).
 
@@ -566,7 +569,9 @@ valid MAC is refused; one's own backup restore still round-trips at full
 trust.
 
 **P0.7 — Honesty-debt backfill.** Failure-mode fixtures + taxonomy entries for
-the 19 uncovered mesh degraded codes; fill the three 0-byte audit test files
+the uncovered mesh degraded codes (52 in the catalog golden: 19
+fixture-uncovered, 18 of those also taxonomy-uncovered — close both gaps);
+fill the three 0-byte audit test files
 with the assertions their names promise; correct `src/core/effect.rs` mesh
 declarations (real `.ee/*.toml` paths, real tables); fix README `[mesh.tailscale]`
 and `.ee/mesh/` drift; update the stale "future `ee mesh preview-grant`" schema
@@ -608,10 +613,10 @@ look like a fork to peers. New migration: `mesh_origin_events`
 via `prev_event_hash`, event kind, material lane, payload reference,
 authored_at), plus the append rules: which local mutations emit events
 (memory create/update/tombstone/shareWithdraw within shared scope; manifest
-operations in §7.4.1), written in the same transaction as the mutation, and
+operations in §7.4 P3.1), written in the same transaction as the mutation, and
 an immutability contract (rows are never updated or deleted; corrections are
 new events). This lands before any wire work and is also what the manifest
-(§7.4.1) rides on.
+(§7.4 P3.1) rides on.
 
 **P1.1 — Hello responder actually binds.** New supervised daemon job:
 `mesh-hello-responder`. Accept loop → read one bounded frame → if hello:
@@ -666,9 +671,10 @@ without asymmetric crypto; relay support via per-origin stream signatures is
 an explicit v2 bead. `ee mesh sync --once` stops emitting
 `mesh_sync_once_network_deferred` when a round actually ran; the code remains
 for daemonless/unreachable cases. `probe_mesh_capability` graduates from
-`Unimplemented`. Key storage lands here (not M2): a `mesh_peer_keys` keychain
-file (0600, user data dir) with per-peer key slots, populated by harness
-fixtures in M1; the invite-ceremony *derivation* of those keys is §7.3.1/M2.
+`Unimplemented`. Key storage lands in M1 — in T2.1's session layer, not
+here: a `mesh_peer_keys` keychain file (0600, user data dir) with per-peer
+key slots, populated by harness fixtures in M1; the invite-ceremony
+*derivation* of those keys is §7.3.1/M2.
 
 **P1.3b — Responder-side anti-entropy serving (the other half of the wire).**
 The client (P1.3) is useless without a peer that *serves* `summary`/
@@ -713,7 +719,7 @@ New DB table `team_members` (workspace-scoped like `mesh_peers`):
 `bound_via` ∈ {invite_ceremony, member_added_node, operator_manual}).
 
 **Authentication model (v1): pairwise symmetric keys established by the invite
-ceremony.** The invite code (§7.4.2) carries a one-time secret. During join,
+ceremony.** The invite code (§7.4 P3.2) carries a one-time secret. During join,
 **each side contributes a fresh random 32-byte nonce over the connection**,
 and both derive the per-pair long-term key
 `k_AB = blake3::derive_key("ee.team.pair.v1", invite_secret ‖ nonce_A ‖ nonce_B ‖ nodekey_A ‖ nodekey_B)`.
@@ -727,10 +733,11 @@ in a `mesh_peer_keys` keychain file (0600, user data dir — not in the
 workspace, not in git; storage lands in M1 per §7.2 P1.3); `MeshPeerKey`
 finally holds real material: the *fingerprint* of `k_AB`. Every
 post-enrollment transport frame is signed with the pairwise key (the codec
-already implements exactly this). Rotation: `ee team member rotate-key --with
-<member>` re-derives with fresh nonces over the existing authenticated
-channel; the existing `ee mesh peer rotate` generation bookkeeping records it.
-Introduction-secret exchanges (§7.4.2) use the same nonce-mixing construction,
+already implements exactly this). Rotation: `ee team members rotate-key
+--with <member>` (the P3.3 command form) re-derives with fresh nonces over
+the existing authenticated channel; the existing `ee mesh peer rotate`
+generation bookkeeping records it.
+Introduction-secret exchanges (§7.4 P3.2) use the same nonce-mixing construction,
 so the inviter cannot derive the pair keys it introduced.
 
 Why not Ed25519 now: the dependency set (blake3, sha2) contains no signature
@@ -768,7 +775,8 @@ elevation basis; `ee team status` shows per-member elevated-row counts; an
 elevation velocity cap per member per day surfaces
 `team_member_elevation_burst` for review instead of silently importing.
 Elevation happens at import time iff **all** of: (a) event's trust lane is
-`peerHumanViaPeer` with source class `human_explicit`; (b) the delivering
+`peerHumanViaPeer` (an existing `MeshTrustLane` variant,
+`src/core/memory_scope.rs:62–86`) with source class `human_explicit`; (b) the delivering
 connection is authenticated as a node bound to an active member; (c) the
 local team policy `elevate_member_human_explicit` is true (set during the
 join ceremony's consent summary, default **on** for invite-ceremony members —
@@ -777,7 +785,10 @@ trust`). Otherwise the existing `agent_validated` cap applies unchanged. The
 three existing rejection points (§3.3 item 5) stay intact for
 `human_explicit` itself — it still never crosses.
 
-Touch set (all must move in one slice, per the three-divergent-enums finding):
+Touch set — the three parallel trust-class-shaped enums with overlapping
+names and different semantics (`src/models/trust.rs:59`,
+`src/mesh/lane_grant_preview.rs:170`, `src/mesh/sync.rs:69`) must move in
+one slice:
 `src/models/trust.rs` enum + DB CHECK migrations + `ask.rs` weights +
 `is_verified_memory` + the mesh-side `lane_grant_preview.rs` and `sync.rs`
 trust enums + schemas + golden refresh. **Schedule-risk flag:** `trust_class`
@@ -815,7 +826,7 @@ continues to leak nothing.
 
 #### 7.3.4 SSO member identity (Microsoft Entra / Okta / Google), two tiers
 
-The invite ceremony (§7.4.2) proves possession of a code; it does not prove
+The invite ceremony (§7.4 P3.2) proves possession of a code; it does not prove
 *who* a member is in the organization's terms. For teams inside companies, the
 authoritative human identity already lives in an SSO IdP — and offboarding is
 done there, not in ee. Two tiers, both opt-in per team, both recorded in the
@@ -843,8 +854,8 @@ parse per-node user profiles. Then:
   and it works offline against the daemon's cached state (staleness is
   surfaced, not hidden).
 
-**Tier 2 — direct OIDC device-code flow (dependency-gated, sequenced after
-core team UX).** For teams that want ee-level proof independent of the tailnet
+**Tier 2 — direct OIDC device-code flow (crates land at start per §13 item 1;
+sequenced after core team UX).** For teams that want ee-level proof independent of the tailnet
 IdP binding (or group-based authorization, or a different IdP than the
 tailnet's):
 
@@ -855,11 +866,12 @@ tailnet's):
   `verification_uri_complete` + user code, poll the token endpoint), no
   localhost redirect server, works over SSH, trivially agent-narratable. Works
   as-is with Entra ID, Okta, Google, and any conformant OIDC provider.
-- HTTPS egress: two options, decided by the operator (§13): (a) shell out to
-  `curl` (present on macOS, modern Windows, and effectively all Linux),
-  following the existing subprocess pattern used for the `tailscale` binary —
-  zero new crates; or (b) an in-tree `rustls`-based client behind a feature
-  flag. Either way the calls happen only inside explicit identity commands.
+- HTTPS egress — **decided (§13 item 1): the `curl` subprocess backend** (curl
+  is present on macOS, modern Windows, and effectively all Linux), following
+  the existing subprocess pattern used for the `tailscale` binary with
+  kill-on-timeout — zero new crates; a feature-flagged `rustls` client was
+  considered and deferred entirely. The calls happen only inside explicit
+  identity commands.
 - ID-token verification (issuer, audience, expiry, **signature via JWKS**,
   plus an `iat`/`auth_time` freshness window and single-use recording of the
   token's `jti`-or-hash by the verifier) is non-negotiable — an unverified JWT
@@ -867,9 +879,10 @@ tailnet's):
   tokens generally carry no `nonce` claim, so a verifier challenge cannot be
   bound into the IdP flow; freshness + single-use is the honest substitute.
   RS256/ES256 verification requires pure-Rust RustCrypto crates (`rsa`,
-  `p256`; `sha2` is already in-tree). This is the same class of dependency
-  decision as the v2 Ed25519 question and is bundled with it (§13). Tier 2
-  does not start until that decision is made.
+  `p256`; `sha2` is already in-tree) — **approved (§13 item 1)**; the crates
+  land in the tree when tier-2 work starts, with dependency-contract-matrix
+  entries in the same commit. Only the v2 Ed25519 relay-signature crate
+  choice remains open (T3.6 writeup).
 - The member record gains `identity_attestation: {kind: oidc, issuer, subject,
   email, verified_at}`. **Verifier model:** the join counterparty verifies the
   presented token and records the attestation in the manifest; other members
@@ -933,8 +946,8 @@ import with `team_member_removed_stream_rejected` (their pre-removal history
 remains valid). Remove-vs-remove races are idempotent; remove-vs-add races
 surface as manifest conflicts for `reconcile`. **Revocation latency is real
 and stated:** under direct-from-origin acceptance, a removal event reaches
-member C only when C syncs with the remover (or any member relaying the
-manifest? no — v1 has no relay), so until then C keeps accepting the removed
+member C only when C syncs with the remover (v1 has no relay, so no other
+member can forward it), so until then C keeps accepting the removed
 member's stream. `ee team status` shows manifest staleness per member, and
 the §8 threat table carries this bound honestly.
 
@@ -973,20 +986,22 @@ additional machine for yourself, via a self-invite variant), `ee team member
 remove <member>` (revoke all their nodes' peer records locally + emit the
 manifest removal event + shareWithdraw for team-shared material + honest
 best-effort caveat), `ee team leave`. Every *other* member enforces the
-removal when they apply the manifest event (§7.4.1's same-transaction
+removal when they apply the manifest event (§7.4 P3.1's same-transaction
 revocation rule) — removal is not a remover-machine-only effect, but its
 propagation is bounded by sync contact (stated in §8).
 
-**P3.4 — Sharing ops.** `ee team share bodies|graph-links --with <member>|--all-members`
+**P3.4 — Sharing ops.** `ee team share bodies --with <member>|--all-members`
 drives real lane-grant preview → confirm → `ee mesh grant` (P0.4) per peer,
 plus `ee share preview` integration for the outbound view. **Honesty gate:**
 `ee team share bodies` ships in M4 *together with* body-lane transport
 (§7.5 P4.6) — a grant ceremony for a lane nothing transports would be exactly
-the surfaces-that-lie failure mode P0 exists to kill. If the commands land
-before the transport for any reason, they must emit
+the surfaces-that-lie failure mode P0 exists to kill. If the command lands
+before the transport for any reason, it must emit
 `mesh_lane_transport_unavailable` instead of a silent no-op grant. Embedding
-lane is deliberately **not** given a team-UX verb in v1 (off-ladder per
-operator onboarding; power users can still use `ee mesh grant` directly).
+**and graphLink** lanes are deliberately **not** given team-UX verbs in v1 —
+no task transports graphLink material in v1 either, so a verb for it would
+recreate the same lie (power users can still use `ee mesh grant` directly,
+which materializes the grant honestly for whenever a transport exists).
 
 **P3.5 — Posture ops.** `ee team status` (members × reachability × last-sync ×
 staleness × pending invites × lane matrix summary), `ee team sync [--now]`,
@@ -1056,7 +1071,7 @@ this landing.
 job runs bounded anti-entropy rounds on an interval (default 300 s, jittered,
 budget-capped; config `[mesh] sync_interval_seconds`), using the same core
 round executor as the CLI (P1.4), and retries deferred member pairings
-(§7.4.2). It finally gives `steward_decision.rs` and `peer_state.rs`
+(§7.4 P3.2). It finally gives `steward_decision.rs` and `peer_state.rs`
 (drift/staleness state machine) their production callers: missed rounds drive
 `soft_stale`/`hard_stale` transitions surfaced in `ee team status`.
 Explicitly opt-in-by-running-the-daemon. **Honest scope of "no daemon
@@ -1106,7 +1121,7 @@ Threat-model deltas on top of ADR 0037's ten rows (each new row keeps the
 | Threat | Control |
 |---|---|
 | Forged event origin over the wire | v1 direct-from-origin acceptance (§7.2 P1.3) + pairwise frame MACs; `mesh_relay_origin_rejected`. v2: per-origin stream signatures. |
-| Invite code interception | Codes are single-use, TTL-bound, secret-hashed at rest, bound to the tailnet (join must arrive over a tailnet connection from the expected account's node), and revocable (`ee team invite revoke`). Interceptor must also be inside the tailnet — the layered requirement is documented, not assumed away. |
+| Invite code interception | Codes are single-use, TTL-bound, secret-hashed at rest, bound to the tailnet (join must arrive over a tailnet connection — and, when tier-1 identity is required, from the expected account's node), and revocable (`ee team invite revoke`). Interceptor must also be inside the tailnet — the layered requirement is documented, not assumed away. |
 | Malicious/compromised member | Per-member revocation (US-7); lanes remain per-member so blast radius is the member's grants; trust elevation is per-member togglable; harmful-feedback demotion applies to synced rows like any other; emergency `ee team pause`. |
 | Removal propagation latency | Under direct-from-origin acceptance, a removal event reaches member C only when C syncs with the remover; until then C keeps accepting the removed member's stream. Bounded by sync cadence; surfaced via manifest staleness in `ee team status`; every member enforces revocation in the same transaction as applying the event. Documented, not hidden. |
 | Agent on a member's machine mints `human_explicit` → team-wide elevation | `human_explicit` is locally CLI-assignable, so elevation amplifies an unauthenticated local class. Controls: `ee why` shows elevation basis; per-member elevated-row counts in `ee team status`; per-member daily elevation velocity cap surfacing `team_member_elevation_burst` for review; per-member elevation toggle; harmful-feedback demotion. |
@@ -1137,10 +1152,15 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
 - **New schemas** (`docs/schemas/` + drift tests): `ee.team.create.v1`,
   `ee.team.invite.v1`, `ee.team.join.v1`, `ee.team.members.v1`,
   `ee.team.status.v1`, `ee.team.activity.v1`, `ee.team.audit.v1`,
-  `ee.team.manifest.v1` (event payloads), `ee.mesh.grant.v1`,
-  plus the reserved-but-unpublished mesh schemas this plan makes real
-  (`ee.mesh.peer_status.v1` → subsumed by team status? decide in ADR;
-  `ee.mesh.import_ledger.v1` inspection surface).
+  `ee.team.manifest.v1` (event payloads), `ee.mesh.grant.v1`, **plus one
+  schema per remaining `ee team` subcommand** — `ee.team.projects.v1`
+  (T4.8), `ee.team.share.v1` (T4.5), `ee.team.sync.v1` and
+  `ee.team.pause.v1`/`resume` (T4.6), `ee.team.idp.v1` and
+  `ee.team.revalidate.v1` (T7.2/T7.4) — or an explicit ADR statement of
+  which are subsumed by `ee.team.members.v1`/`ee.team.status.v1`. The
+  reserved `ee.mesh.peer_status.v1` question (subsumed by team status?) is
+  decided in ADR 0086; the `ee.mesh.import_ledger.v1` inspection surface is
+  owned by T1.3 (which writes the ledger decision columns).
 - **New degraded codes** (each with fixture + taxonomy entry, same commit):
   `mesh_relay_origin_rejected`, `mesh_transport_unreachable`,
   `mesh_frame_auth_failed`, `team_invite_expired`, `team_invite_replayed`,
@@ -1154,8 +1174,20 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
 - **New env vars** (register in `src/config/env_registry.rs` + `docs/env_vars.md`):
   `EE_TEAM_INVITE_TTL_SECONDS`, `EE_MESH_SYNC_INTERVAL_SECONDS`,
   `EE_MESH_TRANSPORT_DISABLED` (belt-and-braces kill switch),
-  `EE_TEAM_IDP_HTTP_BACKEND` (curl|feature-flagged-native, tier 2),
-  `EE_TEAM_IDENTITY_REVALIDATE_DAYS`.
+  `EE_TEAM_IDP_HTTP_BACKEND` (only shipped value `curl`; `native` reserved and
+  rejected at parse time — §13 item 1),
+  `EE_TEAM_IDENTITY_REVALIDATE_DAYS` (local override that may only *tighten*
+  the manifest-configured cadence, never loosen it — the manifest stays the
+  team-wide policy authority). `EE_MESH_HELLO_PORT` and
+  `EE_MESH_HELLO_RESPONDER_DISABLED` pre-exist in the registry and become
+  load-bearing here. Emitter map for the new codes:
+  `mesh_transport_unreachable` (T2.1 session layer connect/timeout, reused by
+  the T2.4 round executor), `mesh_frame_auth_failed` (T2.1 accept path:
+  bad MAC / signed frame from an unkeyed peer), `team_member_unknown_node`
+  (T4.1/T2.4 import path: stream from a node bound to no member),
+  `team_daemon_not_installed` (info; join epilogue + `ee team status`,
+  P5.2), `team_manifest_conflict` (T4.1 application; resolved via
+  `reconcile`).
 - **Config**: `[team]` section (`elevate_member_human_explicit`, defaults),
   `[mesh] sync_interval_seconds`; fix the documented-but-unread
   `[mesh.tailscale]` block one way or the other (read it, or fix README).
@@ -1178,11 +1210,11 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
 | Layer | What |
 |---|---|
 | Unit | Every new pure decision (invite codec, key derivation, elevation rule, project-key derivation incl. shallow-clone fallback, manifest event application, precedence constant) with happy/edge/error cases per testing policy. |
-| Contract | Schema drift tests for every `ee.team.*` and changed mesh schema; degraded-code catalog ↔ fixture ↔ taxonomy sync (extends J6). |
+| Contract | Schema drift tests for every `ee.team.*` and changed mesh schema; degraded-code catalog ↔ fixture ↔ taxonomy sync (extends the J6 failure-mode catalog validator, `tests/contracts/failure_mode_fixtures.rs`). |
 | Golden | `ee team status`/`members`/`activity` JSON goldens (server-path regen only, per the golden workflow); refreshed mesh status goldens after P0.5 de-hardcoding. |
 | Integration (the centerpiece) | **Two-node loopback harness (P1.5)**: real binaries, real sockets, fake tailscale identities. Scenario matrix: pair → sync → attribute; partition → rejoin → converge (cursor/hole/fork scenarios from ADR 0041 as *behavior*, not model assertions); revoke mid-sync; removal propagation + removed-origin stream rejection; invite replay rejected; elevation on/off + elevation-burst cap; project adoption; policy-denied lane never crosses; secret-scan deny on transport send; accept-path flood test against the bootstrap-envelope caps. Three-node variant: direct-from-origin rejection of relayed events, introduction flow, third-member-joins-while-one-is-offline (deferred pairing completes via steward/sync retry). |
 | Migration safety | Trust-class table rebuilds (§7.3.2) get a dedicated migration test asserting row counts and content hashes survive each recreate. |
-| Determinism | Team-scoped pack/search determinism given a fixed synced corpus (extends J7); sync summaries excluded from determinism surfaces as designed. |
+| Determinism | Team-scoped pack/search determinism given a fixed synced corpus (extends the J7 determinism harness, `scripts/e2e_overhaul/determinism.sh` + `tests/determinism_unit.rs`); sync summaries excluded from determinism surfaces as designed. |
 | Mesh-off regression | `mesh_off_no_network.rs` extended: daemon with mesh off binds nothing; `ee team` commands with mesh off fail with honest guidance, add zero degraded noise elsewhere. |
 | Opt-in real-tailnet | `mesh_sync_once_real_tailscale.sh` upgraded to assert a real round; a new `team_join_real_tailscale.sh` (exit 78 skip-clean by default, same contract). |
 | Fake IdP harness | Tier 1: fake-tailscale fixtures gain `UserProfile` owners (mismatch/reassignment scenarios). Tier 2: a local device-flow simulator (python, same pattern as the fake-tailscale socket responder) serving discovery/JWKS/device/token endpoints with rotatable keys — join, revalidation, expiry, group-denial, and outage-grace scenarios run fully offline. |
@@ -1199,17 +1231,17 @@ logging conventions; RCH-remote for cargo-backed stages per repo policy.
 | Milestone | Contents | Gate (all must hold) |
 |---|---|---|
 | **M0 — Truth & safety** | P0.1–P0.7 | bd-30o6g closed with streaming-cap test; export/import observably policy-gated; `ee mesh grant` exists preview-pinned; bypass closed (teammate export cannot inject `human_explicit`); zero uncovered mesh degraded codes; effect/README drift fixed; `verify.sh` green. |
-| **M1 — Peers talk** | P1.0–P1.5 (incl. P1.3b) | Origin event stream durably records local mutations; two-node loopback harness green incl. partition/rejoin + fork rejection + flood test; responder-side serving applies outbound policy + secret scan on the wire (planted secret never crosses); `ee mesh sync --once` completes a real round (no deferred code) between two live instances; key storage in place (fixture-provisioned); mesh-off binds no sockets; real-tailnet smoke green when opted in; `probe_mesh_capability` no longer `Unimplemented`. |
-| **M2 — People & projects** | §7.3 all | Trust-class migration applied + all three enums + weights consistent; elevation path audited and togglable; git + non-git project keys derived/adopted; pairwise keys derived, stored 0600, rotatable. |
-| **M3 — ee team** | §7.4 all except P3.4 body verbs | US-1/2/3/7/8/9 acceptance sketches pass as E2E (join works via `invite --wait` with no daemon installed); join ceremony ⇒ sync-eligible peers with `explicit_human_consent`; removal enforcement + removed-stream rejection proven; every team command emits schema-valid JSON + audit rows; invite replay/TTL enforced. |
+| **M1 — Peers talk** | P1.0–P1.5 (incl. P1.3b) | Origin event stream durably records local mutations; two-node loopback harness green incl. partition/rejoin + fork rejection + flood test; responder-side serving applies outbound policy + secret scan on the wire (planted secret never crosses); `ee mesh sync --once` completes a real round (no deferred code) between two live instances; key storage in place (fixture-provisioned); frame + invite-codec fuzz/property suite green (T2.7); mesh-off binds no sockets; real-tailnet smoke green when opted in; `probe_mesh_capability` no longer `Unimplemented`. |
+| **M2 — People & projects** | §7.3.1–§7.3.3 | Trust-class migration applied + all three enums + weights consistent; elevation path audited and togglable; git + non-git project keys derived/adopted; pairwise keys derived, stored 0600, rotatable. |
+| **M3 — ee team** | §7.4 all except P3.4 body verbs | US-1/2/3/7/8/9 acceptance sketches pass as E2E (join works via `invite --wait` with no daemon installed); join ceremony ⇒ sync-eligible peers with `explicit_human_consent`; removal enforcement + removed-stream rejection proven; every team command emits schema-valid JSON + audit rows (US-10); invite replay/TTL enforced. |
 | **M4 — Unified recall** | §7.5 all | US-4 passes: team-scoped search/pack with attribution on both nodes of the harness; `ee pack --memory-scope` shipped; precedence pinned + tested; conflict detector surfaces planted contradictions; **body-lane transport live and US-6 (`ee team share bodies`) passes end-to-end**; scope docs corrected. |
-| **M5 — Operations** | §7.6 all | Background steward syncs on the harness without CLI involvement; `ee daemon install` works on macOS + Linux; doctor team checks; admission wired; perf profile recorded; quickstart doc validated by a cold run-through. |
-| **M6 — SSO identity** | §7.3.4 both tiers | Tier 1: probe parses node owners; `idp require --tailnet-attested` enforced at join + revalidation on the harness (mismatch ⇒ suspension + audit). Tier 2 (after the §13 dependency decision): device flow against the fake IdP end-to-end; token verification rejects bad issuer/audience/signature/expiry; offboarding scenario (US-12) passes; outage-grace behavior proven. |
+| **M5 — Operations** | §7.6 all | Background steward syncs on the harness without CLI involvement (US-5); `ee daemon install` works on macOS + Linux; doctor team checks; admission wired; perf profile recorded; quickstart doc validated by a cold run-through. |
+| **M6 — SSO identity** | §7.3.4 both tiers | Tier 1 (US-11): probe parses node owners; `idp require --tailnet-attested` enforced at join + revalidation on the harness (mismatch ⇒ suspension + audit). Tier 2 (dependency decision resolved — §13 item 1): device flow against the fake IdP end-to-end via the curl backend; token verification rejects bad issuer/audience/signature/expiry; offboarding scenario (US-12) passes; outage-grace behavior proven. |
 
 M0 → M1 → M2 → M3 → M4 → M5 is the spine; §12 marks the safe parallelism
 inside each. M6 tier 1 can start alongside M3 (it needs member records + join,
-not retrieval); M6 tier 2 is gated on the operator dependency decision and
-sequenced last.
+not retrieval); M6 tier 2 is sequenced last (its crate additions land when it
+starts, per §13 item 1).
 
 ---
 
@@ -1230,7 +1262,7 @@ alternatives, verification hooks). ← nothing. Blocks everything else.
 - T1.3 Wire `decide_mesh_import` into `ee mesh import` + ledger decision columns. ← T0.0
 - T1.4 DB-backed preview-grant + new `ee mesh grant` (absorbs bd-2gvgw). ← T1.2
 - T1.5 De-hardcode mesh status/report fields. ← T1.2, T1.3
-- T1.6 Close JSONL/playbook trust bypass (store-identity header). ← T0.0
+- T1.6 Close JSONL/playbook trust bypass (store-local keyed MAC per P0.6 — the bare store-identity header was considered and rejected). ← T0.0
 - T1.7 Degraded-code fixture/taxonomy backfill + empty audit tests + effect/README drift. ← T0.0 (parallel with all T1.x)
 
 **Sub-epic T2 — M1 Transport**
@@ -1253,7 +1285,7 @@ alternatives, verification hooks). ← nothing. Blocks everything else.
 - T3.6 v2 spike bead (non-blocking): per-origin stream signatures for relay + manifest signing; dependency decision writeup. ← T3.2
 
 **Sub-epic T4 — M3 Team UX**
-- T4.1 Manifest event model (authorization table per §7.4.1) + local cache + application logic incl. same-transaction removal enforcement + removed-origin stream rejection. ← T2.0, T3.1
+- T4.1 Manifest event model (authorization table per §7.4 P3.1) + local cache + application logic incl. same-transaction removal enforcement + removed-origin stream rejection, **plus the `ee team create` command itself** (team_id mint, create event as the manifest stream root, printed default-lane consent summary, `ee.team.create.v1`). ← T2.0, T3.1
 - T4.2 Invite mint/parse/revoke (`eeteam1-` codec, TTL, single-use) + `invite --wait` foreground accept. ← T3.1, T2.1
 - T4.3 Join ceremony end-to-end (bootstrap hello + invite frames, mutual enroll `explicit_human_consent`, manifest exchange, nonce-mixed pairwise keys, TTL-bound introductions, deferred-pairing bookkeeping, consent summary, first sync, `--dry-run`). ← T4.1, T4.2, T3.2, T2.4, T2.4b
 - T4.4 Membership ops (members list/show/trust/rotate-key/reconcile/add-node/remove/leave + shareWithdraw on removal). ← T4.3
@@ -1287,7 +1319,7 @@ alternatives, verification hooks). ← nothing. Blocks everything else.
 - T7.1 Probe extension: parse per-node `UserProfile` owners (+ fake-tailscale fixture owners). ← T0.0 (parallel-safe)
 - T7.2 Tier-1 tailnet attestation: `ee team idp require --tailnet-attested`, manifest policy, join-time + revalidation checks, suspension/grace posture. ← T7.1, T4.3
 - T7.3 `ee team members revalidate` + tier-1 revalidation cadence in the steward job. ← T7.2, T6.1
-- T7.4 Tier-2 OIDC device flow: discovery/JWKS/device/token client (curl-subprocess or feature-flagged native per §13), `ee team idp set`. ← T7.2, dependency decision (§13 item 1)
+- T7.4 Tier-2 OIDC device flow: discovery/JWKS/device/token client (curl subprocess backend per §13 item 1, DECIDED), `ee team idp set`. ← T7.2 (crate additions `rsa`/`p256` land at T7.4/T7.5 start per §13 item 1)
 - T7.5 ID-token verification (issuer/audience/expiry/JWKS signature + iat/auth_time freshness + jti single-use; RustCrypto `rsa`/`p256`). ← T7.4
 - T7.6 OIDC attestation in the join ceremony + member records + group-based authorization (join-counterparty verifier model). ← T7.5
 - T7.7 Fake IdP harness + full offline scenario matrix (join, revalidate, expiry, group denial, outage grace, offboarding). ← T7.4 (parallel with T7.5/T7.6)
@@ -1302,19 +1334,27 @@ justification.
 
 ## 13. Open decisions for the operator (deliberately few)
 
-1. **Cryptography/TLS dependency bundle** — one decision covering three uses:
-   Ed25519 stream signatures (v2 relay, T3.6), OIDC JWT verification
-   (RustCrypto `rsa`/`p256`, T7.5), and the tier-2 HTTPS backend
-   (curl-subprocess with zero new crates vs a feature-flagged `rustls`
-   client). v1 core confederation and SSO tier 1 need **none** of these; tier
-   2 needs the JWT crates at minimum. Recommendation: curl-subprocess + `rsa`/
-   `p256`, deferring rustls entirely.
-2. **Default for `elevate_member_human_explicit`** — this plan says ON for
-   invite-ceremony members (the ceremony is the consent). Flip to off-default
-   if you want maximum conservatism at the cost of the headline "teammates'
-   rules rank like rules" experience.
-3. **Windows background service** — v1 documents manual Task Scheduler setup;
-   promoting to a native service is a scope call.
+1. **Cryptography/TLS dependency bundle** — **DECIDED 2026-07-30 (operator
+   adopted the recommendation):** tier-2 HTTPS egress uses the **curl
+   subprocess** backend (zero new crates; same pattern as the `tailscale`
+   binary fallback); JWT verification uses pure-Rust RustCrypto **`rsa` +
+   `p256`** (added to the tree when T7.4/T7.5 start, listed in the
+   dependency-contract matrix then); **`rustls` is deferred entirely** (the
+   `EE_TEAM_IDP_HTTP_BACKEND` env var stays registered with `curl` as its only
+   shipped value, reserving `native` for a future decision). The remaining
+   sub-decision — an Ed25519 crate for v2 relay stream signatures — stays open
+   until the T3.6 spike writeup recommends one; nothing in v1 blocks on it.
+2. **Default for `elevate_member_human_explicit`** — **DECIDED 2026-07-30
+   (operator adopted the recommendation): ON** for invite-ceremony members
+   (the ceremony is the consent), with the T3.4 amplification controls
+   (elevation-basis in `ee why`, per-member counts in status, daily velocity
+   cap + `team_member_elevation_burst`) shipping in the same slice as the
+   default.
+3. **Windows background service** — there is no Windows daemon to schedule
+   (the daemon is `#[cfg(unix)]`; P5.2 declares Windows members client-only
+   in v1). v1 documents manual Task Scheduler invocation of foreground
+   `ee team sync` for freshness; promoting a TCP-listener-only Windows daemon
+   variant to a native service is the named follow-up scope call.
 4. **`ee context` alias** — team scope lands on `pack`/`search`/`ask`; the
    soft-deprecated `context` alias inherits via shared code, no extra work
    planned.
