@@ -261,7 +261,9 @@ and `cache.rs` get theirs in the body-lane milestone (P4.6), not before.
     granting, or otherwise applying the reviewed exposure, contradicting the
     program's read-only-preview rule. Remove the raw hashes and the
     side-effecting preview flag; authenticate actual exposure approval with a
-    surface-bound store-local token consumed by the mutation.
+    short-lived, nonce-salted, surface-bound store-local token. Keep it
+    in-process for human confirmation and consume it through bounded stdin for
+    robot workflows—never argv or environment variables.
 12. **Status surfaces lie by hardcoding.** `ee mesh status` reports a fixed
     lane policy regardless of config (`src/mesh/foreground_cli.rs:1296–1303`);
     hello-responder `running:false`, discovery-cache `not_loaded`, peer-state
@@ -622,11 +624,11 @@ with the later operation that actually applies or exports the reviewed
 exposure. Remove the per-example public content hash and aggregate public
 preview hash; memory ID + entity revision identify a sample locally without
 creating a dictionary oracle. Also replace the pre-export secret scan's public
-`valueHash` with a domain-separated store-local keyed `findingId` that can
-correlate this store's audit/error entries but cannot be verified by another
-store or from a support bundle. The T1.6 authentication root and fallible
-derivation API land first. No serialization/key-store failure may become a
-successful string-shaped identifier.
+`valueHash` with a fresh, at-least-128-bit OS-CSPRNG `findingId` for each scan
+occurrence. The same ID may correlate one report/error with its audit entry,
+but repeat scans deliberately differ and the ID is never content-derived.
+Randomness/serialization failure is an `ee.error.v2`, never a successful
+hash-shaped identifier.
 
 **P0.4 — DB-backed lane preview, grant, and revocation.**
 Feed the existing `compute_lane_grant_preview` real candidate memories from the
@@ -634,19 +636,29 @@ DB (the module already samples/redacts/bounds at 500), real `peer_in_group`,
 real redaction rules. Change the preview target from its current raw
 `<node-key>` argument to the enrolled opaque `<peer-id>`, and add the missing
 `ee mesh grant <peer-id> --lane <lane>` mutation: authenticated
-preview-token-pinned (`--preview-token` required), audited in the grant
-transaction, and updating the peer record's lane grants. The token is a
-surface/domain/store/workspace-bound keyed MAC derived from T1.6's
-authentication root over one canonical approval snapshot. Both human and JSON
-render from that snapshot, which binds schema/copy version, target + grant
-generation, current/proposed policy generation, the complete
-revision-pinned candidate digest, sample strategy/limit, exact ordered
-redacted samples, and caution codes. Only the opaque token is returned; raw
-content/sample hashes are absent. Apply reconstructs the snapshot and compares
-in constant time before mutation; drift or key rotation returns a fresh
-preview with zero grant/audit effects. The audit stores only a
-non-replayable token ID, not the token or samples. Add the symmetric,
-idempotent
+preview-token-pinned, audited in the grant transaction, and updating the peer
+record's lane grants. Human mode previews/confirms/applies in one process
+without printing the token. Robot preview JSON returns a 15-minute bearer
+token that grant accepts only through bounded `--preview-token-stdin`, never
+argv/env.
+
+The versioned opaque token carries current key ID, a fresh 32-byte nonce,
+bounded issue/expiry times, a nonce-salted keyed snapshot tag, and a separate
+context-bound envelope MAC derived from T1.6. Verify the envelope MAC first:
+malformed, future-issued, wrong-store/workspace/surface/key, or bad-MAC input
+is `mesh_approval_token_invalid`. Then reconstruct the canonical snapshot and
+compare its keyed tag: expiry or drift is `mesh_approval_token_stale` plus a
+fresh preview. This is intentionally not a bare MAC of current state, which
+could not distinguish forgery from staleness. Both human and JSON render from
+the snapshot, which binds schema/copy version, target + grant generation,
+current/proposed policy generation, the complete revision-pinned candidate
+set, sample strategy/limit, exact ordered redacted samples, and caution codes.
+The nonce makes equal previews unlinkable; raw content/sample hashes are
+absent. Envelope verification, snapshot comparison, generation
+compare-and-swap, grant, and consent audit occur in one write transaction, so
+concurrent/replayed apply cannot grant twice. Audit stores only a
+domain-keyed identifier of the high-entropy nonce, not token/tag/samples. Add
+the symmetric, idempotent
 `ee mesh revoke-lane <peer-id> --lane <lane>` mutation; narrowing needs no
 exposure preview, but is audited, advances the node-scoped grant generation,
 closes future serving immediately, and prevents a stale grant/preview from
@@ -661,8 +673,10 @@ own the proof that current Tailscale key rotation cannot retarget or silently
 drop consent.
 Absorb bd-2gvgw's schema `required`-field pinning. Acceptance: grant without a
 matching fresh preview token fails closed; cross-store/workspace/surface/key
-replay and every snapshot-field mutation fail with zero side effects; granted
-lane visibly changes export/import policy decisions from P0.2; revoke-lane
+replay, expiry, nonce/tag tampering, concurrent double-apply, and every
+snapshot-field mutation fail with zero side effects; token input is bounded
+and absent from argv/env/log/audit/support; granted lane visibly changes
+export/import policy decisions from P0.2; revoke-lane
 immediately reverses
 future serving, is replay/idempotence safe, never claims remote erasure, and
 the versioned handoff contract is pinned without requiring later milestone
@@ -681,9 +695,10 @@ P1, not before).
 bypass.** Establish one hardened store-local authentication root with
 fallible, domain-separated subkey derivation, key IDs/rotation, constant-time
 verification, a known-answer self-check, and the TC-D14
-no-output/no-audit/no-backup contract. T1.2 derives only secret-finding
-correlation; T1.4 and T5.9 derive distinct approval-token keys;
-import/playbook MACs have separate domains. No raw root or subkey enters
+no-output/no-audit/no-backup contract. T1.4 and T5.9 derive distinct
+snapshot-tag, token-envelope, and audit-token-ID keys; import/playbook MACs
+have separate domains. Secret-finding occurrence IDs use fresh OS randomness
+and are deliberately independent of this root. No raw root or subkey enters
 SQLite.
 
 `ee import jsonl` must not
@@ -1946,7 +1961,10 @@ never prove local ownership or attribution. The undocumented legacy
 `trust.team_members` agent-nickname list is removed rather than retained as
 an unauthenticated human-team compatibility shim; existing `self` and `swarm`
 scopes continue to cover current/local agents. This intentional early-product
-configuration break is migrated and documented directly.
+configuration break is migrated and documented directly — and
+**operator-confirmed 2026-07-30** ("we have no users so don't care about
+backwards compatibility"), consistent with the repo-wide
+no-backwards-compat policy in AGENTS.md.
 `scope_agent_unavailable` behavior for agent-shaped scopes is unchanged.
 
 **P4.2 — Attribution rendering.** Search/pack/ask/why surfaces render, for
@@ -2128,16 +2146,21 @@ nonces. The local operator preview may show bounded, locally redacted samples
 through the existing redaction/secret-scan path; sample text never enters the
 manifest, wire exchange, durable audit, or recipient-visible metadata, and
 the versioned authenticated preview token uses T1.6's body-share-specific
-subkey to MAC one canonical approval snapshot. It binds team
-root/materializer generation, serving workspace/node, body lane and
-future-serving semantics, exact recipient nodes plus grant generations,
-outbound policy/scanner generation, the complete candidate
-ID/revision/representation/commitment digest, sample strategy/limit, exact
+subkeys and TC-D6's two-layer envelope around one canonical approval
+snapshot. It binds team root/materializer generation, serving workspace/node,
+body lane and future-serving semantics, exact recipient nodes plus grant
+generations, outbound policy/scanner generation, the complete candidate
+ID/revision/representation/commitment set, sample strategy/limit, exact
 ordered redacted samples, caution codes, and schema/copy version. Human and
-JSON render from that same snapshot. Apply recomputes it; drift or key
-rotation returns a fresh preview with zero grant/audit/outbox/fetch/cache
-effects. The token is opaque; neither it nor audit/support output reveals a
-body/sample hash, and durable audit stores only a non-replayable token ID.
+JSON render from that same snapshot. Human confirmation keeps the token
+in-process; robot apply accepts the 15-minute bearer only from bounded
+`--preview-token-stdin`. Envelope verification distinguishes invalid context,
+key, or MAC from an authentic stale/expired snapshot; the snapshot check,
+generation compare-and-swap, grant, and audit share one write transaction.
+Failure returns a fresh preview with zero grant/audit/outbox/fetch/cache
+effects. The token is opaque and nonce-unlinkable; neither it nor
+audit/support output reveals a body/sample hash, and durable audit stores only
+a domain-keyed nonce identifier.
 `ee team unshare bodies` advances the same
 exact-node grant generations and stops future serving from the named current
 local source. `--all-members` means recipients of that source, lists other
@@ -2499,7 +2522,10 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
   CHECK site (§7.3.2), not a constraint tweak. Pair/signing secrets live in
   hardened 0700-directory/0600-file storage on Unix or equivalent
   SID/DACL/reparse/write-through storage on Windows under the user data dir,
-  not in the DB.
+  not in the DB. The store-local authentication root follows the same
+  hardened boundary but has a distinct key namespace/lifecycle; raw root and
+  derived subkeys never enter SQLite. Only nonsecret key IDs and bounded
+  import-verification-window metadata may be persisted.
 - **User-scoped responder registry**: extend the existing hardened workspace
   registry/catalog with exact workspace ID, canonical database identity,
   team ID/genesis hash, route generation, and enabled/posture fields. The
