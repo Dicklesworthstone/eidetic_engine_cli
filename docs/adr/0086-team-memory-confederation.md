@@ -14,7 +14,13 @@ absolute-timestamp rules reinstated, rematerialization pinned with an owning
 bead, RSA policy pinned, and the Ed25519-in-v1 reversal split into plan §13
 item 1b — RATIFIED by the operator 2026-07-30, so the signature/relay
 dependencies are approved and every TC-D that builds on them is fully
-decided)
+decided; recorded by bd-tc-epic-qzk7o.9 and commit 54ee80b8. The subsequent
+audit pinned crash-safe non-downgrading pair rotation, invite/ceremony ID
+entropy, symmetric lane revocation, delegated-member review truthfulness, and
+the rematerialization publication fence; the final pass superseded the
+rotating-key frame-v1 identity, added operation-specific feature gating,
+durable revocation fences, rollback-safe rotation grace, and honest
+local-source unshare scope)
 
 ## Context
 
@@ -96,21 +102,39 @@ The broker binds only while at least one validated route is mesh-enabled:
 pausing one workspace removes only that route, zero enabled routes means no
 listener, and `EE_MESH_HELLO_RESPONDER_DISABLED=1` remains the user-wide kill
 switch.
+The broker also revalidates its local Tailscale address set at startup and on
+network-map/interface changes. Loss of every verified tailnet address closes
+the listener and reports transport-unavailable posture; a changed set drops
+stale sockets before binding only the newly verified addresses. Startup while
+`tailscaled` is unavailable retries under supervision without ever binding a
+wildcard or stale invite hint.
 
 All **post-enrollment** traffic speaks length-prefixed,
-session-authenticated frames via the existing codec (pre-key bootstrap
-traffic is the TC-D2 exception). M1 wires the codec's existing
-`hello`/`summary`/`event_fetch`/`body_fetch` capabilities. M6 adds exactly one
-version-negotiated `identity_attest` capability for the verifier-hosted device
-ceremony in TC-D13; older peers reject it as unsupported. Its application
-payload is capped at 8 KiB and may carry only ceremony identifiers, the
-verification URL/user code, and bounded status—not an ID/access/refresh token.
-The codec's 64 KiB frame / 32 KiB payload budgets and constant-time MAC
-comparison remain the hard outer limits;
-the current codec already signs its source/target fields, but does not verify
-that `targetNodeKey` names the local endpoint. TC-D5 enforces that endpoint
-binding and adds directional session keys and replay protection before the
-codec gets a production caller. Production I/O uses the pinned
+session-authenticated frames (pre-key bootstrap traffic is the TC-D2
+exception). The dead `ee.mesh.tailscale_transport_frame.v1` codec is useful
+scaffolding, but its `sourceNodeKey`/`targetNodeKey` fields encode rotating
+Tailscale public keys as if they were durable endpoint identity, and its MAC
+uses the long-term pair key directly. It is therefore superseded **before its
+first production caller** by `ee.mesh.tailscale_transport_frame.v2`, not
+silently reinterpreted. V2 names random ee `sourceNodeId`/`targetNodeId` and
+binds `teamId`, source/target workspace IDs, session ID, direction, monotonic
+u64 counter, request/response correlation, capability, bounded requested
+budget, and payload hash in a versioned type-tagged/length-prefixed MAC
+preimage. The authenticated session transcript binds both Tailscale stable
+node IDs; current Tailscale public keys remain verified observations and
+never appear as frame identity. A production listener rejects frame v1.
+
+M1 wires v2's `hello`/`summary`/`event_fetch`/`body_fetch` capabilities. M2
+adds the version-negotiated, control-only `pair_rotate` capability used by
+TC-D5; its payload is capped at 4 KiB and can carry only the pinned rotation
+state-machine messages. M6 adds `identity_attest` for the verifier-hosted
+device ceremony in TC-D13; older peers reject either extension as
+unsupported. Its application payload is capped at 8 KiB and may carry only
+ceremony identifiers, the verification URL/user code, and bounded status—not
+an ID/access/refresh token. The codec's 64 KiB frame / 32 KiB payload budgets
+and constant-time MAC comparison remain the hard outer limits. TC-D5 owns the
+v2 endpoint binding, directional session keys, canonical MAC vectors, and
+replay protection. Production I/O uses the pinned
 `asupersync::net::{TcpListener, TcpStream}` APIs: nonblocking,
 readiness-driven accept/connect/read/write with `Cx` cancellation and explicit
 deadlines. It does not park blocking `std::net` calls on worker threads or
@@ -190,13 +214,14 @@ two typed payload contracts:
   `signingKeyRotated`, `laneProfileSet`, `idpPolicySet`, and
   `identityAttested`, plus `manifestConflictResolved` operations.
   `identityAttested` is schema-pinned from v1 even though its emitter and
-  semantics land in the tier-2 identity milestone; pre-feature binaries
-  disposition it as unsupported through `requiredFeatures` rather than
-  misparse it. The concrete gate string is pinned:
-  `requiredFeatures: ["mesh.team.manifest.v1"]` on every manifest-payload
-  event (the `mesh.` feature namespace rule from `docs/mesh/event_schema.md`
-  carries over to the new envelope). Manifest payloads are small, inline
-  metadata and never depend
+  semantics land in the tier-2 identity milestone. Every manifest event
+  requires `mesh.team.manifest.v1`; `identityAttested` additionally requires
+  `mesh.team.identity_attested.v1`. A pre-M6 binary therefore dispositions
+  that operation as `unsupported` even though it understands the base
+  manifest schema—the generic feature bit alone would be an ineffective
+  gate. The `mesh.` feature namespace rule from
+  `docs/mesh/event_schema.md` carries over to the new envelope. Manifest
+  payloads are small, inline metadata and never depend
   on body-lane grants.
 
 The outer envelope carries the origin/team/workspace/sequence/hash-chain
@@ -335,13 +360,21 @@ removals unavailable whenever the remover goes offline.
 Invite and introduction secrets are 32 bytes from the OS CSPRNG, single-use,
 and never user-chosen. During pairing, canonical initiator and responder
 roles each contribute a fresh 32-byte nonce. A length-prefixed canonical
-transcript binds the protocol/KDF version, `team_id`, invite/introduction ID,
+pre-KDF transcript binds the protocol/KDF version, `team_id`,
+invite/introduction ID,
 both roles, both random ee node IDs, both Tailscale stable node IDs, both
 currently observed Tailscale node public keys, both signing-key fingerprints,
-both nonces, and the handshake transcript hash before deriving `k_pair` with
-`blake3::derive_key("ee.team.pair.v1", ...)`. Both sides prove key possession
-before enrollment commits; the invite secret authenticates the ceremony but
-does not determine the pair key by itself.
+and both nonces. Its hash is exactly
+`blake3::derive_key("ee.team.pair.transcript.v1",
+canonical_transcript_bytes)`; it excludes the derived key and
+key-confirmation messages, so the construction is not circular. With `lp`
+denoting u32-LE length-prefixing,
+`k_pair = blake3::derive_key("ee.team.pair.v1",
+lp(invite_or_introduction_secret) || lp(transcript_hash))`. Key-confirmation
+MACs separately bind that transcript hash, pair-key generation, and sender/
+receiver roles. Golden vectors pin every field boundary. Both sides prove key
+possession before enrollment commits; the invite secret authenticates the
+ceremony but does not determine the pair key by itself.
 
 The long-term pair key never MACs application frames directly. Each
 connection performs an authenticated fresh-nonce handshake and derives
@@ -379,13 +412,67 @@ surfaces.
 Pair and signing keys live under a 0700 user-data key directory in 0600
 files opened without following symlinks, with owner/type checks, atomic
 write+rename, and file/directory fsync; existing path-safety helpers are
-reused instead of relying on `chmod` alone. Pair-key rotation stages
-`current` and `next`, confirms the next key in both directions, atomically
-promotes it, and retains the prior generation only for a bounded rollback
-window. The existing redacted `ee backup` format and support bundles continue
-to exclude these credentials. A restore from those artifacts must re-pair;
-loss of a signing lineage requires another active member to revoke/rebind it.
-An operator-managed protected backup of the entire user-data key directory is
+reused instead of relying on `chmod` alone.
+On Windows, "client-only" means no inbound responder, **not** weaker key
+storage: team join/sync/rotation requires an equivalent reviewed safe
+platform adapter that rejects reparse-point components, verifies a
+non-inherited DACL limited to the current user SID and SYSTEM, pins the opened
+file identity, and provides write-through atomic replacement. It may not
+shell out to `icacls` or add project-owned unsafe code. If those guarantees
+are unavailable, credential-bearing team commands fail closed with
+`mesh_key_store_unavailable`; ordinary non-team ee commands remain usable.
+
+Pair-key rotation is a
+generation-bound, crash-resumable two-phase state machine—not a fictitious
+cross-machine atomic write. Both endpoints contribute fresh 32-byte nonces
+inside the current authenticated session and construct a canonical rotation
+transcript binding team, both ee nodes, roles, `rotation_id`, expected/next
+generations, both nonces, and the prior pair transcript hash. Its hash is
+`blake3::derive_key("ee.team.pair.rotate.transcript.v1",
+canonical_rotation_transcript_bytes)`. The next key is exactly
+`blake3::derive_key("ee.team.pair.rotate.v1",
+lp(current_pair_key) || lp(rotation_transcript_hash))`; this is routine
+key hygiene, not compromise recovery—suspected compromise requires a fresh
+pairing ceremony and new independent secret. Both endpoints first durably
+stage the same rotation record; each proves the next key in both directions
+and persists an
+`accepting_next` state before either sends a commit acknowledgement. Each
+endpoint then promotes locally with an atomic file replacement and closes
+sessions derived from the prior generation. A crash may temporarily leave
+one endpoint promoted and the other `accepting_next`; the handshake may use
+the prior key for **rotation-resume messages only**, carried over the
+`pair_rotate` control capability (the only old-key resume surface, matching
+the plan's test contract), bound to that exact
+rotation record, for
+`PAIR_KEY_ROTATION_GRACE_SECONDS = 86400`. The prior key never authenticates a
+new ordinary session or application frame after local promotion, no endpoint
+automatically downgrades, and concurrent or generation-mismatched rotations
+fail closed. After the grace window, incomplete state emits
+`mesh_pair_rotation_repair_required` and requires a fresh pairing ceremony.
+The staged record persists its creation/deadline and a nondecreasing local
+wall-time high-water. Rotation-resume checks advance that high-water and use
+same-process monotonic elapsed time; observing wall time below the persisted
+floor blocks old-key resume immediately with the same repair code. A clock
+rollback therefore cannot reopen or indefinitely extend the grace window.
+This converges after crashes without pretending the two files promote
+atomically or leaving an old application key accepted indefinitely.
+The authoritative local rotation state is an atomically replaced, fsynced
+0600 manifest inside the hardened key directory; database/status rows are a
+rebuildable non-secret projection. A manifest/DB disagreement blocks sessions
+and is reconciled from that manifest before use, so no transaction is claimed
+across SQLite and the filesystem.
+
+`ee mesh rotate-pair <peer-id>` is the explicit v1 trigger and emits
+`ee.mesh.rotate_pair.v1`; v1 claims no automatic rotation cadence. It uses the
+post-enrollment `pair_rotate` control capability, and a peer ID is resolved to
+the exact enrolled ee-node pair/generation before staging. This command is
+routine hygiene only. `ee team members rotate-key` rotates the local
+Ed25519 signing lineage and does not ambiguously claim to rotate pair keys.
+
+The existing redacted `ee backup` format and support bundles continue to
+exclude these credentials. A restore from those artifacts must re-pair; loss
+of a signing lineage requires another active member to revoke/rebind it. An
+operator-managed protected backup of the entire user-data key directory is
 outside the `ee backup` contract and is never inferred from a data artifact.
 
 Signing-key rotation is a separate public lineage transition, not an
@@ -402,7 +489,8 @@ signature by a stolen current key cannot prove its own recovery.
 Introduction exchanges use the pair-key construction above, so an inviter
 cannot derive the pair keys it introduced.
 **Rejected:** deriving from the invite secret alone; direct use of a
-long-term pair key for frames; one-sided pair rotation; silently replacing a
+long-term pair key for frames; one-sided or automatically downgraded pair
+rotation; claiming cross-machine atomic promotion; silently replacing a
 signing key without a dual-signed, hash-linked generation transition.
 
 ### TC-D6 — Member identity is a first-class primitive
@@ -434,7 +522,10 @@ when the product command is
 member-shaped: `--with <member>` previews and grants the member's currently
 bound active nodes, while a node bound later starts at the metadata-only
 default and never inherits an existing body grant without a new preview and
-consent. Status exposes partially granted members.
+consent. `ee mesh revoke-lane` and the member-shaped
+`ee team unshare bodies` advance each exact node's grant generation and stop
+future serving; a stale preview cannot re-enable the lane, and a later grant
+needs a fresh preview. Status exposes partially granted members.
 
 ### TC-D7 — Trust class `peer_human_attested`; `human_explicit` stays local
 
@@ -559,11 +650,13 @@ identity-authorization time floor, transactionally advanced to at least the
 current wall clock before every token-verification, grant/serve, sync-import,
 status, and steward decision that depends on identity. Peer `producedAt`,
 token timestamps, and attestation claims never advance that floor. A local
-clock rollback therefore cannot revive or extend a lease. A forward jump
-fails safe and surfaces `team_identity_clock_rollback`; the explicit local
-repair lowers the floor only after suppressing every currently eligible
-tier-2 lease and requiring fresh interactive attestations, so reset cannot
-reactivate old evidence. Two active member IDs cannot claim the same exact
+clock rollback therefore cannot revive or extend a lease and surfaces
+`team_identity_clock_rollback`. A forward jump simply advances the floor and
+may expire leases early, which is fail-safe; if the system clock is then
+corrected backward, the rollback posture appears. The explicit local repair
+lowers the floor only after suppressing every currently eligible tier-2 lease
+and requiring fresh interactive attestations, so reset cannot reactivate old
+evidence. Two active member IDs cannot claim the same exact
 (`issuer`, `subject`) under one policy generation; all such bindings enter a
 complete-set `manifest_conflict` and sharing for the affected members pauses
 until reconciliation/removal rather than selecting the first arrival. A
@@ -613,8 +706,14 @@ later-discovered node/stream survives the removal. Events through explicit
 cutoffs remain valid. Active members added by the removed member through an
 accepted cutoff remain active but carry the persistent
 `addedByRemovedMember` review flag until each local operator explicitly
-confirms it — confirmation is a local per-node action, never replicated (a
-replicated clear would let one member silently vouch for everyone).
+acknowledges it — acknowledgement is a local per-node action, never replicated
+(a replicated clear would let one member silently vouch for everyone). The
+flag is detection, not revocation: a pre-cutoff member (including a
+sock-puppet) retains ordinary v1 authority until separately removed.
+Removal preview, status, and doctor must therefore identify every such member,
+emit `team_delegated_member_review_required`, and recommend pausing the team
+until the operator either acknowledges a legitimate member or removes a
+suspicious one. V1 does not pretend to solve this without quorum/roles.
 Rejoining always mints a new member ID and signing-key lineage. And to keep
 the vocabulary honest against the unchanged "no CRDTs" non-goal: the
 manifest is still **not** a CRDT — remove-wins cutoffs are a fixed
@@ -648,7 +747,8 @@ and cache-eviction outbox entries use deterministic idempotency keys. Cache
 metadata closes the retrieval path in the transaction; physical eviction is
 idempotent after commit, so a crash cannot leave invalid bytes readable.
 Large reversals checkpoint without exceeding the existing 16-index-jobs-per-
-While a rebuild is incomplete, affected reads carry
+round budget, and only a completed generation becomes visible. While a
+rebuild is incomplete, affected reads carry
 `mesh_rematerialization_pending` (warning) rather than silently presenting
 the thinner fail-closed corpus as complete. An executor/invariant failure is
 `mesh_rematerialization_failed` (high) with structured status/doctor repair;
@@ -674,8 +774,13 @@ policy/admission records; those are not retrieval bytes. Owned by T2.8 under
 M1; T2.4 and T4.1 consume it.
 
 A `nodeRevoked` payload similarly names the exact ee node and the revoker's
-last accepted frontier for that node. It immediately closes local sessions
-and future serving for the node; effects above the cutoff quarantine
+last accepted frontier for that node. Its append transaction advances a
+durable session/grant authorization generation before commit. Every
+subsequent frame handler rechecks that generation before import or serve, so
+an already-open socket cannot race a post-commit body fetch. In-memory session
+closure and connection cancellation are idempotent post-commit effects, not
+fictional SQLite side effects; a crash is safe because restart cannot
+re-authorize the old generation. Effects above the cutoff quarantine
 regardless of arrival order. Ordinary Tailscale node-key rotation for the same
 pinned stable node ID is only an audited transport-observation update under
 TC-D5 and does not create a new ee node or inherit a new grant.
@@ -718,20 +823,37 @@ is durable and audited as that event's disposition while the receipt and
 disposition-scan frontiers advance; it never enters materialized state merely
 because a frontier moved.
 
-`ee team member remove` durably appends the signed removal, revokes future
-serving and pair sessions locally in the same transaction, then attempts
-bounded foreground fanout to every reachable member. Any peer that receives
-it can relay it. Fanout uses TC-D11's bidirectional anti-entropy round: the
-remover connects to a peer responder, advertises its new signed tip, and
-serves the requested removal range over that same session; no `event_push`
-capability or reverse connection is invented. The command reports which
-members acknowledged and which remain exposed; status/doctor retain an
-acknowledgement matrix until every active member has applied the removal.
+`ee team member remove` durably appends the signed removal and advances the
+target nodes' session/grant authorization generations in one transaction.
+Per-frame reauthorization makes future serving fail closed immediately after
+commit; idempotent connection cancellation and bounded fanout happen
+afterward and are never described as part of the database transaction. Any
+peer that receives the removal can relay it. Fanout uses TC-D11's
+bidirectional anti-entropy round: the remover connects to a peer responder,
+advertises its new signed tip, and serves the requested removal range over
+that same session; no `event_push` capability or reverse connection is
+invented. The command reports which members acknowledged and which remain
+exposed; status/doctor retain an acknowledgement matrix until every active
+member has applied the removal.
 Propagation is **not** claimed to be bounded when no active peer receives the
 event. A removal never emits
 `shareWithdraw`: that event is origin-memory-wide, not recipient-specific,
 and would incorrectly withdraw material from members who remain authorized.
 Already-synced copies on the removed machine cannot be erased.
+
+Removal is preview-hash pinned. Human mode renders the target member, exact
+active nodes/signing generations, per-origin cutoffs, accepted-prefix members
+that will remain active, acknowledgement audience, and cached-copy/
+no-`shareWithdraw` residual, then asks for confirmation. Automation first runs
+`ee team member remove <member> --preview --json` and supplies the returned
+`--preview-hash` to the mutating call. The hash binds the team root and
+manifest/materializer generation plus every previewed field. Inside the
+removal transaction, ee recomputes those inputs immediately before append; a
+change returns `team_member_removal_preview_stale` with a new preview action
+and commits no removal, authorization-generation advance, invite
+invalidation, audit/outbox, connection-cancel, or fanout side effect.
+Confirmation never silently approves a different cutoff or delegated-member
+set.
 
 **Rejected:** arrival-order authorization; silently choosing one concurrent
 manifest writer or capacity winner; treating a rotating Tailscale public key
@@ -753,7 +875,9 @@ sync-ineligible by design. Invites contain a version, team ID, invite ID,
 the inviter's exact Tailscale stable node ID and ee node/signing identity,
 the currently observed rotating Tailscale node key plus MagicDNS/IP hints,
 the team-root `hello_port`, genesis event hash, root/signing-key fingerprint,
-and 256-bit secret; they are
+and 256-bit secret. Invite IDs and durable ceremony IDs each contain at least
+128 independent OS-CSPRNG bits; neither is a counter, hash prefix, display
+name, or truncation of the secret. Invites are
 single-use, TTL-bound (default 72 h), hashed-at-rest, and revocable. The
 joiner resolves the exact stable node ID through fresh local Tailscale status
 and connects only to a current IP and current node key associated with it.
@@ -839,8 +963,10 @@ the initiator. Two members with no responder cannot exchange at all, and
 other peers cannot trigger freshness on a client-only member; `ee team
 status` says so plainly. The daemon is `#[cfg(unix)]`; Windows members are
 client-only in v1, but a scheduled/manual outbound round can contribute as
-well as receive. A Windows responder plus secure same-user local broker
-control is the named follow-up. **Rejected:** a strictly requester-read-only
+well as receive only after TC-D5 key-store parity passes; otherwise
+credential-bearing team commands fail with `mesh_key_store_unavailable`.
+A Windows responder plus secure same-user local broker control is the named
+follow-up. **Rejected:** a strictly requester-read-only
 round (cannot carry removal fanout and strands client-only contributions);
 adding a separate `event_push` protocol; hiding listener asymmetry behind
 "sync just works" prose; making any core command daemon-required.
@@ -897,6 +1023,18 @@ residual: the `content_hash` of a withdrawn body
 persists forever in the append-only stream, so a peer who already holds (or
 later guesses byte-exactly) the content can confirm it post-purge — purge
 removes bodies, not the ability to recognize them.
+Likewise, revoking one recipient's body-lane grant prevents future serving
+but cannot erase a body that recipient already cached or copied. The
+recipient-facing command and audit output state that limitation; a later
+origin-wide `shareWithdraw` asks every observing active peer to purge its
+derived copy, but is cooperative revocation rather than a remote-erasure
+guarantee.
+`ee team unshare bodies` is scoped to the **current serving workspace/node**:
+`--all-members` means every recipient of this local source, not every source
+node owned by the human or team. Its preview/result names that source and
+lists other known source nodes as unaffected; the operator runs it on those
+nodes separately. A local-first tool must not imply a distributed revoke it
+cannot authorize or confirm.
 **Rejected:** a body event kind in `mesh_origin_events` (reasons a–c);
 widening the frame codec budgets.
 
@@ -1108,7 +1246,11 @@ name is **retired**: mechanism-level posture stays on the existing
 `ee.mesh.auto_status.v1` / foreground status surfaces; team-level posture is
 `ee.team.status.v1`. The `ee.mesh.import_ledger.v1` inspection surface is
 owned by the import-policy bead (bd-tc-epic-qzk7o.2.1) — shipped with it or
-explicitly deferred in its closeout, never silent. Deterministic retrieval
+explicitly deferred in its closeout, never silent. Mechanism contracts also
+register
+`ee.mesh.tailscale_transport_frame.v2`, `ee.mesh.pair_rotation.v1`, and
+`ee.mesh.rotate_pair.v1`; dead frame v1 is a rejected input, not a
+compatibility alias. Deterministic retrieval
 surfaces use immutable origin `producedAt` (or omit a time field), rendered
 as absolute RFC 3339 only — relative phrasing ("2h ago") is allowed solely
 in non-deterministic human surfaces (`team status`/`activity` human mode);
@@ -1130,7 +1272,8 @@ the recent-time bucket and reported in a deterministic `clockAnomalies`
 collection until wall time catches up. This limits clock-skew ranking abuse
 without pretending the member-attested clock is authoritative.
 
-### TC-D16 — Precedence: local workspace > team > global
+### TC-D16 — Overlap precedence: local workspace > team > global;
+contradictions surface
 
 On overlap, more-specific context wins (mirrors bd-1bfwa's
 workspace-beats-global). On contradiction, neither silently wins — the pair
@@ -1145,23 +1288,27 @@ module cited by both the team and global lanes.
 | Forged event origin or relay | TC-D4 domain-separated Ed25519 origin signatures with strict verification and TC-D5 dual-signed generation continuity; pairwise session MACs authenticate transport, not authorship |
 | Relay mutates an unsigned event identifier | TC-D3 requires `eventId` to be the exact full-digest derivation of the signed `eventHash`; mismatch is rejected before idempotence/storage |
 | A valid origin key equivocates | TC-D4 retains both signed branches, rolls materialization back to the common prefix, suspends the origin, relays fork evidence, and requires another member to revoke/rebind; no first-arrival winner |
-| Frame replay / wrong-target or cross-workspace forwarding | TC-D5 fresh directional session keys, source+target ee-node and pinned Tailscale-stable-ID binding, one authenticated initiator/responder endpoint-workspace pair per session, monotonic counters, and request correlation; producer-owned `origin_workspace_id` is provenance and can never select either receiving database |
+| Frame replay, key-identity downgrade, or wrong-target/cross-workspace forwarding | TC-D1/D5 reject dead frame v1 and use frame v2 random ee-node IDs, team/endpoint-workspace/session/direction/counter/request binding under directional keys. Stable Tailscale IDs live in the handshake and current public keys remain observations; producer-owned `origin_workspace_id` is provenance and can never select either receiving database |
 | Spoofed bootstrap identity / rate-limit evasion | TC-D2 derives identity from accepted source IP via LocalAPI WhoIs; pre-auth source-IP + global buckets ignore claimed headers |
 | Unauthenticated traffic amplifies durable audit/storage | TC-D2 permits no durable mutation before invite proof; unknown-node and malformed bootstrap traffic affects only bounded in-memory source-IP/global counters and aggregate status metrics, never one durable row per attempt |
 | Authenticated peer fills the append-only ledger with small valid batches | TC-D3 charges cumulative inbound storage to the signed origin across relays/key rotations, enforces per-origin/team/free-space ceilings transactionally, reserves only bounded control capacity, and never charges local source truth |
 | Network request selects a local workspace/path | TC-D1 user-scoped broker routes only exact pre-registered team/workspace or invite IDs, never accepts a path from the wire, and revalidates owner-safe database identity/genesis before serving |
 | One workspace daemon monopolizes the shared port | TC-D1 listener owner multiplexes validated routes through a same-EUID bounded local control channel; startup and route ambiguity fail closed rather than spawning another listener |
 | Multiple OS users or incompatible team ports contend on one node | TC-D1 roots/invites commit one v1 port, all broker routes must agree, one OS user owns the host-wide listener, and other users/mismatches are explicitly client-only with doctor repair; no scan/fallback |
+| Windows client-only mode weakens credential storage | TC-D5 requires DACL/reparse-point/opened-identity/write-through parity through a reviewed safe adapter. If unavailable, `mesh_key_store_unavailable` blocks team key operations; no listener does not mean best-effort secrets |
 | Ambient or repository-local Git state rewrites project identity | TC-D8 runs canonical Git directly with bounded/reaped execution, a minimal cleared environment, replacement/lazy-fetch/optional-lock behavior disabled, and nonempty grafts rejected; an installed Git lacking a required safety option is never retried weakly. Fallback reads exactly one raw local `origin` URL with includes and nonlocal config disabled, so aliases, prompts, rewrites, ambient object alternates, or multiple URLs cannot choose a project key |
 | Wrong process answers the inviter port first | TC-D2 requires the invite-pinned Ed25519 challenge over root/identity/nonces/port before the joiner releases the secret |
 | Invite interception / local secret exposure | Single-use leased redemption, TTL, hashed at rest, zeroizing buffers, no argv/env/log ingestion, explicit secret re-entry before key confirmation, and mutual key confirmation; an unbound code remains a bearer credential whose one redemption can be stolen, so the UI names that residual and recommends short TTL/`--wait`/identity policy |
 | Invite locator redirects, goes stale, or breaks on routine key rotation | TC-D10 binds the exact inviter Tailscale stable node ID, ee identity, and team root; fresh local status resolves its current key/IP, treats embedded key/MagicDNS/IP as observations only, accepts rotation only within that stable binding, and requires reissue when the stable ID disappears/changes |
+| Pair rotation crashes, clock rolls back, or a peer forces old-key fallback | TC-D5 uses an explicit control-only capability and two-phase generation record. The prior key can authenticate only the exact pending rotation for 86400 seconds; persisted wall-time high-water plus same-process monotonic elapsed make rollback fail closed, and expired/unverifiable state requires fresh pairing |
 | Compromised member | Data-lane blast radius is the member's node-scoped grants (per-node lanes, elevation toggle, harmful-feedback demotion, revocation). Manifest authority (lane profile, idp policy, removals) is any-active-member in v1 — mitigated by audit + conflict surfacing + `ee team pause`; roles are a v2 question |
 | Compromised member widens lane or relaxes IdP policy | TC-D9 treats manifest policy as coordination input: lane widening cannot mint local grants, and every node retains its explicitly accepted IdP floor until that operator accepts the exact relaxation generation |
 | Compromised member narrows lanes or tightens IdP policy | This remains an availability authority in v1: narrowing/tightening may pause sharing but cannot exfiltrate data. Status/audit identify the author and generation; another active member can revoke the attacker and reconcile policy. Roles/quorum are deferred, so the residual is explicit |
 | Compromised member floods membership | TC-D9 hard-caps active membership at 20 and turns a complete-set overflow into a sharing-blocking capacity conflict; no attacker-grindable event/hash winner is selected. A valid member can still cause an availability incident, consistent with its other v1 manifest authority |
 | Compromised member binds unlimited nodes | TC-D9 caps each member at four active ee nodes; predecessor-rooted concurrent additions commute only within the cap and otherwise all conflict without granting a winner |
-| Removed member's pre-authored authority | TC-D9 signed per-origin cutoffs make rejection arrival-independent; accepted earlier adds stay flagged `addedByRemovedMember` pending local confirmation |
+| Removal inputs change after the operator previews them | TC-D9 binds root/materializer generation, target, nodes/signing generations, per-origin cutoffs, accepted-prefix additions, acknowledgement audience, and non-erasure residual into the required preview hash; transaction-time mismatch returns `team_member_removal_preview_stale` with zero removal/authorization/invite/audit/outbox/connection/fanout effects |
+| An already-open session races node/member revocation | The removal transaction advances durable session/grant authorization generations. Every frame handler rechecks before import/serve; socket cancellation is idempotent after commit, so SQLite is never claimed to close memory state and a crash cannot reauthorize the old generation |
+| Removed member's pre-authored authority | TC-D9 signed per-origin cutoffs make rejection arrival-independent. Accepted earlier adds remain active and are therefore an explicit v1 residual, not silently described as revoked: `addedByRemovedMember` plus `team_delegated_member_review_required` persists until each operator acknowledges or separately removes them, with team pause recommended during review |
 | Mutually invalidating member removals | TC-D9 detects removal dependency cycles as a complete-set manifest conflict, preserves pre-conflict membership, and pauses affected sharing pending reconciliation |
 | Removal propagation latency | TC-D9 bounded foreground fanout + signed relay + acknowledgement matrix; no false bound when nobody receives the removal |
 | Local `human_explicit` minting amplified team-wide | TC-D7 controls: basis in `why`, per-member counts, atomic local-admission velocity cap independent of untrusted origin time, clock-rollback high-water mark, canonical batch order, and burst code |
@@ -1178,6 +1325,7 @@ module cited by both the team and global lanes.
 | Policy-denied event stalls later sync | TC-D3 contiguous receipt/disposition-scan frontiers + sparse audited per-event dispositions; materialization reads only explicit applied rows |
 | Policy denial suppresses a later purge | TC-D3 makes minimal opaque `tombstone`/`shareWithdraw` controls mandatory for active members, so current content policy cannot strand previously admitted derived material |
 | Body hash used as an oracle | TC-D12 exact event/requester/grant authorization and bounded sequenced chunks |
+| Body-lane grant is revoked after bytes were fetched or on only one source node | Revocation stops future serving from the named local source and advances the node-scoped grant generation, but cached/copied bytes cannot be remotely erased and other source nodes are unaffected. Command/audit output says both; origin-wide `shareWithdraw` is a cooperative purge control, not proof of deletion on an offline or malicious peer |
 | Member lies about origin time to stay fresh | TC-D15 makes `producedAt` provenance-only for trust/ranking/lifecycle, requires explicit activity `as_of`, and isolates claims beyond the pinned future-skew window in deterministic clock anomalies |
 
 ## Non-goals (v1)
@@ -1225,11 +1373,17 @@ not an ordinary member slot with manifest authority.
   network-supplied-path attempts fail without leaking local paths.
   Root/local port mismatch, two registered teams with different committed
   ports, another OS user/process owning the host-wide port, and client-only
-  posture are diagnosed; no case scans or falls back.
+  posture are diagnosed; no case scans or falls back. Starting before
+  tailscaled is ready binds nothing and retries; tailnet-address loss closes
+  the listener, and a verified address-set replacement drops stale sockets
+  before binding only the new set.
 - Invite locator cases: stale embedded IP/current-key hints resolve through the
   same pinned stable node ID; routine current-key rotation for that stable ID
   succeeds with pair/ee-key continuity, while a missing/changed stable ID or
   hint pointing at another stable node fails before secret transmission.
+  Injected-RNG format tests prove invite and durable ceremony IDs each carry
+  at least 128 independent random bits and are not derived from the secret or
+  public identity; unknown IDs get only the bounded generic decline.
   A fake process on the correct host/port cannot receive the secret because
   its inviter challenge does not verify against the invite-pinned signing
   identity/root/nonces/port; challenge replay and root/port substitution fail.
@@ -1252,6 +1406,23 @@ not an ordinary member slot with manifest authority.
   and receives in its manual round, two client-only nodes cannot connect, and
   removal fanout succeeds through tip advertisement plus a peer range request
   without any `event_push` frame.
+- Pair-key rotation: crash/restart at every stage/accept/commit/promote
+  boundary converges through the exact rotation record initiated by
+  `ee mesh rotate-pair`; a key-store
+  manifest/DB projection mismatch blocks and repairs from the hardened
+  manifest. Golden vectors pin initial and rotation transcript bytes, context
+  strings, length prefixes, derived keys, and role-bound confirmations. For
+  86400 seconds the prior key authenticates only rotation-resume handshake
+  messages, never ordinary sessions/frames; wrong transcript,
+  generation, concurrent transition, automatic downgrade, persisted-clock
+  rollback, and post-grace resume fail, with fresh pairing as the repair.
+  `ee team members rotate-key` output is signing-lineage-specific.
+- Key-store parity: Unix mode/owner/no-link/fsync and Windows
+  SID/DACL/reparse/opened-file-identity/write-through vectors cover
+  create/read/rotate/crash and attacker-controlled parents. A Windows build
+  without the reviewed safe adapter emits `mesh_key_store_unavailable` and
+  blocks join/sync/rotation; it never shells to repair ACLs or adds
+  project-owned unsafe code.
 - Migration-safety test: row counts + content hashes survive the trust-class
   rebuilds.
 - Determinism: J7 harness extended with team-attributed packs using immutable
@@ -1262,13 +1433,16 @@ not an ordinary member slot with manifest authority.
 - Degraded-code discipline: every new code lands with fixture + taxonomy in
   the same commit (J6 validator); the 19 uncovered legacy mesh codes are
   backfilled first.
-- Fuzz/property: frame decode, bootstrap envelope, origin/payload codecs,
-  invite codec; property tests cover target binding, counter replay, manifest
-  genesis uniqueness/root binding, arrival-order independence,
+- Fuzz/property: frame-v2 decode plus v1 downgrade rejection, bootstrap
+  envelope, origin/payload codecs, invite codec; property tests cover random
+  ee-node/team/endpoint/session/direction/target binding, counter replay,
+  manifest genesis uniqueness/root binding, arrival-order independence,
   mutual-removal cycles, and withheld-payload cursor progress. Canonical
   event/payload and dual-signed signing-key transition known-answer vectors
   are stable across encode/decode and field insertion order; changing
   `eventId` without changing the signed digest is always rejected.
+  A base-manifest-only feature set dispositions `identityAttested` as
+  unsupported because its additional feature bit is absent.
 - Import authentication (TC-D14): a teammate's export cannot inject
   `human_explicit`; an artifact with a correct store UUID but no valid MAC
   is refused; context-matched same-store reimport restores missing rows or
@@ -1320,6 +1494,18 @@ not an ordinary member slot with manifest authority.
   ceremony-proven stable binding is blocked with upgrade guidance, never
   auto-bound; low-level grant preview/mutation resolve peer handle to the
   exact ee-node/generation and cannot be retargeted by key rotation.
+  Member-removal preview hashes bind every root/generation/node/cutoff/
+  delegated-member/acknowledgement input; changing each one before apply emits
+  `team_member_removal_preview_stale` and leaves removal, authorization
+  generations, invite invalidation, audit/outbox, connection cancellation,
+  and fanout untouched. A successful revoke advances the durable generation
+  before open sockets are cancelled, and a planted old session cannot import
+  or serve after commit.
+  Removing a member whose accepted prefix added another member leaves that
+  addition honestly active, emits `team_delegated_member_review_required`,
+  and keeps `addedByRemovedMember` visible in preview/status/doctor until
+  local acknowledgement or separate signed removal; no test treats the flag
+  itself as revocation.
 - Elevation controls (TC-D7): harness matrix covers elevation on/off, rows
   over the velocity cap landing as `agent_validated` with
   `team_member_elevation_burst`, and the three `human_explicit` rejection
@@ -1343,6 +1529,11 @@ not an ordinary member slot with manifest authority.
   derived objects and never origin-owned source truth. A peer that previously
   admitted content still receives and applies its minimal withdrawal control
   after the content lane is denied.
+  Per-recipient `revoke-lane`/`team unshare bodies` advances the exact-node
+  grant generation and stops future fetches, invalidates stale previews, and
+  never claims already-cached/copied bytes were erased or emits an
+  origin-wide `shareWithdraw`. `--all-members` names the current local source
+  node and proves another known source node remains unaffected.
 - Opt-in real-tailnet smokes assert real rounds/joins when enabled, exit-78
   skip-clean otherwise.
 - Fake IdP harness covers every tier-2 scenario offline, including the bounded
