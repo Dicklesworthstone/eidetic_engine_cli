@@ -7832,13 +7832,67 @@ impl DbConnection {
             }
 
             let now = Utc::now().to_rfc3339();
-            match self.apply_migration(migration, &now)? {
+            let outcome = if migration.version == V087_EVIDENCE_STORAGE_REBUILD.version
+                && matches!(&self.location, DatabaseLocation::File(_))
+            {
+                self.apply_file_schema_rebuild_migration(migration, &now)?
+            } else {
+                self.apply_migration(migration, &now)?
+            };
+            match outcome {
                 ApplyOutcome::Applied => applied.push(migration.version),
                 ApplyOutcome::AlreadyApplied => skipped.push(migration.version),
             }
         }
 
         Ok(MigrationResult { applied, skipped })
+    }
+
+    /// Apply a table-replacing migration through a fresh file connection.
+    ///
+    /// The pinned FrankenSQLite generation correctly commits V087's
+    /// rename/create/copy/drop sequence, but a connection that compiled the
+    /// pre-rebuild table can retain that retired root page for a later UPDATE.
+    /// Running the rebuild on a sibling connection turns the schema change into
+    /// an external commit, which FrankenSQLite's normal schema-cookie refresh
+    /// path handles before the original connection is reused.
+    fn apply_file_schema_rebuild_migration(
+        &self,
+        migration: &Migration,
+        applied_at: &str,
+    ) -> Result<ApplyOutcome> {
+        let DatabaseLocation::File(path) = &self.location else {
+            return self.apply_migration(migration, applied_at);
+        };
+        let migration_connection = Self::open_file(path)?;
+        let outcome = migration_connection.apply_migration(migration, applied_at);
+        match outcome {
+            Ok(outcome) => {
+                migration_connection.close()?;
+                if !self.has_migration(migration.version)? {
+                    return Err(DbError::MalformedRow {
+                        operation: DbOperation::ListMigrations,
+                        message: format!(
+                            "schema rebuild migration V{} committed on a fresh connection but \
+                             remained invisible to the original connection",
+                            migration.version
+                        ),
+                    });
+                }
+                Ok(outcome)
+            }
+            Err(error) => {
+                if let Err(close_error) = migration_connection.close() {
+                    tracing::error!(
+                        migration_version = migration.version,
+                        error = %error,
+                        close_error = %close_error,
+                        "failed to close schema rebuild connection after migration failure"
+                    );
+                }
+                Err(error)
+            }
+        }
     }
 
     fn apply_migration(&self, migration: &Migration, applied_at: &str) -> Result<ApplyOutcome> {
@@ -28441,7 +28495,8 @@ mod tests {
 
     #[test]
     fn legacy_evidence_rescreen_is_bounded_audited_and_idempotent() -> TestResult {
-        let connection = DbConnection::open_memory()?;
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let connection = DbConnection::open_file(temp.path().join("legacy-rescreen.db"))?;
         seed_migrations_through(&connection, 84)?;
         setup_workspace(&connection)?;
         let session_id =
@@ -28560,14 +28615,11 @@ mod tests {
             ],
         )?;
         evidence_ids.push(mismatched_evidence_id);
-        connection.apply_migration(
-            &super::V085_EVIDENCE_SECURITY_POSTURE,
-            "2026-07-28T00:00:00Z",
-        )?;
-        connection.apply_migration(&super::V086_RULE_INDEX_GENERATIONS, "2026-07-28T00:00:01Z")?;
-        connection.apply_migration(
-            &super::V087_EVIDENCE_STORAGE_REBUILD,
-            "2026-07-30T00:00:00Z",
+        let migration = connection.migrate()?;
+        ensure_equal(
+            migration.applied(),
+            &[85, 86, 87],
+            "legacy evidence upgrade migrations",
         )?;
         ensure(
             matches!(
