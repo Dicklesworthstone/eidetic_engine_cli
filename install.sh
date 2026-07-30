@@ -39,6 +39,10 @@ set -euo pipefail
 umask 022
 shopt -s lastpipe 2>/dev/null || true
 
+# Apple still ships Bash 3.2, which treats an empty "${array[@]}" expansion
+# as an unbound variable under `set -u`. Every expansion of a possibly empty
+# array in this installer must use "${array[@]+"${array[@]}"}" instead.
+
 # ───────────────────────────────────────────────────────────────────────────
 # Defaults & CLI state
 # ───────────────────────────────────────────────────────────────────────────
@@ -229,7 +233,7 @@ draw_box() {
   esc=$(printf '\033')
   local strip_ansi_sed="s/${esc}\\[[0-9;]*m//g"
 
-  for line in "${lines[@]}"; do
+  for line in "${lines[@]+"${lines[@]}"}"; do
     local stripped
     stripped=$(printf '%b' "$line" | LC_ALL=C sed "$strip_ansi_sed")
     local len=${#stripped}
@@ -246,7 +250,7 @@ draw_box() {
   done
 
   printf "\033[%sm╔%s╗\033[0m\n" "$color" "$border"
-  for line in "${lines[@]}"; do
+  for line in "${lines[@]+"${lines[@]}"}"; do
     local stripped
     stripped=$(printf '%b' "$line" | LC_ALL=C sed "$strip_ansi_sed")
     local len=${#stripped}
@@ -526,7 +530,7 @@ print_detected_agents() {
     echo ""
     echo -e "\033[1;39mDetected AI Coding Agent${plural}:\033[0m"
   fi
-  for agent in "${DETECTED_AGENTS[@]}"; do
+  for agent in "${DETECTED_AGENTS[@]+"${DETECTED_AGENTS[@]}"}"; do
     case "$agent" in
       claude-code)        render "Claude Code"        "$CLAUDE_VERSION" ;;
       codex-cli)          render "Codex CLI"          "$CODEX_VERSION" ;;
@@ -542,7 +546,7 @@ print_detected_agents() {
 
 is_agent_detected() {
   local target="$1"
-  for agent in "${DETECTED_AGENTS[@]}"; do
+  for agent in "${DETECTED_AGENTS[@]+"${DETECTED_AGENTS[@]}"}"; do
     [[ "$agent" == "$target" ]] && return 0
   done
   return 1
@@ -1270,7 +1274,7 @@ select_extracted_binary() {
 
   if [ "${#executable_candidates[@]}" -gt 1 ]; then
     err "Archive contains multiple executable '$BINARY' candidates:"
-    for candidate in "${executable_candidates[@]}"; do
+    for candidate in "${executable_candidates[@]+"${executable_candidates[@]}"}"; do
       err "  - ${candidate#"$TMP"/extract/}"
     done
     err "Refusing to choose by filesystem traversal order."
@@ -1290,7 +1294,7 @@ select_extracted_binary() {
 
   if [ "${#all_candidates[@]}" -gt 1 ]; then
     err "Archive contains multiple matching '$BINARY' candidates without owner-execute mode:"
-    for candidate in "${all_candidates[@]}"; do
+    for candidate in "${all_candidates[@]+"${all_candidates[@]}"}"; do
       err "  - ${candidate#"$TMP"/extract/}"
     done
     err "Refusing to choose by filesystem traversal order."

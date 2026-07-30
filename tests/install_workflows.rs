@@ -338,6 +338,104 @@ ee_curl https://example.invalid/proxied
 
 #[cfg(unix)]
 #[test]
+fn installer_has_no_bash_3_2_unsafe_empty_array_expansions() -> TestResult {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+    let installer = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let mut unsafe_expansions = Vec::new();
+
+    for (line_index, line) in installer.lines().enumerate() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        let mut array_names = Vec::new();
+        let mut cursor = 0;
+        while let Some(relative_start) = line[cursor..].find("${") {
+            let start = cursor + relative_start + 2;
+            let Some(relative_end) = line[start..].find("[@]}") else {
+                cursor = start;
+                continue;
+            };
+            let name = &line[start..start + relative_end];
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|character| character == '_' || character.is_ascii_alphanumeric())
+            {
+                array_names.push(name);
+            }
+            cursor = start;
+        }
+
+        let mut remainder = line.to_owned();
+        array_names.sort_unstable();
+        array_names.dedup();
+        for name in array_names {
+            let safe = ["${", name, "[@]+\"${", name, "[@]}\"}"].concat();
+            remainder = remainder.replace(&safe, "");
+            let unsafe_form = ["${", name, "[@]}"].concat();
+            if remainder.contains(&unsafe_form) {
+                unsafe_expansions.push(format!("{}: {}", line_index + 1, line.trim()));
+            }
+        }
+    }
+
+    ensure(
+        unsafe_expansions.is_empty(),
+        &format!(
+            "install.sh contains empty-array expansions that fail under `set -u` on Bash 3.2: {}",
+            unsafe_expansions.join("; ")
+        ),
+    )?;
+
+    let function_start = installer
+        .find("is_agent_detected() {")
+        .ok_or_else(|| "installer is_agent_detected function is missing".to_owned())?;
+    let function_end = installer[function_start..]
+        .find("\n}\n\n# ─")
+        .map(|offset| function_start + offset + 2)
+        .ok_or_else(|| "installer is_agent_detected function end is missing".to_owned())?;
+    let function = &installer[function_start..function_end];
+    let harness = format!(
+        r#"set -euo pipefail
+DETECTED_AGENTS=()
+{function}
+if is_agent_detected codex-cli; then
+  exit 10
+fi
+DETECTED_AGENTS=("claude-code" "codex-cli")
+is_agent_detected codex-cli
+if is_agent_detected missing-agent; then
+  exit 11
+fi
+printf 'empty-and-populated-agent-scan-ok\n'
+"#
+    );
+    let output = Command::new("/bin/bash")
+        .arg("-c")
+        .arg(harness)
+        .env_remove("BASH_ENV")
+        .output()
+        .map_err(|error| format!("failed to run installer empty-array harness: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        output.status.success(),
+        &format!(
+            "installer empty-array harness failed with status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status.code()
+        ),
+    )?;
+    ensure_equal(
+        stdout.as_ref(),
+        "empty-and-populated-agent-scan-ok\n",
+        "installer empty-array agent scan",
+    )
+}
+
+#[cfg(unix)]
+#[test]
 fn installer_retries_compatible_linux_archive_without_crossing_trust_inputs() -> TestResult {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
     let installer = fs::read_to_string(&path)

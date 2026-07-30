@@ -26,10 +26,12 @@ Evidence scale:
 
 ### Fixed
 
-- The Unix release installer now forwards an empty proxy argument list safely
-  under `set -u` on Apple's stock Bash 3.2, so proxy-free macOS installs can
-  resolve the latest release instead of reporting the misleading
-  `Could not resolve latest release` error.
+- The Unix release installer now expands every possibly empty array safely
+  under `set -u` on Apple's stock Bash 3.2, including proxy forwarding,
+  agent detection, box rendering, and archive candidate handling. Proxy-free
+  macOS installs can now resolve the latest release instead of reporting the
+  misleading `Could not resolve latest release` error, and machines with no
+  detected coding agent no longer fail during post-install configuration.
 - The Unix release installer now retries the compatible GNU archive when an
   x86_64 Linux release does not include the preferred musl artifact, avoiding
   an unexpected nightly Rust source build. Explicit artifact/checksum inputs
