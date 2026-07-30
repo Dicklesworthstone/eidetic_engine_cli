@@ -10070,25 +10070,57 @@ fn stored_evidence_security_state_hash(span: &StoredEvidenceSpan) -> String {
     )
 }
 
-fn stored_evidence_security_matches_prepared(
+fn stored_evidence_security_mismatches(
     span: &StoredEvidenceSpan,
     prepared: &PreparedEvidenceSecurity,
-) -> bool {
-    span.cass_span_id == prepared.upstream_ref_hash
-        && span.excerpt == prepared.excerpt
-        && span.content_hash == prepared.canonical_excerpt_hash
-        && span.metadata_json.as_deref() == Some(prepared.safe_metadata_json.as_str())
-        && span.producer_kind == prepared.producer_kind.as_str()
-        && span.screening_version == EVIDENCE_SCREENING_VERSION
-        && span.secret_redaction_status == prepared.secret_redaction_status
-        && span.redaction_classes_json == prepared.redaction_classes_json
-        && span.instruction_risk == prepared.instruction_risk
-        && span.search_eligibility == prepared.search_eligibility
-        && span.pack_eligibility == prepared.pack_eligibility
-        && span.canonical_provenance_revision == EVIDENCE_CANONICAL_PROVENANCE_REVISION
-        && span.canonical_excerpt_hash.as_deref() == Some(prepared.canonical_excerpt_hash.as_str())
-        && span.security_policy_epoch == EVIDENCE_SECURITY_POLICY_EPOCH
-        && span.upstream_ref_hash.as_deref() == Some(prepared.upstream_ref_hash.as_str())
+) -> Vec<&'static str> {
+    let mut mismatches = Vec::new();
+    if span.cass_span_id != prepared.upstream_ref_hash {
+        mismatches.push("cass_span_id");
+    }
+    if span.excerpt != prepared.excerpt {
+        mismatches.push("excerpt");
+    }
+    if span.content_hash != prepared.canonical_excerpt_hash {
+        mismatches.push("content_hash");
+    }
+    if span.metadata_json.as_deref() != Some(prepared.safe_metadata_json.as_str()) {
+        mismatches.push("metadata_json");
+    }
+    if span.producer_kind != prepared.producer_kind.as_str() {
+        mismatches.push("producer_kind");
+    }
+    if span.screening_version != EVIDENCE_SCREENING_VERSION {
+        mismatches.push("screening_version");
+    }
+    if span.secret_redaction_status != prepared.secret_redaction_status {
+        mismatches.push("secret_redaction_status");
+    }
+    if span.redaction_classes_json != prepared.redaction_classes_json {
+        mismatches.push("redaction_classes_json");
+    }
+    if span.instruction_risk != prepared.instruction_risk {
+        mismatches.push("instruction_risk");
+    }
+    if span.search_eligibility != prepared.search_eligibility {
+        mismatches.push("search_eligibility");
+    }
+    if span.pack_eligibility != prepared.pack_eligibility {
+        mismatches.push("pack_eligibility");
+    }
+    if span.canonical_provenance_revision != EVIDENCE_CANONICAL_PROVENANCE_REVISION {
+        mismatches.push("canonical_provenance_revision");
+    }
+    if span.canonical_excerpt_hash.as_deref() != Some(prepared.canonical_excerpt_hash.as_str()) {
+        mismatches.push("canonical_excerpt_hash");
+    }
+    if span.security_policy_epoch != EVIDENCE_SECURITY_POLICY_EPOCH {
+        mismatches.push("security_policy_epoch");
+    }
+    if span.upstream_ref_hash.as_deref() != Some(prepared.upstream_ref_hash.as_str()) {
+        mismatches.push("upstream_ref_hash");
+    }
+    mismatches
 }
 
 impl DbConnection {
@@ -10314,12 +10346,15 @@ impl DbConnection {
                 span.id
             ))
         })?;
-        if persisted.workspace_id != span.workspace_id
-            || !stored_evidence_security_matches_prepared(&persisted, prepared)
-        {
+        let mut mismatches = stored_evidence_security_mismatches(&persisted, prepared);
+        if persisted.workspace_id != span.workspace_id {
+            mismatches.push("workspace_id");
+        }
+        if !mismatches.is_empty() {
             return Err(malformed_evidence_input(format!(
-                "legacy evidence rescreen post-update verification failed for {}",
-                span.id
+                "legacy evidence rescreen post-update verification failed for {} (fields={})",
+                span.id,
+                mismatches.join(","),
             )));
         }
         let after_hash = stored_evidence_security_state_hash(&persisted);
