@@ -12,6 +12,15 @@ how two `ee` peers reconcile their event streams after partitions, restarts,
 duplicate deliveries, and out-of-order arrival without coordination — i.e.
 without distributed consensus.
 
+ADR 0086 later narrows this ADR for live signed team streams. Those streams use
+the composite `(team_id, origin_workspace_id, origin_node_id,
+signing_key_generation, origin_seq)` key and retain both signed fork headers
+while rematerializing only the common prefix; this ADR's simpler
+`(origin_node_id, seq)` key and first-accepted branch do not govern that
+production path. The contiguous-frontier, idempotence, bounded-range, and
+logical-conflict scenarios — including `anti_entropy_model.rs` as an
+executable specification — remain applicable.
+
 `ee` does not need linearizability for memory facts. Memories, links,
 embeddings, and revisions are append-only evidence. The product contract
 (ADR 0007) is that context packs and search results are returned from
@@ -34,7 +43,9 @@ durable contiguous-replay cursors**. It is not gossip, not Paxos, not CRDT
 merging. It is the smallest mechanic that lets two peers converge after a
 partition while preserving each event's origin attribution.
 
-The model has five pieces:
+The pre-team executable model has five pieces. ADR 0086's live signed team
+stream preserves the mechanics but uses its composite origin key and
+fork-blocked rematerialization rule:
 
 1. **Event keys are `(origin_node_id, seq)` and immutable.** Every mesh
    event carries the origin node ID that produced it and a monotonically

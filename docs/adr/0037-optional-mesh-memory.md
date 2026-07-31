@@ -17,6 +17,12 @@ several machines. That goal is useful, but it is easy to over-read it as a
 distributed database, a required daemon, or a direct peer-to-peer replacement
 for the local store. Those interpretations would violate the project contract.
 
+ADR 0086 later supersedes one narrow reservation in this ADR: the
+never-published `ee.mesh.peer_status.v1` name is retired. Mechanism posture
+stays on the existing auto/foreground status contracts, and team posture uses
+`ee.team.status.v1`. The optional, local-first, no-distributed-database
+constraints below remain controlling.
+
 The current implementation does not have canonical JSONL memory logs that can
 be gossiped as-is, and it does not have a ready network daemon socket for memory
 traffic. The durable store is local FrankenSQLite/SQLModel, with derived indexes,
@@ -117,7 +123,7 @@ names before emitting them:
 | `ee.mesh.event.v1` | Append-only mesh export/import event envelope |
 | `ee.mesh.peer_policy.v1` | Local peer authorization, trust, and redaction policy |
 | `ee.mesh.revision_notice.v1` | Explicit notice that fresher peer material is available for a returned result |
-| `ee.mesh.peer_status.v1` | Redaction-safe peer/cache/status posture |
+| `ee.mesh.peer_status.v1` | **Retired before publication by ADR 0086.** Mechanism posture stays on the existing auto/foreground contracts; team posture uses `ee.team.status.v1`. |
 | `ee.mesh.import_ledger.v1` | Local replay cursor and idempotency record for peer events |
 
 These names reserve contract intent, not implementation permission. Each schema

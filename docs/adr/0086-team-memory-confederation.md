@@ -1,13 +1,14 @@
 # ADR 0086: Team Memory Confederation
 
 Status: accepted (decisions final; implementation tracked by bd-tc-epic-qzk7o)
+Date: 2026-07-30
 Bead: bd-tc-epic-qzk7o (program epic; this ADR is bd-tc-epic-qzk7o.1)
+Supersedes: ADR 0037's never-published `ee.mesh.peer_status.v1` reservation; ADR 0038 D9's raw peer-key target and `ee.mesh.lane_grant_preview.v1` contract for live team use; ADR 0041's `(origin_node_id, seq)` key and first-arrival fork materialization for live team streams only
 Plan: [`docs/mesh/team_confederation_plan.md`](../mesh/team_confederation_plan.md)
 Related: ADR 0037 (optional mesh), 0038 (auto-enrollment), 0041 (anti-entropy),
 0009 (trust classes), 0069 (global knowledge lane), 0083 (user-global store)
-Date: 2026-07-30
 Last amended: 2026-07-30 (operator-ratified implementation-readiness,
-security, consistency, and task-graph review; decisions remain final)
+security, consistency, authority, and task-graph review; decisions remain final)
 
 ## Context
 
@@ -31,6 +32,13 @@ absolute-path hashes), and a trust tier for a teammate's deliberate
 This ADR records the decisions. The plan document holds the full design,
 milestones, and task DAG; the two must not drift — where they conflict, this
 ADR wins and the plan gets corrected.
+
+The supersession above is deliberately narrow. ADR 0037's optional/local-first
+boundary, ADR 0038's legacy auto-enrollment safety invariants, and ADR 0041's
+contiguous-frontier/idempotence scenarios remain design inputs. What changes
+is the public contract for the live team path: its status schema, grant target
+and v2 preview/approval boundary, composite origin key, and fork
+materialization are the ones defined here.
 
 ## Decisions
 

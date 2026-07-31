@@ -3,7 +3,7 @@
 Status: active plan
 Owning ADR: [ADR 0086 — team memory confederation](../adr/0086-team-memory-confederation.md) (decisions TC-D1…TC-D16; where plan and ADR conflict, the ADR wins and the plan gets corrected)
 Related ADRs: 0037 (optional mesh), 0038 (auto-enrollment), 0041 (anti-entropy), 0009 (trust classes), 0069 (global knowledge lane), 0083 (user-global store)
-Related open beads: bd-30o6g, bd-3mw86, bd-2gvgw, bd-1bfwa (epic + .2/.3/.4/.5)
+Related beads: bd-30o6g (closed by T1.1), bd-3mw86 (in progress), bd-2gvgw (blocked on/absorbed by T1.4), bd-1bfwa (open epic + .2/.3/.4/.5)
 Date: 2026-07-30
 
 ---
@@ -278,7 +278,8 @@ and `cache.rs` get theirs in the body-lane milestone (P4.6), not before.
     only 33 have failure-mode fixtures and 34 taxonomy entries; e.g.
     `mesh_sync_once_network_deferred`, `mesh_disabled`, all seven
     `mesh_peer_*` codes lack fixtures (AGENTS.md requires fixture + taxonomy
-    per emitted code). Three audit test files are 0 bytes
+    per emitted code). Three audit test files contain only a newline (1 byte;
+    no tests)
     (`tests/mesh_{tailnet_change,identity_change_guard,discovery_policy}_audit.rs`).
 15. **Effect-registry and docs drift.** `src/core/effect.rs` declares
     nonexistent `.ee/mesh/*.json` paths and a never-created `mesh_audit_events`
@@ -291,9 +292,9 @@ and `cache.rs` get theirs in the body-lane milestone (P4.6), not before.
 
 | Bead | Status | Interaction with this plan |
 |---|---|---|
-| **bd-30o6g** (P2) — remote-evidence byte policy trusts declared size, not fetched body length (`src/mesh/remote_evidence.rs:435–454`) | open | **Hard prerequisite for any real transport.** Acceptance already demands a streaming `max_bytes+1` cap in the future fetch adapter. Transport beads depend on it. |
+| **bd-30o6g** (P2) — remote-evidence byte policy trusted declared size, not fetched body length | closed by T1.1 (`63514470`, lint follow-up `40a1c0c8`; audited in `fbcc6252`) | **Completed hard prerequisite.** T5.9 must reuse the bounded `max_bytes+1` reader rather than recreate a post-hoc size check; its first CLI emitter also owns the same-commit failure-mode fixtures/taxonomy for the four module codes. |
 | **bd-3mw86** (P1) — `ee mesh disable --peer` lacks durable per-peer containment | in_progress (another agent) | Do not touch. The team UX consumes whatever per-peer suspension state lands; note it as a soft dependency of the incident-containment story. |
-| **bd-2gvgw** (P3) — pin lane-grant preview nested `required` fields | blocked (stale — its only blocker is closed) | The M0 grant/preview work builds on this schema; absorb or depend on it. |
+| **bd-2gvgw** (P3) — pin lane-grant preview nested `required` fields | blocked on T1.4 (`bd-tc-epic-qzk7o.2.2`); absorbed | T1.4 owns the final authenticated-preview schema and closes both beads together. The older infrastructure blocker is closed, but the new product dependency is intentional. |
 | **bd-1bfwa** (P2 epic) — global knowledge lane (within one user, cross-workspace) | open, 4 live children | ADR 0069 explicitly fences mesh out of the global lane. Team lane is a *sibling* lane at the same retrieval chokepoint (`memory_in_scope_with_tags`). Sequence the team retrieval work to coordinate (same files: `src/core/memory_scope.rs`, search/context integration), and pin the precedence chain local-workspace > team > global in one place. No hard dependency either direction, but the two efforts must not silently redefine each other's scope semantics. |
 | bd-36bbk.2 / bd-36bbk.3 (closed) | — | Closed on the *seam*, not a working transport; their close notes explicitly defer production wiring. This plan is the successor they anticipated. |
 
@@ -518,7 +519,7 @@ Six pillars, each independently valuable, ordered by dependency:
 ```
 P0  Wire-reality groundwork      (make existing surfaces tell the truth,
                                   wire the policy engine, close the trust
-                                  bypass, fix bd-30o6g)
+                                  bypass, preserve the bounded byte-cap invariant)
 P1  Real transport               (listener in daemon + client in CLI,
                                   hello over TCP, anti-entropy rounds that
                                   advance cursors, metadata lane first)
@@ -595,11 +596,17 @@ honesty-only/implements-surface taxonomy exists precisely because of this
 failure mode). P0 makes the substrate truthful and closes the security holes
 that real transport would otherwise amplify.
 
-**P0.1 — Fix bd-30o6g (byte-policy trusts declared size).**
-`MeshRemoteEvidenceFetchPolicy` must enforce `fetched_body.len()` with a
-streaming `max_bytes+1` read cap, not `reference.size_bytes`. This is currently
-latent (test-only call sites) and becomes remotely exploitable the moment a
-real fetch adapter exists. Do this first; the transport beads depend on it.
+**P0.1 — Remote-evidence streaming byte cap — COMPLETE 2026-07-30
+(`bd-tc-epic-qzk7o.2.6`, absorbing `bd-30o6g`).**
+Commit `63514470` added the bounded `max_bytes+1` reader and actual-length
+enforcement before hashing or persistence; `40a1c0c8` completed the strict
+lint proof, and `fbcc6252` audited the implementation/plan handoff. Declared
+size mismatches and hash mismatches quarantine, exact-cap and cap-plus-one
+boundaries are covered, and current call sites remain test-only. T5.9 must use
+this reader at its fetch boundary. Because the four codes are not yet emitted
+by a public CLI response, their failure-mode fixtures and taxonomy entries
+land atomically with T5.9's first CLI emitter rather than pretending the
+module-only result already has a response-surface catalog entry.
 
 **P0.2 — Wire the policy engine into the existing file paths.**
 `ee mesh export` consults `decide_mesh_outbound_policy` per record and lane;
@@ -773,7 +780,7 @@ accept only the current key, so rotation forces a fresh preview.
 **P0.7 — Honesty-debt backfill.** Failure-mode fixtures + taxonomy entries for
 the uncovered mesh degraded codes (52 in the catalog golden: 19
 fixture-uncovered, 18 of those also taxonomy-uncovered — close both gaps);
-fill the three 0-byte audit test files
+fill the three newline-only audit test files
 with the assertions their names promise; correct `src/core/effect.rs` mesh
 declarations (real `.ee/*.toml` paths, real tables); fix README `[mesh.tailscale]`
 and `.ee/mesh/` drift; update the stale "future `ee mesh preview-grant`" schema
@@ -2679,7 +2686,9 @@ an explicit dependency of T2.0 and T4.2 so the authorization trail is
 machine-visible. ← T0.0. Blocks T2.0 and T4.2.
 
 **Sub-epic T1 — M0 Truth & safety**
-- T1.1 Streaming byte-cap fix (absorbs bd-30o6g; coordinate/close that bead). ← T0.0
+- T1.1 Streaming byte-cap fix — **COMPLETE 2026-07-30**
+  (`bd-tc-epic-qzk7o.2.6` and absorbed `bd-30o6g`; implementation
+  `63514470`, lint follow-up `40a1c0c8`, handoff audit `fbcc6252`). ← T0.0
 - T1.2 Wire outbound policy into `ee mesh export` + share-preview verdicts
   (P0.2+P0.3); remove `--record-consent`, public per-content/aggregate
   preview hashes, and the secret scan's public `valueHash`; emit only
@@ -2857,11 +2866,14 @@ machine-visible. ← T0.0. Blocks T2.0 and T4.2.
 - T4.5 History sharing only: revision-pinned/resumable `ee team share history` for origin-owned pre-team metadata with per-item revalidation and projection-race idempotence; consent enumerates the closed metadata disclosure fields and explicitly covers current and future active members until origin-wide withdrawal. M3 ships no body verb or unavailable success variant. ← T4.3, T2.0
 - T4.6 Posture ops (status/sync/pause/resume/audit; unpaired, conflicts,
   removal acknowledgements, delegated-member review, pair-rotation repair,
-  rematerialization generation/fence, staleness, elevation counts, responder
-  posture); durable pause-generation barrier checked at round/frame/import/
-  serve boundaries and validated-generation resume; side-effect registry and
-  tests keep status/audit/list/preview read-only while sync/pause/resume audit
-  their mutations. ← T4.3, T4.4
+  history projection, rematerialization generation/fence, staleness,
+  elevation counts, responder posture); durable pause-generation barrier
+  checked at round/frame/import/serve boundaries and validated-generation
+  resume; side-effect registry and tests keep status/audit/list/preview
+  read-only while sync/pause/resume audit their mutations. M3 reports only
+  the existing mechanism-cache posture and reserves a versioned extension
+  point for T5.9; it does not claim body-cache lifecycle or body-lane success
+  before M4. ← T4.3, T4.4, T4.5
 - T4.7 `ee team` E2E over the harness: listener-owner races and two-workspace one-broker routing isolation; other-EUID/unrelated owner, cross-team committed-port mismatch, and local client-only posture; genesis/root/port mismatch and missing/duplicate/conflicting genesis; default/wait/no-wait/resume invite behavior, ≥128-bit invite/ceremony ID vectors, generic unknown-ID decline, pre-secret signed challenge/wrong-process rejection, same-stable-ID key rotation, stable-ID substitution, join crash/retry/pre-key re-entry/concurrent redemption/bearer warning, invite/introduction clock rollback + restart + revoke-all floor repair; future-only activation and history preview/change/race/resume; later-member receipt of confirmed non-withdrawn history; node-bind/revocation/lost-last-node recovery; membership-cap arrival permutations; removal cutoff arrival permutations + mutual-removal cycle + offline-remover relay/ack + accepted-prefix delegated-member review that never masquerades as revocation; durable pause-generation fencing and validated resume; read-only leaves make zero durable changes while mutating/network leaves audit; ordinary independent memory streams converge, manifest and capacity conflicts remain explicitly blocked. ← T4.3..T4.6, T4.8, T2.5
 - T4.8 `ee team projects share|adopt|list` (US-9: minted project ids for non-git workspaces, adoption mapping, manifest registry). ← T3.5, T4.1
 
@@ -2872,8 +2884,8 @@ machine-visible. ← T0.0. Blocks T2.0 and T4.2.
 - T5.4 `ee team activity` over only the closed project/kind/level/member/origin-time/body-availability metadata allowlist (never body-derived title/preview); the schema and human copy describe captured/shared memory events, not command execution or a complete CASS session log. Optional absolute JSON cutoff + required `--as-of`; relative human cutoff resolves visibly; default-100/max-1000 shared `ee.cursor.v1` pagination; stable `(producedAt DESC,eventId ASC)` ordinary ordering; claims later than as-of + 600 seconds move to deterministic `clockAnomalies`; time-window output labels member-attested/backdating incompleteness, while unfiltered cursor drain + origin-sequence audit remain complete. ← T4.1, T5.2
 - T5.5 Overlap precedence constant (local>team>global), contradiction
   surfacing, bd-1bfwa coordination, and tests. ← T5.2
-- T5.6 Evidence-bounded peer conflict detector (SRR6.37 completion): deterministic duplicate/near-duplicate, typed/canonical-field contradiction only, free-text suspicion as review candidate, missing-body unassessed posture, detector provenance + insights surfacing. ← T5.2
-- T5.7 Index-intake integration: transactionally coalesced workspace/source/round-range jobs with idempotency and source-snapshot publication fence; amplification budget verification at team scale. ← T2.4
+- T5.6 Evidence-bounded peer conflict detector (SRR6.37 completion): deterministic duplicate/near-duplicate, typed/canonical-field contradiction only, free-text suspicion as review candidate, missing-body unassessed posture, detector provenance + insights surfacing through T5.5's shared precedence/conflict surface. ← T5.5
+- T5.7 Index-intake integration: transactionally coalesced workspace/source/round-range jobs with idempotency and source-snapshot publication fence; amplification budget verification at team scale. Reuse the one source-snapshot protocol owned by `bd-d67os.28`; that bead must close with source-based verification before this task can claim the fence is safe. ← T2.4, bd-d67os.28
 - T5.8 Team retrieval determinism: with canonical event/body corpus and maintenance state fixed, producer-local shared and receiver-projected rows select the same IDs/order under neutral team temporal scores; varying local created/diagnostic receipt/sync times leaves selection unchanged; varying signed origin time changes rendered provenance bytes but not selection/scores; explicit time filters and activity anomaly output stay assurance-labeled and explicit-as-of deterministic; local first receipt may independently alter later maintenance state. ← T5.3, T5.4
 - T5.9 Body product slice: atomically ship `ee team share
   bodies`/`unshare bodies` schemas, authenticated preview tokens,
@@ -2941,7 +2953,7 @@ machine-visible. ← T0.0. Blocks T2.0 and T4.2.
   bundles leak no body/path/nonce. ← T5.9, T5.7, T4.7, T2.5
 
 **Sub-epic T6 — M5 Operations**
-- T6.1 Background sync steward job (wires `steward_decision.rs`, `peer_state.rs`; retries deferred pairings/removal fanout/body fetch). ← T2.4, T2.4b, T4.3
+- T6.1 Background sync steward job (wires `steward_decision.rs`, `peer_state.rs`; retries deferred pairings/removal fanout/body fetch). ← T2.4, T2.4b, T4.3, T5.9
 - T6.2 `ee daemon install|uninstall|status` (one user-scoped launchd/systemd service multiplexing registered workspaces; Windows client-only posture is conditional on T2.1 credential-store parity and otherwise blocks team key operations; doctor-runtime mutation rules). ← T2.2
 - T6.3 Full admission control (`admission.rs`) wired into responder accept
   path, superseding T2.1's minimal caps; doctor/status report T2.4 cumulative
@@ -2955,9 +2967,10 @@ machine-visible. ← T0.0. Blocks T2.0 and T4.2.
   owner/one-responder-user limitation, client-only repair, removal
   acknowledgements, invite-authorization time rollback and atomic
   revoke-all-before-floor repair, delegated-member review, and rematerialization
-  generation/fence/outbox recovery). ← T4.6, T6.1, T6.2
+  generation/fence/outbox recovery, plus T5.9 body-cache lifecycle
+  reconciliation). ← T4.6, T5.9, T6.1, T6.2
 - T6.5 Perf bench profile + budgets (join, signed relay, body/index amplification). ← T2.5, T4.3, T5.7, T5.9, T5.10
-- T6.6 Docs: quickstart, trusted-team vs untrusted-contractor fitness table, agent-ux team notes, CHANGELOG. ← T4.7, T5.3, T5.10, T6.2
+- T6.6 Docs: quickstart, trusted-team vs untrusted-contractor fitness table, agent-ux team notes, CHANGELOG, with codes and repair commands sourced from the completed doctor surface. ← T4.7, T5.3, T5.10, T6.2, T6.4
 - T6.7 Program closeout: verification-matrix style ledger of every child, deferred items, and proof rows. ← everything
 
 **Sub-epic T7 — M6 SSO identity**
@@ -2975,7 +2988,7 @@ machine-visible. ← T0.0. Blocks T2.0 and T4.2.
   non-persisting effective view. The explicitly confirmed repair suppresses
   current tier-2 leases before lowering a forward-jumped floor. ← T7.2, T6.1
 - T7.7 Base fake-IdP harness/protocol fixtures (discovery/JWKS/device/token, secretless-public-client and client-secret-required capability variants, positive/zero/missing/overflow expiry+interval, omitted-interval default, no-early-poll, cumulative slow-down, timeout backoff, provider/local/300-request expiry, cancellation/reap/no-auto-restart, process-loss outer-identity-pending/fresh-ceremony behavior, rotatable/retired/weak/wrong-curve keys, duplicate JSON member names at every layer, noncanonical compact-JWT/base64url forms, unsupported `crit`, token-controlled/embedded key headers, missing/duplicate/ambiguous `kid` and key metadata mismatch, DNS rebinding, inherited proxy/`.curlrc`/netrc/CA/keylog traps, GET redirect and credential-POST traps, inherited-pipe/timeout/output-cap/reap cases, replay races, and assertions that bearer tokens never enter mesh frames); no CLI acceptance dependency. ← T0.0 (parallel-safe)
-- T7.4 Tier-2 provider preflight + constrained curl device client: require a capability-compatible secretless public client (`token_endpoint_auth_methods_supported: none`) and reject client-secret-required providers without distributing a secret; invoke an allowlisted canonical system curl directly from a minimal environment with ambient config/proxy/netrc/CA/keylog disabled, explicit approved CA-bundle handling, strict URLs, bounded stdin/output/process lifetime, redacted token responses, no credential-POST redirects, manual validated GET redirects, and pinned DNS; implement RFC 8628 polling with positive checked expiry/interval, default-5 interval, no-early-poll, cumulative +5 slow-down, timeout backoff, earlier-of-provider/1800-second monotonic deadline, 300-request ceiling, terminal cancellation/error handling, and structured `team_idp_device_flow_expired` without automatic restart; add `ee team idp set`, including exact-generation explicit local acceptance for policy relaxation/incomparability and grace-safe activation bootstrap. ← T7.2, T7.7
+- T7.4 Tier-2 provider preflight + constrained curl device client: require a capability-compatible secretless public client (`token_endpoint_auth_methods_supported: none`) and reject client-secret-required providers without distributing a secret; invoke an allowlisted canonical system curl directly from a minimal environment with ambient config/proxy/netrc/CA/keylog disabled, explicit approved CA-bundle handling, strict URLs, bounded stdin/output/process lifetime, redacted token responses, no credential-POST redirects, manual validated GET redirects, and pinned DNS; implement RFC 8628 polling with positive checked expiry/interval, default-5 interval, no-early-poll, cumulative +5 slow-down, timeout backoff, earlier-of-provider/1800-second monotonic deadline, 300-request ceiling, terminal cancellation/error handling, and structured `team_idp_device_flow_expired` without automatic restart; add `ee team idp set`, including exact-generation explicit local acceptance for policy relaxation/incomparability and grace-safe activation bootstrap. Because `idp set` is an identity-policy mutation, it advances T7.3's shared identity-authorization time floor transactionally before accepting or activating policy. ← T7.2, T7.3, T7.7
 - T7.5 ID-token verification (fresh discovery/JWKS on every new presentation,
   with 304 allowed and stale offline keys forbidden; bounded
   duplicate-member-rejecting JSON and canonical unpadded
@@ -3087,7 +3100,7 @@ justification.
 Captured here so they're not lost if milestones reorder: effect-registry mesh
 path/table corrections; README `[mesh.tailscale]` + `.ee/mesh/` + scope-flag
 drift; stale schema description on lane-grant preview; `probe_mesh_capability`
-`"1"` handling; `self_advertised_tags` hardcoding; three 0-byte audit test
+`"1"` handling; `self_advertised_tags` hardcoding; three newline-only audit test
 files; 19 uncovered degraded codes; `mesh_anti_entropy_transport_unavailable`
 defined-but-never-emitted (either emit or delete); `docs/mesh/local_two_node_demo.md`
 revised in place to document the real harness (do not delete the file);
