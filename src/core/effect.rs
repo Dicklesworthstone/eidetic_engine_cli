@@ -1932,10 +1932,10 @@ impl EffectManifest {
             ),
             CommandEffect::external_io_write(
                 "mesh auto-enroll",
-                vec!["mesh_peers", "mesh_audit_events", "audit_log"],
+                vec!["mesh_peers", "audit_log"],
                 vec![
-                    ".ee/mesh/auto_enroll_overrides.json",
-                    ".ee/mesh/discovery_denylist.txt",
+                    ".ee/auto_enroll_overrides.toml",
+                    ".ee/discovery_denylist.toml",
                 ],
                 "tailscale peer set hash plus workspace id",
                 "Probe mesh peers and persist reviewed auto-enrollment state",
@@ -2387,33 +2387,33 @@ impl EffectManifest {
             ),
             CommandEffect::durable_write_with_workspace_files(
                 "mesh discovery-policy",
-                vec!["mesh_audit_events", "audit_log"],
+                vec!["audit_log"],
                 vec![
-                    ".ee/mesh/discovery_policy.json",
-                    ".ee/mesh/discovery_allowlist.txt",
-                    ".ee/mesh/discovery_denylist.txt",
+                    ".ee/discovery_policy.toml",
+                    ".ee/discovery_allowlist.toml",
+                    ".ee/discovery_denylist.toml",
                 ],
                 "Persist mesh discovery policy files and audit the policy change",
             ),
             CommandEffect::durable_write_with_workspace_files(
                 "mesh export",
-                vec!["mesh_audit_events", "audit_log"],
+                vec!["audit_log"],
                 vec!["<--out path>"],
                 "Export authorized mesh material to an explicit side-path artifact",
             ),
             CommandEffect::durable_write(
                 "mesh peer add",
-                vec!["mesh_peers", "mesh_audit_events", "audit_log"],
+                vec!["mesh_peers", "audit_log"],
                 "Add a mesh peer with audited policy metadata",
             ),
             CommandEffect::durable_write(
                 "mesh peer revoke",
-                vec!["mesh_peers", "mesh_audit_events", "audit_log"],
+                vec!["mesh_peers", "audit_log"],
                 "Revoke a mesh peer with audited policy metadata",
             ),
             CommandEffect::durable_write(
                 "mesh peer rotate",
-                vec!["mesh_peers", "mesh_audit_events", "audit_log"],
+                vec!["mesh_peers", "audit_log"],
                 "Rotate mesh peer credentials with audited policy metadata",
             ),
             CommandEffect::durable_write(
@@ -2646,13 +2646,13 @@ impl EffectManifest {
             ),
             CommandEffect::config_write(
                 "mesh disable",
-                vec![".ee/config.toml", ".ee/mesh/emergency_disable.json"],
+                vec![".ee/config.toml"],
                 "workspace id plus mesh disable reason",
                 "Disable mesh synchronization for a workspace",
             ),
             CommandEffect::config_write(
                 "mesh reenable",
-                vec![".ee/config.toml", ".ee/mesh/emergency_disable.json"],
+                vec![".ee/config.toml"],
                 "workspace id plus mesh reenable reason",
                 "Re-enable mesh synchronization for a workspace",
             ),

@@ -1388,9 +1388,11 @@ max_bytes = 1073741824
 enabled = false
 mode = "off"                          # off | cache | revisable | blocking
 
-[mesh.tailscale]
-discovery_mode = "service_tag"         # service_tag | auto_admit | allowlist
-respond_mode   = "service_tag"
+# Discovery/responder policy is NOT config.toml: it lives in workspace-local
+# TOML files (<workspace>/.ee/discovery_policy.toml plus the
+# discovery_allowlist / discovery_denylist / respond_allowlist files),
+# managed by `ee mesh discovery-policy set|allow|deny`, with
+# EE_TAILSCALE_DISCOVERY_MODE / EE_TAILSCALE_RESPOND_MODE as env overrides.
 ```
 
 Environment variable overrides:
@@ -1513,7 +1515,9 @@ Additional runtime-adjacent modules:
 ├── config.toml             # checked-in project overrides
 ├── backups/                # default `ee backup create` root
 ├── index/                  # default workspace index dir for local runs
-├── mesh/                   # optional mesh cache and peer metadata
+├── discovery_policy.toml   # optional mesh discovery/responder policy
+├── discovery_allowlist.toml / discovery_denylist.toml / respond_allowlist.toml
+├── auto_enroll_overrides.toml  # reviewed mesh auto-enrollment overrides
 ├── playbook.yaml           # human-editable rules promoted into the project
 ├── memory.jsonl            # optional auto-export
 └── README.txt
