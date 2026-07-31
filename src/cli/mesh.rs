@@ -64,7 +64,10 @@ use crate::mesh::tailscale_autodiscovery::{
 };
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
-use crate::policy::{MESH_SECRET_EXPORT_DENIED_CODE, MeshExportSecretScanReport};
+use crate::policy::{
+    MESH_SECRET_EXPORT_DENIED_CODE, MeshExportSecretScanReport, OsSecretFindingRandom,
+    decorate_export_secret_findings,
+};
 
 use super::{Cli, write_domain_error, write_stdout};
 
@@ -1806,7 +1809,16 @@ where
     };
     let checked_export = match snapshot.checked_export_artifact() {
         Ok(checked_export) => checked_export,
-        Err(secret_scan) => {
+        Err(mut secret_scan) => {
+            // Decorate the denial report's findings with fresh opaque IDs from
+            // the OS CSPRNG at this effectful boundary. A randomness failure is
+            // an ee.error.v2, never a hash-shaped or fallback identifier.
+            if let Err(error) =
+                decorate_export_secret_findings(&mut secret_scan, &mut OsSecretFindingRandom)
+            {
+                let domain_error = mesh_secret_finding_random_error(&error);
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
             let audit_id = match record_mesh_export_secret_scan_audit(
                 cli,
                 args.database.as_deref(),
@@ -1895,6 +1907,18 @@ fn mesh_secret_export_denied_error(
                 .to_owned(),
         ),
         details_json,
+    }
+}
+
+fn mesh_secret_finding_random_error(
+    error: &crate::policy::SecretFindingRandomError,
+) -> DomainError {
+    DomainError::Storage {
+        message: format!(
+            "mesh export could not decorate secret findings with secure identifiers: {}",
+            error.message
+        ),
+        repair: Some("Retry on a host with a healthy OS CSPRNG.".to_owned()),
     }
 }
 
