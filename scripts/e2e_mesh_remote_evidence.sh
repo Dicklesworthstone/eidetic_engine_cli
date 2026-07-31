@@ -14,6 +14,11 @@ scenarios=(
   fetchable_remote_body_metadata_only_until_lazy_fetch
   allowed_fetch_content_hash_verified_before_persist
   hash_mismatch_quarantines_remote_material
+  bounded_stream_exact_cap
+  bounded_stream_cap_plus_one_rejected
+  missing_declared_size_actual_cap_enforced
+  declared_size_mismatch_quarantined
+  u64_max_cap_conversion_safe
   unsafe_remote_evidence_uri_rejected
 )
 
@@ -29,9 +34,16 @@ required_terms=(
   evidence_fetch_allowed
   evidence_fetch_denied
   evidence_hash_verified
+  evidence_body_quarantined
   body_persist_allowed=false
   content_hash_verified
   content_hash_mismatch
+  copy_remote_evidence_body_bounded
+  mesh_remote_evidence_body_size_exceeds_policy
+  mesh_remote_evidence_declared_size_mismatch
+  declaredSizeBytes
+  actualSizeBytes
+  degradedCodes
   "redacted placeholder"
 )
 
