@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "steward_auto_enroll_consecutive_failures",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.14",
+    "epic_letter": "SRR6.46.14"
+  },
+  "surfaces": [
+    "daemon steward"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Steward auto-enroll reconciliation has failed at least the warning-threshold number of consecutive times (3), indicating a persistent environment or policy problem rather than a transient miss.",
+    "setup_commands": [
+      "enable steward auto-enroll reconciliation",
+      "make the underlying auto-enroll planning fail repeatedly, for example with tailscaled stopped"
+    ],
+    "invocation": "daemon steward tick, surfaced via ee mesh status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "steward_auto_enroll_consecutive_failures",
+    "severity": "warning",
+    "message_contains": [
+      "consecutive"
+    ],
+    "repair_contains": "ee mesh auto-enroll"
+  }
+}

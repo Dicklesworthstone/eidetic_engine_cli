@@ -307,7 +307,7 @@ when the applied candidate, audit row, and derived memory agree, `curate apply`
 returns the existing applied result. Missing, duplicate, or mismatched replay
 evidence is classified under the `create_derived_replay_*` conflict codes above.
 
-#### Search and pack quality (61)
+#### Search and pack quality (76)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
 | `adaptive_backoff_applied` | low | bd-16pwc.2 (SRR5) |
@@ -383,6 +383,21 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `hello_responder_no_tailscale_ip` | medium | bd-36bbk.1.12 |
 | `hello_responder_crash_loop` | high | bd-36bbk.1.12 |
 | `hello_responder_rate_limited_storm` | warning | bd-36bbk.1.12 |
+| `hello_responder_node_key_mismatch` | medium | bd-36bbk.1.8 |
+| `mesh_peer_explicit_consent_required` | medium | bd-1x87h (SRR6.24) |
+| `mesh_peer_handshake_denied` | medium | bd-1x87h (SRR6.24) |
+| `mesh_peer_network_only_denied` | medium | bd-1x87h (SRR6.24) |
+| `mesh_peer_capability_handshake_mismatch` | medium | bd-1x87h (SRR6.24) |
+| `mesh_peer_unknown_attempt_denied` | medium | bd-1x87h (SRR6.24) |
+| `mesh_peer_key_rotation_invalid_key` | medium | bd-1x87h (SRR6.24) |
+| `mesh_peer_key_rotation_revoked` | medium | bd-1x87h (SRR6.24) |
+| `mesh_peer_key_rotation_unchanged` | info | bd-1x87h (SRR6.24) |
+| `lane_grant_preview_peer_not_in_group` | info | bd-36bbk.1.17 |
+| `lane_grant_preview_lane_already_granted` | info | bd-36bbk.1.17 |
+| `steward_auto_enroll_disabled` | info | bd-36bbk.1.14 |
+| `steward_auto_enroll_daily_cap_reached` | warning | bd-36bbk.1.14 |
+| `steward_auto_enroll_consecutive_failures` | warning | bd-36bbk.1.14 |
+| `size_limit_exceeded` | medium | bd-2612e |
 | `host_calibration_contradictory` | medium | bd-1zb7k.12.3.4 (H3.4) |
 | `host_calibration_missing` | warning | bd-1zb7k.12.3.4 (H3.4) |
 | `host_calibration_partial` | warning | bd-1zb7k.12.3.4 (H3.4) |
@@ -674,9 +689,12 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `mesh_cached_body_hash_mismatch` | high | bd-nw0v3.3 (SRR6.16) |
 | `mesh_secret_export_denied` | high | (TBD) |
 
-#### Mesh foreground sync (3)
+#### Mesh foreground sync (9)
 | Code | Severity | Bead |
 |------|----------|------|
+| `mesh_disabled` | info | bd-2wngl (SRR6.8) |
+| `mesh_workspace_uninitialized` | warning | bd-2wngl (SRR6.8) |
+| `mesh_sync_once_network_deferred` | info | bd-36bbk.2 |
 | `mesh_sync_supervisor_backpressure` | info | bd-1ylr3 (SRR6.10) |
 | `mesh_sync_supervisor_budget_exhausted` | warning | bd-1ylr3 (SRR6.10) |
 | `mesh_sync_supervisor_runtime_error` | warning | bd-1ylr3 (SRR6.10) |

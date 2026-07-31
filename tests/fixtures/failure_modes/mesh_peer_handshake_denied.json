@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_peer_handshake_denied",
+  "introduced_by": {
+    "bead": "bd-1x87h",
+    "epic_letter": "SRR6.24"
+  },
+  "surfaces": [
+    "mesh peer add"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Peer enrollment is attempted with a handshake record that was not granted or lacks discovery consent, so the fail-closed enrollment gate denies the peer.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "supply handshake flags describing a declined or consentless responder"
+    ],
+    "invocation": "ee mesh peer add <node-key> --yes --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_peer_handshake_denied",
+    "severity": "medium",
+    "message_contains": [
+      "handshake"
+    ],
+    "repair_contains": "ee mesh"
+  }
+}

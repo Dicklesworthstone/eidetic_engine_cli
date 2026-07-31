@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_peer_key_rotation_unchanged",
+  "introduced_by": {
+    "bead": "bd-1x87h",
+    "epic_letter": "SRR6.24"
+  },
+  "surfaces": [
+    "mesh peer rotate"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "A key rotation supplies the same fingerprint the peer record already holds, so the rotation is a no-op denial: the generation is not bumped for an unchanged key.",
+    "setup_commands": [
+      "enroll a mesh peer with a known fingerprint",
+      "run rotate passing that same fingerprint"
+    ],
+    "invocation": "ee mesh peer rotate <node-key> --fingerprint <same> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_peer_key_rotation_unchanged",
+    "severity": "info",
+    "message_contains": [
+      "unchanged"
+    ],
+    "repair_contains": "ee mesh peer rotate"
+  }
+}

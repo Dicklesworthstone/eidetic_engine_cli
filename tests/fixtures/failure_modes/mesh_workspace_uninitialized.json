@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_workspace_uninitialized",
+  "introduced_by": {
+    "bead": "bd-2wngl",
+    "epic_letter": "SRR6.8"
+  },
+  "surfaces": [
+    "mesh status"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A mesh foreground command targets a workspace whose .ee/ee.db does not exist, so mesh storage cannot be inspected.",
+    "setup_commands": [
+      "point --workspace at a directory that was never initialized with ee init"
+    ],
+    "invocation": "ee mesh status --workspace ./uninitialized --json"
+  },
+  "expected_emission": {
+    "code": "mesh_workspace_uninitialized",
+    "severity": "warning",
+    "message_contains": [
+      "Mesh foreground storage was not inspected",
+      ".ee/ee.db does not exist"
+    ],
+    "repair_contains": "ee init --workspace"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_peer_capability_handshake_mismatch",
+  "introduced_by": {
+    "bead": "bd-1x87h",
+    "epic_letter": "SRR6.24"
+  },
+  "surfaces": [
+    "mesh peer add"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The requested capability profile needs a material lane the granted handshake did not advertise, so enrollment is denied instead of silently narrowing the profile.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "request a body-allowed profile while the handshake advertises metadata only"
+    ],
+    "invocation": "ee mesh peer add <node-key> --yes --responder-capability metadata --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_peer_capability_handshake_mismatch",
+    "severity": "medium",
+    "message_contains": [
+      "did not advertise required capability"
+    ],
+    "repair_contains": "ee mesh"
+  }
+}

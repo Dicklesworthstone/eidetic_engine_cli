@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_disabled",
+  "introduced_by": {
+    "bead": "bd-2wngl",
+    "epic_letter": "SRR6.8"
+  },
+  "surfaces": [
+    "mesh status",
+    "mesh init"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "A mesh foreground command runs while optional mesh is disabled (the default posture), so the command reports local-only posture instead of mesh state.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "leave EE_MESH_ENABLED unset and [mesh].enabled = false"
+    ],
+    "invocation": "ee mesh status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_disabled",
+    "severity": "info",
+    "message_contains": [
+      "Optional mesh memory is disabled",
+      "local-only"
+    ],
+    "repair_contains": "EE_MESH_ENABLED"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "size_limit_exceeded",
+  "introduced_by": {
+    "bead": "bd-2612e",
+    "epic_letter": "MCP"
+  },
+  "surfaces": [
+    "mcp serve-stdio"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "An MCP stdio client sends a JSON-RPC request frame larger than the configured request-size cap (default 16 MiB, floor 1 KiB), so the adapter rejects the frame instead of buffering it unbounded.",
+    "setup_commands": [
+      "build with --features mcp",
+      "start ee mcp serve-stdio",
+      "send a request frame larger than the configured cap"
+    ],
+    "invocation": "ee mcp serve-stdio"
+  },
+  "expected_emission": {
+    "code": "size_limit_exceeded",
+    "severity": "medium",
+    "message_contains": [
+      "size"
+    ],
+    "repair_contains": "request"
+  }
+}

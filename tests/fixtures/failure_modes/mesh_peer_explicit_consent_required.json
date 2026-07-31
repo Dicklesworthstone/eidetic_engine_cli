@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_peer_explicit_consent_required",
+  "introduced_by": {
+    "bead": "bd-1x87h",
+    "epic_letter": "SRR6.24"
+  },
+  "surfaces": [
+    "mesh peer add"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Peer enrollment is attempted without the explicit human consent flag; the fail-closed enrollment gate refuses because network reachability and handshake data alone never authorize a peer.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "run mesh peer add without --yes"
+    ],
+    "invocation": "ee mesh peer add <node-key> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_peer_explicit_consent_required",
+    "severity": "medium",
+    "message_contains": [
+      "consent"
+    ],
+    "repair_contains": "--yes"
+  }
+}
