@@ -1487,7 +1487,7 @@ fn mesh_lane_name(lane: MeshLane) -> &'static str {
     }
 }
 
-fn parse_mesh_lane(lane: &str) -> Option<MeshLane> {
+pub(crate) fn parse_mesh_lane(lane: &str) -> Option<MeshLane> {
     match lane {
         "metadata" => Some(MeshLane::Metadata),
         "body" => Some(MeshLane::Body),

@@ -48,8 +48,8 @@ use crate::mesh::foreground_cli::{
     MESH_EXPORT_ARTIFACT_SCHEMA_V1, MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE, MeshCliDegradation,
     MeshCliExportReport, MeshCliImportReport, MeshCliPeersReport, MeshCliStatusReport,
     MeshCliSyncReport, MeshExportArtifact, MeshForegroundSnapshot, MeshStorageCounts,
-    MeshSyncSupervisorOptions, MeshSyncSupervisorReport, foreground_degradations,
-    run_mesh_sync_supervisor_supervised,
+    MeshSyncSupervisorOptions, MeshSyncSupervisorReport, apply_outbound_export_policy,
+    foreground_degradations, run_mesh_sync_supervisor_supervised,
 };
 use crate::mesh::hello_responder::HelloResponderStatusReport;
 use crate::mesh::peer::{
@@ -597,6 +597,13 @@ pub struct MeshExportArgs {
     /// Write the mesh export artifact to this local file.
     #[arg(long = "out", value_name = "PATH")]
     pub out: Option<PathBuf>,
+
+    /// Target peer id whose outbound policy (`[[mesh.peer_policies]]`) governs
+    /// what may be exported. When set, each event is filtered per record and
+    /// lane: records the peer may not receive are dropped, and bodies are
+    /// stripped when the body lane is denied. Omit for an unfiltered self-export.
+    #[arg(long = "peer", value_name = "PEER_ID")]
+    pub peer: Option<String>,
 }
 
 /// Arguments for `ee mesh import`.
@@ -1832,7 +1839,20 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
-    let artifact = checked_export.artifact;
+    let mut artifact = checked_export.artifact;
+    // When a target peer is named, its outbound policy governs what may leave:
+    // drop records the peer may not receive and strip denied bodies. This is
+    // the production entry point that makes [[mesh.peer_policies]] load-bearing.
+    if let Some(peer_id) = args.peer.as_deref() {
+        let registry = load_mesh_peer_policy_registry(cli, args.database.as_deref());
+        let filtered = apply_outbound_export_policy(
+            std::mem::take(&mut artifact.events),
+            &registry,
+            &snapshot.workspace_id,
+            peer_id,
+        );
+        artifact.events = filtered.events;
+    }
     let secret_scan = checked_export.secret_scan;
     let audit_id = match record_mesh_export_secret_scan_audit(
         cli,
@@ -1908,6 +1928,26 @@ fn mesh_secret_export_denied_error(
         ),
         details_json,
     }
+}
+
+/// Build the peer-policy registry from the effective workspace config. A
+/// missing or unparseable `config.toml` yields an empty registry, so a named
+/// peer with no configured policy fails closed (every record is denied) rather
+/// than leaking an unfiltered export.
+fn load_mesh_peer_policy_registry(
+    cli: &Cli,
+    database_override: Option<&Path>,
+) -> crate::mesh::policy::MeshPeerPolicyRegistry {
+    let workspace_path = cli.resolve_workspace();
+    let config_path = database_override
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| workspace_path.join(".ee"))
+        .join("config.toml");
+    let config = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|contents| crate::config::ConfigFile::parse(&contents).ok())
+        .unwrap_or_default();
+    crate::mesh::policy::MeshPeerPolicyRegistry::from_config(&config)
 }
 
 fn mesh_secret_finding_random_error(
