@@ -369,15 +369,61 @@ def make_handler(state: IdpState, base_url_holder: dict):
             payload.update(claims_config.get("extra", {}))
             for key in claims_config.get("omit", []):
                 payload.pop(key, None)
+
+            # Token-defect injection for the JOSE attack matrix. Each defect
+            # produces a token that a correct verifier (T7.5) MUST reject; the
+            # harness's job is to be able to MINT each one, deterministically.
+            defects = state.scenario.get("defects", {})
             header = {"alg": alg, "typ": "JWT", "kid": kid}
+            if defects.get("wrong_kid"):
+                header["kid"] = "kid-not-in-jwks"
+            if defects.get("alg_none"):
+                # Unsigned "none" token: no signature segment content.
+                header["alg"] = "none"
+                unsigned = (
+                    b64url(json.dumps(header, separators=(",", ":")).encode())
+                    + "."
+                    + b64url(json.dumps(payload, separators=(",", ":")).encode())
+                    + "."
+                )
+                state.minted_jtis.append(jti)
+                return unsigned
+            if "header_alg" in defects:
+                # Algorithm-confusion: advertise one alg, sign with another.
+                header["alg"] = defects["header_alg"]
+
             signing_input = (
                 b64url(json.dumps(header, separators=(",", ":")).encode())
                 + "."
                 + b64url(json.dumps(payload, separators=(",", ":")).encode())
             ).encode("ascii")
             signature = material.sign(alg, signing_input)
+            token = signing_input.decode("ascii") + "." + b64url(signature)
+            if defects.get("bad_signature"):
+                # Flip the final signature byte so verification must fail.
+                head, _, sig = token.rpartition(".")
+                raw = bytearray(
+                    base64.urlsafe_b64decode(sig + "=" * (-len(sig) % 4))
+                )
+                raw[-1] ^= 0x01
+                token = head + "." + b64url(bytes(raw))
+            if defects.get("noncanonical_base64url"):
+                # Re-encode segments with '+'/'/' + padding (invalid for JOSE,
+                # which requires unpadded base64url) to exercise strict decode.
+                head_seg, payload_seg, sig_seg = token.split(".")
+
+                def to_standard(segment):
+                    data = base64.urlsafe_b64decode(
+                        segment + "=" * (-len(segment) % 4)
+                    )
+                    return base64.b64encode(data).decode("ascii")
+
+                token = ".".join(
+                    to_standard(segment)
+                    for segment in (head_seg, payload_seg, sig_seg)
+                )
             state.minted_jtis.append(jti)
-            return signing_input.decode("ascii") + "." + b64url(signature)
+            return token
 
         def _handle_control(self):
             try:
