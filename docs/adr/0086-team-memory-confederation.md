@@ -585,19 +585,50 @@ authenticated session node and must match the active manifest binding; a
 request field cannot impersonate another member. Status exposes partially
 granted members.
 
-Exposure-increasing grants use an authenticated `--preview-token`, not a
-public digest of preview content. The token is a domain-separated,
-store-local keyed MAC over one canonical approval snapshot from which both
-human and JSON output are rendered. That snapshot binds the store/workspace,
-surface/schema and copy versions, target identity and grant generation,
-current/proposed policy generations, the complete revision-pinned candidate
-set, sample strategy/limit, the exact ordered redacted samples, and caution
-codes. The token is opaque and never contains or exposes a raw body/content
-hash; another store, workspace, command surface, or retired key cannot verify
-it. Apply recomputes the snapshot and compares in constant time before any
-mutation. Drift returns a fresh preview with zero grant/audit effects. The
-preview remains read-only, and a successful mutation records only a
-non-replayable token identifier—not the token or sample bytes.
+Exposure-increasing grants use an authenticated preview token, not a public
+digest of preview content. Ordinary human and robot previews are deterministic
+and token-free. Human mutation previews, confirms, and applies inside one
+process without printing the token. A robot that intends to mutate must opt in
+with `--issue-approval-token`; only that response adds a short-lived
+`approvalToken` bearer, explicitly marked sensitive, plus its expiry. Apply
+consumes it from bounded stdin via `--preview-token-stdin`; it never travels
+in argv or an environment variable.
+
+The token has a recognizable `eeap1_` prefix so ee-controlled tracing,
+redaction, support, and CASS-import materialization can scrub it. This does not
+pretend to control a third-party stdout/session recorder: an opted-in robot
+response can be captured there until expiry. That residual is stated in the
+schema and operator guidance and is bounded by context binding, short expiry,
+and generation-CAS single use.
+
+The versioned opaque envelope contains no stable store, workspace, or key
+identifier. It carries a fresh 32-byte token nonce, bounded issue/expiry times
+(`APPROVAL_TOKEN_TTL_SECONDS = 900` in v1), a nonce-salted keyed snapshot
+tag, and an envelope MAC. Separate domain-derived keys protect the snapshot
+tag and envelope. The envelope MAC binds the invocation's store, workspace,
+and command surface plus every envelope field; malformed input, a wrong
+context/current key, a future-issued token, or a bad MAC returns
+`mesh_approval_token_invalid`. Only after that constant-time check does apply
+rebuild the canonical approval snapshot and compare its nonce-salted keyed
+tag. Expiry or snapshot drift returns `mesh_approval_token_stale` with a
+structured action to run preview again; an error never carries a replacement
+bearer token. Human mode may render the current token-free preview and ask for
+new confirmation in-process, while robot mode must make a separate preview
+call. This two-layer shape is required: a bare MAC of the current snapshot
+could not distinguish a forged token from an authentic stale one. The nonce
+makes tags for identical previews unlinkable.
+
+Both human and JSON output are rendered from the canonical snapshot. It binds
+the store/workspace, surface/schema and copy versions, target identity and
+grant generation, current/proposed policy generations, the complete
+revision-pinned candidate set, sample strategy/limit, the exact ordered
+redacted samples, and caution codes. Verification, a generation
+compare-and-swap, the grant, and its consent audit occur in one write
+transaction; a successful mutation advances the generation, so concurrent or
+replayed application of the same token cannot grant twice. The preview
+remains read-only. Durable audit records only a domain-keyed identifier of
+the high-entropy token nonce—not the token, snapshot tag, content/sample
+hash, or sample bytes.
 
 ### TC-D7 — Trust class `peer_human_attested`; `human_explicit` stays local
 
@@ -1188,8 +1219,13 @@ ID/revision/representation/commitment digest, sample parameters, exact
 ordered locally redacted samples, and every non-erasure/later-node/source
 caution code. Both renderers consume that same snapshot; copy or renderer
 changes require a version bump and invalidate old tokens. Apply recomputes
-the snapshot immediately before the grant transaction. Any mismatch returns
-a fresh preview and leaves grants, audit, outbox, fetch, and cache untouched.
+the snapshot immediately before the grant transaction. Default JSON is
+deterministic and token-free; TC-D6's explicit robot issuance, authenticated
+no-stable-ID envelope, 15-minute expiry, stdin-only consumption, and
+single-transaction generation compare-and-swap apply unchanged. Any invalid,
+expired, replayed, or drifted token returns the appropriate error and a fresh
+preview action while leaving grants, audit, outbox, fetch, and cache untouched;
+the error itself never contains a replacement token.
 Sample bytes and commitment nonces never enter the token output, durable
 audit, manifest, wire, or support bundle.
 
@@ -1406,6 +1442,18 @@ rejected. T1.6 owns the key lifecycle, hardened storage, known-answer check,
 and derivation API before either import authentication or exposure approval
 consumes it.
 
+Secret-scan finding identifiers are not derived from secret bytes at all.
+Each scan occurrence receives a fresh opaque identifier with at least 128
+OS-CSPRNG bits; the same identifier may correlate that one error/report with
+its audit record, while a repeat scan deliberately receives a different
+identifier. The pure detector still returns a deterministic, ID-free,
+sorted/deduplicated internal result. Only the effectful command boundary
+decorates those findings, in canonical order, using an injected secure-random
+source; deterministic tests inject fixed randomness without creating a
+production bypass. This removes equality and chosen-input oracles without
+smuggling ambient nondeterminism into policy logic. Randomness failure is a
+fallible `ee.error.v2` path, never a hash-shaped fallback identifier.
+
 `ee export` artifacts are MAC'd with the native-import subkey over a
 constant-size versioned canonical header containing
 the artifact family/schema and canonical record-encoding version, source
@@ -1456,11 +1504,13 @@ bounded verification window for same-store artifacts and rejects retired key
 IDs outside it. Consent-preview tokens deliberately accept only the current
 key: key rotation invalidates every outstanding approval and requires a fresh
 read-only preview. T1.4 and T5.9 use separate surface-specific approval
-subkeys and MAC the complete canonical approval snapshot described in TC-D6
-and TC-D12. This prevents cross-surface replay and keeps sample/body digests
-out of durable audit. Token construction is fallible; serialization,
-key-store, or canonicalization failure returns `ee.error.v2`, never a
-string-shaped fallback token.
+subkeys and implement the nonce-salted snapshot-tag plus envelope-MAC
+construction described in TC-D6 and TC-D12. This both distinguishes invalid
+from stale tokens and prevents cross-surface replay or equality testing while
+keeping sample/body digests out of durable audit. Token construction and
+bounded stdin decoding are fallible; randomness, serialization, key-store, or
+canonicalization failure returns `ee.error.v2`, never a string-shaped
+fallback token.
 
 **Rejected:** store-UUID comparison (identifiers leak via
 support bundles; a leak reopens the bypass verbatim); adding private keys to
@@ -1488,8 +1538,9 @@ explicitly names a coalesced security posture counter. The existing
 `ee share preview --record-consent` shape is removed directly: recording
 consent without applying the reviewed exposure is misleading and violates
 the read-only preview contract. Consent is recorded only by the later
-mutation/export operation that consumes the exact approval token or by an
-independently explicit action with its own effect contract.
+grant/body-share mutation that consumes the exact approval token; an export
+records its own actual policy-checked export effect rather than claiming a
+preview alone was consent.
 The reserved-never-published
 `ee.mesh.peer_status.v1`
 name is **retired**: mechanism-level posture stays on the existing
@@ -1613,8 +1664,9 @@ module cited by both the team and global lanes.
 | Inbound abuse on the open port | TC-D2 bootstrap caps at listener birth; full admission control in operations |
 | Policy-denied event stalls later sync | TC-D3 contiguous receipt/disposition-scan frontiers + sparse audited per-event dispositions; materialization reads only explicit applied rows |
 | Policy denial suppresses a later purge | TC-D3 makes minimal opaque `tombstone`/`shareWithdraw` controls mandatory for active members, so current content policy cannot strand previously admitted derived material |
-| Preview or secret-scan hashes become offline content or equality oracles | TC-D6/D14 remove public unkeyed body/secret/sample hashes. Read-only exposure previews show locally redacted samples, while surface-specific store-local MACs authenticate the complete canonical approval snapshot; errors and durable audit expose only opaque, non-replayable identifiers |
-| Exposure inputs or the exact approval presentation change after preview | TC-D6/D12 bind target/source/grant/policy/scanner/candidate state plus sample parameters, exact ordered redacted samples, cautions, and copy/schema versions into the authenticated token. Apply recomputes before mutation; drift yields a fresh preview and zero grant/audit/outbox/fetch/cache effects |
+| Preview or secret-scan hashes become offline content or equality oracles | TC-D6/D14 remove public unkeyed body/secret/sample hashes. Secret findings use random per-occurrence IDs; approval tokens use fresh-nonce keyed tags, so repeated equal previews do not link. Errors and durable audit expose only opaque, non-replayable identifiers |
+| Approval token is forged, stale, replayed, or leaked through process metadata | TC-D6/D12 keep ordinary previews deterministic and token-free; robot issuance is explicit. The no-stable-ID `eeap1_` envelope uses a context-bound MAC (failure = invalid) and authenticated nonce-salted snapshot tag (mismatch/expiry = stale). Apply is one generation-CAS transaction; human mode keeps the token in-process and robot mode uses bounded stdin, never argv/env. Ee-controlled tracing, errors, audit, support, and CASS-import materialization redact it. A third-party stdout/session recorder can still capture an opted-in bearer until expiry; that named residual is bounded by 15-minute expiry, context binding, and single use |
+| Exposure inputs or the exact approval presentation change after preview | TC-D6/D12 bind target/source/grant/policy/scanner/candidate state plus sample parameters, exact ordered redacted samples, cautions, and copy/schema versions into the authenticated token. Apply recomputes inside the mutation transaction; drift requires a fresh preview and yields zero grant/audit/outbox/fetch/cache effects |
 | Team metadata or a body commitment is used as a content oracle | TC-D3 excludes title/preview/tags/URIs/raw paths and body text from the closed metadata allowlist. TC-D12 signs a fresh-nonce salted commitment per revision and withholds its nonce until authenticated, authorized fetch; byte-identical revisions are unlinkable to metadata-only peers |
 | Serve-time redaction changes bytes while claiming the signed source commitment | TC-D12 performs no in-flight body transformation in v1. `redact` serves only an `already_redacted` representation whose exact commitment and redaction provenance were signed in the event; an `exact` body that now requires redaction stays metadata-only. Returned nonce plus streamed bytes must reproduce the signed `bodyCommitment` |
 | A relayer turns its cached body into a new serving authority | TC-D12 permits body serving only by the event's owning origin workspace/node from local source truth. Relays carry signed metadata/events but never re-serve cached bodies; missing old revisions return unavailable rather than substitution |
@@ -1789,12 +1841,23 @@ not an ordinary member slot with manifest authority.
 - Consent/authentication privacy (TC-D6/D12/D14/D15): `ee share preview` is
   side-effect-free and emits no unkeyed content/secret/sample hash;
   `--record-consent` is absent. Cross-store/workspace/surface/key-generation
-  token replay fails. Mutating each canonical approval field—including
-  exact redacted samples, cautions, and copy/schema version—makes grant/body
-  apply return a fresh preview with zero state/audit/outbox/fetch/cache
-  effects. Audit and support bundles contain neither token nor sample bytes,
-  and serialization/key-store failures return errors rather than token-shaped
-  strings.
+  token replay fails. Invalid-MAC and authentic-stale cases are
+  distinguishable; nonce reuse/linkability, concurrent double-apply,
+  future-issued/expired tokens, argv/env leakage, oversized stdin, and key
+  rotation fail closed. Default preview JSON is byte-deterministic and
+  token-free; only explicit `--issue-approval-token` adds a random,
+  marked-sensitive `eeap1_` bearer, and its envelope exposes no stable store,
+  workspace, or key identifier. Mutating each canonical approval
+  field—including exact redacted sample bytes, sample order, cautions, and
+  copy/schema version—makes grant/body apply require a separate fresh preview
+  with zero state/audit/outbox/fetch/cache effects. Stale/invalid errors never
+  contain a replacement bearer. Repeated secret scans get unrelated
+  occurrence IDs. Ee-controlled trace/audit/support and CASS-import
+  materialization contain neither token, snapshot tag, nor sample bytes;
+  token-prefix/JSON-field redaction is tested. Operator copy names the
+  residual that an external recorder may retain an opted-in bearer until
+  expiry. Randomness/serialization/key-store failures return errors rather
+  than token-shaped strings.
 - Project identity (TC-D8): two clones at different paths derive equal keys;
   object-format-tagged multi-root sets agree independent of order; shallow
   repositories are detected before boundary commits can masquerade as roots;

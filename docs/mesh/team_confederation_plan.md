@@ -619,16 +619,21 @@ records `mesh_peer_policy_denied` in the ledger instead of upserting rows.
 `policy_action: "allow"` verdicts (`src/cli/share.rs:221–247`) with real calls
 into the outbound policy for the named peer; unknown peer ⇒ explicit
 `share_preview_peer_unknown` degraded entry instead of pretending. Make the
-surface strictly read-only: remove `--record-consent` and record consent only
-with the later operation that actually applies or exports the reviewed
-exposure. Remove the per-example public content hash and aggregate public
-preview hash; memory ID + entity revision identify a sample locally without
-creating a dictionary oracle. Also replace the pre-export secret scan's public
+surface strictly read-only: remove `--record-consent`. A grant/body-share
+mutation records consent only when it consumes the exact approval token; an
+export audits its actual policy-checked export effect rather than claiming
+that preview alone recorded consent. Remove the per-example public content
+hash and aggregate public preview hash; memory ID + entity revision identify
+a sample locally without creating a dictionary oracle. Also replace the
+pre-export secret scan's public
 `valueHash` with a fresh, at-least-128-bit OS-CSPRNG `findingId` for each scan
 occurrence. The same ID may correlate one report/error with its audit entry,
 but repeat scans deliberately differ and the ID is never content-derived.
-Randomness/serialization failure is an `ee.error.v2`, never a successful
-hash-shaped identifier.
+Keep the pure detector deterministic and identifier-free: after its canonical
+sort/dedup, the effectful command layer decorates findings in order using an
+injected secure-random source. Tests inject fixed randomness without exposing
+a production seed/bypass. Randomness/serialization failure is an
+`ee.error.v2`, never a successful hash-shaped identifier.
 
 **P0.4 — DB-backed lane preview, grant, and revocation.**
 Feed the existing `compute_lane_grant_preview` real candidate memories from the
@@ -637,20 +642,26 @@ real redaction rules. Change the preview target from its current raw
 `<node-key>` argument to the enrolled opaque `<peer-id>`, and add the missing
 `ee mesh grant <peer-id> --lane <lane>` mutation: authenticated
 preview-token-pinned, audited in the grant transaction, and updating the peer
-record's lane grants. Human mode previews/confirms/applies in one process
-without printing the token. Robot preview JSON returns a 15-minute bearer
-token that grant accepts only through bounded `--preview-token-stdin`, never
-argv/env.
+record's lane grants. Ordinary human/JSON preview is deterministic and
+token-free. Human mode previews/confirms/applies in one process without
+printing the token. Robot mode must explicitly pass
+`--issue-approval-token`; only that response adds a marked-sensitive
+15-minute `approvalToken` with recognizable `eeap1_` prefix. Grant accepts it
+only through bounded `--preview-token-stdin`, never argv/env.
 
-The versioned opaque token carries current key ID, a fresh 32-byte nonce,
-bounded issue/expiry times, a nonce-salted keyed snapshot tag, and a separate
-context-bound envelope MAC derived from T1.6. Verify the envelope MAC first:
+The versioned opaque token exposes no stable store/workspace/key identifier.
+It carries a fresh 32-byte nonce, bounded issue/expiry times, a nonce-salted
+keyed snapshot tag, and a separate context-bound envelope MAC derived from
+T1.6. Verify the envelope MAC first:
 malformed, future-issued, wrong-store/workspace/surface/key, or bad-MAC input
 is `mesh_approval_token_invalid`. Then reconstruct the canonical snapshot and
 compare its keyed tag: expiry or drift is `mesh_approval_token_stale` plus a
-fresh preview. This is intentionally not a bare MAC of current state, which
-could not distinguish forgery from staleness. Both human and JSON render from
-the snapshot, which binds schema/copy version, target + grant generation,
+structured re-preview action, never a replacement bearer in the error.
+Human mode may re-render the current token-free preview and ask again
+in-process; robot mode makes a separate preview call. This is intentionally
+not a bare MAC of current state, which could not distinguish forgery from
+staleness. Both human and JSON render from the snapshot, which binds
+schema/copy version, target + grant generation,
 current/proposed policy generation, the complete revision-pinned candidate
 set, sample strategy/limit, exact ordered redacted samples, and caution codes.
 The nonce makes equal previews unlinkable; raw content/sample hashes are
@@ -675,7 +686,12 @@ Absorb bd-2gvgw's schema `required`-field pinning. Acceptance: grant without a
 matching fresh preview token fails closed; cross-store/workspace/surface/key
 replay, expiry, nonce/tag tampering, concurrent double-apply, and every
 snapshot-field mutation fail with zero side effects; token input is bounded
-and absent from argv/env/log/audit/support; granted lane visibly changes
+and absent from argv/env/ee-controlled trace/error/audit/support and CASS-
+import materialization; invalid/stale errors contain only structured
+recovery, never a replacement token. Default preview JSON is deterministic
+and token-free; explicit issuance is nondeterministic/fallible, the envelope
+contains no stable identifier, token-prefix/field redaction is tested, and
+operator copy names the external-recorder capture residual. Granted lane visibly changes
 export/import policy decisions from P0.2; revoke-lane
 immediately reverses
 future serving, is replay/idempotence safe, never claims remote erasure, and
@@ -699,7 +715,7 @@ no-output/no-audit/no-backup contract. T1.4 and T5.9 derive distinct
 snapshot-tag, token-envelope, and audit-token-ID keys; import/playbook MACs
 have separate domains. Secret-finding occurrence IDs use fresh OS randomness
 and are deliberately independent of this root. No raw root or subkey enters
-SQLite.
+SQLite, and a current-key-only approval envelope carries no key ID.
 
 `ee import jsonl` must not
 grant `human_explicit` on the strength of a spoofable `import_source=native`
@@ -2153,14 +2169,19 @@ generations, outbound policy/scanner generation, the complete candidate
 ID/revision/representation/commitment set, sample strategy/limit, exact
 ordered redacted samples, caution codes, and schema/copy version. Human and
 JSON render from that same snapshot. Human confirmation keeps the token
-in-process; robot apply accepts the 15-minute bearer only from bounded
-`--preview-token-stdin`. Envelope verification distinguishes invalid context,
-key, or MAC from an authentic stale/expired snapshot; the snapshot check,
-generation compare-and-swap, grant, and audit share one write transaction.
-Failure returns a fresh preview with zero grant/audit/outbox/fetch/cache
-effects. The token is opaque and nonce-unlinkable; neither it nor
-audit/support output reveals a body/sample hash, and durable audit stores only
-a domain-keyed nonce identifier.
+in-process. Default JSON is deterministic and token-free; robot issuance
+requires `--issue-approval-token`, marks the no-stable-ID `eeap1_` bearer
+sensitive, and apply accepts it only from bounded `--preview-token-stdin`.
+Envelope verification distinguishes invalid context, key, or MAC from an
+authentic stale/expired snapshot; the snapshot check, generation
+compare-and-swap, grant, and audit share one write transaction.
+Failure returns only a structured re-preview action, never a replacement
+bearer, and has zero grant/audit/outbox/fetch/cache effects. The token is
+opaque and nonce-unlinkable; neither it nor ee-controlled
+trace/audit/support or CASS-import materialization reveals a body/sample hash,
+and durable audit stores only a domain-keyed nonce identifier. Operator copy
+names the residual that an external recorder may retain an explicitly issued
+token until expiry.
 `ee team unshare bodies` advances the same
 exact-node grant generations and stops future serving from the named current
 local source. `--all-members` means recipients of that source, lists other
@@ -2295,8 +2316,9 @@ Threat-model deltas on top of ADR 0037's ten rows (each new row keeps the
 | Member-supplied time manipulates trust, ranking, lifecycle, or recent-activity visibility | Signed `producedAt` is member-attested provenance/display only. Authorization, elevation caps, retention/decay, lifecycle mutation, and default retrieval relevance use no origin clock; explicit-as-of activity isolates claims over the 600-second future-skew bound in deterministic `clockAnomalies`. Backdating can omit an event from an explicit member-attested time window, so the schema states that residual and directs completeness checks to an unfiltered generation-stable cursor drain or origin-sequence audit. |
 | Policy-denied event stalls its stream | Signed safe headers advance a contiguous receipt frontier; a separate scan frontier advances over explicit per-event applied/withheld/quarantined/unsupported dispositions, so later events apply while denied payloads remain fetchable after policy change. |
 | Policy denial suppresses a later purge | `tombstone`/`shareWithdraw` carry only opaque revocation references and are mandatory for active members; current content policy cannot strand previously admitted derived material. |
-| Data exfil via wider lanes or state changes after approval | Read-only preview → canonical approval snapshot → surface/store/workspace-bound authenticated token → recomputation → mutation + audit in one transaction, plus the hard secret-scan deny on every export/serve path. Target/grant/policy/scanner/candidate/sample/caution/copy drift and key rotation require a fresh preview with zero mutation side effects. |
-| Preview/secret-scan hashes become content or equality oracles | Public per-content, per-sample, aggregate-preview, and secret-value hashes are removed. Secret findings use a surface-bound store-local keyed correlation ID; grant/body approval MACs include exact redacted samples internally but expose/persist only opaque non-replayable identifiers. Cross-store/support-bundle observers cannot test guesses. |
+| Data exfil via wider lanes or state changes after approval | Deterministic token-free preview (or explicit marked-sensitive robot issuance) → canonical approval snapshot → short-lived nonce-salted snapshot tag + context-bound envelope MAC → bounded stdin/in-process verification → generation CAS + mutation + audit in one transaction, plus the hard secret-scan deny on every export/serve path. Invalid, expired, replayed, or target/grant/policy/scanner/candidate/sample/caution/copy-drifted tokens require a separate fresh preview with zero mutation side effects; errors expose no replacement bearer. |
+| Preview/secret-scan hashes become content or equality oracles | Public per-content, per-sample, aggregate-preview, and secret-value hashes are removed. Secret findings use unrelated random per-occurrence IDs. Approval tags are keyed and salted by a fresh token nonce, so equal previews do not link; only opaque non-replayable identifiers persist. Chosen-input, cross-store, and support-bundle observers cannot test guesses. |
+| A robot approval response is captured by an external session recorder | Ordinary preview JSON is token-free; issuance requires `--issue-approval-token`. The optional `approvalToken` is marked sensitive, prefixed `eeap1_`, and omitted/redacted from ee-controlled traces, errors, audit, support, and CASS-import materialization. Raw third-party stdout/session capture remains an explicit residual until the 15-minute, context-bound, generation-single-use bearer expires. |
 | Team metadata or body commitment is used as a content oracle | The closed metadata schema excludes body/title/preview/tags/URIs/raw paths. Every revision signs a fresh-nonce salted commitment and withholds its nonce until authenticated-session-derived member/grant authorization succeeds; metadata-only peers cannot test guesses or link byte-identical revisions. |
 | Redaction changes bytes while claiming the signed event commitment | V1 never transforms a body during fetch. A redact-only policy serves only an event-signed `already_redacted` representation; exact bytes otherwise stay metadata-only. Returned nonce plus streamed bytes must reproduce the signed `bodyCommitment`, and a newly triggered secret scan denies rather than mutates. |
 | Relayer serves a cached body or an old event receives current bytes | Only the event's owning origin workspace/node serves from local source truth. Relays never become body authorities; tombstoned/withdrawn/missing old revisions return unavailable rather than substitution. |
@@ -2335,7 +2357,8 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
   `ee.mesh.memory_event.v1`,
   `ee.team.manifest_event.v1`, `ee.mesh.share_preview.v2`,
   `ee.mesh.export_secret_scan.v2`,
-  `ee.mesh.lane_grant_preview.v2`, `ee.mesh.grant.v1`, and
+  `ee.mesh.lane_grant_preview.v2`, the nested opaque-envelope contract
+  `ee.mesh.approval_token.v1`, `ee.mesh.grant.v1`, and
   `ee.mesh.revoke_lane.v1`; plus one top-level schema per executable
   `ee team` leaf:
   `ee.team.create.v1`, `ee.team.invite.v1`,
@@ -2358,7 +2381,15 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
   The three preview/scan v2 contracts directly supersede their v1 shapes:
   public content/secret/sample hashes and side-effecting preview consent are
   removed, lane preview targets opaque peer identity and returns an
-  authenticated `previewToken`, and no compatibility alias is retained.
+  authenticated `approvalToken` only under explicit
+  `--issue-approval-token`, and no compatibility alias is retained. The
+  ordinary response is deterministic/token-free; the optional field is
+  omitted unless issuance was requested. When present it is one closed object:
+  `approvalToken = { schema: "ee.mesh.approval_token.v1", value:
+  "eeap1_<base64url>", expiresAt: <RFC3339>, handling: "secret" }`. The
+  envelope serializes no stable store/workspace/key identifier; schema and
+  contract tests pin the prefix, omission rule, `handling` constant, bounds,
+  and redaction behavior.
   Group nodes emit no response. Flags such as
   invite default/`--wait`/`--no-wait`/`--resume` and join `--dry-run` use
   explicitly tagged variants within their one leaf schema; member removal
@@ -2444,10 +2475,12 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
   authentication root cannot be created/read/verified; native-trust import
   and exposure approval fail closed while ordinary local memory remains
   usable), `mesh_approval_token_invalid` (T1.4/T5.9: malformed, wrong-domain,
-  wrong-store/workspace/surface, retired-key, or MAC-invalid token;
+  wrong-store/workspace/surface, future-issued, retired-key, or envelope-MAC-
+  invalid token;
   no mutation), `mesh_approval_token_stale` (T1.4/T5.9: the canonical
-  approval snapshot changed; return a fresh read-only preview and commit
-  nothing),
+  approval snapshot changed, the token expired, or a successful/concurrent
+  generation advance made it replayed; return a structured re-preview action
+  with no replacement bearer and commit nothing),
   `mesh_responder_port_conflict` (T2.2 cannot acquire the root-committed
   address/port, including another local user/process; never falls back),
   `team_responder_port_mismatch` (T4.1/join/status: local configured port or
@@ -2485,7 +2518,9 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
 - **Config**: `[team]` section (`elevate_member_human_explicit`, defaults,
   `peer_human_attested_max_per_member_24h = 100` with checked positive local
   override). `PAIR_KEY_ROTATION_GRACE_SECONDS = 86400` is a v1 protocol
-  constant, not a peer- or environment-controlled setting;
+  constant, not a peer- or environment-controlled setting.
+  `APPROVAL_TOKEN_TTL_SECONDS = 900` is likewise a fixed v1 local-consent
+  bound, not peer- or environment-controlled;
   `[mesh] sync_interval_seconds`; `[mesh.admission]`
   `max_inbound_origin_bytes = 67108864`,
   `max_inbound_team_bytes = 268435456` (the per-team-workspace total —
@@ -2559,7 +2594,7 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
 | Cross-platform key store | Unix owner/mode/no-symlink/atomic-fsync vectors and Windows SID/DACL/reparse-point/opened-file-identity/write-through vectors exercise create/read/rotate/crash/attacker-controlled-parent cases. A Windows build lacking the safe adapter emits high `mesh_key_store_unavailable` and blocks join/sync/rotate without affecting ordinary local commands; no test accepts inherited broad ACLs, shell-based permission repair, or project-owned unsafe. |
 | Cross-platform body cache | Unix owner/mode/no-symlink/fsync and Windows SID/DACL/reparse-point/opened-file-identity/write-through vectors cover temporary creation, verified publication, crash boundaries, eviction, and withdrawal under hostile parents. Crash injection proves `staging` stays invisible until verified rename/fsync and `invalidated_pending_purge` closes retrieval/index access before removal; restart/steward/doctor reconcile staged orphans and pending purges idempotently, and filesystem presence never resurrects availability. Failure emits high `mesh_body_cache_lifecycle_failed`, leaves the item metadata-only, and proves no weakly protected object is retrieval-addressable; the T2.1 secure-file primitive is reused rather than forked. |
 | Metadata disclosure and body commitment | Schema/golden tests enumerate the exact safe-header and memory-metadata allowlists and prove body/title/preview/tags/URI/raw-path/evidence/nonce fields cannot leak through metadata, activity, audit, status, or support bundles. Fresh 32-byte nonces make equal bodies in distinct revisions unlinkable; metadata-only peers cannot verify guesses. `exact` and `already_redacted` bodies publish only when transfer integrity passes and returned nonce plus exact bytes recompute the signed `bodyCommitment`. A redact-only policy over `exact` remains metadata-only; no transformed bytes publish under the source commitment. |
-| Preview/secret-finding privacy and consent fencing | `ee.mesh.share_preview.v2` is read-only, has no `--record-consent`, public content/sample hashes, or token-shaped serialization fallback. `ee.mesh.export_secret_scan.v2` replaces raw-value hashes with a store-local keyed correlation ID. Grant/body preview tokens reject wrong store/workspace/surface/domain/key and constant-time MAC failures; key rotation invalidates them. Mutating target/grant/policy/scanner/candidate/sample/caution/copy inputs after preview yields `mesh_approval_token_stale`, a fresh preview, and zero grant/audit/outbox/fetch/cache effects. Human and JSON are rendered from the same canonical snapshot; audit/support contain neither token nor sample bytes. |
+| Preview/secret-finding privacy and consent fencing | `ee.mesh.share_preview.v2` is read-only, has no `--record-consent`, public content/sample hashes, or token-shaped fallback. `ee.mesh.export_secret_scan.v2` replaces raw-value hashes with unrelated per-scan random occurrence IDs, including chosen-input/repeat-scan tests; its pure detector remains byte-deterministic and ID-free, while an injected secure-random command boundary decorates canonical findings. Grant/body tokens have fresh nonces, a 15-minute bound, separate nonce-salted snapshot tag and context-bound envelope MAC, current-key-only verification, and no serialized stable identifier. Tests distinguish malformed/wrong-context/MAC-invalid from authentic stale/expired, prove equal previews unlinkable, and serialize concurrent apply so one generation-CAS transaction wins. Default preview JSON is deterministic/token-free; human mode never prints the token, while robot issuance is explicit and apply accepts bounded stdin only. The marked-sensitive `eeap1_` value is absent from argv/env/ee-controlled trace/error/audit/support and redacted by CASS import; tests and operator copy name raw external-recorder capture as a bounded residual. Mutating every target/grant/policy/scanner/candidate/sample/caution/copy input requires a separate fresh preview and yields zero grant/audit/outbox/fetch/cache effects; failure errors contain no replacement bearer. |
 | Pair-key rotation | `ee mesh rotate-pair` is the explicit trigger and the ≤4 KiB `pair_rotate` capability is the only old-key resume surface. Crash/restart at every stage/accept/commit/promote boundary converges without accepting old-key application traffic. A promoted/staged split resumes only the exact rotation for 86400 seconds; replayed, concurrent, wrong-generation, wrong-transcript, ordinary-session downgrade, post-grace, and persisted-time-floor rollback attempts fail. Promotion closes old sessions, expired/unverifiable state emits `mesh_pair_rotation_repair_required`, and fresh pairing repairs it. `ee team members rotate-key` goldens say signing lineage, never pair key. |
 | Invite/introduction time safety | Mint, lease, redeem/resume, revoke, expiry, and introduction authorization advance one persisted nondecreasing floor; same-process monotonic deadlines also fire. Rollback at every boundary and restart emits `team_invite_clock_rollback` and cannot extend/reuse a credential; a forward jump may expire early. Doctor repair proves all pending invites, leases, and introductions are atomically revoked before lowering the floor, with no resurrection. |
 | Grant narrowing | `revoke-lane` immediately blocks future serving, advances the exact-node generation, is idempotent under replay, invalidates stale previews, survives current Tailscale key rotation without retargeting, and requires a fresh preview to re-grant. Team body unshare fans out to the current recipient set **from the named local source node** and every result/golden carries both the other-source-nodes-unaffected and cached-copy non-erasure caveats; no per-recipient revoke emits `shareWithdraw`. |
@@ -2597,11 +2632,11 @@ logging conventions; RCH-remote for cargo-backed stages per repo policy.
 
 | Milestone | Contents | Gate (all must hold) |
 |---|---|---|
-| **M0 — Truth & safety** | P0.1–P0.7 | bd-30o6g closed with streaming-cap test; export/import observably policy-gated; share preview is read-only with no public content/secret hashes or consent-without-effect; the hardened store authentication root supplies domain-separated import, finding-correlation, and approval subkeys; `ee mesh grant` requires a fresh authenticated preview token and `ee mesh revoke-lane` narrows idempotently without stale-token regrant; wrong-context/token/key and approval-snapshot drift fail with zero effects; bypass closed with a constant-size context-bound store-local-MAC header whose ordered-record root is emitted from one read snapshot and recomputed inside one rollback transaction (teammate/cross-family/cross-workspace artifacts cannot inject `human_explicit`, and native reimport cannot overwrite divergent state or resurrect a tombstone/withdrawal); zero uncovered mesh degraded codes; effect/README drift fixed; `verify.sh` green. |
+| **M0 — Truth & safety** | P0.1–P0.7 | bd-30o6g closed with streaming-cap test; export/import observably policy-gated; share preview is read-only with no public content/secret hashes or consent-without-effect, and secret findings use unrelated random occurrence IDs; the hardened store authentication root supplies domain-separated import and approval subkeys; `ee mesh grant` requires a short-lived nonce-salted two-layer preview token, consumed in-process or through bounded stdin, and `ee mesh revoke-lane` narrows idempotently without stale-token regrant. Default preview JSON is deterministic/token-free; robot issuance is explicit, marked sensitive, and carries no stable store/key identifier. Invalid versus authentic-stale is implementably distinct; wrong context/key, expiry, concurrent replay, and approval-snapshot drift fail with zero effects and no argv/env/ee-trace/audit/support/CASS-materialization token leak; external-recorder capture is documented as a bounded residual. The import bypass is closed with a constant-size context-bound store-local-MAC header whose ordered-record root is emitted from one read snapshot and recomputed inside one rollback transaction (teammate/cross-family/cross-workspace artifacts cannot inject `human_explicit`, and native reimport cannot overwrite divergent state or resurrect a tombstone/withdrawal); zero uncovered mesh degraded codes; effect/README drift fixed; `verify.sh` green. |
 | **M1 — Peers talk** | P1.0–P1.5 (incl. P1.3b) | Canonically encoded, strictly verified signed origin events durably record only origin-owned local mutations; peer material never re-emits and first-event projection is valid; T2.4 waits for T4.1's active-member authorizer before advertising/applying/relaying either base team feature, so pair/session/signature proof alone is never team authority; cumulative normal intake is charged to signed origins while control intake is independently capped by non-recycled authenticated node (1 MiB) and team (80 MiB), so origin/workspace/key/member churn cannot amplify reserve or block local source truth; dead key-identity frame v1 is rejected and frame v2 binds random ee nodes/team/endpoint workspaces/session/direction/exact-next counter under directional keys; hardened key storage passes Unix mode/no-link/fsync and Windows DACL/reparse/write-through parity or blocks team credentials with `mesh_key_store_unavailable`; local-target/replay-safe sessions, accepted-source WhoIs stable-ID binding, opaque peer handles, and legacy upgrade guidance hold; one user-scoped responder multiplexes exact validated routes for multiple local workspaces only when their root/local ports agree, rebinds only verified tailnet-address changes, diagnoses host-wide/other-EUID ownership, and never scans/wildcard-falls back; distinct-source loopback with fixture-preprovisioned hardened pair keys proves real production session traffic, partition/fork/flood/withheld-cursor/stable-key-rotation scenarios, three-node authorized signed relay, and valid-origin equivocation rollback/convergence; no public raw-key import/test backdoor exists, and an unkeyed peer receives structured pairing-required guidance until M2/M3 ceremonies land; responder policy + secret scan hold; `ee mesh sync --once` runs a real round for a keyed peer; frame/bootstrap/origin/storage-accounting fuzz/properties pass; mesh-off binds no sockets; real-tailnet smoke and capability probe graduate. |
 | **M2 — People & projects** | §7.3.1–§7.3.3 | Random ee node IDs + pinned tailnet/stable-node identity survive ordinary current-key rotation and reject stable-ID substitution; `peer_human_attested` migration/enums/weights are consistent; the atomic default-100-per-rolling-24h local-admission cap survives forged origin time, clock rollback, and concurrent batches, counts each unique content `create`/`revise` exactly once after idempotence, and makes an over-cap revision `agent_validated` instead of inheriting stale elevation; explicit `ee mesh rotate-pair` converges through the pinned two-phase/control-only-resume protocol without old-key application fallback or clock-extended grace, while `ee team members rotate-key` remains the distinct dual-signed/hash-linked signing-lineage operation; Git SHA-1/SHA-256/multi-root/non-Git keys derive/adopt; shallow roots never masquerade as complete, replacement refs/grafts/lazy fetch/ambient Git state cannot rewrite identity, multiple raw local `origin` URLs remain ambiguous rather than selecting a winner, and no root-set/history/object-format/remote drift silently rekeys a persisted project—explicit reconcile passes. |
 | **M3 — ee team** | §7.4 all (history sharing only; no body verbs) | US-1/2/3/7/8/9 pass E2E; plain invite always leaves a live redemption path, daemon/default/wait/no-wait/resume behavior is explicit, the root/invite commit the one v1 port, invite/ceremony IDs meet their entropy floor, the inviter's signed nonce challenge proves exact ee identity/root/port before the secret is transmitted, and persisted-floor + monotonic invite/introduction expiry cannot be extended by clock rollback/restart; join is stable-node-bound, crash-resumable/idempotent with safe pre-key secret re-entry, exiting 0 only after first sync; post-genesis node binding requires an existing-node/new-node ceremony, revocation is cutoff-bound, and lost-last-node recovery cannot self-authorize; the complete active set never silently exceeds 20, no member silently exceeds four active nodes, and both overflow classes converge on capacity conflicts without granting arrival/hash winners; pre-team history stays local unless the revision-pinned history-share flow is confirmed, whose consent explicitly covers current and future active members until origin-wide withdrawal; a later joiner receives confirmed non-withdrawn history; member removal is preview-hash pinned and any target/node/cutoff/delegation drift fails with zero side effects; signed cutoffs are arrival-independent, omitted target origins default to no retained authority, mutually invalidating removals conflict without orphaning the team, accepted-prefix delegated members remain honestly active with mandatory review posture, relay/ack posture is proven, and no recipient removal emits `shareWithdraw`; every leaf emits schema-valid JSON, mutating/network leaves audit, and read-only/list/preview leaves produce zero durable side effects; pause-generation fencing blocks planted live sessions and resume rejects them; invite replay/TTL/concurrent redemption fail closed. |
-| **M4 — Unified recall** | §7.5 all | US-4 passes: team-scoped search/pack with receiver-derived attribution on both nodes; null/spoofed member fields cannot become local or impersonate; all team candidates use the same neutral temporal default; activity exposes only the closed metadata allowlist and never body-derived titles. `trust.team_members` is removed rather than retained as unauthenticated human-team compatibility. Member-attested origin time remains provenance-only; explicit-as-of activity labels skew/backdating limits and generation-stable pagination recovers admitted events. `ee pack --memory-scope` ships; overlap/contradiction behavior is tested. **T5.9 atomically ships body transport plus `ee team share bodies`/`unshare bodies` schemas, authenticated preview-token/grant/revoke/audit behavior**; no degraded-success stub exists. Wrong-context/key tokens and any canonical approval-snapshot drift fail with a fresh preview and zero effects, and neither token nor sample/body hashes persist. Fresh-nonce signed commitments prevent metadata guessing/linkability, authorized transfer recomputes the commitment before publish, revoke makes no remote-erasure/source-wide claim, cross-platform cache parity or metadata-only failure is proven, and support-bundle/withdrawal boundaries pass. |
+| **M4 — Unified recall** | §7.5 all | US-4 passes: team-scoped search/pack with receiver-derived attribution on both nodes; null/spoofed member fields cannot become local or impersonate; all team candidates use the same neutral temporal default; activity exposes only the closed metadata allowlist and never body-derived titles. `trust.team_members` is removed rather than retained as unauthenticated human-team compatibility. Member-attested origin time remains provenance-only; explicit-as-of activity labels skew/backdating limits and generation-stable pagination recovers admitted events. `ee pack --memory-scope` ships; overlap/contradiction behavior is tested. **T5.9 atomically ships body transport plus `ee team share bodies`/`unshare bodies` schemas, authenticated preview-token/grant/revoke/audit behavior**; no degraded-success stub exists. Default preview JSON is deterministic/token-free; explicit robot issuance adds a marked-sensitive, no-stable-ID `eeap1_` bearer. The two-layer, fresh-nonce, 15-minute token distinguishes invalid from stale, is generation-CAS single-use, and travels only in-process or over bounded stdin; every approval-snapshot drift requires a separate fresh preview with zero effects, while errors/persistence expose neither replacement token nor sample/body hashes. Ee sinks and CASS materialization redact it; operator copy names external-recorder capture until expiry. Fresh-nonce signed commitments prevent metadata guessing/linkability, authorized transfer recomputes the commitment before publish, revoke makes no remote-erasure/source-wide claim, cross-platform cache parity or metadata-only failure is proven, and support-bundle/withdrawal boundaries pass. |
 | **M5 — Operations** | §7.6 all | Background steward syncs on the harness without CLI involvement (US-5); `ee daemon install` works on macOS + Linux; doctor validates root/local port agreement, one host-wide responder owner, client-only posture, routes/keys/identity, and cross-platform body-cache security; admission wired; perf profile recorded; quickstart doc validates custom-port and multi-user limitations in a cold run-through. |
 | **M6 — SSO identity** | §7.3.4 both tiers | Tier 1 owner mismatch suspends + audits. Tier 2 accepts only capability-compatible secretless public device clients and rejects providers requiring a distributed client secret; the distinct verifier hosts the flow, receives and zeroizes bearer tokens locally, and sends only bounded ceremony metadata/status over version-negotiated `identity_attest`. Fresh discovery/JWKS per presentation, minimal-environment constrained curl, duplicate-key-rejecting bounded JSON/JWT parsing, exact-original-input signature verification, issuer-JWKS-only key selection, and strict token verification reject stale retired keys, token-controlled/embedded keys, ambiguous `kid`, unsupported critical headers/noncanonical encoding, unsupported providers, DNS-rebinding/private-address/ambient-proxy/config/CA/keylog/redirect leaks, credential-POST redirects, unbounded or unreaped subprocess I/O, weak or mismatched keys, bad issuer/audience/`azp`/algorithm/time/verified-email/group claims, and replay races. Durable/team-visible evidence is limited to the previewed subject/optional-email/configured-group-match decision and verification provenance; full groups, unrelated claims, tokens, and ceremony ephemera never persist or replicate. Receiver-side future-skew, cadence, evidence-expiry, and late-delivery checks bound every lease. Nondecreasing local authorization time makes authorizing/mutating/import/serve paths rollback-safe while read-only surfaces remain non-persisting; forward-jump repair cannot reactivate old leases. Nonce extension is used when present and weaker fallback is explicit; finite attestation leases reject self-renewal, commute under concurrent arrival, conflict duplicate issuer/subject bindings, bootstrap without instant one-member lockout, expire through cadence + grace without background IdP HTTP, and make the offboarding latency honest. |
 
@@ -2640,21 +2675,30 @@ machine-visible. ← T0.0. Blocks T2.0 and T4.2.
 - T1.2 Wire outbound policy into `ee mesh export` + share-preview verdicts
   (P0.2+P0.3); remove `--record-consent`, public per-content/aggregate
   preview hashes, and the secret scan's public `valueHash`; emit only
-  revision-pinned samples and a T1.6-domain-keyed `findingId`, with fallible
-  errors and v2 schemas. ← T1.6
+  revision-pinned samples and a fresh random per-scan `findingId` unrelated to
+  secret bytes. Preserve a deterministic ID-free pure detector, then decorate
+  canonical findings at the effectful boundary with injected secure
+  randomness; failures are errors and v2 schemas replace v1 directly. ← T0.0
 - T1.3 Wire `decide_mesh_import` into `ee mesh import` + ledger decision
   columns, and expose a versioned normalized admission request that live typed
   events can reuse without turning an unsigned `ee.mesh.event.v1` file row
   into team origin authority. ← T0.0
 - T1.4 DB-backed preview-grant retargeted from raw node key to opaque enrolled
-  peer ID + T1.6-keyed canonical approval snapshot and
-  preview-token-pinned `ee mesh grant <peer-id>` + idempotent
+  peer ID + T1.6-keyed canonical approval snapshot and short-lived,
+  nonce-salted snapshot-tag/envelope-MAC token; human apply keeps it
+  in-process. Default JSON is deterministic/token-free; robot issuance is
+  explicit via `--issue-approval-token`, marks the no-stable-ID `eeap1_`
+  bearer sensitive, and `ee mesh grant <peer-id>` consumes it from bounded
+  `--preview-token-stdin`, never argv/env. Ee sinks/CASS materialization redact
+  it and operator copy names the external-recorder residual. Add idempotent
   generation-advancing `ee mesh revoke-lane <peer-id>` (absorbs bd-2gvgw);
   peer ID is lookup only. M0 pins a versioned target adapter; T2.2/T3.1—not
   this bead—later migrate/resolve it to the exact ee-node grant
-  principal/generation. Wrong-context/key tokens or snapshot drift commit
-  nothing; stale previews cannot undo a revoke and neither
-  command claims remote erasure. ← T1.2
+  principal/generation. Invalid versus authentic-stale/expired is distinct;
+  verification + generation CAS + grant/audit share one transaction, so
+  wrong-context/key, drift, and concurrent replay commit nothing. Stale
+  previews cannot undo a revoke and neither command claims remote erasure.
+  ← T1.2, T1.6
 - T1.5 De-hardcode mesh status/report fields. ← T1.2, T1.3
 - T1.6 Hardened store-local authentication root + close JSONL/playbook trust
   bypass: fallible fixed-domain subkeys and known-answer/key-rotation
@@ -2667,8 +2711,10 @@ machine-visible. ← T0.0. Blocks T2.0 and T4.2.
   exact contextual match; native reimport restores missing rows or no-ops on
   byte-identical rows but never overwrites divergent revisions or resurrects
   tombstones/withdrawals; credential-free `ee backup` restore is external and
-  requires local re-attestation. Approval tokens accept current key only;
-  import verification alone retains the bounded prior-key window. ← T0.0
+  requires local re-attestation. Approval surfaces derive separate
+  snapshot-tag, envelope-MAC, and audit-ID subkeys; tokens accept the current
+  key only and serialize no key ID, while import verification alone retains
+  the bounded prior-key window. ← T0.0
 - T1.7 Degraded-code fixture/taxonomy backfill + empty audit tests + effect/README drift. ← T0.0 (parallel with all T1.x)
 
 **Sub-epic T2 — M1 Transport**
@@ -2821,8 +2867,70 @@ machine-visible. ← T0.0. Blocks T2.0 and T4.2.
 - T5.6 Evidence-bounded peer conflict detector (SRR6.37 completion): deterministic duplicate/near-duplicate, typed/canonical-field contradiction only, free-text suspicion as review candidate, missing-body unassessed posture, detector provenance + insights surfacing. ← T5.2
 - T5.7 Index-intake integration: transactionally coalesced workspace/source/round-range jobs with idempotency and source-snapshot publication fence; amplification budget verification at team scale. ← T2.4
 - T5.8 Team retrieval determinism: with canonical event/body corpus and maintenance state fixed, producer-local shared and receiver-projected rows select the same IDs/order under neutral team temporal scores; varying local created/diagnostic receipt/sync times leaves selection unchanged; varying signed origin time changes rendered provenance bytes but not selection/scores; explicit time filters and activity anomaly output stay assurance-labeled and explicit-as-of deterministic; local first receipt may independently alter later maintenance state. ← T5.3, T5.4
-- T5.9 Body product slice: atomically ship `ee team share bodies`/`unshare bodies` schemas, authenticated preview tokens, receiver-resolved current-node grant/revoke mutations, audits, and transport—no unavailable success variant. The T1.6-domain-keyed canonical approval snapshot binds team root/materializer generation, source workspace/node, lane/future-serving semantics, exact recipient nodes and grant generations, outbound policy/scanner generation, complete candidate ID/revision/representation/commitment digest, sample strategy/limit, exact ordered redacted samples, cautions, and schema/copy version. Human/JSON render from it; apply recomputes every input, wrong context/key fails, and drift returns a fresh preview with zero grant/audit/outbox/fetch/cache side effects. The token and sample/body hashes never persist. Fetch authorization derives requester member from the authenticated session and binds exact event/project/grant to the owning origin workspace/node. Event-signed fresh-nonce `bodyCommitment`, `exact`/`already_redacted` representation, and redaction provenance permit no in-flight transform, metadata guess/link oracle, relayer-cache authority, or missing-revision substitution; release nonce only after authorization and recompute commitment before publication. Use sequenced transfer integrity, aggregate cap, sync/prefetch-only execution; crash-safe cache state machine where verified private publication/fsync precedes `staging→available`, while retrieval/index invalidation precedes `available→invalidated_pending_purge→purged|evicted` physical removal, with startup/steward/doctor reconciliation and filesystem presence never authoritative; Unix 0700/0600/no-link/fsync plus Windows SID/DACL/reparse/opened-identity/write-through parity through T2.1's secure-file primitive, with high `mesh_body_cache_lifecycle_failed` metadata-only behavior on any proof failure; lifecycle/withdrawal consistency, support-bundle exclusion, missing-body posture, bounded retry, later-node non-inheritance, and honest future-serving-only/source-specific/non-erasure semantics. ← T2.4, T2.4b, T1.1, T1.4, T4.3
-- T5.10 US-6 E2E over the product harness: body preview/token/grant ⇒ sync fetch/cache ⇒ indexed retrieval; wrong store/workspace/surface/key tokens and independent drift of every canonical approval field fail with a fresh preview and zero effects, while token/sample/body hashes stay out of audit/support. Exact and already-redacted signed representations pass while redact-over-exact, transformed-commitment masquerade, later scanner denial, relayer-cache serve, and old-revision substitution stay metadata-only; metadata-only peers cannot guess or link equal bodies; authenticated-node/member mismatch fails before nonce release; ordinary deny performs no fetch/read blocking; revoke/unshare ⇒ no future fetch from the named local source while prior copied bytes are explicitly non-erasable, later nodes do not inherit, and other local source nodes are explicitly unaffected; partial-publication attempts fail; crash injection at every staging/publication/invalidation/purge transition proves no pre-verification visibility, no post-invalidation access, and idempotent reconciliation; Unix/Windows cache-security failure publishes nothing and remains metadata-only; withdrawal purges only derived objects and support bundles leak no body/path/nonce. ← T5.9, T5.7, T4.7, T2.5
+- T5.9 Body product slice: atomically ship `ee team share
+  bodies`/`unshare bodies` schemas, authenticated preview tokens,
+  receiver-resolved current-node grant/revoke mutations, audits, and
+  transport—no unavailable success variant. The T1.6-domain-keyed canonical
+  approval snapshot binds team root/materializer generation, source
+  workspace/node, lane/future-serving semantics, exact recipient nodes and
+  grant generations, outbound policy/scanner generation, complete candidate
+  ID/revision/representation/commitment set, sample strategy/limit, exact
+  ordered redacted samples, cautions, and schema/copy version. Human/JSON
+  render from it. Default JSON is deterministic/token-free; explicit robot
+  issuance adds a marked-sensitive, no-stable-ID `eeap1_` bearer. Use TC-D6's
+  15-minute fresh-nonce snapshot-tag/envelope-MAC token: keep it in-process
+  for human confirmation, consume bounded stdin for robot apply, distinguish
+  invalid context/key/MAC from authentic stale/expired, and verify snapshot +
+  generation CAS + grant/audit in one transaction. Drift/replay requires a
+  separate fresh preview and has zero grant/audit/outbox/fetch/cache effects;
+  errors contain no replacement bearer. Token/tag/sample/body hashes never
+  persist or leak through argv/env/ee-controlled trace/support/CASS
+  materialization; external capture until expiry remains documented. Fetch
+  authorization derives requester member from the authenticated session and
+  binds exact event/project/grant to the owning origin workspace/node.
+  Event-signed fresh-nonce `bodyCommitment`, `exact`/`already_redacted`
+  representation, and redaction provenance permit no in-flight transform,
+  metadata guess/link oracle, relayer-cache authority, or missing-revision
+  substitution; release nonce only after authorization and recompute
+  commitment before publication. Use sequenced transfer integrity, aggregate
+  cap, sync/prefetch-only execution; crash-safe cache state machine where
+  verified private publication/fsync precedes `staging→available`, while
+  retrieval/index invalidation precedes
+  `available→invalidated_pending_purge→purged|evicted` physical removal, with
+  startup/steward/doctor reconciliation and filesystem presence never
+  authoritative; Unix 0700/0600/no-link/fsync plus Windows
+  SID/DACL/reparse/opened-identity/write-through parity through T2.1's
+  secure-file primitive, with high `mesh_body_cache_lifecycle_failed`
+  metadata-only behavior on any proof failure; lifecycle/withdrawal
+  consistency, support-bundle exclusion, missing-body posture, bounded retry,
+  later-node non-inheritance, and honest
+  future-serving-only/source-specific/non-erasure semantics. ← T2.4, T2.4b,
+  T1.1, T1.4, T4.3
+- T5.10 US-6 E2E over the product harness: body preview/token/grant ⇒ sync
+  fetch/cache ⇒ indexed retrieval; default preview is
+  deterministic/token-free, explicit issuance is marked sensitive, and the
+  envelope has no stable identifier. Malformed/wrong
+  store/workspace/surface/key/MAC tokens, future/expired tokens, concurrent
+  replay, and independent drift of every canonical approval field require a
+  separate fresh preview and fail with zero effects, while errors contain no
+  replacement bearer, equal previews are unlinkable, and
+  token/tag/sample/body hashes stay out of argv/env/ee-controlled
+  trace/audit/support/CASS materialization. External-recorder capture is
+  documented and TTL-bounded. Human in-process and robot bounded-stdin
+  workflows both pass. Exact and already-redacted signed representations pass
+  while redact-over-exact, transformed-commitment masquerade, later scanner
+  denial, relayer-cache serve, and old-revision substitution stay
+  metadata-only; metadata-only peers cannot guess or link equal bodies;
+  authenticated-node/member mismatch fails before nonce release; ordinary
+  deny performs no fetch/read blocking; revoke/unshare ⇒ no future fetch from
+  the named local source while prior copied bytes are explicitly non-erasable,
+  later nodes do not inherit, and other local source nodes are explicitly
+  unaffected; partial-publication attempts fail; crash injection at every
+  staging/publication/invalidation/purge transition proves no
+  pre-verification visibility, no post-invalidation access, and idempotent
+  reconciliation; Unix/Windows cache-security failure publishes nothing and
+  remains metadata-only; withdrawal purges only derived state and support
+  bundles leak no body/path/nonce. ← T5.9, T5.7, T4.7, T2.5
 
 **Sub-epic T6 — M5 Operations**
 - T6.1 Background sync steward job (wires `steward_decision.rs`, `peer_state.rs`; retries deferred pairings/removal fanout/body fetch). ← T2.4, T2.4b, T4.3
