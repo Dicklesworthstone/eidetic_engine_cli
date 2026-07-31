@@ -2427,6 +2427,14 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
   `identity_revalidation_overdue` (warning), `team_idp_unreachable`,
   `team_identity_clock_rollback` (warning),
   `team_idp_provider_unsupported`, `team_idp_token_invalid`,
+  `mesh_remote_evidence_body_size_exceeds_policy`,
+  `mesh_remote_evidence_declared_size_mismatch`,
+  `mesh_fetched_body_hash_mismatch`, and
+  `mesh_remote_evidence_stream_io_failed` (module-level plan/stream codes
+  shipped by T1.1 in commit 63514470 — `src/mesh/remote_evidence.rs`
+  `degraded_codes` — with test-only call sites today; the response-surface
+  fixture + taxonomy obligation lands with the first CLI emitter, T5.9's
+  fetch adapter, in that same commit per the registry rule),
   `team_attribution_unresolved` (T2.4/T4.1 receiver-derived attribution:
   missing/ambiguous/payload-mismatched member resolution quarantines the
   event — ADR TC-D6),
