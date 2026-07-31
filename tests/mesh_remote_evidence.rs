@@ -198,15 +198,20 @@ fn hash_mismatch_quarantines_remote_material_without_persistence() {
 fn bounded_stream_accepts_exact_cap_and_rejects_cap_plus_one_mid_stream() {
     let mut exact_reader = Cursor::new(b"1234");
     let mut exact_staging = Vec::new();
-    let copied = copy_remote_evidence_body_bounded(&mut exact_reader, &mut exact_staging, 4)
-        .expect("exact-cap body should pass");
+    let copied = match copy_remote_evidence_body_bounded(&mut exact_reader, &mut exact_staging, 4) {
+        Ok(copied) => copied,
+        Err(error) => panic!("exact-cap body should pass: {error}"),
+    };
     assert_eq!(copied, 4);
     assert_eq!(exact_staging, b"1234");
 
     let mut oversized_reader = Cursor::new(b"12345");
     let mut oversized_staging = Vec::new();
-    let error = copy_remote_evidence_body_bounded(&mut oversized_reader, &mut oversized_staging, 4)
-        .expect_err("cap+1 body must fail");
+    let error =
+        match copy_remote_evidence_body_bounded(&mut oversized_reader, &mut oversized_staging, 4) {
+            Ok(copied) => panic!("cap+1 body must fail, copied {copied} bytes"),
+            Err(error) => error,
+        };
     assert_eq!(error.code(), degraded_codes::BODY_SIZE_EXCEEDS_POLICY);
     assert!(matches!(
         error,
@@ -336,8 +341,10 @@ fn u64_max_cap_does_not_overflow_size_conversion_or_stream_probe() {
 
     let mut empty_reader = Cursor::new(Vec::<u8>::new());
     let mut staged = Vec::new();
-    let copied = copy_remote_evidence_body_bounded(&mut empty_reader, &mut staged, u64::MAX)
-        .expect("empty stream with u64::MAX cap should not overflow");
+    let copied = match copy_remote_evidence_body_bounded(&mut empty_reader, &mut staged, u64::MAX) {
+        Ok(copied) => copied,
+        Err(error) => panic!("empty stream with u64::MAX cap should not overflow: {error}"),
+    };
     assert_eq!(copied, 0);
     assert!(staged.is_empty());
 }

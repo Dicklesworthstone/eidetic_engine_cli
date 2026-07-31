@@ -764,16 +764,14 @@ mod tests {
         let mut reader = Cursor::new(body);
         let mut staged = Vec::new();
 
-        let copied = copy_remote_evidence_body_bounded(
-            &mut reader,
-            &mut staged,
-            u64::try_from(body.len()).expect("fixture length fits u64"),
-        )
-        .expect("exact-cap body should pass");
+        let copied = match copy_remote_evidence_body_bounded(&mut reader, &mut staged, 7) {
+            Ok(copied) => copied,
+            Err(error) => panic!("exact-cap body should pass: {error}"),
+        };
 
-        assert_eq!(copied, body.len() as u64);
+        assert_eq!(copied, 7);
         assert_eq!(staged, body);
-        assert_eq!(reader.position(), body.len() as u64);
+        assert_eq!(reader.position(), 7);
     }
 
     #[test]
@@ -782,8 +780,10 @@ mod tests {
         let mut reader = Cursor::new(body);
         let mut staged = Vec::new();
 
-        let error = copy_remote_evidence_body_bounded(&mut reader, &mut staged, 4)
-            .expect_err("cap+1 body must fail");
+        let error = match copy_remote_evidence_body_bounded(&mut reader, &mut staged, 4) {
+            Ok(copied) => panic!("cap+1 body must fail, copied {copied} bytes"),
+            Err(error) => error,
+        };
 
         assert_eq!(error.code(), degraded_codes::BODY_SIZE_EXCEEDS_POLICY);
         assert!(matches!(
