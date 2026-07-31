@@ -3234,6 +3234,15 @@ pub struct PackArgs {
     /// new pack row per page.
     #[arg(long, value_name = "CURSOR")]
     pub cursor: Option<String>,
+
+    /// Trust lane to apply before packing memories: self, team, global, workspace, verified, or swarm.
+    /// An explicit value overrides any task-lens scope overlay; omitted keeps lens-then-swarm behavior.
+    #[arg(long, value_parser = parse_memory_scope_arg)]
+    pub memory_scope: Option<MemoryScope>,
+
+    /// Fail closed when relevant evidence exists outside the requested memory scope.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_scope: bool,
 }
 
 /// Pack subcommands: build, replay, diff.
@@ -3277,6 +3286,15 @@ pub struct PackBuildArgs {
     /// Fail instead of falling back when the requested retrieval source is unavailable.
     #[arg(long, action = ArgAction::SetTrue)]
     pub strict_source_mode: bool,
+
+    /// Trust lane to apply before packing memories: self, team, global, workspace, verified, or swarm.
+    /// An explicit value overrides any task-lens scope overlay; omitted keeps lens-then-swarm behavior.
+    #[arg(long, value_parser = parse_memory_scope_arg)]
+    pub memory_scope: Option<MemoryScope>,
+
+    /// Fail closed when relevant evidence exists outside the requested memory scope.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_scope: bool,
 
     /// Context profile: compact, balanced, grounding, orientation, thorough, or submodular.
     #[arg(long, short = 'p')]
@@ -3415,6 +3433,8 @@ impl PackArgs {
             speed: self.speed,
             source_mode: self.source_mode,
             strict_source_mode: self.strict_source_mode,
+            memory_scope: self.memory_scope,
+            strict_scope: self.strict_scope,
             profile: self.profile.clone(),
             pack_profile: self.pack_profile,
             resource_profile: self.resource_profile,
@@ -39644,8 +39664,11 @@ where
             include_stale: args.include_stale,
             relevance_floor: None,
             mesh_mode: args.mesh_mode,
-            memory_scope: lens_memory_scope.unwrap_or(MemoryScope::Swarm),
-            strict_scope: false,
+            memory_scope: args
+                .memory_scope
+                .or(lens_memory_scope)
+                .unwrap_or(MemoryScope::Swarm),
+            strict_scope: args.strict_scope,
             coordination_snapshot: args.coordination_snapshot.clone(),
             coordination_stale_after_ms: args.coordination_stale_after_ms,
             task_lens: resolved_lens
@@ -39849,8 +39872,11 @@ where
         redaction_level: task_lens_redaction(resolved_lens.as_ref())
             .unwrap_or(BackupRedaction::Minimal)
             .to_model(),
-        memory_scope: lens_memory_scope.unwrap_or(MemoryScope::Swarm),
-        strict_scope: false,
+        memory_scope: args
+            .memory_scope
+            .or(lens_memory_scope)
+            .unwrap_or(MemoryScope::Swarm),
+        strict_scope: args.strict_scope,
         ppr_weight: None,
         changed_symbols: Vec::new(),
         changed_symbols_from_git: false,
