@@ -8,6 +8,8 @@
 //! presence transitions are the documented probe artifact and are treated
 //! as no-change.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use ee::mesh::identity_change_guard::{
     AUTO_ENROLLMENT_TAILNET_CHANGED_CODE, BoundIdentity, CurrentIdentity, IdentityGuardVerdict,
     evaluate_identity_guard,

@@ -6,6 +6,8 @@
 //! copy-paste repair commands with shell-safe quoting, and serde payloads
 //! whose evidence fields survive a round-trip (what the audit row records).
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use ee::mesh::identity_change_guard::{
     AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE, BoundIdentity, CurrentIdentity,
     HELLO_RESPONDER_NODE_KEY_MISMATCH_CODE, IdentityGuardVerdict, ResponderBindVerdict,
