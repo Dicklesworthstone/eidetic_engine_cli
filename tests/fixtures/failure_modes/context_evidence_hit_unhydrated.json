@@ -25,6 +25,7 @@
     "severity": "low",
     "message_contains": [
       "has not been distilled into a memory"
-    ]
+    ],
+    "repair_contains": "ee index rebuild"
   }
 }

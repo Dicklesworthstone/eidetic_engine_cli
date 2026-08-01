@@ -24,6 +24,7 @@
     "severity": "info",
     "message_contains": [
       "emitting the full pack instead"
-    ]
+    ],
+    "repair_contains": "pass an explicit pack hash to --since"
   }
 }

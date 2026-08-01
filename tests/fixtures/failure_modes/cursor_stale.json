@@ -27,6 +27,7 @@
     "message_contains": [
       "issued at DB generation",
       "partition the result set honestly"
-    ]
+    ],
+    "repair_contains": "without --cursor to start a fresh page sequence"
   }
 }

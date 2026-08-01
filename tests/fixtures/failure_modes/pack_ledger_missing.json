@@ -25,7 +25,8 @@
       "no persisted replay ledger",
       "--read-only/--no-persist",
       "item-addressed"
-    ]
+    ],
+    "repair_contains": "pass the memory id directly"
   },
   "notes": "The repair is to rerun `ee pack` without read-only/no-persist or pass the target memory id directly. The error protects item-addressed feedback from attaching to the wrong memory."
 }

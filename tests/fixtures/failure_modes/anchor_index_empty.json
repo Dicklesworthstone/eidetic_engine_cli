@@ -23,6 +23,7 @@
     "message_contains": [
       "anchor reverse index has no rows",
       "nothing is anchored yet"
-    ]
+    ],
+    "repair_contains": "ee index rebuild"
   }
 }

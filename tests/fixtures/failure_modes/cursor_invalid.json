@@ -25,6 +25,7 @@
     "message_contains": [
       "failed validation",
       "MAC mismatch"
-    ]
+    ],
+    "repair_contains": "without --cursor to start a fresh page sequence"
   }
 }

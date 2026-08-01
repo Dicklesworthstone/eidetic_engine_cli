@@ -546,7 +546,7 @@ ee recall --path 'src/**' --workspace . --json
 
 **Expected emission.** Message contains: `anchor reverse index has no rows ... nothing is anchored yet`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `ee index rebuild`
 
 **Fixture.** [`tests/fixtures/failure_modes/anchor_index_empty.json`](../tests/fixtures/failure_modes/anchor_index_empty.json)
 
@@ -578,7 +578,7 @@ ee recall --path 'src/**' --workspace . --json
 
 **Expected emission.** Message contains: `behind database generation ... results may miss recent memories`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `ee index rebuild`
 
 **Fixture.** [`tests/fixtures/failure_modes/anchor_index_stale.json`](../tests/fixtures/failure_modes/anchor_index_stale.json)
 
@@ -2946,7 +2946,7 @@ EE_AGENT_NAME=FreshAgent ee pack "release prep" --workspace . --since last --jso
 
 **Expected emission.** Message contains: `emitting the full pack instead`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `pass an explicit pack hash to --since`
 
 **Fixture.** [`tests/fixtures/failure_modes/context_delta_no_baseline.json`](../tests/fixtures/failure_modes/context_delta_no_baseline.json)
 
@@ -3045,7 +3045,7 @@ ee pack "<unique transcript phrase from the imported session>" --workspace . --j
 
 **Expected emission.** Message contains: `has not been distilled into a memory`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `ee index rebuild`
 
 **Fixture.** [`tests/fixtures/failure_modes/context_evidence_hit_unhydrated.json`](../tests/fixtures/failure_modes/context_evidence_hit_unhydrated.json)
 
@@ -3108,7 +3108,7 @@ ee pack "format before release" --workspace . --json
 
 **Expected emission.** Message contains: `matched search but has no source memories`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `ee index rebuild`
 
 **Fixture.** [`tests/fixtures/failure_modes/context_rule_hit_unhydrated.json`](../tests/fixtures/failure_modes/context_rule_hit_unhydrated.json)
 
@@ -3487,7 +3487,7 @@ ee schema list --cursor not-a-valid-cursor --max-output-tokens 150 --json
 
 **Expected emission.** Message contains: `failed validation ... MAC mismatch`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `without --cursor to start a fresh page sequence`
 
 **Fixture.** [`tests/fixtures/failure_modes/cursor_invalid.json`](../tests/fixtures/failure_modes/cursor_invalid.json)
 
@@ -3519,7 +3519,7 @@ ee schema list --cursor <captured-cursor> --max-output-tokens 150 --json
 
 **Expected emission.** Message contains: `issued at DB generation ... partition the result set honestly`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `without --cursor to start a fresh page sequence`
 
 **Fixture.** [`tests/fixtures/failure_modes/cursor_stale.json`](../tests/fixtures/failure_modes/cursor_stale.json)
 
@@ -8579,7 +8579,7 @@ ee swarm brief --workspace . --json
 
 **Expected emission.** Message contains: `blocked by database read-snapshot contention ... NOT inspected`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `ee doctor`
 
 **Fixture.** [`tests/fixtures/failure_modes/memory_drift_lock_contention.json`](../tests/fixtures/failure_modes/memory_drift_lock_contention.json)
 
@@ -10091,7 +10091,7 @@ ee status --max-output-tokens 10 --json
 
 **Expected emission.** Message contains: `Output budget unsatisfiable ... payload withheld`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Raise --max-output-tokens`
 
 **Fixture.** [`tests/fixtures/failure_modes/output_budget_unsatisfiable.json`](../tests/fixtures/failure_modes/output_budget_unsatisfiable.json)
 
@@ -10157,7 +10157,7 @@ ee schema list --max-output-tokens 150 --json  # recall variant: ee recall --pat
 
 **Expected emission.** Message contains: `trailing element(s) ... declared truncation point`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `Resume with --cursor`
 
 **Fixture.** [`tests/fixtures/failure_modes/output_truncated_budget.json`](../tests/fixtures/failure_modes/output_truncated_budget.json)
 
@@ -10416,7 +10416,7 @@ ee outcome --workspace . --pack blake3:missing-pack-hash --item 1 --signal helpf
 
 **Expected emission.** Message contains: `no persisted replay ledger ... --read-only/--no-persist ... item-addressed`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `pass the memory id directly`
 
 **Fixture.** [`tests/fixtures/failure_modes/pack_ledger_missing.json`](../tests/fixtures/failure_modes/pack_ledger_missing.json)
 
@@ -11552,7 +11552,7 @@ ee recall --diff HEAD~1 --path 'src/**' --workspace . --json
 
 **Expected emission.** Message contains: `--diff selector degraded to an empty path set ... git was unavailable`
 
-**Repair hint.** Present in fixture; see the response payload's `error.repair` field at runtime.
+**Repair hint.** `git on PATH`
 
 **Fixture.** [`tests/fixtures/failure_modes/recall_git_unavailable.json`](../tests/fixtures/failure_modes/recall_git_unavailable.json)
 
