@@ -70,7 +70,7 @@ contract update. Until then, outbound callers must treat:
 - `redactedPayloadRequired=true` whenever a redacted payload would be allowed.
 
 Share previews are dry-run evidence, not export authorization. They must use
-`SHARE_PREVIEW_SCHEMA_V1`, `SharePreviewCandidate.redaction_class`,
+`SHARE_PREVIEW_SCHEMA_V2`, `SharePreviewCandidate.redaction_class`,
 `build_share_preview`, `share_preview_hash`, `scan_mesh_export_subjects`, and
 `MESH_EXPORT_POLICY_ATTESTATION_SCHEMA_V1` from `src/policy/mod.rs`.
 For `memory_anchors`, share previews stay `hash_only`, and any future policy

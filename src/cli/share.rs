@@ -4,12 +4,15 @@ use std::path::{Path, PathBuf};
 use clap::{ArgAction, Parser, Subcommand};
 use serde_json::{Value as JsonValue, json};
 
+use crate::config::MeshLane;
+use crate::core::memory_scope::MeshOutboundPolicyDecisionInput;
 use crate::db::{DbConnection, StoredMemory};
+use crate::mesh::policy::MeshPeerPolicyRegistry;
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
 use crate::policy::{
-    SharePreviewCandidate, SharePreviewInput, SharePreviewReport, build_share_preview,
-    redact_secret_like_content, share_preview_hash,
+    SHARE_PREVIEW_PEER_UNKNOWN_CODE, SharePreviewCandidate, SharePreviewInput, SharePreviewReport,
+    build_share_preview, redact_secret_like_content, share_preview_hash,
 };
 
 use super::{Cli, write_domain_error, write_stdout};
@@ -107,11 +110,18 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
-    let candidates =
-        share_preview_candidates(&memories, args.include_body, args.include_embeddings);
+    let registry = super::mesh::load_mesh_peer_policy_registry(cli, args.database.as_deref());
+    let candidate_set = share_preview_candidates(
+        &memories,
+        args.include_body,
+        args.include_embeddings,
+        &registry,
+        validated_args.peer_id,
+        &workspace_id,
+    );
     let report = build_share_preview(&SharePreviewInput {
         target_peer_id: validated_args.peer_id,
-        candidates: &candidates,
+        candidates: &candidate_set.candidates,
         consent_required: true,
         max_examples: args.max_examples,
     });
@@ -124,6 +134,7 @@ where
         args,
         report: &report,
         preview_hash: &preview_hash,
+        peer_unknown: candidate_set.peer_unknown,
     };
 
     write_share_preview_report(cli, &render_input, stdout)
@@ -148,11 +159,63 @@ fn validate_share_preview_args(
     Ok(SharePreviewValidatedArgs { peer_id })
 }
 
+struct SharePreviewCandidateSet<'a> {
+    candidates: Vec<SharePreviewCandidate<'a>>,
+    peer_unknown: bool,
+}
+
+fn policy_action_label(allowed: bool) -> &'static str {
+    if allowed { "allow" } else { "deny" }
+}
+
+/// Build the per-lane share-preview candidates for `target_peer_id`, deriving
+/// each lane's `policy_action` from the real outbound peer-policy verdict
+/// (`decide_outbound`) rather than simulating "allow". Memories are treated as
+/// originating in the local workspace, so onward-sharing provenance of
+/// imported memories is out of scope here. Peer resolution is lane-independent,
+/// so a single probe decides whether the peer is configured at all: when it is
+/// not, `select_outbound_policy` errors, every lane fails closed (deny), and
+/// `peer_unknown` is set so the caller can surface
+/// [`SHARE_PREVIEW_PEER_UNKNOWN_CODE`]. The `--include-body`/`--include-embeddings`
+/// flags remain the operator's opt-in for previewing those lanes; an
+/// un-requested lane is always denied regardless of policy, and a body whose
+/// content is secret-like is never counted as exportable even when the peer
+/// policy would otherwise allow the body lane.
 fn share_preview_candidates<'a>(
     memories: &'a [StoredMemory],
     include_body: bool,
     include_embeddings: bool,
-) -> Vec<SharePreviewCandidate<'a>> {
+    registry: &MeshPeerPolicyRegistry,
+    target_peer_id: &str,
+    workspace_id: &str,
+) -> SharePreviewCandidateSet<'a> {
+    let outbound_input = |material_lane: MeshLane| MeshOutboundPolicyDecisionInput {
+        local_workspace_id: workspace_id,
+        target_peer_id,
+        origin_workspace_id: workspace_id,
+        material_lane,
+        payload_is_redacted: false,
+    };
+
+    let peer_unknown = registry
+        .select_outbound_policy(&outbound_input(MeshLane::Metadata))
+        .is_err();
+
+    // The per-lane verdicts do not depend on per-memory content (we evaluate
+    // raw-payload export with `payload_is_redacted = false`), so resolve them
+    // once and gate body/embedding on the operator's include flags.
+    let metadata_allowed = registry
+        .decide_outbound(&outbound_input(MeshLane::Metadata))
+        .permits_payload_export();
+    let body_policy_allows = include_body
+        && registry
+            .decide_outbound(&outbound_input(MeshLane::Body))
+            .permits_payload_export();
+    let embedding_allowed = include_embeddings
+        && registry
+            .decide_outbound(&outbound_input(MeshLane::Embedding))
+            .permits_payload_export();
+
     let mut candidates = Vec::with_capacity(memories.len().saturating_mul(3));
     for memory in memories {
         candidates.push(SharePreviewCandidate {
@@ -162,15 +225,19 @@ fn share_preview_candidates<'a>(
             trust_class: &memory.trust_class,
             material_lane: "metadata",
             redaction_class: "metadata_only",
-            policy_action: "allow",
+            policy_action: policy_action_label(metadata_allowed),
             content_preview: &memory.content,
-            estimated_bytes: metadata_estimated_bytes(memory),
+            estimated_bytes: if metadata_allowed {
+                metadata_estimated_bytes(memory)
+            } else {
+                0
+            },
             body_bytes: 0,
             embedding_bytes: 0,
         });
 
         let body_redaction = redact_secret_like_content(&memory.content);
-        let body_exportable = include_body && !body_redaction.redacted;
+        let body_exportable = body_policy_allows && !body_redaction.redacted;
         candidates.push(SharePreviewCandidate {
             memory_id: &memory.id,
             level: &memory.level,
@@ -186,7 +253,7 @@ fn share_preview_candidates<'a>(
             } else {
                 "body_denied"
             },
-            policy_action: if body_exportable { "allow" } else { "deny" },
+            policy_action: policy_action_label(body_exportable),
             content_preview: &memory.content,
             estimated_bytes: if body_exportable {
                 memory.content.len() as u64
@@ -212,22 +279,26 @@ fn share_preview_candidates<'a>(
             } else {
                 "embedding_denied"
             },
-            policy_action: if include_embeddings { "allow" } else { "deny" },
+            policy_action: policy_action_label(embedding_allowed),
             content_preview: &memory.content,
-            estimated_bytes: if include_embeddings {
+            estimated_bytes: if embedding_allowed {
                 EMBEDDING_ESTIMATED_BYTES
             } else {
                 0
             },
             body_bytes: 0,
-            embedding_bytes: if include_embeddings {
+            embedding_bytes: if embedding_allowed {
                 EMBEDDING_ESTIMATED_BYTES
             } else {
                 0
             },
         });
     }
-    candidates
+
+    SharePreviewCandidateSet {
+        candidates,
+        peer_unknown,
+    }
 }
 
 fn metadata_estimated_bytes(memory: &StoredMemory) -> u64 {
@@ -252,6 +323,7 @@ struct SharePreviewRenderInput<'a> {
     args: &'a SharePreviewArgs,
     report: &'a SharePreviewReport,
     preview_hash: &'a str,
+    peer_unknown: bool,
 }
 
 fn write_share_preview_report<W>(
@@ -265,7 +337,7 @@ where
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => write_stdout(
             stdout,
-            &render_share_preview_human(input.report, input.preview_hash),
+            &render_share_preview_human(input.report, input.preview_hash, input.peer_unknown),
         ),
         output::Renderer::Toon => {
             let data = share_preview_data_json(input);
@@ -282,11 +354,30 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": share_preview_data_json(input),
-                "degraded": [],
+                "degraded": share_preview_degraded(input),
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
     }
+}
+
+/// Degraded notices for the share preview. The only entry is the fail-closed
+/// [`SHARE_PREVIEW_PEER_UNKNOWN_CODE`], emitted when the target peer has no
+/// resolvable outbound policy so nothing would be shared.
+fn share_preview_degraded(input: &SharePreviewRenderInput<'_>) -> Vec<JsonValue> {
+    let mut degraded = Vec::new();
+    if input.peer_unknown {
+        degraded.push(json!({
+            "code": SHARE_PREVIEW_PEER_UNKNOWN_CODE,
+            "severity": "warning",
+            "message": format!(
+                "No outbound mesh policy resolves for peer '{}'; every lane fails closed and nothing would be shared.",
+                input.report.target_peer_id
+            ),
+            "repair": "Add a [[mesh.peer_policies]] entry for this peer (matching workspace_id, peer_id, and origin_workspace_ids with allowed_lanes) to .ee/config.toml, then re-run the preview.",
+        }));
+    }
+    degraded
 }
 
 fn share_preview_data_json(input: &SharePreviewRenderInput<'_>) -> JsonValue {
@@ -319,7 +410,11 @@ fn share_preview_events(preview_hash: &str) -> Vec<JsonValue> {
     ]
 }
 
-fn render_share_preview_human(report: &SharePreviewReport, preview_hash: &str) -> String {
+fn render_share_preview_human(
+    report: &SharePreviewReport,
+    preview_hash: &str,
+    peer_unknown: bool,
+) -> String {
     let mut output = format!(
         "Share preview for {peer}\n  Dry run: yes\n  Export performed: no\n  Preview hash: {preview_hash}\n  Candidates: {total} total, {allowed} exportable, {denied} denied\n  Estimated exposure: {bytes} bytes ({body} body, {embedding} embedding)\n",
         peer = report.target_peer_id,
@@ -330,6 +425,11 @@ fn render_share_preview_human(report: &SharePreviewReport, preview_hash: &str) -
         body = report.estimated_body_bytes,
         embedding = report.estimated_embedding_bytes,
     );
+    if peer_unknown {
+        output.push_str(
+            "  WARNING: no outbound mesh policy resolves for this peer; nothing would be shared.\n",
+        );
+    }
     if !report.denied_classes.is_empty() {
         output.push_str("  Denied classes:\n");
         for denied in &report.denied_classes {
@@ -383,6 +483,49 @@ fn storage_error(context: &str, error: crate::db::DbError) -> DomainError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ConfigFile;
+
+    const TEST_WORKSPACE_ID: &str = "wsp_sharepreview0000000000001";
+
+    /// A `[[mesh.peer_policies]]` registry that allows every lane for
+    /// `peer_alpha` originating in [`TEST_WORKSPACE_ID`], so the flag-gated
+    /// candidate-generation assertions are driven by the include flags and
+    /// redaction rather than by a missing policy.
+    fn allow_all_registry() -> MeshPeerPolicyRegistry {
+        let config = ConfigFile::parse(
+            r#"
+[[mesh.peer_policies]]
+policy_id = "pol_preview"
+workspace_id = "wsp_sharepreview0000000000001"
+peer_id = "peer_alpha"
+origin_workspace_ids = ["wsp_sharepreview0000000000001"]
+trust_lane = "peerAgent"
+import_trust_class = "agent_validated"
+default_action = "deny"
+
+[mesh.peer_policies.allowed_lanes]
+metadata = "allow"
+body = "allow"
+embedding = "allow"
+graph_link = "allow"
+revision_notice = "allow"
+curation_signal = "allow"
+
+[mesh.peer_policies.redaction]
+metadata = "share"
+preview = "redact"
+body = "share"
+embedding = "share"
+
+[mesh.peer_policies.body_fetch]
+allowed = true
+requires_consent = false
+max_bytes = 1048576
+"#,
+        )
+        .expect("allow-all preview policy config should parse");
+        MeshPeerPolicyRegistry::from_config(&config)
+    }
 
     fn stored_memory(id: &str, content: &str) -> StoredMemory {
         StoredMemory {
@@ -455,7 +598,15 @@ mod tests {
             "mem_sharepreview00000000000001",
             "Never send API_KEY=sk-proj-local-secret over mesh.",
         )];
-        let candidates = share_preview_candidates(&memories, false, false);
+        let candidates = share_preview_candidates(
+            &memories,
+            false,
+            false,
+            &allow_all_registry(),
+            "peer_alpha",
+            TEST_WORKSPACE_ID,
+        )
+        .candidates;
         let report = build_share_preview(&SharePreviewInput {
             target_peer_id: "peer_alpha",
             candidates: &candidates,
@@ -492,7 +643,15 @@ mod tests {
             "mem_sharepreview00000000000002",
             "Public release note can be shared after review.",
         )];
-        let candidates = share_preview_candidates(&memories, true, false);
+        let candidates = share_preview_candidates(
+            &memories,
+            true,
+            false,
+            &allow_all_registry(),
+            "peer_alpha",
+            TEST_WORKSPACE_ID,
+        )
+        .candidates;
         let report = build_share_preview(&SharePreviewInput {
             target_peer_id: "peer_alpha",
             candidates: &candidates,
@@ -518,7 +677,15 @@ mod tests {
             "mem_sharepreview00000000000004",
             "Never send API_KEY=sk-proj-local-secret over mesh.",
         )];
-        let candidates = share_preview_candidates(&memories, true, false);
+        let candidates = share_preview_candidates(
+            &memories,
+            true,
+            false,
+            &allow_all_registry(),
+            "peer_alpha",
+            TEST_WORKSPACE_ID,
+        )
+        .candidates;
         let report = build_share_preview(&SharePreviewInput {
             target_peer_id: "peer_alpha",
             candidates: &candidates,
@@ -579,7 +746,15 @@ mod tests {
             "mem_sharepreview00000000000003",
             "Public release note can be shared after review.",
         )];
-        let candidates = share_preview_candidates(&memories, false, false);
+        let candidates = share_preview_candidates(
+            &memories,
+            false,
+            false,
+            &allow_all_registry(),
+            "peer_alpha",
+            TEST_WORKSPACE_ID,
+        )
+        .candidates;
         let report = build_share_preview(&SharePreviewInput {
             target_peer_id: "peer_alpha",
             candidates: &candidates,
@@ -594,6 +769,7 @@ mod tests {
             args: &args,
             report: &report,
             preview_hash: &preview_hash,
+            peer_unknown: false,
         };
         let mut stdout = Vec::new();
 
@@ -607,7 +783,118 @@ mod tests {
         assert_eq!(envelope["degraded"], serde_json::json!([]));
         assert_eq!(
             envelope["data"]["schema"],
-            crate::policy::SHARE_PREVIEW_SCHEMA_V1
+            crate::policy::SHARE_PREVIEW_SCHEMA_V2
+        );
+    }
+
+    #[test]
+    fn configured_peer_allows_metadata_and_reports_peer_known() {
+        let memories = [stored_memory(
+            "mem_sharepreview00000000000006",
+            "Public release note can be shared after review.",
+        )];
+        let set = share_preview_candidates(
+            &memories,
+            false,
+            false,
+            &allow_all_registry(),
+            "peer_alpha",
+            TEST_WORKSPACE_ID,
+        );
+
+        assert!(!set.peer_unknown, "configured peer must not be unknown");
+        let metadata = set
+            .candidates
+            .iter()
+            .find(|candidate| candidate.material_lane == "metadata")
+            .expect("metadata candidate present");
+        assert_eq!(metadata.policy_action, "allow");
+    }
+
+    #[test]
+    fn unknown_peer_fails_closed_and_denies_every_lane() {
+        let memories = [stored_memory(
+            "mem_sharepreview00000000000007",
+            "Public release note can be shared after review.",
+        )];
+        // Empty registry => no policy resolves for the peer.
+        let empty = MeshPeerPolicyRegistry::from_config(&ConfigFile::default());
+        let set = share_preview_candidates(
+            &memories,
+            true,
+            true,
+            &empty,
+            "peer_alpha",
+            TEST_WORKSPACE_ID,
+        );
+
+        assert!(
+            set.peer_unknown,
+            "unconfigured peer must be flagged unknown"
+        );
+        assert!(
+            set.candidates
+                .iter()
+                .all(|candidate| candidate.policy_action == "deny"),
+            "every lane must fail closed for an unknown peer"
+        );
+    }
+
+    #[test]
+    fn unknown_peer_envelope_emits_peer_unknown_degraded_code() {
+        let cli = Cli::try_parse_from(["ee", "--json"]).expect("parse json cli");
+        let args = share_preview_args();
+        let memories = [stored_memory(
+            "mem_sharepreview00000000000008",
+            "Public release note can be shared after review.",
+        )];
+        let empty = MeshPeerPolicyRegistry::from_config(&ConfigFile::default());
+        let set = share_preview_candidates(
+            &memories,
+            false,
+            false,
+            &empty,
+            "peer_alpha",
+            TEST_WORKSPACE_ID,
+        );
+        let report = build_share_preview(&SharePreviewInput {
+            target_peer_id: "peer_alpha",
+            candidates: &set.candidates,
+            consent_required: true,
+            max_examples: 0,
+        });
+        let preview_hash = share_preview_hash(&report);
+        let input = SharePreviewRenderInput {
+            workspace_path: Path::new("/tmp/share-preview-workspace"),
+            database_path: Path::new("/tmp/share-preview-workspace/.ee/ee.db"),
+            workspace_id: TEST_WORKSPACE_ID,
+            args: &args,
+            report: &report,
+            preview_hash: &preview_hash,
+            peer_unknown: set.peer_unknown,
+        };
+        let mut stdout = Vec::new();
+
+        let exit = write_share_preview_report(&cli, &input, &mut stdout);
+
+        assert_eq!(exit, ProcessExitCode::Success);
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&stdout).expect("share preview json envelope");
+        // A fail-closed preview is still a successful, non-mutating command.
+        assert_eq!(envelope["success"], true);
+        let degraded = envelope["degraded"]
+            .as_array()
+            .expect("degraded array present");
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(
+            degraded[0]["code"],
+            crate::policy::SHARE_PREVIEW_PEER_UNKNOWN_CODE
+        );
+        assert_eq!(degraded[0]["severity"], "warning");
+        assert!(
+            degraded[0]["repair"]
+                .as_str()
+                .is_some_and(|repair| repair.contains("mesh.peer_policies"))
         );
     }
 }

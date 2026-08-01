@@ -112,7 +112,12 @@ pub fn redaction_placeholder(scanner_name: &str) -> String {
     format!("[REDACTED:{scanner_name}]")
 }
 pub const TRUST_PROMOTION_EVIDENCE_REJECTED_CODE: &str = "trust_promotion_evidence_rejected";
-pub const SHARE_PREVIEW_SCHEMA_V1: &str = "ee.mesh.share_preview.v1";
+pub const SHARE_PREVIEW_SCHEMA_V2: &str = "ee.mesh.share_preview.v2";
+/// Degraded code emitted when `ee share preview` targets a peer with no
+/// resolvable outbound policy for the local workspace/origin. The preview
+/// fails closed (every lane denies), so the operator is told the peer is
+/// unconfigured rather than being shown a misleading "allow".
+pub const SHARE_PREVIEW_PEER_UNKNOWN_CODE: &str = "share_preview_peer_unknown";
 pub const MESH_SECRET_EXPORT_DENIED_CODE: &str = "mesh_secret_export_denied";
 pub const MESH_EXPORT_SECRET_SCAN_SCHEMA_V2: &str = "ee.mesh.export_secret_scan.v2";
 pub const MESH_EXPORT_POLICY_ATTESTATION_SCHEMA_V1: &str = "ee.mesh.export_policy_attestation.v1";
@@ -517,7 +522,7 @@ pub fn build_share_preview(input: &SharePreviewInput<'_>) -> SharePreviewReport 
     });
 
     let mut report = SharePreviewReport {
-        schema: SHARE_PREVIEW_SCHEMA_V1,
+        schema: SHARE_PREVIEW_SCHEMA_V2,
         target_peer_id: input.target_peer_id.to_owned(),
         export_performed: false,
         consent_required: input.consent_required,
@@ -3338,13 +3343,13 @@ mod tests {
         INSTRUCTION_LIKE_SCORE_THRESHOLD, InstructionRisk, InstructionSignalKind,
         MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES, MESH_EXPORT_SECRET_SCAN_SCHEMA_V2,
         MESH_SECRET_EXPORT_DENIED_CODE, MeshExportSecretScanReport, MeshExportSecretScanSubject,
-        SHARE_PREVIEW_SCHEMA_V1, SecretFindingRandom, SecretFindingRandomError,
+        SHARE_PREVIEW_SCHEMA_V2, SecretFindingRandom, SecretFindingRandomError,
         SharePreviewCandidate, SharePreviewInput, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE,
         build_share_preview, decorate_export_secret_findings, detect_instruction_like_content,
         redact_public_replay_field, redact_public_replay_text, redact_secret_like_content,
         redaction_placeholder, scan_mesh_export_subjects, screen_external_text_for_ingestion,
-        share_preview_hash, subsystem_name, validate_trust_promotion_evidence,
-        workspace_secret_risk_evidence, workspace_secret_risk_overrides_safe_classification,
+        subsystem_name, validate_trust_promotion_evidence, workspace_secret_risk_evidence,
+        workspace_secret_risk_overrides_safe_classification,
     };
 
     #[test]
@@ -3537,7 +3542,7 @@ mod tests {
             max_examples: 4,
         });
 
-        assert_eq!(report.schema, SHARE_PREVIEW_SCHEMA_V1);
+        assert_eq!(report.schema, SHARE_PREVIEW_SCHEMA_V2);
         assert!(!report.export_performed);
         assert!(report.consent_required);
         assert_eq!(report.total_candidates, 2);

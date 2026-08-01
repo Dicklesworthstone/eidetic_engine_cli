@@ -394,6 +394,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `mesh_peer_key_rotation_unchanged` | info | bd-1x87h (SRR6.24) |
 | `lane_grant_preview_peer_not_in_group` | info | bd-36bbk.1.17 |
 | `lane_grant_preview_lane_already_granted` | info | bd-36bbk.1.17 |
+| `share_preview_peer_unknown` | warning | bd-tc-epic-qzk7o.2.7 |
 | `steward_auto_enroll_disabled` | info | bd-36bbk.1.14 |
 | `steward_auto_enroll_daily_cap_reached` | warning | bd-36bbk.1.14 |
 | `steward_auto_enroll_consecutive_failures` | warning | bd-36bbk.1.14 |

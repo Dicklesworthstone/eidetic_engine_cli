@@ -1934,7 +1934,7 @@ fn mesh_secret_export_denied_error(
 /// missing or unparseable `config.toml` yields an empty registry, so a named
 /// peer with no configured policy fails closed (every record is denied) rather
 /// than leaking an unfiltered export.
-fn load_mesh_peer_policy_registry(
+pub(crate) fn load_mesh_peer_policy_registry(
     cli: &Cli,
     database_override: Option<&Path>,
 ) -> crate::mesh::policy::MeshPeerPolicyRegistry {
