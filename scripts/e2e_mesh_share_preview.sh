@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bd-1ps4c - share-preview dry run and consent-audit UX e2e driver.
+# bd-1ps4c - share-preview dry-run UX e2e driver (read-only, no consent audit).
 
 set -euo pipefail
 
@@ -47,21 +47,17 @@ assert_jq "$PREVIEW_JSON" '[.. | strings | contains("sk-proj-local-only-token")]
     "share_preview_does_not_leak_secret"
 emit_preview_events "$PREVIEW_JSON"
 
-mesh_phase_log "action" "node01" "record consent audit without export"
-CONSENT_JSON="$(ee_workspace share preview --peer peer_alpha --json --include-body --record-consent --max-examples 8 2>/dev/null || true)"
-assert_jq "$CONSENT_JSON" '.success // false' "true" "share_preview_consent_success"
-assert_jq "$CONSENT_JSON" '.data.exportPerformed' "false" "share_preview_consent_still_no_export"
-assert_jq_nonempty "$CONSENT_JSON" '.data.consentAudit.auditId // empty' "share_preview_consent_audit_id"
-assert_jq "$CONSENT_JSON" '.data.consentAudit.consentRecorded' "true" "share_preview_consent_recorded"
-assert_jq "$CONSENT_JSON" '.data.consentAudit.exportAfterConsent' "false" "share_preview_no_export_after_consent"
-emit_preview_events "$CONSENT_JSON"
+mesh_phase_log "action" "node01" "include-body share preview stays a dry run"
+BODY_JSON="$(ee_workspace share preview --peer peer_alpha --json --include-body --max-examples 8 2>/dev/null || true)"
+assert_jq "$BODY_JSON" '.success // false' "true" "share_preview_body_success"
+assert_jq "$BODY_JSON" '.data.exportPerformed' "false" "share_preview_body_still_no_export"
+assert_jq "$BODY_JSON" '.data.consentAudit // "absent"' "absent" "share_preview_no_consent_audit"
+assert_jq "$BODY_JSON" '[.data.events[]?.event] | any(. == "consent_recorded")' "false" \
+    "share_preview_no_consent_event"
+emit_preview_events "$BODY_JSON"
 
 mesh_phase_log "assert" "node01" "share preview structured events captured"
 assert_jq_nonempty "$PREVIEW_JSON" '.data.events[]? | select(.event == "preview_generated") | .event' \
     "share_preview_event_preview_generated"
 assert_jq_nonempty "$PREVIEW_JSON" '.data.events[]? | select(.event == "export_not_performed") | .event' \
     "share_preview_event_export_not_performed"
-assert_jq_nonempty "$CONSENT_JSON" '.data.events[]? | select(.event == "consent_recorded") | .event' \
-    "share_preview_event_consent_recorded"
-assert_jq_nonempty "$CONSENT_JSON" '.data.events[]? | select(.event == "export_after_consent") | .event' \
-    "share_preview_event_export_after_consent"

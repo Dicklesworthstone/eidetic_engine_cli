@@ -36,19 +36,18 @@ ee share preview --peer peer_alpha --include-embeddings --workspace . --json
 - Denied lanes and redaction classes are listed in `deniedClasses[]`.
 - The response emits `preview_generated` and `export_not_performed` events.
 
-## Consent Audit
+## Consent
 
-When an operator has reviewed the preview, record that consent without exporting
-anything:
+`share preview` is strictly read-only and never records consent. The former
+`--record-consent` flag (and its `consentAudit` response block and
+`mesh.share.consent` audit row) was removed per ADR 0086 (TC-D14/TC-D15):
+recording a consent row from a read-only preview conflated review with
+authorization and produced a stable, replayable audit artifact.
 
-```bash
-ee share preview --peer peer_alpha --include-body --record-consent --workspace . --json
-```
-
-This writes a local audit row with action `mesh.share.consent` and returns a
-`consentAudit` block containing the audit id, preview hash, reason, and
-`exportAfterConsent=false`. A later export command must still perform its own
-policy check; the preview command does not export data.
+Consent to widen sharing is instead expressed by the token-consuming exposure
+grant mutation (documented separately), which is the only surface that
+authorizes an export. The preview command exists solely to let an operator see
+what *would* be shared before invoking that mutation.
 
 ## Fields To Inspect
 
@@ -66,7 +65,8 @@ Before granting body sharing, verify:
 - `data.preview.deniedClasses[]` does not include
   `redaction_class:body_redacted`; if it does, the raw body lane remains
   denied and only metadata is exportable.
-- `data.previewHash` is captured in the consent audit row.
+- `data.previewHash` is stable for identical previews and can be quoted when
+  authorizing the exposure grant mutation.
 
 Embedding sharing is sensitive even without raw bodies. Keep
 `--include-embeddings` off unless the peer policy and operator review both allow

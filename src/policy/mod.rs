@@ -113,7 +113,6 @@ pub fn redaction_placeholder(scanner_name: &str) -> String {
 }
 pub const TRUST_PROMOTION_EVIDENCE_REJECTED_CODE: &str = "trust_promotion_evidence_rejected";
 pub const SHARE_PREVIEW_SCHEMA_V1: &str = "ee.mesh.share_preview.v1";
-pub const SHARE_PREVIEW_CONSENT_AUDIT_SCHEMA_V1: &str = "ee.mesh.share_consent_audit.v1";
 pub const MESH_SECRET_EXPORT_DENIED_CODE: &str = "mesh_secret_export_denied";
 pub const MESH_EXPORT_SECRET_SCAN_SCHEMA_V2: &str = "ee.mesh.export_secret_scan.v2";
 pub const MESH_EXPORT_POLICY_ATTESTATION_SCHEMA_V1: &str = "ee.mesh.export_policy_attestation.v1";
@@ -184,18 +183,6 @@ pub struct SharePreviewExample {
     pub preview_hash: String,
     pub redacted_preview: String,
     pub redaction_reasons: Vec<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SharePreviewConsentAudit {
-    pub schema: &'static str,
-    pub target_peer_id: String,
-    pub preview_hash: String,
-    pub consent_recorded: bool,
-    pub export_after_consent: bool,
-    pub dry_run: bool,
-    pub reason: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -594,24 +581,6 @@ pub fn share_preview_hash(report: &SharePreviewReport) -> String {
     match serde_json::to_vec(report) {
         Ok(bytes) => format!("blake3:{}", blake3::hash(&bytes).to_hex()),
         Err(error) => format!("serialization_error:{error}"),
-    }
-}
-
-#[must_use]
-pub fn share_preview_consent_audit(
-    report: &SharePreviewReport,
-    consent_recorded: bool,
-    export_after_consent: bool,
-    reason: impl Into<String>,
-) -> SharePreviewConsentAudit {
-    SharePreviewConsentAudit {
-        schema: SHARE_PREVIEW_CONSENT_AUDIT_SCHEMA_V1,
-        target_peer_id: report.target_peer_id.clone(),
-        preview_hash: share_preview_hash(report),
-        consent_recorded,
-        export_after_consent,
-        dry_run: !export_after_consent,
-        reason: reason.into(),
     }
 }
 
@@ -3369,15 +3338,13 @@ mod tests {
         INSTRUCTION_LIKE_SCORE_THRESHOLD, InstructionRisk, InstructionSignalKind,
         MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES, MESH_EXPORT_SECRET_SCAN_SCHEMA_V2,
         MESH_SECRET_EXPORT_DENIED_CODE, MeshExportSecretScanReport, MeshExportSecretScanSubject,
-        SHARE_PREVIEW_CONSENT_AUDIT_SCHEMA_V1, SHARE_PREVIEW_SCHEMA_V1, SecretFindingRandom,
-        SecretFindingRandomError, SharePreviewCandidate, SharePreviewInput,
-        TRUST_PROMOTION_EVIDENCE_REJECTED_CODE, build_share_preview,
-        decorate_export_secret_findings, detect_instruction_like_content,
+        SHARE_PREVIEW_SCHEMA_V1, SecretFindingRandom, SecretFindingRandomError,
+        SharePreviewCandidate, SharePreviewInput, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE,
+        build_share_preview, decorate_export_secret_findings, detect_instruction_like_content,
         redact_public_replay_field, redact_public_replay_text, redact_secret_like_content,
         redaction_placeholder, scan_mesh_export_subjects, screen_external_text_for_ingestion,
-        share_preview_consent_audit, share_preview_hash, subsystem_name,
-        validate_trust_promotion_evidence, workspace_secret_risk_evidence,
-        workspace_secret_risk_overrides_safe_classification,
+        share_preview_hash, subsystem_name, validate_trust_promotion_evidence,
+        workspace_secret_risk_evidence, workspace_secret_risk_overrides_safe_classification,
     };
 
     #[test]
@@ -3604,38 +3571,6 @@ mod tests {
                 .redaction_reasons
                 .contains(&"api_key".to_owned())
         );
-    }
-
-    #[test]
-    fn share_preview_consent_audit_is_stable_and_dry_run_safe() {
-        let candidates = [SharePreviewCandidate {
-            memory_id: "mem_a",
-            level: "procedural",
-            kind: "rule",
-            trust_class: "agent_validated",
-            material_lane: "metadata",
-            redaction_class: "redact",
-            policy_action: "allow",
-            content_preview: "Public shape only; no raw body.",
-            estimated_bytes: 42,
-            body_bytes: 0,
-            embedding_bytes: 0,
-        }];
-        let report = build_share_preview(&SharePreviewInput {
-            target_peer_id: "peer_alpha",
-            candidates: &candidates,
-            consent_required: true,
-            max_examples: 1,
-        });
-        let audit = share_preview_consent_audit(&report, true, false, "operator_preview_ack");
-
-        assert_eq!(audit.schema, SHARE_PREVIEW_CONSENT_AUDIT_SCHEMA_V1);
-        assert_eq!(audit.target_peer_id, "peer_alpha");
-        assert_eq!(audit.preview_hash, share_preview_hash(&report));
-        assert!(audit.consent_recorded);
-        assert!(audit.dry_run);
-        assert!(!audit.export_after_consent);
-        assert_eq!(audit.reason, "operator_preview_ack");
     }
 
     #[test]
