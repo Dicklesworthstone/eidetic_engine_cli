@@ -4880,6 +4880,112 @@ max_bytes = 0
         );
     }
 
+    #[test]
+    fn mesh_import_records_denial_and_admits_nothing_for_non_member() {
+        let connection = DbConnection::open_memory().expect("open memory db");
+        connection.migrate().expect("migrate db");
+        let workspace_id = "wsp_meshreplay0000000000000001";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-mesh-replay-deny".to_string(),
+                    name: Some("mesh replay deny".to_string()),
+                },
+            )
+            .expect("insert workspace");
+
+        // No peer-group bindings and an empty policy registry => the producer
+        // is not a bound member, so the membership gate denies before policy.
+        let artifact = mesh_export_artifact_for_import_counts();
+        let empty_registry = crate::mesh::policy::MeshPeerPolicyRegistry::from_config(
+            &crate::config::ConfigFile::default(),
+        );
+        let counts = import_mesh_artifact_into_connection(
+            &connection,
+            workspace_id,
+            &artifact,
+            &[],
+            &empty_registry,
+        )
+        .expect("import");
+        assert_eq!(
+            counts,
+            (1, 1, 1),
+            "peer/cursor/event ledger rows are still recorded honestly"
+        );
+
+        let events = connection
+            .list_mesh_import_ledger_events_for_workspace(workspace_id)
+            .expect("list events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].import_decision, "deny");
+        assert!(
+            events[0]
+                .policy_failure_surface_json
+                .as_deref()
+                .is_some_and(|json| json.contains("mesh_peer_policy_denied")),
+            "denial must record the mesh_peer_policy_denied failure surface: {:?}",
+            events[0].policy_failure_surface_json
+        );
+
+        let index_jobs = connection
+            .list_search_index_jobs(workspace_id, None)
+            .expect("list index jobs");
+        assert!(
+            index_jobs.is_empty(),
+            "a denied event admits nothing: no import index job may be enqueued"
+        );
+    }
+
+    #[test]
+    fn mesh_import_denies_body_lane_under_metadata_only_authority() {
+        let connection = DbConnection::open_memory().expect("open memory db");
+        connection.migrate().expect("migrate db");
+        let workspace_id = "wsp_meshreplay0000000000000001";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-mesh-replay-body".to_string(),
+                    name: Some("mesh replay body".to_string()),
+                },
+            )
+            .expect("insert workspace");
+
+        // The configured member is admitted for metadata but the body lane is
+        // denied by both layers; the event records a denial and admits nothing.
+        let mut artifact = mesh_export_artifact_for_import_counts();
+        artifact.events[0].material_lane = "body".to_string();
+        let config = admitting_replay_config();
+        let bindings = config.mesh.peer_group_bindings.clone().unwrap_or_default();
+        let registry = crate::mesh::policy::MeshPeerPolicyRegistry::from_config(&config);
+        let counts = import_mesh_artifact_into_connection(
+            &connection,
+            workspace_id,
+            &artifact,
+            &bindings,
+            &registry,
+        )
+        .expect("import");
+        assert_eq!(counts, (1, 1, 1));
+
+        let events = connection
+            .list_mesh_import_ledger_events_for_workspace(workspace_id)
+            .expect("list events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].material_lane, "body");
+        assert_eq!(events[0].import_decision, "deny");
+
+        let index_jobs = connection
+            .list_search_index_jobs(workspace_id, None)
+            .expect("list index jobs");
+        assert!(
+            index_jobs.is_empty(),
+            "body lane is denied; nothing is admitted to local truth"
+        );
+    }
+
     fn mesh_export_artifact_for_import_counts() -> MeshExportArtifact {
         MeshExportArtifact {
             schema: MESH_EXPORT_ARTIFACT_SCHEMA_V1.to_string(),
