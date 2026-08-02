@@ -11,6 +11,7 @@ use crate::models::{
     ExportFooter, ExportHeader, ExportLinkRecord, ExportMemoryRecord, ExportRecord, ExportScope,
     ExportTagRecord, ExportWorkspaceRecord, RedactionLevel,
 };
+use crate::policy::import_auth::{RecordsRootBuilder, canonical_record_hash};
 
 /// Patterns that indicate sensitive content requiring redaction.
 ///
@@ -869,6 +870,9 @@ pub struct JsonlExporter<W: Write> {
     link_count: u64,
     tag_count: u64,
     audit_count: u64,
+    /// Ordered digest over the exact emitted memory-record bytes, for the
+    /// store-local authentication root (ADR 0086 TC-D14).
+    records_root: RecordsRootBuilder,
 }
 
 impl<W: Write> JsonlExporter<W> {
@@ -884,6 +888,7 @@ impl<W: Write> JsonlExporter<W> {
             link_count: 0,
             tag_count: 0,
             audit_count: 0,
+            records_root: RecordsRootBuilder::new(),
         }
     }
 
@@ -934,22 +939,36 @@ impl<W: Write> JsonlExporter<W> {
         }
 
         let redacted = redact_memory_record(record, self.redaction_level);
+        let memory_id = redacted.memory_id.clone();
 
-        if self.export_scope == ExportScope::MetadataOnly {
+        let json = if self.export_scope == ExportScope::MetadataOnly {
             let mut meta_only = redacted;
             meta_only.content = String::new();
-            let json = serde_json::to_string(&meta_only)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            writeln!(self.writer, "{json}")?;
+            serde_json::to_string(&meta_only)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
         } else {
-            let json = serde_json::to_string(&redacted)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-            writeln!(self.writer, "{json}")?;
-        }
+            serde_json::to_string(&redacted)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        };
+        writeln!(self.writer, "{json}")?;
+
+        // Bind the exact emitted line bytes (no trailing newline) at this
+        // ordinal; the importer recomputes over the raw line it reads back.
+        self.records_root
+            .push(&memory_id, &canonical_record_hash(json.as_bytes()));
 
         self.records_written += 1;
         self.memory_count += 1;
         Ok(())
+    }
+
+    /// Finalize the ordered records root over the memory records written so
+    /// far, returning `(records_root, memory_count)`. The exporter feeds every
+    /// emitted memory line into this digest so an authenticated export
+    /// (ADR 0086 TC-D14) MACs a root that reflects exactly what was written.
+    #[must_use]
+    pub fn finalize_records_root(&self) -> ([u8; 32], u64) {
+        (self.records_root.finalize(), self.records_root.count())
     }
 
     /// Write an artifact record.
@@ -1582,6 +1601,65 @@ mod tests {
         assert!(written.contains("ee.export.memory.v1"));
         assert!(written.contains("Test content"));
         assert_eq!(memory_count, 1);
+    }
+
+    fn export_memory(memory_id: &str, content: &str) -> ExportMemoryRecord {
+        ExportMemoryRecord::builder()
+            .memory_id(memory_id)
+            .workspace_id("ws-123")
+            .level("procedural")
+            .kind("rule")
+            .content(content)
+            .created_at("2026-04-30T12:00:00Z")
+            .build()
+            .expect("memory has required fields")
+    }
+
+    fn records_root_over(memories: &[(&str, &str)]) -> ([u8; 32], u64) {
+        let mut output = Vec::new();
+        let mut exporter = JsonlExporter::new(&mut output, RedactionLevel::None, ExportScope::All);
+        for &(id, content) in memories {
+            exporter
+                .write_memory(export_memory(id, content))
+                .expect("write memory");
+        }
+        exporter.finalize_records_root()
+    }
+
+    #[test]
+    fn records_root_counts_and_distinguishes_memories() {
+        let (root_two, count_two) = records_root_over(&[("mem-a", "one"), ("mem-b", "two")]);
+        let (root_one, count_one) = records_root_over(&[("mem-a", "one")]);
+        assert_eq!(count_two, 2);
+        assert_eq!(count_one, 1);
+        assert_ne!(root_two, root_one, "dropping a memory must change the root");
+    }
+
+    #[test]
+    fn records_root_is_deterministic_across_exporters() {
+        let first = records_root_over(&[("mem-a", "one"), ("mem-b", "two")]);
+        let second = records_root_over(&[("mem-a", "one"), ("mem-b", "two")]);
+        assert_eq!(first, second, "identical exports must yield the same root");
+    }
+
+    #[test]
+    fn records_root_is_order_sensitive() {
+        let (forward, _) = records_root_over(&[("mem-a", "one"), ("mem-b", "two")]);
+        let (reversed, _) = records_root_over(&[("mem-b", "two"), ("mem-a", "one")]);
+        assert_ne!(
+            forward, reversed,
+            "reordering memories must change the root"
+        );
+    }
+
+    #[test]
+    fn records_root_reflects_content_edits() {
+        let (original, _) = records_root_over(&[("mem-a", "one")]);
+        let (edited, _) = records_root_over(&[("mem-a", "one-edited")]);
+        assert_ne!(
+            original, edited,
+            "editing a memory body must change the root"
+        );
     }
 
     #[test]

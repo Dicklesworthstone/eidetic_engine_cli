@@ -27,6 +27,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::policy::import_auth::AuthenticatedHeader;
+
 /// Schema identifier for export header records.
 pub const EXPORT_HEADER_SCHEMA_V1: &str = "ee.export.header.v1";
 
@@ -803,6 +805,12 @@ pub struct ExportFooter {
     pub checksum: Option<String>,
     pub success: bool,
     pub error_message: Option<String>,
+    /// Store-local authentication block (ADR 0086 TC-D14). Present only when the
+    /// exporting store MAC'd the artifact; absent artifacts import at external
+    /// (non-native) trust. Skipped when absent so unauthenticated artifacts are
+    /// byte-identical to the historical footer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<AuthenticatedHeader>,
 }
 
 impl ExportFooter {
@@ -825,6 +833,7 @@ pub struct ExportFooterBuilder {
     checksum: Option<String>,
     success: bool,
     error_message: Option<String>,
+    authentication: Option<AuthenticatedHeader>,
 }
 
 impl ExportFooterBuilder {
@@ -894,6 +903,13 @@ impl ExportFooterBuilder {
         self
     }
 
+    /// Attach (or clear) the store-local authentication block.
+    #[must_use]
+    pub fn authentication(mut self, authentication: Option<AuthenticatedHeader>) -> Self {
+        self.authentication = authentication;
+        self
+    }
+
     /// Build the footer record.
     ///
     /// # Errors
@@ -917,6 +933,7 @@ impl ExportFooterBuilder {
             checksum: self.checksum,
             success: self.success,
             error_message: self.error_message,
+            authentication: self.authentication,
         })
     }
 }
