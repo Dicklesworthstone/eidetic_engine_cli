@@ -7,6 +7,7 @@
 pub mod memory_decay;
 pub mod producer_normalization;
 pub mod security_profile;
+pub mod store_auth;
 pub mod swarm_slo_attribution;
 pub mod trust_decay;
 
