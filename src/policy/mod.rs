@@ -4,6 +4,7 @@
 //! and import sources. Includes security profiles and file-permission
 //! diagnostics.
 
+pub mod import_auth;
 pub mod memory_decay;
 pub mod producer_normalization;
 pub mod security_profile;
