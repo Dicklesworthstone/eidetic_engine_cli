@@ -1297,6 +1297,10 @@ CLI path end to end.
 4. User config: `~/.config/ee/config.toml`
 5. Built-in defaults
 
+Unknown TOML keys are rejected rather than silently ignored. The error names the
+full key path and, when there is one unambiguous close match among sibling keys,
+includes that key as a conservative suggestion.
+
 Full annotated example:
 
 ```toml
@@ -1327,7 +1331,7 @@ semantic_weight = 0.45
 # neural-local Model2Vec arm when the bundled model is available; it
 # deterministically renormalizes to lexical scoring when hash fallback is active.
 graph_weight    = 0.10
-query_plan_cache_entries = 1024
+# Query-plan cache sizing is environment-only: EE_QUERY_PLAN_CACHE_ENTRIES=1024
 query_miss_retention_days = 30        # retained hash-only miss demand for `ee learn gaps`
 
 [pack]
@@ -1386,7 +1390,7 @@ max_bytes = 1073741824
 
 [mesh]
 enabled = false
-mode = "off"                          # off | cache | revisable | blocking
+command_mode = "off"                  # off | cache | revisable | blocking
 
 # Discovery/responder policy is NOT config.toml: it lives in workspace-local
 # TOML files (<workspace>/.ee/discovery_policy.toml plus the
@@ -1409,13 +1413,13 @@ Environment variable overrides:
 | `EE_JOURNAL_RETENTION_DAYS` | `[journal].retention_days` for the explicit journal-retention steward job |
 | `EE_HARMFUL_PER_SOURCE_PER_HOUR` | `[feedback].harmful_per_source_per_hour` |
 | `EE_HARMFUL_BURST_WINDOW_SECONDS` | `[feedback].harmful_burst_window_seconds` |
-| `EE_QUERY_PLAN_CACHE_ENTRIES` | query-plan cache size |
+| `EE_QUERY_PLAN_CACHE_ENTRIES` | query-plan cache size (environment-only; no TOML key) |
 | `EE_QUERY_MISS_RETENTION_DAYS` | `[search].query_miss_retention_days` for hash-only search/ask miss demand retained by `ee learn gaps` |
 | `EE_PPR_CACHE_ENTRIES` | PPR prefetch cache size |
 | `EE_L2_PACK_CACHE_BYTES` / `EE_L2_PACK_CACHE_DIR` / `EE_L2_PACK_CACHE_DISABLE` | pack L2 cache controls |
 | `EE_READ_POOL_SIZE` / `EE_READ_POOL_ACQUIRE_TIMEOUT_MS` / `EE_READ_POOL_MAX_PIN_SECONDS` | read-pool controls |
 | `EE_GRAPH_MEMORY_SNAPSHOT_CAP_MB` / `EE_GRAPH_MEMORY_PER_ALGORITHM_CAP_MB` | graph working-set admission controls |
-| `EE_MESH_ENABLED` / `EE_MESH_MODE` | optional mesh default posture |
+| `EE_MESH_ENABLED` / `EE_MESH_MODE` | `[mesh].enabled` / `[mesh].command_mode` |
 | `EE_TAILSCALE_DISCOVERY_MODE` / `EE_TAILSCALE_RESPOND_MODE` | Tailscale discovery and responder policy |
 | `EE_TAILSCALE_PEER_PROBE_TIMEOUT_MS` / `EE_TAILSCALE_DISCOVERY_BUDGET_MS` | Tailscale peer-discovery budgets |
 | `EE_FLIGHT_RECORDER` / `EE_FLIGHT_RECORDER_DIR` / `EE_FLIGHT_RECORDER_RETENTION_DAYS` | flight-recorder controls; see [`docs/agent-ux/flight-recorder.md`](docs/agent-ux/flight-recorder.md) |

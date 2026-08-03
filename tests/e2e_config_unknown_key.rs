@@ -15,6 +15,11 @@
 //!
 //! This pin-test mirrors the
 //! `tests/e2e_schema_export_unknown.rs` harness shape.
+//!
+//! bd-config-unknown-keys-silent-mio6h extends the same real-binary
+//! coverage to unknown keys read from `.ee/config.toml`. A typo inside a
+//! task-lens override must fail both configuration inspection and lens
+//! loading with the indexed key path and a sibling-key suggestion.
 
 #![cfg(unix)]
 
@@ -66,6 +71,29 @@ fn init_workspace(workspace_arg: &str) -> TestResult {
     )
 }
 
+fn workspace_with_task_lens_key_typo(prefix: &str) -> Result<String, String> {
+    let workspace = unique_workspace(prefix)?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    init_workspace(&workspace_arg)?;
+
+    let config_path = workspace.join(".ee").join("config.toml");
+    fs::write(
+        &config_path,
+        r#"[[task_lens.overrides]]
+id = "local-bugfix-override"
+version = 1
+description = "Local bugfix lens used to exercise config validation."
+allowed_kind = ["failure", "risk"]
+"#,
+    )
+    .map_err(|error| format!("failed to write {}: {error}", config_path.display()))?;
+
+    Ok(workspace_arg)
+}
+
 fn assert_unknown_key_error(output: &Output, label: &str, expected_key: &str) -> TestResult {
     ensure(
         !output.status.success(),
@@ -94,6 +122,38 @@ fn assert_unknown_key_error(output: &Output, label: &str, expected_key: &str) ->
         format!("Configuration error repair must pin the documented suggestion; got {repair}"),
     )?;
     Ok(())
+}
+
+fn assert_config_file_unknown_key_error(output: &Output, command: &str) -> TestResult {
+    ensure(
+        output.status.code() == Some(2),
+        format!(
+            "ee {command} must exit 2 for an unknown config-file key; status: {:?}; stdout: {}; stderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ),
+    )?;
+    let parsed: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("ee {command} stdout must be JSON: {error}"))?;
+    ensure(
+        parsed["schema"].as_str() == Some("ee.error.v2"),
+        format!("ee {command} must emit ee.error.v2; got {parsed}"),
+    )?;
+    ensure(
+        parsed["error"]["code"].as_str() == Some("configuration"),
+        format!("ee {command} must emit error code configuration; got {parsed}"),
+    )?;
+
+    let message = parsed["error"]["message"].as_str().unwrap_or_default();
+    ensure(
+        message.contains("task_lens.overrides[0].allowed_kind"),
+        format!("ee {command} error must identify the indexed offending path; got `{message}`"),
+    )?;
+    ensure(
+        message.contains("allowed_kinds"),
+        format!("ee {command} error must suggest `allowed_kinds`; got `{message}`"),
+    )
 }
 
 #[test]
@@ -137,4 +197,32 @@ fn config_set_unknown_key_returns_configuration_error_before_write() -> TestResu
         "0.5",
     ])?;
     assert_unknown_key_error(&output, "set", phantom)
+}
+
+#[test]
+fn config_show_rejects_unknown_task_lens_override_key() -> TestResult {
+    let workspace_arg = workspace_with_task_lens_key_typo("show-file-typo")?;
+    let output = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "config",
+        "show",
+    ])?;
+
+    assert_config_file_unknown_key_error(&output, "config show")
+}
+
+#[test]
+fn lens_list_rejects_unknown_task_lens_override_key() -> TestResult {
+    let workspace_arg = workspace_with_task_lens_key_typo("lens-file-typo")?;
+    let output = run_ee(&[
+        "--workspace",
+        workspace_arg.as_str(),
+        "--json",
+        "lens",
+        "list",
+    ])?;
+
+    assert_config_file_unknown_key_error(&output, "lens list")
 }
