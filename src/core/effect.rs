@@ -1941,13 +1941,6 @@ impl EffectManifest {
                 "Probe mesh peers and persist reviewed auto-enrollment state",
             ),
             CommandEffect::external_io_write(
-                "mesh sync",
-                vec!["mesh_peers", "mesh_import_ledger", "search_index_jobs"],
-                vec!["peer mesh transport"],
-                "origin peer cursor plus event content hash",
-                "Contact mesh peers and import authorized memory events",
-            ),
-            CommandEffect::external_io_write(
                 "model fetch",
                 vec!["model_registry", "audit_log"],
                 vec!["~/.local/share/ee/models/"],
@@ -2066,6 +2059,16 @@ impl EffectManifest {
                 vec!["mesh_peers", "mesh_import_ledger", "search_index_jobs"],
                 "origin peer cursor plus event content hash",
                 "Import a mesh artifact by replaying idempotent peer events",
+            ),
+            // Honest classification (bd-6dmhw): the production sync transport
+            // is a deliberate no-op until M1 real transport lands
+            // (bd-tc-epic-qzk7o.3.x); the command performs no peer network
+            // I/O today. Restore external_io_write with the transport.
+            CommandEffect::append_only_write(
+                "mesh sync",
+                vec!["mesh_peers", "mesh_import_ledger", "search_index_jobs"],
+                "origin peer cursor plus event content hash",
+                "Run one foreground sync cycle over locally available peer state; network transport is deferred",
             ),
             CommandEffect::append_only_write(
                 "verification ingest",
