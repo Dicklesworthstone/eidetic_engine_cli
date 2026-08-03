@@ -22599,6 +22599,21 @@ fn open_preflight_token_database(
     open_preflight_token_database_for_workspace(workspace, database)
 }
 
+fn canonical_workspace_row(
+    connection: &crate::db::DbConnection,
+    workspace: &Path,
+) -> crate::db::Result<(PathBuf, Option<crate::db::StoredWorkspace>)> {
+    let canonical_workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let mut existing_workspace =
+        connection.get_workspace_by_path(&canonical_workspace.to_string_lossy())?;
+    if existing_workspace.is_none() && canonical_workspace != workspace {
+        existing_workspace = connection.get_workspace_by_path(&workspace.to_string_lossy())?;
+    }
+    Ok((canonical_workspace, existing_workspace))
+}
+
 fn open_preflight_token_database_for_workspace(
     workspace: PathBuf,
     database: Option<&Path>,
@@ -22623,22 +22638,27 @@ fn open_preflight_token_database_for_workspace(
         repair: Some("ee migrate run --workspace . --json".to_owned()),
     })?;
 
-    let workspace_path = workspace.to_string_lossy().into_owned();
-    let workspace_id = match connection
-        .get_workspace_by_path(&workspace_path)
-        .map_err(|error| DomainError::Storage {
+    // Match init, remember, search, and the memory verbs: a lexical relative
+    // path must resolve to the canonical workspace row before we consider a
+    // legacy raw-path row. Otherwise preflight can create an empty duplicate
+    // workspace whose path is `./...`, and later raw-first readers can report
+    // an empty store even though the canonical row owns all memories.
+    let (canonical_workspace, existing_workspace) =
+        canonical_workspace_row(&connection, &workspace).map_err(|error| DomainError::Storage {
             message: format!("Failed to query workspace row: {error}"),
             repair: Some("ee doctor --json".to_owned()),
-        })? {
+        })?;
+    let canonical_workspace_path = canonical_workspace.to_string_lossy().into_owned();
+    let workspace_id = match existing_workspace {
         Some(workspace) => workspace.id,
         None => {
-            let workspace_id = crate::core::workspace::stable_workspace_id(&workspace);
+            let workspace_id = crate::core::workspace::stable_workspace_id(&canonical_workspace);
             connection
                 .insert_workspace(
                     &workspace_id,
                     &crate::db::CreateWorkspaceInput {
-                        path: workspace_path,
-                        name: workspace
+                        path: canonical_workspace_path,
+                        name: canonical_workspace
                             .file_name()
                             .map(|name| name.to_string_lossy().into_owned()),
                     },
@@ -22651,6 +22671,9 @@ fn open_preflight_token_database_for_workspace(
         }
     };
 
+    // Registry loading, issuer metadata, and symlink policy use the caller's
+    // original path spelling. Canonicalization above is only for database
+    // identity; do not silently change those observable path semantics.
     Ok((connection, workspace_id, workspace))
 }
 
@@ -45026,15 +45049,14 @@ fn open_verify_rch_ledger_database_for_read(
             message: format!("Failed to open RCH verifier ledger database: {error}"),
             repair: Some("ee status --json".to_owned()),
         })?;
-    let workspace_path = workspace.to_string_lossy().into_owned();
-    let workspace_id = connection
-        .get_workspace_by_path(&workspace_path)
-        .map_err(|error| DomainError::Storage {
+    let (canonical_workspace, existing_workspace) =
+        canonical_workspace_row(&connection, &workspace).map_err(|error| DomainError::Storage {
             message: format!("Failed to query workspace row: {error}"),
             repair: Some("ee doctor --json".to_owned()),
-        })?
+        })?;
+    let workspace_id = existing_workspace
         .map(|row| row.id)
-        .unwrap_or_else(|| workspace_core::stable_workspace_id(&workspace));
+        .unwrap_or_else(|| workspace_core::stable_workspace_id(&canonical_workspace));
     Ok(Some((connection, workspace_id)))
 }
 
@@ -66727,6 +66749,23 @@ mod tests {
         connection
             .migrate()
             .map_err(|error| format!("migrate test db: {error}"))?;
+        let canonical_workspace = workspace
+            .canonicalize()
+            .map_err(|error| format!("canonicalize test workspace: {error}"))?;
+        let canonical_workspace_id =
+            crate::core::workspace::stable_workspace_id(&canonical_workspace);
+        connection
+            .insert_workspace(
+                &canonical_workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: canonical_workspace.to_string_lossy().into_owned(),
+                    name: Some("RCH verification workspace".to_owned()),
+                },
+            )
+            .map_err(|error| format!("insert RCH verification workspace: {error}"))?;
+        connection
+            .close()
+            .map_err(|error| format!("close RCH verification workspace: {error}"))?;
 
         let proof_path = tempdir.path().join("rch-proof.json");
         let proof = serde_json::json!({
@@ -66756,7 +66795,11 @@ mod tests {
         });
         fs::write(&proof_path, proof.to_string())
             .map_err(|error| format!("write proof fixture: {error}"))?;
-        let workspace_arg = workspace.to_string_lossy().into_owned();
+        let workspace_arg = canonical_workspace
+            .join("..")
+            .join("workspace")
+            .to_string_lossy()
+            .into_owned();
         let proof_arg = proof_path.to_string_lossy().into_owned();
 
         let (ingest_exit, ingest_stdout, ingest_stderr) = invoke(&[
@@ -66839,6 +66882,17 @@ mod tests {
             &blockers_json["data"]["blockers"][0]["remediationBead"],
             &serde_json::json!("bd-17c65.10.17.1.2"),
             "blocker remediation bead",
+        )?;
+
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| format!("reopen RCH verification workspace: {error}"))?;
+        let workspaces = connection
+            .list_workspaces()
+            .map_err(|error| format!("list RCH verification workspaces: {error}"))?;
+        ensure_equal(
+            &workspaces.len(),
+            &1usize,
+            "RCH verification must not create a lexical workspace alias",
         )
     }
 
@@ -67858,6 +67912,51 @@ mod tests {
             )
             .map_err(|error| format!("insert preflight guard workspace row: {error}"))?;
         Ok(())
+    }
+
+    #[test]
+    fn preflight_database_reuses_canonical_workspace_for_lexical_alias() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let canonical_tempdir = tempdir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let canonical_workspace = canonical_tempdir.join("campaign");
+        seed_preflight_guard_cli_workspace(&canonical_workspace, "canonical campaign")?;
+
+        let lexical_workspace = canonical_workspace.join("..").join("campaign");
+        let expected_resolved_workspace = lexical_workspace.clone();
+        let expected_workspace_id =
+            crate::core::workspace::stable_workspace_id(&canonical_workspace);
+        let canonical_workspace_path = canonical_workspace.to_string_lossy().into_owned();
+
+        let (connection, workspace_id, resolved_workspace) =
+            super::open_preflight_token_database_for_workspace(lexical_workspace, None)
+                .map_err(|error| error.message())?;
+
+        ensure_equal(
+            &workspace_id,
+            &expected_workspace_id,
+            "preflight canonical workspace id",
+        )?;
+        ensure_equal(
+            &resolved_workspace,
+            &expected_resolved_workspace,
+            "preflight preserves caller workspace path",
+        )?;
+        let workspaces = connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &workspaces.len(),
+            &1usize,
+            "preflight must not create a lexical alias row",
+        )?;
+        ensure_equal(
+            &workspaces[0].path,
+            &canonical_workspace_path,
+            "preflight workspace row path",
+        )
     }
 
     fn preflight_halt_audit_count(workspace: &Path) -> Result<usize, String> {
