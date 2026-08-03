@@ -32,6 +32,16 @@
         ]
       }
     ],
-    "degraded": []
+    "degraded": [
+      {
+        "code": "mesh_store_authentication_unavailable",
+        "severity": "high",
+        "message": "<DEGRADED_MESSAGE>",
+        "repair": "Initialize the store-authentication root before importing at native trust.",
+        "sources": [
+          "playbook_import"
+        ]
+      }
+    ]
   }
 }

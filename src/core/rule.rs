@@ -2440,6 +2440,37 @@ pub fn import_playbook(
         "no_changes"
     };
 
+    // Surface WHY human_explicit rules were capped (TC-D14): a store fault is
+    // a high degradation of this response; a merely-unauthenticated artifact
+    // degrades only when it actually cost a rule its trust class.
+    let mut degraded = Vec::new();
+    let trust_was_capped = decisions.iter().any(|decision| {
+        decision.issue_codes.iter().any(|code| {
+            code == "playbook_trust_capped_unauthenticated"
+                || code == crate::policy::store_auth::MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE
+        })
+    });
+    if trust_was_capped {
+        match &auth_state {
+            PlaybookAuthState::Authenticated => {}
+            PlaybookAuthState::StoreUnavailable { error } => {
+                degraded.push(store_auth_degradation(error));
+            }
+            PlaybookAuthState::Unauthenticated { reason } => {
+                degraded.push(RuleAddDegradation {
+                    code: "playbook_trust_capped_unauthenticated".to_owned(),
+                    severity: "warning".to_owned(),
+                    message: format!(
+                        "human_explicit playbook rules were capped at agent_validated: {reason}"
+                    ),
+                    repair: "Re-export the playbook from this workspace (ee playbook export) so \
+                             it carries a valid store-local MAC, or accept the capped trust class."
+                        .to_owned(),
+                });
+            }
+        }
+    }
+
     Ok(PlaybookImportReport {
         schema: PLAYBOOK_IMPORT_SCHEMA_V1,
         command: "playbook import",
@@ -2463,7 +2494,7 @@ pub fn import_playbook(
         downgraded_count,
         durable_mutation: !options.dry_run && imported_count > 0,
         decisions,
-        degraded: Vec::new(),
+        degraded,
     })
 }
 

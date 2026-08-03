@@ -201,6 +201,14 @@ fn normalize_playbook_import_response(mut value: JsonValue) -> JsonValue {
             }
         }
     }
+    // Trust-cap degradation messages embed the machine-specific key-store path.
+    if let Some(degraded) = value["data"]["degraded"].as_array_mut() {
+        for entry in degraded {
+            if entry["message"].is_string() {
+                entry["message"] = JsonValue::String("<DEGRADED_MESSAGE>".to_owned());
+            }
+        }
+    }
     value
 }
 
