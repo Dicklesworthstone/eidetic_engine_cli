@@ -1448,31 +1448,26 @@ fn native_import_auth_state(
         parsed.records_root.count(),
     ) {
         Ok(ImportAuthOutcome::Authenticated { .. }) => NativeAuthState::Authenticated,
-        Ok(outcome) => NativeAuthState::Unauthenticated {
-            reason: match outcome {
-                ImportAuthOutcome::Authenticated { .. } => unreachable!("matched above"),
-                ImportAuthOutcome::RecordsMismatch => {
-                    "the received records disagree with the MAC-authenticated records root/count \
+        Ok(ImportAuthOutcome::RecordsMismatch) => NativeAuthState::Unauthenticated {
+            reason: "the received records disagree with the MAC-authenticated records root/count \
                      (tampered, reordered, truncated, or padded)"
-                        .to_owned()
-                }
-                ImportAuthOutcome::MacMismatch => {
-                    "the footer MAC does not verify under this store's key and this workspace's \
+                .to_owned(),
+        },
+        Ok(ImportAuthOutcome::MacMismatch) => NativeAuthState::Unauthenticated {
+            reason: "the footer MAC does not verify under this store's key and this workspace's \
                      binding context (foreign workspace, surface, or edited header)"
-                        .to_owned()
-                }
-                ImportAuthOutcome::KeyOutsideWindow => {
-                    "the footer names a key outside this store's verification window (foreign \
+                .to_owned(),
+        },
+        Ok(ImportAuthOutcome::KeyOutsideWindow) => NativeAuthState::Unauthenticated {
+            reason: "the footer names a key outside this store's verification window (foreign \
                      store or rotated-out key)"
-                        .to_owned()
-                }
-                ImportAuthOutcome::SchemaMismatch => {
-                    "the footer authentication block has an unsupported schema".to_owned()
-                }
-                ImportAuthOutcome::Malformed => {
-                    "the footer authentication block is malformed".to_owned()
-                }
-            },
+                .to_owned(),
+        },
+        Ok(ImportAuthOutcome::SchemaMismatch) => NativeAuthState::Unauthenticated {
+            reason: "the footer authentication block has an unsupported schema".to_owned(),
+        },
+        Ok(ImportAuthOutcome::Malformed) => NativeAuthState::Unauthenticated {
+            reason: "the footer authentication block is malformed".to_owned(),
         },
         Err(error) => NativeAuthState::StoreUnavailable { error },
     }
