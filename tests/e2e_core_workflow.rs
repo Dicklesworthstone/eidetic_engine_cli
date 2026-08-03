@@ -133,6 +133,122 @@ fn json_str<'a>(
 }
 
 #[test]
+fn init_publishes_ready_empty_search_index() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let workspace = tempdir.path().to_string_lossy().to_string();
+
+    let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
+    ensure_equal(
+        &init.status.code(),
+        &Some(EXIT_SUCCESS),
+        "fresh init exit code",
+    )?;
+    assert_stderr_empty(&init, "fresh init")?;
+    let init_json = stdout_json(&init)?;
+    assert_schema(&init_json, "ee.response.v2", "fresh init")?;
+    ensure(
+        init_json
+            .pointer("/data/actions")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|actions| {
+                actions.iter().any(|action| {
+                    action.get("action").and_then(serde_json::Value::as_str)
+                        == Some("initialize_index")
+                        && action.get("status").and_then(serde_json::Value::as_str) == Some("ready")
+                })
+            }),
+        format!("fresh init must report a ready search index: {init_json}"),
+    )?;
+
+    let status = run_ee(&["--workspace", &workspace, "index", "status", "--json"])?;
+    ensure_equal(
+        &status.status.code(),
+        &Some(EXIT_SUCCESS),
+        "fresh index status exit code",
+    )?;
+    assert_stderr_empty(&status, "fresh index status")?;
+    let status_json = stdout_json(&status)?;
+    assert_schema(&status_json, "ee.response.v2", "fresh index status")?;
+    ensure_equal(
+        &status_json.pointer("/data/health"),
+        &Some(&serde_json::Value::String("ready".to_owned())),
+        "fresh index health",
+    )?;
+    ensure_equal(
+        &status_json.pointer("/data/indexDocumentCount"),
+        &Some(&serde_json::Value::from(0)),
+        "fresh index document count",
+    )?;
+    ensure_equal(
+        &status_json.pointer("/data/indexDocumentCounts"),
+        &Some(&serde_json::json!({
+            "memories": 0,
+            "sessions": 0,
+            "artifacts": 0,
+            "rules": 0,
+            "evidence": 0,
+        })),
+        "fresh index per-source document counts",
+    )?;
+    ensure_equal(
+        &status_json.pointer("/data/actualCorpusRevision"),
+        &status_json.pointer("/data/expectedCorpusRevision"),
+        "fresh index corpus revision",
+    )?;
+    ensure_equal(
+        &status_json.pointer("/data/repairHint"),
+        &Some(&serde_json::Value::Null),
+        "fresh index repair hint",
+    )?;
+    let db_generation = status_json
+        .pointer("/data/dbGeneration")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("fresh index status missing dbGeneration: {status_json}"))?;
+    let index_generation = status_json
+        .pointer("/data/indexGeneration")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("fresh index status missing indexGeneration: {status_json}"))?;
+    ensure_equal(
+        &index_generation,
+        &db_generation,
+        "fresh index generation matches database",
+    )?;
+
+    let search = run_ee(&[
+        "--workspace",
+        &workspace,
+        "search",
+        "cold start",
+        "--source-mode",
+        "lexical_only",
+        "--json",
+    ])?;
+    ensure_equal(
+        &search.status.code(),
+        &Some(EXIT_SUCCESS),
+        "empty-index search exit code",
+    )?;
+    assert_stderr_empty(&search, "empty-index search")?;
+    let search_json = stdout_json(&search)?;
+    assert_schema(&search_json, "ee.response.v2", "empty-index search")?;
+    ensure_equal(
+        &search_json.pointer("/data/status"),
+        &Some(&serde_json::Value::String("no_results".to_owned())),
+        "empty-index search status",
+    )?;
+    ensure_equal(
+        &search_json.pointer("/data/results"),
+        &Some(&serde_json::json!([])),
+        "empty-index search results",
+    )?;
+    ensure_equal(
+        &search_json.pointer("/data/errors"),
+        &Some(&serde_json::json!([])),
+        "empty-index search errors",
+    )
+}
+
+#[test]
 fn core_workflow_init_remember_search_context_why() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let workspace = tempdir.path().to_string_lossy().to_string();

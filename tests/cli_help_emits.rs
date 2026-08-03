@@ -1,6 +1,34 @@
 use std::process::Command;
 
 #[test]
+fn init_help_promises_a_ready_search_index() -> Result<(), String> {
+    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["init", "--help"])
+        .output()
+        .map_err(|error| format!("run ee init --help: {error}"))?;
+
+    assert!(
+        output.status.success(),
+        "ee init --help failed with status {:?}; stderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("init help stdout is utf-8: {error}"))?;
+    let normalized = stdout.to_ascii_lowercase();
+    assert!(
+        normalized.contains("ready zero-document search index"),
+        "ee init --help must explain search-index readiness:\n{stdout}"
+    );
+    assert!(
+        normalized.contains("without a separate") && normalized.contains("index rebuild"),
+        "ee init --help must say that no separate rebuild is required:\n{stdout}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn root_help_emits_walking_skeleton_prelude() -> Result<(), String> {
     let output = Command::new(env!("CARGO_BIN_EXE_ee"))
         .arg("--help")

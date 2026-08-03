@@ -28,7 +28,7 @@ pub const AGENT_CORE_COMMANDS: &[AgentCoreCommand] = &[
     },
     AgentCoreCommand {
         name: "init",
-        description: "Initialize an ee workspace",
+        description: "Initialize a workspace with a ready zero-document search index",
     },
     AgentCoreCommand {
         name: "remember",
@@ -237,7 +237,7 @@ pub const GUIDE_SECTIONS: &[GuideSection] = &[
     },
     GuideSection {
         title: "Workspace",
-        content: "ee operates on workspaces (directories). Use --workspace to specify the target, or it defaults to the current directory. The .ee/ folder contains the database and indexes.",
+        content: "ee operates on workspaces (directories). Use --workspace to specify the target, or it defaults to the current directory. The .ee/ folder contains the database and search indexes; `ee init` publishes a ready zero-document index so retrieval works immediately after the first memory is captured.",
     },
     GuideSection {
         title: "Degradation",

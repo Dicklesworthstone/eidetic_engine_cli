@@ -10,7 +10,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{build_info, workspace::stable_workspace_id};
+use super::{
+    build_info,
+    index::{
+        IndexRebuildOptions, IndexRebuildStatus, index_corpus_compatibility_is_current,
+        rebuild_index,
+    },
+    workspace::stable_workspace_id,
+};
 use crate::db::{CreateWorkspaceInput, DbConnection};
 
 /// Status of the init operation.
@@ -340,8 +347,8 @@ fn record_failed_init_action(
 
 /// Initialize the ee workspace.
 ///
-/// Creates the .ee directory, database file placeholder, and index directory
-/// if they don't exist. Idempotent: returns success if already initialized.
+/// Creates the .ee directory and database, then publishes a ready search index
+/// if one does not exist. Idempotent: returns success if already initialized.
 ///
 /// Modes:
 /// - `dry_run`: Report what would be done without creating files
@@ -429,17 +436,17 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                 issue.status,
                 issue.message,
             );
-        } else if !index_dir.exists() {
+        } else if !index_corpus_compatibility_is_current(&index_dir) {
             repair_actions.push(InitAction {
-                action: "create_directory",
+                action: "initialize_index",
                 path: index_dir.clone(),
                 status: "missing",
             });
         } else {
             repair_actions.push(InitAction {
-                action: "check_directory",
+                action: "check_index",
                 path: index_dir.clone(),
-                status: "ok",
+                status: "compatible",
             });
         }
 
@@ -505,9 +512,9 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                 issue.status,
                 issue.message,
             );
-        } else if !index_dir.exists() {
+        } else if !index_corpus_compatibility_is_current(&index_dir) {
             actions.push(InitAction {
-                action: "create_directory",
+                action: "initialize_index",
                 path: index_dir.clone(),
                 status: "would_create",
             });
@@ -613,69 +620,30 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
         });
     }
 
-    if let Some(issue) = init_path_safety_issue(&index_dir, options.allow_symlink) {
-        record_failed_init_action(
-            &mut actions,
-            &mut action_errors,
-            "check_directory",
-            index_dir.clone(),
-            issue.status,
-            issue.message,
-        );
-        any_failed = true;
-    } else if !index_dir.exists() {
-        match fs::create_dir_all(&index_dir) {
-            Ok(()) => {
-                if let Some(issue) = init_path_safety_issue(&index_dir, options.allow_symlink) {
-                    record_failed_init_action(
-                        &mut actions,
-                        &mut action_errors,
-                        "create_directory",
-                        index_dir.clone(),
-                        issue.status,
-                        issue.message,
-                    );
-                    any_failed = true;
-                } else if let Err(error) =
-                    harden_init_directory_mode(&index_dir, options.allow_symlink)
-                {
-                    record_failed_init_action(
-                        &mut actions,
-                        &mut action_errors,
-                        "create_directory",
-                        index_dir.clone(),
-                        "failed",
-                        format!("failed to harden directory permissions: {error}"),
-                    );
-                    any_failed = true;
-                } else {
-                    actions.push(InitAction {
-                        action: "create_directory",
-                        path: index_dir.clone(),
-                        status: "created",
-                    });
-                    any_created = true;
-                }
+    let (rebuild_initial_index, index_was_compatible) =
+        if let Some(issue) = init_path_safety_issue(&index_dir, options.allow_symlink) {
+            record_failed_init_action(
+                &mut actions,
+                &mut action_errors,
+                "check_directory",
+                index_dir.clone(),
+                issue.status,
+                issue.message,
+            );
+            any_failed = true;
+            (false, false)
+        } else {
+            let index_was_compatible = index_corpus_compatibility_is_current(&index_dir);
+            let rebuild_initial_index = options.force || !index_was_compatible;
+            if !rebuild_initial_index {
+                actions.push(InitAction {
+                    action: "check_index",
+                    path: index_dir.clone(),
+                    status: "compatible",
+                });
             }
-            Err(error) => {
-                record_failed_init_action(
-                    &mut actions,
-                    &mut action_errors,
-                    "create_directory",
-                    index_dir.clone(),
-                    "failed",
-                    format!("failed to create directory: {error}"),
-                );
-                any_failed = true;
-            }
-        }
-    } else {
-        actions.push(InitAction {
-            action: "check_directory",
-            path: index_dir.clone(),
-            status: "exists",
-        });
-    }
+            (rebuild_initial_index, index_was_compatible)
+        };
 
     if let Some(issue) = init_path_safety_issue(&database_path, options.allow_symlink) {
         record_failed_init_action(
@@ -730,6 +698,81 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
             .is_some_and(|action| action.status == "failed")
         {
             any_failed = true;
+        }
+    }
+
+    if !any_failed && rebuild_initial_index {
+        let rebuild = rebuild_index(&IndexRebuildOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database_path.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: false,
+        });
+        match rebuild {
+            Ok(report)
+                if matches!(
+                    report.status,
+                    IndexRebuildStatus::Success | IndexRebuildStatus::NoDocuments
+                ) =>
+            {
+                if let Err(error) = harden_init_directory_mode(&index_dir, options.allow_symlink) {
+                    record_failed_init_action(
+                        &mut actions,
+                        &mut action_errors,
+                        "initialize_index",
+                        index_dir.clone(),
+                        "failed",
+                        format!(
+                            "search index was published but its directory permissions could not be hardened: {error}; run `ee index rebuild --workspace .` after correcting the filesystem permissions"
+                        ),
+                    );
+                    any_failed = true;
+                } else {
+                    actions.push(InitAction {
+                        action: "initialize_index",
+                        path: index_dir.clone(),
+                        status: if index_was_compatible {
+                            "revalidated"
+                        } else {
+                            "ready"
+                        },
+                    });
+                    if !index_was_compatible {
+                        any_created = true;
+                    }
+                }
+            }
+            Ok(report) => {
+                let detail = if report.errors.is_empty() {
+                    format!("index bootstrap returned {}", report.status.as_str())
+                } else {
+                    report.errors.join("; ")
+                };
+                record_failed_init_action(
+                    &mut actions,
+                    &mut action_errors,
+                    "initialize_index",
+                    index_dir.clone(),
+                    "failed",
+                    format!(
+                        "failed to initialize search index: {detail}; run `ee index rebuild --workspace .`"
+                    ),
+                );
+                any_failed = true;
+            }
+            Err(error) => {
+                record_failed_init_action(
+                    &mut actions,
+                    &mut action_errors,
+                    "initialize_index",
+                    index_dir.clone(),
+                    "failed",
+                    format!(
+                        "failed to initialize search index: {error}; run `ee index rebuild --workspace .`"
+                    ),
+                );
+                any_failed = true;
+            }
         }
     }
 
@@ -1291,6 +1334,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
         let workspace = temp_dir.path().to_path_buf();
         let database_path = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
         let options = InitOptions {
             workspace_path: workspace.clone(),
             dry_run: false,
@@ -1304,11 +1348,7 @@ mod tests {
 
         ensure(report.status, InitStatus::Created, "status is created")?;
         ensure(workspace.join(".ee").exists(), true, ".ee dir should exist")?;
-        ensure(
-            workspace.join(".ee").join("index").exists(),
-            true,
-            "index dir should exist",
-        )?;
+        ensure(index_dir.exists(), true, "index dir should exist")?;
         ensure(database_path.exists(), true, "database file should exist")?;
         let database_action = report
             .actions
@@ -1316,6 +1356,12 @@ mod tests {
             .find(|action| action.action == "create_file" && action.path == database_path)
             .ok_or_else(|| "missing database create action".to_string())?;
         ensure(database_action.status, "created", "database action status")?;
+        let index_action = report
+            .actions
+            .iter()
+            .find(|action| action.action == "initialize_index" && action.path == index_dir)
+            .ok_or_else(|| "missing search-index initialization action".to_string())?;
+        ensure(index_action.status, "ready", "search index action status")?;
         ensure(
             report
                 .actions
@@ -1323,6 +1369,45 @@ mod tests {
                 .any(|action| action.status == "failed"),
             false,
             "init should not report failed actions",
+        )?;
+
+        let index_status =
+            crate::core::index::get_index_status(&crate::core::index::IndexStatusOptions {
+                workspace_path: workspace.clone(),
+                database_path: Some(database_path.clone()),
+                index_dir: Some(index_dir),
+            })
+            .map_err(|error| error.to_string())?;
+        ensure(
+            index_status.health,
+            crate::core::index::IndexHealth::Ready,
+            "fresh index health",
+        )?;
+        ensure(index_status.index_exists, true, "fresh index exists")?;
+        ensure(
+            index_status.index_document_count,
+            Some(0),
+            "fresh index document count",
+        )?;
+        let document_counts = index_status
+            .index_document_counts
+            .ok_or_else(|| "fresh index is missing per-source document counts".to_string())?;
+        ensure(document_counts.total(), 0, "fresh index source counts")?;
+        ensure(
+            index_status.index_generation,
+            index_status.db_generation,
+            "fresh index generation matches database",
+        )?;
+        ensure(
+            index_status.actual_corpus_revision.as_deref(),
+            Some(index_status.expected_corpus_revision.as_str()),
+            "fresh index corpus revision",
+        )?;
+        ensure(index_status.repair_hint, None, "fresh index repair hint")?;
+        ensure(
+            index_status.last_check_error,
+            None,
+            "fresh index check error",
         )?;
 
         let connection =
@@ -1518,6 +1603,7 @@ mod tests {
     fn init_is_idempotent() -> TestResult {
         let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
         let workspace = temp_dir.path().to_path_buf();
+        let metadata_path = workspace.join(".ee").join("index").join("meta.json");
         let options = InitOptions {
             workspace_path: workspace,
             dry_run: false,
@@ -1541,6 +1627,7 @@ mod tests {
             false,
             "first run has no failed actions",
         )?;
+        let initial_metadata = fs::read(&metadata_path).map_err(|error| error.to_string())?;
 
         let second_report = init_workspace(&options);
         ensure(
@@ -1555,6 +1642,20 @@ mod tests {
                 .any(|action| action.status == "failed"),
             false,
             "second run has no failed actions",
+        )?;
+        ensure(
+            second_report
+                .actions
+                .iter()
+                .any(|action| action.action == "initialize_index"),
+            false,
+            "second run does not rebuild a ready index",
+        )?;
+        let rerun_metadata = fs::read(&metadata_path).map_err(|error| error.to_string())?;
+        ensure(
+            rerun_metadata,
+            initial_metadata,
+            "idempotent init preserves index metadata",
         )?;
 
         Ok(())

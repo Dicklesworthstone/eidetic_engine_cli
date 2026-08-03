@@ -924,7 +924,9 @@ pub enum Command {
     /// Graph analytics, snapshots, and export artifacts.
     #[command(subcommand)]
     Graph(GraphCommand),
-    /// Initialize an ee workspace.
+    /// Initialize an ee workspace with a ready zero-document search index.
+    ///
+    /// Retrieval works without a separate `ee index rebuild` step.
     Init(InitArgs),
     /// Import memories and evidence from external sources.
     #[command(subcommand)]
