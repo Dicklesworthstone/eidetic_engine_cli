@@ -61655,6 +61655,8 @@ mod tests {
     use clap::{Parser, error::ErrorKind};
     use fs4::fs_std::FileExt as Fs4FileExt;
 
+    use crate::core::agent_docs::{AGENT_CORE_COMMANDS, AgentDocsTopic};
+
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, AttestCommand, AuditCommand, BackupCommand,
         BackupRedaction, BootstrapCommand, COORDINATION_FALLBACK_INGEST_SCHEMA_V1,
