@@ -5153,7 +5153,10 @@ mod tests {
             "expected import error",
         )?;
         ensure(
-            err.message().contains("scope `directory` requires"),
+            // fcd181f1 rewrote the inner message; pin the stable outer wrap
+            // ("invalid --scope-pattern for scope `directory`: <inner>").
+            err.message()
+                .contains("invalid --scope-pattern for scope `directory`"),
             "error should include invalid rule reason",
         )?;
         let connection =

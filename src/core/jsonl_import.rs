@@ -1803,6 +1803,10 @@ mod tests {
         }
     }
 
+    fn authenticated() -> NativeAuthState {
+        NativeAuthState::Authenticated
+    }
+
     fn sample_jsonl() -> String {
         [
             r#"{"schema":"ee.export.header.v1","format_version":1,"created_at":"2026-04-30T00:00:00Z","workspace_id":"wsp_01234567890123456789012345","workspace_path":"/source","export_scope":"memories","redaction_level":"none","record_count":3,"ee_version":"0.1.0","hostname":null,"export_id":"exp-001","import_source":"native","trust_level":"validated","checksum":null,"signature":null,"source_schema_version":null}"#,
@@ -2328,11 +2332,11 @@ mod tests {
             r#""utility":0.7,"trust_class":"human_explicit","trust_subclass":"project-rule","created_at""#,
         );
         let parsed = parse_jsonl_source(&input);
-        let prepared = prepare_memories(
-            &parsed,
-            "wsp_01234567890123456789012345",
-            &unauthenticated(),
-        );
+        // Record-level human_explicit on a native artifact requires the
+        // artifact to authenticate (TC-D14); this test covers preservation,
+        // not the gate, so it models the authenticated case.
+        let prepared =
+            prepare_memories(&parsed, "wsp_01234567890123456789012345", &authenticated());
 
         ensure(prepared.has_errors(), false, "prepared has no errors")?;
         let memory = prepared
@@ -2358,11 +2362,8 @@ mod tests {
             r#""utility":0.7,"trust_class":"human_explicit","created_at""#,
         );
         let parsed = parse_jsonl_source(&input);
-        let prepared = prepare_memories(
-            &parsed,
-            "wsp_01234567890123456789012345",
-            &unauthenticated(),
-        );
+        let prepared =
+            prepare_memories(&parsed, "wsp_01234567890123456789012345", &authenticated());
 
         ensure(prepared.has_errors(), false, "prepared has no errors")?;
         let memory = prepared
