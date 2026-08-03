@@ -301,3 +301,10 @@ tests/audit_artifacts/install_pipeline_*.json
 /tests/artifacts/
 # git-repo-janitor skill scratch + recovery bundles (regenerable, never source)
 /.repo_janitor_workspace/
+agy.mcp.json
+cursor.mcp.json
+factory.mcp.json
+gemini.mcp.json
+windsurf.mcp.json
+# br doctor per-run artifacts
+.doctor/
