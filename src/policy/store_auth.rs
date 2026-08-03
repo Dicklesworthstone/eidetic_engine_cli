@@ -360,9 +360,7 @@ impl fmt::Debug for Secret {
 
 impl Drop for Secret {
     fn drop(&mut self) {
-        for byte in &mut self.0 {
-            *byte = 0;
-        }
+        self.0.fill(0);
         compiler_fence(Ordering::SeqCst);
     }
 }
