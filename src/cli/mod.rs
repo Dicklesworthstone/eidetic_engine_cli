@@ -351,9 +351,9 @@ const MIGRATION_REPAIR_COMMAND: &str = "ee migrate run --workspace . --json";
 /// Top-level long help prelude rendered by clap above the standard USAGE /
 /// OPTIONS / COMMANDS sections. Bead bd-17c65.6.3 (F3): without this,
 /// `ee --help` prints 40+ subcommands alphabetically and an agent has no
-/// signal for the most-used path. The prelude points at the AGENTS.md
-/// 5-command core path, then groups the rest into stable categories so the
-/// alphabetical detail list below stays useful as a reference.
+/// signal for the most-used path. The prelude renders the canonical agent
+/// core path, then groups the rest into stable categories so the alphabetical
+/// detail list below stays useful as a reference.
 const HELP_CORE_COMMAND_COLUMN: usize = 14;
 
 const HELP_PRELUDE_SUFFIX: &str = concat!(

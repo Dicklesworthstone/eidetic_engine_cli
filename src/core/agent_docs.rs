@@ -14,7 +14,9 @@ use crate::models::{ERROR_SCHEMA_V2, PACK_SCHEMA_V2, RESPONSE_SCHEMA_V2};
 /// consume this table so their curated command lists cannot drift apart.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgentCoreCommand {
+    /// Top-level CLI subcommand name.
     pub name: &'static str,
+    /// One-line description rendered in root help.
     pub description: &'static str,
 }
 
