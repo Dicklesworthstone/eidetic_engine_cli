@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::db::{
     CreateAuditInput, CreateMemoryInput, CreateWorkspaceInput, DatabaseConfig, DbConnection,
-    DbError,
+    DbError, StoredMemory,
 };
 use crate::models::{
     EXPORT_AGENT_SCHEMA_V1, EXPORT_ARTIFACT_SCHEMA_V1, EXPORT_AUDIT_SCHEMA_V1,
@@ -26,6 +26,19 @@ use crate::models::{
     MemoryContent, MemoryId, MemoryKind, MemoryLevel, Tag, TrustClass, TrustLevel, UnitScore,
     WorkspaceId,
 };
+use crate::policy::import_auth::{
+    ArtifactContext, EXPORT_ARTIFACT_FAMILY, EXPORT_RECORD_ENCODING_V1, ImportAuthOutcome,
+    RecordsRootBuilder, STORE_KEY_NAMESPACE_V1, canonical_record_hash, verify_artifact,
+};
+use crate::policy::store_auth::{
+    MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE, MacDomain, StoreAuthError, StoreAuthRoot,
+    workspace_keys_dir,
+};
+
+/// Issue code emitted when a native-source artifact claims `human_explicit`
+/// trust but its footer does not authenticate under this store's key
+/// (ADR 0086 TC-D14). Closes the spoofable `import_source=native` bypass.
+pub const UNAUTHENTICATED_NATIVE_IMPORT_TRUST_CODE: &str = "unauthenticated_native_import_trust";
 
 const DEFAULT_DB_FILE: &str = "ee.db";
 pub(crate) const IMPORT_ACTION: &str = "memory.import.jsonl";
@@ -510,6 +523,10 @@ struct ParsedJsonlImport {
     issues: Vec<JsonlImportIssue>,
     records_total: u32,
     ignored_records: u32,
+    /// Ordered digest over the raw memory line bytes as read, matching what
+    /// the exporter MAC'd (ADR 0086 TC-D14). Verified against the footer
+    /// authentication block before native trust is honored.
+    records_root: RecordsRootBuilder,
 }
 
 impl ParsedJsonlImport {
@@ -563,7 +580,8 @@ pub fn import_jsonl_records(
     connection.migrate()?;
     let workspace_id = ensure_workspace(&connection, &workspace_path)?;
 
-    let prepared = prepare_memories(&parsed, &workspace_id);
+    let native_auth = native_import_auth_state(&parsed, &workspace_path, &workspace_id);
+    let prepared = prepare_memories(&parsed, &workspace_id, &native_auth);
     if prepared.has_errors() {
         report.issues.extend(prepared.issues);
         report.status = "rejected".to_owned();
@@ -571,13 +589,21 @@ pub fn import_jsonl_records(
         return Ok(report);
     }
 
+    // Reimport is an idempotent restore: missing rows import, byte-identical
+    // rows no-op, and divergent or tombstone-conflicting rows are preserved
+    // untouched with an explicit conflict signal — never overwritten or
+    // resurrected (ADR 0086 TC-D14).
     let mut to_insert = Vec::new();
     let mut skipped_duplicate = 0_u32;
     for memory in prepared.memories {
-        if connection.get_memory(&memory.id)?.is_some() {
-            skipped_duplicate = skipped_duplicate.saturating_add(1);
-        } else {
-            to_insert.push(memory);
+        match connection.get_memory(&memory.id)? {
+            Some(existing) => {
+                skipped_duplicate = skipped_duplicate.saturating_add(1);
+                if let Some(issue) = reimport_conflict_issue(&existing, &memory) {
+                    report.issues.push(issue);
+                }
+            }
+            None => to_insert.push(memory),
         }
     }
 
@@ -632,6 +658,50 @@ pub fn import_jsonl_records(
     });
     report.imported_memory_ids = to_insert.into_iter().map(|memory| memory.id).collect();
     Ok(report)
+}
+
+fn reimport_conflict_issue(
+    existing: &StoredMemory,
+    incoming: &PreparedMemory,
+) -> Option<JsonlImportIssue> {
+    let mut divergences = Vec::new();
+    if existing.content != incoming.input.content {
+        divergences.push("content");
+    }
+    if existing.level != incoming.input.level {
+        divergences.push("level");
+    }
+    if existing.kind != incoming.input.kind {
+        divergences.push("kind");
+    }
+    if existing.trust_class != incoming.input.trust_class {
+        divergences.push("trust_class");
+    }
+    match (
+        existing.tombstoned_at.as_deref(),
+        incoming.tombstoned_at.as_deref(),
+    ) {
+        (Some(_), None) => {
+            divergences
+                .push("tombstone (existing row is tombstoned; a plain import would resurrect it)");
+        }
+        (None, Some(_)) => {
+            divergences.push("tombstone (import carries a tombstone; the existing row is live)");
+        }
+        _ => {}
+    }
+    if divergences.is_empty() {
+        return None;
+    }
+    Some(JsonlImportIssue::warning(
+        None,
+        "reimport_divergent_existing_row",
+        format!(
+            "memory `{}` already exists and diverges on {}; the existing row is preserved (reimport never overwrites or resurrects)",
+            incoming.id,
+            divergences.join(", ")
+        ),
+    ))
 }
 
 fn report_from_parsed(
@@ -689,6 +759,7 @@ fn parse_jsonl_source(input: &str) -> ParsedJsonlImport {
         issues: Vec::new(),
         records_total: 0,
         ignored_records: 0,
+        records_root: RecordsRootBuilder::new(),
     };
     let mut first_schema: Option<(u32, String)> = None;
     let mut seen_memory_ids = BTreeSet::new();
@@ -741,6 +812,14 @@ fn parse_jsonl_source(input: &str) -> ParsedJsonlImport {
         match schema {
             EXPORT_HEADER_SCHEMA_V1 => parse_header_record(&mut parsed, line_number, value),
             EXPORT_MEMORY_SCHEMA_V1 => {
+                // Fold the raw trimmed line bytes at this ordinal — the exact
+                // bytes the exporter hashed — so tampering, reordering, or
+                // truncation diverges the recomputed root from the MAC'd one.
+                if let Some(memory_id) = value.get("memory_id").and_then(JsonValue::as_str) {
+                    parsed
+                        .records_root
+                        .push(memory_id, &canonical_record_hash(trimmed.as_bytes()));
+                }
                 parse_memory_record(&mut parsed, &mut seen_memory_ids, line_number, value);
             }
             EXPORT_TAG_SCHEMA_V1 => parse_tag_record(&mut parsed, line_number, value),
@@ -1055,14 +1134,25 @@ impl PreparedMemories {
     }
 }
 
-fn prepare_memories(parsed: &ParsedJsonlImport, workspace_id: &str) -> PreparedMemories {
+fn prepare_memories(
+    parsed: &ParsedJsonlImport,
+    workspace_id: &str,
+    native_auth: &NativeAuthState,
+) -> PreparedMemories {
     let trust_class = trust_class_for_header(parsed.header.as_ref());
     let trust_subclass = trust_subclass_for_header(parsed.header.as_ref());
     let mut memories = Vec::with_capacity(parsed.memories.len());
     let mut issues = Vec::new();
 
     for memory in &parsed.memories {
-        match prepare_memory(memory, workspace_id, trust_class, &trust_subclass, parsed) {
+        match prepare_memory(
+            memory,
+            workspace_id,
+            trust_class,
+            &trust_subclass,
+            parsed,
+            native_auth,
+        ) {
             Ok(prepared) => memories.push(prepared),
             Err(issue) => issues.push(issue),
         }
@@ -1077,6 +1167,7 @@ fn prepare_memory(
     trust_class: TrustClass,
     trust_subclass: &str,
     parsed: &ParsedJsonlImport,
+    native_auth: &NativeAuthState,
 ) -> Result<PreparedMemory, JsonlImportIssue> {
     let import_memory_id = import_memory_id(memory, parsed)?;
     let import_source = parsed
@@ -1084,7 +1175,7 @@ fn prepare_memory(
         .as_ref()
         .map(|header| header.import_source)
         .unwrap_or(ImportSource::Unknown);
-    let trust_class = trust_class_for_memory(memory, trust_class, import_source)?;
+    let trust_class = trust_class_for_memory(memory, trust_class, import_source, native_auth)?;
     let trust_subclass = trust_subclass_for_memory(memory, trust_subclass);
     let level: MemoryLevel = memory.level.parse().map_err(|error| {
         JsonlImportIssue::error(
@@ -1306,6 +1397,87 @@ fn score_or_default(value: Option<f64>, default: f32) -> Result<f32, String> {
         .map_err(|error| format!("score is invalid: {error}"))
 }
 
+/// Whether the artifact authenticates under this store's key for native-trust
+/// admission (ADR 0086 TC-D14). Computed once per import, then consulted for
+/// every record-level `human_explicit` claim.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NativeAuthState {
+    /// The footer MAC verified against the local store key, the local
+    /// workspace scope, and the records root recomputed from the received
+    /// lines.
+    Authenticated,
+    /// The artifact carries no valid authentication for this store; the
+    /// reason is a secret-free explanation for the refusal message.
+    Unauthenticated { reason: String },
+    /// The store-local authentication root itself is unavailable. Fail
+    /// closed: native trust is refused with
+    /// [`MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE`].
+    StoreUnavailable { error: StoreAuthError },
+}
+
+fn native_import_auth_state(
+    parsed: &ParsedJsonlImport,
+    workspace_path: &Path,
+    local_workspace_id: &str,
+) -> NativeAuthState {
+    let Some(authentication) = parsed
+        .footer
+        .as_ref()
+        .and_then(|footer| footer.authentication.as_ref())
+    else {
+        return NativeAuthState::Unauthenticated {
+            reason: "the artifact footer carries no store-local authentication block".to_owned(),
+        };
+    };
+    let root = match StoreAuthRoot::open(workspace_keys_dir(workspace_path)) {
+        Ok(root) => root,
+        Err(error) => return NativeAuthState::StoreUnavailable { error },
+    };
+    let context = ArtifactContext {
+        artifact_family: EXPORT_ARTIFACT_FAMILY,
+        record_encoding_version: EXPORT_RECORD_ENCODING_V1,
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: local_workspace_id,
+    };
+    match verify_artifact(
+        &root,
+        MacDomain::NativeImportRecordsRoot,
+        &context,
+        authentication,
+        &parsed.records_root.finalize(),
+        parsed.records_root.count(),
+    ) {
+        Ok(ImportAuthOutcome::Authenticated { .. }) => NativeAuthState::Authenticated,
+        Ok(outcome) => NativeAuthState::Unauthenticated {
+            reason: match outcome {
+                ImportAuthOutcome::Authenticated { .. } => unreachable!("matched above"),
+                ImportAuthOutcome::RecordsMismatch => {
+                    "the received records disagree with the MAC-authenticated records root/count \
+                     (tampered, reordered, truncated, or padded)"
+                        .to_owned()
+                }
+                ImportAuthOutcome::MacMismatch => {
+                    "the footer MAC does not verify under this store's key and this workspace's \
+                     binding context (foreign workspace, surface, or edited header)"
+                        .to_owned()
+                }
+                ImportAuthOutcome::KeyOutsideWindow => {
+                    "the footer names a key outside this store's verification window (foreign \
+                     store or rotated-out key)"
+                        .to_owned()
+                }
+                ImportAuthOutcome::SchemaMismatch => {
+                    "the footer authentication block has an unsupported schema".to_owned()
+                }
+                ImportAuthOutcome::Malformed => {
+                    "the footer authentication block is malformed".to_owned()
+                }
+            },
+        },
+        Err(error) => NativeAuthState::StoreUnavailable { error },
+    }
+}
+
 fn trust_class_for_header(header: Option<&ExportHeader>) -> TrustClass {
     let Some(header) = header else {
         return TrustClass::LegacyImport;
@@ -1326,6 +1498,7 @@ fn trust_class_for_memory(
     memory: &ExportMemoryRecord,
     fallback: TrustClass,
     import_source: ImportSource,
+    native_auth: &NativeAuthState,
 ) -> Result<TrustClass, JsonlImportIssue> {
     let Some(raw) = memory.trust_class.as_deref() else {
         return Ok(fallback);
@@ -1348,16 +1521,46 @@ fn trust_class_for_memory(
             ),
         )
     })?;
-    if import_source.is_external() && trust_class == TrustClass::HumanExplicit {
-        return Err(JsonlImportIssue::error(
-            None,
-            "external_import_human_explicit_trust_class",
-            format!(
-                "memory `{}` from {} cannot import as human_explicit; use agent_assertion or agent_validated for peer or external material",
-                memory.memory_id,
-                import_source.as_str()
-            ),
-        ));
+    if trust_class == TrustClass::HumanExplicit {
+        if import_source.is_external() {
+            return Err(JsonlImportIssue::error(
+                None,
+                "external_import_human_explicit_trust_class",
+                format!(
+                    "memory `{}` from {} cannot import as human_explicit; use agent_assertion or agent_validated for peer or external material",
+                    memory.memory_id,
+                    import_source.as_str()
+                ),
+            ));
+        }
+        // Native trust must be authenticated, not merely claimed: a spoofable
+        // `import_source=native` header no longer admits human_explicit rows
+        // (ADR 0086 TC-D14).
+        match native_auth {
+            NativeAuthState::Authenticated => {}
+            NativeAuthState::Unauthenticated { reason } => {
+                return Err(JsonlImportIssue::error(
+                    None,
+                    UNAUTHENTICATED_NATIVE_IMPORT_TRUST_CODE,
+                    format!(
+                        "memory `{}` claims human_explicit but the artifact does not authenticate under this store: {reason}. Re-export from this workspace (ee backup create / ee export) so the footer carries a valid store-local MAC, or import the rows at agent_validated or lower",
+                        memory.memory_id
+                    ),
+                ));
+            }
+            NativeAuthState::StoreUnavailable { error } => {
+                return Err(JsonlImportIssue::error(
+                    None,
+                    MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE,
+                    format!(
+                        "memory `{}` claims human_explicit but the store-local authentication root is unavailable: {} Repair: {}",
+                        memory.memory_id,
+                        error.message(),
+                        error.repair()
+                    ),
+                ));
+            }
+        }
     }
     Ok(trust_class)
 }
@@ -1596,6 +1799,12 @@ mod tests {
             Ok(())
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
+        }
+    }
+
+    fn unauthenticated() -> NativeAuthState {
+        NativeAuthState::Unauthenticated {
+            reason: "test artifact without authentication".to_owned(),
         }
     }
 
@@ -2042,7 +2251,11 @@ mod tests {
         );
         ensure(report.tag_records, 2, "reported tag records")?;
 
-        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+        let prepared = prepare_memories(
+            &parsed,
+            "wsp_01234567890123456789012345",
+            &unauthenticated(),
+        );
         ensure(prepared.has_errors(), false, "prepared has no errors")?;
         let memory = prepared
             .memories
@@ -2074,7 +2287,11 @@ mod tests {
     fn prepare_memories_validates_scores() -> TestResult {
         let input = sample_jsonl().replace(r#""confidence":0.9"#, r#""confidence":1.5"#);
         let parsed = parse_jsonl_source(&input);
-        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+        let prepared = prepare_memories(
+            &parsed,
+            "wsp_01234567890123456789012345",
+            &unauthenticated(),
+        );
 
         ensure(prepared.has_errors(), true, "prepared has errors")?;
         ensure(
@@ -2092,7 +2309,11 @@ mod tests {
         let input =
             sample_jsonl().replace(r#""confidence":0.9"#, r#""confidence":1.0000000000000002"#);
         let parsed = parse_jsonl_source(&input);
-        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+        let prepared = prepare_memories(
+            &parsed,
+            "wsp_01234567890123456789012345",
+            &unauthenticated(),
+        );
 
         ensure(prepared.has_errors(), true, "prepared has errors")?;
         ensure(
@@ -2112,7 +2333,11 @@ mod tests {
             r#""utility":0.7,"trust_class":"human_explicit","trust_subclass":"project-rule","created_at""#,
         );
         let parsed = parse_jsonl_source(&input);
-        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+        let prepared = prepare_memories(
+            &parsed,
+            "wsp_01234567890123456789012345",
+            &unauthenticated(),
+        );
 
         ensure(prepared.has_errors(), false, "prepared has no errors")?;
         let memory = prepared
@@ -2138,7 +2363,11 @@ mod tests {
             r#""utility":0.7,"trust_class":"human_explicit","created_at""#,
         );
         let parsed = parse_jsonl_source(&input);
-        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+        let prepared = prepare_memories(
+            &parsed,
+            "wsp_01234567890123456789012345",
+            &unauthenticated(),
+        );
 
         ensure(prepared.has_errors(), false, "prepared has no errors")?;
         let memory = prepared
@@ -2169,7 +2398,11 @@ mod tests {
                 r#""utility":0.7,"trust_class":"human_explicit","created_at""#,
             );
         let parsed = parse_jsonl_source(&input);
-        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+        let prepared = prepare_memories(
+            &parsed,
+            "wsp_01234567890123456789012345",
+            &unauthenticated(),
+        );
 
         ensure(prepared.has_errors(), true, "prepared has errors")?;
         ensure(prepared.memories.len(), 0, "external human memory blocked")?;
@@ -2191,7 +2424,11 @@ mod tests {
             r#""updated_at":null,"tombstoned_at":"2026-05-02T00:00:00Z","tombstoned_reason":"superseded by newer release rule","valid_from":"2026-05-01T00:00:00Z","expires_at":"2026-06-01T00:00:00Z""#,
         );
         let parsed = parse_jsonl_source(&input);
-        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+        let prepared = prepare_memories(
+            &parsed,
+            "wsp_01234567890123456789012345",
+            &unauthenticated(),
+        );
         ensure(prepared.has_errors(), false, "prepared has no errors")?;
         let memory = prepared
             .memories
@@ -2224,7 +2461,11 @@ mod tests {
     fn prepare_memories_preserves_export_graph_fields_in_audit_details() -> TestResult {
         let input = sample_jsonl_with_graph_fields();
         let parsed = parse_jsonl_source(&input);
-        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+        let prepared = prepare_memories(
+            &parsed,
+            "wsp_01234567890123456789012345",
+            &unauthenticated(),
+        );
         ensure(prepared.has_errors(), false, "prepared has no errors")?;
         let memory = prepared
             .memories
@@ -2289,7 +2530,11 @@ mod tests {
             r#""utility":0.7,"bayes_alpha":2.5,"created_at""#,
         );
         let parsed = parse_jsonl_source(&input);
-        let prepared = prepare_memories(&parsed, "wsp_01234567890123456789012345");
+        let prepared = prepare_memories(
+            &parsed,
+            "wsp_01234567890123456789012345",
+            &unauthenticated(),
+        );
 
         ensure(prepared.has_errors(), true, "prepared has errors")?;
         ensure(
@@ -2332,6 +2577,311 @@ mod tests {
             .get_memory_bayes_posterior("mem_01234567890123456789012345")
             .map_err(|error| error.to_string())?;
         ensure(posterior, Some((2.5, 1.5)), "restored posterior")
+    }
+
+    fn human_explicit_jsonl() -> String {
+        sample_jsonl().replace(
+            r#""utility":0.7,"created_at""#,
+            r#""utility":0.7,"trust_class":"human_explicit","created_at""#,
+        )
+    }
+
+    /// Replace the sample footer with one carrying `authentication`, MAC'd by
+    /// the store at `workspace` over the artifact's memory lines, bound to
+    /// `workspace_scope`.
+    fn authenticate_sample(
+        artifact: &str,
+        workspace: &Path,
+        workspace_scope: &str,
+    ) -> Result<String, String> {
+        use crate::policy::import_auth::authenticate_artifact;
+
+        let root = StoreAuthRoot::open_or_create(workspace_keys_dir(workspace))
+            .map_err(|error| error.message())?;
+        let mut builder = RecordsRootBuilder::new();
+        for line in artifact.lines() {
+            let value: JsonValue =
+                serde_json::from_str(line.trim()).map_err(|error| error.to_string())?;
+            if value.get("schema").and_then(JsonValue::as_str) == Some(EXPORT_MEMORY_SCHEMA_V1) {
+                let memory_id = value
+                    .get("memory_id")
+                    .and_then(JsonValue::as_str)
+                    .ok_or("memory line without memory_id")?;
+                builder.push(memory_id, &canonical_record_hash(line.trim().as_bytes()));
+            }
+        }
+        let header = authenticate_artifact(
+            &root,
+            MacDomain::NativeImportRecordsRoot,
+            &ArtifactContext {
+                artifact_family: EXPORT_ARTIFACT_FAMILY,
+                record_encoding_version: EXPORT_RECORD_ENCODING_V1,
+                source_key_namespace: STORE_KEY_NAMESPACE_V1,
+                workspace_scope,
+            },
+            &builder.finalize(),
+            builder.count(),
+        )
+        .map_err(|error| error.message())?;
+        let authentication = serde_json::to_string(&header).map_err(|error| error.to_string())?;
+        Ok(artifact.replace(
+            r#""error_message":null}"#,
+            &format!(r#""error_message":null,"authentication":{authentication}}}"#),
+        ))
+    }
+
+    /// Workspace fixture for authenticated-import tests: canonical path, a
+    /// migrated DB, and the workspace id `ee import jsonl` will resolve.
+    fn authenticated_import_workspace(
+        tempdir: &tempfile::TempDir,
+    ) -> Result<(PathBuf, String), String> {
+        let workspace = tempdir.path().join("workspace");
+        fs::create_dir_all(workspace.join(crate::config::WORKSPACE_MARKER))
+            .map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let connection = DbConnection::open(DatabaseConfig::file(
+            workspace
+                .join(crate::config::WORKSPACE_MARKER)
+                .join(DEFAULT_DB_FILE),
+        ))
+        .map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id =
+            ensure_workspace(&connection, &workspace).map_err(|error| error.to_string())?;
+        Ok((workspace, workspace_id))
+    }
+
+    #[test]
+    fn native_human_explicit_without_authentication_is_refused() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace, _workspace_id) = authenticated_import_workspace(&tempdir)?;
+        let source = tempdir.path().join("source.jsonl");
+        fs::write(&source, human_explicit_jsonl()).map_err(|error| error.to_string())?;
+
+        let report = import_jsonl_records(&JsonlImportOptions {
+            workspace_path: workspace.clone(),
+            database_path: None,
+            source_path: source,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(report.status.as_str(), "rejected", "import status")?;
+        ensure(report.memories_imported, 0, "memories imported")?;
+        ensure(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == UNAUTHENTICATED_NATIVE_IMPORT_TRUST_CODE),
+            true,
+            "unauthenticated native trust issue",
+        )?;
+        let connection = DbConnection::open(DatabaseConfig::file(
+            workspace
+                .join(crate::config::WORKSPACE_MARKER)
+                .join(DEFAULT_DB_FILE),
+        ))
+        .map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .get_memory("mem_01234567890123456789012345")
+                .map_err(|error| error.to_string())?
+                .is_none(),
+            true,
+            "refused import must leave zero rows",
+        )
+    }
+
+    #[test]
+    fn authenticated_native_human_explicit_import_round_trips() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace, workspace_id) = authenticated_import_workspace(&tempdir)?;
+        let artifact = authenticate_sample(&human_explicit_jsonl(), &workspace, &workspace_id)?;
+        let source = tempdir.path().join("source.jsonl");
+        fs::write(&source, artifact).map_err(|error| error.to_string())?;
+
+        let report = import_jsonl_records(&JsonlImportOptions {
+            workspace_path: workspace.clone(),
+            database_path: None,
+            source_path: source,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(report.status.as_str(), "completed", "import status")?;
+        ensure(report.memories_imported, 1, "memories imported")?;
+        let connection = DbConnection::open(DatabaseConfig::file(
+            workspace
+                .join(crate::config::WORKSPACE_MARKER)
+                .join(DEFAULT_DB_FILE),
+        ))
+        .map_err(|error| error.to_string())?;
+        let stored = connection
+            .get_memory("mem_01234567890123456789012345")
+            .map_err(|error| error.to_string())?
+            .ok_or("imported memory missing")?;
+        ensure(
+            stored.trust_class.as_str(),
+            "human_explicit",
+            "authenticated native import preserves human_explicit",
+        )
+    }
+
+    #[test]
+    fn tampered_authenticated_artifact_refuses_native_trust() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace, workspace_id) = authenticated_import_workspace(&tempdir)?;
+        let artifact = authenticate_sample(&human_explicit_jsonl(), &workspace, &workspace_id)?
+            .replace("Run cargo fmt --check", "Disable all release checks");
+        let source = tempdir.path().join("source.jsonl");
+        fs::write(&source, artifact).map_err(|error| error.to_string())?;
+
+        let report = import_jsonl_records(&JsonlImportOptions {
+            workspace_path: workspace,
+            database_path: None,
+            source_path: source,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(report.status.as_str(), "rejected", "import status")?;
+        ensure(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == UNAUTHENTICATED_NATIVE_IMPORT_TRUST_CODE),
+            true,
+            "tampered artifact must refuse native trust",
+        )
+    }
+
+    #[test]
+    fn foreign_workspace_authentication_refuses_native_trust() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace, _workspace_id) = authenticated_import_workspace(&tempdir)?;
+        // MAC'd by this store, but bound to a different workspace scope.
+        let artifact =
+            authenticate_sample(&human_explicit_jsonl(), &workspace, "wsp_foreign_scope")?;
+        let source = tempdir.path().join("source.jsonl");
+        fs::write(&source, artifact).map_err(|error| error.to_string())?;
+
+        let report = import_jsonl_records(&JsonlImportOptions {
+            workspace_path: workspace,
+            database_path: None,
+            source_path: source,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(report.status.as_str(), "rejected", "import status")?;
+        ensure(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == UNAUTHENTICATED_NATIVE_IMPORT_TRUST_CODE),
+            true,
+            "cross-workspace authentication must not admit human_explicit",
+        )
+    }
+
+    #[test]
+    fn store_unavailable_fails_closed_for_native_human_explicit() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace, _workspace_id) = authenticated_import_workspace(&tempdir)?;
+        // A structurally valid authentication block, but this workspace has no
+        // initialized key store: fail closed with the store-unavailable code.
+        let authentication = format!(
+            r#"{{"schema":"{}","keyId":"{}","recordCount":1,"recordsRoot":"{}","mac":"{}"}}"#,
+            crate::policy::import_auth::NATIVE_IMPORT_AUTH_SCHEMA,
+            "00".repeat(16),
+            "11".repeat(32),
+            "22".repeat(32),
+        );
+        let artifact = human_explicit_jsonl().replace(
+            r#""error_message":null}"#,
+            &format!(r#""error_message":null,"authentication":{authentication}}}"#),
+        );
+        let source = tempdir.path().join("source.jsonl");
+        fs::write(&source, artifact).map_err(|error| error.to_string())?;
+
+        let report = import_jsonl_records(&JsonlImportOptions {
+            workspace_path: workspace,
+            database_path: None,
+            source_path: source,
+            dry_run: false,
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure(report.status.as_str(), "rejected", "import status")?;
+        ensure(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE),
+            true,
+            "missing key store must fail closed for native human_explicit",
+        )
+    }
+
+    #[test]
+    fn reimport_preserves_existing_row_and_flags_divergence() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let source = tempdir.path().join("source.jsonl");
+        fs::write(&source, sample_jsonl()).map_err(|error| error.to_string())?;
+        let options = JsonlImportOptions {
+            workspace_path: workspace.clone(),
+            database_path: None,
+            source_path: source.clone(),
+            dry_run: false,
+        };
+        let first = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        ensure(first.memories_imported, 1, "first import")?;
+
+        // Byte-identical reimport: pure no-op, no conflict signal.
+        let second = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        ensure(second.status.as_str(), "completed", "identical reimport")?;
+        ensure(second.memories_skipped_duplicate, 1, "identical skip")?;
+        ensure(
+            second
+                .issues
+                .iter()
+                .any(|issue| issue.code == "reimport_divergent_existing_row"),
+            false,
+            "identical reimport must not flag a conflict",
+        )?;
+
+        // Divergent reimport: same id, edited content — preserved + flagged.
+        fs::write(
+            &source,
+            sample_jsonl().replace("Run cargo fmt --check", "Never run cargo fmt"),
+        )
+        .map_err(|error| error.to_string())?;
+        let third = import_jsonl_records(&options).map_err(|error| error.to_string())?;
+        ensure(third.status.as_str(), "completed", "divergent reimport")?;
+        ensure(third.memories_skipped_duplicate, 1, "divergent skip")?;
+        ensure(
+            third
+                .issues
+                .iter()
+                .any(|issue| issue.code == "reimport_divergent_existing_row"),
+            true,
+            "divergent reimport must flag the preserved conflict",
+        )?;
+        let connection = DbConnection::open(DatabaseConfig::file(database_path(&options)))
+            .map_err(|error| error.to_string())?;
+        let stored = connection
+            .get_memory("mem_01234567890123456789012345")
+            .map_err(|error| error.to_string())?
+            .ok_or("memory missing after reimport")?;
+        ensure(
+            stored.content.contains("Run cargo fmt --check"),
+            true,
+            "existing row content must be preserved, never overwritten",
+        )
     }
 
     #[cfg(unix)]
