@@ -99,7 +99,7 @@ use crate::core::disk_pressure::{
     gather_artifact_retention_report, gather_build_admission_report, gather_disk_pressure_report,
 };
 use crate::core::docs_bootstrap::{
-    ApplyDocsBootstrapOptions, BootstrapApplyReport, CompileDocsBootstrapOptions,
+    ApplyDocsBootstrapOptions, BootstrapApplyReport, BootstrapDocGlob, CompileDocsBootstrapOptions,
     apply_docs_bootstrap, compile_docs_bootstrap,
 };
 use crate::core::doctor::{
@@ -1587,7 +1587,10 @@ pub enum BackupCommand {
 /// Subcommands for `ee bootstrap`.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum BootstrapCommand {
-    /// Compile allowlisted workspace docs into dry-run bootstrap candidates.
+    /// Compile default policy/README docs plus `--include` references into candidates.
+    ///
+    /// The default set is AGENTS.md, README.md, docs/env_vars.md, ADRs, schemas,
+    /// and failure-mode fixtures. Add other reference corpora with `--include`.
     Docs(BootstrapDocsArgs),
     /// Apply a previously approved bootstrap run through curation.
     Apply(BootstrapApplyArgs),
@@ -1599,6 +1602,14 @@ pub struct BootstrapDocsArgs {
     /// Produce a no-mutation candidate report.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+
+    /// Add workspace-relative docs beyond the bounded default set (repeatable).
+    ///
+    /// Supports `*` and `?` within one path component and a whole-component
+    /// `**` for recursive matching. The first component must be literal.
+    /// Repeat the same selectors on `bootstrap apply`.
+    #[arg(long, value_name = "GLOB", action = ArgAction::Append)]
+    pub include: Vec<BootstrapDocGlob>,
 
     /// Maximum bytes to read from any one allowlisted source.
     #[arg(long, value_name = "BYTES")]
@@ -1619,6 +1630,10 @@ pub struct BootstrapApplyArgs {
     /// Only apply candidates already approved through normal curation review.
     #[arg(long, action = ArgAction::SetTrue)]
     pub approved_only: bool,
+
+    /// Reapply a docs include glob used by the preview run (repeatable).
+    #[arg(long, value_name = "GLOB", action = ArgAction::Append)]
+    pub include: Vec<BootstrapDocGlob>,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -20398,6 +20413,7 @@ where
 
     let workspace_path = cli.resolve_workspace();
     let mut options = CompileDocsBootstrapOptions::for_workspace(workspace_path.as_path());
+    options.include_globs = args.include.as_slice();
     if let Some(max_source_bytes) = args.max_source_bytes {
         options.max_source_bytes = max_source_bytes;
     }
@@ -20424,6 +20440,7 @@ where
     options.database_path = args.database.as_deref();
     options.actor = args.actor.as_deref();
     options.approved_only = args.approved_only;
+    options.include_globs = args.include.as_slice();
     if let Some(max_source_bytes) = args.max_source_bytes {
         options.max_source_bytes = max_source_bytes;
     }
@@ -20446,17 +20463,24 @@ where
     W: Write,
 {
     match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
-            stdout,
-            &format!(
-                "Docs bootstrap dry-run\n  Run: {}\n  Sources: {}\n  Candidates: {}\n  Quarantined: {}\n  Durable mutation: {}\n",
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let include_globs = if run.include_globs.is_empty() {
+                "(defaults only)".to_owned()
+            } else {
+                run.include_globs.join(", ")
+            };
+            let mut rendered = format!(
+                "Docs bootstrap dry-run\n  Run: {}\n  Includes: {}\n  Sources: {}\n  Candidates: {}\n  Quarantined: {}\n  Durable mutation: {}\n",
                 run.run_id,
+                include_globs,
                 run.source_count,
                 run.candidates.len(),
                 run.curate_quarantine.len(),
                 run.durable_mutation
-            ),
-        ),
+            );
+            rendered.push_str(&render_bootstrap_degradations(&run.degraded));
+            write_stdout(stdout, &rendered)
+        }
         output::Renderer::Toon => write_stdout(
             stdout,
             &(output::render_toon_from_json(&run.data_json()) + "\n"),
@@ -20485,19 +20509,26 @@ where
     W: Write,
 {
     match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
-            stdout,
-            &format!(
-                "Docs bootstrap apply\n  Run: {}\n  Candidates: {}\n  Materialized: {}\n  Approved queued: {}\n  Applied: {}\n  Blocked: {}\n  Durable mutation: {}\n",
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let include_globs = if report.include_globs.is_empty() {
+                "(defaults only)".to_owned()
+            } else {
+                report.include_globs.join(", ")
+            };
+            let mut rendered = format!(
+                "Docs bootstrap apply\n  Run: {}\n  Includes: {}\n  Candidates: {}\n  Materialized: {}\n  Approved queued: {}\n  Applied: {}\n  Blocked: {}\n  Durable mutation: {}\n",
                 report.run_id,
+                include_globs,
                 report.candidate_count,
                 report.materialized_count,
                 report.approved_candidate_count,
                 report.applied_count,
                 report.blocked_count,
                 report.durable_mutation
-            ),
-        ),
+            );
+            rendered.push_str(&render_bootstrap_degradations(&report.degraded));
+            write_stdout(stdout, &rendered)
+        }
         output::Renderer::Toon => write_stdout(
             stdout,
             &(output::render_toon_from_json(&report.data_json()) + "\n"),
@@ -20515,6 +20546,26 @@ where
             write_stdout(stdout, &(response.to_string() + "\n"))
         }
     }
+}
+
+fn render_bootstrap_degradations(
+    degraded: &[crate::core::docs_bootstrap::BootstrapDegradation],
+) -> String {
+    if degraded.is_empty() {
+        return "  Degraded: none\n".to_owned();
+    }
+    let mut rendered = "  Degraded:\n".to_owned();
+    for degradation in degraded {
+        let path = degradation
+            .path
+            .as_deref()
+            .map_or_else(String::new, |path| format!(" [{path}]"));
+        rendered.push_str(&format!(
+            "    - {}{}: {} Repair: {}\n",
+            degradation.code, path, degradation.message, degradation.repair
+        ));
+    }
+    rendered
 }
 
 fn handle_import_cass<W, E>(
@@ -65922,6 +65973,10 @@ mod tests {
             "bootstrap",
             "docs",
             "--dry-run",
+            "--include",
+            "SKILL.md",
+            "--include",
+            "references/**/*.md",
             "--max-source-bytes",
             "1024",
             "--max-total-bytes",
@@ -65932,6 +65987,15 @@ mod tests {
         match parsed.command {
             Some(Command::Bootstrap(BootstrapCommand::Docs(args))) => {
                 ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(
+                    &args
+                        .include
+                        .iter()
+                        .map(BootstrapDocGlob::as_str)
+                        .collect::<Vec<_>>(),
+                    &vec!["SKILL.md", "references/**/*.md"],
+                    "include globs",
+                )?;
                 ensure_equal(&args.max_source_bytes, &Some(1024), "max source bytes")?;
                 ensure_equal(&args.max_total_bytes, &Some(4096), "max total bytes")
             }
@@ -65947,6 +66011,10 @@ mod tests {
             "apply",
             "boot_123",
             "--approved-only",
+            "--include",
+            "SKILL.md",
+            "--include",
+            "references/**/*.md",
             "--database",
             "db.sqlite",
             "--actor",
@@ -65963,6 +66031,15 @@ mod tests {
                 ensure_equal(&args.run_id, &"boot_123".to_string(), "run id")?;
                 ensure_equal(&args.approved_only, &true, "approved only")?;
                 ensure_equal(
+                    &args
+                        .include
+                        .iter()
+                        .map(BootstrapDocGlob::as_str)
+                        .collect::<Vec<_>>(),
+                    &vec!["SKILL.md", "references/**/*.md"],
+                    "include globs",
+                )?;
+                ensure_equal(
                     &args.database,
                     &Some(std::path::PathBuf::from("db.sqlite")),
                     "database",
@@ -65973,6 +66050,52 @@ mod tests {
             }
             other => Err(format!("expected bootstrap apply command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn parser_rejects_docs_bootstrap_include_outside_workspace() -> TestResult {
+        let error = Cli::try_parse_from([
+            "ee",
+            "bootstrap",
+            "docs",
+            "--dry-run",
+            "--include",
+            "../references/**/*.md",
+        ])
+        .expect_err("parent traversal include must be rejected");
+
+        ensure_equal(
+            &error.kind(),
+            &clap::error::ErrorKind::ValueValidation,
+            "invalid include error kind",
+        )
+    }
+
+    #[test]
+    fn bootstrap_docs_help_explains_default_scope_and_reference_includes() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "help", "bootstrap", "docs"]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "bootstrap docs help exit")?;
+        ensure(stderr.is_empty(), "bootstrap docs help stderr stays empty")?;
+        ensure_contains(&stdout, "--include <GLOB>", "reference include flag")?;
+        ensure_contains(&stdout, "bounded default set", "default scope")
+    }
+
+    #[test]
+    fn docs_bootstrap_human_degradations_keep_actionable_details() {
+        let rendered =
+            render_bootstrap_degradations(&[crate::core::docs_bootstrap::BootstrapDegradation {
+                code: "docs_bootstrap_source_missing".to_owned(),
+                severity: "low",
+                message: "Requested selector matched no workspace files.".to_owned(),
+                repair: "Check the selector and retry.".to_owned(),
+                path: Some("references/**/*.md".to_owned()),
+            }]);
+
+        assert!(rendered.contains("docs_bootstrap_source_missing"));
+        assert!(rendered.contains("[references/**/*.md]"));
+        assert!(rendered.contains("Requested selector matched no workspace files."));
+        assert!(rendered.contains("Repair: Check the selector and retry."));
     }
 
     #[test]

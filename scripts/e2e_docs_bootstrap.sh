@@ -7,14 +7,16 @@
 #      reviewable candidates carrying source spans, source hashes, anchors, and a
 #      specificity score (structural extraction, no summarization). NOTHING is
 #      written (durableMutation is false / the store stays empty).
-#   2. The run is DETERMINISTIC: two dry-runs over the same tree yield the same
+#   2. Explicit SKILL.md + references/**/*.md selectors add a recursive,
+#      provenance-tagged reference corpus without broadening the default set.
+#   3. The run is DETERMINISTIC: two dry-runs over the same tree yield the same
 #      candidate ids.
-#   3. Guard rails surface as STRUCTURED degraded rows, never silent loss:
+#   4. Guard rails surface as STRUCTURED degraded rows, never silent loss:
 #      an oversized source -> docs_bootstrap_source_oversized; a symlinked
 #      allowlisted path -> docs_bootstrap_symlink_rejected; a missing allowlisted
 #      source -> docs_bootstrap_source_missing.
-#   4. A non-allowlisted file (a stray secret) is never read into a candidate.
-#   5. `ee bootstrap apply` refuses without --approved-only (no bulk auto-import),
+#   5. A non-allowlisted file (a stray secret) is never read into a candidate.
+#   6. `ee bootstrap apply` refuses without --approved-only (no bulk auto-import),
 #      and `--approved-only` applies only curation-approved candidates (here none
 #      are approved, so nothing is written) — the no-silent-write guarantee.
 #
@@ -43,6 +45,11 @@ step "seed the workspace's own doc shapes (AGENTS.md rules + forbidden deps)"
 printf '# AGENTS\n\n## Forbidden deps\n- tokio (use asupersync)\n- rusqlite (use fsqlite via sqlmodel)\n\n## Rules\n- Never force-push to main.\n- Always run tests before pushing.\n' \
     >"$WS/AGENTS.md"
 printf '# Demo project\n\nThis project does X. Run ee init to start.\n' >"$WS/README.md"
+printf '# Skill guide\n\nAlways inspect counterexamples before promotion.\n' >"$WS/SKILL.md"
+mkdir -p "$WS/references/phases"
+printf '# Operator library\n' >"$WS/references/operators.md"
+printf '# Counterexample enumeration\n' >"$WS/references/phases/counterexamples.md"
+printf '# Not selected\n' >"$WS/references/phases/ignored.txt"
 # A stray non-allowlisted file the compiler must NOT read.
 printf 'SECRET_TOKEN=hunter2\n' >"$WS/secrets.env"
 
@@ -57,7 +64,7 @@ if ! ee_supports bootstrap docs; then
 fi
 
 step "bootstrap docs --dry-run compiles structural candidates (no mutation)"
-run="$(ee_json bootstrap docs --dry-run --workspace "$WS" --json)"
+run="$(ee_json bootstrap docs --dry-run --include SKILL.md --include 'references/**/*.md' --workspace "$WS" --json)"
 assert_jq "$run" '.success == true' "bootstrap docs --dry-run succeeds"
 assert_jq "$run" '.data.schema == "ee.bootstrap.docs.run.v1"' "run carries the v1 schema"
 assert_jq "$run" '(.data.candidates | length) >= 1' "at least one candidate compiled"
@@ -75,15 +82,28 @@ assert_jq "$run" 'all(.data.candidates[]?; (.specificity | type) == "number")' \
 # Provenance points back at an allowlisted doc, never the stray secret file.
 assert_jq "$run" 'all(.data.candidates[]?; (.sourcePath | test("secrets.env") | not))' \
     "no candidate is sourced from the non-allowlisted secret file"
+assert_jq "$run" '([.data.sources[] | select(.sourceKind == "reference_doc") | .relativePath] == ["SKILL.md", "references/operators.md", "references/phases/counterexamples.md"])' \
+    "explicit reference selectors add exact and nested Markdown in deterministic order"
+assert_jq "$run" '(.data.includeGlobs == ["SKILL.md", "references/**/*.md"])' \
+    "dry-run returns the normalized selector recipe required by apply"
+assert_jq "$run" 'all(.data.sources[]?; (.relativePath | test("ignored.txt") | not))' \
+    "reference glob does not widen beyond its Markdown match"
+assert_jq "$run" 'any(.data.candidates[]?; .sourcePath == "SKILL.md" or (.sourcePath | startswith("references/")))' \
+    "the selected reference corpus produces at least one candidate"
+assert_jq "$run" 'all(.data.candidates[]? | select(.sourcePath == "SKILL.md" or (.sourcePath | startswith("references/"))); .sourceKind == "reference_doc" and .trustClass == "agent_assertion" and (.tags | index("source_kind:reference_doc") != null))' \
+    "reference candidates retain conservative trust and a durable source-kind tag"
 
 step "the run is deterministic over a fixed doc tree"
 ids_a="$(printf '%s' "$run" | jq -c '[.data.candidates[].candidateId] | sort')"
-run2="$(ee_json bootstrap docs --dry-run --workspace "$WS" --json)"
+run2="$(ee_json bootstrap docs --dry-run --include 'references/**/*.md' --include SKILL.md --workspace "$WS" --json)"
 ids_b="$(printf '%s' "$run2" | jq -c '[.data.candidates[].candidateId] | sort')"
 assert_eq "$ids_a" "$ids_b" "two dry-runs yield identical candidate ids"
+run_id_b="$(printf '%s' "$run2" | jq -r '.data.runId // empty')"
+run_id_a="$(printf '%s' "$run" | jq -r '.data.runId // empty')"
+assert_eq "$run_id_a" "$run_id_b" "selector order does not change the deterministic run id"
 
 step "oversize source is rejected as a structured degraded row (no silent loss)"
-oversize="$(ee_json bootstrap docs --dry-run --max-source-bytes 5 --workspace "$WS" --json)"
+oversize="$(ee_json bootstrap docs --dry-run --include SKILL.md --include 'references/**/*.md' --max-source-bytes 5 --workspace "$WS" --json)"
 assert_jq "$oversize" 'any(.data.degraded[]?; .code == "docs_bootstrap_source_oversized")' \
     "an oversized allowlisted source surfaces docs_bootstrap_source_oversized"
 assert_jq "$oversize" 'all(.data.degraded[]?; has("code") and has("message"))' \
@@ -92,8 +112,7 @@ assert_jq "$oversize" 'all(.data.degraded[]?; has("code") and has("message"))' \
 step "symlinked allowlisted path is rejected (no symlink traversal)"
 sym_ws="${WS%/}.symlink"
 mkdir -p "$sym_ws"
-printf '# real\n## Rules\n- keep it real\n' >"$sym_ws/real_agents.md"
-ln -s "$sym_ws/real_agents.md" "$sym_ws/AGENTS.md"
+ln -s "$WS/secrets.env" "$sym_ws/AGENTS.md"
 ee_json init --workspace "$sym_ws" --json >/dev/null
 sym_run="$(ee_json bootstrap docs --dry-run --workspace "$sym_ws" --json)"
 if printf '%s' "$sym_run" | jq -e '.success == true' >/dev/null 2>&1; then
@@ -108,15 +127,20 @@ fi
 step "apply refuses bulk auto-import without --approved-only"
 run_id="$(printf '%s' "$run" | jq -r '.data.runId // empty')"
 if [ -n "$run_id" ] && ee_supports bootstrap apply; then
-    refuse="$(ee_json bootstrap apply "$run_id" --workspace "$WS" --json)"
+    refuse="$(ee_json bootstrap apply "$run_id" --include SKILL.md --include 'references/**/*.md' --workspace "$WS" --json)"
     assert_jq "$refuse" '(.success // false) != true' \
         "bootstrap apply refuses without --approved-only (no bulk auto-import)"
 
+    step "apply requires the same reference selectors as the reviewed run"
+    mismatch="$(ee_json bootstrap apply "$run_id" --approved-only --workspace "$WS" --json)"
+    assert_jq "$mismatch" '(.success // false) != true and (.error.message | contains("does not match"))' \
+        "bootstrap apply rejects a run when its include selectors are omitted"
+
     step "apply --approved-only writes nothing when no candidate is approved"
-    applied="$(ee_json bootstrap apply "$run_id" --approved-only --workspace "$WS" --json)"
+    applied="$(ee_json bootstrap apply "$run_id" --approved-only --include SKILL.md --include 'references/**/*.md' --workspace "$WS" --json)"
     # No candidate was approved through curation, so nothing is written silently.
-    assert_jq "$applied" '((.data.appliedCount // .data.applied // 0) | tonumber) == 0' \
-        "apply --approved-only writes no unapproved candidate (no silent write)"
+    assert_jq "$applied" '.success == true and .data.materializedCount > 0 and .data.appliedCount == 0' \
+        "apply materializes review rows but writes no unapproved memory"
 else
     log_drop 1 "bootstrap apply or runId unavailable: when present, assert apply refuses without --approved-only and applies only curation-approved candidates with audit"
 fi
