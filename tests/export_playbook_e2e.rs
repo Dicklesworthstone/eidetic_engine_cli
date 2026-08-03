@@ -107,7 +107,16 @@ fn workspace_args(workspace: &Path) -> Vec<String> {
     ]
 }
 
+/// `data.version` tracks the crate version; scrub it so goldens survive
+/// releases (the May-era snaps pinned "0.1.0" and went born-red at 0.2.0).
+fn scrub_version(value: &mut JsonValue) {
+    if value["data"]["version"].is_string() {
+        value["data"]["version"] = JsonValue::String("<VERSION>".to_owned());
+    }
+}
+
 fn normalize_export_response(mut value: JsonValue) -> JsonValue {
+    scrub_version(&mut value);
     value["data"]["workspacePath"] = JsonValue::String("<WORKSPACE>".to_owned());
     value["data"]["workspaceId"] = JsonValue::String("<WORKSPACE_ID>".to_owned());
     value["data"]["databasePath"] = JsonValue::String("<DATABASE>".to_owned());
@@ -143,6 +152,7 @@ fn scrub_playbook_rule(rule: &mut JsonValue) {
 }
 
 fn normalize_playbook_list_response(mut value: JsonValue) -> JsonValue {
+    scrub_version(&mut value);
     value["data"]["workspaceId"] = JsonValue::String("<WORKSPACE_ID>".to_owned());
     value["data"]["workspacePath"] = JsonValue::String("<WORKSPACE>".to_owned());
     value["data"]["databasePath"] = JsonValue::String("<DATABASE>".to_owned());
@@ -155,6 +165,7 @@ fn normalize_playbook_list_response(mut value: JsonValue) -> JsonValue {
 }
 
 fn normalize_playbook_export_response(mut value: JsonValue) -> JsonValue {
+    scrub_version(&mut value);
     value["data"]["workspaceId"] = JsonValue::String("<WORKSPACE_ID>".to_owned());
     value["data"]["workspacePath"] = JsonValue::String("<WORKSPACE>".to_owned());
     value["data"]["databasePath"] = JsonValue::String("<DATABASE>".to_owned());
@@ -180,6 +191,7 @@ fn normalize_playbook_export_response(mut value: JsonValue) -> JsonValue {
 }
 
 fn normalize_playbook_import_response(mut value: JsonValue) -> JsonValue {
+    scrub_version(&mut value);
     value["data"]["workspaceId"] = JsonValue::String("<WORKSPACE_ID>".to_owned());
     value["data"]["workspacePath"] = JsonValue::String("<TARGET_WORKSPACE>".to_owned());
     value["data"]["databasePath"] = JsonValue::String("<TARGET_DATABASE>".to_owned());
@@ -201,11 +213,14 @@ fn normalize_playbook_import_response(mut value: JsonValue) -> JsonValue {
             }
         }
     }
-    // Trust-cap degradation messages embed the machine-specific key-store path.
-    if let Some(degraded) = value["data"]["degraded"].as_array_mut() {
-        for entry in degraded {
-            if entry["message"].is_string() {
-                entry["message"] = JsonValue::String("<DEGRADED_MESSAGE>".to_owned());
+    // Trust-cap degradation messages embed the machine-specific key-store
+    // path — scrub both the report copy and the envelope mirror.
+    for pointer in ["/data/degraded", "/degraded"] {
+        if let Some(degraded) = value.pointer_mut(pointer).and_then(JsonValue::as_array_mut) {
+            for entry in degraded {
+                if entry["message"].is_string() {
+                    entry["message"] = JsonValue::String("<DEGRADED_MESSAGE>".to_owned());
+                }
             }
         }
     }

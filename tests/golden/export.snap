@@ -1,10 +1,28 @@
 {
   "schema": "ee.response.v2",
   "success": true,
+  "degraded": [
+    {
+      "code": "graph_snapshot_not_included",
+      "severity": "warning",
+      "message": "graph snapshots and graph algorithm cache rows are not included in this backup",
+      "sources": [
+        "backup_export"
+      ]
+    },
+    {
+      "code": "index_manifest_missing",
+      "severity": "warning",
+      "message": "no workspace index manifest was found; backup includes the durable JSONL source of truth only",
+      "sources": [
+        "backup_export"
+      ]
+    }
+  ],
   "data": {
     "schema": "ee.export.report.v1",
     "command": "export",
-    "version": "0.1.0",
+    "version": "<VERSION>",
     "status": "completed",
     "dryRun": false,
     "workspacePath": "<WORKSPACE>",
@@ -48,17 +66,29 @@
     ],
     "degraded": [
       {
+        "code": "graph_snapshot_not_included",
+        "severity": "warning",
+        "message": "graph snapshots and graph algorithm cache rows are not included in this backup",
+        "nextAction": "rerun backup create with --include-graph-cache",
+        "sources": [
+          "backup_export"
+        ]
+      },
+      {
         "code": "index_manifest_missing",
         "severity": "warning",
         "message": "no workspace index manifest was found; backup includes the durable JSONL source of truth only",
-        "nextAction": "run ee index rebuild --workspace . before creating a backup that must include derived index metadata"
-      },
-      {
-        "code": "graph_snapshot_not_included",
-        "severity": "warning",
-        "message": "graph snapshots are derived assets and are not included in the EE-223 backup foundation slice",
-        "nextAction": "run ee graph refresh after restore, or complete EE-298 for richer backup inspection"
+        "nextAction": "run ee index rebuild --workspace . before creating a backup that must include derived index metadata",
+        "sources": [
+          "backup_export"
+        ]
       }
-    ]
+    ],
+    "redaction": {
+      "level_applied": "standard",
+      "level_source": "cli",
+      "fields_redacted": [],
+      "patterns_matched": []
+    }
   }
 }

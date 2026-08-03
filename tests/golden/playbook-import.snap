@@ -4,7 +4,7 @@
   "data": {
     "schema": "ee.playbook.import.v1",
     "command": "playbook import",
-    "version": "0.1.0",
+    "version": "<VERSION>",
     "status": "imported",
     "dryRun": false,
     "workspaceId": "<WORKSPACE_ID>",
@@ -43,5 +43,16 @@
         ]
       }
     ]
-  }
+  },
+  "degraded": [
+    {
+      "code": "mesh_store_authentication_unavailable",
+      "severity": "high",
+      "message": "<DEGRADED_MESSAGE>",
+      "repair": "Initialize the store-authentication root before importing at native trust.",
+      "sources": [
+        "playbook_import"
+      ]
+    }
+  ]
 }
