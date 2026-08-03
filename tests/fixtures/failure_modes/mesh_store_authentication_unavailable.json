@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_store_authentication_unavailable",
+  "introduced_by": {
+    "bead": "bd-tc-epic-qzk7o.2.4",
+    "epic_letter": "TC"
+  },
+  "surfaces": [
+    "backup",
+    "export"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The store-local authentication root (ADR 0086 TC-D14) cannot be established or verified when an artifact-producing command runs: the workspace key directory is symlinked, readable beyond the owner, malformed, or fails its known-answer/integrity self-check. The command completes but ships the artifact unauthenticated (no footer authentication block); import then refuses native human_explicit trust for the unauthenticated artifact instead of trusting a spoofable header.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "mkdir -p .ee/keys-elsewhere",
+      "ln -s \"$PWD/.ee/keys-elsewhere\" .ee/keys"
+    ],
+    "invocation": "ee backup create --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_store_authentication_unavailable",
+    "severity": "high",
+    "message_contains": [
+      "Store-authentication",
+      "symbolic link"
+    ],
+    "repair_contains": "owner-only directory"
+  }
+}

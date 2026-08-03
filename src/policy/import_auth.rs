@@ -45,6 +45,18 @@ const ROOT_LEN: usize = 32;
 /// Wire schema tag for the transmitted authentication block.
 pub const NATIVE_IMPORT_AUTH_SCHEMA: &str = "ee.mesh.native_import_auth.v1";
 
+/// Artifact family bound into the context for `ee export` / `ee backup`
+/// JSONL record artifacts. Exporter and importer must use the exact same
+/// string or verification fails by construction.
+pub const EXPORT_ARTIFACT_FAMILY: &str = "ee.export.memories";
+/// Canonical record-encoding version for exported memory lines: the records
+/// root digests the exact emitted (post-redaction) line bytes.
+pub const EXPORT_RECORD_ENCODING_V1: &str = "ee.export_record.v1";
+/// Source store-key namespace tag bound into artifact contexts.
+pub const STORE_KEY_NAMESPACE_V1: &str = "ee.store.v1";
+/// Artifact family bound into the context for portable playbook documents.
+pub const PLAYBOOK_ARTIFACT_FAMILY: &str = "ee.playbook";
+
 /// Domain prefix folded into the records-root digest so a raw records root can
 /// never be confused with an unrelated BLAKE3 digest of the same bytes.
 const RECORDS_ROOT_DOMAIN: &[u8] = b"ee.mesh.import_auth.records_root.v1";

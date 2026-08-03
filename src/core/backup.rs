@@ -34,6 +34,11 @@ use crate::models::{
     ImportSource, RedactionLevel, TrustLevel, jsonl::ExportRecordBuildError,
 };
 use crate::output::jsonl_export::{ExportStats, JsonlExporter};
+use crate::policy::import_auth::{
+    ArtifactContext, EXPORT_ARTIFACT_FAMILY, EXPORT_RECORD_ENCODING_V1, STORE_KEY_NAMESPACE_V1,
+    authenticate_artifact,
+};
+use crate::policy::store_auth::{MacDomain, StoreAuthRoot, workspace_keys_dir};
 
 const DEFAULT_DB_FILE: &str = "ee.db";
 const DEFAULT_BACKUP_DIR: &str = "backups";
@@ -836,11 +841,29 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         &mut degraded,
     );
 
+    // TC-D14: a store-auth fault must not block the backup — the artifact
+    // ships unauthenticated with a high degraded entry, and import then
+    // refuses native `human_explicit` trust instead of trusting the header.
+    let store_auth = match StoreAuthRoot::open_or_create(workspace_keys_dir(&workspace_path)) {
+        Ok(root) => Some(root),
+        Err(error) => {
+            degraded.push(BackupDegradation::with_severity(
+                error.degraded_code(),
+                "high",
+                error.message(),
+                error.repair(),
+            ));
+            None
+        }
+    };
+
     let (records_bytes, stats) = render_records(
         &backup_id,
         &created_at,
         options.redaction_level,
         &export_data,
+        store_auth.as_ref(),
+        &mut degraded,
     )?;
 
     let planned_records_artifact = BackupArtifactReport {
@@ -2651,6 +2674,8 @@ fn render_records(
     created_at: &str,
     redaction_level: RedactionLevel,
     data: &BackupExportData,
+    store_auth: Option<&StoreAuthRoot>,
+    degraded: &mut Vec<BackupDegradation>,
 ) -> Result<(Vec<u8>, ExportStats), DomainError> {
     let mut output = Vec::new();
     let stats = {
@@ -2710,11 +2735,42 @@ fn render_records(
                 .map_err(io_error("write backup audit record"))?;
         }
 
+        // MAC the canonical header over the records root accumulated from the
+        // exact emitted (post-redaction) memory line bytes of this snapshot.
+        let authentication = store_auth.and_then(|auth_root| {
+            let (records_root, record_count) = exporter.finalize_records_root();
+            let context = ArtifactContext {
+                artifact_family: EXPORT_ARTIFACT_FAMILY,
+                record_encoding_version: EXPORT_RECORD_ENCODING_V1,
+                source_key_namespace: STORE_KEY_NAMESPACE_V1,
+                workspace_scope: &data.workspace.workspace_id,
+            };
+            match authenticate_artifact(
+                auth_root,
+                MacDomain::NativeImportRecordsRoot,
+                &context,
+                &records_root,
+                record_count,
+            ) {
+                Ok(header) => Some(header),
+                Err(error) => {
+                    degraded.push(BackupDegradation::with_severity(
+                        error.degraded_code(),
+                        "high",
+                        error.message(),
+                        error.repair(),
+                    ));
+                    None
+                }
+            }
+        });
+
         let stats = exporter
             .write_footer(
                 ExportFooter::builder()
                     .export_id(backup_id)
                     .completed_at(created_at)
+                    .authentication(authentication)
                     .build()
                     .map_err(export_build_error("build backup JSONL footer"))?,
             )
@@ -5048,6 +5104,132 @@ mod tests {
         ensure(
             manifest.contains(BACKUP_MANIFEST_SCHEMA_V1),
             "manifest schema must be present",
+        )
+    }
+
+    #[test]
+    fn backup_create_authenticates_the_records_footer() -> TestResult {
+        use crate::policy::import_auth::{
+            ImportAuthOutcome, RecordsRootBuilder, canonical_record_hash, verify_artifact,
+        };
+
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let out = workspace.join("auth-backups");
+        let report = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            !report.degraded.iter().any(|entry| {
+                entry.code == crate::policy::store_auth::MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE
+            }),
+            "a healthy workspace must not degrade store authentication",
+        )?;
+
+        // Recompute the records root exactly the way slice-4 import will: over
+        // the raw emitted memory line bytes, in order.
+        let records =
+            fs::read_to_string(&report.records_path).map_err(|error| error.to_string())?;
+        let mut builder = RecordsRootBuilder::new();
+        let mut footer = None;
+        for line in records.lines() {
+            let value: JsonValue = serde_json::from_str(line).map_err(|error| error.to_string())?;
+            match value.get("schema").and_then(JsonValue::as_str) {
+                Some("ee.export.memory.v1") => {
+                    let memory_id = value
+                        .get("memory_id")
+                        .and_then(JsonValue::as_str)
+                        .ok_or_else(|| "memory record is missing memory_id".to_owned())?;
+                    builder.push(memory_id, &canonical_record_hash(line.as_bytes()));
+                }
+                Some("ee.export.footer.v1") => {
+                    footer = Some(
+                        serde_json::from_str::<ExportFooter>(line)
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
+                _ => {}
+            }
+        }
+        let footer = footer.ok_or_else(|| "records JSONL has no footer".to_owned())?;
+        let header = footer
+            .authentication
+            .ok_or_else(|| "footer must carry a store-local authentication block".to_owned())?;
+        ensure_equal(header.record_count, report.memory_count, "record count")?;
+
+        let root =
+            StoreAuthRoot::open(workspace_keys_dir(&workspace)).map_err(|error| error.message())?;
+        let context = ArtifactContext {
+            artifact_family: EXPORT_ARTIFACT_FAMILY,
+            record_encoding_version: EXPORT_RECORD_ENCODING_V1,
+            source_key_namespace: STORE_KEY_NAMESPACE_V1,
+            workspace_scope: &report.workspace_id,
+        };
+        let outcome = verify_artifact(
+            &root,
+            MacDomain::NativeImportRecordsRoot,
+            &context,
+            &header,
+            &builder.finalize(),
+            builder.count(),
+        )
+        .map_err(|error| error.message())?;
+        ensure(
+            matches!(outcome, ImportAuthOutcome::Authenticated { .. }),
+            format!("recomputed records must authenticate, got {outcome:?}"),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_create_degrades_when_the_key_store_is_symlinked() -> TestResult {
+        let (_tempdir, workspace, database) = fixture().map_err(|error| error.message())?;
+        let keys_target = workspace.join("keys-elsewhere");
+        fs::create_dir_all(&keys_target).map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&keys_target, workspace_keys_dir(&workspace))
+            .map_err(|error| error.to_string())?;
+
+        let out = workspace.join("degraded-backups");
+        let report = create_backup(&BackupCreateOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database),
+            output_dir: Some(out),
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let entry = report
+            .degraded
+            .iter()
+            .find(|entry| {
+                entry.code == crate::policy::store_auth::MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE
+            })
+            .ok_or_else(|| "symlinked key store must degrade the backup".to_owned())?;
+        ensure_equal(entry.severity.as_str(), "high", "degraded severity")?;
+
+        let records =
+            fs::read_to_string(&report.records_path).map_err(|error| error.to_string())?;
+        let footer_line = records
+            .lines()
+            .find(|line| line.contains(r#""schema":"ee.export.footer.v1""#))
+            .ok_or_else(|| "records JSONL has no footer".to_owned())?;
+        let footer: ExportFooter =
+            serde_json::from_str(footer_line).map_err(|error| error.to_string())?;
+        ensure(
+            footer.authentication.is_none(),
+            "an unauthenticated backup must not carry an authentication block",
         )
     }
 

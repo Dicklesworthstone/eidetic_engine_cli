@@ -59,6 +59,16 @@ const MAX_KEY_FILE_BYTES: u64 = 64 * 1024;
 pub const MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE: &str =
     "mesh_store_authentication_unavailable";
 
+/// Canonical on-disk location of a workspace's store-authentication key
+/// directory. Exporters and importers must open the same root, so every
+/// caller resolves the directory through this helper.
+#[must_use]
+pub fn workspace_keys_dir(workspace_path: &Path) -> PathBuf {
+    workspace_path
+        .join(crate::config::WORKSPACE_MARKER)
+        .join("keys")
+}
+
 /// Internal derivation context for the key-file integrity self-check. This is
 /// deliberately *not* a public [`MacDomain`]: it authenticates the key file's
 /// own consistency, not any consumer payload.

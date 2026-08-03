@@ -705,6 +705,19 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `mesh_event_quarantined` | high | (TBD) |
 | `subscribe_cursor_stale` | warning | (TBD) |
 
+#### Store-local artifact authentication (1)
+| Code | Severity | Bead |
+|------|----------|------|
+| `mesh_store_authentication_unavailable` | high | bd-tc-epic-qzk7o.2.4 (TC-D14) |
+
+The store-local authentication root (ADR 0086 TC-D14) could not be
+established or verified: the key store is missing, malformed, symlinked,
+readable beyond the owner, or failed its known-answer/integrity self-check.
+Fail closed: `ee backup create` / `ee export` ship the artifact
+*unauthenticated* (no footer authentication block), and import refuses
+native `human_explicit` trust for unauthenticated artifacts rather than
+trusting a spoofable header. `response_time`.
+
 #### Causal lab (13)
 | Code | Severity | Bead |
 |------|----------|------|
