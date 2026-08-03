@@ -8,6 +8,56 @@ use crate::hooks::HARNESS_HOOK_INSTALL_SCHEMA_V1;
 use crate::models::memory::TYPED_MEMORY_FIELDS_SCHEMA_V2;
 use crate::models::{ERROR_SCHEMA_V2, PACK_SCHEMA_V2, RESPONSE_SCHEMA_V2};
 
+/// One command on the canonical agent-oriented starting path.
+///
+/// Human root help and the machine-readable `agent-docs` overview both
+/// consume this table so their curated command lists cannot drift apart.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentCoreCommand {
+    pub name: &'static str,
+    pub description: &'static str,
+}
+
+/// Canonical agent-oriented commands, ordered for session-start discovery.
+pub const AGENT_CORE_COMMANDS: &[AgentCoreCommand] = &[
+    AgentCoreCommand {
+        name: "orient",
+        description: "Start a session with pack, doctor, and workspace-hygiene context",
+    },
+    AgentCoreCommand {
+        name: "init",
+        description: "Initialize an ee workspace",
+    },
+    AgentCoreCommand {
+        name: "remember",
+        description: "Capture an explicit memory",
+    },
+    AgentCoreCommand {
+        name: "search",
+        description: "Fine-grained memory retrieval",
+    },
+    AgentCoreCommand {
+        name: "ask",
+        description: "Answer a direct question with citations or honest abstention",
+    },
+    AgentCoreCommand {
+        name: "pack",
+        description: "Assemble a task-specific context pack",
+    },
+    AgentCoreCommand {
+        name: "lens",
+        description: "Inspect reusable task-lens policies",
+    },
+    AgentCoreCommand {
+        name: "why",
+        description: "Explain why a memory was stored or selected",
+    },
+    AgentCoreCommand {
+        name: "status",
+        description: "Report workspace and subsystem posture",
+    },
+];
+
 fn normalized_agent_docs_token(value: &str) -> String {
     let mut normalized = String::with_capacity(value.len());
     let mut previous_was_lowercase_or_digit = false;

@@ -12949,7 +12949,19 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         subcommands: &[],
         args: &[CommandArg {
             name: "TOPIC",
-            description: "Documentation topic (guide, commands, contracts, schemas, paths, env, exit-codes, fields, errors, formats, examples)",
+            description: "Documentation topic (guide, commands, contracts, schemas, paths, env, exit-codes, fields, errors, formats, examples, recipes)",
+            required: false,
+            default: None,
+        }],
+    },
+    CommandEntry {
+        name: "ask",
+        description: "Answer a direct question with citations or honest abstention",
+        available: true,
+        subcommands: &[],
+        args: &[CommandArg {
+            name: "QUESTION",
+            description: "Question to answer extractively from stored memories",
             required: false,
             default: None,
         }],
@@ -14214,8 +14226,9 @@ pub fn render_agent_status_toon(report: &AgentInventoryReport) -> String {
 }
 
 use crate::core::agent_docs::{
-    AGENT_DOC_RECIPES, AgentDocsReport, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, EXAMPLES,
-    EXIT_CODES, FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS, env_var_entries,
+    AGENT_CORE_COMMANDS, AGENT_DOC_RECIPES, AgentDocsReport, AgentDocsTopic, CONTRACTS,
+    DEFAULT_PATHS, EXAMPLES, EXIT_CODES, FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS,
+    env_var_entries,
 };
 
 #[must_use]
@@ -14240,12 +14253,11 @@ pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
                 "primaryWorkflow",
                 "ee pack \"<task>\" --workspace . --max-tokens 4000 --json",
             );
-            d.field_array_of_strs(
-                "coreCommands",
-                &[
-                    "init", "remember", "search", "ask", "pack", "lens", "orient", "why", "status",
-                ],
-            );
+            let core_commands = AGENT_CORE_COMMANDS
+                .iter()
+                .map(|command| command.name)
+                .collect::<Vec<_>>();
+            d.field_array_of_strs("coreCommands", &core_commands);
             d.field_str("recipeCatalogCommand", "ee agent-docs recipes --json");
             d.field_raw("recipeCount", &AGENT_DOC_RECIPES.len().to_string());
             d.field_array_of_strs(

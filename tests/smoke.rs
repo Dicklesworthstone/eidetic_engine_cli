@@ -11,6 +11,7 @@ use std::process::{Command, Output};
 #[cfg(unix)]
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use ee::core::agent_docs::AgentDocsTopic;
 #[cfg(unix)]
 use ee::db::{
     CreateCurationCandidateInput, CreateMemoryLinkInput, CreateModelRegistryInput, DatabaseConfig,
@@ -8230,21 +8231,8 @@ fn contract_drift_schema_format_is_valid() -> TestResult {
 #[test]
 fn contract_drift_agent_docs_all_topics_valid() -> TestResult {
     // Verify that all agent docs topics produce valid output
-    let topics = [
-        "guide",
-        "commands",
-        "contracts",
-        "schemas",
-        "paths",
-        "env",
-        "exit-codes",
-        "fields",
-        "errors",
-        "formats",
-        "examples",
-    ];
-
-    for topic in topics {
+    for topic in AgentDocsTopic::all() {
+        let topic = topic.as_str();
         let output = run_ee(&["agent-docs", topic, "--json"])?;
         ensure(
             output.status.success(),

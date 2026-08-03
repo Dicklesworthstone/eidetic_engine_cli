@@ -27,7 +27,7 @@ use crate::core::agent_detect::{
     AgentDetectOptions, AgentSourcesOptions, AgentStatusOptions, build_agent_sources_report,
     detect_installed_agents, gather_agent_status,
 };
-use crate::core::agent_docs::{AgentDocsReport, AgentDocsTopic};
+use crate::core::agent_docs::{AGENT_CORE_COMMANDS, AgentDocsReport, AgentDocsTopic};
 use crate::core::artifact::{
     ArtifactInspectOptions, ArtifactListOptions, ArtifactRegisterOptions, inspect_artifact,
     list_artifacts as list_artifact_registry, register_artifact,
@@ -354,16 +354,9 @@ const MIGRATION_REPAIR_COMMAND: &str = "ee migrate run --workspace . --json";
 /// signal for the most-used path. The prelude points at the AGENTS.md
 /// 5-command core path, then groups the rest into stable categories so the
 /// alphabetical detail list below stays useful as a reference.
-const HELP_PRELUDE: &str = concat!(
-    "Most-used commands (start here):\n",
-    "  init          Initialize an ee workspace\n",
-    "  remember      Capture an explicit memory\n",
-    "  search        Fine-grained memory retrieval\n",
-    "  similar       Find semantic neighbors for a memory\n",
-    "  pack          Assemble a task-specific context pack\n",
-    "  primer        Deterministic cached workspace charter (session-start knowledge)\n",
-    "  lens          Inspect reusable task lens policies for pack/search\n",
-    "  why           Explain why a memory was stored or selected\n",
+const HELP_CORE_COMMAND_COLUMN: usize = 14;
+
+const HELP_PRELUDE_SUFFIX: &str = concat!(
     "\n",
     "Agent shortcuts:\n",
     "  note          Capture a memory with agent-friendly level/kind inference\n",
@@ -371,30 +364,46 @@ const HELP_PRELUDE: &str = concat!(
     "\n",
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
-    "  Inspect:        status, doctor, capabilities, insights, impact, lens, why-not, recall, similar, trust report, memory show, memory history\n",
+    "  Inspect:        doctor, capabilities, insights, impact, why-not, recall, similar, primer, trust report, memory show, memory history\n",
     "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome, journal\n",
+    "  Assert:         claim, certificate, attest, demo, tripwire\n",
+    "  Coordinate:     swarm, handoff, preflight, situation, plan, workflow\n",
     "  Curate:         capture, curate (candidates|validate|apply), reflect, playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
-    "  Maintenance:    maintenance, job, index, steward, daemon\n",
-    "  Import/Export:  import (cass|jsonl|eidetic-legacy|agentsmd), export [agentsmd], backup, handoff\n",
-    "  Diagnostics:    diag, eval, demo, db, analyze, audit, migrate\n",
+    "  Maintenance:    maintenance, job, index, daemon\n",
+    "  Import/Export:  import (cass|jsonl|eidetic-legacy|agentsmd), export [agentsmd], backup\n",
+    "  Diagnostics:    diag, eval, db, analyze, audit, migrate\n",
     "  Configuration:  install, completion, mcp, serve, agent\n",
     "\n",
     "Documentation:\n",
-    "  ee --help                  this view\n",
-    "  ee --agent-docs            long-form agent-oriented documentation\n",
-    "  ee capabilities            feature flags, discovered binaries, env overrides\n",
-    "  ee <subcommand> --help     per-command help\n",
+    "  ee --help                 this view\n",
+    "  ee agent-docs <topic>     focused docs: guide, recipes, contracts, errors, exit-codes\n",
+    "  ee --agent-docs           machine-readable overview and complete topic index\n",
+    "  ee capabilities           feature flags, discovered binaries, env overrides\n",
+    "  ee <subcommand> --help    per-command help\n",
 );
 
-const HELP_LONG_ABOUT: &str = HELP_PRELUDE;
+fn help_prelude() -> String {
+    let mut output = String::from("Most-used commands (start here):\n");
+    for command in AGENT_CORE_COMMANDS {
+        output.push_str("  ");
+        output.push_str(command.name);
+        for _ in command.name.len()..HELP_CORE_COMMAND_COLUMN {
+            output.push(' ');
+        }
+        output.push_str(command.description);
+        output.push('\n');
+    }
+    output.push_str(HELP_PRELUDE_SUFFIX);
+    output
+}
 
 #[derive(Clone, Debug, Parser, PartialEq)]
 #[command(
     name = "ee",
     version,
     about = "Durable, local-first, explainable memory for coding agents.",
-    long_about = HELP_LONG_ABOUT,
+    long_about = help_prelude(),
     disable_colored_help = true,
     color = clap::ColorChoice::Never,
     disable_help_subcommand = true
@@ -2048,7 +2057,7 @@ pub struct AgentDetectArgs {
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct AgentDocsArgs {
     /// Documentation topic to display. Omit for overview.
-    /// Topics: guide, commands, contracts, schemas, paths, env, exit-codes, fields, errors, formats, examples
+    /// Topics: guide, commands, contracts, schemas, paths, env, exit-codes, fields, errors, formats, examples, recipes
     #[arg(value_name = "TOPIC")]
     pub topic: Option<String>,
 }
@@ -19155,8 +19164,9 @@ where
     // all 80+ subcommands, so the discovery view stays scannable. The complete
     // command list and every flag remain one keystroke away via `ee --help`
     // (and `ee help <command>` for a single command). (agent-UX item 7)
+    let prelude = help_prelude();
     let terse = format!(
-        "{HELP_PRELUDE}\nUsage: ee [OPTIONS] [COMMAND]\n\n\
+        "{prelude}\nUsage: ee [OPTIONS] [COMMAND]\n\n\
          Run `ee --help` for the complete command list and all global flags, \
          or `ee help <command>` for one command.\n"
     );
@@ -70165,13 +70175,51 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Success, "help exit")?;
         ensure_contains(&stdout, "Usage:", "help usage line")?;
         ensure_contains(&stdout, "Most-used commands (start here)", "help prelude")?;
-        for command in ["init", "remember", "search", "pack", "lens", "why"] {
+        for command in AGENT_CORE_COMMANDS {
             ensure_contains(
                 &stdout,
-                &format!("  {command} "),
-                &format!("help promotes {command}"),
+                &format!("  {} ", command.name),
+                &format!("help promotes {}", command.name),
             )?;
         }
+        let most_used = stdout
+            .split_once("Most-used commands (start here):\n")
+            .and_then(|(_, tail)| tail.split_once("\nAgent shortcuts:"))
+            .map(|(section, _)| section)
+            .ok_or_else(|| "help most-used section missing".to_string())?;
+        let promoted_names = most_used
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .collect::<Vec<_>>();
+        let canonical_names = AGENT_CORE_COMMANDS
+            .iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &promoted_names,
+            &canonical_names,
+            "human help uses canonical agent core command order",
+        )?;
+        for snippet in [
+            "Assert:         claim, certificate, attest, demo, tripwire",
+            "Coordinate:     swarm, handoff, preflight, situation, plan, workflow",
+            "ee agent-docs <topic>",
+            "guide, recipes, contracts, errors, exit-codes",
+        ] {
+            ensure_contains(&stdout, snippet, "help discovery contract")?;
+        }
+        ensure(
+            !most_used.contains("similar") && !most_used.contains("primer"),
+            "non-core similar/primer stay outside Most-used",
+        )?;
+        let curated_prelude = stdout
+            .split_once("Usage:")
+            .map(|(prelude, _)| prelude)
+            .ok_or_else(|| "help prelude boundary missing".to_string())?;
+        ensure(
+            !curated_prelude.contains("steward"),
+            "help must not advertise nonexistent top-level steward command",
+        )?;
         ensure_contains(&stdout, "status", "help status subcommand")?;
         ensure_contains(&stdout, "insights", "help insights subcommand")?;
         ensure_contains(
@@ -70181,6 +70229,9 @@ mod tests {
         )?;
         ensure_contains(&stdout, "  note ", "help lists note shortcut")?;
         ensure_contains(&stdout, "  pack ", "help lists pack shortcut")?;
+        let orient_pos = stdout
+            .find("  orient ")
+            .ok_or_else(|| "help orient position missing".to_string())?;
         let init_pos = stdout
             .find("  init ")
             .ok_or_else(|| "help init position missing".to_string())?;
@@ -70196,6 +70247,7 @@ mod tests {
         let search_pos = stdout
             .find("  search ")
             .ok_or_else(|| "help search position missing".to_string())?;
+        ensure(orient_pos < init_pos, "help lists orient first")?;
         ensure(init_pos < search_pos, "help lists init before search")?;
         ensure(
             remember_pos < search_pos,
@@ -70621,13 +70673,14 @@ mod tests {
         let (exit, stdout, stderr) = invoke(&["ee", "--help-json"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "help-json exit")?;
         ensure(stderr.is_empty(), "help-json stderr must be empty")?;
-        for cmd in &["init", "note", "pack", "lens", "why", "search", "remember"] {
+        for command in AGENT_CORE_COMMANDS {
             ensure_contains(
                 &stdout,
-                &format!("\"name\":\"{cmd}\""),
-                &format!("help-json must list {cmd}"),
+                &format!("\"name\":\"{}\"", command.name),
+                &format!("help-json must list {}", command.name),
             )?;
         }
+        ensure_contains(&stdout, "\"name\":\"note\"", "help-json must list note")?;
         Ok(())
     }
 
@@ -78946,20 +78999,24 @@ demos:
 
     #[test]
     fn agent_docs_all_topics_return_success() -> TestResult {
-        let topics = [
-            "guide",
-            "commands",
-            "contracts",
-            "schemas",
-            "paths",
-            "env",
-            "exit-codes",
-            "fields",
-            "errors",
-            "formats",
-            "examples",
-        ];
-        for topic in topics {
+        let (help_exit, help_stdout, help_stderr) = invoke(&["ee", "agent-docs", "--help"]);
+        ensure_equal(
+            &help_exit,
+            &ProcessExitCode::Success,
+            "agent-docs help exit",
+        )?;
+        ensure(
+            help_stderr.is_empty(),
+            "agent-docs help stderr must be empty",
+        )?;
+
+        for topic in AgentDocsTopic::all() {
+            let topic = topic.as_str();
+            ensure_contains(
+                &help_stdout,
+                topic,
+                &format!("agent-docs help lists {topic}"),
+            )?;
             let (exit, stdout, stderr) = invoke(&["ee", "agent-docs", topic, "--json"]);
             #[allow(clippy::needless_borrows_for_generic_args)]
             {
