@@ -1307,9 +1307,18 @@ pub fn probe_mesh_capability() -> CapabilityStatus {
         return CapabilityStatus::Unimplemented;
     }
 
-    match read_env_var(EnvVar::MeshEnabled).as_deref() {
-        Some("true") => CapabilityStatus::Unimplemented,
-        _ => CapabilityStatus::Pending,
+    // Accept every documented truthy form (`true`/`1`/`yes`/`on`), not just
+    // the literal "true" — `EE_MESH_ENABLED=1` must not silently read as off.
+    mesh_capability_from_flag(read_env_bool(EnvVar::MeshEnabled))
+}
+
+/// Pure decision half of [`probe_mesh_capability`], split out because env
+/// mutation is untestable under `forbid(unsafe_code)`.
+const fn mesh_capability_from_flag(enabled: Option<bool>) -> CapabilityStatus {
+    if matches!(enabled, Some(true)) {
+        CapabilityStatus::Unimplemented
+    } else {
+        CapabilityStatus::Pending
     }
 }
 
@@ -5975,6 +5984,32 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    #[test]
+    fn mesh_capability_flag_decision_covers_documented_truthy_forms() -> TestResult {
+        // Every documented truthy form parses to Some(true) via the shared
+        // parser; the decision half must then report the honest gap. `=1`
+        // regressing to Pending is bd-y6o13.
+        for raw in ["true", "1", "yes", "on"] {
+            ensure(
+                mesh_capability_from_flag(crate::config::parse_env_bool_flag(raw)),
+                CapabilityStatus::Unimplemented,
+                &format!("truthy `{raw}`"),
+            )?;
+        }
+        for parsed in [Some(false), None] {
+            ensure(
+                mesh_capability_from_flag(parsed),
+                CapabilityStatus::Pending,
+                "falsy/absent flag",
+            )?;
+        }
+        ensure(
+            mesh_capability_from_flag(crate::config::parse_env_bool_flag("maybe")),
+            CapabilityStatus::Pending,
+            "unparseable flag stays pending",
+        )
     }
 
     fn unique_test_dir(label: &str) -> PathBuf {
