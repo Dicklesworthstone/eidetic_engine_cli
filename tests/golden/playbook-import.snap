@@ -17,7 +17,7 @@
     "importedCount": 1,
     "duplicateCount": 0,
     "skippedCount": 0,
-    "downgradedCount": 0,
+    "downgradedCount": 1,
     "durableMutation": true,
     "decisions": [
       {
@@ -27,7 +27,9 @@
         "importedRuleId": "<IMPORTED_RULE_ID>",
         "auditId": "<AUDIT_ID>",
         "indexJobId": "<INDEX_JOB_ID>",
-        "issueCodes": []
+        "issueCodes": [
+          "mesh_store_authentication_unavailable"
+        ]
       }
     ],
     "degraded": []

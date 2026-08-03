@@ -44,7 +44,14 @@
           "createdAt": "<TIMESTAMP>",
           "updatedAt": "<TIMESTAMP>"
         }
-      ]
+      ],
+      "authentication": {
+        "schema": "ee.mesh.native_import_auth.v1",
+        "keyId": "<KEY_ID>",
+        "recordCount": 1,
+        "recordsRoot": "<RECORDS_ROOT>",
+        "mac": "<MAC>"
+      }
     },
     "degraded": []
   }

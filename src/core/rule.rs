@@ -29,6 +29,12 @@ use crate::models::{
     RuleLifecycleTransition, RuleLifecycleTrigger, RuleMaturity, RuleScope, Tag, TrustClass,
     UnitScore, WorkspaceId,
 };
+use crate::policy::import_auth::{
+    ArtifactContext, AuthenticatedHeader, ImportAuthOutcome, PLAYBOOK_ARTIFACT_FAMILY,
+    PLAYBOOK_RECORD_ENCODING_V1, RecordsRootBuilder, STORE_KEY_NAMESPACE_V1, authenticate_artifact,
+    canonical_record_hash, verify_artifact,
+};
+use crate::policy::store_auth::{MacDomain, StoreAuthError, StoreAuthRoot, workspace_keys_dir};
 use crate::search::normalize_rule_scope_pattern;
 
 /// Stable schema for `ee rule add` response data.
@@ -938,6 +944,11 @@ pub struct PlaybookPortableDocument {
     pub workspace_path: String,
     pub rule_count: usize,
     pub rules: Vec<PlaybookPortableRule>,
+    /// Store-local authentication block (ADR 0086 TC-D14). Present only when
+    /// the exporting store MAC'd the rules' records root; import caps
+    /// `human_explicit` rules at `agent_validated` when absent or invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<AuthenticatedHeader>,
 }
 
 /// Result of listing playbook-portable rules.
@@ -2120,6 +2131,34 @@ pub fn export_playbook(
     )?;
     let snapshot = load_playbook_snapshot(&prepared, options.include_tombstoned, options.limit, 0)?;
     let exported_at = Utc::now().to_rfc3339();
+
+    // TC-D14: MAC the rules' records root under the playbook subkey so
+    // `ee playbook import` can honor human_explicit only for artifacts this
+    // store actually produced. A store-auth fault degrades the export (high)
+    // and the document ships unauthenticated instead of blocking.
+    let mut degraded = Vec::new();
+    let records_root = playbook_records_root(&snapshot.rules)?;
+    let authentication =
+        match StoreAuthRoot::open_or_create(workspace_keys_dir(&prepared.workspace_path)) {
+            Ok(root) => match authenticate_artifact(
+                &root,
+                MacDomain::PlaybookImportRecordsRoot,
+                &playbook_artifact_context(&prepared.workspace_id),
+                &records_root.finalize(),
+                records_root.count(),
+            ) {
+                Ok(header) => Some(header),
+                Err(error) => {
+                    degraded.push(store_auth_degradation(&error));
+                    None
+                }
+            },
+            Err(error) => {
+                degraded.push(store_auth_degradation(&error));
+                None
+            }
+        };
+
     let document = PlaybookPortableDocument {
         schema: PLAYBOOK_PORTABLE_SCHEMA_V1.to_owned(),
         exported_at,
@@ -2128,6 +2167,7 @@ pub fn export_playbook(
         workspace_path: prepared.workspace_path.display().to_string(),
         rule_count: snapshot.rules.len(),
         rules: snapshot.rules,
+        authentication,
     };
     let bytes = serde_json::to_vec_pretty(&document).map_err(|error| DomainError::Storage {
         message: format!("failed to serialize playbook export: {error}"),
@@ -2159,8 +2199,85 @@ pub fn export_playbook(
         no_overwrite: true,
         redaction_status: "metadata_and_rule_text_only_no_memory_content".to_owned(),
         document,
-        degraded: Vec::new(),
+        degraded,
     })
+}
+
+/// Ordered records root over the rules' compact serde_json serialization —
+/// the encoding both exporter and importer reproduce from the shared struct.
+fn playbook_records_root(
+    rules: &[PlaybookPortableRule],
+) -> Result<RecordsRootBuilder, DomainError> {
+    let mut builder = RecordsRootBuilder::new();
+    for rule in rules {
+        let bytes = serde_json::to_vec(rule).map_err(|error| DomainError::Storage {
+            message: format!("failed to serialize playbook rule for authentication: {error}"),
+            repair: Some("inspect rule content and retry".to_owned()),
+        })?;
+        builder.push(
+            rule.source_rule_id.as_deref().unwrap_or(""),
+            &canonical_record_hash(&bytes),
+        );
+    }
+    Ok(builder)
+}
+
+fn playbook_artifact_context(workspace_id: &str) -> ArtifactContext<'_> {
+    ArtifactContext {
+        artifact_family: PLAYBOOK_ARTIFACT_FAMILY,
+        record_encoding_version: PLAYBOOK_RECORD_ENCODING_V1,
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace_id,
+    }
+}
+
+fn store_auth_degradation(error: &StoreAuthError) -> RuleAddDegradation {
+    RuleAddDegradation {
+        code: error.degraded_code().to_owned(),
+        severity: "high".to_owned(),
+        message: error.message(),
+        repair: error.repair(),
+    }
+}
+
+/// Whether a playbook artifact authenticates under this store's playbook
+/// subkey for trust-preserving import (ADR 0086 TC-D14).
+enum PlaybookAuthState {
+    Authenticated,
+    Unauthenticated { reason: String },
+    StoreUnavailable { error: StoreAuthError },
+}
+
+fn playbook_auth_state(
+    document: &PlaybookPortableDocument,
+    workspace_path: &Path,
+    workspace_id: &str,
+) -> Result<PlaybookAuthState, DomainError> {
+    let Some(authentication) = document.authentication.as_ref() else {
+        return Ok(PlaybookAuthState::Unauthenticated {
+            reason: "the playbook carries no store-local authentication block".to_owned(),
+        });
+    };
+    let root = match StoreAuthRoot::open(workspace_keys_dir(workspace_path)) {
+        Ok(root) => root,
+        Err(error) => return Ok(PlaybookAuthState::StoreUnavailable { error }),
+    };
+    let records_root = playbook_records_root(&document.rules)?;
+    let state = match verify_artifact(
+        &root,
+        MacDomain::PlaybookImportRecordsRoot,
+        &playbook_artifact_context(workspace_id),
+        authentication,
+        &records_root.finalize(),
+        records_root.count(),
+    ) {
+        Ok(ImportAuthOutcome::Authenticated { .. }) => PlaybookAuthState::Authenticated,
+        Ok(outcome) => PlaybookAuthState::Unauthenticated {
+            reason: format!("the playbook authentication block does not verify ({outcome:?})"),
+        },
+        Err(error) => PlaybookAuthState::StoreUnavailable { error },
+    };
+    Ok(state)
 }
 
 /// Import a portable playbook artifact into procedural rules.
@@ -2183,6 +2300,8 @@ pub fn import_playbook(
             ),
         })?;
     validate_playbook_document(&document)?;
+    let auth_state =
+        playbook_auth_state(&document, &prepared.workspace_path, &prepared.workspace_id)?;
 
     let existing = load_playbook_snapshot(&prepared, true, MAX_RULE_LIST_LIMIT, 0)?;
     let mut existing_contents = existing
@@ -2245,6 +2364,23 @@ pub fn import_playbook(
         }
         let maturity = import_maturity.unwrap_or(RuleMaturity::Candidate.as_str());
 
+        // TC-D14: human_explicit survives import only when the playbook
+        // authenticates under this store's playbook subkey; otherwise the
+        // rule is capped at agent_validated (store faults fail closed too).
+        let mut effective_trust_class = rule.trust_class.as_str();
+        if effective_trust_class == "human_explicit"
+            && !matches!(auth_state, PlaybookAuthState::Authenticated)
+        {
+            issue_codes.push(match &auth_state {
+                PlaybookAuthState::StoreUnavailable { .. } => {
+                    crate::policy::store_auth::MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE.to_owned()
+                }
+                _ => "playbook_trust_capped_unauthenticated".to_owned(),
+            });
+            downgraded_count += 1;
+            effective_trust_class = "agent_validated";
+        }
+
         if options.dry_run {
             existing_contents.insert(normalized);
             decisions.push(PlaybookImportDecision {
@@ -2269,7 +2405,7 @@ pub fn import_playbook(
             confidence: Some(rule.confidence),
             utility: rule.utility,
             importance: rule.importance,
-            trust_class: &rule.trust_class,
+            trust_class: effective_trust_class,
             protected: rule.protected,
             tags: &rule.tags,
             source_memory_ids: &[],
@@ -4892,6 +5028,7 @@ mod tests {
                 created_at: Some("2026-05-16T00:00:00Z".to_owned()),
                 updated_at: None,
             }],
+            authentication: None,
         };
 
         let err = match validate_playbook_document(&document) {
@@ -4960,6 +5097,7 @@ mod tests {
             workspace_path: "/source".to_owned(),
             rule_count: 2,
             rules: vec![valid_rule, invalid_rule],
+            authentication: None,
         };
         let source_path = workspace_path.join("invalid-playbook.json");
         fs::write(
@@ -4995,6 +5133,233 @@ mod tests {
         ensure(
             rules.is_empty(),
             "preflight failure must not persist valid prefix",
+        )
+    }
+
+    /// Workspace fixture for playbook trust-cap tests: canonical path, a
+    /// migrated DB with a workspace row, and the stable workspace id.
+    fn playbook_auth_workspace(
+        tempdir: &tempfile::TempDir,
+    ) -> Result<(PathBuf, PathBuf, String), String> {
+        let workspace_path = tempdir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(&workspace_path);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("playbook-auth".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        Ok((workspace_path, database_path, workspace_id))
+    }
+
+    fn human_explicit_portable_document(workspace_id: &str) -> PlaybookPortableDocument {
+        PlaybookPortableDocument {
+            schema: PLAYBOOK_PORTABLE_SCHEMA_V1.to_owned(),
+            exported_at: "2026-08-02T00:00:00Z".to_owned(),
+            ee_version: env!("CARGO_PKG_VERSION").to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            workspace_path: "/source".to_owned(),
+            rule_count: 1,
+            rules: vec![PlaybookPortableRule {
+                source_rule_id: Some("rule_01234567890123456789012345".to_owned()),
+                content: "Run cargo fmt --check before release.".to_owned(),
+                maturity: RuleMaturity::Candidate.as_str().to_owned(),
+                scope: RuleScope::Workspace.as_str().to_owned(),
+                scope_pattern: None,
+                trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                protected: false,
+                confidence: 0.8,
+                utility: 0.5,
+                importance: 0.6,
+                tags: vec!["release".to_owned()],
+                source_memory_ids: Vec::new(),
+                source_memory_count: 0,
+                created_at: Some("2026-08-02T00:00:00Z".to_owned()),
+                updated_at: None,
+            }],
+            authentication: None,
+        }
+    }
+
+    fn authenticate_playbook_document(
+        document: &mut PlaybookPortableDocument,
+        workspace_path: &Path,
+        workspace_id: &str,
+    ) -> TestResult {
+        let root = StoreAuthRoot::open_or_create(workspace_keys_dir(workspace_path))
+            .map_err(|error| error.message())?;
+        let records_root =
+            playbook_records_root(&document.rules).map_err(|error| error.message())?;
+        document.authentication = Some(
+            authenticate_artifact(
+                &root,
+                MacDomain::PlaybookImportRecordsRoot,
+                &playbook_artifact_context(workspace_id),
+                &records_root.finalize(),
+                records_root.count(),
+            )
+            .map_err(|error| error.message())?,
+        );
+        Ok(())
+    }
+
+    fn run_playbook_import(
+        workspace_path: &Path,
+        database_path: &Path,
+        document: &PlaybookPortableDocument,
+    ) -> Result<PlaybookImportReport, String> {
+        let source_path = workspace_path.join("playbook-import.json");
+        fs::write(
+            &source_path,
+            serde_json::to_vec_pretty(document).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        import_playbook(&PlaybookImportOptions {
+            workspace_path,
+            database_path: Some(database_path),
+            source_path: &source_path,
+            dry_run: false,
+            actor: Some("test"),
+        })
+        .map_err(|error| error.message())
+    }
+
+    fn imported_rule_trust_class(
+        database_path: &Path,
+        workspace_id: &str,
+    ) -> Result<String, String> {
+        let connection =
+            DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+        let rules = connection
+            .list_procedural_rules(workspace_id, None, None, true)
+            .map_err(|error| error.to_string())?;
+        rules
+            .first()
+            .map(|rule| rule.trust_class.clone())
+            .ok_or_else(|| "expected one imported rule".to_owned())
+    }
+
+    #[test]
+    fn playbook_import_caps_unauthenticated_human_explicit() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&tempdir)?;
+        let document = human_explicit_portable_document(&workspace_id);
+
+        let report = run_playbook_import(&workspace_path, &database_path, &document)?;
+        ensure(report.imported_count == 1, "rule should import")?;
+        ensure(
+            report.downgraded_count >= 1,
+            "unauthenticated human_explicit must count as downgraded",
+        )?;
+        ensure(
+            report.decisions[0]
+                .issue_codes
+                .iter()
+                .any(|code| code == "playbook_trust_capped_unauthenticated"),
+            "cap must be visible as a per-rule issue code",
+        )?;
+        ensure(
+            imported_rule_trust_class(&database_path, &workspace_id)? == "agent_validated",
+            "unauthenticated human_explicit must be capped at agent_validated",
+        )
+    }
+
+    #[test]
+    fn playbook_import_preserves_authenticated_human_explicit() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&tempdir)?;
+        let mut document = human_explicit_portable_document(&workspace_id);
+        authenticate_playbook_document(&mut document, &workspace_path, &workspace_id)?;
+
+        let report = run_playbook_import(&workspace_path, &database_path, &document)?;
+        ensure(report.imported_count == 1, "rule should import")?;
+        ensure(
+            !report.decisions[0]
+                .issue_codes
+                .iter()
+                .any(|code| code == "playbook_trust_capped_unauthenticated"),
+            "authenticated playbook must not be capped",
+        )?;
+        ensure(
+            imported_rule_trust_class(&database_path, &workspace_id)? == "human_explicit",
+            "authenticated playbook preserves human_explicit",
+        )
+    }
+
+    #[test]
+    fn playbook_import_caps_tampered_authenticated_playbook() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&tempdir)?;
+        let mut document = human_explicit_portable_document(&workspace_id);
+        authenticate_playbook_document(&mut document, &workspace_path, &workspace_id)?;
+        document.rules[0].content = "Skip all release checks entirely today.".to_owned();
+
+        let report = run_playbook_import(&workspace_path, &database_path, &document)?;
+        ensure(
+            report.imported_count == 1,
+            "tampered rule still imports, capped",
+        )?;
+        ensure(
+            report.decisions[0]
+                .issue_codes
+                .iter()
+                .any(|code| code == "playbook_trust_capped_unauthenticated"),
+            "tampered records root must cap trust",
+        )?;
+        ensure(
+            imported_rule_trust_class(&database_path, &workspace_id)? == "agent_validated",
+            "tampered playbook must not keep human_explicit",
+        )
+    }
+
+    #[test]
+    fn playbook_export_attaches_verifiable_authentication() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&tempdir)?;
+        let output_path = workspace_path.join("playbook-export.json");
+
+        let report = export_playbook(&PlaybookExportOptions {
+            workspace_path: &workspace_path,
+            database_path: Some(&database_path),
+            output_path: &output_path,
+            limit: 10,
+            include_tombstoned: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let authentication = report
+            .document
+            .authentication
+            .as_ref()
+            .ok_or("export must attach a store-local authentication block")?;
+        let root = StoreAuthRoot::open(workspace_keys_dir(&workspace_path))
+            .map_err(|error| error.message())?;
+        let records_root =
+            playbook_records_root(&report.document.rules).map_err(|error| error.message())?;
+        let outcome = verify_artifact(
+            &root,
+            MacDomain::PlaybookImportRecordsRoot,
+            &playbook_artifact_context(&workspace_id),
+            authentication,
+            &records_root.finalize(),
+            records_root.count(),
+        )
+        .map_err(|error| error.message())?;
+        ensure(
+            matches!(outcome, ImportAuthOutcome::Authenticated { .. }),
+            "exported playbook must verify under this store's playbook subkey",
         )
     }
 

@@ -7,7 +7,9 @@
   },
   "surfaces": [
     "backup",
-    "export"
+    "export",
+    "import",
+    "playbook"
   ],
   "severity": "high",
   "repair_present": true,

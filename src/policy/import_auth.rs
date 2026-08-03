@@ -56,6 +56,10 @@ pub const EXPORT_RECORD_ENCODING_V1: &str = "ee.export_record.v1";
 pub const STORE_KEY_NAMESPACE_V1: &str = "ee.store.v1";
 /// Artifact family bound into the context for portable playbook documents.
 pub const PLAYBOOK_ARTIFACT_FAMILY: &str = "ee.playbook";
+/// Canonical record-encoding version for playbook rules: the records root
+/// digests each rule's compact serde_json serialization, which both sides
+/// reproduce from the same struct definition.
+pub const PLAYBOOK_RECORD_ENCODING_V1: &str = "ee.playbook_rule.v1";
 
 /// Domain prefix folded into the records-root digest so a raw records root can
 /// never be confused with an unrelated BLAKE3 digest of the same bytes.

@@ -9367,7 +9367,7 @@ ee mesh export --workspace . --json
 
 **Severity:** high
 
-**Surfaces:** backup, export
+**Surfaces:** backup, export, import, playbook
 
 **Introduced by:** bd-tc-epic-qzk7o.2.4 (epic TC)
 

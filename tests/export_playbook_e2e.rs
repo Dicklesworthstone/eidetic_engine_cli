@@ -168,6 +168,14 @@ fn normalize_playbook_export_response(mut value: JsonValue) -> JsonValue {
             scrub_playbook_rule(rule);
         }
     }
+    // The store-local authentication block (TC-D14) has a random key id and a
+    // MAC over rule ids/timestamps, so only its schema and count are stable.
+    let authentication = &mut value["data"]["document"]["authentication"];
+    if authentication.is_object() {
+        authentication["keyId"] = JsonValue::String("<KEY_ID>".to_owned());
+        authentication["recordsRoot"] = JsonValue::String("<RECORDS_ROOT>".to_owned());
+        authentication["mac"] = JsonValue::String("<MAC>".to_owned());
+    }
     value
 }
 
