@@ -172,6 +172,7 @@ fn normalize_playbook_export_response(mut value: JsonValue) -> JsonValue {
     value["data"]["outputPath"] = JsonValue::String("<PLAYBOOK>".to_owned());
     value["data"]["artifactHash"] = JsonValue::String("<ARTIFACT_HASH>".to_owned());
     value["data"]["document"]["exportedAt"] = JsonValue::String("<TIMESTAMP>".to_owned());
+    value["data"]["document"]["eeVersion"] = JsonValue::String("<VERSION>".to_owned());
     value["data"]["document"]["workspaceId"] = JsonValue::String("<WORKSPACE_ID>".to_owned());
     value["data"]["document"]["workspacePath"] = JsonValue::String("<WORKSPACE>".to_owned());
     if let Some(rules) = value["data"]["document"]["rules"].as_array_mut() {

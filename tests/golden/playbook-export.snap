@@ -20,7 +20,7 @@
     "document": {
       "schema": "ee.playbook.portable.v1",
       "exportedAt": "<TIMESTAMP>",
-      "eeVersion": "0.1.0",
+      "eeVersion": "<VERSION>",
       "workspaceId": "<WORKSPACE_ID>",
       "workspacePath": "<WORKSPACE>",
       "ruleCount": 1,
