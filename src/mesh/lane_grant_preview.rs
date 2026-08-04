@@ -21,13 +21,12 @@
 //! flow: (1) the preview is a pure read with a strict "no DB writes,
 //! no audit rows" invariant, while auto-enroll is mutating; (2) the
 //! visibility math is non-trivial and earns its own focused test
-//! surface; (3) keeping the schema constants here lets the CLI / MCP
-//! renderer follow-up wire without re-deriving them.
+//! surface; (3) keeping the schema constants here lets the CLI and a future
+//! MCP renderer consume one shape without re-deriving it.
 //!
-//! The CLI / MCP / renderer surface (`ee mesh preview-grant`,
-//! `ee_mesh_preview_grant` MCP tool) lands in a follow-up slice to
-//! avoid touching `src/cli/mod.rs` while other agents hold
-//! reservations there.
+//! The `ee mesh preview-grant` CLI surface is wired to real DB inputs. An
+//! `ee_mesh_preview_grant` MCP tool remains deferred; it must reuse this pure
+//! computation and schema rather than introduce a second preview contract.
 
 use std::cmp::Reverse;
 #[cfg(test)]
@@ -252,8 +251,8 @@ pub struct LaneGrantPreviewInput<'a> {
     /// Reported into the output after terminal/control hazards are
     /// deterministically neutralized.
     pub redaction_rules: &'a [String],
-    /// Seed for [`SampleStrategy::Random`]. Pinned by the test layer
-    /// and by `--seed` on the future CLI surface for reproducibility.
+    /// Seed for [`SampleStrategy::Random`]. Pinned by the test layer and by
+    /// the CLI's `--seed` option for reproducibility.
     pub sample_random_seed: u64,
 }
 

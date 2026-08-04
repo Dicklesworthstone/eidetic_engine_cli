@@ -17,7 +17,8 @@ mesh sync --once` is wired to a no-op transport that always emits
 `mesh_sync_once_network_deferred`, discovery reads Tailscale ACL capability
 metadata that no code ever publishes, and the mesh policy engine
 (`decide_mesh_peer_policy` / `decide_mesh_outbound_policy` / `decide_mesh_import`)
-has zero production callers. The working peer data path today is sneakernet:
+now gates the authenticated file-transfer and consent surfaces, but no live
+network transport calls it. The working peer data path today is sneakernet:
 `ee mesh export --peer <peer-id>` → copy file → `ee mesh import`.
 
 This plan turns that foundation into **team confederation**: N human users, each
@@ -161,11 +162,11 @@ map, design docs/ADRs, trust/identity surfaces, beads inventory).
 | Hello wire protocol (`ee.mesh.hello.v1` / `.response.v1` / `.error.v1`), ≤4096-byte payloads, version negotiation, privacy-preserving decline | `src/mesh/hello.rs`; `decide_hello_response` at `:405` | Complete; **zero non-test callers**. |
 | Discovery policy: `service_tag` (default) / `auto_admit` / `allowlist` on both caller and responder axes; denylist overrides all; TOML files under `<ws>/.ee/` | `src/mesh/discovery_policy.rs`; CLI `src/cli/mesh.rs:1322–1477` | Real and wired for policy *decisions*. |
 | Auto-enrollment: 13-step fail-closed flow, forensic audit-before-write, tailnet/node-key identity guard, rollback | `src/mesh/auto_enrollment.rs`, `auto_enrollment_safety.rs`, `identity_change_guard.rs`; CLI `src/cli/mesh.rs:1164–1320` | Real, transactional. But see trust dead-end in §3.3. |
-| Mesh policy engine: per-peer per-lane per-origin-workspace inbound/outbound decisions, trust-lane ceilings, side-effect booleans | `src/core/memory_scope.rs:754,999,658`; facade `src/mesh/policy.rs` | Complete + tested; **zero production callers**. |
+| Mesh policy engine: per-peer per-lane per-origin-workspace inbound/outbound decisions, trust-lane ceilings, side-effect booleans | `src/core/memory_scope.rs`; facade `src/mesh/policy.rs`; production callers in `src/mesh/foreground_cli.rs` and `src/cli/mesh.rs` | Complete, tested, and load-bearing for file export/import plus consent previews; live network transport remains deferred. |
 | Authenticated lane-grant consent (DB-backed counts, revision-pinned candidates, redacted samples, cautions, grant/revoke) | `src/mesh/lane_grant_preview.rs`, `src/mesh/lane_grant.rs`; CLI wiring in `src/cli/mesh.rs` | T1.4 is wired: ordinary previews are deterministic and token-free; explicit robot issuance binds the complete eligible memory and mesh-ledger candidate set, and grant/revoke mutate generation plus audit atomically. |
-| Pre-export secret scan (hard-denies `ee mesh export` with `mesh_secret_export_denied`) | `src/policy/mod.rs:284–350` | Real and enforced, but its error/audit finding exposes an unkeyed `valueHash` of the secret-bearing value—an offline equality/dictionary oracle. |
+| Pre-export secret scan (hard-denies `ee mesh export` with `mesh_secret_export_denied`) | `src/policy/mod.rs` | Real and enforced. The pure detector remains deterministic and value-free; the command boundary decorates findings with fresh opaque CSPRNG-backed `findingId` values before error/audit projection. |
 | `ee mesh export` / `ee mesh import`: bounded, schema-gated, idempotent, ledger-writing, index-job-enqueuing file exchange | `src/cli/mesh.rs:1793–1872, 1988–2028, 3056–3262` | Real. **This is the only working peer data path today.** |
-| `ee share preview`: DB-backed counts and redacted examples; optional `--record-consent` audit | `src/cli/share.rs`, `src/policy/mod.rs:530–583` | Real, but verdicts are simulated, per-example unkeyed content hashes and the aggregate public hash are offline oracles, serialization failure becomes a string-shaped “hash,” and `--record-consent` mutates a preview without applying any exposure. |
+| `ee share preview`: DB-backed counts and redacted examples | `src/cli/share.rs`, `src/policy/mod.rs` | Real, read-only, and policy-backed. Public content/aggregate hashes and `--record-consent` are removed; unknown peers fail closed with an explicit degraded signal. |
 | Emergency disable/reenable, workspace-scoped, honest `PeerScopeNotDurable` for `--peer` | `src/mesh/emergency_disable.rs`; CLI `src/cli/mesh.rs:923–1012` | Real (peer-scoped containment owed under bd-3mw86, in progress by another agent). |
 | Read-side visibility filter for mesh-derived hits | `src/core/search.rs:9816–9830`, `src/core/context.rs:6484` | Real and wired. |
 | Local Tailscale probe: unix-socket LocalAPI with a ~60-line hand-rolled HTTP client + subprocess fallback, binary authenticity check | `src/core/tailscale_probe.rs:887–1020` | Real. **The only real network I/O in the subsystem — and the precedent that std::net networking is compatible with the forbidden-deps policy.** |
@@ -249,21 +250,15 @@ and `cache.rs` get theirs in the body-lane milestone (P4.6), not before.
     similarly passes `trust_class` through verbatim (`src/core/rule.rs:2273`),
     attenuating only maturity. **The informal manual team-sync path is strictly
     more permissive than the mesh.** This must be closed, not formalized.
-11. **Consent and secret-scan hashes are content oracles, and preview
-    “consent” has no matching effect.** `share_preview_content_hash`
-    (`src/policy/mod.rs:579–583`) emits an unkeyed 64-bit prefix for each
-    body sample; the aggregate `share_preview_hash` hashes that report and
-    turns serialization failure into a token-shaped string
-    (`:530–534`). `MeshExportSecretFinding.value_hash` exposes a full unkeyed
-    digest of the secret-bearing value in errors and audit (`:378–385`).
-    These are offline equality/dictionary oracles. Meanwhile
-    `ee share preview --record-consent` appends consent without exporting,
-    granting, or otherwise applying the reviewed exposure, contradicting the
-    program's read-only-preview rule. Remove the raw hashes and the
-    side-effecting preview flag; authenticate actual exposure approval with a
-    short-lived, nonce-salted, surface-bound store-local token. Keep it
-    in-process for human confirmation and consume it through bounded stdin for
-    robot workflows—never argv or environment variables.
+11. **Resolved baseline defect — consent and secret-scan hashes were content
+    oracles, and preview “consent” had no matching effect.** At the audited
+    baseline, share-preview hashes and `MeshExportSecretFinding.value_hash`
+    enabled offline equality checks, while `--record-consent` mutated state
+    without applying the reviewed exposure. P0.1/P0.3/T1.4 removed those public
+    hashes and the side-effecting preview flag, introduced fresh per-scan
+    `findingId` values, and bound actual grant mutations to a short-lived,
+    nonce-salted, surface-bound store-local token consumed in-process or
+    through bounded stdin—never argv or environment variables.
 12. **Status surfaces lie by hardcoding.** `ee mesh status` reports a fixed
     lane policy regardless of config (`src/mesh/foreground_cli.rs:1296–1303`);
     hello-responder `running:false`, discovery-cache `not_loaded`, peer-state
