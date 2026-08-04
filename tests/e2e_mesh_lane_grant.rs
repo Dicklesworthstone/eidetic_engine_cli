@@ -1642,7 +1642,7 @@ fn concurrent_double_apply_commits_once_and_stales_the_loser() -> TestResult {
                     let approval_audit_id = verified.audit_id().to_opaque_string();
                     connection
                         .insert_audit_with_mutation_kind(
-                            "audit_concurrent_lane_grant",
+                            &ee::db::generate_audit_id(),
                             &CreateAuditInput {
                                 workspace_id: Some(input.workspace_id.clone()),
                                 actor: Some("e2e concurrent lane grant".to_owned()),
@@ -2439,9 +2439,29 @@ fn mesh_export_rejects_unknown_and_disabled_targets_without_effects() -> TestRes
         !missing_flag.status.success(),
         "mesh export without --peer must fail argument parsing",
     )?;
+    ensure_json_stderr_empty(&missing_flag, "missing mesh export peer")?;
+    let missing_flag_json = stdout_json(&missing_flag, "missing mesh export peer")?;
+    ensure_equal(
+        &missing_flag_json.pointer("/schema").and_then(Value::as_str),
+        &Some("ee.error.v2"),
+        "missing-peer parse error schema",
+    )?;
+    ensure_equal(
+        &missing_flag_json
+            .pointer("/error/code")
+            .and_then(Value::as_str),
+        &Some("usage"),
+        "missing-peer parse error code",
+    )?;
     ensure(
-        redacted_output(&missing_flag.stderr).contains("--peer <PEER_ID>"),
-        "missing-peer parse failure must identify the required flag",
+        missing_flag_json
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| {
+                message.contains("the following required arguments were not provided:")
+                    && message.contains("--peer <PEER_ID>")
+            }),
+        format!("missing-peer parse failure must identify the required flag: {missing_flag_json}"),
     )?;
     ensure_equal(
         &fs::read(&output_path)

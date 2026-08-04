@@ -409,6 +409,7 @@ fn mesh_export_secret_finding(
         return None;
     }
 
+    let canonical_public_event_id = mesh_export_subject_is_canonical_public_event_id(subject);
     let redaction = redact_secret_like_content(&subject.value);
     let path_risk = mesh_export_path_secret_risk(&subject.field, &subject.value);
     if !redaction.redacted && path_risk.is_empty() {
@@ -423,6 +424,18 @@ fn mesh_export_secret_finding(
         .collect::<Vec<_>>();
     pattern_ids.sort();
     pattern_ids.dedup();
+    if canonical_public_event_id {
+        pattern_ids.retain(|pattern_id| pattern_id != "high_entropy_secret");
+    }
+    if pattern_ids.is_empty() {
+        return None;
+    }
+
+    let retained_match_count = redaction
+        .matches
+        .iter()
+        .filter(|matched| !canonical_public_event_id || matched.pattern_id != "high_entropy_secret")
+        .count();
 
     let redacted_preview = if redaction.redacted {
         mesh_secret_redacted_preview(&redaction.content)
@@ -435,12 +448,32 @@ fn mesh_export_secret_finding(
         source_id: subject.source_id.clone(),
         field: subject.field.clone(),
         pattern_ids,
-        match_count: redaction.matches.len().max(1) as u32,
+        match_count: retained_match_count.max(1) as u32,
         redacted_preview,
         // Pure detector: ID-free and byte-deterministic. The effectful command
         // boundary decorates via decorate_export_secret_findings.
         finding_id: None,
     })
+}
+
+fn mesh_export_subject_is_canonical_public_event_id(subject: &MeshExportSecretScanSubject) -> bool {
+    // Event IDs are public content digests. Keep this exemption bound to the
+    // two canonical identity projections so an ID-shaped value in arbitrary
+    // event content cannot bypass the ordinary secret detector.
+    if subject.source_surface != "event"
+        || !matches!(subject.field.as_str(), "eventId" | "eventJson.eventId")
+        || subject.source_id != subject.value
+    {
+        return false;
+    }
+
+    let Some(digest) = subject.value.strip_prefix("mesh_evt_") else {
+        return false;
+    };
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn mesh_export_path_secret_risk(field: &str, value: &str) -> Vec<String> {
@@ -4952,6 +4985,42 @@ mod tests {
 
         assert!(!report.redacted);
         assert!(report.content.contains(&public_hash));
+    }
+
+    #[test]
+    fn mesh_export_scan_exempts_only_matching_canonical_event_identity_fields() {
+        let event_id = "mesh_evt_ac0af31de1c5c8b08d69329d01cd8112d0e2c96e20884e03e6725b327be422c9";
+        let report = scan_mesh_export_subjects(&[
+            MeshExportSecretScanSubject::new("event", event_id, "eventId", event_id),
+            MeshExportSecretScanSubject::new("event", event_id, "eventJson.eventId", event_id),
+        ]);
+        assert_eq!(report.scanned_field_count, 2);
+        assert_eq!(report.finding_count, 0);
+        assert!(!report.denied());
+
+        let payload_report = scan_mesh_export_subjects(&[MeshExportSecretScanSubject::new(
+            "event",
+            event_id,
+            "eventJson.trustClaim.token",
+            event_id,
+        )]);
+        assert!(payload_report.denied());
+        assert_eq!(
+            payload_report.denied_secret_classes,
+            vec!["high_entropy_secret".to_owned()]
+        );
+
+        let mismatched_report = scan_mesh_export_subjects(&[MeshExportSecretScanSubject::new(
+            "event",
+            "mesh_evt_mismatched",
+            "eventId",
+            event_id,
+        )]);
+        assert!(mismatched_report.denied());
+        assert_eq!(
+            mismatched_report.denied_secret_classes,
+            vec!["high_entropy_secret".to_owned()]
+        );
     }
 
     #[test]
