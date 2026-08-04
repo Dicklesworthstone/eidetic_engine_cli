@@ -31273,7 +31273,7 @@ mod tests {
             &reflection_result_candidate_input(
                 request_id,
                 Some("approved"),
-                "2026-08-04T12:01:00Z",
+                "2026-05-24T00:10:00Z",
             ),
         )?;
         ensure(
@@ -31282,7 +31282,7 @@ mod tests {
                 request_id,
                 candidate_id,
                 &reflection_hash('9'),
-                "2026-08-04T12:02:00Z",
+                "2026-05-24T00:15:00Z",
             )?,
             "V091 fixture links a live consumer to the candidate",
         )?;
