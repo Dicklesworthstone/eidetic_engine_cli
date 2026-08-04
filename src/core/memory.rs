@@ -15514,9 +15514,7 @@ mod tests {
     #[test]
     fn remember_batch_accepts_registry_fields_object() -> TestResult {
         let temp = upgrade_test_workspace()?;
-        let input = concat!(
-            "{\"content\":\"Remote verification decision.\",\"kind\":\"decision\",\"fields\":{\"chosen\":\"RCH remote\",\"options\":[\"local Cargo\",\"RCH remote\"],\"rationale\":\"avoid local artifacts\"}}\n",
-        );
+        let input = "{\"content\":\"Remote verification decision.\",\"kind\":\"decision\",\"fields\":{\"chosen\":\"RCH remote\",\"options\":[\"local Cargo\",\"RCH remote\"],\"rationale\":\"avoid local artifacts\"}}\n";
         let report = remember_memory_batch_stdin(&upgrade_batch_options(temp.path(), false), input)
             .map_err(|error| error.message())?;
         ensure(report.stored_count, 1, "stored typed batch row")?;
