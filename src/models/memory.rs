@@ -338,6 +338,161 @@ fn typed_memory_valid_field_names(specs: &[TypedMemoryFieldSpec]) -> Vec<String>
     specs.iter().map(|spec| spec.name.to_owned()).collect()
 }
 
+/// Return the canonical registry field names accepted for a memory kind.
+///
+/// Kinds without a v2 typed sidecar return an empty list. This is the same
+/// vocabulary published by `ee.memory.typed_fields.v2` and used in structured
+/// validation errors.
+#[must_use]
+pub fn typed_memory_field_names(kind: &MemoryKind) -> Vec<String> {
+    typed_memory_field_specs(kind)
+        .map(typed_memory_valid_field_names)
+        .unwrap_or_default()
+}
+
+/// Normalize a typed-memory field name exactly as `ee search --field` does.
+///
+/// CLI callers may use kebab-case for convenience; persisted sidecars always
+/// use lowercase snake_case registry names.
+pub fn normalize_typed_memory_field_name(raw: &str) -> Result<String, String> {
+    let field = raw.trim().replace('-', "_");
+    if field.is_empty() {
+        return Err("typed memory field name must not be empty".to_owned());
+    }
+    if field
+        .bytes()
+        .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
+    {
+        Ok(field)
+    } else {
+        Err(format!(
+            "typed memory field name `{}` must be lowercase snake_case",
+            raw.trim()
+        ))
+    }
+}
+
+/// Convert repeatable `NAME=VALUE` assignments into one canonical v2 sidecar.
+///
+/// Registry text-list fields accumulate repeated assignments in argument
+/// order. Scalar fields must be assigned at most once. Values may contain
+/// additional `=` characters; `~` and `^` are search-only operators.
+pub fn canonicalize_typed_memory_field_assignments_json_with_redactor<F>(
+    kind: &MemoryKind,
+    assignments: &[String],
+    redact: F,
+) -> Result<Option<String>, MemoryValidationError>
+where
+    F: FnMut(&str) -> String,
+{
+    if assignments.is_empty() {
+        return Ok(None);
+    }
+
+    let specs = typed_memory_field_specs(kind).ok_or_else(|| {
+        MemoryValidationError::TypedFieldsUnsupportedKind {
+            kind: kind.as_str().to_owned(),
+        }
+    })?;
+    let mut fields = BTreeMap::<String, JsonValue>::new();
+    for assignment in assignments {
+        let Some((raw_field, raw_value)) = assignment.split_once('=') else {
+            let separator = assignment
+                .char_indices()
+                .find_map(|(index, character)| matches!(character, '~' | '^').then_some(index))
+                .unwrap_or(assignment.len());
+            let raw_field = assignment[..separator].trim();
+            let field = normalize_typed_memory_field_name(raw_field)
+                .ok()
+                .filter(|field| typed_memory_field_spec(specs, field).is_some())
+                .unwrap_or_else(|| "fields".to_owned());
+            return Err(MemoryValidationError::TypedFieldInvalid {
+                field,
+                reason: "assignment must use NAME=VALUE; `~` and `^` are search-only separators"
+                    .to_owned(),
+            });
+        };
+        let field = normalize_typed_memory_field_name(raw_field).map_err(|reason| {
+            MemoryValidationError::TypedFieldInvalid {
+                field: raw_field.trim().to_owned(),
+                reason,
+            }
+        })?;
+        let value = raw_value.trim();
+        if value.is_empty() {
+            return Err(MemoryValidationError::TypedFieldInvalid {
+                field,
+                reason: "assignment value must not be empty".to_owned(),
+            });
+        }
+        let Some(spec) = typed_memory_field_spec(specs, &field) else {
+            return Err(MemoryValidationError::TypedFieldNotAllowed {
+                kind: kind.as_str().to_owned(),
+                field,
+                valid_fields: typed_memory_valid_field_names(specs),
+            });
+        };
+        match spec.shape {
+            TypedMemoryFieldShape::TextList => {
+                let values = fields
+                    .entry(field)
+                    .or_insert_with(|| JsonValue::Array(Vec::new()));
+                let values = values.as_array_mut().ok_or_else(|| {
+                    MemoryValidationError::InvalidTypedFieldsJson {
+                        message: "typed list assignment accumulator was not an array".to_owned(),
+                    }
+                })?;
+                values.push(JsonValue::String(value.to_owned()));
+            }
+            TypedMemoryFieldShape::Text | TypedMemoryFieldShape::Rfc3339 => {
+                if fields
+                    .insert(field.clone(), JsonValue::String(value.to_owned()))
+                    .is_some()
+                {
+                    return Err(MemoryValidationError::TypedFieldInvalid {
+                        field,
+                        reason: "scalar field was assigned more than once".to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    let raw_json = serde_json::to_string(&fields).map_err(|error| {
+        MemoryValidationError::InvalidTypedFieldsJson {
+            message: error.to_string(),
+        }
+    })?;
+    canonicalize_typed_memory_fields_json_with_redactor(kind, &raw_json, redact).map(Some)
+}
+
+/// Merge body-extracted and explicitly assigned sidecars.
+///
+/// Explicit assignments win when the same registry field was also extracted
+/// from the body. Both inputs must already be canonical and redacted.
+pub fn merge_typed_memory_fields_json(
+    kind: &MemoryKind,
+    extracted_json: Option<&str>,
+    explicit_json: Option<&str>,
+) -> Result<Option<String>, MemoryValidationError> {
+    let mut fields = match extracted_json {
+        Some(raw) => typed_memory_fields_from_json(kind, raw)?,
+        None => BTreeMap::new(),
+    };
+    if let Some(raw) = explicit_json {
+        fields.extend(typed_memory_fields_from_json(kind, raw)?);
+    }
+    if fields.is_empty() {
+        return Ok(None);
+    }
+    let raw_json = serde_json::to_string(&fields).map_err(|error| {
+        MemoryValidationError::InvalidTypedFieldsJson {
+            message: error.to_string(),
+        }
+    })?;
+    canonicalize_typed_memory_fields_json(kind, &raw_json).map(Some)
+}
+
 /// Canonicalize validated typed memory fields without changing values.
 ///
 /// This is intended for already-redacted inputs. Ingestion paths that accept
@@ -1423,10 +1578,11 @@ mod tests {
         Confidence, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES,
         MAX_TYPED_MEMORY_FIELD_LIST_ITEMS, MAX_TYPED_MEMORY_FIELD_VALUE_BYTES,
         MAX_TYPED_MEMORY_FIELDS, MemoryContent, MemoryKind, MemoryLevel, MemoryValidationError,
-        TYPED_MEMORY_FIELDS_SCHEMA_V2, Tag, UnitScore, canonicalize_typed_memory_fields_json,
-        canonicalize_typed_memory_fields_json_with_redactor,
-        extract_typed_memory_fields_json_with_redactor, typed_memory_fields_from_json,
-        typed_memory_index_metadata_from_json,
+        TYPED_MEMORY_FIELDS_SCHEMA_V2, Tag, UnitScore,
+        canonicalize_typed_memory_field_assignments_json_with_redactor,
+        canonicalize_typed_memory_fields_json, canonicalize_typed_memory_fields_json_with_redactor,
+        extract_typed_memory_fields_json_with_redactor, merge_typed_memory_fields_json,
+        typed_memory_fields_from_json, typed_memory_index_metadata_from_json,
     };
 
     fn decision_field_text_strategy() -> impl Strategy<Value = String> {
@@ -1834,6 +1990,82 @@ mod tests {
             err,
             MemoryValidationError::TypedFieldNotAllowed { .. }
         ));
+    }
+
+    #[test]
+    fn typed_memory_field_assignments_normalize_and_accumulate_lists() {
+        let assignments = vec![
+            "chosen=RCH remote".to_owned(),
+            "options=local Cargo".to_owned(),
+            "options=RCH remote=verified".to_owned(),
+            "revisit-by=2026-09-15T00:00:00Z".to_owned(),
+        ];
+        let canonical = canonicalize_typed_memory_field_assignments_json_with_redactor(
+            &MemoryKind::Decision,
+            &assignments,
+            str::to_owned,
+        )
+        .expect("explicit decision fields validate")
+        .expect("explicit fields produce a sidecar");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&canonical).expect("canonical assignment JSON");
+
+        assert_eq!(parsed["fields"]["chosen"], "RCH remote");
+        assert_eq!(parsed["fields"]["options"][0], "local Cargo");
+        assert_eq!(parsed["fields"]["options"][1], "RCH remote=verified");
+        assert_eq!(parsed["fields"]["revisit_by"], "2026-09-15T00:00:00Z");
+    }
+
+    #[test]
+    fn typed_memory_field_assignments_reject_ambiguous_scalars_and_search_operators() {
+        let duplicate = canonicalize_typed_memory_field_assignments_json_with_redactor(
+            &MemoryKind::Failure,
+            &["family=one".to_owned(), "family=two".to_owned()],
+            str::to_owned,
+        )
+        .expect_err("duplicate scalar assignment is ambiguous");
+        assert!(matches!(
+            duplicate,
+            MemoryValidationError::TypedFieldInvalid { field, .. } if field == "family"
+        ));
+
+        let search_operator = canonicalize_typed_memory_field_assignments_json_with_redactor(
+            &MemoryKind::Failure,
+            &["family~prefetch".to_owned()],
+            str::to_owned,
+        )
+        .expect_err("search operator is not a write assignment");
+        assert!(matches!(
+            search_operator,
+            MemoryValidationError::TypedFieldInvalid { field, reason }
+                if field == "family" && reason.contains("NAME=VALUE")
+        ));
+    }
+
+    #[test]
+    fn explicit_typed_fields_override_body_extraction() {
+        let extracted = extract_typed_memory_fields_json_with_redactor(
+            &MemoryKind::Failure,
+            "Family: extracted family. Cause: extracted cause.",
+            str::to_owned,
+        )
+        .expect("body fields extract")
+        .expect("body has fields");
+        let explicit = canonicalize_typed_memory_field_assignments_json_with_redactor(
+            &MemoryKind::Failure,
+            &["family=explicit family".to_owned()],
+            str::to_owned,
+        )
+        .expect("explicit field validates")
+        .expect("explicit field exists");
+        let merged =
+            merge_typed_memory_fields_json(&MemoryKind::Failure, Some(&extracted), Some(&explicit))
+                .expect("sidecars merge")
+                .expect("merged sidecar exists");
+        let parsed: serde_json::Value = serde_json::from_str(&merged).expect("merged sidecar JSON");
+
+        assert_eq!(parsed["fields"]["family"], "explicit family");
+        assert_eq!(parsed["fields"]["cause"], "extracted cause");
     }
 
     #[test]

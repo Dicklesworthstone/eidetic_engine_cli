@@ -10174,6 +10174,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: memory_list_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::memory::TYPED_MEMORY_FIELDS_SCHEMA_V2,
+            version: "2",
+            description: "Registry-backed typed sidecar fields for structured memories",
+            category: "memory",
+            definition: typed_memory_fields_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.status.v1",
             version: "1",
             description: "Status response envelope and health posture payload",
@@ -11586,6 +11593,10 @@ fn memory_show_schema_definition() -> String {
 
 fn memory_list_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.memory.list.v1.json").to_string()
+}
+
+fn typed_memory_fields_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.memory.typed_fields.v2.json").to_string()
 }
 
 fn status_response_schema_definition() -> String {

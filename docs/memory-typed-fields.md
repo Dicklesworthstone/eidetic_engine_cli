@@ -1,9 +1,10 @@
 # Typed Memory Fields
 
 Typed memory fields are the machine-readable sidecar for memory kinds that
-agents need to filter, inspect, or reason about without parsing prose. The body
-of the memory stays authoritative; the sidecar is a validated extraction of
-explicit markers already present in the body.
+agents need to filter, inspect, or reason about without parsing prose. The
+sidecar can be populated from explicit `--field NAME=VALUE` assignments or by
+extracting labeled markers already present in the body. Explicit assignments
+win when both sources name the same registry field.
 
 The canonical sidecar schema is `ee.memory.typed_fields.v2`:
 
@@ -69,6 +70,45 @@ now need five fields (`options`, `chosen`, `rationale`, `supersedes`,
 `revisit_by`). The headroom is bounded; user-defined field names are still out
 of scope.
 
+## Explicit Capture
+
+`ee remember` and `ee note` accept repeatable exact assignments:
+
+```bash
+ee remember "Remote verification won the storage decision." \
+  --kind decision \
+  --field "chosen=RCH remote" \
+  --field "options=local Cargo" \
+  --field "options=RCH remote" \
+  --field "rationale=avoid local build artifacts" \
+  --json
+```
+
+Field names use the same normalization as search: `revisit-by` and
+`revisit_by` both persist as `revisit_by`. The first `=` separates the name
+from the value, so additional `=`, `~`, and `^` characters remain literal parts
+of the value. Using `~` or `^` instead of `=` as the assignment separator is
+rejected because those operators are search-only.
+
+Repeat a list-valued field (`options`, `exceptions`) to append items in command
+order. Assigning a scalar field more than once is an error. Explicit values
+override values extracted from body labels; other extracted fields remain.
+Dry runs validate and return the canonical field map at
+`data.typedFields` without writing it.
+
+For `ee remember --batch --stdin`, put a `fields` object on each JSONL row.
+Scalar registry fields take strings and list fields take arrays of strings:
+
+```json
+{"content":"Remote verification decision.","kind":"decision","fields":{"chosen":"RCH remote","options":["local Cargo","RCH remote"]}}
+```
+
+Command-level `--field` is rejected in batch mode so fields cannot be silently
+applied to every row. `--field` is also rejected with `--reinforce`, because a
+reinforced write preserves the surviving memory rather than implicitly
+mutating its sidecar. Idempotency identity includes the canonical explicit
+fields, so reusing a key with changed fields is a conflict.
+
 ## Search Filters
 
 `ee search` accepts `--kind <kind>` plus repeatable typed field filters:
@@ -95,7 +135,9 @@ different field contract. The common cases are:
 
 | Case | Outcome |
 |---|---|
-| Field name is not valid for the kind | error includes the offending field and valid names |
+| Field name is not valid for the kind | `typed_field_unknown` includes the offending field and valid names |
+| Assignment omits `=` or uses `~` / `^` | `typed_field_invalid` explains that writes require `NAME=VALUE` |
+| Scalar field is assigned more than once | `typed_field_invalid` identifies the duplicate field |
 | Field has the wrong JSON type | error names the expected shape |
 | RFC3339 field cannot parse | error names the timestamp field and parse reason |
 | Text/list/JSON exceeds a bound | error includes actual size and limit |
@@ -106,9 +148,12 @@ different field contract. The common cases are:
 Failure:
 
 ```bash
-ee remember "Tried: page-cache prefetch. Result: tail latency regressed. Family: aggressive-prefetch. Cause: cache pollution. Reverted at SHA 9af3c21." \
+ee remember "Tried page-cache prefetch; tail latency regressed and the change was reverted." \
   --kind failure \
   --level episodic \
+  --field family=aggressive-prefetch \
+  --field "cause=cache pollution" \
+  --field reverted-at-sha=9af3c21 \
   --json
 ```
 
@@ -139,5 +184,5 @@ ee memory show <memory-id> --json
 ```
 
 Machine readers should read `data.memory.typedFields` when present. Absence of
-`typedFields` means the memory body did not contain explicit extractable fields
-or the kind is not registry-backed.
+`typedFields` means no explicit assignments or extractable body labels produced
+fields, or the kind is not registry-backed.

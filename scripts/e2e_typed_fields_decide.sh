@@ -98,8 +98,9 @@ assert_jq_two_args() {
 
 remember_fielded_memory() {
     local kind="$1" body="$2" source="$3"
+    shift 3
     ee_json --workspace "$WS" remember "$body" \
-        --level procedural --kind "$kind" --source "$source" --json
+        --level procedural --kind "$kind" --source "$source" "$@" --json
 }
 
 with_temp_workspace WS
@@ -109,10 +110,14 @@ init_out="$(ee_json --workspace "$WS" init --json)"
 assert_jq "$init_out" '.success == true' "ee init succeeds"
 
 step "remember fielded failure memory"
-failure_body="Tried page-cache WAL prefetch. Result: -8% on small-N reads. Family: page-cache wal. Cause: cache pollution. Regression surface: shard read pool. Reverted at SHA 9af3c21."
-failure_out="$(remember_fielded_memory "failure" "$failure_body" "test://typed-fields-decide/failure")"
+failure_body="Tried page-cache WAL prefetch; small-N reads regressed and the change was reverted."
+failure_out="$(remember_fielded_memory "failure" "$failure_body" "test://typed-fields-decide/failure" \
+    --field "family=page-cache wal" --field "cause=cache pollution" \
+    --field "regression-surface=shard read pool" --field "reverted-at-sha=9af3c21")"
 assert_jq "$failure_out" '.success == true and .data.kind == "failure" and .data.persisted == true' \
     "failure memory persisted"
+assert_jq "$failure_out" '.data.typedFields.family == "page-cache wal" and .data.typedFields.cause == "cache pollution"' \
+    "remember response reports explicit failure fields"
 failure_id="$(memory_id_from_remember "$failure_out")"
 family_search="$(ee_json --workspace "$WS" search "page-cache wal" \
     --kind failure --field "family=page-cache wal" --json)"
@@ -120,10 +125,11 @@ assert_jq "$family_search" '.success == true' "failure family exact field search
 assert_search_returns_memory "$family_search" "$failure_id" "failure family exact search returns fielded memory"
 
 step "remember fielded command memory"
-command_body="Command: scripts/rch_verify.sh -- cargo check --all-targets
-When to use: before closing typed-fields decide work
-Exit code: 0 means remote proof passed"
-command_out="$(remember_fielded_memory "command" "$command_body" "test://typed-fields-decide/command")"
+command_body="Use scripts/rch_verify.sh as the remote proof before closing typed-fields work."
+command_out="$(remember_fielded_memory "command" "$command_body" "test://typed-fields-decide/command" \
+    --field "command=scripts/rch_verify.sh -- cargo check --all-targets" \
+    --field "when-to-use=before closing typed-fields decide work" \
+    --field "exit-meaning=0 means remote proof passed")"
 assert_jq "$command_out" '.success == true and .data.kind == "command"' "command memory persisted"
 command_id="$(memory_id_from_remember "$command_out")"
 command_search="$(ee_json --workspace "$WS" search "remote proof" \
@@ -131,8 +137,11 @@ command_search="$(ee_json --workspace "$WS" search "remote proof" \
 assert_search_returns_memory "$command_search" "$command_id" "command prefix search returns fielded memory"
 
 step "remember fielded rule memory"
-rule_body="Condition: typed field regression. Action: run scripts/e2e_typed_fields_decide.sh. Exceptions: docs only, read-only review."
-rule_out="$(remember_fielded_memory "rule" "$rule_body" "test://typed-fields-decide/rule")"
+rule_body="Protect the typed-field regression contract with the public E2E harness."
+rule_out="$(remember_fielded_memory "rule" "$rule_body" "test://typed-fields-decide/rule" \
+    --field "condition=typed field regression" \
+    --field "action=run scripts/e2e_typed_fields_decide.sh" \
+    --field "exceptions=docs only" --field "exceptions=read-only review")"
 assert_jq "$rule_out" '.success == true and .data.kind == "rule"' "rule memory persisted"
 rule_id="$(memory_id_from_remember "$rule_out")"
 rule_search="$(ee_json --workspace "$WS" search "typed field regression" \
@@ -140,8 +149,10 @@ rule_search="$(ee_json --workspace "$WS" search "typed field regression" \
 assert_search_returns_memory "$rule_search" "$rule_id" "rule contains search returns fielded memory"
 
 step "remember fielded convention memory"
-convention_body="Scope: decide typed-fields tests. Pattern: use public CLI JSON envelopes for contract tests."
-convention_out="$(remember_fielded_memory "convention" "$convention_body" "test://typed-fields-decide/convention")"
+convention_body="Public CLI JSON envelopes define the typed-fields test contract."
+convention_out="$(remember_fielded_memory "convention" "$convention_body" "test://typed-fields-decide/convention" \
+    --field "scope=decide typed-fields tests" \
+    --field "pattern=use public CLI JSON envelopes for contract tests")"
 assert_jq "$convention_out" '.success == true and .data.kind == "convention"' "convention memory persisted"
 convention_id="$(memory_id_from_remember "$convention_out")"
 convention_search="$(ee_json --workspace "$WS" search "public CLI" \
@@ -149,16 +160,22 @@ convention_search="$(ee_json --workspace "$WS" search "public CLI" \
 assert_search_returns_memory "$convention_search" "$convention_id" "convention exact search returns fielded memory"
 
 step "remember fielded risk and anti-pattern memories"
-risk_body="Trigger: local Cargo during RCH-only swarm. Blast radius: fills internal SSD. Safer alternative: scripts/rch_verify.sh."
-risk_out="$(remember_fielded_memory "risk" "$risk_body" "test://typed-fields-decide/risk")"
+risk_body="Local Cargo can fill the internal SSD during an RCH-only swarm."
+risk_out="$(remember_fielded_memory "risk" "$risk_body" "test://typed-fields-decide/risk" \
+    --field "trigger=local Cargo during RCH-only swarm" \
+    --field "blast-radius=fills internal SSD" \
+    --field "safer-alternative=scripts/rch_verify.sh")"
 assert_jq "$risk_out" '.success == true and .data.kind == "risk"' "risk memory persisted"
 risk_id="$(memory_id_from_remember "$risk_out")"
 risk_search="$(ee_json --workspace "$WS" search "internal SSD" \
     --kind risk --field "trigger~Cargo" --json)"
 assert_search_returns_memory "$risk_search" "$risk_id" "risk contains search returns fielded memory"
 
-antipattern_body="Trigger: fake abstention as implementation. Blast radius: closes beads without working code. Safer alternative: ship real tests and source."
-antipattern_out="$(remember_fielded_memory "anti-pattern" "$antipattern_body" "test://typed-fields-decide/anti-pattern")"
+antipattern_body="Fake abstention can close beads without working code."
+antipattern_out="$(remember_fielded_memory "anti-pattern" "$antipattern_body" "test://typed-fields-decide/anti-pattern" \
+    --field "trigger=fake abstention as implementation" \
+    --field "blast-radius=closes beads without working code" \
+    --field "safer-alternative=ship real tests and source")"
 assert_jq "$antipattern_out" '.success == true and .data.kind == "anti-pattern"' \
     "anti-pattern memory persisted"
 antipattern_id="$(memory_id_from_remember "$antipattern_out")"
@@ -166,6 +183,12 @@ antipattern_search="$(ee_json --workspace "$WS" search "fake abstention" \
     --kind anti-pattern --field "safer-alternative^ship real" --json)"
 assert_search_returns_memory "$antipattern_search" "$antipattern_id" \
     "anti-pattern prefix search returns fielded memory"
+
+step "note and dry-run expose explicit typed fields without mutation"
+note_out="$(ee_json --workspace "$WS" note "A note about the prefetch family." \
+    --kind failure --field "family=note-prefetch" --dry-run --json)"
+assert_jq "$note_out" '.success == true and .data.dry_run == true and .data.persisted == false and .data.typedFields.family == "note-prefetch"' \
+    "note dry-run validates and reports explicit fields"
 
 step "decide record stores exact typed fields"
 first_out="$(ee_json --workspace "$WS" decide record "Storage layer topic" \
@@ -236,11 +259,11 @@ assert_jq_arg "$second_show" "first_id" "$first_id" \
     '.success == true and .data.memory.typedFields.chosen == "RCH remote" and .data.memory.typedFields.supersedes == $first_id and .data.memory.typedFields.revisit_by == "2026-06-14T12:00:00Z"' \
     "memory show renders superseding decision typed fields"
 
-step "remember batch JSONL derives typed fields and indexes them"
+step "remember batch JSONL writes explicit fields objects and indexes them"
 batch_payload="$LOG_DIR/typed-fields-batch.jsonl"
 printf '%s\n' \
-    '{"content":"Command: ee decide list --json\nWhen to use: inspect current decision heads\nExit code: 0 means listed","level":"procedural","kind":"command","source":"test://typed-fields-decide/batch-command"}' \
-    '{"content":"Condition: typed field batch regression. Action: run scripts/e2e_typed_fields_decide.sh. Exceptions: docs only","level":"procedural","kind":"rule","source":"test://typed-fields-decide/batch-rule"}' \
+    '{"content":"Inspect current decision heads with ee decide list --json.","level":"procedural","kind":"command","fields":{"command":"ee decide list --json","when_to_use":"inspect current decision heads","exit_meaning":"0 means listed"},"source":"test://typed-fields-decide/batch-command"}' \
+    '{"content":"Protect the typed field batch regression.","level":"procedural","kind":"rule","fields":{"condition":"typed field batch regression","action":"run scripts/e2e_typed_fields_decide.sh","exceptions":["docs only"]},"source":"test://typed-fields-decide/batch-rule"}' \
     >"$batch_payload"
 e2e_log_note "command remember batch --stdin payload=$batch_payload"
 batch_out="$("$EE_BIN" --workspace "$WS" remember --batch --stdin --json <"$batch_payload")"

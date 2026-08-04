@@ -75,6 +75,46 @@ fn ee_search_parses_and_accesses_without_panicking() {
     }
 }
 
+#[test]
+fn remember_and_note_typed_field_flags_do_not_collide_with_global_fields() {
+    let remember = Cli::try_parse_from([
+        "ee",
+        "remember",
+        "Remote verification won.",
+        "--kind",
+        "decision",
+        "--field",
+        "chosen=RCH remote",
+        "--field",
+        "options=local Cargo",
+        "--fields",
+        "standard",
+    ])
+    .expect("remember typed fields parse");
+    let Some(Command::Remember(args)) = remember.command else {
+        panic!("expected remember command");
+    };
+    assert_eq!(
+        args.typed_field_assignments,
+        ["chosen=RCH remote", "options=local Cargo"]
+    );
+
+    let note = Cli::try_parse_from([
+        "ee",
+        "note",
+        "A failed prefetch attempt.",
+        "--kind",
+        "failure",
+        "--field",
+        "family=aggressive-prefetch",
+    ])
+    .expect("note typed field parses");
+    let Some(Command::Note(args)) = note.command else {
+        panic!("expected note command");
+    };
+    assert_eq!(args.typed_field_assignments, ["family=aggressive-prefetch"]);
+}
+
 /// Exhaustive build sweep: force clap to fully build every leaf subcommand.
 /// `debug_assert()` already does this internally, but keeping an explicit walk
 /// makes the coverage obvious and fails with the offending subcommand path if a

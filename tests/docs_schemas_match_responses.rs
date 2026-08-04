@@ -86,6 +86,10 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     ),
     ("ee.memory.show.v1", "ee.memory.show.v1.json"),
     ("ee.memory.list.v1", "ee.memory.list.v1.json"),
+    (
+        ee::models::memory::TYPED_MEMORY_FIELDS_SCHEMA_V2,
+        "ee.memory.typed_fields.v2.json",
+    ),
     ("ee.status.v1", "ee.status.v1.json"),
     ("ee.doctor.v1", "ee.doctor.v1.json"),
     ("ee.capabilities.v1", "ee.capabilities.v1.json"),
@@ -249,6 +253,27 @@ fn docs_schema_files_are_strict_draft_2020_12_documents() -> TestResult {
         }
     }
     Ok(())
+}
+
+#[test]
+fn typed_memory_fields_schema_publishes_the_authoritative_utf8_byte_limit() -> TestResult {
+    let schema = schema_doc(ee::models::memory::TYPED_MEMORY_FIELDS_SCHEMA_V2)?;
+    let byte_limit = schema
+        .pointer("/$defs/text/x-ee-maxUtf8Bytes")
+        .and_then(Value::as_u64);
+    let runtime_limit = u64::try_from(ee::models::memory::MAX_TYPED_MEMORY_FIELD_VALUE_BYTES)
+        .map_err(|error| format!("typed-memory runtime byte limit does not fit u64: {error}"))?;
+    if byte_limit != Some(runtime_limit) {
+        return Err(format!(
+            "typed-memory schema byte limit drifted: expected {}, got {byte_limit:?}",
+            ee::models::memory::MAX_TYPED_MEMORY_FIELD_VALUE_BYTES
+        ));
+    }
+    ensure_json_str(
+        &schema,
+        "/$defs/text/description",
+        "Non-empty text capped by the runtime at 4096 UTF-8 bytes. JSON Schema maxLength counts Unicode code points; x-ee-maxUtf8Bytes is the authoritative byte bound for preflight clients.",
+    )
 }
 
 #[test]

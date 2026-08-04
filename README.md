@@ -1558,10 +1558,11 @@ Memory `kind` is orthogonal: `rule`, `fact`, `decision`, `failure`, `command`, `
 Every memory carries: `id`, `level`, `kind`, `content`, `content_hash`, `tags[]`, `confidence`, `utility`, `importance`, `created_at`, `last_seen_at`, `access_count`, `source_type`, `source_uri`, `evidence_spans[]`, `links[]`, `trust_class`.
 
 Registry-backed kinds can also carry a typed sidecar with schema
-`ee.memory.typed_fields.v2`. The sidecar is extraction-first: the memory body
-must contain explicit labels such as `Family:`, `Chosen:`, `Command:`,
-`Condition:`, or `Scope:`. Bare prose stays bare; `ee` does not fabricate
-machine fields.
+`ee.memory.typed_fields.v2`. Use repeatable `--field NAME=VALUE` on
+`ee remember` or `ee note`, or let `ee` extract explicit labels such as
+`Family:`, `Chosen:`, `Command:`, `Condition:`, or `Scope:` from the body.
+Explicit assignments override same-name extracted values. Bare prose stays
+bare; `ee` does not fabricate machine fields.
 
 | Kind | Typed fields |
 |---|---|
@@ -1577,6 +1578,15 @@ operators: `name=value` for exact, `name~value` for contains, and `name^value`
 for prefix. The full registry, bounds, indexed-field status, and v1-to-v2
 compatibility notes live in
 [`docs/memory-typed-fields.md`](docs/memory-typed-fields.md).
+
+```bash
+ee remember "Remote verification won the storage decision." \
+  --kind decision \
+  --field "chosen=RCH remote" \
+  --field "options=local Cargo" \
+  --field "options=RCH remote" \
+  --json
+```
 
 Decision memories have a dedicated micro-ADR workflow through `ee decide`.
 `record` creates or supersedes a decision chain head, `list` reviews current
