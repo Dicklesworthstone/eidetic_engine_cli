@@ -31,7 +31,7 @@
         "V085": "V085_EVIDENCE_SECURITY_POSTURE (forward-only fail-closed evidence admission and provenance-integrity repair)",
         "V086": "V086_RULE_INDEX_GENERATIONS (forward-only procedural-rule generation tracking and source-row repair)",
         "V087": "V087_EVIDENCE_STORAGE_REBUILD (forward-only canonical evidence-table rebuild and generation repair)",
-        "V088": "V088_MESH_LANE_GRANT_STATES (authenticated per-peer mesh lane grant and revocation state)"
+        "V088": "V088_MESH_LANE_GRANT_STATES (authenticated per-peer mesh lane grant and revocation state with exact approved-config bindings)"
       }
     }
   },

@@ -10,13 +10,23 @@ use std::fs;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 
+use ee::config::MeshLane;
+use ee::db::{
+    CreateAuditInput, DbConnection, MeshLaneGrantAtomicError, MeshLaneGrantMutationError,
+    MeshLaneGrantMutationInput, MeshLaneGrantTargetAdapter,
+};
+use ee::mesh::lane_grant::{APPROVAL_TOKEN_TTL_SECONDS, compare_snapshot, issue, verify_authentic};
+use ee::policy::store_auth::{StoreAuthRoot, workspace_keys_dir};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
 const TEST_LANE_ARG: &str = "graph-link";
 const TEST_LANE_WIRE: &str = "graph_link";
+const GRANT_SCHEMA: &str = "ee.mesh.grant.v1";
 const GRANT_AUDIT_ACTION: &str = "mesh.audit.lane_grant";
 const REVOKE_AUDIT_ACTION: &str = "mesh.audit.lane_revoke";
 
@@ -189,12 +199,15 @@ fn assert_no_bearer(text: &[u8], label: &str) -> TestResult {
     )
 }
 
-fn write_mesh_policy_config(workspace: &Path, workspace_id: &str, peer_id: &str) -> TestResult {
-    let config = format!(
-        r#"[mesh]
-enabled = true
-command_mode = "cache"
-
+fn write_mesh_policy_config(
+    workspace: &Path,
+    workspace_id: &str,
+    peer_id: &str,
+    include_peer_group_binding: bool,
+) -> TestResult {
+    let group_binding = if include_peer_group_binding {
+        format!(
+            r#"
 [[mesh.peer_group_bindings]]
 workspace_id = "{workspace_id}"
 workspace_alias = "lane-grant-e2e"
@@ -211,6 +224,16 @@ embedding = "deny"
 graph_link = "deny"
 revision_notice = "allow"
 curation_signal = "deny"
+"#,
+        )
+    } else {
+        String::new()
+    };
+    let config = format!(
+        r#"[mesh]
+enabled = true
+command_mode = "cache"
+{group_binding}
 
 [[mesh.peer_policies]]
 policy_id = "pol_lane_grant_e2e"
@@ -292,7 +315,7 @@ fn set_up_fixture(label: &str) -> Result<LaneGrantFixture, String> {
     let peer_json = success_json(&peer_add, "ee mesh peer add")?;
     let peer_id = json_string(&peer_json, "/data/peerId", "ee mesh peer add")?;
 
-    write_mesh_policy_config(tempdir.path(), &workspace_id, &peer_id)?;
+    write_mesh_policy_config(tempdir.path(), &workspace_id, &peer_id, true)?;
 
     let remember = run_ee(
         &workspace,
@@ -367,6 +390,71 @@ fn preview_payload(json: &Value, label: &str) -> Result<Value, String> {
     json.pointer("/data/preview")
         .cloned()
         .ok_or_else(|| format!("{label}: missing /data/preview: {json}"))
+}
+
+fn canonical_preview_bytes(json: &Value, label: &str) -> Result<Vec<u8>, String> {
+    let mut preview = preview_payload(json, label)?;
+    preview
+        .as_object_mut()
+        .ok_or_else(|| format!("{label}: preview payload was not an object"))?
+        .remove("approvalToken");
+    serde_json::to_vec(&preview)
+        .map_err(|error| format!("{label}: failed to serialize canonical preview: {error}"))
+}
+
+fn approval_error_json(
+    output: &Output,
+    label: &str,
+    expected_code: &str,
+    expected_severity: &str,
+    expected_message: &str,
+) -> Result<Value, String> {
+    ensure(
+        !output.status.success(),
+        format!("{label}: approval failure unexpectedly succeeded"),
+    )?;
+    ensure_json_stderr_empty(output, label)?;
+    assert_no_bearer(&output.stdout, &format!("{label} stdout"))?;
+    assert_no_bearer(&output.stderr, &format!("{label} stderr"))?;
+    let json = stdout_json(output, label)?;
+    ensure_equal(
+        &json.pointer("/schema").and_then(Value::as_str),
+        &Some("ee.error.v2"),
+        &format!("{label} error schema"),
+    )?;
+    ensure_equal(
+        &json.pointer("/error/code").and_then(Value::as_str),
+        &Some(expected_code),
+        &format!("{label} error code"),
+    )?;
+    ensure_equal(
+        &json.pointer("/error/severity").and_then(Value::as_str),
+        &Some(expected_severity),
+        &format!("{label} error severity"),
+    )?;
+    ensure(
+        json.pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains(expected_message)),
+        format!("{label}: public message omitted {expected_message:?}: {json}"),
+    )?;
+    ensure(
+        json.pointer("/error/repair")
+            .and_then(Value::as_str)
+            .is_some_and(|repair| repair.contains("read-only lane preview again")),
+        format!("{label}: public repair did not require a fresh read-only preview: {json}"),
+    )?;
+    ensure(
+        json.pointer("/error/details/recovery/0/command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| {
+                command.contains("mesh preview-grant")
+                    && command.contains("--issue-approval-token")
+                    && command.contains("--json")
+            }),
+        format!("{label}: structured recovery command was missing or incomplete: {json}"),
+    )?;
+    Ok(json)
 }
 
 #[test]
@@ -487,8 +575,575 @@ fn ordinary_preview_is_token_free_deterministic_and_read_only() -> TestResult {
 }
 
 #[test]
+fn preview_cautions_are_projected_as_actionable_top_level_degradations() -> TestResult {
+    let fixture = set_up_fixture("preview-degraded")?;
+    let already_granted_output = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "preview-grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            "metadata",
+            "--json",
+        ],
+    )?;
+    let already_granted = success_json(&already_granted_output, "already-granted preview")?;
+    let already_granted_degraded = already_granted
+        .pointer("/degraded")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry.pointer("/code").and_then(Value::as_str)
+                    == Some("lane_grant_preview_lane_already_granted")
+            })
+        })
+        .ok_or_else(|| format!("already-granted preview omitted degradation: {already_granted}"))?;
+    ensure_equal(
+        &already_granted_degraded
+            .pointer("/severity")
+            .and_then(Value::as_str),
+        &Some("info"),
+        "already-granted degradation severity",
+    )?;
+    ensure(
+        already_granted_degraded
+            .pointer("/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("currently exposed")),
+        format!("already-granted degradation message drifted: {already_granted_degraded}"),
+    )?;
+
+    write_mesh_policy_config(
+        Path::new(&fixture.workspace),
+        &fixture.workspace_id,
+        &fixture.peer_id,
+        false,
+    )?;
+    let omitted_group_output = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "preview-grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            TEST_LANE_ARG,
+            "--json",
+        ],
+    )?;
+    let omitted_group = success_json(&omitted_group_output, "peer-group-omitted preview")?;
+    let omitted_group_degraded = omitted_group
+        .pointer("/degraded")
+        .and_then(Value::as_array)
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry.pointer("/code").and_then(Value::as_str)
+                    == Some("lane_grant_preview_peer_not_in_group")
+            })
+        })
+        .ok_or_else(|| {
+            format!("peer-group-omitted preview omitted degradation: {omitted_group}")
+        })?;
+    ensure_equal(
+        &omitted_group_degraded
+            .pointer("/severity")
+            .and_then(Value::as_str),
+        &Some("info"),
+        "peer-group degradation severity",
+    )?;
+    ensure(
+        omitted_group_degraded
+            .pointer("/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("peer-group bindings")),
+        format!("peer-group degradation message drifted: {omitted_group_degraded}"),
+    )?;
+    ensure(
+        omitted_group_degraded
+            .pointer("/repair")
+            .and_then(Value::as_str)
+            .is_some_and(|repair| repair.contains("[[mesh.peer_group_bindings]]")),
+        format!("peer-group degradation repair drifted: {omitted_group_degraded}"),
+    )
+}
+
+#[test]
+fn human_confirmation_reuses_json_preview_and_commits_the_reviewed_effect() -> TestResult {
+    let fixture = set_up_fixture("human-confirm")?;
+    let (_, preview_json) = preview(&fixture, false)?;
+    let snapshot = preview_payload(&preview_json, "pre-confirmation JSON preview")?;
+    let generation = json_u64(&snapshot, "/grantGeneration", "JSON preview")?;
+    let proposed_decision = json_string(&snapshot, "/proposedPolicy/decision", "JSON preview")?;
+
+    let human_preview = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "preview-grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            TEST_LANE_ARG,
+        ],
+    )?;
+    ensure(
+        human_preview.status.success(),
+        format!(
+            "human preview failed with exit {:?}\nstdout:\n{}\nstderr:\n{}",
+            human_preview.status.code(),
+            redacted_output(&human_preview.stdout),
+            redacted_output(&human_preview.stderr),
+        ),
+    )?;
+    ensure(
+        String::from_utf8_lossy(&human_preview.stderr)
+            .trim()
+            .is_empty(),
+        format!(
+            "human preview unexpectedly wrote stderr: {}",
+            redacted_output(&human_preview.stderr)
+        ),
+    )?;
+    assert_no_bearer(&human_preview.stdout, "human preview stdout")?;
+    let human_preview_text = String::from_utf8(human_preview.stdout)
+        .map_err(|error| format!("human preview stdout was not UTF-8: {error}"))?;
+    let expected_lines = [
+        format!(
+            "  peer: {}",
+            json_string(&snapshot, "/target/peerId", "JSON preview")?
+        ),
+        format!(
+            "  lane: {}",
+            json_string(&snapshot, "/lane", "JSON preview")?
+        ),
+        format!("  generation: {generation}"),
+        format!(
+            "  current: {}",
+            json_string(&snapshot, "/currentPolicy/decision", "JSON preview")?
+        ),
+        format!("  proposed: {proposed_decision}"),
+        format!(
+            "  affected memories: {}",
+            json_u64(&snapshot, "/affectedMemoryCount", "JSON preview")?
+        ),
+        format!(
+            "  redacted from exposure: {}",
+            json_u64(&snapshot, "/redactedFromExposureCount", "JSON preview")?
+        ),
+    ];
+    for line in expected_lines {
+        ensure(
+            human_preview_text.lines().any(|actual| actual == line),
+            format!("human preview omitted JSON-derived line {line:?}"),
+        )?;
+    }
+
+    let grant = run_ee_with_stdin(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            TEST_LANE_ARG,
+        ],
+        b"yes\n",
+    )?;
+    ensure(
+        grant.status.success(),
+        format!(
+            "confirmed human grant failed with exit {:?}\nstdout:\n{}\nstderr:\n{}",
+            grant.status.code(),
+            redacted_output(&grant.stdout),
+            redacted_output(&grant.stderr),
+        ),
+    )?;
+    assert_no_bearer(&grant.stdout, "confirmed human grant stdout")?;
+    assert_no_bearer(&grant.stderr, "confirmed human grant stderr")?;
+    let grant_stdout = String::from_utf8(grant.stdout)
+        .map_err(|error| format!("confirmed human grant stdout was not UTF-8: {error}"))?;
+    ensure(
+        grant_stdout.starts_with(&human_preview_text),
+        "human grant must render the same canonical preview that the standalone preview rendered",
+    )?;
+    let next_generation = generation
+        .checked_add(1)
+        .ok_or_else(|| "test preview generation overflowed".to_owned())?;
+    ensure(
+        grant_stdout.contains(&format!(
+            "ee mesh grant: peer={} lane={TEST_LANE_WIRE} decision={proposed_decision} generation {generation} -> {next_generation}",
+            fixture.peer_id
+        )),
+        format!("human mutation report did not match the reviewed JSON snapshot: {grant_stdout}"),
+    )?;
+    let grant_stderr = String::from_utf8(grant.stderr)
+        .map_err(|error| format!("confirmed human grant stderr was not UTF-8: {error}"))?;
+    ensure_equal(
+        &grant_stderr,
+        &format!(
+            "Grant lane '{TEST_LANE_WIRE}' to peer {}? [y/N] ",
+            fixture.peer_id
+        ),
+        "human confirmation prompt",
+    )?;
+
+    let (_, after_json) = preview(&fixture, false)?;
+    let after = preview_payload(&after_json, "post-human-grant preview")?;
+    ensure_equal(
+        &json_u64(&after, "/grantGeneration", "post-human-grant preview")?,
+        &next_generation,
+        "human grant generation effect",
+    )?;
+    ensure_equal(
+        &after
+            .pointer("/currentPolicy/decision")
+            .and_then(Value::as_str),
+        &Some(proposed_decision.as_str()),
+        "human grant policy effect",
+    )?;
+    ensure_equal(
+        &lane_audit_entries(&fixture, GRANT_AUDIT_ACTION)?.len(),
+        &1,
+        "confirmed human grant audit count",
+    )
+}
+
+#[test]
+fn invalid_and_expired_bearers_have_distinct_public_errors_and_zero_effect() -> TestResult {
+    let fixture = set_up_fixture("invalid-expired")?;
+    let (_, baseline_json) = preview(&fixture, false)?;
+    let baseline = preview_payload(&baseline_json, "invalid/expired baseline")?;
+
+    let invalid = run_ee_with_stdin(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            TEST_LANE_ARG,
+            "--preview-token-stdin",
+            "--json",
+        ],
+        b"eeap1_invalid-bearer\n",
+    )?;
+    approval_error_json(
+        &invalid,
+        "malformed approval bearer",
+        "mesh_approval_token_invalid",
+        "high",
+        "invalid for this store, workspace, and command",
+    )?;
+
+    let canonical_snapshot = canonical_preview_bytes(&baseline_json, "expired-token preview")?;
+    let keys_dir = workspace_keys_dir(Path::new(&fixture.workspace));
+    let root = StoreAuthRoot::open(&keys_dir)
+        .map_err(|error| format!("failed to open store-auth root for expired bearer: {error}"))?;
+    let now = chrono::Utc::now().timestamp();
+    let issued_at = now
+        .checked_sub(APPROVAL_TOKEN_TTL_SECONDS)
+        .ok_or_else(|| "approval token expiry fixture timestamp underflowed".to_owned())?;
+    let expired = issue(
+        &root,
+        &fixture.workspace_id,
+        GRANT_SCHEMA,
+        &canonical_snapshot,
+        issued_at,
+    )
+    .map_err(|error| format!("failed to issue authentic expired bearer: {error}"))?;
+    let expired_bearer = expired.token().expose_bearer();
+    drop(root);
+
+    let expired_result = run_ee_with_stdin(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            TEST_LANE_ARG,
+            "--preview-token-stdin",
+            "--json",
+        ],
+        format!("{expired_bearer}\n").as_bytes(),
+    )?;
+    approval_error_json(
+        &expired_result,
+        "authentic expired approval bearer",
+        "mesh_approval_token_stale",
+        "warning",
+        "authentic but its approved preview is stale",
+    )?;
+
+    let (_, after_json) = preview(&fixture, false)?;
+    let after = preview_payload(&after_json, "post-invalid/expired preview")?;
+    ensure_equal(
+        &after,
+        &baseline,
+        "invalid and expired bearers must leave the lane snapshot unchanged",
+    )?;
+    ensure_equal(
+        &lane_audit_entries(&fixture, GRANT_AUDIT_ACTION)?.len(),
+        &0,
+        "invalid and expired bearers must append no grant audit",
+    )
+}
+
+#[test]
+fn store_key_rotation_invalidates_outstanding_bearer_with_zero_effect() -> TestResult {
+    let fixture = set_up_fixture("key-rotation")?;
+    let (_, baseline_json) = preview(&fixture, false)?;
+    let baseline = preview_payload(&baseline_json, "key-rotation baseline")?;
+    let (_, issued_json) = preview(&fixture, true)?;
+    let bearer = sensitive_json_string(
+        &issued_json,
+        "/data/preview/approvalToken/bearer",
+        "pre-rotation approval preview",
+    )?;
+
+    let keys_dir = workspace_keys_dir(Path::new(&fixture.workspace));
+    let mut root = StoreAuthRoot::open(&keys_dir)
+        .map_err(|error| format!("failed to open store-auth root for rotation: {error}"))?;
+    let original_key_id = root.current_key_id();
+    let rotated_key_id = root
+        .rotate()
+        .map_err(|error| format!("failed to rotate store-auth root: {error}"))?;
+    ensure(
+        rotated_key_id != original_key_id,
+        "store-auth rotation must install a distinct current key",
+    )?;
+    drop(root);
+
+    let rejected = run_ee_with_stdin(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            TEST_LANE_ARG,
+            "--preview-token-stdin",
+            "--json",
+        ],
+        format!("{bearer}\n").as_bytes(),
+    )?;
+    approval_error_json(
+        &rejected,
+        "rotated-key approval bearer",
+        "mesh_approval_token_invalid",
+        "high",
+        "invalid for this store, workspace, and command",
+    )?;
+
+    let (_, after_json) = preview(&fixture, false)?;
+    let after = preview_payload(&after_json, "post-key-rotation preview")?;
+    ensure_equal(
+        &after,
+        &baseline,
+        "key rotation and rejected bearer must leave lane state unchanged",
+    )?;
+    ensure_equal(
+        &lane_audit_entries(&fixture, GRANT_AUDIT_ACTION)?.len(),
+        &0,
+        "rotated-key rejection must append no grant audit",
+    )
+}
+
+#[test]
+fn concurrent_double_apply_commits_once_and_stales_the_loser() -> TestResult {
+    let fixture = set_up_fixture("concurrent-apply")?;
+    let database_path = Path::new(&fixture.workspace).join(".ee").join("ee.db");
+    let config_bytes = fs::read(
+        Path::new(&fixture.workspace)
+            .join(".ee")
+            .join("config.toml"),
+    )
+    .map_err(|error| format!("read concurrent approval config: {error}"))?;
+    let approval_config_digest = ee::mesh::lane_grant::approval_config_digest(&config_bytes);
+    let keys_dir = workspace_keys_dir(Path::new(&fixture.workspace));
+    let root = StoreAuthRoot::open(&keys_dir)
+        .map_err(|error| format!("open concurrent store-auth root: {error}"))?;
+    let canonical_snapshot = b"authenticated concurrent lane-grant snapshot".to_vec();
+    let approval_now = chrono::Utc::now().timestamp();
+    let issued = issue(
+        &root,
+        &fixture.workspace_id,
+        GRANT_SCHEMA,
+        &canonical_snapshot,
+        approval_now,
+    )
+    .map_err(|error| format!("issue concurrent approval bearer: {error}"))?;
+    let bearer = issued.token().expose_bearer();
+    drop(root);
+    let barrier = Arc::new(Barrier::new(3));
+    let effect_count = Arc::new(AtomicUsize::new(0));
+    let spawn_contender = |label: &'static str| {
+        let database_path = database_path.clone();
+        let workspace_id = fixture.workspace_id.clone();
+        let peer_id = fixture.peer_id.clone();
+        let approval_config_digest = approval_config_digest.clone();
+        let keys_dir = keys_dir.clone();
+        let bearer = bearer.clone();
+        let canonical_snapshot = canonical_snapshot.clone();
+        let barrier = Arc::clone(&barrier);
+        let effect_count = Arc::clone(&effect_count);
+        std::thread::spawn(move || -> Result<&'static str, String> {
+            // Each contender independently reads generation zero and prepares
+            // an identical CAS input before either may enter the writer-fenced
+            // transaction. Even setup errors rendezvous at the barrier so the
+            // test cannot deadlock while reporting the real preparation fault.
+            let prepared = (|| {
+                let root = StoreAuthRoot::open(&keys_dir)
+                    .map_err(|error| format!("{label}: open store-auth root: {error}"))?;
+                let authenticated =
+                    verify_authentic(&root, &workspace_id, GRANT_SCHEMA, &bearer, approval_now)
+                        .map_err(|error| format!("{label}: authenticate shared bearer: {error}"))?;
+                let connection = DbConnection::open_file(&database_path)
+                    .map_err(|error| format!("{label}: open database: {error}"))?;
+                let peer = connection
+                    .get_mesh_peer(&workspace_id, &peer_id)
+                    .map_err(|error| format!("{label}: load peer: {error}"))?
+                    .ok_or_else(|| format!("{label}: enrolled peer disappeared"))?;
+                let generation = connection
+                    .mesh_lane_grant_generation(&workspace_id, &peer_id)
+                    .map_err(|error| format!("{label}: load generation: {error}"))?;
+                ensure_equal(&generation, &0, &format!("{label} prepared generation"))?;
+                let target_adapter =
+                    MeshLaneGrantTargetAdapter::new(peer.peer_id.clone(), peer.origin_node_id);
+                Ok((
+                    connection,
+                    root,
+                    authenticated,
+                    MeshLaneGrantMutationInput {
+                        workspace_id,
+                        peer_id: peer.peer_id,
+                        target_adapter,
+                        material_lane: MeshLane::GraphLink,
+                        expected_generation: generation,
+                        approval_config_digest: Some(approval_config_digest),
+                        updated_at: Some("2026-08-04T00:00:00Z".to_owned()),
+                    },
+                ))
+            })();
+            barrier.wait();
+            let (connection, root, authenticated, input) = prepared?;
+
+            let transaction = connection.apply_mesh_lane_grant_transaction(
+                &input,
+                || {
+                    compare_snapshot(&root, &authenticated, &canonical_snapshot, approval_now)
+                        .map_err(|error| error.code().to_owned())
+                },
+                |state, verified| {
+                    let approval_audit_id = verified.audit_id().to_opaque_string();
+                    connection
+                        .insert_audit_with_mutation_kind(
+                            "audit_concurrent_lane_grant",
+                            &CreateAuditInput {
+                                workspace_id: Some(input.workspace_id.clone()),
+                                actor: Some("e2e concurrent lane grant".to_owned()),
+                                action: GRANT_AUDIT_ACTION.to_owned(),
+                                target_type: Some("mesh_peer".to_owned()),
+                                target_id: Some(input.peer_id.clone()),
+                                details: Some(
+                                    serde_json::json!({
+                                        "policyDecisionId": approval_audit_id,
+                                        "grantGeneration": state.grant_generation,
+                                    })
+                                    .to_string(),
+                                ),
+                            },
+                            GRANT_AUDIT_ACTION,
+                        )
+                        .map_err(|error| format!("audit insert failed: {error}"))?;
+                    effect_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            );
+            match transaction {
+                Ok((state, _, ())) => {
+                    ensure_equal(
+                        &state.grant_generation,
+                        &1,
+                        &format!("{label} committed generation"),
+                    )?;
+                    Ok("committed")
+                }
+                Err(MeshLaneGrantAtomicError::Verification(code))
+                    if code == "mesh_approval_token_stale" =>
+                {
+                    Ok("stale")
+                }
+                Err(MeshLaneGrantAtomicError::Mutation(
+                    MeshLaneGrantMutationError::GenerationConflict { .. },
+                )) => Ok("stale"),
+                Err(error) => Err(format!("{label}: unexpected atomic outcome: {error}")),
+            }
+        })
+    };
+    let first = spawn_contender("first contender");
+    let second = spawn_contender("second contender");
+    barrier.wait();
+    let first_outcome = first
+        .join()
+        .map_err(|_| "first concurrent contender panicked".to_owned())??;
+    let second_outcome = second
+        .join()
+        .map_err(|_| "second concurrent contender panicked".to_owned())??;
+    let mut outcomes = [first_outcome, second_outcome];
+    outcomes.sort_unstable();
+    ensure_equal(
+        &outcomes,
+        &["committed", "stale"],
+        "barrier-coordinated concurrent outcomes",
+    )?;
+    ensure_equal(
+        &effect_count.load(Ordering::SeqCst),
+        &1,
+        "stale contender must execute no transactional effect",
+    )?;
+
+    let (_, after_json) = preview(&fixture, false)?;
+    let after = preview_payload(&after_json, "post-concurrent-grant preview")?;
+    ensure_equal(
+        &json_u64(&after, "/grantGeneration", "post-concurrent-grant preview")?,
+        &1,
+        "concurrent double apply generation",
+    )?;
+    ensure_equal(
+        &after
+            .pointer("/currentPolicy/decision")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "concurrent double apply decision",
+    )?;
+    let audits = lane_audit_entries(&fixture, GRANT_AUDIT_ACTION)?;
+    ensure_equal(&audits.len(), &1, "concurrent double apply audit count")?;
+    ensure_equal(
+        &audits[0]
+            .pointer("/details/policyDecisionId")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.starts_with("eela1_")),
+        &true,
+        "concurrent double apply committed authenticated audit binding",
+    )?;
+    assert_no_bearer(
+        serde_json::to_string(&audits)
+            .map_err(|error| format!("serialize concurrent audits: {error}"))?
+            .as_bytes(),
+        "concurrent audit rows",
+    )
+}
+
+#[test]
 fn bounded_stdin_grant_replay_and_revoke_are_generation_atomic() -> TestResult {
     let fixture = set_up_fixture("mutation")?;
+    let config_path = Path::new(&fixture.workspace)
+        .join(".ee")
+        .join("config.toml");
+    let original_config_bytes = fs::read(&config_path)
+        .map_err(|error| format!("read original lane-grant config: {error}"))?;
+    let expected_config_digest =
+        ee::mesh::lane_grant::approval_config_digest(&original_config_bytes);
     let (_, issued_json) = preview(&fixture, true)?;
     let bearer = sensitive_json_string(
         &issued_json,
@@ -574,11 +1229,27 @@ fn bounded_stdin_grant_replay_and_revoke_are_generation_atomic() -> TestResult {
         &Some(approval_audit_id.as_str()),
         "grant audit approval binding",
     )?;
-    assert_no_bearer(
-        serde_json::to_string(&grant_audits[0])
-            .map_err(|error| format!("serialize grant audit: {error}"))?
-            .as_bytes(),
-        "grant audit row",
+    ensure_equal(
+        &grant_audits[0]
+            .pointer("/details/details/entries/approval_config_digest/kind")
+            .and_then(Value::as_str),
+        &Some("digest"),
+        "grant audit config-binding kind",
+    )?;
+    ensure_equal(
+        &grant_audits[0]
+            .pointer("/details/details/entries/approval_config_digest/value")
+            .and_then(Value::as_str),
+        &Some(expected_config_digest.as_str()),
+        "grant audit exact approved config digest",
+    )?;
+    let serialized_grant_audit = serde_json::to_string(&grant_audits[0])
+        .map_err(|error| format!("serialize grant audit: {error}"))?;
+    assert_no_bearer(serialized_grant_audit.as_bytes(), "grant audit row")?;
+    ensure(
+        !serialized_grant_audit.contains("[mesh]")
+            && !serialized_grant_audit.contains("command_mode"),
+        "grant audit must persist only the config digest, never raw config bytes",
     )?;
 
     let (_, granted_preview_json) = preview(&fixture, false)?;
@@ -594,6 +1265,50 @@ fn bounded_stdin_grant_replay_and_revoke_are_generation_atomic() -> TestResult {
             .and_then(Value::as_str),
         &Some("allow"),
         "post-grant decision",
+    )?;
+
+    let mut drifted_config_bytes = original_config_bytes.clone();
+    drifted_config_bytes.extend_from_slice(b"\n# post-approval byte drift\n");
+    fs::write(&config_path, &drifted_config_bytes)
+        .map_err(|error| format!("write drifted lane-grant config: {error}"))?;
+    let (_, drifted_preview_json) = preview(&fixture, false)?;
+    let drifted_preview = preview_payload(&drifted_preview_json, "config-drifted preview")?;
+    ensure_equal(
+        &json_u64(
+            &drifted_preview,
+            "/grantGeneration",
+            "config-drifted preview",
+        )?,
+        &1,
+        "config drift does not mutate consent generation",
+    )?;
+    ensure_equal(
+        &drifted_preview
+            .pointer("/currentPolicy/decision")
+            .and_then(Value::as_str),
+        &Some("deny"),
+        "config drift makes the widened allow dormant",
+    )?;
+
+    fs::write(&config_path, &original_config_bytes)
+        .map_err(|error| format!("restore exact lane-grant config: {error}"))?;
+    let (_, restored_preview_json) = preview(&fixture, false)?;
+    let restored_preview = preview_payload(&restored_preview_json, "config-restored preview")?;
+    ensure_equal(
+        &json_u64(
+            &restored_preview,
+            "/grantGeneration",
+            "config-restored preview",
+        )?,
+        &1,
+        "byte-exact config restore preserves consent generation",
+    )?;
+    ensure_equal(
+        &restored_preview
+            .pointer("/currentPolicy/decision")
+            .and_then(Value::as_str),
+        &Some("allow"),
+        "byte-exact config restore reactivates only the matching approval",
     )?;
 
     let replay = run_ee_with_stdin(
@@ -648,6 +1363,9 @@ fn bounded_stdin_grant_replay_and_revoke_are_generation_atomic() -> TestResult {
         &grant_audits,
         "stale replay must not append an audit row",
     )?;
+
+    fs::write(&config_path, &drifted_config_bytes)
+        .map_err(|error| format!("reapply config drift before revoke: {error}"))?;
 
     let revoke = run_ee(
         &fixture.workspace,
@@ -734,6 +1452,27 @@ fn bounded_stdin_grant_replay_and_revoke_are_generation_atomic() -> TestResult {
             .and_then(Value::as_str),
         &Some("deny"),
         "post-revoke decision",
+    )?;
+    fs::write(&config_path, &original_config_bytes)
+        .map_err(|error| format!("restore config after revoke: {error}"))?;
+    let (_, restored_after_revoke_json) = preview(&fixture, false)?;
+    let restored_after_revoke =
+        preview_payload(&restored_after_revoke_json, "restored post-revoke preview")?;
+    ensure_equal(
+        &json_u64(
+            &restored_after_revoke,
+            "/grantGeneration",
+            "restored post-revoke preview",
+        )?,
+        &2,
+        "config restore cannot undo revoke generation",
+    )?;
+    ensure_equal(
+        &restored_after_revoke
+            .pointer("/currentPolicy/decision")
+            .and_then(Value::as_str),
+        &Some("deny"),
+        "revoke remains deny after config drift and byte-exact restore",
     )
 }
 

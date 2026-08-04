@@ -66,7 +66,21 @@ const MAX_SURFACE_CONTEXT_BYTES: usize = 256;
 const ENVELOPE_MAC_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.envelope.v1";
 const SNAPSHOT_TAG_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.snapshot.v1";
 const AUDIT_ID_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.audit_id.v1";
+const CONFIG_DIGEST_MESSAGE_DOMAIN: &[u8] = b"ee.mesh.lane_approval.config.v1\0";
 const AUDIT_ID_PREFIX: &str = "eela1_";
+
+/// Bind one durable allow override to the exact config-file bytes reviewed by
+/// the operator. Runtime policy lookup recomputes this digest from the current
+/// file and converts an absent or mismatched allow binding into an explicit
+/// deny, closing the filesystem/DB commit race fail-closed.
+#[must_use]
+pub fn approval_config_digest(config_bytes: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(CONFIG_DIGEST_MESSAGE_DOMAIN);
+    hasher.update(&(config_bytes.len() as u64).to_be_bytes());
+    hasher.update(config_bytes);
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
 
 /// Security-core outcome. It deliberately exposes only the invalid/stale split
 /// required by the public error contract. Store-key failures retain their
@@ -648,6 +662,17 @@ mod tests {
                 .to_opaque_string()
                 .starts_with(AUDIT_ID_PREFIX)
         );
+    }
+
+    #[test]
+    fn config_digest_is_exact_byte_bound_and_canonical() {
+        let first = approval_config_digest(b"[mesh]\nenabled = true\n");
+        let equal = approval_config_digest(b"[mesh]\nenabled = true\n");
+        let formatting_drift = approval_config_digest(b"[mesh]\nenabled=true\n");
+
+        assert_eq!(first, equal);
+        assert_ne!(first, formatting_drift);
+        assert!(crate::db::is_canonical_blake3_hash(&first));
     }
 
     #[test]

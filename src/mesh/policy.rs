@@ -31,6 +31,7 @@ pub use crate::core::memory_scope::{
 pub struct MeshPeerPolicyRegistry {
     policies: Vec<MeshPeerPolicy>,
     lane_grant_states: BTreeMap<(String, String), StoredMeshLaneGrantState>,
+    current_approval_config_digest: Option<String>,
 }
 
 impl MeshPeerPolicyRegistry {
@@ -39,6 +40,7 @@ impl MeshPeerPolicyRegistry {
         Self {
             policies: policies.into_iter().collect(),
             lane_grant_states: BTreeMap::new(),
+            current_approval_config_digest: None,
         }
     }
 
@@ -52,6 +54,25 @@ impl MeshPeerPolicyRegistry {
             .iter()
             .map(MeshPeerPolicy::from);
         Self::new(policies)
+    }
+
+    /// Build a registry from one successfully parsed, exact config snapshot.
+    /// Missing config is represented by a valid empty byte slice; callers must
+    /// use [`Self::from_config`] instead when bytes were unreadable or invalid.
+    #[must_use]
+    pub fn from_config_snapshot(config: &ConfigFile, config_bytes: &[u8]) -> Self {
+        Self::from_config(config).with_approval_config_snapshot(config_bytes)
+    }
+
+    /// Attach the exact successfully parsed config bytes to an existing
+    /// registry. This is useful when policy records are supplied by a caller
+    /// that already owns one coherent config snapshot.
+    #[must_use]
+    pub fn with_approval_config_snapshot(mut self, config_bytes: &[u8]) -> Self {
+        self.current_approval_config_digest = Some(
+            crate::mesh::lane_grant::approval_config_digest(config_bytes),
+        );
+        self
     }
 
     #[must_use]
@@ -76,6 +97,11 @@ impl MeshPeerPolicyRegistry {
     #[must_use]
     pub fn lane_grant_states(&self) -> &BTreeMap<(String, String), StoredMeshLaneGrantState> {
         &self.lane_grant_states
+    }
+
+    #[must_use]
+    pub fn current_approval_config_digest(&self) -> Option<&str> {
+        self.current_approval_config_digest.as_deref()
     }
 
     #[must_use]
@@ -112,7 +138,12 @@ impl MeshPeerPolicyRegistry {
                     && state.target_adapter.peer_id == peer_id
                     && state.workspace_id == local_workspace_id
             })
-            .and_then(|state| state.override_for(material_lane))
+            .and_then(|state| {
+                state.effective_override_for(
+                    material_lane,
+                    self.current_approval_config_digest.as_deref(),
+                )
+            })
     }
 
     /// Project the exact durable override needed by the inbound membership
@@ -684,6 +715,12 @@ mod tests {
             graph_link_override: None,
             revision_notice_override: None,
             curation_signal_override: None,
+            metadata_approval_config_digest: None,
+            body_approval_config_digest: None,
+            embedding_approval_config_digest: None,
+            graph_link_approval_config_digest: None,
+            revision_notice_approval_config_digest: None,
+            curation_signal_approval_config_digest: None,
             updated_at: "2026-08-04T00:00:00Z".to_owned(),
         }
     }
@@ -761,6 +798,115 @@ mod tests {
             registry.policies()[0].allowed_lanes.metadata,
             base_builder.allowed_lanes.metadata,
             "effective override must not mutate the shared configured policy"
+        );
+    }
+
+    #[test]
+    fn widened_lane_requires_matching_config_binding_in_both_directions() {
+        let mut unbound = lane_state("peer_builder_one", MeshLaneDecision::Allow);
+        let policy = policy("pol_builder", "peer_builder_one", "wsp_remote_beta");
+
+        let missing =
+            MeshPeerPolicyRegistry::new([policy.clone()]).with_lane_grant_states([unbound.clone()]);
+        assert_eq!(
+            missing
+                .decide_inbound(&inbound_input("peer_builder_one"))
+                .import
+                .workspace_scope_decision,
+            MeshImportDecisionKind::Deny
+        );
+        assert_eq!(
+            missing
+                .decide_outbound(&outbound_input("peer_builder_one"))
+                .action,
+            MeshImportDecisionKind::Deny
+        );
+
+        let approved_bytes = b"[mesh]\nenabled = true\n";
+        unbound.metadata_approval_config_digest = Some(
+            crate::mesh::lane_grant::approval_config_digest(approved_bytes),
+        );
+        let mismatched = MeshPeerPolicyRegistry::new([policy.clone()])
+            .with_approval_config_snapshot(b"[mesh]\nenabled = false\n")
+            .with_lane_grant_states([unbound.clone()]);
+        assert_eq!(
+            mismatched
+                .decide_inbound(&inbound_input("peer_builder_one"))
+                .import
+                .workspace_scope_decision,
+            MeshImportDecisionKind::Deny
+        );
+        assert_eq!(
+            mismatched
+                .decide_outbound(&outbound_input("peer_builder_one"))
+                .action,
+            MeshImportDecisionKind::Deny
+        );
+
+        let matching = MeshPeerPolicyRegistry::new([policy])
+            .with_approval_config_snapshot(approved_bytes)
+            .with_lane_grant_states([unbound]);
+        assert_eq!(
+            matching
+                .decide_inbound(&inbound_input("peer_builder_one"))
+                .import
+                .workspace_scope_decision,
+            MeshImportDecisionKind::Allow
+        );
+        assert_eq!(
+            matching
+                .decide_outbound(&outbound_input("peer_builder_one"))
+                .action,
+            MeshImportDecisionKind::Allow
+        );
+    }
+
+    #[test]
+    fn config_bindings_are_per_lane_and_denies_survive_digest_drift() {
+        let config_a = b"config-a";
+        let config_b = b"config-b";
+        let mut state = lane_state("peer_builder_one", MeshLaneDecision::Allow);
+        state.metadata_approval_config_digest =
+            Some(crate::mesh::lane_grant::approval_config_digest(config_a));
+        state.body_override = Some(MeshLaneDecision::Allow);
+        state.body_approval_config_digest =
+            Some(crate::mesh::lane_grant::approval_config_digest(config_b));
+        state.graph_link_override = Some(MeshLaneDecision::Deny);
+
+        let under_a = MeshPeerPolicyRegistry::new([policy(
+            "pol_builder",
+            "peer_builder_one",
+            "wsp_remote_beta",
+        )])
+        .with_approval_config_snapshot(config_a)
+        .with_lane_grant_states([state.clone()]);
+        assert_eq!(
+            under_a.lane_override_for("wsp_local_alpha", "peer_builder_one", MeshLane::Metadata,),
+            Some(MeshLaneDecision::Allow)
+        );
+        assert_eq!(
+            under_a.lane_override_for("wsp_local_alpha", "peer_builder_one", MeshLane::Body,),
+            Some(MeshLaneDecision::Deny)
+        );
+
+        let under_b = MeshPeerPolicyRegistry::new([policy(
+            "pol_builder",
+            "peer_builder_one",
+            "wsp_remote_beta",
+        )])
+        .with_approval_config_snapshot(config_b)
+        .with_lane_grant_states([state]);
+        assert_eq!(
+            under_b.lane_override_for("wsp_local_alpha", "peer_builder_one", MeshLane::Metadata,),
+            Some(MeshLaneDecision::Deny)
+        );
+        assert_eq!(
+            under_b.lane_override_for("wsp_local_alpha", "peer_builder_one", MeshLane::Body,),
+            Some(MeshLaneDecision::Allow)
+        );
+        assert_eq!(
+            under_b.lane_override_for("wsp_local_alpha", "peer_builder_one", MeshLane::GraphLink,),
+            Some(MeshLaneDecision::Deny)
         );
     }
 

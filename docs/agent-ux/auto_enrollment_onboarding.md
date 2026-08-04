@@ -331,7 +331,7 @@ every step):
 | `mesh_revoke_unknown_peer` | warning | Named peer not in current peer-group | Re-list eligible peers |
 | `discovery_policy_no_ee_mesh_tag` | info | Responder is in `service_tag` mode but not advertising the tag | `tailscale up --advertise-tags=tag:ee-mesh` |
 | `discovery_policy_empty_allowlist` | info | Discovery mode is `allowlist` but no node keys are configured | Add allowed node keys or switch discovery mode |
-| `lane_grant_preview_peer_not_in_group` | warning | Named peer not in the workspace's auto-enrolled group | Preview still runs; peer wouldn't receive until enrolled |
+| `lane_grant_preview_peer_not_in_group` | info | Enrolled peer is omitted from this workspace's `[[mesh.peer_group_bindings]]` | Add the peer id to the matching binding; preview still runs |
 | `steward_auto_enroll_disabled` | info | `EE_MESH_AUTO_ENROLL_ON_DEMAND=0` (default) | Set the env var if you want auto-reconciliation |
 | `mesh_peer_policy_denied` | medium | SRR6.5 peer policy denied the requested mesh lane | Review trust and lane policy before retrying |
 | `mesh_peer_human_explicit_filtered` | medium | Human-explicit memories were filtered from peer exposure | Use preview-grant and explicit policy before widening access |
@@ -392,6 +392,10 @@ it in command arguments, a shell variable, logs, audit notes, support bundles,
 or session transcripts. Ordinary previews never contain it. Grant verification
 authenticates the token before comparing the canonical snapshot, then commits
 the generation compare-and-swap, allow decision, and audit row atomically.
+Each widened allow is also bound to the exact `.ee/config.toml` bytes that were
+reviewed. Any edit, including formatting or comments, makes that allow dormant
+until the exact bytes are restored or a fresh preview and grant approve the new
+file; revoke/deny decisions remain restrictive across config changes.
 
 Narrowing a lane does not require an approval token:
 

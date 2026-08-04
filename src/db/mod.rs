@@ -7662,9 +7662,11 @@ UPDATE workspace_generations
 /// value in this table is an exact `(workspace_id, peer_id, lane)` override;
 /// NULL deliberately means "inherit config" rather than deny.  The target
 /// adapter is canonical and versioned so approval snapshots bind both the
-/// stable local peer id and the peer's current origin-node identity.  Every
-/// successful grant or revoke advances `grant_generation`; the write API below
-/// performs that compare-and-swap under `BEGIN IMMEDIATE`.
+/// stable local peer id and the peer's current origin-node identity. Each
+/// widened lane also stores the exact approved config-file digest; an allow
+/// without a current matching digest is denied at policy use. Every successful
+/// grant or revoke advances `grant_generation`; the write API below performs
+/// that compare-and-swap under `BEGIN IMMEDIATE`.
 pub const V088_MESH_LANE_GRANT_STATES: Migration = Migration::new(
     88,
     "mesh_lane_grant_states",
@@ -7710,7 +7712,73 @@ CREATE TABLE mesh_lane_grant_states (
     curation_signal_override TEXT CHECK (
         curation_signal_override IS NULL OR curation_signal_override IN ('allow', 'quarantine', 'deny')
     ),
+    metadata_approval_config_digest TEXT CHECK (
+        metadata_approval_config_digest IS NULL OR (
+            length(metadata_approval_config_digest) = 71
+            AND substr(metadata_approval_config_digest, 1, 7) = 'blake3:'
+            AND substr(metadata_approval_config_digest, 8) NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    body_approval_config_digest TEXT CHECK (
+        body_approval_config_digest IS NULL OR (
+            length(body_approval_config_digest) = 71
+            AND substr(body_approval_config_digest, 1, 7) = 'blake3:'
+            AND substr(body_approval_config_digest, 8) NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    embedding_approval_config_digest TEXT CHECK (
+        embedding_approval_config_digest IS NULL OR (
+            length(embedding_approval_config_digest) = 71
+            AND substr(embedding_approval_config_digest, 1, 7) = 'blake3:'
+            AND substr(embedding_approval_config_digest, 8) NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    graph_link_approval_config_digest TEXT CHECK (
+        graph_link_approval_config_digest IS NULL OR (
+            length(graph_link_approval_config_digest) = 71
+            AND substr(graph_link_approval_config_digest, 1, 7) = 'blake3:'
+            AND substr(graph_link_approval_config_digest, 8) NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    revision_notice_approval_config_digest TEXT CHECK (
+        revision_notice_approval_config_digest IS NULL OR (
+            length(revision_notice_approval_config_digest) = 71
+            AND substr(revision_notice_approval_config_digest, 1, 7) = 'blake3:'
+            AND substr(revision_notice_approval_config_digest, 8) NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    curation_signal_approval_config_digest TEXT CHECK (
+        curation_signal_approval_config_digest IS NULL OR (
+            length(curation_signal_approval_config_digest) = 71
+            AND substr(curation_signal_approval_config_digest, 1, 7) = 'blake3:'
+            AND substr(curation_signal_approval_config_digest, 8) NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
     updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    CHECK (
+        (metadata_override = 'allow' AND metadata_approval_config_digest IS NOT NULL)
+        OR (COALESCE(metadata_override, '') <> 'allow' AND metadata_approval_config_digest IS NULL)
+    ),
+    CHECK (
+        (body_override = 'allow' AND body_approval_config_digest IS NOT NULL)
+        OR (COALESCE(body_override, '') <> 'allow' AND body_approval_config_digest IS NULL)
+    ),
+    CHECK (
+        (embedding_override = 'allow' AND embedding_approval_config_digest IS NOT NULL)
+        OR (COALESCE(embedding_override, '') <> 'allow' AND embedding_approval_config_digest IS NULL)
+    ),
+    CHECK (
+        (graph_link_override = 'allow' AND graph_link_approval_config_digest IS NOT NULL)
+        OR (COALESCE(graph_link_override, '') <> 'allow' AND graph_link_approval_config_digest IS NULL)
+    ),
+    CHECK (
+        (revision_notice_override = 'allow' AND revision_notice_approval_config_digest IS NOT NULL)
+        OR (COALESCE(revision_notice_override, '') <> 'allow' AND revision_notice_approval_config_digest IS NULL)
+    ),
+    CHECK (
+        (curation_signal_override = 'allow' AND curation_signal_approval_config_digest IS NOT NULL)
+        OR (COALESCE(curation_signal_override, '') <> 'allow' AND curation_signal_approval_config_digest IS NULL)
+    ),
     PRIMARY KEY (workspace_id, peer_id),
     FOREIGN KEY (workspace_id, peer_id)
         REFERENCES mesh_peers(workspace_id, peer_id)
@@ -7720,7 +7788,7 @@ CREATE TABLE mesh_lane_grant_states (
 CREATE INDEX idx_mesh_lane_grant_states_generation
     ON mesh_lane_grant_states(workspace_id, grant_generation, peer_id);
 "#,
-    "blake3:v088_mesh_lane_grant_states_2026_08_04",
+    "blake3:v088_mesh_lane_grant_states_config_bound_2026_08_04",
 );
 
 /// All migrations in version order.
@@ -11870,6 +11938,12 @@ pub struct StoredMeshLaneGrantState {
     pub graph_link_override: Option<MeshLaneDecision>,
     pub revision_notice_override: Option<MeshLaneDecision>,
     pub curation_signal_override: Option<MeshLaneDecision>,
+    pub metadata_approval_config_digest: Option<String>,
+    pub body_approval_config_digest: Option<String>,
+    pub embedding_approval_config_digest: Option<String>,
+    pub graph_link_approval_config_digest: Option<String>,
+    pub revision_notice_approval_config_digest: Option<String>,
+    pub curation_signal_approval_config_digest: Option<String>,
     pub updated_at: String,
 }
 
@@ -11886,14 +11960,73 @@ impl StoredMeshLaneGrantState {
         }
     }
 
-    fn set_override(&mut self, lane: MeshLane, decision: MeshLaneDecision) {
+    /// Return the exact config digest authenticated for one widened lane.
+    #[must_use]
+    pub fn approval_config_digest_for(&self, lane: MeshLane) -> Option<&str> {
         match lane {
-            MeshLane::Metadata => self.metadata_override = Some(decision),
-            MeshLane::Body => self.body_override = Some(decision),
-            MeshLane::Embedding => self.embedding_override = Some(decision),
-            MeshLane::GraphLink => self.graph_link_override = Some(decision),
-            MeshLane::RevisionNotice => self.revision_notice_override = Some(decision),
-            MeshLane::CurationSignal => self.curation_signal_override = Some(decision),
+            MeshLane::Metadata => self.metadata_approval_config_digest.as_deref(),
+            MeshLane::Body => self.body_approval_config_digest.as_deref(),
+            MeshLane::Embedding => self.embedding_approval_config_digest.as_deref(),
+            MeshLane::GraphLink => self.graph_link_approval_config_digest.as_deref(),
+            MeshLane::RevisionNotice => self.revision_notice_approval_config_digest.as_deref(),
+            MeshLane::CurationSignal => self.curation_signal_approval_config_digest.as_deref(),
+        }
+    }
+
+    /// Resolve one durable override against the exact current config bytes.
+    /// A deny/quarantine remains restrictive across config changes. An allow
+    /// with an absent or stale binding becomes an explicit deny rather than
+    /// falling through to a potentially widened configured baseline.
+    #[must_use]
+    pub fn effective_override_for(
+        &self,
+        lane: MeshLane,
+        current_config_digest: Option<&str>,
+    ) -> Option<MeshLaneDecision> {
+        let decision = self.override_for(lane)?;
+        if decision != MeshLaneDecision::Allow {
+            return Some(decision);
+        }
+        if current_config_digest
+            .is_some_and(|current| self.approval_config_digest_for(lane) == Some(current))
+        {
+            Some(MeshLaneDecision::Allow)
+        } else {
+            Some(MeshLaneDecision::Deny)
+        }
+    }
+
+    fn set_override(
+        &mut self,
+        lane: MeshLane,
+        decision: MeshLaneDecision,
+        approval_config_digest: Option<String>,
+    ) {
+        match lane {
+            MeshLane::Metadata => {
+                self.metadata_override = Some(decision);
+                self.metadata_approval_config_digest = approval_config_digest;
+            }
+            MeshLane::Body => {
+                self.body_override = Some(decision);
+                self.body_approval_config_digest = approval_config_digest;
+            }
+            MeshLane::Embedding => {
+                self.embedding_override = Some(decision);
+                self.embedding_approval_config_digest = approval_config_digest;
+            }
+            MeshLane::GraphLink => {
+                self.graph_link_override = Some(decision);
+                self.graph_link_approval_config_digest = approval_config_digest;
+            }
+            MeshLane::RevisionNotice => {
+                self.revision_notice_override = Some(decision);
+                self.revision_notice_approval_config_digest = approval_config_digest;
+            }
+            MeshLane::CurationSignal => {
+                self.curation_signal_override = Some(decision);
+                self.curation_signal_approval_config_digest = approval_config_digest;
+            }
         }
     }
 
@@ -11904,6 +12037,12 @@ impl StoredMeshLaneGrantState {
         self.graph_link_override = None;
         self.revision_notice_override = None;
         self.curation_signal_override = None;
+        self.metadata_approval_config_digest = None;
+        self.body_approval_config_digest = None;
+        self.embedding_approval_config_digest = None;
+        self.graph_link_approval_config_digest = None;
+        self.revision_notice_approval_config_digest = None;
+        self.curation_signal_approval_config_digest = None;
     }
 }
 
@@ -11915,6 +12054,8 @@ pub struct MeshLaneGrantMutationInput {
     pub target_adapter: MeshLaneGrantTargetAdapter,
     pub material_lane: MeshLane,
     pub expected_generation: u64,
+    /// Required canonical digest for an allow; ignored and cleared for revoke.
+    pub approval_config_digest: Option<String>,
     pub updated_at: Option<String>,
 }
 
@@ -11926,6 +12067,7 @@ pub enum MeshLaneGrantMutationError {
     InvalidTargetAdapter {
         message: String,
     },
+    InvalidApprovalConfigDigest,
     PeerNotFound {
         workspace_id: String,
         peer_id: String,
@@ -11959,6 +12101,9 @@ impl fmt::Display for MeshLaneGrantMutationError {
         match self {
             Self::Database(error) => write!(formatter, "{error}"),
             Self::InvalidTargetAdapter { message } => formatter.write_str(message),
+            Self::InvalidApprovalConfigDigest => {
+                formatter.write_str("mesh lane allow requires a canonical approved config digest")
+            }
             Self::PeerNotFound {
                 workspace_id,
                 peer_id,
@@ -11998,6 +12143,7 @@ impl Error for MeshLaneGrantMutationError {
         match self {
             Self::Database(error) => Some(error),
             Self::InvalidTargetAdapter { .. }
+            | Self::InvalidApprovalConfigDigest
             | Self::PeerNotFound { .. }
             | Self::PeerDisabled { .. }
             | Self::TargetMismatch { .. }
@@ -12770,8 +12916,16 @@ impl DbConnection {
                     target_origin_node_id, target_adapter_json, grant_generation,
                     metadata_override, body_override, embedding_override,
                     graph_link_override, revision_notice_override,
-                    curation_signal_override, updated_at
+                    curation_signal_override,
+                    metadata_approval_config_digest,
+                    body_approval_config_digest,
+                    embedding_approval_config_digest,
+                    graph_link_approval_config_digest,
+                    revision_notice_approval_config_digest,
+                    curation_signal_approval_config_digest,
+                    updated_at
                  ) VALUES (?1, ?2, 1, ?3, ?4, 1,
+                           NULL, NULL, NULL, NULL, NULL, NULL,
                            NULL, NULL, NULL, NULL, NULL, NULL, ?5)",
                 &[
                     Value::Text(workspace_id.to_owned()),
@@ -12823,6 +12977,12 @@ impl DbConnection {
                     graph_link_override = NULL,
                     revision_notice_override = NULL,
                     curation_signal_override = NULL,
+                    metadata_approval_config_digest = NULL,
+                    body_approval_config_digest = NULL,
+                    embedding_approval_config_digest = NULL,
+                    graph_link_approval_config_digest = NULL,
+                    revision_notice_approval_config_digest = NULL,
+                    curation_signal_approval_config_digest = NULL,
                     updated_at = ?6
               WHERE workspace_id = ?1
                 AND peer_id = ?2
@@ -12898,6 +13058,12 @@ impl DbConnection {
                     s.grant_generation, s.metadata_override, s.body_override,
                     s.embedding_override, s.graph_link_override,
                     s.revision_notice_override, s.curation_signal_override,
+                    s.metadata_approval_config_digest,
+                    s.body_approval_config_digest,
+                    s.embedding_approval_config_digest,
+                    s.graph_link_approval_config_digest,
+                    s.revision_notice_approval_config_digest,
+                    s.curation_signal_approval_config_digest,
                     s.updated_at,
                     CASE
                         WHEN s.target_origin_node_id = p.origin_node_id AND p.enabled = 1
@@ -12929,6 +13095,12 @@ impl DbConnection {
                     s.grant_generation, s.metadata_override, s.body_override,
                     s.embedding_override, s.graph_link_override,
                     s.revision_notice_override, s.curation_signal_override,
+                    s.metadata_approval_config_digest,
+                    s.body_approval_config_digest,
+                    s.embedding_approval_config_digest,
+                    s.graph_link_approval_config_digest,
+                    s.revision_notice_approval_config_digest,
+                    s.curation_signal_approval_config_digest,
                     s.updated_at,
                     CASE
                         WHEN s.target_origin_node_id = p.origin_node_id AND p.enabled = 1
@@ -13100,6 +13272,18 @@ impl DbConnection {
                 message: "target adapter peer_id does not match the mutation peer_id".to_owned(),
             });
         }
+        let approval_config_digest = if decision == MeshLaneDecision::Allow {
+            Some(
+                input
+                    .approval_config_digest
+                    .as_deref()
+                    .filter(|digest| is_canonical_blake3_hash(digest))
+                    .ok_or(MeshLaneGrantMutationError::InvalidApprovalConfigDigest)?
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
 
         let peer = self
             .get_mesh_peer(&input.workspace_id, &input.peer_id)?
@@ -13170,6 +13354,12 @@ impl DbConnection {
                 graph_link_override: None,
                 revision_notice_override: None,
                 curation_signal_override: None,
+                metadata_approval_config_digest: None,
+                body_approval_config_digest: None,
+                embedding_approval_config_digest: None,
+                graph_link_approval_config_digest: None,
+                revision_notice_approval_config_digest: None,
+                curation_signal_approval_config_digest: None,
                 updated_at: updated_at.clone(),
             });
         if !next.target_matches_current_peer {
@@ -13184,7 +13374,7 @@ impl DbConnection {
         next.target_matches_current_peer = true;
         next.grant_generation = next_generation;
         next.updated_at = updated_at.clone();
-        next.set_override(input.material_lane, decision);
+        next.set_override(input.material_lane, decision, approval_config_digest);
 
         let values = mesh_lane_grant_state_values(&next, next_generation_sql);
         if existing.is_some() {
@@ -13203,10 +13393,16 @@ impl DbConnection {
                         graph_link_override = ?10,
                         revision_notice_override = ?11,
                         curation_signal_override = ?12,
-                        updated_at = ?13
+                        metadata_approval_config_digest = ?13,
+                        body_approval_config_digest = ?14,
+                        embedding_approval_config_digest = ?15,
+                        graph_link_approval_config_digest = ?16,
+                        revision_notice_approval_config_digest = ?17,
+                        curation_signal_approval_config_digest = ?18,
+                        updated_at = ?19
                   WHERE workspace_id = ?1
                     AND peer_id = ?2
-                    AND grant_generation = ?14",
+                    AND grant_generation = ?20",
                 &update_values,
             )?;
             if affected != 1 {
@@ -13226,9 +13422,17 @@ impl DbConnection {
                     target_origin_node_id, target_adapter_json, grant_generation,
                     metadata_override, body_override, embedding_override,
                     graph_link_override, revision_notice_override,
-                    curation_signal_override, updated_at
+                    curation_signal_override,
+                    metadata_approval_config_digest,
+                    body_approval_config_digest,
+                    embedding_approval_config_digest,
+                    graph_link_approval_config_digest,
+                    revision_notice_approval_config_digest,
+                    curation_signal_approval_config_digest,
+                    updated_at
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
                  )",
                 &values,
             )?;
@@ -15281,14 +15485,14 @@ fn stored_mesh_lane_grant_state_from_row(row: &Row) -> Result<StoredMeshLaneGran
         });
     }
 
-    Ok(StoredMeshLaneGrantState {
+    let state = StoredMeshLaneGrantState {
         workspace_id,
         peer_id,
         target_adapter,
         target_adapter_json,
         target_matches_current_peer: required_sqlite_bool(
             row,
-            13,
+            19,
             DbOperation::Query,
             "target_matches_current_peer",
         )?,
@@ -15299,8 +15503,55 @@ fn stored_mesh_lane_grant_state_from_row(row: &Row) -> Result<StoredMeshLaneGran
         graph_link_override: optional_mesh_lane_decision(row, 9, "graph_link_override")?,
         revision_notice_override: optional_mesh_lane_decision(row, 10, "revision_notice_override")?,
         curation_signal_override: optional_mesh_lane_decision(row, 11, "curation_signal_override")?,
-        updated_at: required_text(row, 12, DbOperation::Query, "updated_at")?.to_owned(),
-    })
+        metadata_approval_config_digest: optional_mesh_lane_approval_digest(
+            row,
+            12,
+            "metadata_approval_config_digest",
+        )?,
+        body_approval_config_digest: optional_mesh_lane_approval_digest(
+            row,
+            13,
+            "body_approval_config_digest",
+        )?,
+        embedding_approval_config_digest: optional_mesh_lane_approval_digest(
+            row,
+            14,
+            "embedding_approval_config_digest",
+        )?,
+        graph_link_approval_config_digest: optional_mesh_lane_approval_digest(
+            row,
+            15,
+            "graph_link_approval_config_digest",
+        )?,
+        revision_notice_approval_config_digest: optional_mesh_lane_approval_digest(
+            row,
+            16,
+            "revision_notice_approval_config_digest",
+        )?,
+        curation_signal_approval_config_digest: optional_mesh_lane_approval_digest(
+            row,
+            17,
+            "curation_signal_approval_config_digest",
+        )?,
+        updated_at: required_text(row, 18, DbOperation::Query, "updated_at")?.to_owned(),
+    };
+    for lane in [
+        MeshLane::Metadata,
+        MeshLane::Body,
+        MeshLane::Embedding,
+        MeshLane::GraphLink,
+        MeshLane::RevisionNotice,
+        MeshLane::CurationSignal,
+    ] {
+        let is_allow = state.override_for(lane) == Some(MeshLaneDecision::Allow);
+        if is_allow != state.approval_config_digest_for(lane).is_some() {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: format!("mesh lane {lane:?} allow/config-digest binding is inconsistent"),
+            });
+        }
+    }
+    Ok(state)
 }
 
 fn optional_mesh_lane_decision(
@@ -15321,12 +15572,36 @@ fn optional_mesh_lane_decision(
         .transpose()
 }
 
+fn optional_mesh_lane_approval_digest(
+    row: &Row,
+    index: usize,
+    field: &str,
+) -> Result<Option<String>> {
+    optional_text(row, index)?
+        .map(|digest| {
+            if is_canonical_blake3_hash(digest) {
+                Ok(digest.to_owned())
+            } else {
+                Err(DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: format!("{field} is not a canonical BLAKE3 digest"),
+                })
+            }
+        })
+        .transpose()
+}
+
 fn mesh_lane_grant_state_values(
     state: &StoredMeshLaneGrantState,
     generation_sql: i64,
 ) -> Vec<Value> {
     let decision_value = |decision: Option<MeshLaneDecision>| {
         decision.map_or(Value::Null, |value| Value::Text(value.as_str().to_owned()))
+    };
+    let digest_value = |digest: &Option<String>| {
+        digest
+            .as_ref()
+            .map_or(Value::Null, |value| Value::Text(value.clone()))
     };
     vec![
         Value::Text(state.workspace_id.clone()),
@@ -15341,6 +15616,12 @@ fn mesh_lane_grant_state_values(
         decision_value(state.graph_link_override),
         decision_value(state.revision_notice_override),
         decision_value(state.curation_signal_override),
+        digest_value(&state.metadata_approval_config_digest),
+        digest_value(&state.body_approval_config_digest),
+        digest_value(&state.embedding_approval_config_digest),
+        digest_value(&state.graph_link_approval_config_digest),
+        digest_value(&state.revision_notice_approval_config_digest),
+        digest_value(&state.curation_signal_approval_config_digest),
         Value::Text(state.updated_at.clone()),
     ]
 }
@@ -36014,6 +36295,7 @@ mod tests {
             ),
             material_lane: MeshLane::Metadata,
             expected_generation: 0,
+            approval_config_digest: Some(format!("blake3:{}", "a".repeat(64))),
             updated_at: Some("2026-08-04T00:01:00Z".to_owned()),
         };
         ensure_equal(
@@ -36024,6 +36306,25 @@ mod tests {
             &0,
             "missing lane state starts at generation zero",
         )?;
+        let unbound = connection.apply_mesh_lane_grant(&super::MeshLaneGrantMutationInput {
+            approval_config_digest: None,
+            ..mutation.clone()
+        });
+        ensure(
+            matches!(
+                unbound,
+                Err(super::MeshLaneGrantMutationError::InvalidApprovalConfigDigest)
+            ),
+            "an allow without an exact approved config digest must fail closed",
+        )?;
+        ensure_equal(
+            &connection.mesh_lane_grant_generation(
+                "wsp_01234567890123456789012345",
+                "peer_alpha_000001",
+            )?,
+            &0,
+            "unbound allow commits zero generation changes",
+        )?;
         let granted = connection
             .apply_mesh_lane_grant(&mutation)
             .map_err(|error| TestFailure::new(error.to_string()))?;
@@ -36032,6 +36333,11 @@ mod tests {
             &granted.metadata_override,
             &Some(MeshLaneDecision::Allow),
             "grant writes exact allow override",
+        )?;
+        ensure_equal(
+            &granted.metadata_approval_config_digest,
+            &mutation.approval_config_digest,
+            "grant binds the exact approved config digest",
         )?;
         ensure_equal(
             &granted.body_override,
@@ -36071,6 +36377,11 @@ mod tests {
             &revoked.metadata_override,
             &Some(MeshLaneDecision::Deny),
             "revoke writes exact deny override",
+        )?;
+        ensure_equal(
+            &revoked.metadata_approval_config_digest,
+            &None,
+            "revoke clears the widened-lane config binding",
         )?;
         let revoked_again = connection
             .revoke_mesh_lane(&super::MeshLaneGrantMutationInput {
@@ -36133,6 +36444,7 @@ mod tests {
             .apply_mesh_lane_grant(&super::MeshLaneGrantMutationInput {
                 material_lane: MeshLane::Body,
                 expected_generation: 3,
+                approval_config_digest: Some(format!("blake3:{}", "b".repeat(64))),
                 updated_at: Some("2026-08-04T00:05:00Z".to_owned()),
                 ..mutation.clone()
             })
@@ -36142,6 +36454,11 @@ mod tests {
             &body_granted.body_override,
             &Some(MeshLaneDecision::Allow),
             "body override is stored before rotation",
+        )?;
+        ensure_equal(
+            &body_granted.body_approval_config_digest,
+            &Some(format!("blake3:{}", "b".repeat(64))),
+            "each widened lane retains its own approved config digest",
         )?;
 
         connection.upsert_mesh_peer_in_current_transaction(&super::UpsertMeshPeerInput {
@@ -36192,6 +36509,11 @@ mod tests {
             &fresh.body_override,
             &None,
             "old-target lane grants must not transfer to the rotated target",
+        )?;
+        ensure_equal(
+            &fresh.body_approval_config_digest,
+            &None,
+            "old-target config bindings must not transfer to the rotated target",
         )?;
 
         let disabled = super::UpsertMeshPeerInput {

@@ -7550,7 +7550,7 @@ preview the same metadata lane for that peer
 **Invocation.**
 
 ```bash
-ee mesh preview-grant <enrolled-node-key> --lane metadata --workspace . --json
+ee mesh preview-grant <peer-id> --lane metadata --workspace . --json
 ```
 
 **Expected emission.** Message contains: `already granted ... currently exposed`
@@ -7569,19 +7569,20 @@ ee mesh preview-grant <enrolled-node-key> --lane metadata --workspace . --json
 
 **Introduced by:** bd-36bbk.1.17 (epic SRR6.46.17)
 
-**Trigger.** A lane-grant preview targets a node key that is not currently a member of the workspace's peer group, so the preview warns that materializing the grant would also require enrollment.
+**Trigger.** A lane-grant preview targets an enrolled opaque peer ID that is not currently named by the workspace's peer-group bindings, so the preview warns that materializing the grant would also require group membership.
 
 **Setup.**
 
 ```bash
 ee init --workspace . --json
-run preview-grant against a node key that was never enrolled as a peer
+enroll/configure peer_example but omit it from [[mesh.peer_group_bindings]]
+run preview-grant against the enrolled opaque peer ID
 ```
 
 **Invocation.**
 
 ```bash
-ee mesh preview-grant nodekey:00... --lane metadata --workspace . --json
+ee mesh preview-grant peer_example --lane metadata --workspace . --json
 ```
 
 **Expected emission.** Message contains: `peer`

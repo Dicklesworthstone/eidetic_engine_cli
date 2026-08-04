@@ -631,10 +631,10 @@ fn collect_cautions(
         cautions.push(Caution {
             kind: caution_kinds::PEER_NOT_IN_GROUP.to_owned(),
             message: format!(
-                "peer {} is not in the workspace's auto-enrolled peer-group; the preview still runs but the peer would not actually receive data until enrolled",
+                "peer {} is enrolled but is not included in this workspace's peer-group bindings; the preview still runs, but group-authorized data will not flow until the matching binding includes that peer",
                 input.peer_node_key
             ),
-            severity: "warning".to_owned(),
+            severity: "info".to_owned(),
         });
     }
 
@@ -1492,8 +1492,9 @@ mod tests {
             .iter()
             .find(|c| c.kind == caution_kinds::PEER_NOT_IN_GROUP)
             .expect("peer_not_in_group caution present");
-        assert_eq!(caution.severity, "warning");
+        assert_eq!(caution.severity, "info");
         assert!(caution.message.contains("nodekey:stranger"));
+        assert!(caution.message.contains("peer-group bindings"));
     }
 
     #[test]
