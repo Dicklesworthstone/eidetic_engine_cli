@@ -889,6 +889,70 @@ fn invalid_and_expired_bearers_have_distinct_public_errors_and_zero_effect() -> 
 }
 
 #[test]
+fn config_byte_drift_after_preview_stales_bearer_with_zero_effect() -> TestResult {
+    let fixture = set_up_fixture("config-drift-before-grant")?;
+    let (_, issued_json) = preview(&fixture, true)?;
+    let bearer = sensitive_json_string(
+        &issued_json,
+        "/data/preview/approvalToken/bearer",
+        "pre-config-drift approval preview",
+    )?;
+    let config_path = Path::new(&fixture.workspace)
+        .join(".ee")
+        .join("config.toml");
+    let mut drifted_config_bytes = fs::read(&config_path)
+        .map_err(|error| format!("read pre-drift lane-grant config: {error}"))?;
+    drifted_config_bytes.extend_from_slice(b"\n# comment-only drift after approval preview\n");
+    fs::write(&config_path, drifted_config_bytes)
+        .map_err(|error| format!("write comment-drifted lane-grant config: {error}"))?;
+
+    let rejected = run_ee_with_stdin(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            TEST_LANE_ARG,
+            "--preview-token-stdin",
+            "--json",
+        ],
+        format!("{bearer}\n").as_bytes(),
+    )?;
+    approval_error_json(
+        &rejected,
+        "comment-drifted approval bearer",
+        "mesh_approval_token_stale",
+        "warning",
+        "authentic but its approved preview is stale",
+    )?;
+
+    let (_, after_json) = preview(&fixture, false)?;
+    let after = preview_payload(&after_json, "post-config-drift rejection preview")?;
+    ensure_equal(
+        &json_u64(
+            &after,
+            "/grantGeneration",
+            "post-config-drift rejection preview",
+        )?,
+        &0,
+        "config-drift rejection must not advance consent generation",
+    )?;
+    ensure_equal(
+        &after
+            .pointer("/currentPolicy/decision")
+            .and_then(Value::as_str),
+        &Some("deny"),
+        "config-drift rejection must leave the lane denied",
+    )?;
+    ensure_equal(
+        &lane_audit_entries(&fixture, GRANT_AUDIT_ACTION)?.len(),
+        &0,
+        "config-drift rejection must append no grant audit",
+    )
+}
+
+#[test]
 fn store_key_rotation_invalidates_outstanding_bearer_with_zero_effect() -> TestResult {
     let fixture = set_up_fixture("key-rotation")?;
     let (_, baseline_json) = preview(&fixture, false)?;
