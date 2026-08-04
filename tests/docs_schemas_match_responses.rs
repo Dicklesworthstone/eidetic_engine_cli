@@ -86,6 +86,10 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     ),
     ("ee.memory.show.v1", "ee.memory.show.v1.json"),
     ("ee.memory.list.v1", "ee.memory.list.v1.json"),
+    (
+        ee::models::memory::TYPED_MEMORY_FIELDS_SCHEMA_V2,
+        "ee.memory.typed_fields.v2.json",
+    ),
     ("ee.status.v1", "ee.status.v1.json"),
     ("ee.doctor.v1", "ee.doctor.v1.json"),
     ("ee.capabilities.v1", "ee.capabilities.v1.json"),

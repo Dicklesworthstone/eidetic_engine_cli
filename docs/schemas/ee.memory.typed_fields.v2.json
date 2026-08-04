@@ -17,6 +17,12 @@
       "maxProperties": 8
     }
   },
+  "field_presets": {
+    "minimal": ["schema", "kind", "fields"],
+    "summary": ["schema", "kind", "fields"],
+    "standard": ["schema", "kind", "fields"],
+    "full": ["*"]
+  },
   "allOf": [
     {
       "if": {"properties": {"kind": {"const": "failure"}}},
