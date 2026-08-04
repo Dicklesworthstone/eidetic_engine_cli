@@ -828,8 +828,8 @@ fn trust_class_basis_points(trust_class: &str) -> u16 {
         "human_explicit" => 1000,
         "peer_human_attested" => 900,
         "agent_validated" => 800,
-        "cass_evidence" => 650,
-        "agent_assertion" => 500,
+        "agent_assertion" => 650,
+        "cass_evidence" => 500,
         "legacy_import" => 300,
         _ => 400,
     }
@@ -2202,15 +2202,23 @@ mod tests {
     type TestResult = Result<(), String>;
 
     #[test]
-    fn peer_human_attested_hotset_weight_sits_between_local_human_and_agent_validation() {
-        assert!(
-            trust_class_basis_points("human_explicit")
-                > trust_class_basis_points("peer_human_attested")
-        );
-        assert!(
-            trust_class_basis_points("peer_human_attested")
-                > trust_class_basis_points("agent_validated")
-        );
+    fn trust_class_hotset_weights_follow_canonical_order() {
+        let ordered = [
+            "human_explicit",
+            "peer_human_attested",
+            "agent_validated",
+            "agent_assertion",
+            "cass_evidence",
+            "legacy_import",
+        ];
+        for adjacent in ordered.windows(2) {
+            assert!(
+                trust_class_basis_points(adjacent[0]) > trust_class_basis_points(adjacent[1]),
+                "{} must rank above {}",
+                adjacent[0],
+                adjacent[1]
+            );
+        }
     }
 
     fn builder(threshold_gen: u64) -> HotsetManifestBuilder {

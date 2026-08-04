@@ -1072,7 +1072,9 @@ fn trust_class_score(trust_class: &str) -> f64 {
         "agent_validated" | "source_verified" => 0.9,
         "imported" | "cass_import" => 0.7,
         "agent_assertion" => 0.6,
+        "cass_evidence" => 0.55,
         "derived" | "inferred" => 0.55,
+        "legacy_import" => 0.4,
         _ => 0.5,
     }
 }
@@ -1387,9 +1389,23 @@ mod tests {
     }
 
     #[test]
-    fn peer_human_attested_health_score_sits_between_local_human_and_agent_validation() {
-        assert!(trust_class_score("human_explicit") > trust_class_score("peer_human_attested"));
-        assert!(trust_class_score("peer_human_attested") > trust_class_score("agent_validated"));
+    fn trust_class_health_scores_follow_canonical_order() {
+        let ordered = [
+            "human_explicit",
+            "peer_human_attested",
+            "agent_validated",
+            "agent_assertion",
+            "cass_evidence",
+            "legacy_import",
+        ];
+        for adjacent in ordered.windows(2) {
+            assert!(
+                trust_class_score(adjacent[0]) > trust_class_score(adjacent[1]),
+                "{} must rank above {}",
+                adjacent[0],
+                adjacent[1]
+            );
+        }
     }
 
     #[test]

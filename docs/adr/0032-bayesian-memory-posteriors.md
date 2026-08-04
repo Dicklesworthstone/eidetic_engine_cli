@@ -215,8 +215,9 @@ What becomes harder:
   the response-size budget allows up to 10 percent overhead over
   pre-N7.1 baseline.
 - **ADR 0009 is amended.** Downstream readers must consult both
-  ADR 0009 (for trust-class definitions and initial confidences) and
-  this ADR (for transition rules). A future merge ADR can fold them.
+  ADR 0009 (for trust-class definitions and initial confidences, as
+  amended by ADR 0086 TC-D7 for `peer_human_attested`) and this ADR
+  (for transition rules). A future merge ADR can fold them.
 - **The existing scalar `confidence` field stays present for
   envelope-version compatibility but is now a derived view over the
   Beta posterior** (`confidence = alpha / (alpha + beta)`). Removing
@@ -350,9 +351,10 @@ pass and the implements-surface label matches.
 - `bd-17c65.14.7` — N7 umbrella feature bead.
 - `bd-17c65.14.7.2` — N7.1 implementation sub-bead (this ADR gates
   it).
-- ADR 0009 — Trust Class Taxonomy (amended by this ADR for
-  transitions; class definitions and initial confidences remain
-  load-bearing from 0009).
+- ADR 0009 — Trust Class Taxonomy (amended by ADR 0086 TC-D7 for
+  `peer_human_attested` and by this ADR for transitions; the base
+  class definitions and initial confidences remain load-bearing from
+  0009).
 - ADR 0013 — Single Write Owner Actor (governs atomicity of
   posterior updates under concurrent writes).
 - `bd-17c65.12.2` — L1 concurrent write contention (N7.1 depends on
