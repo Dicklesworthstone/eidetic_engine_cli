@@ -10655,12 +10655,20 @@ mod tests {
                 Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>,
                 None,
             );
+            // Mirrors the production rebuild: frankensearch's IndexBuilder no
+            // longer writes a Tantivy arm on the cass-compat lane, so ee's
+            // own lexical arm runs after the vector build.
+            #[cfg(feature = "lexical-bm25")]
+            let lexical_documents = documents.clone();
             IndexBuilder::new(&build_index_dir)
                 .with_embedder_stack(stack)
                 .add_documents(documents)
                 .build(&cx)
                 .await
                 .map_err(|error| error.to_string())?;
+            #[cfg(feature = "lexical-bm25")]
+            crate::core::index::build_lexical_tier(&cx, &build_index_dir, &lexical_documents)
+                .await?;
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
@@ -13722,12 +13730,18 @@ mod tests {
                 Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>,
                 None,
             );
+            // Mirrors the production rebuild: frankensearch's IndexBuilder no
+            // longer writes a Tantivy arm on the cass-compat lane, so ee's
+            // own lexical arm runs after the vector build.
+            let lexical_documents = documents.clone();
             IndexBuilder::new(&build_index_dir)
                 .with_embedder_stack(stack)
                 .add_documents(documents)
                 .build(&cx)
                 .await
                 .map_err(|error| error.to_string())?;
+            crate::core::index::build_lexical_tier(&cx, &build_index_dir, &lexical_documents)
+                .await?;
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
@@ -13861,12 +13875,18 @@ mod tests {
                 Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>,
                 None,
             );
+            // Mirrors the production rebuild: frankensearch's IndexBuilder no
+            // longer writes a Tantivy arm on the cass-compat lane, so ee's
+            // own lexical arm runs after the vector build.
+            let lexical_documents = documents.clone();
             IndexBuilder::new(&build_index_dir)
                 .with_embedder_stack(stack)
                 .add_documents(documents)
                 .build(&cx)
                 .await
                 .map_err(|error| error.to_string())?;
+            crate::core::index::build_lexical_tier(&cx, &build_index_dir, &lexical_documents)
+                .await?;
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
@@ -13997,12 +14017,18 @@ mod tests {
                 Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>,
                 None,
             );
+            // Mirrors the production rebuild: frankensearch's IndexBuilder no
+            // longer writes a Tantivy arm on the cass-compat lane, so ee's
+            // own lexical arm runs after the vector build.
+            let lexical_documents = documents.clone();
             IndexBuilder::new(&build_index_dir)
                 .with_embedder_stack(stack)
                 .add_documents(documents)
                 .build(&cx)
                 .await
                 .map_err(|error| error.to_string())?;
+            crate::core::index::build_lexical_tier(&cx, &build_index_dir, &lexical_documents)
+                .await?;
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;

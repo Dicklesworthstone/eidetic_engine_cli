@@ -34,7 +34,7 @@ use crate::search::{
     session_to_document,
 };
 #[cfg(feature = "lexical-bm25")]
-use crate::search::{LexicalSearch, TantivyIndex};
+use crate::search::{LexicalRead, LexicalWrite, TantivyIndex};
 use asupersync::sync::OnceCell as AsyncOnceCell;
 use frankensearch::embed::{
     ConsentSource, DownloadConsent, DownloadProgress, ModelDownloader, ModelLifecycle,
@@ -3884,6 +3884,46 @@ fn build_empty_index_sync(index_dir: &Path, stack: EmbedderStack) -> Result<Buil
     })
 }
 
+/// Build the Tantivy lexical tier for a full rebuild.
+///
+/// frankensearch d117ce1f ("make Quill the lexical feature backend") left
+/// `IndexBuilder` without a Tantivy write arm for the `lexical-tantivy`
+/// (cass-compat) lane ee stays on, so full rebuilds stopped producing
+/// `<index_dir>/lexical`. This replicates the retired
+/// `lexical`-without-`quill` builder arm exactly: skip when there are no
+/// staged documents (the old arm never created the directory then), admit
+/// every source document with per-document failures logged and non-fatal
+/// (they surface later as a persisted-count mismatch in
+/// `verify_published_tier_counts`, matching the old ignored-receipt
+/// semantics), and keep create/commit failures fatal — a half-written
+/// lexical index is worse than an absent arm.
+#[cfg(feature = "lexical-bm25")]
+pub(crate) async fn build_lexical_tier(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    documents: &[crate::search::IndexableDocument],
+) -> Result<(), String> {
+    if documents.is_empty() {
+        return Ok(());
+    }
+    let lexical_path = index_dir.join(LEXICAL_INDEX_SUBDIR);
+    let lexical = TantivyIndex::create(&lexical_path)
+        .map_err(|error| format!("failed to create lexical tier: {error}"))?;
+    for document in documents {
+        if let Err(error) = lexical.index_document(cx, document).await {
+            tracing::warn!(
+                doc_id = %document.id,
+                error = %error,
+                "lexical indexing failed for document"
+            );
+        }
+    }
+    lexical
+        .commit(cx)
+        .await
+        .map_err(|error| format!("failed to commit lexical tier: {error}"))
+}
+
 fn build_index_sync(
     index_dir: &Path,
     stack: EmbedderStack,
@@ -3901,6 +3941,16 @@ fn build_index_sync(
             let cx = asupersync::Cx::current()
                 .expect("run_cli_future's block_on installs an ambient runtime Cx");
             let source_count = documents.len();
+            // frankensearch d117ce1f made Quill the backend of its `lexical`
+            // feature, so `IndexBuilder` no longer compiles a Tantivy write
+            // arm under ee's `lexical-tantivy` (cass-compat) lane. ee builds
+            // the Tantivy tier itself below, preserving the retired arm's
+            // exact semantics; stage a copy of every source document first,
+            // mirroring the builder's old deep-clone lexical staging (vector
+            // -tier embedding failures never excluded a document from the
+            // lexical arm).
+            #[cfg(feature = "lexical-bm25")]
+            let lexical_documents = documents.clone();
             let builder = IndexBuilder::new(&index_dir_owned)
                 .with_embedder_stack(stack)
                 .add_documents(documents);
@@ -3908,18 +3958,28 @@ fn build_index_sync(
             let build_result = builder.build(&cx).await;
             let converted = match build_result {
                 Ok(stats) => {
-                    let errors = stats
-                        .errors
-                        .into_iter()
-                        .map(|(id, error)| (id, format!("fast tier: {error}")))
-                        .collect::<Vec<_>>();
-                    Ok(BuildStats {
-                        source_count,
-                        doc_count: stats.doc_count,
-                        error_count: stats.error_count,
-                        has_quality_index: stats.has_quality_index,
-                        errors,
-                    })
+                    #[cfg(feature = "lexical-bm25")]
+                    let lexical_result =
+                        build_lexical_tier(&cx, &index_dir_owned, &lexical_documents).await;
+                    #[cfg(not(feature = "lexical-bm25"))]
+                    let lexical_result: Result<(), String> = Ok(());
+                    match lexical_result {
+                        Ok(()) => {
+                            let errors = stats
+                                .errors
+                                .into_iter()
+                                .map(|(id, error)| (id, format!("fast tier: {error}")))
+                                .collect::<Vec<_>>();
+                            Ok(BuildStats {
+                                source_count,
+                                doc_count: stats.doc_count,
+                                error_count: stats.error_count,
+                                has_quality_index: stats.has_quality_index,
+                                errors,
+                            })
+                        }
+                        Err(error) => Err(format!("Index build failed: {error}")),
+                    }
                 }
                 Err(e) => Err(format!("Index build failed: {e}")),
             };
@@ -4049,7 +4109,7 @@ fn verify_published_tier_counts(
                 lexical_path.display()
             )
         })?;
-        let actual = LexicalSearch::doc_count(&lexical);
+        let actual = LexicalRead::doc_count(&lexical);
         if actual != expected {
             return Err(format!(
                 "lexical-tier persisted document count mismatch: expected {expected}, found {actual}"
