@@ -78,10 +78,14 @@ pub const IDENTITY_ATTEST_MAX_PAYLOAD_BYTES: usize = 8192;
 // (`b3sum`) over the fixed KAT binding in the tests below. They pin the
 // derivation contexts, the transcript layout, the preimage layout, and the
 // keyed-MAC wiring; an accidental edit to any of them fails the KAT test.
+#[cfg(test)]
 const KAT_TRANSCRIPT_HASH_HEX: &str =
     "7c9fc90baec20563de192e24b11246eb1965b3d95a9d66a2e9e34d252d3e571e";
+#[cfg(test)]
 const KAT_I2R_HEX: &str = "a2124625eaf2ff02018622ad52c592168e5d90e6465013caa005f1269a9a6915";
+#[cfg(test)]
 const KAT_R2I_HEX: &str = "3791d4c418b7bc7b6525c4eab9f2126b07fec5875fd7afd66d09c1b4b209650a";
+#[cfg(test)]
 const KAT_FRAME_MAC_HEX: &str = "126228fbdff27bb7a9a34f451bc91da3de49a9a6a3782a18cf3fa33ec6c3f1d7";
 
 /// Direction of a frame inside an established session.
@@ -897,8 +901,10 @@ pub const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 4096;
 // (`b3sum`) over the fixed KAT binding: pair key `0x00..0x1f`, nonces
 // `0x11 * 32` / `0x22 * 32`, generation 1, observations
 // `nodekey:kat-init-observed` / `nodekey:kat-resp-observed`.
+#[cfg(test)]
 const KAT_RESPONDER_CONFIRM_MAC_HEX: &str =
     "2dcc3285621e01ef65b0c0275ad8422549df8f147b952c98f34359ff5eab5162";
+#[cfg(test)]
 const KAT_INITIATOR_FINISH_MAC_HEX: &str =
     "d4f02ca7ca6cd9585ae3b5d58a4aca7815da0e221fd5f885bf0a648958fb4b6f";
 
