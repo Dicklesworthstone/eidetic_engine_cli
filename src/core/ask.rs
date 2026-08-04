@@ -386,6 +386,7 @@ pub fn tokenize_for_ask(text: &str) -> Vec<String> {
 fn trust_tilt(trust_class: &str) -> f32 {
     match trust_class {
         "human_explicit" => 1.00,
+        "peer_human_attested" => 0.92,
         "agent_validated" => 0.85,
         "agent_assertion" => 0.70,
         "cass_evidence" => 0.55,
@@ -1321,9 +1322,16 @@ mod tests {
     #[test]
     fn trust_tilt_ordering() {
         assert!(trust_tilt("human_explicit") > trust_tilt("agent_validated"));
+        assert!(trust_tilt("human_explicit") > trust_tilt("peer_human_attested"));
+        assert!(trust_tilt("peer_human_attested") > trust_tilt("agent_validated"));
         assert!(trust_tilt("agent_validated") > trust_tilt("agent_assertion"));
         assert!(trust_tilt("agent_assertion") > trust_tilt("cass_evidence"));
         assert!(trust_tilt("cass_evidence") > trust_tilt("legacy_import"));
+    }
+
+    #[test]
+    fn peer_human_attested_ask_weight_is_point_ninety_two() {
+        assert!((trust_tilt("peer_human_attested") - 0.92).abs() < f32::EPSILON);
     }
 
     #[test]

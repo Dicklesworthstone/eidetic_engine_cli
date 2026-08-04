@@ -106,7 +106,7 @@ fn selective_sync_candidates() -> Vec<SelectiveSyncCandidate> {
     .into_iter()
     .map(|lane| {
         SelectiveSyncCandidate::new("mem-a", "workspace-a", "procedural", "rule", lane)
-            .with_trust_class(SyncTrustClass::AgentValidated)
+            .with_trust_class(SyncTrustClass::PeerHumanAttested)
             .with_evidence_refs(lane == SyncMaterialLane::EvidenceRef)
             .with_estimated_bytes(10)
     })

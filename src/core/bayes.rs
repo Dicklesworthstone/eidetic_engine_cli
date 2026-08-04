@@ -537,6 +537,38 @@ pub fn trust_class_transition(
                 )
             }
         }
+        TrustClass::PeerHumanAttested => {
+            if explicit_human_promotion {
+                TrustClassTransition::promote(
+                    current_class,
+                    TrustClass::HumanExplicit,
+                    posterior,
+                    (ci90_lower, ci90_upper),
+                    validation_events,
+                    explicit_human_promotion,
+                    "peer_human_attested_promote_explicit_local_operator",
+                )
+            } else if ci90_upper < 0.45 {
+                TrustClassTransition::demote(
+                    current_class,
+                    TrustClass::AgentValidated,
+                    posterior,
+                    (ci90_lower, ci90_upper),
+                    validation_events,
+                    explicit_human_promotion,
+                    "peer_human_attested_demote_ci90_upper_lt_0_45",
+                )
+            } else {
+                TrustClassTransition::stable(
+                    current_class,
+                    posterior,
+                    Some((ci90_lower, ci90_upper)),
+                    validation_events,
+                    explicit_human_promotion,
+                    "local_human_promotion_requires_operator",
+                )
+            }
+        }
         TrustClass::HumanExplicit => {
             if ci90_upper < 0.45 {
                 TrustClassTransition::demote(

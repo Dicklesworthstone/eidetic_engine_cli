@@ -341,7 +341,7 @@ pub fn parse_subscribe_filter(raw: Option<&str>) -> Result<SubscribeFilter, Doma
                     |error| {
                         subscribe_filter_domain_error(
                             format!("Invalid trust class `{value}`: {error}"),
-                            "Use human_explicit, agent_validated, agent_assertion, cass_evidence, or legacy_import.",
+                            "Use human_explicit, peer_human_attested, agent_validated, agent_assertion, cass_evidence, or legacy_import.",
                         )
                     },
                 )?;
@@ -671,7 +671,8 @@ fn resolve_workspace_path(path: &Path) -> Result<PathBuf, DomainError> {
 
 fn trust_rank(trust_class: TrustClass) -> u8 {
     match trust_class {
-        TrustClass::HumanExplicit => 5,
+        TrustClass::HumanExplicit => 6,
+        TrustClass::PeerHumanAttested => 5,
         TrustClass::AgentValidated => 4,
         TrustClass::AgentAssertion => 3,
         TrustClass::CassEvidence => 2,
@@ -732,6 +733,12 @@ fn subscribe_filter_domain_error(message: String, repair: &'static str) -> Domai
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_human_attested_rank_is_between_local_human_and_agent_validation() {
+        assert!(trust_rank(TrustClass::HumanExplicit) > trust_rank(TrustClass::PeerHumanAttested));
+        assert!(trust_rank(TrustClass::PeerHumanAttested) > trust_rank(TrustClass::AgentValidated));
+    }
 
     fn sample_delta() -> MemoryDelta {
         MemoryDelta {

@@ -115,6 +115,8 @@ fn level_transition_audit_details_include_hash_and_evidence() {
         event: "workflow.completed",
         evidence_refs: &["wf-release"],
         source_action: Some("ee workflow close"),
+        previous_trust_class: None,
+        new_trust_class: None,
     });
     let parsed: Value = serde_json::from_str(&details).expect("details parse as JSON");
 
@@ -253,6 +255,130 @@ fn manual_level_command_applies_all_adjacent_transitions_with_transition_audit()
             Value::String("memory.level".to_owned())
         );
     }
+}
+
+#[test]
+fn manual_level_transition_demotes_peer_human_attested_authority_atomically() {
+    let temp = tempfile::tempdir().expect("tempdir creates");
+    let database_path = temp.path().join("ee.db");
+    let remembered = remember_memory(&RememberMemoryOptions {
+        workspace_path: temp.path(),
+        database_path: Some(&database_path),
+        content: "A peer-attested semantic memory that must not become a local procedural rule.",
+        workflow_id: None,
+        level: "semantic",
+        kind: "fact",
+        tags: Some("lifecycle"),
+        confidence: 0.8,
+        source: Some("mesh://active-member/attestation"),
+        allow_secret_mention: false,
+        valid_from: None,
+        valid_to: None,
+        dry_run: false,
+        auto_link: true,
+        propose_candidates: false,
+    })
+    .expect("memory persists");
+    let memory_id = remembered.memory_id.to_string();
+
+    {
+        let connection =
+            DbConnection::open_file(&remembered.database_path).expect("db opens for seeding");
+        assert!(
+            connection
+                .update_memory_trust_class(&memory_id, "peer_human_attested")
+                .expect("peer trust fixture updates")
+        );
+    }
+
+    let dry_run = update_memory_level(&MemoryLevelOptions {
+        workspace_path: temp.path(),
+        database_path: &remembered.database_path,
+        memory_id: &memory_id,
+        level: "procedural",
+        expected_level: Some("semantic"),
+        reason: Some("local operator promotes the lifecycle level"),
+        actor: Some("lifecycle-test"),
+        dry_run: true,
+        include_tombstoned: false,
+    })
+    .expect("dry run succeeds");
+    assert!(
+        dry_run
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence
+                == "trust_class_transition:peer_human_attested->agent_assertion")
+    );
+
+    let report = update_memory_level(&MemoryLevelOptions {
+        workspace_path: temp.path(),
+        database_path: &remembered.database_path,
+        memory_id: &memory_id,
+        level: "procedural",
+        expected_level: Some("semantic"),
+        reason: Some("local operator promotes the lifecycle level"),
+        actor: Some("lifecycle-test"),
+        dry_run: false,
+        include_tombstoned: false,
+    })
+    .expect("level transition succeeds");
+    assert!(report.persisted);
+
+    let connection = DbConnection::open_file(&remembered.database_path).expect("db reopens");
+    let memory = connection
+        .get_memory(&memory_id)
+        .expect("memory query succeeds")
+        .expect("memory exists");
+    assert_eq!(memory.level, "procedural");
+    assert_eq!(memory.trust_class, "agent_assertion");
+
+    let audits = connection
+        .list_audit_by_target("memory", &memory_id, None)
+        .expect("target audit query succeeds");
+    let level_audit = audits
+        .iter()
+        .find(|entry| entry.action == audit_actions::MEMORY_LEVEL_TRANSITION)
+        .expect("level-transition audit exists");
+    let level_details: Value = serde_json::from_str(
+        level_audit
+            .details
+            .as_deref()
+            .expect("level-transition details exist"),
+    )
+    .expect("level-transition details parse");
+    assert_eq!(
+        level_details["previousTrustClass"],
+        Value::String("peer_human_attested".to_owned())
+    );
+    assert_eq!(
+        level_details["newTrustClass"],
+        Value::String("agent_assertion".to_owned())
+    );
+
+    let trust_audit = audits
+        .iter()
+        .find(|entry| entry.action == audit_actions::TRUST_CLASS_TRANSITION)
+        .expect("trust-transition audit exists");
+    let trust_details: Value = serde_json::from_str(
+        trust_audit
+            .details
+            .as_deref()
+            .expect("trust-transition details exist"),
+    )
+    .expect("trust-transition details parse");
+    assert_eq!(
+        trust_details["trigger"],
+        Value::String("local_level_transition".to_owned())
+    );
+    assert_eq!(
+        trust_details["fromClass"],
+        Value::String("peer_human_attested".to_owned())
+    );
+    assert_eq!(
+        trust_details["toClass"],
+        Value::String("agent_assertion".to_owned())
+    );
 }
 
 #[test]

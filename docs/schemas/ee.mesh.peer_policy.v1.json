@@ -50,7 +50,7 @@
       "$ref": "#/$defs/trustLane"
     },
     "importTrustClass": {
-      "description": "Local trust class assigned to imported peer material. Peer material may import only as agent_assertion or agent_validated, never as human_explicit, cass_evidence, or legacy_import.",
+      "description": "Local trust class assigned by generic peer policy. It may be only agent_assertion or agent_validated. peer_human_attested requires the dedicated signed-active-member admission path; human_explicit, cass_evidence, and legacy_import remain disallowed.",
       "type": "string",
       "enum": ["agent_assertion", "agent_validated"]
     },

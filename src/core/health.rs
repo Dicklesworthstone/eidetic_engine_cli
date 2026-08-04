@@ -1068,6 +1068,7 @@ fn action_for_sub_score(
 fn trust_class_score(trust_class: &str) -> f64 {
     match trust_class {
         "human_explicit" | "human_verified" => 1.0,
+        "peer_human_attested" => 0.95,
         "agent_validated" | "source_verified" => 0.9,
         "imported" | "cass_import" => 0.7,
         "agent_assertion" => 0.6,
@@ -1383,6 +1384,12 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    #[test]
+    fn peer_human_attested_health_score_sits_between_local_human_and_agent_validation() {
+        assert!(trust_class_score("human_explicit") > trust_class_score("peer_human_attested"));
+        assert!(trust_class_score("peer_human_attested") > trust_class_score("agent_validated"));
     }
 
     #[test]

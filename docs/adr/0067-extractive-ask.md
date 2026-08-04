@@ -49,8 +49,9 @@ span_score = w1·lexical_overlap(question, span)
   `ask_semantic_degraded` (info) and w2 mass shifts to w1 (documented
   re-normalization, still deterministic).
 - `memory_confidence_trust_tilt`: the memory's confidence scaled by trust
-  class (human_explicit > agent_validated > agent_assertion >
-  cass_evidence > legacy_import, using the established trust ordering).
+  class (human_explicit > peer_human_attested > agent_validated >
+  agent_assertion > cass_evidence > legacy_import, using the established trust
+  ordering).
 - **Corroboration**: spans are clustered with the existing MI-dedup
   machinery (cosine ≥ 0.85, NMI ≥ 0.72 constants reused, not redefined);
   a cluster's representative span gains a corroboration multiplier

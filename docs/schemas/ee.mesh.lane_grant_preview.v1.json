@@ -108,11 +108,12 @@
       "enum": [
         "human_explicit",
         "human_revised",
+        "peer_human_attested",
         "agent_validated",
         "agent_proposed",
         "external"
       ],
-      "description": "SRR6.5 trust authority class. `human_explicit` is the user's directly-authored material — most sensitive to leak — and triggers the `high_trust_class_exposure` caution when exposed."
+      "description": "SRR6.5 trust authority class. `human_explicit` is the user's directly-authored material — most sensitive to leak — and triggers the `high_trust_class_exposure` caution when exposed. `peer_human_attested` records a signed active-member origin that declared `human_explicit` without claiming that a human typed it."
     },
     "previewRow": {
       "type": "object",

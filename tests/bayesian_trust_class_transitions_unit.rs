@@ -118,6 +118,15 @@ fn trust_class_transition_table_demotes_on_ci_upper_crossings() -> Result<(), St
         TrustClassTransitionDirection::Demote,
         "human_explicit_demote_ci90_upper_lt_0_45",
     );
+    assert_transition(
+        TrustClass::PeerHumanAttested,
+        strong_negative,
+        0,
+        false,
+        TrustClass::AgentValidated,
+        TrustClassTransitionDirection::Demote,
+        "peer_human_attested_demote_ci90_upper_lt_0_45",
+    );
 
     Ok(())
 }
@@ -176,6 +185,24 @@ fn human_explicit_promotion_requires_operator_intent() -> Result<(), String> {
         TrustClass::HumanExplicit,
         TrustClassTransitionDirection::Promote,
         "agent_validated_promote_explicit_human_operator",
+    );
+    assert_transition(
+        TrustClass::PeerHumanAttested,
+        strong_positive,
+        0,
+        false,
+        TrustClass::PeerHumanAttested,
+        TrustClassTransitionDirection::Stable,
+        "local_human_promotion_requires_operator",
+    );
+    assert_transition(
+        TrustClass::PeerHumanAttested,
+        strong_positive,
+        0,
+        true,
+        TrustClass::HumanExplicit,
+        TrustClassTransitionDirection::Promote,
+        "peer_human_attested_promote_explicit_local_operator",
     );
 
     Ok(())

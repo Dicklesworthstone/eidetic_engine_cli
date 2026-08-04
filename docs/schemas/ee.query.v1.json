@@ -164,7 +164,7 @@
     "stringArray": {"type": "array", "items": {"type": "string"}},
     "trustClass": {
       "type": "string",
-      "enum": ["human_explicit", "agent_validated", "agent_assertion", "cass_evidence", "legacy_import"]
+      "enum": ["human_explicit", "peer_human_attested", "agent_validated", "agent_assertion", "cass_evidence", "legacy_import"]
     }
   }
 }

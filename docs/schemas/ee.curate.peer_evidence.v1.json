@@ -34,9 +34,9 @@
       "maximum": 1.0
     },
     "trustClass": {
-      "description": "Trust class assigned to the candidate after peer contributions are folded in. Peer-only evidence MUST land at `agent_assertion` or `agent_validated` and MUST NOT escalate the candidate to `human_explicit` or `cass_evidence` — those classes are reserved for local human or local replay evidence respectively (parallels [[ee.mesh.peer_policy.v1]] `importTrustClass`).",
+      "description": "Trust class assigned to the candidate after peer contributions are folded in. Peer-only evidence MUST land at `agent_assertion` or `agent_validated` and MUST NOT escalate the candidate to `peer_human_attested`, `human_explicit`, or `cass_evidence` — those classes require the dedicated signed-member admission path, local human authority, or local replay evidence respectively (parallels [[ee.mesh.peer_policy.v1]] `importTrustClass`).",
       "type": "string",
-      "enum": ["agent_assertion", "agent_validated", "human_explicit", "cass_evidence", "legacy_import"]
+      "enum": ["human_explicit", "peer_human_attested", "agent_validated", "agent_assertion", "cass_evidence", "legacy_import"]
     },
     "peerEvidence": {
       "description": "Each entry records one peer's contribution to the candidate's evidence. The body of remote memories is not included here — only redaction-safe identifiers and the score delta the contribution produced.",

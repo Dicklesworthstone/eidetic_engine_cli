@@ -248,12 +248,13 @@
       "type": "string",
       "enum": [
         "human_explicit",
+        "peer_human_attested",
         "agent_validated",
         "agent_assertion",
         "cass_evidence",
         "legacy_import"
       ],
-      "description": "Canonical five-class vocabulary from src/models/trust.rs."
+      "description": "Canonical six-class vocabulary from src/models/trust.rs. `peer_human_attested` records a signed active-member origin that declared `human_explicit`; it does not prove a human typed the row."
     },
     "previewRow": {
       "type": "object",

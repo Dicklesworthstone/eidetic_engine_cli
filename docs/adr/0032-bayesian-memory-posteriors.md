@@ -104,8 +104,8 @@ event signal and weight, and the posterior `(alpha, beta)`.
 
 ### Trust-class transitions (amends ADR 0009)
 
-ADR 0009 enumerated five trust classes with initial confidences but
-left the transition rules to implementation. This ADR pins the
+ADR 0009 enumerated the original five trust classes with initial confidences;
+ADR 0086 TC-D7 later inserted `peer_human_attested`. This ADR pins the
 transition rules to *credible-interval boundary crossings*, not
 point-estimate thresholds. Transitions are audited via a new audit
 action `trust_class.transition`.
@@ -116,6 +116,7 @@ action `trust_class.transition`.
 | `cass_evidence`   | `agent_assertion` | `ci90.lo > 0.60`                                             | `ci90.hi < 0.35` |
 | `agent_assertion` | `agent_validated` | `ci90.lo > 0.70` AND `alpha + beta >= 6` (sample-size gate)  | `ci90.hi < 0.40` |
 | `agent_validated` | `human_explicit`  | NOT AUTOMATIC — requires explicit `ee rule promote --to human_explicit` | `ci90.hi < 0.45` |
+| `peer_human_attested` | `human_explicit` | NOT AUTOMATIC — requires explicit local operator promotion | `ci90.hi < 0.45` demotes to `agent_validated` |
 
 Two structural choices in this table need explicit rationale:
 
@@ -139,6 +140,12 @@ human_explicit` to commit a memory into it. Demotion from
 `human_explicit` is still automatic on `ci90.hi < 0.45` so a memory
 explicitly marked human-trusted but persistently harmful does not
 remain authoritative.
+
+Bayesian evidence never promotes a row *into* `peer_human_attested`; only the
+signed active-member import admission path in ADR 0086 TC-D7 can assign that
+class. A local operator may explicitly promote an attested row to the strictly
+local `human_explicit` class, while sufficiently harmful evidence demotes it to
+`agent_validated`.
 
 ### Backfill for existing memories
 

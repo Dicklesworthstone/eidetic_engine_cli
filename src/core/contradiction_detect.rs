@@ -401,7 +401,8 @@ pub const CONFLICT_SURFACE_SCHEMA_V1: &str = "ee.conflict.v1";
 #[must_use]
 pub fn trust_class_rank(trust_class: &str) -> u8 {
     match trust_class.parse::<TrustClass>() {
-        Ok(TrustClass::HumanExplicit) => 5,
+        Ok(TrustClass::HumanExplicit) => 6,
+        Ok(TrustClass::PeerHumanAttested) => 5,
         Ok(TrustClass::AgentValidated) => 4,
         Ok(TrustClass::AgentAssertion) => 3,
         Ok(TrustClass::CassEvidence) => 2,
@@ -1008,7 +1009,8 @@ mod tests {
 
     #[test]
     fn trust_class_rank_follows_the_canonical_store_taxonomy() {
-        assert!(trust_class_rank("human_explicit") > trust_class_rank("agent_validated"));
+        assert!(trust_class_rank("human_explicit") > trust_class_rank("peer_human_attested"));
+        assert!(trust_class_rank("peer_human_attested") > trust_class_rank("agent_validated"));
         assert!(trust_class_rank("agent_validated") > trust_class_rank("agent_assertion"));
         assert!(trust_class_rank("agent_assertion") > trust_class_rank("cass_evidence"));
         assert!(trust_class_rank("cass_evidence") > trust_class_rank("legacy_import"));

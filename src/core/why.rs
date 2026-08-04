@@ -2504,6 +2504,10 @@ fn round_graph_score(value: f64) -> f64 {
 fn determine_origin(trust_class: &str) -> String {
     match trust_class {
         "human_explicit" => "Explicitly remembered via `ee remember`".to_string(),
+        "peer_human_attested" => {
+            "A signed origin from an active member declared the source row human_explicit"
+                .to_string()
+        }
         "agent_validated" => "Agent assertion with validated outcome evidence".to_string(),
         "agent_assertion" => "Agent assertion awaiting validation".to_string(),
         "cass_evidence" => "Imported from CASS session evidence".to_string(),
@@ -3231,6 +3235,14 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    #[test]
+    fn determine_origin_explains_peer_human_attestation_without_overclaiming() {
+        let origin = determine_origin("peer_human_attested");
+        assert!(origin.contains("signed origin"));
+        assert!(origin.contains("active member"));
+        assert!(!origin.contains("typed"));
     }
 
     #[test]

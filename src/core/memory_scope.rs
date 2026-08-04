@@ -1252,7 +1252,7 @@ pub fn memory_producer_agent(memory: &StoredMemory) -> Option<String> {
 pub fn is_verified_memory(memory: &StoredMemory) -> bool {
     matches!(
         TrustClass::from_str(&memory.trust_class),
-        Ok(TrustClass::HumanExplicit | TrustClass::AgentValidated)
+        Ok(TrustClass::HumanExplicit | TrustClass::PeerHumanAttested | TrustClass::AgentValidated)
     )
 }
 
@@ -1462,6 +1462,7 @@ fn peer_safe_mesh_import_trust_class(import_trust_class: Option<TrustClass>) -> 
 fn mesh_peer_import_trust_class_rejection_reason(trust_class: TrustClass) -> Option<&'static str> {
     match trust_class {
         TrustClass::HumanExplicit => Some("peer_import_human_explicit_disallowed"),
+        TrustClass::PeerHumanAttested => Some("peer_import_peer_human_attested_disallowed"),
         TrustClass::CassEvidence => Some("peer_import_cass_evidence_disallowed"),
         TrustClass::LegacyImport => Some("peer_import_legacy_import_disallowed"),
         TrustClass::AgentValidated | TrustClass::AgentAssertion => None,
@@ -1877,7 +1878,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_scope_accepts_human_and_agent_validated_only() {
+    fn verified_scope_accepts_local_and_peer_human_plus_agent_validated_only() {
         let context = MemoryScopeContext {
             scope: MemoryScope::Verified,
             strict_scope: false,
@@ -1886,6 +1887,7 @@ mod tests {
         };
 
         assert!(context.memory_in_scope(&memory_with_scope(TrustClass::HumanExplicit, None)));
+        assert!(context.memory_in_scope(&memory_with_scope(TrustClass::PeerHumanAttested, None)));
         assert!(context.memory_in_scope(&memory_with_scope(TrustClass::AgentValidated, None)));
         assert!(!context.memory_in_scope(&memory_with_scope(TrustClass::AgentAssertion, None)));
     }
@@ -2273,6 +2275,70 @@ team_members = ["OutsideAgent"]
     }
 
     #[test]
+    fn generic_mesh_peer_policy_cannot_mint_peer_human_attested() {
+        let mut policy = peer_policy();
+        policy.trust_lane = MeshTrustLane::PeerHumanViaPeer;
+        policy.import_trust_class = TrustClass::PeerHumanAttested;
+
+        let decision =
+            decide_mesh_peer_policy(&peer_policy_input(MeshLane::Metadata), Some(&policy));
+
+        assert_eq!(
+            decision.import.workspace_scope_decision,
+            MeshImportDecisionKind::Reject
+        );
+        assert_eq!(
+            decision.import.reason,
+            "peer_import_peer_human_attested_disallowed"
+        );
+        assert_eq!(decision.trust_lane, Some(MeshTrustLane::PeerHumanViaPeer));
+        assert_eq!(decision.import_trust_class, None);
+        assert!(!decision.permits_import_as_human_explicit());
+        assert_eq!(decision.to_json()["importTrustClass"], JsonValue::Null);
+    }
+
+    #[test]
+    fn human_explicit_remains_rejected_at_every_peer_import_boundary() {
+        assert!(!MeshTrustLane::LocalHuman.permits_peer_import());
+        assert_eq!(
+            mesh_peer_import_trust_class_rejection_reason(TrustClass::HumanExplicit),
+            Some("peer_import_human_explicit_disallowed")
+        );
+        assert_eq!(
+            peer_safe_mesh_import_trust_class(Some(TrustClass::HumanExplicit)),
+            None
+        );
+
+        let mut policy = peer_policy();
+        policy.trust_lane = MeshTrustLane::PeerHumanViaPeer;
+        policy.import_trust_class = TrustClass::HumanExplicit;
+
+        let decision =
+            decide_mesh_peer_policy(&peer_policy_input(MeshLane::Metadata), Some(&policy));
+
+        assert_eq!(
+            decision.import.workspace_scope_decision,
+            MeshImportDecisionKind::Reject
+        );
+        assert_eq!(
+            decision.import.reason,
+            "peer_import_human_explicit_disallowed"
+        );
+        assert_eq!(decision.import_trust_class, None);
+        assert!(!decision.permits_import_as_human_explicit());
+
+        let json = decision.to_json();
+        assert_eq!(json["importTrustClass"], JsonValue::Null);
+        assert_eq!(json["failure"]["code"], "mesh_peer_policy_rejected");
+        assert_ne!(
+            json.pointer("/importTrustClass")
+                .and_then(JsonValue::as_str),
+            Some(TrustClass::HumanExplicit.as_str()),
+            "decision JSON leaked the local-only human trust class: {json}"
+        );
+    }
+
+    #[test]
     fn mesh_peer_policy_rejects_local_human_trust_lane_for_peer_import() {
         let mut policy = peer_policy();
         policy.trust_lane = MeshTrustLane::LocalHuman;
@@ -2295,6 +2361,10 @@ team_members = ["OutsideAgent"]
             (
                 TrustClass::HumanExplicit,
                 "peer_import_human_explicit_disallowed",
+            ),
+            (
+                TrustClass::PeerHumanAttested,
+                "peer_import_peer_human_attested_disallowed",
             ),
             (
                 TrustClass::CassEvidence,

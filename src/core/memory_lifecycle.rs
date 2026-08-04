@@ -241,12 +241,14 @@ pub struct MemoryLevelTransitionAudit<'a> {
     pub event: &'a str,
     pub evidence_refs: &'a [&'a str],
     pub source_action: Option<&'a str>,
+    pub previous_trust_class: Option<&'a str>,
+    pub new_trust_class: Option<&'a str>,
 }
 
 /// Build stable JSON details for a `memory.level_transition` audit row.
 #[must_use]
 pub fn level_transition_audit_details(input: &MemoryLevelTransitionAudit<'_>) -> String {
-    let payload = json!({
+    let mut payload = json!({
         "schema": MEMORY_LEVEL_TRANSITION_AUDIT_SCHEMA_V1,
         "memoryId": input.memory_id,
         "previousLevel": input.previous_level,
@@ -257,6 +259,10 @@ pub fn level_transition_audit_details(input: &MemoryLevelTransitionAudit<'_>) ->
         "evidenceRefs": input.evidence_refs,
         "sourceAction": input.source_action,
     });
+    if let (Some(previous), Some(new)) = (input.previous_trust_class, input.new_trust_class) {
+        payload["previousTrustClass"] = json!(previous);
+        payload["newTrustClass"] = json!(new);
+    }
     let details_hash = format!(
         "blake3:{}",
         blake3::hash(payload.to_string().as_bytes()).to_hex()

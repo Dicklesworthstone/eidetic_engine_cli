@@ -898,10 +898,15 @@ impl Default for WriteImmuneQuarantineConfig {
             max_missing_evidence_ratio: DEFAULT_WRITE_IMMUNE_MISSING_EVIDENCE_RATIO,
             max_high_trust_missing_evidence_ratio:
                 DEFAULT_WRITE_IMMUNE_HIGH_TRUST_MISSING_EVIDENCE_RATIO,
-            high_trust_classes: ["human_explicit", "agent_validated", "cass_evidence"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+            high_trust_classes: [
+                "human_explicit",
+                "peer_human_attested",
+                "agent_validated",
+                "cass_evidence",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
             source_whitelist: BTreeSet::new(),
         }
     }
@@ -3128,6 +3133,12 @@ mod tests {
     use proptest::test_runner::{Config as ProptestConfig, TestCaseError};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::sync::Arc;
+
+    #[test]
+    fn write_immune_defaults_treat_peer_human_attestation_as_high_trust() {
+        let config = WriteImmuneQuarantineConfig::default();
+        assert!(config.high_trust_classes.contains("peer_human_attested"));
+    }
 
     #[derive(Clone, Debug)]
     struct ScheduledSpoolWrite {

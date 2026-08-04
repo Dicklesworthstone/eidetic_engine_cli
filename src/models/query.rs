@@ -1437,11 +1437,11 @@ fn trust_class_rank(value: &str) -> Option<usize> {
         .position(|candidate| *candidate == trust_class)
 }
 
-/// Derive trust posture from trust class string (EE-260, ADR-0009).
+/// Derive trust posture from trust class string (EE-260, ADR-0009, ADR-0086 TC-D7).
 #[must_use]
 pub fn posture_for_trust_class(trust_class: &str) -> &'static str {
     match trust_class {
-        "human_explicit" | "agent_validated" => "authoritative",
+        "human_explicit" | "peer_human_attested" | "agent_validated" => "authoritative",
         "agent_assertion" | "cass_evidence" => "advisory",
         "legacy_import" => "legacy_evidence",
         _ => "advisory",
@@ -2319,6 +2319,10 @@ mod tests {
             "human_explicit should pass min_class=agent_validated",
         )?;
         ensure(
+            filters.matches("peer_human_attested", "authoritative"),
+            "peer_human_attested should pass min_class=agent_validated",
+        )?;
+        ensure(
             filters.matches("agent_validated", "authoritative"),
             "agent_validated should pass min_class=agent_validated",
         )?;
@@ -2381,6 +2385,13 @@ mod tests {
         ensure(
             filters.matches("human_explicit", "authoritative"),
             "authoritative posture should pass",
+        )?;
+        ensure(
+            filters.matches(
+                "peer_human_attested",
+                posture_for_trust_class("peer_human_attested"),
+            ),
+            "peer_human_attested should carry authoritative posture",
         )?;
         ensure(
             !filters.matches("agent_assertion", "advisory"),

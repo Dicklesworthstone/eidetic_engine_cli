@@ -57,8 +57,8 @@ fn insert_memory(
             importance: 0.8,
             provenance_uri: Some("test://memory-debt".to_owned()),
             // Valid per the memories.trust_class CHECK constraint
-            // (human_explicit|agent_validated|agent_assertion|cass_evidence|
-            // legacy_import); the prior "untrusted" value was rejected at INSERT,
+            // (human_explicit|peer_human_attested|agent_validated|agent_assertion|
+            // cass_evidence|legacy_import); the prior "untrusted" value was rejected at INSERT,
             // leaving this whole test file born-red. Orphan-debt detection keys
             // off link_count, not trust_class, so this does not change classes.
             trust_class: "agent_assertion".to_owned(),

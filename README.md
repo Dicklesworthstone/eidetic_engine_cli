@@ -1919,6 +1919,7 @@ Memories carry a trust class that affects packing priority:
 | Class | Source | Initial confidence |
 |---|---|---|
 | `human_explicit` | User-typed `ee remember` | 0.85 |
+| `peer_human_attested` | Signed origin from an active team member whose store declared `human_explicit`; this attests the member's declaration, not who typed it | 0.75 |
 | `agent_validated` | Agent assertion + outcome confirmation | 0.65 |
 | `agent_assertion` | Agent assertion, no validation | 0.50 |
 | `cass_evidence` | Imported session span | 0.45 |
@@ -1935,8 +1936,8 @@ Advisory priority at retrieval time:
 | `clear` | Normal ranking |
 
 Lifecycle rules, advisory priority, and prompt-injection handling are specified
-in [`docs/trust-model.md`](docs/trust-model.md); ADR 0009 remains the canonical
-trust taxonomy.
+in [`docs/trust-model.md`](docs/trust-model.md); ADR 0009 as amended by ADR 0086
+TC-D7 remains the canonical trust taxonomy.
 
 ### Prompt-injection guard
 

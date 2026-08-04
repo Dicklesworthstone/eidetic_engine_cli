@@ -41440,6 +41440,7 @@ fn validate_trust_object(value: &serde_json::Value) -> Result<(), QueryFileError
 
     let valid_trust_classes = [
         "human_explicit",
+        "peer_human_attested",
         "agent_validated",
         "agent_assertion",
         "cass_evidence",

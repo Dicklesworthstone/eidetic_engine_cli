@@ -5558,12 +5558,15 @@ fn unparseable_import_event() -> ImportEventDecision {
     }
 }
 
-/// Peer-supplied events may not claim trust classes above the `agent_validated`
-/// ceiling; a claim of operator, CASS, or legacy authority is rejected so a
-/// peer cannot launder elevated trust into the local store (ADR 0086 TC-D3).
-const MESH_IMPORT_REJECTED_TRUST_CLAIMS: [&str; 4] = [
+/// Generic peer-supplied events may not claim trust classes above the
+/// `agent_validated` ceiling. `peer_human_attested` requires the dedicated
+/// signed active-member admission path; operator, CASS, and legacy authority
+/// claims are likewise rejected to prevent trust laundering (ADR 0086 TC-D3,
+/// TC-D7).
+const MESH_IMPORT_REJECTED_TRUST_CLAIMS: [&str; 5] = [
     "localHuman",
     "human_explicit",
+    "peer_human_attested",
     "cass_evidence",
     "legacy_import",
 ];
@@ -7599,7 +7602,12 @@ max_bytes = 0
     #[test]
     fn import_event_decision_rejects_over_claimed_trust() {
         let (bindings, registry) = admitting_replay_authority();
-        for claim in ["human_explicit", "cass_evidence", "legacy_import"] {
+        for claim in [
+            "human_explicit",
+            "peer_human_attested",
+            "cass_evidence",
+            "legacy_import",
+        ] {
             let event = replay_event("metadata", claim);
             let decision = decide_import_event(REPLAY_WORKSPACE_ID, &event, &bindings, &registry);
             assert!(
@@ -7654,6 +7662,7 @@ max_bytes = 0
             ("untrusted", "untrusted"),
             ("localHuman", "untrusted"),
             ("human_explicit", "untrusted"),
+            ("peer_human_attested", "untrusted"),
             ("cass_evidence", "untrusted"),
             ("legacy_import", "untrusted"),
         ] {

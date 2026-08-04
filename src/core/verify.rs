@@ -1436,7 +1436,7 @@ fn provenance_reverify_verification_note(referent: &VerifyProvenanceReferentRepo
 
 fn provenance_reverify_demoted_trust_class(previous: &str) -> Option<&'static str> {
     match TrustClass::from_str(previous).ok()? {
-        TrustClass::HumanExplicit | TrustClass::AgentValidated => {
+        TrustClass::HumanExplicit | TrustClass::PeerHumanAttested | TrustClass::AgentValidated => {
             Some(TrustClass::AgentAssertion.as_str())
         }
         TrustClass::AgentAssertion | TrustClass::CassEvidence | TrustClass::LegacyImport => None,
@@ -4249,5 +4249,13 @@ mod tests {
             Action::DemoteAndRevalidate
         );
         assert!(Status::EvidenceMissing.reverify_action().demotes());
+    }
+
+    #[test]
+    fn provenance_reverify_demotes_peer_attestation_when_origin_evidence_fails() {
+        assert_eq!(
+            provenance_reverify_demoted_trust_class("peer_human_attested"),
+            Some("agent_assertion")
+        );
     }
 }

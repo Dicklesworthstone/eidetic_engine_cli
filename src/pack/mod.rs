@@ -1793,7 +1793,9 @@ impl PackTrustPosture {
     #[must_use]
     pub const fn for_class(class: TrustClass) -> Self {
         match class {
-            TrustClass::HumanExplicit | TrustClass::AgentValidated => Self::Authoritative,
+            TrustClass::HumanExplicit
+            | TrustClass::PeerHumanAttested
+            | TrustClass::AgentValidated => Self::Authoritative,
             TrustClass::AgentAssertion | TrustClass::CassEvidence => Self::Advisory,
             TrustClass::LegacyImport => Self::LegacyEvidence,
         }
@@ -1958,7 +1960,8 @@ pub struct PackSelectedItem {
 /// trusted) for the pack-time contradiction guard (bd-1n0np.7.5).
 const fn trust_class_rank_milli(class: TrustClass) -> i64 {
     match class {
-        TrustClass::HumanExplicit => 5_000,
+        TrustClass::HumanExplicit => 6_000,
+        TrustClass::PeerHumanAttested => 5_000,
         TrustClass::AgentValidated => 4_000,
         TrustClass::AgentAssertion => 3_000,
         TrustClass::CassEvidence => 2_000,
@@ -3210,6 +3213,7 @@ fn round_metric(value: f32) -> f32 {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PackTrustCounts {
     pub human_explicit: usize,
+    pub peer_human_attested: usize,
     pub agent_validated: usize,
     pub agent_assertion: usize,
     pub cass_evidence: usize,
@@ -3221,6 +3225,9 @@ impl PackTrustCounts {
         match class {
             TrustClass::HumanExplicit => {
                 self.human_explicit = self.human_explicit.saturating_add(1);
+            }
+            TrustClass::PeerHumanAttested => {
+                self.peer_human_attested = self.peer_human_attested.saturating_add(1);
             }
             TrustClass::AgentValidated => {
                 self.agent_validated = self.agent_validated.saturating_add(1);
@@ -3239,7 +3246,9 @@ impl PackTrustCounts {
 
     #[must_use]
     pub const fn authoritative(&self) -> usize {
-        self.human_explicit.saturating_add(self.agent_validated)
+        self.human_explicit
+            .saturating_add(self.peer_human_attested)
+            .saturating_add(self.agent_validated)
     }
 
     #[must_use]
@@ -4039,6 +4048,8 @@ fn has_human_vs_agent_assertion(left: &PackDraftItem, right: &PackDraftItem) -> 
         (left.trust.class, right.trust.class),
         (TrustClass::HumanExplicit, TrustClass::AgentAssertion)
             | (TrustClass::AgentAssertion, TrustClass::HumanExplicit)
+            | (TrustClass::PeerHumanAttested, TrustClass::AgentAssertion)
+            | (TrustClass::AgentAssertion, TrustClass::PeerHumanAttested)
     )
 }
 
@@ -14605,12 +14616,35 @@ mod tests {
     }
 
     #[test]
+    fn peer_human_attested_is_authoritative_and_ranked_between_local_human_and_agent() {
+        ensure_equal(
+            &PackTrustPosture::for_class(TrustClass::PeerHumanAttested),
+            &PackTrustPosture::Authoritative,
+            "peer human pack posture",
+        )?;
+        ensure(
+            trust_class_rank_milli(TrustClass::HumanExplicit)
+                > trust_class_rank_milli(TrustClass::PeerHumanAttested),
+            "local human trust must outrank peer attestation",
+        )?;
+        ensure(
+            trust_class_rank_milli(TrustClass::PeerHumanAttested)
+                > trust_class_rank_milli(TrustClass::AgentValidated),
+            "peer attestation must outrank agent validation",
+        )
+    }
+
+    #[test]
     fn advisory_banner_separates_trust_postures_and_degradations() -> TestResult {
         let request = ContextRequest::from_query("review imported release rule")
             .map_err(|error| format!("request rejected: {error:?}"))?;
         let human = candidate(1, 0.9, 0.8, 10)?.with_trust_signal(PackTrustSignal::new(
             TrustClass::HumanExplicit,
             Some("project-rule".to_string()),
+        ));
+        let peer_human = candidate(4, 0.85, 0.75, 10)?.with_trust_signal(PackTrustSignal::new(
+            TrustClass::PeerHumanAttested,
+            Some("team-rule".to_string()),
         ));
         let agent = candidate(2, 0.8, 0.7, 10)?
             .with_trust_signal(PackTrustSignal::new(TrustClass::AgentAssertion, None));
@@ -14619,7 +14653,7 @@ mod tests {
         let draft = assemble_draft(
             request.query.clone(),
             request.budget,
-            vec![human, agent, legacy],
+            vec![human, peer_human, agent, legacy],
         )
         .map_err(|error| format!("draft rejected: {error:?}"))?;
         let degraded = ContextResponseDegradation::new(
@@ -14634,7 +14668,7 @@ mod tests {
 
         let banner = response.data.advisory_banner();
         ensure_equal(&banner.status.as_str(), &"degraded", "banner status")?;
-        ensure_equal(&banner.authoritative_count, &1, "authoritative count")?;
+        ensure_equal(&banner.authoritative_count, &2, "authoritative count")?;
         ensure_equal(&banner.advisory_count, &1, "advisory count")?;
         ensure_equal(&banner.legacy_count, &1, "legacy count")?;
         ensure_equal(&banner.degradation_count, &1, "degradation count")?;

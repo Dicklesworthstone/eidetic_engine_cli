@@ -47,8 +47,12 @@ const DECISION_FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_policy_decision_outbound_quarantined.json",
     "tests/fixtures/mesh/peer_policy_decision_outbound_rejected.json",
 ];
-const DISALLOWED_PEER_IMPORT_TRUST_CLASSES: &[&str] =
-    &["human_explicit", "cass_evidence", "legacy_import"];
+const DISALLOWED_PEER_IMPORT_TRUST_CLASSES: &[&str] = &[
+    "human_explicit",
+    "peer_human_attested",
+    "cass_evidence",
+    "legacy_import",
+];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

@@ -1,7 +1,8 @@
-//! Trust class taxonomy (EE-260, ADR-0009).
+//! Trust class taxonomy (EE-260, ADR-0009, ADR-0086).
 //!
-//! Defines the five-class trust taxonomy for memories:
+//! Defines the six-class trust taxonomy for memories:
 //! - `human_explicit`: Human invoked `ee remember` directly (0.85)
+//! - `peer_human_attested`: Active member's signed origin declared `human_explicit` (0.75)
 //! - `agent_validated`: Agent assertion + validated outcome (0.65)
 //! - `agent_assertion`: Agent assertion, no outcome yet (0.50)
 //! - `cass_evidence`: Imported session span from `cass` (0.45)
@@ -60,6 +61,8 @@ pub const LOCAL_SIGNING_KEY_POLICY_SCHEMA_V1: &str = "ee.local_signing_key_polic
 pub enum TrustClass {
     /// Human invoked `ee remember` directly.
     HumanExplicit,
+    /// Signed peer origin from an active member declared `human_explicit`.
+    PeerHumanAttested,
     /// Agent assertion with at least one validated outcome.
     AgentValidated,
     /// Agent assertion, no outcome events yet.
@@ -76,6 +79,7 @@ impl TrustClass {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::HumanExplicit => "human_explicit",
+            Self::PeerHumanAttested => "peer_human_attested",
             Self::AgentValidated => "agent_validated",
             Self::AgentAssertion => "agent_assertion",
             Self::CassEvidence => "cass_evidence",
@@ -83,11 +87,12 @@ impl TrustClass {
         }
     }
 
-    /// Initial confidence for this trust class per ADR-0009.
+    /// Initial confidence for this trust class per ADR-0009 and ADR-0086 TC-D7.
     #[must_use]
     pub const fn initial_confidence(self) -> f32 {
         match self {
             Self::HumanExplicit => 0.85,
+            Self::PeerHumanAttested => 0.75,
             Self::AgentValidated => 0.65,
             Self::AgentAssertion => 0.50,
             Self::CassEvidence => 0.45,
@@ -97,9 +102,10 @@ impl TrustClass {
 
     /// All variants in a stable order.
     #[must_use]
-    pub const fn all() -> [Self; 5] {
+    pub const fn all() -> [Self; 6] {
         [
             Self::HumanExplicit,
+            Self::PeerHumanAttested,
             Self::AgentValidated,
             Self::AgentAssertion,
             Self::CassEvidence,
@@ -111,7 +117,10 @@ impl TrustClass {
     /// local signature before authoritative use.
     #[must_use]
     pub const fn requires_local_signature_for_validated_procedural(self) -> bool {
-        matches!(self, Self::HumanExplicit | Self::AgentValidated)
+        matches!(
+            self,
+            Self::HumanExplicit | Self::PeerHumanAttested | Self::AgentValidated
+        )
     }
 }
 
@@ -138,7 +147,7 @@ impl fmt::Display for ParseTrustClassError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "unknown trust class `{}`; expected one of human_explicit, agent_validated, agent_assertion, cass_evidence, legacy_import",
+            "unknown trust class `{}`; expected one of human_explicit, peer_human_attested, agent_validated, agent_assertion, cass_evidence, legacy_import",
             self.input
         )
     }
@@ -152,6 +161,7 @@ impl FromStr for TrustClass {
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         match normalized_trust_token(input).as_str() {
             "human_explicit" => Ok(Self::HumanExplicit),
+            "peer_human_attested" => Ok(Self::PeerHumanAttested),
             "agent_validated" => Ok(Self::AgentValidated),
             "agent_assertion" => Ok(Self::AgentAssertion),
             "cass_evidence" => Ok(Self::CassEvidence),
@@ -320,6 +330,10 @@ mod tests {
             Ok(TrustClass::HumanExplicit)
         );
         assert_eq!(
+            TrustClass::from_str("PeerHumanAttested"),
+            Ok(TrustClass::PeerHumanAttested)
+        );
+        assert_eq!(
             TrustClass::from_str("CassEvidence"),
             Ok(TrustClass::CassEvidence)
         );
@@ -332,6 +346,7 @@ mod tests {
     #[test]
     fn trust_class_initial_confidences_match_adr() {
         assert!((TrustClass::HumanExplicit.initial_confidence() - 0.85).abs() < 0.001);
+        assert!((TrustClass::PeerHumanAttested.initial_confidence() - 0.75).abs() < 0.001);
         assert!((TrustClass::AgentValidated.initial_confidence() - 0.65).abs() < 0.001);
         assert!((TrustClass::AgentAssertion.initial_confidence() - 0.50).abs() < 0.001);
         assert!((TrustClass::CassEvidence.initial_confidence() - 0.45).abs() < 0.001);
@@ -350,7 +365,22 @@ mod tests {
 
     #[test]
     fn trust_class_as_str_is_stable() {
+        assert_eq!(
+            TrustClass::all().map(TrustClass::as_str),
+            [
+                "human_explicit",
+                "peer_human_attested",
+                "agent_validated",
+                "agent_assertion",
+                "cass_evidence",
+                "legacy_import",
+            ]
+        );
         assert_eq!(TrustClass::HumanExplicit.as_str(), "human_explicit");
+        assert_eq!(
+            TrustClass::PeerHumanAttested.as_str(),
+            "peer_human_attested"
+        );
         assert_eq!(TrustClass::AgentValidated.as_str(), "agent_validated");
         assert_eq!(TrustClass::AgentAssertion.as_str(), "agent_assertion");
         assert_eq!(TrustClass::CassEvidence.as_str(), "cass_evidence");
@@ -359,7 +389,11 @@ mod tests {
 
     #[test]
     fn local_signing_policy_requires_validated_high_trust_procedural_signatures() {
-        for trust_class in [TrustClass::HumanExplicit, TrustClass::AgentValidated] {
+        for trust_class in [
+            TrustClass::HumanExplicit,
+            TrustClass::PeerHumanAttested,
+            TrustClass::AgentValidated,
+        ] {
             let decision = evaluate_local_signing_key_policy(
                 MemoryLevel::Procedural,
                 trust_class,

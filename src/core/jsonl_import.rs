@@ -39,6 +39,10 @@ use crate::policy::store_auth::{
 /// trust but its footer does not authenticate under this store's key
 /// (ADR 0086 TC-D14). Closes the spoofable `import_source=native` bypass.
 pub const UNAUTHENTICATED_NATIVE_IMPORT_TRUST_CODE: &str = "unauthenticated_native_import_trust";
+/// JSONL artifacts cannot establish the signed active-member origin required
+/// to mint `peer_human_attested`, even when their store-local MAC is valid.
+pub const PEER_HUMAN_ATTESTED_IMPORT_PATH_REQUIRED_CODE: &str =
+    "peer_human_attested_requires_team_import_path";
 
 const DEFAULT_DB_FILE: &str = "ee.db";
 pub(crate) const IMPORT_ACTION: &str = "memory.import.jsonl";
@@ -1516,6 +1520,16 @@ fn trust_class_for_memory(
             ),
         )
     })?;
+    if trust_class == TrustClass::PeerHumanAttested {
+        return Err(JsonlImportIssue::error(
+            None,
+            PEER_HUMAN_ATTESTED_IMPORT_PATH_REQUIRED_CODE,
+            format!(
+                "memory `{}` cannot import as peer_human_attested through JSONL; only the signed active-member admission path may assign that local class",
+                memory.memory_id
+            ),
+        ));
+    }
     if trust_class == TrustClass::HumanExplicit {
         if import_source.is_external() {
             return Err(JsonlImportIssue::error(
@@ -2410,6 +2424,30 @@ mod tests {
             }),
             true,
             "external human_explicit issue",
+        )
+    }
+
+    #[test]
+    fn authenticated_jsonl_cannot_mint_peer_human_attested() -> TestResult {
+        let input = sample_jsonl().replace(
+            r#""utility":0.7,"created_at""#,
+            r#""utility":0.7,"trust_class":"peer_human_attested","created_at""#,
+        );
+        let parsed = parse_jsonl_source(&input);
+        let prepared =
+            prepare_memories(&parsed, "wsp_01234567890123456789012345", &authenticated());
+
+        ensure(prepared.has_errors(), true, "prepared has errors")?;
+        ensure(prepared.memories.len(), 0, "peer attestation row blocked")?;
+        ensure(
+            prepared.issues.iter().any(|issue| {
+                issue.code == PEER_HUMAN_ATTESTED_IMPORT_PATH_REQUIRED_CODE
+                    && issue
+                        .message
+                        .contains("signed active-member admission path")
+            }),
+            true,
+            "peer attestation requires team import issue",
         )
     }
 

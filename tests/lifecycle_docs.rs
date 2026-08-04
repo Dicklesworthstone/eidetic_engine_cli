@@ -20,6 +20,7 @@ fn ensure_contains(haystack: &str, needle: &str, context: &str) -> TestResult {
 fn initial_confidence_wire(class: TrustClass) -> &'static str {
     match class {
         TrustClass::HumanExplicit => "0.85",
+        TrustClass::PeerHumanAttested => "0.75",
         TrustClass::AgentValidated => "0.65",
         TrustClass::AgentAssertion => "0.50",
         TrustClass::CassEvidence => "0.45",

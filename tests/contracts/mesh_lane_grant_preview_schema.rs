@@ -18,6 +18,8 @@ use ee::mesh::lane_grant_preview::{
     LANE_GRANT_PREVIEW_COPY_VERSION, LANE_GRANT_PREVIEW_SCHEMA_V2,
     LANE_GRANT_TARGET_ADAPTER_VERSION, lane_grant_redaction_scanner_generation,
 };
+use ee::mesh::sync::SyncTrustClass;
+use ee::models::TrustClass;
 use ee::output::{public_schemas, render_schema_export_json};
 use serde_json::Value;
 
@@ -73,6 +75,7 @@ const REQUIRED_LANE_DECISIONS: &[&str] = &["allow", "quarantine", "deny"];
 
 const REQUIRED_TRUST_CLASSES: &[&str] = &[
     "human_explicit",
+    "peer_human_attested",
     "agent_validated",
     "agent_assertion",
     "cass_evidence",
@@ -329,13 +332,64 @@ fn lane_grant_preview_lane_decision_enum_is_three_states() -> TestResult {
 }
 
 #[test]
-fn lane_grant_preview_trust_class_enum_is_five_authority_classes() -> TestResult {
+fn lane_grant_preview_trust_class_enum_is_six_authority_classes() -> TestResult {
     let schema = load_schema(PREVIEW_PATH)?;
     require_closed_set(
         &schema,
         "/$defs/trustClass/enum",
         REQUIRED_TRUST_CLASSES,
         "trustClass enum",
+    )
+}
+
+#[test]
+fn peer_human_attested_is_consistent_across_runtime_sync_and_lane_contracts() -> TestResult {
+    let canonical = TrustClass::all()
+        .map(TrustClass::as_str)
+        .into_iter()
+        .collect::<Vec<_>>();
+    ensure(
+        canonical == REQUIRED_TRUST_CLASSES,
+        format!("runtime trust taxonomy drifted from lane contract: {canonical:?}"),
+    )?;
+
+    let sync = SyncTrustClass::all();
+    let peer_position = sync
+        .iter()
+        .position(|class| *class == SyncTrustClass::PeerHumanAttested)
+        .ok_or_else(|| "sync trust taxonomy omitted peer_human_attested".to_owned())?;
+    let local_position = sync
+        .iter()
+        .position(|class| *class == SyncTrustClass::HumanExplicit)
+        .ok_or_else(|| "sync trust taxonomy omitted human_explicit".to_owned())?;
+    let validated_position = sync
+        .iter()
+        .position(|class| *class == SyncTrustClass::AgentValidated)
+        .ok_or_else(|| "sync trust taxonomy omitted agent_validated".to_owned())?;
+    ensure(
+        local_position < peer_position && peer_position < validated_position,
+        "sync trust taxonomy must place peer attestation below local human and above agent validation",
+    )?;
+
+    let historical_sync_classes = sync
+        .iter()
+        .copied()
+        .map(SyncTrustClass::as_str)
+        .collect::<Vec<_>>();
+    let historical = load_schema(HISTORICAL_PREVIEW_PATH)?;
+    require_closed_set(
+        &historical,
+        "/$defs/trustClass/enum",
+        &historical_sync_classes,
+        "historical v1 sync trustClass enum",
+    )?;
+
+    let canonical_preview = load_schema(PREVIEW_PATH)?;
+    require_closed_set(
+        &canonical_preview,
+        "/$defs/trustClass/enum",
+        REQUIRED_TRUST_CLASSES,
+        "canonical v2 trustClass enum",
     )
 }
 

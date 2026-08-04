@@ -129,11 +129,12 @@
       ]
     },
     "trustClass": {
-      "description": "Local trust class. Peer-origin material is capped at agent_assertion / agent_validated per ee.curate.peer_evidence.v1's trustCap rule.",
+      "description": "Local trust class. Ordinary peer-origin material is capped at agent_assertion / agent_validated per ee.curate.peer_evidence.v1's trustCap rule. The dedicated signed active-member admission path may assign peer_human_attested; human_explicit remains strictly local.",
       "type": "string",
       "enum": [
         "human_explicit",
         "human_revised",
+        "peer_human_attested",
         "agent_validated",
         "agent_assertion",
         "agent_proposed",

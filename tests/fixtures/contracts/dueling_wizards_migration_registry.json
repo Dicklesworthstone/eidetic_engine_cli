@@ -4,8 +4,8 @@
   "gateBead": "bd-1n0np.23.1",
   "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
   "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
-  "currentLastCompiledMigration": 89,
-  "nextPlannedMigration": 90,
+  "currentLastCompiledMigration": 93,
+  "nextPlannedMigration": 94,
   "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
   "backupCoverageBead": "bd-1n0np.23.2",
   "policy": {
@@ -32,7 +32,11 @@
         "V086": "V086_RULE_INDEX_GENERATIONS (forward-only procedural-rule generation tracking and source-row repair)",
         "V087": "V087_EVIDENCE_STORAGE_REBUILD (forward-only canonical evidence-table rebuild and generation repair)",
         "V088": "V088_MESH_LANE_GRANT_STATES (authenticated per-peer mesh lane grant and revocation state with target-identity bindings)",
-        "V089": "V089_MESH_LANE_GRANT_CONFIG_BINDINGS (forward-only immutable-V088 repair that adds exact approved-config bindings and invalidates unbound allows)"
+        "V089": "V089_MESH_LANE_GRANT_CONFIG_BINDINGS (forward-only immutable-V088 repair that adds exact approved-config bindings and invalidates unbound allows)",
+        "V090": "V090_MEMORY_PEER_HUMAN_ATTESTED_TRUST (forward-only memories trust CHECK rebuild for ADR 0086 TC-D7)",
+        "V091": "V091_CURATION_PEER_HUMAN_ATTESTED_TRUST (forward-only curation candidate trust CHECK rebuild for ADR 0086 TC-D7)",
+        "V092": "V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST (forward-only procedural-rule trust CHECK rebuild for ADR 0086 TC-D7)",
+        "V093": "V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST (forward-only pack-item trust CHECK rebuild for ADR 0086 TC-D7)"
       }
     }
   },
@@ -119,7 +123,7 @@
     },
     {
       "id": "attestation_bundles",
-      "version": 90,
+      "version": 94,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -129,7 +133,7 @@
     },
     {
       "id": "query_miss_ledger",
-      "version": 91,
+      "version": 95,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -139,7 +143,7 @@
     },
     {
       "id": "source_write_stats",
-      "version": 92,
+      "version": 96,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -290,8 +294,8 @@
     },
     {
       "id": "attestation_bundles",
-      "version": 90,
-      "migrationName": "V090_ATTESTATION_BUNDLES",
+      "version": 94,
+      "migrationName": "V094_ATTESTATION_BUNDLES",
       "ownerBead": "bd-1n0np.22.1",
       "ownerSurface": "attestation_bundles",
       "status": "planned",
@@ -305,8 +309,8 @@
     },
     {
       "id": "query_miss_ledger",
-      "version": 91,
-      "migrationName": "V091_QUERY_MISS_LEDGER",
+      "version": 95,
+      "migrationName": "V095_QUERY_MISS_LEDGER",
       "ownerBead": "bd-1n0np.6.3",
       "ownerSurface": "gap_honesty",
       "status": "planned",
@@ -319,8 +323,8 @@
     },
     {
       "id": "source_write_stats",
-      "version": 92,
-      "migrationName": "V092_SOURCE_WRITE_STATS",
+      "version": 96,
+      "migrationName": "V096_SOURCE_WRITE_STATS",
       "ownerBead": "bd-1n0np.8.5",
       "ownerSurface": "read_fence",
       "status": "planned",

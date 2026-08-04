@@ -15,9 +15,10 @@
 //!
 //! 2. The trust-cap invariant is encoded structurally: `trustCap` only
 //!    accepts `agent_assertion` or `agent_validated`. Peer-only
-//!    evidence cannot escalate a candidate to `human_explicit` or
-//!    `cass_evidence` because those values are reserved for local
-//!    human or local-replay evidence.
+//!    evidence cannot escalate a candidate to `peer_human_attested`,
+//!    `human_explicit`, or `cass_evidence`: those values require the
+//!    signed-member admission path, local human authority, or local-replay
+//!    evidence respectively.
 //!
 //! 3. The four documented `promotionBlockReason` values are present:
 //!    `peer_evidence_only_below_trust_cap`,
@@ -57,6 +58,14 @@ const REQUIRED_TOP_LEVEL: &[&str] = &[
     "promotable",
 ];
 const TRUST_CAP_ALLOWED: &[&str] = &["agent_assertion", "agent_validated"];
+const CANONICAL_TRUST_CLASSES: &[&str] = &[
+    "human_explicit",
+    "peer_human_attested",
+    "agent_validated",
+    "agent_assertion",
+    "cass_evidence",
+    "legacy_import",
+];
 const REQUIRED_PROMOTION_BLOCK_REASONS: &[&str] = &[
     "peer_evidence_only_below_trust_cap",
     "contradicting_peer_evidence",
@@ -152,11 +161,27 @@ fn ee_curate_peer_evidence_v1_trust_cap_excludes_local_human_lanes() -> TestResu
         format!(
             "trustCap enum must be exactly {TRUST_CAP_ALLOWED:?}; got: {values:?}. \
              bd-1fjhu peer-only evidence must not escalate candidates to \
-             human_explicit or cass_evidence; those values are reserved for \
-             local human or local replay evidence respectively."
+             peer_human_attested, human_explicit, or cass_evidence; those values \
+             require signed-member admission, local human authority, or local \
+             replay evidence respectively."
         ),
     )?;
     Ok(())
+}
+
+#[test]
+fn ee_curate_peer_evidence_v1_top_level_trust_class_is_canonical_six_class_set() -> TestResult {
+    let schema = load_schema()?;
+    let values = collect_strings(
+        &schema["properties"]["trustClass"]["enum"],
+        "properties.trustClass.enum",
+    )?;
+    ensure(
+        values == CANONICAL_TRUST_CLASSES,
+        format!(
+            "trustClass enum must match the canonical ordered six-class taxonomy; got: {values:?}"
+        ),
+    )
 }
 
 #[test]

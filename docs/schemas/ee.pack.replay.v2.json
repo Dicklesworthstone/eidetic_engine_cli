@@ -367,7 +367,7 @@
         "diversityKeyHash": {"$ref": "#/$defs/blake3Hash"},
         "trustClass": {
           "type": "string",
-          "enum": ["human_explicit", "agent_validated", "agent_assertion", "cass_evidence", "legacy_import"]
+          "enum": ["human_explicit", "peer_human_attested", "agent_validated", "agent_assertion", "cass_evidence", "legacy_import"]
         },
         "trustSubclass": {"type": ["string", "null"]},
         "provenance": {"$ref": "#/$defs/provenance"},

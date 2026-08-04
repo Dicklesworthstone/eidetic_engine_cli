@@ -187,7 +187,8 @@ impl SampleStrategy {
 
 fn trust_score(trust_class: TrustClass) -> u8 {
     match trust_class {
-        TrustClass::HumanExplicit => 5,
+        TrustClass::HumanExplicit => 6,
+        TrustClass::PeerHumanAttested => 5,
         TrustClass::AgentValidated => 4,
         TrustClass::AgentAssertion => 3,
         TrustClass::CassEvidence => 2,
@@ -1842,6 +1843,42 @@ mod tests {
         assert!(kinds.contains(caution_kinds::HIGH_TRUST_CLASS_EXPOSURE));
     }
 
+    #[test]
+    fn human_explicit_exposure_caution_excludes_peer_human_attested() {
+        let no_tags = empty_strings();
+        let no_redacted = empty_strings();
+        let memories = [build_memory(
+            "peer-attested-1",
+            TrustClass::PeerHumanAttested,
+            &no_tags,
+            1,
+            false,
+            false,
+            &no_redacted,
+        )];
+        let redaction_rules = empty_strings();
+        let preview = compute_lane_grant_preview(&LaneGrantPreviewInput {
+            peer_node_key: "nodekey:test",
+            peer_in_group: true,
+            lane: Lane::Body,
+            workspace_id: "ws-1",
+            current_policy: IntendedLanePolicy::conservative_default(),
+            proposed_policy: body_grant_proposed(),
+            memories: &memories,
+            sample_strategy: SampleStrategy::HighestTrust,
+            limit: 25,
+            redaction_rules: &redaction_rules,
+            sample_random_seed: 42,
+        });
+
+        assert!(
+            preview
+                .cautions
+                .iter()
+                .all(|caution| caution.kind != caution_kinds::HIGH_TRUST_CLASS_EXPOSURE)
+        );
+    }
+
     // ---- Caution: sensitive tag exposure -----------------------------------
 
     #[test]
@@ -2045,7 +2082,7 @@ mod tests {
     // ---- Sample strategy: HighestTrust orders human_explicit first ---------
 
     #[test]
-    fn highest_trust_strategy_orders_human_explicit_before_agent_proposed() {
+    fn highest_trust_strategy_orders_peer_attestation_between_human_and_agent_validation() {
         let no_tags = empty_strings();
         let no_redacted = empty_strings();
         let memories = [
@@ -2061,6 +2098,24 @@ mod tests {
             build_memory(
                 "explicit",
                 TrustClass::HumanExplicit,
+                &no_tags,
+                1,
+                false,
+                false,
+                &no_redacted,
+            ),
+            build_memory(
+                "peer-attested",
+                TrustClass::PeerHumanAttested,
+                &no_tags,
+                1,
+                false,
+                false,
+                &no_redacted,
+            ),
+            build_memory(
+                "validated",
+                TrustClass::AgentValidated,
                 &no_tags,
                 1,
                 false,
@@ -2097,7 +2152,16 @@ mod tests {
             .iter()
             .map(|row| row.memory_id.as_str())
             .collect();
-        assert_eq!(order, vec!["explicit", "agent", "external"]);
+        assert_eq!(
+            order,
+            vec![
+                "explicit",
+                "peer-attested",
+                "validated",
+                "agent",
+                "external"
+            ]
+        );
     }
 
     // ---- Sample strategy: MostRecent orders by created_at desc -------------

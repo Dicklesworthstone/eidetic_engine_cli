@@ -4,8 +4,9 @@ This document describes how EE keeps useful memories available while preventing
 low-trust, stale, legacy, or instruction-like content from becoming authoritative
 context for an agent.
 
-The canonical trust taxonomy is ADR 0009. The canonical context-pack UX contract
-is ADR 0007. This page connects those decisions to the lifecycle that
+The canonical trust taxonomy is ADR 0009 as amended by ADR 0086 TC-D7. The
+canonical context-pack UX contract is ADR 0007. This page connects those
+decisions to the lifecycle that
 `ee pack`, `ee why`, curation, imports, and maintenance jobs must preserve.
 
 ## Lifecycle
@@ -32,6 +33,7 @@ confidence; it does not replace redaction policy, maturity, or provenance.
 | Class | Source | Initial confidence | Pack posture |
 | --- | --- | ---: | --- |
 | `human_explicit` | A human invoked `ee remember` directly. | 0.85 | Eligible for high-priority advice unless redaction blocks it. |
+| `peer_human_attested` | A valid signed origin from an active member declared the source row `human_explicit`. This attests the member's declaration; it does not prove a human typed the row. | 0.75 | Authoritative team evidence with its elevation basis retained in provenance. |
 | `agent_validated` | Agent assertion with outcome evidence and validation. | 0.65 | Eligible for advice, with provenance and validation notes. |
 | `agent_assertion` | Agent assertion without validated outcome evidence. | 0.50 | Useful but advisory; never presented as settled policy. |
 | `cass_evidence` | Imported span from `coding_agent_session_search`. | 0.45 | Evidence first; promoted only through review and validation. |
@@ -39,6 +41,11 @@ confidence; it does not replace redaction policy, maturity, or provenance.
 
 `trust_subclass` is optional metadata. It may describe local project categories,
 but v1 scoring and routing must not key off it.
+
+`peer_human_attested` can be assigned only by the signed active-member admission
+path. Generic peer policy, JSONL/playbook import, curation, and local rule
+commands cannot mint it. `human_explicit` itself remains local and never crosses
+the mesh boundary.
 
 ## Advisory Priority
 
@@ -116,8 +123,9 @@ posture where applicable.
 ## Local Signing Key Policy
 
 High-trust procedural memory needs an extra local proof before it becomes
-authoritative advice. A validated procedural memory in `human_explicit` or
-`agent_validated` trust must carry a local signature; otherwise the policy emits
+authoritative advice. A validated procedural memory in `human_explicit`,
+`peer_human_attested`, or `agent_validated` trust must carry a local signature;
+otherwise the policy emits
 `local_signing_key_required` and the memory stays out of authoritative
 procedural sections until signed.
 

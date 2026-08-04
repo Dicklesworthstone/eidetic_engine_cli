@@ -2715,7 +2715,7 @@ fn required_table_peer_import_trust_class(
         _ => Err(ConfigParseError::InvalidValue {
             key: format!("{prefix}.{key}"),
             value,
-            message: "peer material must import as `agent_assertion` or `agent_validated`, never `human_explicit`, `cass_evidence`, or `legacy_import`".to_string(),
+            message: "generic peer policy may import only as `agent_assertion` or `agent_validated`; `peer_human_attested` requires the dedicated signed-member admission path, and `human_explicit`, `cass_evidence`, and `legacy_import` remain disallowed".to_string(),
         }),
     }
 }
@@ -4481,7 +4481,12 @@ requires_consent = true
             format!("unexpected localHuman error: {local_human_error:?}"),
         )?;
 
-        for disallowed_class in ["human_explicit", "cass_evidence", "legacy_import"] {
+        for disallowed_class in [
+            "human_explicit",
+            "peer_human_attested",
+            "cass_evidence",
+            "legacy_import",
+        ] {
             let config = format!(
                 r#"
 [[mesh.peer_policies]]
@@ -4521,6 +4526,7 @@ requires_consent = true
                             && value == disallowed_class
                             && message.contains("agent_assertion")
                             && message.contains("agent_validated")
+                            && message.contains("peer_human_attested")
                             && message.contains("human_explicit")
                             && message.contains("cass_evidence")
                             && message.contains("legacy_import")

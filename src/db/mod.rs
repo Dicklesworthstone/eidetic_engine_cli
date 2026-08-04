@@ -7953,6 +7953,486 @@ CREATE INDEX idx_mesh_lane_grant_states_generation
     "blake3:v089_mesh_lane_grant_config_bindings_2026_08_04",
 );
 
+/// V090: Admit signed peer-human attestations as a durable memory trust class.
+///
+/// SQLite cannot widen an inline CHECK constraint in place. This is the
+/// canonical create/copy/drop/rename rebuild: migration execution temporarily
+/// disables foreign-key actions outside the migration transaction so inbound
+/// references remain byte-for-byte intact while the parent table is replaced.
+pub const V090_MEMORY_PEER_HUMAN_ATTESTED_TRUST: Migration = Migration::new(
+    90,
+    "memory_peer_human_attested_trust",
+    r#"
+CREATE TABLE memories_v090_new (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'mem_*' AND length(id) = 30),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    level TEXT NOT NULL CHECK (level IN ('working', 'episodic', 'semantic', 'procedural')),
+    kind TEXT NOT NULL CHECK (length(trim(kind)) > 0),
+    content TEXT NOT NULL CHECK (length(trim(content)) > 0 AND length(content) <= 65536),
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    utility REAL NOT NULL CHECK (utility >= 0.0 AND utility <= 1.0),
+    importance REAL NOT NULL CHECK (importance >= 0.0 AND importance <= 1.0),
+    provenance_uri TEXT CHECK (provenance_uri IS NULL OR length(trim(provenance_uri)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    tombstoned_at TEXT CHECK (tombstoned_at IS NULL OR length(trim(tombstoned_at)) > 0),
+    trust_class TEXT NOT NULL DEFAULT 'agent_assertion' CHECK (trust_class IN (
+        'human_explicit', 'peer_human_attested', 'agent_validated',
+        'agent_assertion', 'cass_evidence', 'legacy_import'
+    )),
+    trust_subclass TEXT CHECK (trust_subclass IS NULL OR length(trim(trust_subclass)) > 0),
+    provenance_chain_hash TEXT
+        CHECK (provenance_chain_hash IS NULL OR provenance_chain_hash GLOB 'blake3:*'),
+    provenance_chain_hash_version TEXT NOT NULL DEFAULT 'ee.memory.provenance_chain.v1'
+        CHECK (provenance_chain_hash_version = 'ee.memory.provenance_chain.v1'),
+    provenance_verification_status TEXT NOT NULL DEFAULT 'unverified'
+        CHECK (provenance_verification_status IN ('unverified', 'verified', 'missing', 'mismatch', 'skipped')),
+    provenance_verified_at TEXT
+        CHECK (provenance_verified_at IS NULL OR length(trim(provenance_verified_at)) > 0),
+    provenance_verification_note TEXT
+        CHECK (provenance_verification_note IS NULL OR length(trim(provenance_verification_note)) > 0),
+    valid_from TEXT CHECK (valid_from IS NULL OR length(trim(valid_from)) > 0),
+    valid_to TEXT CHECK (valid_to IS NULL OR length(trim(valid_to)) > 0),
+    workflow_id TEXT CHECK (
+        workflow_id IS NULL
+        OR (length(trim(workflow_id)) > 0 AND length(workflow_id) <= 128)
+    ),
+    bayes_alpha REAL NOT NULL DEFAULT 0.5 CHECK (bayes_alpha > 0.0 AND bayes_alpha < 1e9),
+    bayes_beta REAL NOT NULL DEFAULT 0.5 CHECK (bayes_beta > 0.0 AND bayes_beta < 1e9),
+    logical_id TEXT,
+    content_simhash BLOB CHECK (content_simhash IS NULL OR length(content_simhash) = 16),
+    typed_fields_json TEXT CHECK (
+        typed_fields_json IS NULL
+        OR (length(trim(typed_fields_json)) > 0 AND json_valid(typed_fields_json))
+    )
+);
+
+INSERT INTO memories_v090_new (
+    id, workspace_id, level, kind, content, confidence, utility, importance,
+    provenance_uri, created_at, updated_at, tombstoned_at, trust_class,
+    trust_subclass, provenance_chain_hash, provenance_chain_hash_version,
+    provenance_verification_status, provenance_verified_at,
+    provenance_verification_note, valid_from, valid_to, workflow_id,
+    bayes_alpha, bayes_beta, logical_id, content_simhash, typed_fields_json
+)
+SELECT
+    id, workspace_id, level, kind, content, confidence, utility, importance,
+    provenance_uri, created_at, updated_at, tombstoned_at, trust_class,
+    trust_subclass, provenance_chain_hash, provenance_chain_hash_version,
+    provenance_verification_status, provenance_verified_at,
+    provenance_verification_note, valid_from, valid_to, workflow_id,
+    bayes_alpha, bayes_beta, logical_id, content_simhash, typed_fields_json
+FROM memories
+ORDER BY rowid;
+
+DROP TABLE memories;
+ALTER TABLE memories_v090_new RENAME TO memories;
+
+CREATE INDEX idx_memories_workspace ON memories(workspace_id);
+CREATE INDEX idx_memories_level ON memories(level);
+CREATE INDEX idx_memories_kind ON memories(kind);
+CREATE INDEX idx_memories_tombstoned ON memories(tombstoned_at);
+CREATE INDEX idx_memories_trust_class ON memories(trust_class);
+CREATE INDEX idx_memories_provenance_chain_hash
+    ON memories(provenance_chain_hash)
+    WHERE provenance_chain_hash IS NOT NULL;
+CREATE INDEX idx_memories_provenance_verification_status
+    ON memories(provenance_verification_status);
+CREATE INDEX idx_memories_valid_from ON memories(valid_from) WHERE valid_from IS NOT NULL;
+CREATE INDEX idx_memories_valid_to ON memories(valid_to) WHERE valid_to IS NOT NULL;
+CREATE INDEX idx_memories_workspace_workflow
+    ON memories(workspace_id, workflow_id)
+    WHERE workflow_id IS NOT NULL;
+CREATE INDEX idx_memories_logical_id ON memories(logical_id);
+CREATE INDEX idx_memories_workspace_content_simhash
+    ON memories(workspace_id, content_simhash)
+    WHERE content_simhash IS NOT NULL
+      AND tombstoned_at IS NULL
+      AND valid_to IS NULL;
+CREATE INDEX idx_memories_kind_typed_fields
+    ON memories(kind)
+    WHERE typed_fields_json IS NOT NULL;
+
+CREATE TRIGGER trg_workspace_generations_memories_insert
+AFTER INSERT ON memories
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.updated_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_memories_update
+AFTER UPDATE ON memories
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.updated_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = NEW.workspace_id;
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = OLD.workspace_id
+       AND OLD.workspace_id <> NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_memories_delete
+AFTER DELETE ON memories
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id = OLD.workspace_id;
+END;
+"#,
+    "blake3:v090_memory_peer_human_attested_trust_2026_08_04",
+);
+
+/// V091: Allow curation to propose the peer-human-attested trust class.
+///
+/// Retired `curation_candidates_v*` tables are immutable migration evidence;
+/// only the canonical live queue is rebuilt and widened here.
+pub const V091_CURATION_PEER_HUMAN_ATTESTED_TRUST: Migration = Migration::new(
+    91,
+    "curation_peer_human_attested_trust",
+    r#"
+CREATE TABLE curation_candidates_v091_new (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'curate_*' AND length(id) = 33),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    candidate_type TEXT NOT NULL CHECK (candidate_type IN (
+        'consolidate', 'promote', 'deprecate', 'supersede', 'tombstone',
+        'merge', 'paraphrase_dedup_proposal', 'split', 'retract', 'rule',
+        'anti_pattern_proposal', 'procedure', 'create_derived_memory'
+    )),
+    target_memory_id TEXT REFERENCES memories(id) ON DELETE CASCADE,
+    proposed_content TEXT CHECK (proposed_content IS NULL OR length(trim(proposed_content)) > 0),
+    proposed_confidence REAL CHECK (
+        proposed_confidence IS NULL
+        OR (proposed_confidence >= 0.0 AND proposed_confidence <= 1.0)
+    ),
+    proposed_trust_class TEXT CHECK (
+        proposed_trust_class IS NULL OR proposed_trust_class IN (
+            'human_explicit', 'peer_human_attested', 'agent_validated',
+            'agent_assertion', 'cass_evidence', 'legacy_import'
+        )
+    ),
+    source_type TEXT NOT NULL CHECK (source_type IN (
+        'agent_inference', 'rule_engine', 'human_request', 'feedback_event',
+        'contradiction_detected', 'decay_trigger', 'counterfactual_replay'
+    )),
+    source_id TEXT CHECK (source_id IS NULL OR length(trim(source_id)) > 0),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'applied')),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    reviewed_at TEXT CHECK (reviewed_at IS NULL OR length(trim(reviewed_at)) > 0),
+    reviewed_by TEXT CHECK (reviewed_by IS NULL OR length(trim(reviewed_by)) > 0),
+    applied_at TEXT CHECK (applied_at IS NULL OR length(trim(applied_at)) > 0),
+    ttl_expires_at TEXT CHECK (ttl_expires_at IS NULL OR length(trim(ttl_expires_at)) > 0),
+    review_state TEXT NOT NULL DEFAULT 'new' CHECK (review_state IN (
+        'new', 'needs_evidence', 'needs_scope', 'duplicate', 'snoozed',
+        'accepted', 'rejected', 'merged', 'superseded', 'expired', 'applied'
+    )),
+    snoozed_until TEXT CHECK (snoozed_until IS NULL OR length(trim(snoozed_until)) > 0),
+    merged_into_candidate_id TEXT CHECK (merged_into_candidate_id IS NULL OR (
+        merged_into_candidate_id GLOB 'curate_*' AND length(merged_into_candidate_id) = 33
+    )),
+    state_entered_at TEXT CHECK (state_entered_at IS NULL OR length(trim(state_entered_at)) > 0),
+    last_action_at TEXT CHECK (last_action_at IS NULL OR length(trim(last_action_at)) > 0),
+    ttl_policy_id TEXT CHECK (ttl_policy_id IS NULL OR length(trim(ttl_policy_id)) > 0),
+    derivation_source_refs_json TEXT CHECK (
+        derivation_source_refs_json IS NULL
+        OR (length(trim(derivation_source_refs_json)) > 0 AND json_valid(derivation_source_refs_json))
+    ),
+    derivation_metadata_json TEXT CHECK (
+        derivation_metadata_json IS NULL
+        OR (length(trim(derivation_metadata_json)) > 0 AND json_valid(derivation_metadata_json))
+    ),
+    CHECK (
+        (candidate_type = 'create_derived_memory'
+            AND target_memory_id IS NULL
+            AND derivation_source_refs_json IS NOT NULL
+            AND derivation_metadata_json IS NOT NULL)
+        OR
+        (candidate_type != 'create_derived_memory'
+            AND target_memory_id IS NOT NULL
+            AND derivation_source_refs_json IS NULL
+            AND derivation_metadata_json IS NULL)
+    )
+);
+
+INSERT INTO curation_candidates_v091_new (
+    id, workspace_id, candidate_type, target_memory_id, proposed_content,
+    proposed_confidence, proposed_trust_class, source_type, source_id, reason,
+    confidence, status, created_at, reviewed_at, reviewed_by, applied_at,
+    ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id,
+    state_entered_at, last_action_at, ttl_policy_id,
+    derivation_source_refs_json, derivation_metadata_json
+)
+SELECT
+    id, workspace_id, candidate_type, target_memory_id, proposed_content,
+    proposed_confidence, proposed_trust_class, source_type, source_id, reason,
+    confidence, status, created_at, reviewed_at, reviewed_by, applied_at,
+    ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id,
+    state_entered_at, last_action_at, ttl_policy_id,
+    derivation_source_refs_json, derivation_metadata_json
+FROM curation_candidates
+ORDER BY rowid;
+
+DROP TABLE curation_candidates;
+ALTER TABLE curation_candidates_v091_new RENAME TO curation_candidates;
+
+CREATE INDEX idx_curation_candidates_v062_workspace ON curation_candidates(workspace_id);
+CREATE INDEX idx_curation_candidates_v062_target
+    ON curation_candidates(target_memory_id)
+    WHERE target_memory_id IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v062_status ON curation_candidates(status);
+CREATE INDEX idx_curation_candidates_v062_type ON curation_candidates(candidate_type);
+CREATE INDEX idx_curation_candidates_v062_created ON curation_candidates(created_at);
+CREATE INDEX idx_curation_candidates_v062_ttl
+    ON curation_candidates(ttl_expires_at)
+    WHERE ttl_expires_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v062_review_state ON curation_candidates(review_state);
+CREATE INDEX idx_curation_candidates_v062_snoozed_until
+    ON curation_candidates(snoozed_until)
+    WHERE snoozed_until IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v062_merged_into
+    ON curation_candidates(merged_into_candidate_id)
+    WHERE merged_into_candidate_id IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v062_state_entered
+    ON curation_candidates(state_entered_at)
+    WHERE state_entered_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v062_last_action
+    ON curation_candidates(last_action_at)
+    WHERE last_action_at IS NOT NULL;
+CREATE INDEX idx_curation_candidates_v062_ttl_policy
+    ON curation_candidates(ttl_policy_id)
+    WHERE ttl_policy_id IS NOT NULL;
+
+CREATE TRIGGER trg_workspace_generations_curation_candidates_insert
+AFTER INSERT ON curation_candidates
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.created_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.created_at
+     WHERE workspace_id = NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_curation_candidates_update
+AFTER UPDATE ON curation_candidates
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, COALESCE(NEW.last_action_at, NEW.reviewed_at, NEW.applied_at, NEW.created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')));
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = COALESCE(NEW.last_action_at, NEW.reviewed_at, NEW.applied_at, NEW.created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+     WHERE workspace_id = NEW.workspace_id;
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = COALESCE(NEW.last_action_at, NEW.reviewed_at, NEW.applied_at, NEW.created_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+     WHERE workspace_id = OLD.workspace_id
+       AND OLD.workspace_id <> NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_curation_candidates_delete
+AFTER DELETE ON curation_candidates
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id = OLD.workspace_id;
+END;
+"#,
+    "blake3:v091_curation_peer_human_attested_trust_2026_08_04",
+);
+
+/// V092: Admit signed peer-human attestations on procedural rules.
+pub const V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST: Migration = Migration::new(
+    92,
+    "procedural_rule_peer_human_attested_trust",
+    r#"
+CREATE TABLE procedural_rules_v092_new (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'rule_*' AND length(id) = 31),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    content TEXT NOT NULL CHECK (length(trim(content)) > 0 AND length(content) <= 8192),
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    utility REAL NOT NULL CHECK (utility >= 0.0 AND utility <= 1.0),
+    importance REAL NOT NULL CHECK (importance >= 0.0 AND importance <= 1.0),
+    trust_class TEXT NOT NULL CHECK (trust_class IN (
+        'human_explicit', 'peer_human_attested', 'agent_validated',
+        'agent_assertion', 'cass_evidence', 'legacy_import'
+    )),
+    scope TEXT NOT NULL DEFAULT 'workspace' CHECK (scope IN (
+        'global', 'workspace', 'project', 'directory', 'file_pattern'
+    )),
+    scope_pattern TEXT CHECK (scope_pattern IS NULL OR length(trim(scope_pattern)) > 0),
+    maturity TEXT NOT NULL DEFAULT 'candidate' CHECK (maturity IN (
+        'draft', 'candidate', 'validated', 'deprecated', 'superseded'
+    )),
+    positive_feedback_count INTEGER NOT NULL DEFAULT 0 CHECK (positive_feedback_count >= 0),
+    negative_feedback_count INTEGER NOT NULL DEFAULT 0 CHECK (negative_feedback_count >= 0),
+    last_applied_at TEXT CHECK (last_applied_at IS NULL OR length(trim(last_applied_at)) > 0),
+    last_validated_at TEXT CHECK (last_validated_at IS NULL OR length(trim(last_validated_at)) > 0),
+    superseded_by TEXT REFERENCES procedural_rules(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    tombstoned_at TEXT CHECK (tombstoned_at IS NULL OR length(trim(tombstoned_at)) > 0),
+    protected INTEGER NOT NULL DEFAULT 0 CHECK (protected IN (0, 1)),
+    validation_passes INTEGER NOT NULL DEFAULT 0 CHECK (validation_passes >= 0),
+    validation_contradictions INTEGER NOT NULL DEFAULT 0 CHECK (validation_contradictions >= 0)
+);
+
+INSERT INTO procedural_rules_v092_new (
+    id, workspace_id, content, confidence, utility, importance, trust_class,
+    scope, scope_pattern, maturity, positive_feedback_count,
+    negative_feedback_count, last_applied_at, last_validated_at, superseded_by,
+    created_at, updated_at, tombstoned_at, protected, validation_passes,
+    validation_contradictions
+)
+SELECT
+    id, workspace_id, content, confidence, utility, importance, trust_class,
+    scope, scope_pattern, maturity, positive_feedback_count,
+    negative_feedback_count, last_applied_at, last_validated_at, superseded_by,
+    created_at, updated_at, tombstoned_at, protected, validation_passes,
+    validation_contradictions
+FROM procedural_rules
+ORDER BY rowid;
+
+DROP TABLE procedural_rules;
+ALTER TABLE procedural_rules_v092_new RENAME TO procedural_rules;
+
+CREATE INDEX idx_procedural_rules_workspace ON procedural_rules(workspace_id);
+CREATE INDEX idx_procedural_rules_maturity ON procedural_rules(maturity);
+CREATE INDEX idx_procedural_rules_trust_class ON procedural_rules(trust_class);
+CREATE INDEX idx_procedural_rules_scope ON procedural_rules(scope);
+CREATE INDEX idx_procedural_rules_confidence ON procedural_rules(confidence);
+CREATE INDEX idx_procedural_rules_tombstoned ON procedural_rules(tombstoned_at);
+CREATE INDEX idx_procedural_rules_protected ON procedural_rules(protected);
+
+CREATE TRIGGER trg_workspace_generations_procedural_rules_insert
+AFTER INSERT ON procedural_rules
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.updated_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_procedural_rules_update
+AFTER UPDATE ON procedural_rules
+WHEN OLD.id IS NOT NEW.id
+  OR OLD.workspace_id IS NOT NEW.workspace_id
+  OR OLD.content IS NOT NEW.content
+  OR OLD.confidence IS NOT NEW.confidence
+  OR OLD.utility IS NOT NEW.utility
+  OR OLD.importance IS NOT NEW.importance
+  OR OLD.trust_class IS NOT NEW.trust_class
+  OR OLD.scope IS NOT NEW.scope
+  OR OLD.scope_pattern IS NOT NEW.scope_pattern
+  OR OLD.maturity IS NOT NEW.maturity
+  OR OLD.protected IS NOT NEW.protected
+  OR OLD.positive_feedback_count IS NOT NEW.positive_feedback_count
+  OR OLD.negative_feedback_count IS NOT NEW.negative_feedback_count
+  OR OLD.validation_passes IS NOT NEW.validation_passes
+  OR OLD.validation_contradictions IS NOT NEW.validation_contradictions
+  OR OLD.last_applied_at IS NOT NEW.last_applied_at
+  OR OLD.last_validated_at IS NOT NEW.last_validated_at
+  OR OLD.superseded_by IS NOT NEW.superseded_by
+  OR OLD.created_at IS NOT NEW.created_at
+  OR OLD.updated_at IS NOT NEW.updated_at
+  OR OLD.tombstoned_at IS NOT NEW.tombstoned_at
+BEGIN
+    INSERT OR IGNORE INTO workspace_generations (workspace_id, generation, updated_at)
+    VALUES (NEW.workspace_id, 0, NEW.updated_at);
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = NEW.workspace_id;
+
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = NEW.updated_at
+     WHERE workspace_id = OLD.workspace_id
+       AND OLD.workspace_id <> NEW.workspace_id;
+END;
+
+CREATE TRIGGER trg_workspace_generations_procedural_rules_delete
+AFTER DELETE ON procedural_rules
+BEGIN
+    UPDATE workspace_generations
+       SET generation = generation + 1,
+           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+     WHERE workspace_id = OLD.workspace_id;
+END;
+"#,
+    "blake3:v092_procedural_rule_peer_human_attested_trust_2026_08_04",
+);
+
+/// V093: Persist peer-human-attested provenance on selected pack items.
+pub const V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST: Migration = Migration::new(
+    93,
+    "pack_item_peer_human_attested_trust",
+    r#"
+CREATE TABLE pack_items_v093_new (
+    pack_id TEXT NOT NULL REFERENCES pack_records(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    rank INTEGER NOT NULL CHECK (rank > 0),
+    section TEXT NOT NULL CHECK (section IN (
+        'procedural_rules', 'decisions', 'failures', 'evidence', 'artifacts'
+    )),
+    estimated_tokens INTEGER NOT NULL CHECK (estimated_tokens > 0),
+    relevance REAL NOT NULL CHECK (relevance >= 0.0 AND relevance <= 1.0),
+    utility REAL NOT NULL CHECK (utility >= 0.0 AND utility <= 1.0),
+    why TEXT NOT NULL CHECK (length(trim(why)) > 0),
+    diversity_key TEXT CHECK (diversity_key IS NULL OR length(trim(diversity_key)) > 0),
+    provenance_json TEXT NOT NULL DEFAULT '{"schema":"ee.pack_item.provenance.v1","entries":[]}'
+        CHECK (json_valid(provenance_json)),
+    trust_class TEXT NOT NULL DEFAULT 'agent_assertion' CHECK (trust_class IN (
+        'human_explicit', 'peer_human_attested', 'agent_validated',
+        'agent_assertion', 'cass_evidence', 'legacy_import'
+    )),
+    trust_subclass TEXT CHECK (trust_subclass IS NULL OR length(trim(trust_subclass)) > 0),
+    PRIMARY KEY (pack_id, memory_id)
+);
+
+INSERT INTO pack_items_v093_new (
+    pack_id, memory_id, rank, section, estimated_tokens, relevance, utility,
+    why, diversity_key, provenance_json, trust_class, trust_subclass
+)
+SELECT
+    pack_id, memory_id, rank, section, estimated_tokens, relevance, utility,
+    why, diversity_key, provenance_json, trust_class, trust_subclass
+FROM pack_items
+ORDER BY rowid;
+
+DROP TABLE pack_items;
+ALTER TABLE pack_items_v093_new RENAME TO pack_items;
+
+CREATE INDEX idx_pack_items_memory ON pack_items(memory_id);
+CREATE INDEX idx_pack_items_section ON pack_items(section);
+CREATE INDEX idx_pack_items_rank ON pack_items(pack_id, rank);
+CREATE INDEX idx_pack_items_trust_class ON pack_items(trust_class);
+"#,
+    "blake3:v093_pack_item_peer_human_attested_trust_2026_08_04",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -8044,6 +8524,10 @@ pub const MIGRATIONS: &[Migration] = &[
     V087_EVIDENCE_STORAGE_REBUILD,
     V088_MESH_LANE_GRANT_STATES,
     V089_MESH_LANE_GRANT_CONFIG_BINDINGS,
+    V090_MEMORY_PEER_HUMAN_ATTESTED_TRUST,
+    V091_CURATION_PEER_HUMAN_ATTESTED_TRUST,
+    V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST,
+    V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -8087,6 +8571,16 @@ enum ApplyOutcome {
     Applied,
     /// Migration was already present when re-checked under the transaction.
     AlreadyApplied,
+}
+
+fn migration_requires_foreign_key_relaxation(migration: &Migration) -> bool {
+    [
+        V090_MEMORY_PEER_HUMAN_ATTESTED_TRUST.version(),
+        V091_CURATION_PEER_HUMAN_ATTESTED_TRUST.version(),
+        V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST.version(),
+        V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST.version(),
+    ]
+    .contains(&migration.version())
 }
 
 /// Result of applying migrations.
@@ -8135,10 +8629,16 @@ impl DbConnection {
             let now = Utc::now().to_rfc3339();
             let rebuilds_existing_table = migration.version
                 == V087_EVIDENCE_STORAGE_REBUILD.version
-                || migration.version == V089_MESH_LANE_GRANT_CONFIG_BINDINGS.version;
+                || migration.version == V089_MESH_LANE_GRANT_CONFIG_BINDINGS.version
+                || migration.version == V090_MEMORY_PEER_HUMAN_ATTESTED_TRUST.version
+                || migration.version == V091_CURATION_PEER_HUMAN_ATTESTED_TRUST.version
+                || migration.version == V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST.version
+                || migration.version == V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST.version;
             let outcome =
                 if rebuilds_existing_table && matches!(&self.location, DatabaseLocation::File(_)) {
                     self.apply_file_schema_rebuild_migration(migration, &now)?
+                } else if migration_requires_foreign_key_relaxation(migration) {
+                    self.apply_foreign_key_relaxed_migration(migration, &now)?
                 } else {
                     self.apply_migration(migration, &now)?
                 };
@@ -8165,10 +8665,18 @@ impl DbConnection {
         applied_at: &str,
     ) -> Result<ApplyOutcome> {
         let DatabaseLocation::File(path) = &self.location else {
-            return self.apply_migration(migration, applied_at);
+            return if migration_requires_foreign_key_relaxation(migration) {
+                self.apply_foreign_key_relaxed_migration(migration, applied_at)
+            } else {
+                self.apply_migration(migration, applied_at)
+            };
         };
         let migration_connection = Self::open_file(path)?;
-        let outcome = migration_connection.apply_migration(migration, applied_at);
+        let outcome = if migration_requires_foreign_key_relaxation(migration) {
+            migration_connection.apply_foreign_key_relaxed_migration(migration, applied_at)
+        } else {
+            migration_connection.apply_migration(migration, applied_at)
+        };
         match outcome {
             Ok(outcome) => {
                 migration_connection.close()?;
@@ -8196,6 +8704,171 @@ impl DbConnection {
                 Err(error)
             }
         }
+    }
+
+    /// Apply an official create/copy/drop/rename table rebuild without firing
+    /// inbound foreign-key actions for the retired parent table.
+    ///
+    /// SQLite only accepts `PRAGMA foreign_keys` changes outside a transaction,
+    /// so enforcement is relaxed before the atomic migration transaction and
+    /// restored on every exit path. The rebuild, `foreign_key_check`, and
+    /// migration-ledger write all commit or roll back together.
+    fn apply_foreign_key_relaxed_migration(
+        &self,
+        migration: &Migration,
+        applied_at: &str,
+    ) -> Result<ApplyOutcome> {
+        self.execute_raw_for(DbOperation::Execute, "PRAGMA foreign_keys = OFF")?;
+        let disabled_state = match self.foreign_key_enforcement_state() {
+            Ok(state) => state,
+            Err(error) => {
+                if let Err(reenforce_error) =
+                    self.execute_raw_for(DbOperation::EnableForeignKeys, "PRAGMA foreign_keys = ON")
+                {
+                    tracing::error!(
+                        migration_version = migration.version,
+                        error = %error,
+                        reenforce_error = %reenforce_error,
+                        "failed to restore foreign-key enforcement after state inspection failure"
+                    );
+                }
+                return Err(error);
+            }
+        };
+        if disabled_state != 0 {
+            let error = DbError::MalformedRow {
+                operation: DbOperation::EnableForeignKeys,
+                message: format!(
+                    "schema rebuild migration V{} refused to run because foreign-key actions remained enabled",
+                    migration.version
+                ),
+            };
+            if let Err(reenforce_error) =
+                self.execute_raw_for(DbOperation::EnableForeignKeys, "PRAGMA foreign_keys = ON")
+            {
+                tracing::error!(
+                    migration_version = migration.version,
+                    error = %error,
+                    reenforce_error = %reenforce_error,
+                    "failed to restore foreign-key enforcement after disable-state mismatch"
+                );
+            }
+            return Err(error);
+        }
+
+        let outcome = self.apply_migration_with_foreign_key_check(migration, applied_at);
+        let reenforce =
+            self.execute_raw_for(DbOperation::EnableForeignKeys, "PRAGMA foreign_keys = ON");
+
+        let outcome = match outcome {
+            Ok(outcome) => {
+                reenforce?;
+                outcome
+            }
+            Err(error) => {
+                if let Err(reenforce_error) = reenforce {
+                    tracing::error!(
+                        migration_version = migration.version,
+                        error = %error,
+                        reenforce_error = %reenforce_error,
+                        "failed to restore foreign-key enforcement after migration failure"
+                    );
+                }
+                return Err(error);
+            }
+        };
+
+        if self.foreign_key_enforcement_state()? != 1 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::EnableForeignKeys,
+                message: format!(
+                    "schema rebuild migration V{} completed without restoring foreign-key enforcement",
+                    migration.version
+                ),
+            });
+        }
+
+        Ok(outcome)
+    }
+
+    /// Apply a foreign-key-relaxed rebuild while keeping validation and the
+    /// migration-ledger write in the same transaction as the schema change.
+    /// A failed `foreign_key_check` therefore rolls back the rebuild and leaves
+    /// the migration retryable instead of recording a broken schema version.
+    fn apply_migration_with_foreign_key_check(
+        &self,
+        migration: &Migration,
+        applied_at: &str,
+    ) -> Result<ApplyOutcome> {
+        let checksum = migration.checksum();
+        let record = MigrationRecord::new(migration.version, migration.name, checksum, applied_at)?;
+
+        self.begin_transaction(IsolationLevel::RepeatableRead)?;
+
+        let result = (|| {
+            let outcome = if self.has_migration(migration.version)? {
+                ApplyOutcome::AlreadyApplied
+            } else {
+                self.execute_raw_for(DbOperation::Execute, migration.sql)?;
+                ApplyOutcome::Applied
+            };
+
+            let foreign_keys = self.check_foreign_keys()?;
+            if !foreign_keys.passed {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::ForeignKeyCheck,
+                    message: format!(
+                        "schema rebuild migration V{} left {} foreign-key violation(s)",
+                        migration.version,
+                        foreign_keys.violations.len()
+                    ),
+                });
+            }
+
+            if outcome == ApplyOutcome::Applied {
+                self.record_migration(&record)?;
+            }
+            Ok(outcome)
+        })();
+
+        match result {
+            Ok(outcome) => match self.commit() {
+                Ok(()) => Ok(outcome),
+                Err(error) => {
+                    if let Err(rollback_error) = self.rollback() {
+                        tracing::error!(
+                            phase = "db_foreign_key_relaxed_migration_commit",
+                            error = %error,
+                            rollback_error = %rollback_error,
+                            "failed to rollback foreign-key-relaxed migration after commit failure"
+                        );
+                    }
+                    Err(error)
+                }
+            },
+            Err(error) => {
+                if let Err(rollback_error) = self.rollback() {
+                    tracing::error!(
+                        phase = "db_foreign_key_relaxed_migration_validation",
+                        error = %error,
+                        rollback_error = %rollback_error,
+                        "failed to rollback invalid foreign-key-relaxed migration"
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn foreign_key_enforcement_state(&self) -> Result<i64> {
+        let rows = self.query_for(DbOperation::ForeignKeyCheck, "PRAGMA foreign_keys", &[])?;
+        rows.first()
+            .and_then(|row| row.get(0))
+            .and_then(Value::as_i64)
+            .ok_or_else(|| DbError::MalformedRow {
+                operation: DbOperation::ForeignKeyCheck,
+                message: "PRAGMA foreign_keys returned no integer state".to_owned(),
+            })
     }
 
     fn apply_migration(&self, migration: &Migration, applied_at: &str) -> Result<ApplyOutcome> {
@@ -18056,8 +18729,8 @@ impl DbConnection {
     /// helper does NOT touch the audit log so the audit can be
     /// composed within a larger transaction.
     ///
-    /// The DB's CHECK constraint on `trust_class` enforces the
-    /// 5-class enum from ADR 0009; passing an invalid class returns
+    /// The DB's CHECK constraint on `trust_class` enforces the six-class
+    /// taxonomy from ADR 0009 as amended by ADR 0086 TC-D7; an invalid class returns
     /// an error from the storage layer rather than panicking.
     pub fn update_memory_trust_class(&self, id: &str, new_class: &str) -> Result<bool> {
         let Some(existing) = self.get_memory(id)? else {
@@ -18912,10 +19585,16 @@ pub struct MemoryLevelTransitionAuditInput {
     pub event: String,
     pub evidence_refs: Vec<String>,
     pub source_action: Option<String>,
+    /// Trust class before the level transition when the transition also
+    /// changes authority posture.
+    pub previous_trust_class: Option<String>,
+    /// Trust class after the level transition when the transition also
+    /// changes authority posture.
+    pub new_trust_class: Option<String>,
 }
 
 fn memory_level_transition_audit_details(input: &MemoryLevelTransitionAuditInput) -> String {
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "schema": MEMORY_LEVEL_TRANSITION_AUDIT_SCHEMA_V1,
         "memoryId": input.memory_id.as_str(),
         "previousLevel": input.previous_level.as_str(),
@@ -18926,6 +19605,13 @@ fn memory_level_transition_audit_details(input: &MemoryLevelTransitionAuditInput
         "evidenceRefs": &input.evidence_refs,
         "sourceAction": input.source_action.as_deref(),
     });
+    if let (Some(previous), Some(new)) = (
+        input.previous_trust_class.as_deref(),
+        input.new_trust_class.as_deref(),
+    ) {
+        payload["previousTrustClass"] = serde_json::json!(previous);
+        payload["newTrustClass"] = serde_json::json!(new);
+    }
     let details_hash = format!(
         "blake3:{}",
         blake3::hash(payload.to_string().as_bytes()).to_hex()
@@ -19477,12 +20163,20 @@ impl DbConnection {
 
         let mut updated = existing.clone();
         updated.level = input.level.clone();
+        let demotes_peer_attestation = text_matches(&existing.trust_class, "peer_human_attested");
+        let next_trust_class = if demotes_peer_attestation {
+            "agent_assertion".to_string()
+        } else {
+            existing.trust_class.clone()
+        };
+        updated.trust_class = next_trust_class.clone();
         let provenance_chain_hash = compute_memory_provenance_chain_hash(&updated);
         let affected = self.execute_for(
             DbOperation::Execute,
-            "UPDATE memories SET level = ?1, updated_at = ?2, provenance_chain_hash = ?3, provenance_chain_hash_version = ?4, provenance_verification_status = ?5, provenance_verified_at = NULL, provenance_verification_note = NULL WHERE id = ?6 AND workspace_id = ?7 AND tombstoned_at IS NULL AND level = ?8",
+            "UPDATE memories SET level = ?1, trust_class = ?2, updated_at = ?3, provenance_chain_hash = ?4, provenance_chain_hash_version = ?5, provenance_verification_status = ?6, provenance_verified_at = NULL, provenance_verification_note = NULL WHERE id = ?7 AND workspace_id = ?8 AND tombstoned_at IS NULL AND level = ?9 AND trust_class = ?10",
             &[
                 Value::Text(input.level.clone()),
+                Value::Text(next_trust_class.clone()),
                 Value::Text(input.updated_at.clone()),
                 Value::Text(provenance_chain_hash),
                 Value::Text(PROVENANCE_CHAIN_HASH_VERSION.to_string()),
@@ -19490,6 +20184,7 @@ impl DbConnection {
                 Value::Text(memory_id.to_string()),
                 Value::Text(input.workspace_id.clone()),
                 Value::Text(expected_level.to_owned()),
+                Value::Text(existing.trust_class.clone()),
             ],
         )?;
         if affected == 0 {
@@ -19501,14 +20196,45 @@ impl DbConnection {
                 workspace_id: input.workspace_id.clone(),
                 actor: input.actor.clone(),
                 memory_id: memory_id.to_string(),
-                previous_level: existing.level,
+                previous_level: existing.level.clone(),
                 new_level: input.level.clone(),
                 reason: input.reason.clone(),
                 automatic: input.automatic,
                 event: input.event.clone(),
                 evidence_refs: input.evidence_refs.clone(),
                 source_action: input.source_action.clone(),
+                previous_trust_class: demotes_peer_attestation
+                    .then(|| existing.trust_class.clone()),
+                new_trust_class: demotes_peer_attestation.then(|| next_trust_class.clone()),
             })?;
+        if demotes_peer_attestation {
+            let trust_audit_id = generate_audit_id();
+            self.insert_audit(
+                &trust_audit_id,
+                &CreateAuditInput {
+                    workspace_id: Some(input.workspace_id.clone()),
+                    actor: input.actor.clone(),
+                    action: audit_actions::TRUST_CLASS_TRANSITION.to_string(),
+                    target_type: Some("memory".to_string()),
+                    target_id: Some(memory_id.to_string()),
+                    details: Some(
+                        serde_json::json!({
+                            "schema": "ee.audit.trust_class_transition.v1",
+                            "fromClass": existing.trust_class.as_str(),
+                            "toClass": next_trust_class.as_str(),
+                            "direction": "demote",
+                            "trigger": "local_level_transition",
+                            "reason": "peer_attestation_does_not_authorize_local_level_transition",
+                            "previousLevel": existing.level.as_str(),
+                            "newLevel": input.level.as_str(),
+                            "levelTransitionAuditId": audit_id.as_str(),
+                            "sourceAction": input.source_action.as_deref(),
+                        })
+                        .to_string(),
+                    ),
+                },
+            )?;
+        }
         Ok(Some(audit_id))
     }
 
@@ -19699,6 +20425,8 @@ impl DbConnection {
             event: "feedback.harmful_decay".to_string(),
             evidence_refs: vec!["decay_evaluation".to_string()],
             source_action: Some(audit_actions::MEMORY_DECAY_DEMOTE.to_string()),
+            previous_trust_class: None,
+            new_trust_class: None,
         })?;
 
         Ok(Some(audit_id))
@@ -19751,6 +20479,8 @@ impl DbConnection {
                     event: "decay.l3".to_string(),
                     evidence_refs: vec!["decay_evaluation".to_string()],
                     source_action: Some(audit_actions::MEMORY_DECAY_TOMBSTONE.to_string()),
+                    previous_trust_class: None,
+                    new_trust_class: None,
                 })?;
 
             Ok(Some(audit_id))
@@ -19830,6 +20560,8 @@ impl DbConnection {
                     event: "workflow.completed".to_string(),
                     evidence_refs: vec![workflow_id.to_string(), closed_at.to_string()],
                     source_action: Some("ee workflow close".to_string()),
+                    previous_trust_class: None,
+                    new_trust_class: None,
                 })?;
             promotions.push(WorkflowMemoryPromotion {
                 memory_id: memory.id,
@@ -21250,6 +21982,8 @@ impl DbConnection {
             event: "manual.tombstone".to_string(),
             evidence_refs,
             source_action: Some(audit_actions::MEMORY_TOMBSTONE.to_string()),
+            previous_trust_class: None,
+            new_trust_class: None,
         })?;
 
         Ok(Some(audit_id))
@@ -22876,6 +23610,7 @@ fn is_pack_trust_class(value: &str) -> bool {
     matches!(
         value,
         "human_explicit"
+            | "peer_human_attested"
             | "agent_validated"
             | "agent_assertion"
             | "cass_evidence"
@@ -29359,6 +30094,34 @@ mod tests {
         Ok(!rows.is_empty())
     }
 
+    fn table_row_count(
+        connection: &DbConnection,
+        table_name: &str,
+    ) -> std::result::Result<i64, TestFailure> {
+        let rows = connection.query(&format!("SELECT COUNT(*) FROM {table_name}"), &[])?;
+        first_value(&rows, 0, table_name)?
+            .as_i64()
+            .ok_or_else(|| TestFailure::new(format!("{table_name}: row count is not an integer")))
+    }
+
+    fn ordered_text_hash(
+        connection: &DbConnection,
+        sql: &str,
+    ) -> std::result::Result<String, TestFailure> {
+        let rows = connection.query(sql, &[])?;
+        let mut hasher = blake3::Hasher::new();
+        for row in &rows {
+            let value = row.get(0).and_then(Value::as_str).ok_or_else(|| {
+                TestFailure::new(format!("text hash query returned non-text: {sql}"))
+            })?;
+            let length =
+                u64::try_from(value.len()).map_err(|error| TestFailure::new(error.to_string()))?;
+            hasher.update(&length.to_le_bytes());
+            hasher.update(value.as_bytes());
+        }
+        Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+    }
+
     fn column_signature(columns: &[MigrationTableColumn]) -> Vec<(&str, &str, bool, u32)> {
         columns
             .iter()
@@ -29913,8 +30676,8 @@ mod tests {
         let migration = connection.migrate()?;
         ensure_equal(
             &migration.applied().to_vec(),
-            &vec![89_u32],
-            "legacy target fixtures migrate through V089",
+            &(89_u32..=93).collect::<Vec<_>>(),
+            "legacy target fixtures migrate through V089 and later trust rebuilds",
         )?;
         let states = connection.list_mesh_lane_grant_states("wsp_01234567890123456789012345")?;
         ensure_equal(
@@ -30025,8 +30788,8 @@ mod tests {
         let migration = connection.migrate()?;
         ensure_equal(
             &migration.applied().to_vec(),
-            &vec![89_u32],
-            "V089 is the only pending migration",
+            &(89_u32..=93).collect::<Vec<_>>(),
+            "V089 and later trust rebuilds are pending",
         )?;
 
         let allow = connection
@@ -30239,8 +31002,8 @@ mod tests {
             let migration = connection.migrate()?;
             ensure_equal(
                 &migration.applied().to_vec(),
-                &vec![89_u32],
-                &format!("known accidental {case} checksum applies V089"),
+                &(89_u32..=93).collect::<Vec<_>>(),
+                &format!("known accidental {case} checksum applies V089 and later trust rebuilds"),
             )?;
             let state = connection
                 .get_mesh_lane_grant_state(
@@ -30321,6 +31084,519 @@ mod tests {
                 "unknown V088 checksum must remain a drift error, got {other:?}"
             ))),
         }
+    }
+
+    #[test]
+    fn foreign_key_relaxed_rebuild_rolls_back_before_recording_on_fk_violation() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_migration_table()?;
+        connection.execute_raw(
+            "CREATE TABLE fk_rebuild_parent (id INTEGER PRIMARY KEY, body TEXT NOT NULL);\
+             CREATE TABLE fk_rebuild_child (\
+                 id INTEGER PRIMARY KEY,\
+                 parent_id INTEGER NOT NULL REFERENCES fk_rebuild_parent(id)\
+             );\
+             INSERT INTO fk_rebuild_parent (id, body) VALUES (1, 'preserved');\
+             INSERT INTO fk_rebuild_child (id, parent_id) VALUES (1, 1)",
+        )?;
+
+        let invalid_rebuild = Migration::new(
+            90_090,
+            "test_invalid_foreign_key_relaxed_rebuild",
+            "CREATE TABLE fk_rebuild_parent_new (\
+                 id INTEGER PRIMARY KEY, body TEXT NOT NULL\
+             );\
+             INSERT INTO fk_rebuild_parent_new (id, body)\
+                 SELECT id + 1, body FROM fk_rebuild_parent;\
+             DROP TABLE fk_rebuild_parent;\
+             ALTER TABLE fk_rebuild_parent_new RENAME TO fk_rebuild_parent",
+            "blake3:test_invalid_foreign_key_relaxed_rebuild",
+        );
+
+        let error = connection
+            .apply_foreign_key_relaxed_migration(&invalid_rebuild, "2026-08-04T12:00:00Z")
+            .expect_err("orphaning rebuild must fail before commit");
+        ensure(
+            matches!(
+                error,
+                DbError::MalformedRow {
+                    operation: DbOperation::ForeignKeyCheck,
+                    ..
+                }
+            ),
+            "orphaning rebuild reports foreign-key validation failure",
+        )?;
+        ensure(
+            !connection.has_migration(invalid_rebuild.version())?,
+            "failed rebuild must remain absent from the migration ledger",
+        )?;
+        let parent_rows =
+            connection.query("SELECT id, body FROM fk_rebuild_parent ORDER BY id", &[])?;
+        ensure_equal(
+            &parent_rows.len(),
+            &1,
+            "failed rebuild restores parent row count",
+        )?;
+        ensure_equal(
+            &first_value(&parent_rows, 0, "failed rebuild parent id")?.as_i64(),
+            &Some(1),
+            "failed rebuild restores parent id",
+        )?;
+        ensure_equal(
+            &first_value(&parent_rows, 1, "failed rebuild parent body")?.as_str(),
+            &Some("preserved"),
+            "failed rebuild restores parent content",
+        )?;
+        ensure_equal(
+            &table_row_count(&connection, "fk_rebuild_child")?,
+            &1,
+            "failed rebuild preserves child rows",
+        )?;
+        ensure(
+            !table_exists(&connection, "fk_rebuild_parent_new")?,
+            "failed rebuild rolls back its replacement table",
+        )?;
+        ensure(
+            connection.check_foreign_keys()?.passed,
+            "failed rebuild leaves no foreign-key violations",
+        )?;
+        ensure_equal(
+            &connection.foreign_key_enforcement_state()?,
+            &1,
+            "failed rebuild restores foreign-key enforcement",
+        )?;
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn v090_memory_trust_rebuild_preserves_rows_content_hashes_and_children() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 89)?;
+        setup_workspace(&connection)?;
+
+        let memory_id = "mem_000000000000000000000v0901";
+        let mut input = test_memory_input(
+            "wsp_01234567890123456789012345",
+            "V090 preserves this canonical memory body byte-for-byte.",
+        );
+        input.tags = vec!["v090-preserved".to_owned()];
+        connection.insert_memory(memory_id, &input)?;
+
+        let rows_before = table_row_count(&connection, "memories")?;
+        let content_hash_before =
+            ordered_text_hash(&connection, "SELECT content FROM memories ORDER BY id")?;
+        let tag_rows_before = table_row_count(&connection, "memory_tags")?;
+
+        let outcome = connection.apply_foreign_key_relaxed_migration(
+            &super::V090_MEMORY_PEER_HUMAN_ATTESTED_TRUST,
+            "2026-08-04T12:00:00Z",
+        )?;
+        ensure_equal(
+            &outcome,
+            &super::ApplyOutcome::Applied,
+            "V090 migration outcome",
+        )?;
+
+        ensure_equal(
+            &table_row_count(&connection, "memories")?,
+            &rows_before,
+            "V090 memory row count",
+        )?;
+        ensure_equal(
+            &ordered_text_hash(&connection, "SELECT content FROM memories ORDER BY id")?,
+            &content_hash_before,
+            "V090 memory content hash",
+        )?;
+        ensure_equal(
+            &table_row_count(&connection, "memory_tags")?,
+            &tag_rows_before,
+            "V090 inbound child row count",
+        )?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE memories SET trust_class = ?1 WHERE id = ?2",
+            &[
+                Value::Text("peer_human_attested".to_owned()),
+                Value::Text(memory_id.to_owned()),
+            ],
+        )?;
+        let trust_rows = connection.query(
+            "SELECT trust_class FROM memories WHERE id = ?1",
+            &[Value::Text(memory_id.to_owned())],
+        )?;
+        ensure_equal(
+            &first_value(&trust_rows, 0, "V090 trust class")?.as_str(),
+            &Some("peer_human_attested"),
+            "V090 accepts peer_human_attested",
+        )?;
+        let schema_rows = connection.query(
+            "SELECT name FROM sqlite_master
+             WHERE (type = 'index' AND name = 'idx_memories_trust_class')
+                OR (type = 'trigger' AND name = 'trg_workspace_generations_memories_update')",
+            &[],
+        )?;
+        ensure_equal(
+            &schema_rows.len(),
+            &2,
+            "V090 restores memory index and generation trigger",
+        )?;
+        ensure(
+            !table_exists(&connection, "memories_v090_new")?,
+            "V090 leaves no temporary memory table",
+        )?;
+        ensure(
+            connection.check_foreign_keys()?.passed,
+            "V090 foreign keys pass",
+        )?;
+        let foreign_keys = connection.query("PRAGMA foreign_keys", &[])?;
+        ensure_equal(
+            &first_value(&foreign_keys, 0, "V090 foreign key pragma")?.as_i64(),
+            &Some(1),
+            "V090 restores foreign-key enforcement",
+        )
+    }
+
+    #[test]
+    fn v091_curation_trust_rebuild_preserves_rows_content_hashes_and_consumers() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 90)?;
+        setup_workspace(&connection)?;
+
+        let request_id = "reflect_req_v091_preservation";
+        connection
+            .insert_reflection_request_ledger(request_id, &reflection_request_ledger_input())?;
+        let candidate_id = "curate_09090909090909090909090909";
+        connection.insert_curation_candidate(
+            candidate_id,
+            &reflection_result_candidate_input(
+                request_id,
+                Some("approved"),
+                "2026-08-04T12:01:00Z",
+            ),
+        )?;
+        ensure(
+            connection.mark_reflection_request_consumed(
+                "wsp_01234567890123456789012345",
+                request_id,
+                candidate_id,
+                &reflection_hash('9'),
+                "2026-08-04T12:02:00Z",
+            )?,
+            "V091 fixture links a live consumer to the candidate",
+        )?;
+
+        let rows_before = table_row_count(&connection, "curation_candidates")?;
+        let content_hash_before = ordered_text_hash(
+            &connection,
+            "SELECT COALESCE(proposed_content, '') FROM curation_candidates ORDER BY id",
+        )?;
+
+        let outcome = connection.apply_foreign_key_relaxed_migration(
+            &super::V091_CURATION_PEER_HUMAN_ATTESTED_TRUST,
+            "2026-08-04T12:03:00Z",
+        )?;
+        ensure_equal(
+            &outcome,
+            &super::ApplyOutcome::Applied,
+            "V091 migration outcome",
+        )?;
+        ensure_equal(
+            &table_row_count(&connection, "curation_candidates")?,
+            &rows_before,
+            "V091 curation row count",
+        )?;
+        ensure_equal(
+            &ordered_text_hash(
+                &connection,
+                "SELECT COALESCE(proposed_content, '') FROM curation_candidates ORDER BY id",
+            )?,
+            &content_hash_before,
+            "V091 proposed-content hash",
+        )?;
+
+        let consumed = connection
+            .get_reflection_request_ledger("wsp_01234567890123456789012345", request_id)?
+            .ok_or("V091 reflection consumer missing after rebuild")?;
+        ensure_equal(
+            &consumed.consumed_candidate_id,
+            &Some(candidate_id.to_owned()),
+            "V091 preserves inbound consumer reference",
+        )?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE curation_candidates SET proposed_trust_class = ?1 WHERE id = ?2",
+            &[
+                Value::Text("peer_human_attested".to_owned()),
+                Value::Text(candidate_id.to_owned()),
+            ],
+        )?;
+        let trust_rows = connection.query(
+            "SELECT proposed_trust_class FROM curation_candidates WHERE id = ?1",
+            &[Value::Text(candidate_id.to_owned())],
+        )?;
+        ensure_equal(
+            &first_value(&trust_rows, 0, "V091 proposed trust class")?.as_str(),
+            &Some("peer_human_attested"),
+            "V091 accepts peer_human_attested",
+        )?;
+        ensure(
+            !table_exists(&connection, "curation_candidates_v091_new")?,
+            "V091 leaves no temporary curation table",
+        )?;
+        ensure(
+            table_exists(&connection, "curation_candidates_v060")?,
+            "V091 preserves retired migration-evidence tables",
+        )?;
+        ensure(
+            connection.check_foreign_keys()?.passed,
+            "V091 foreign keys pass",
+        )
+    }
+
+    #[test]
+    fn v092_rule_trust_rebuild_preserves_rows_content_hashes_and_junctions() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 91)?;
+        setup_workspace(&connection)?;
+
+        let memory_id = "mem_000000000000000000000v0921";
+        connection.insert_memory(
+            memory_id,
+            &test_memory_input(
+                "wsp_01234567890123456789012345",
+                "V092 source memory for preserved rule provenance.",
+            ),
+        )?;
+        let rule_id = "rule_09209209209209209209209209";
+        connection.insert_procedural_rule(
+            rule_id,
+            &CreateProceduralRuleInput {
+                workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                content: "V092 preserves this procedural rule body byte-for-byte.".to_owned(),
+                confidence: 0.75,
+                utility: 0.8,
+                importance: 0.85,
+                trust_class: "agent_validated".to_owned(),
+                scope: "workspace".to_owned(),
+                scope_pattern: None,
+                maturity: "validated".to_owned(),
+                protected: true,
+                source_memory_ids: vec![memory_id.to_owned()],
+                tags: vec!["v092-preserved".to_owned()],
+            },
+        )?;
+        let superseding_rule_id = "rule_09209209209209209209209210";
+        connection.insert_procedural_rule(
+            superseding_rule_id,
+            &CreateProceduralRuleInput {
+                workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                content: "V092 preserves this superseding procedural rule.".to_owned(),
+                confidence: 0.8,
+                utility: 0.75,
+                importance: 0.7,
+                trust_class: "agent_validated".to_owned(),
+                scope: "workspace".to_owned(),
+                scope_pattern: None,
+                maturity: "validated".to_owned(),
+                protected: false,
+                source_memory_ids: Vec::new(),
+                tags: Vec::new(),
+            },
+        )?;
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE procedural_rules SET superseded_by = ?1 WHERE id = ?2",
+            &[
+                Value::Text(superseding_rule_id.to_owned()),
+                Value::Text(rule_id.to_owned()),
+            ],
+        )?;
+
+        let rows_before = table_row_count(&connection, "procedural_rules")?;
+        let content_hash_before = ordered_text_hash(
+            &connection,
+            "SELECT content FROM procedural_rules ORDER BY id",
+        )?;
+        let sources_before = table_row_count(&connection, "rule_source_memories")?;
+        let tags_before = table_row_count(&connection, "rule_tags")?;
+
+        let outcome = connection.apply_foreign_key_relaxed_migration(
+            &super::V092_PROCEDURAL_RULE_PEER_HUMAN_ATTESTED_TRUST,
+            "2026-08-04T12:04:00Z",
+        )?;
+        ensure_equal(
+            &outcome,
+            &super::ApplyOutcome::Applied,
+            "V092 migration outcome",
+        )?;
+        ensure_equal(
+            &table_row_count(&connection, "procedural_rules")?,
+            &rows_before,
+            "V092 procedural-rule row count",
+        )?;
+        ensure_equal(
+            &ordered_text_hash(
+                &connection,
+                "SELECT content FROM procedural_rules ORDER BY id",
+            )?,
+            &content_hash_before,
+            "V092 procedural-rule content hash",
+        )?;
+        ensure_equal(
+            &table_row_count(&connection, "rule_source_memories")?,
+            &sources_before,
+            "V092 source-memory junction rows",
+        )?;
+        ensure_equal(
+            &table_row_count(&connection, "rule_tags")?,
+            &tags_before,
+            "V092 tag junction rows",
+        )?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE procedural_rules SET trust_class = ?1 WHERE id = ?2",
+            &[
+                Value::Text("peer_human_attested".to_owned()),
+                Value::Text(rule_id.to_owned()),
+            ],
+        )?;
+        let stored = connection
+            .get_procedural_rule(rule_id)?
+            .ok_or("V092 rule missing after trust update")?;
+        ensure_equal(
+            &stored.trust_class,
+            &"peer_human_attested".to_owned(),
+            "V092 accepts peer_human_attested",
+        )?;
+        ensure_equal(
+            &stored.superseded_by,
+            &Some(superseding_rule_id.to_owned()),
+            "V092 preserves procedural-rule self reference",
+        )?;
+
+        let schema_rows = connection.query(
+            "SELECT name FROM sqlite_master
+             WHERE (type = 'index' AND name = 'idx_procedural_rules_trust_class')
+                OR (type = 'trigger' AND name = 'trg_workspace_generations_procedural_rules_update')",
+            &[],
+        )?;
+        ensure_equal(
+            &schema_rows.len(),
+            &2,
+            "V092 restores rule index and generation trigger",
+        )?;
+        ensure(
+            !table_exists(&connection, "procedural_rules_v092_new")?,
+            "V092 leaves no temporary rule table",
+        )?;
+        ensure(
+            connection.check_foreign_keys()?.passed,
+            "V092 foreign keys pass",
+        )
+    }
+
+    #[test]
+    fn v093_pack_item_trust_rebuild_preserves_rows_and_explanation_hashes() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_migrations_through(&connection, 92)?;
+        setup_workspace(&connection)?;
+        let memory_id = "mem_000000000000000000000v0931";
+        insert_pack_test_memory(
+            &connection,
+            memory_id,
+            "V093 source memory for selected pack provenance.",
+        )?;
+        let pack_id = "pack_000000000000000000000v0931";
+        connection.insert_pack_record(
+            pack_id,
+            &super::CreatePackRecordInput {
+                workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                query: "v093 trust rebuild".to_owned(),
+                profile: "compact".to_owned(),
+                max_tokens: 128,
+                used_tokens: 50,
+                item_count: 1,
+                omitted_count: 0,
+                pack_hash: pack_test_hash("v093-trust-rebuild"),
+                degraded_json: None,
+                created_by: Some("v093-test".to_owned()),
+            },
+            &[pack_item_input(pack_id, memory_id, 1)],
+            &[],
+        )?;
+
+        let rows_before = table_row_count(&connection, "pack_items")?;
+        let why_hash_before = ordered_text_hash(
+            &connection,
+            "SELECT why FROM pack_items ORDER BY pack_id, rank",
+        )?;
+
+        let outcome = connection.apply_foreign_key_relaxed_migration(
+            &super::V093_PACK_ITEM_PEER_HUMAN_ATTESTED_TRUST,
+            "2026-08-04T12:05:00Z",
+        )?;
+        ensure_equal(
+            &outcome,
+            &super::ApplyOutcome::Applied,
+            "V093 migration outcome",
+        )?;
+        ensure_equal(
+            &table_row_count(&connection, "pack_items")?,
+            &rows_before,
+            "V093 pack-item row count",
+        )?;
+        ensure_equal(
+            &ordered_text_hash(
+                &connection,
+                "SELECT why FROM pack_items ORDER BY pack_id, rank",
+            )?,
+            &why_hash_before,
+            "V093 pack explanation hash",
+        )?;
+
+        connection.execute_for(
+            DbOperation::Execute,
+            "UPDATE pack_items SET trust_class = ?1 WHERE pack_id = ?2 AND memory_id = ?3",
+            &[
+                Value::Text("peer_human_attested".to_owned()),
+                Value::Text(pack_id.to_owned()),
+                Value::Text(memory_id.to_owned()),
+            ],
+        )?;
+        let items = connection.get_pack_items(pack_id)?;
+        ensure_equal(&items.len(), &1, "V093 selected item count")?;
+        ensure_equal(
+            &items[0].trust_class,
+            &"peer_human_attested".to_owned(),
+            "V093 accepts peer_human_attested",
+        )?;
+
+        let index_rows = connection.query(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'index' AND name = 'idx_pack_items_trust_class'",
+            &[],
+        )?;
+        ensure_equal(&index_rows.len(), &1, "V093 restores pack trust index")?;
+        ensure(
+            !table_exists(&connection, "pack_items_v093_new")?,
+            "V093 leaves no temporary pack-item table",
+        )?;
+        ensure(
+            connection.check_foreign_keys()?.passed,
+            "V093 foreign keys pass",
+        )
+    }
+
+    #[test]
+    fn pack_trust_class_allowlist_matches_peer_human_attested_schema() -> TestResult {
+        ensure(
+            super::is_pack_trust_class("peer_human_attested"),
+            "pack writer accepts peer_human_attested",
+        )
     }
 
     #[test]
@@ -30428,7 +31704,11 @@ mod tests {
         )?;
 
         let migration = connection.migrate()?;
-        ensure_equal(&migration.applied().to_vec(), &vec![84_u32], "V084 applied")?;
+        ensure_equal(
+            &migration.applied().to_vec(),
+            &(84_u32..=93).collect::<Vec<_>>(),
+            "V084 and later migrations applied",
+        )?;
         let first_record_after = connection
             .get_pack_record(first_id)?
             .ok_or_else(|| TestFailure::new("V084 parent fixture missing after migration"))?;
@@ -30822,9 +32102,10 @@ mod tests {
         )?;
         evidence_ids.push(mismatched_evidence_id);
         let migration = connection.migrate()?;
-        ensure(
-            migration.applied() == [85, 86, 87, 88, 89],
-            "legacy evidence upgrade must apply V085 through V089 in order",
+        ensure_equal(
+            &migration.applied().to_vec(),
+            &(85_u32..=93).collect::<Vec<_>>(),
+            "legacy evidence upgrade must apply V085 through V093 in order",
         )?;
         ensure(
             matches!(
@@ -37716,7 +38997,12 @@ mod tests {
         connection.migrate()?;
         setup_workspace(&connection)?;
 
-        for import_trust_class in ["human_explicit", "cass_evidence", "legacy_import"] {
+        for import_trust_class in [
+            "human_explicit",
+            "peer_human_attested",
+            "cass_evidence",
+            "legacy_import",
+        ] {
             let decision = format!(
                 r#"{{"schema":"ee.mesh.policy_decision.v1","direction":"inbound","action":"allow","reason":"peer_policy_lane_allowed","policyRef":"mesh_pol_7d4b19e22c","materialLane":"metadata","redaction":"share","trustLane":"peerAgent","importTrustClass":"{import_trust_class}","bodyFetchAllowed":false,"localTruthSideEffectsAllowed":true,"searchOrGraphSideEffectsAllowed":true,"failure":null}}"#
             );

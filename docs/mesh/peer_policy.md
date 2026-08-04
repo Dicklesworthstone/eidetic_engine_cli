@@ -34,10 +34,12 @@ Peer policy records may assign only the peer-safe lanes:
 `peerHumanViaPeer`, `peerAgent`, `peerDerived`, or `untrusted`. The config
 parser and schema both reject `localHuman` in peer policy records.
 
-Imported peer material maps to `agent_assertion` or `agent_validated` in the
-local memory trust class. It must never import as `human_explicit`,
-`cass_evidence`, or `legacy_import`, even when the remote peer says a human
-authored the original record.
+Generic peer policy maps imported material to `agent_assertion` or
+`agent_validated`. It cannot mint `peer_human_attested`; that class requires the
+dedicated signed-active-member admission path and local elevation policy.
+Imported material must never retain `human_explicit`, `cass_evidence`, or
+`legacy_import`, even when the remote peer says a human authored the original
+record.
 
 ## Lane Grants
 
@@ -98,10 +100,11 @@ callers that need to expose allowed decisions:
   failure evidence, not an allowed peer-policy posture.
 - `importTrustClass` is limited to `agent_assertion`, `agent_validated`, or
   `null` when no matching policy exists. Mesh peer decisions must not surface
-  `human_explicit`, `cass_evidence`, or `legacy_import` as imported peer trust.
-  If a malformed in-memory policy attempts to use one of those local-only
-  classes, the decision rejects it and suppresses the unsafe class to `null` in
-  JSON. Allowed inbound decisions must use a concrete peer-safe trust class;
+  `peer_human_attested`, `human_explicit`, `cass_evidence`, or `legacy_import`
+  as a generic imported-peer trust assignment. If a malformed in-memory policy
+  attempts to use one of those restricted classes, the decision rejects it and
+  suppresses the unsafe class to `null` in JSON. Allowed inbound decisions must
+  use a concrete peer-safe trust class;
   `null` is reserved for missing-policy denial surfaces and rejected invalid
   policy material.
 - `bodyFetchAllowed`, `localTruthSideEffectsAllowed`, and
@@ -158,8 +161,9 @@ Workspace-local peer policies are registered in `.ee/config.toml` under
 `[[mesh.peer_policies]]`. The config parser is intentionally stricter than the
 schema fixture surface: missing policy fields are configuration errors, the
 default action must be `deny`, peer material can import only as
-`agent_assertion` or `agent_validated`, `human_explicit`/`cass_evidence`/
-`legacy_import` are rejected as local-only import trust classes, and
+`agent_assertion` or `agent_validated`, `peer_human_attested` is reserved for
+the dedicated signed-member admission path, `human_explicit`/`cass_evidence`/
+`legacy_import` are rejected as restricted import trust classes, and
 `localHuman` is rejected for peer policy trust lanes.
 
 ```toml

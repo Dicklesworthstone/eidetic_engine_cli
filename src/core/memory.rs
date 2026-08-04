@@ -8502,10 +8502,15 @@ pub fn update_memory_level(
         repair: Some("See docs for the memory level lifecycle transition table.".to_owned()),
     })?;
     let actor = options.actor.or(Some("ee memory level"));
-    let evidence_refs = vec![
+    let demotes_peer_attestation = memory.trust_class == TrustClass::PeerHumanAttested.as_str();
+    let mut evidence_refs = vec![
         format!("actor:{}", actor.unwrap_or("ee memory level")),
         format!("reason:{manual_reason}"),
     ];
+    if demotes_peer_attestation {
+        evidence_refs
+            .push("trust_class_transition:peer_human_attested->agent_assertion".to_owned());
+    }
 
     if options.dry_run {
         return Ok(MemoryLevelReport {
@@ -10083,6 +10088,13 @@ pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
         return MemoryReviseReport::no_changes(options.original_memory_id.to_owned());
     }
 
+    let revised_trust_class = if original.trust_class == TrustClass::PeerHumanAttested.as_str() {
+        changed_fields.push("trust_class".to_owned());
+        TrustClass::AgentAssertion.as_str().to_owned()
+    } else {
+        original.trust_class.clone()
+    };
+
     // If dry run, return preview
     if options.dry_run {
         return MemoryReviseReport::dry_run_preview(
@@ -10168,7 +10180,7 @@ pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
         utility: original.utility,
         importance: original.importance,
         provenance_uri: new_provenance_uri,
-        trust_class: original.trust_class.clone(),
+        trust_class: revised_trust_class.clone(),
         trust_subclass: original.trust_subclass.clone(),
         tags: new_tags,
         valid_from: Some(revised_at.clone()),
@@ -10180,6 +10192,8 @@ pub fn revise_memory(options: &ReviseMemoryOptions<'_>) -> MemoryReviseReport {
         "logical_id": logical_id,
         "revision_number": revision_number,
         "changed_fields": changed_fields,
+        "from_trust_class": original.trust_class.clone(),
+        "to_trust_class": revised_trust_class,
         "reason": options.reason.as_str(),
         "actor": options.actor.unwrap_or("ee memory revise"),
         "revised_at": revised_at,
@@ -14847,6 +14861,59 @@ mod tests {
             true,
             "new revision remains live",
         )
+    }
+
+    #[test]
+    fn revise_memory_demotes_peer_attestation_for_locally_created_revision() -> TestResult {
+        let (_temp, created) = remember_revisable_memory("Use the signed team release checklist.")?;
+        let memory_id = created.memory_id.to_string();
+        let connection = crate::db::DbConnection::open_file(&created.database_path)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .update_memory_trust_class(&memory_id, TrustClass::PeerHumanAttested.as_str())
+                .map_err(|error| error.to_string())?,
+            true,
+            "fixture trust update",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = revise_memory(&ReviseMemoryOptions {
+            database_path: &created.database_path,
+            original_memory_id: &memory_id,
+            content: Some("Use a locally revised team release checklist."),
+            level: None,
+            kind: None,
+            confidence: None,
+            tags: None,
+            provenance_uri: None,
+            reason: ReviseReason::Correction,
+            actor: Some("SapphireBeacon"),
+            dry_run: false,
+        });
+
+        ensure(report.success, true, "revision success")?;
+        ensure(
+            report.changed_fields,
+            vec!["content".to_owned(), "trust_class".to_owned()],
+            "revision reports trust demotion",
+        )?;
+        let new_id = report
+            .new_id
+            .as_deref()
+            .ok_or_else(|| "peer revision should report a new memory id".to_owned())?;
+        let connection = crate::db::DbConnection::open_file(&created.database_path)
+            .map_err(|error| error.to_string())?;
+        let revised = connection
+            .get_memory(new_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "peer revision should persist".to_owned())?;
+        ensure(
+            revised.trust_class,
+            TrustClass::AgentAssertion.as_str().to_owned(),
+            "local revision trust class",
+        )?;
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]

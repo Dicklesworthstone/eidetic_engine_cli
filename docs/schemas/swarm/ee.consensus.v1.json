@@ -20,7 +20,7 @@
         "additionalProperties": false,
         "properties": {
           "agentName": {"type": ["string", "null"]},
-          "trustClass": {"type": "string", "enum": ["human_explicit", "agent_validated", "agent_assertion", "cass_evidence", "legacy_import"]}
+          "trustClass": {"type": "string", "enum": ["human_explicit", "peer_human_attested", "agent_validated", "agent_assertion", "cass_evidence", "legacy_import"]}
         }
       }
     },

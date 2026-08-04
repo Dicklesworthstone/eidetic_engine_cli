@@ -1260,7 +1260,9 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
         .filter(|item| {
             matches!(
                 item.trust.class,
-                TrustClass::HumanExplicit | TrustClass::AgentValidated
+                TrustClass::HumanExplicit
+                    | TrustClass::PeerHumanAttested
+                    | TrustClass::AgentValidated
             )
         })
         .map(|item| item.memory_id)

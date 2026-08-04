@@ -946,7 +946,9 @@ pub struct PlaybookPortableDocument {
     pub rules: Vec<PlaybookPortableRule>,
     /// Store-local authentication block (ADR 0086 TC-D14). Present only when
     /// the exporting store MAC'd the rules' records root; import caps
-    /// `human_explicit` rules at `agent_validated` when absent or invalid.
+    /// privileged rules at `agent_validated` when the artifact cannot prove
+    /// the required local authority. `peer_human_attested` is always capped
+    /// because a playbook MAC does not prove signed active-member admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authentication: Option<AuthenticatedHeader>,
 }
@@ -2315,7 +2317,13 @@ pub fn import_playbook(
         .filter(|value| !value.is_empty())
         .unwrap_or("ee playbook import");
     if !options.dry_run {
-        preflight_playbook_import_candidates(&document, &prepared, &existing_contents, actor)?;
+        preflight_playbook_import_candidates(
+            &document,
+            &auth_state,
+            &prepared,
+            &existing_contents,
+            actor,
+        )?;
     }
 
     let mut imported_count = 0_usize;
@@ -2364,21 +2372,10 @@ pub fn import_playbook(
         }
         let maturity = import_maturity.unwrap_or(RuleMaturity::Candidate.as_str());
 
-        // TC-D14: human_explicit survives import only when the playbook
-        // authenticates under this store's playbook subkey; otherwise the
-        // rule is capped at agent_validated (store faults fail closed too).
-        let mut effective_trust_class = rule.trust_class.as_str();
-        if effective_trust_class == "human_explicit"
-            && !matches!(auth_state, PlaybookAuthState::Authenticated)
-        {
-            issue_codes.push(match &auth_state {
-                PlaybookAuthState::StoreUnavailable { .. } => {
-                    crate::policy::store_auth::MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE.to_owned()
-                }
-                _ => "playbook_trust_capped_unauthenticated".to_owned(),
-            });
+        let effective_trust_class =
+            portable_import_trust_class(rule, &auth_state, &mut issue_codes);
+        if effective_trust_class != rule.trust_class {
             downgraded_count += 1;
-            effective_trust_class = "agent_validated";
         }
 
         if options.dry_run {
@@ -2595,6 +2592,33 @@ fn portable_import_maturity(
     Some(parsed.as_str())
 }
 
+fn portable_import_trust_class<'a>(
+    rule: &'a PlaybookPortableRule,
+    auth_state: &PlaybookAuthState,
+    issue_codes: &mut Vec<String>,
+) -> &'a str {
+    if rule.trust_class == TrustClass::PeerHumanAttested.as_str() {
+        issue_codes.push("playbook_peer_human_attested_capped".to_owned());
+        return TrustClass::AgentValidated.as_str();
+    }
+
+    if rule.trust_class == TrustClass::HumanExplicit.as_str()
+        && !matches!(auth_state, PlaybookAuthState::Authenticated)
+    {
+        issue_codes.push(match auth_state {
+            PlaybookAuthState::StoreUnavailable { .. } => {
+                crate::policy::store_auth::MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE.to_owned()
+            }
+            PlaybookAuthState::Authenticated | PlaybookAuthState::Unauthenticated { .. } => {
+                "playbook_trust_capped_unauthenticated".to_owned()
+            }
+        });
+        return TrustClass::AgentValidated.as_str();
+    }
+
+    &rule.trust_class
+}
+
 fn validate_playbook_document(document: &PlaybookPortableDocument) -> Result<(), DomainError> {
     if document.schema != PLAYBOOK_PORTABLE_SCHEMA_V1 {
         return Err(DomainError::Import {
@@ -2620,6 +2644,7 @@ fn validate_playbook_document(document: &PlaybookPortableDocument) -> Result<(),
 
 fn preflight_playbook_import_candidates(
     document: &PlaybookPortableDocument,
+    auth_state: &PlaybookAuthState,
     prepared: &PreparedRuleRead,
     existing_contents: &BTreeSet<String>,
     actor: &str,
@@ -2635,6 +2660,7 @@ fn preflight_playbook_import_candidates(
         let Some(maturity) = portable_import_maturity(rule, &mut issue_codes) else {
             continue;
         };
+        let effective_trust_class = portable_import_trust_class(rule, auth_state, &mut issue_codes);
         prepare_rule_add(&RuleAddOptions {
             workspace_path: &prepared.workspace_path,
             database_path: Some(&prepared.database_path),
@@ -2645,7 +2671,7 @@ fn preflight_playbook_import_candidates(
             confidence: Some(rule.confidence),
             utility: rule.utility,
             importance: rule.importance,
-            trust_class: &rule.trust_class,
+            trust_class: effective_trust_class,
             protected: rule.protected,
             tags: &rule.tags,
             source_memory_ids: &[],
@@ -3677,15 +3703,32 @@ fn prepare_rule_update(
         candidate_scope_pattern.as_deref(),
         "ee rule update --help",
     )?;
-    let trust_class = options
+    let requested_trust_class = options
         .trust_class
         .map(TrustClass::from_str)
         .transpose()
-        .map_err(|error| rule_read_usage_error(error.to_string(), "ee rule update --help"))?
-        .map_or_else(
-            || previous.trust_class.clone(),
-            |value| value.as_str().to_owned(),
-        );
+        .map_err(|error| rule_read_usage_error(error.to_string(), "ee rule update --help"))?;
+    if requested_trust_class == Some(TrustClass::PeerHumanAttested) {
+        return Err(rule_read_usage_error(
+            "peer_human_attested can be assigned only by the signed active-member admission path"
+                .to_owned(),
+            "ee team sync --help",
+        ));
+    }
+    if previous.trust_class == TrustClass::PeerHumanAttested.as_str()
+        && content != previous.content
+        && requested_trust_class.is_none()
+    {
+        return Err(rule_read_usage_error(
+            "updating peer_human_attested rule content requires an explicit lower --trust-class because locally revised bytes are not covered by the signed member attestation"
+                .to_owned(),
+            "ee rule update --help",
+        ));
+    }
+    let trust_class = requested_trust_class.map_or_else(
+        || previous.trust_class.clone(),
+        |value| value.as_str().to_owned(),
+    );
     let confidence = parse_update_score(options.confidence, previous.confidence, "confidence")?;
     let utility = parse_update_score(options.utility, previous.utility, "utility")?;
     let importance = parse_update_score(options.importance, previous.importance, "importance")?;
@@ -3917,6 +3960,12 @@ fn prepare_rule_add(options: &RuleAddOptions<'_>) -> Result<PreparedRuleAdd, Dom
 
     let trust_class = TrustClass::from_str(options.trust_class)
         .map_err(|error| rule_usage_error(error.to_string()))?;
+    if trust_class == TrustClass::PeerHumanAttested {
+        return Err(rule_usage_error(
+            "peer_human_attested can be assigned only by the signed active-member admission path"
+                .to_owned(),
+        ));
+    }
     let source_memory_ids = parse_source_memory_ids(options.source_memory_ids)?;
     if maturity == RuleMaturity::Validated && source_memory_ids.is_empty() {
         return Err(rule_usage_error(
@@ -5332,6 +5381,32 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_playbook_still_cannot_mint_peer_human_attested() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&tempdir)?;
+        let mut document = human_explicit_portable_document(&workspace_id);
+        document.rules[0].trust_class = TrustClass::PeerHumanAttested.as_str().to_owned();
+        authenticate_playbook_document(&mut document, &workspace_path, &workspace_id)?;
+
+        let report = run_playbook_import(&workspace_path, &database_path, &document)?;
+        ensure(
+            report.imported_count == 1,
+            "rule should import at capped trust",
+        )?;
+        ensure(
+            report.decisions[0]
+                .issue_codes
+                .iter()
+                .any(|code| code == "playbook_peer_human_attested_capped"),
+            "peer attestation cap must be visible",
+        )?;
+        ensure(
+            imported_rule_trust_class(&database_path, &workspace_id)? == "agent_validated",
+            "playbook MAC must not mint peer_human_attested",
+        )
+    }
+
+    #[test]
     fn playbook_import_caps_tampered_authenticated_playbook() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&tempdir)?;
@@ -5592,6 +5667,115 @@ mod tests {
         assert_eq!(report.source_memory_ids, vec![source_b, source_a]);
         assert_eq!(report.evidence.status, "declared_not_verified");
         ensure(!report.persisted, "dry-run must not persist")
+    }
+
+    #[test]
+    fn rule_add_cannot_mint_peer_human_attested() -> TestResult {
+        let error = add_rule(&RuleAddOptions {
+            workspace_path: Path::new("."),
+            database_path: None,
+            content: "Use signed team admission for peer human rules.",
+            scope: "workspace",
+            scope_pattern: None,
+            maturity: "candidate",
+            confidence: None,
+            utility: 0.5,
+            importance: 0.5,
+            trust_class: "peer_human_attested",
+            protected: false,
+            tags: &[],
+            source_memory_ids: &[],
+            dry_run: true,
+            actor: None,
+        })
+        .expect_err("direct rule add must not mint peer attestation");
+
+        ensure(
+            error
+                .message()
+                .contains("signed active-member admission path"),
+            "error should direct callers to the team import path",
+        )
+    }
+
+    #[test]
+    fn rule_update_cannot_preserve_peer_attestation_on_locally_changed_content() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(workspace_path);
+        let rule_id = "rule_01234567890123456789054321";
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("peer-attested-rule-update".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_procedural_rule(
+                rule_id,
+                &CreateProceduralRuleInput {
+                    workspace_id: workspace_id.clone(),
+                    content: "Run the signed team release procedure.".to_owned(),
+                    confidence: 0.75,
+                    utility: 0.7,
+                    importance: 0.8,
+                    trust_class: TrustClass::PeerHumanAttested.as_str().to_owned(),
+                    scope: "workspace".to_owned(),
+                    scope_pattern: None,
+                    maturity: "candidate".to_owned(),
+                    protected: false,
+                    source_memory_ids: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let error = update_rule(&RuleUpdateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            rule_id,
+            content: Some("Run a locally rewritten release procedure."),
+            scope: None,
+            scope_pattern: None,
+            clear_scope_pattern: false,
+            trust_class: None,
+            confidence: None,
+            utility: None,
+            importance: None,
+            protected: None,
+            tags: None,
+            clear_tags: false,
+            source_memory_ids: None,
+            clear_source_memory_ids: false,
+            dry_run: false,
+            actor: Some("test"),
+        })
+        .expect_err("local content rewrite must not retain peer attestation");
+        ensure(
+            error.message().contains("explicit lower --trust-class"),
+            "error must require an explicit trust downgrade",
+        )?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let stored = connection
+            .get_procedural_rule(rule_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "peer-attested rule disappeared after rejected update".to_owned())?;
+        ensure(
+            stored.content == "Run the signed team release procedure."
+                && stored.trust_class == TrustClass::PeerHumanAttested.as_str(),
+            "rejected update must preserve the original attested rule",
+        )?;
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]

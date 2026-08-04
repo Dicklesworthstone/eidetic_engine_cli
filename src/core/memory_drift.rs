@@ -2843,6 +2843,7 @@ fn unit_score_micros(value: f64) -> u64 {
 fn trust_class_micros(trust_class: &str) -> u64 {
     match trust_class.trim() {
         "human_explicit" => 850_000,
+        "peer_human_attested" => 750_000,
         "agent_validated" => 650_000,
         "agent_assertion" => 500_000,
         "cass_evidence" => 450_000,
@@ -2987,6 +2988,13 @@ mod tests {
     use crate::db::{
         CreateMemoryInput, CreatePackItemInput, CreatePackRecordInput, CreateWorkspaceInput,
     };
+
+    #[test]
+    fn peer_human_attested_drift_weight_matches_initial_confidence_order() {
+        assert_eq!(trust_class_micros("peer_human_attested"), 750_000);
+        assert!(trust_class_micros("human_explicit") > trust_class_micros("peer_human_attested"));
+        assert!(trust_class_micros("peer_human_attested") > trust_class_micros("agent_validated"));
+    }
 
     fn sample_snapshot(anchors: Vec<MemoryDriftAnchor>) -> MemoryDriftSnapshot {
         MemoryDriftSnapshot::new(

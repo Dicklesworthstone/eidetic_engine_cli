@@ -84,6 +84,9 @@ fn parse_trust_class_constant_time(input: &str) -> Option<TrustClass> {
     if std::hint::black_box(ct_str_eq(input, "human_explicit")) {
         matched = Some(TrustClass::HumanExplicit);
     }
+    if std::hint::black_box(ct_str_eq(input, "peer_human_attested")) {
+        matched = Some(TrustClass::PeerHumanAttested);
+    }
     // Use black_box to prevent short-circuit optimization
     if std::hint::black_box(ct_str_eq(input, "agent_validated")) {
         matched = Some(TrustClass::AgentValidated);
@@ -1345,6 +1348,7 @@ pub fn validate_trust_promotion_evidence(
 
     let trust_class = match proposed_trust_class {
         "human_explicit" => Some(TrustClass::HumanExplicit),
+        "peer_human_attested" => Some(TrustClass::PeerHumanAttested),
         "agent_validated" => Some(TrustClass::AgentValidated),
         "agent_assertion" => Some(TrustClass::AgentAssertion),
         "cass_evidence" => Some(TrustClass::CassEvidence),
@@ -1357,6 +1361,9 @@ pub fn validate_trust_promotion_evidence(
     };
 
     match trust_class {
+        TrustClass::PeerHumanAttested => Err(TrustPromotionEvidenceRejection::new(
+            "peer_human_attested_requires_team_import_path",
+        )),
         TrustClass::AgentValidated => {
             if source_type != "feedback_event" {
                 return Err(TrustPromotionEvidenceRejection::new(
@@ -3974,6 +3981,24 @@ mod tests {
     }
 
     #[test]
+    fn trust_promotion_rejects_peer_human_attested_outside_team_import() -> Result<(), String> {
+        let rejection = validate_trust_promotion_evidence(
+            "peer_human_attested",
+            "human_request",
+            "audit_0123456789abcdef0123456789abcdef",
+        )
+        .err()
+        .ok_or_else(|| "generic curation must not mint peer attestation".to_owned())?;
+
+        assert_eq!(rejection.code, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE);
+        assert_eq!(
+            rejection.reason,
+            "peer_human_attested_requires_team_import_path"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn trust_promotion_rejects_unknown_trust_class() -> Result<(), String> {
         let rejection = validate_trust_promotion_evidence("superadmin", "any_source", "any_id")
             .err()
@@ -4011,6 +4036,10 @@ mod tests {
         assert_eq!(
             super::parse_trust_class_constant_time("agent_validated"),
             Some(crate::models::TrustClass::AgentValidated)
+        );
+        assert_eq!(
+            super::parse_trust_class_constant_time("peer_human_attested"),
+            Some(crate::models::TrustClass::PeerHumanAttested)
         );
 
         for near_miss in [

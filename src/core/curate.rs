@@ -10805,6 +10805,16 @@ fn evaluate_candidate_for_apply(
         );
         target_after.trust_class = trust_class.clone();
     }
+    if target_memory.trust_class == TrustClass::PeerHumanAttested.as_str()
+        && target_after.content != target_memory.content
+        && target_after.trust_class == TrustClass::PeerHumanAttested.as_str()
+    {
+        errors.push(validation_issue(
+            "peer_human_attested_content_change_requires_trust_demotion",
+            "Locally curated content is not covered by the source member's signed human-explicit attestation.",
+            "Recreate the candidate with an explicitly justified lower proposed trust class, or ingest a new signed active-member origin event.",
+        ));
+    }
     if (rule_create.is_some() || procedure_create.is_some()) && target_after.level != "procedural" {
         push_apply_change(
             &mut changes,
@@ -13029,6 +13039,8 @@ fn persist_candidate_application_inner(
                     event: "manual.tombstone".to_owned(),
                     evidence_refs: vec![stored.id.clone()],
                     source_action: Some(audit_actions::CURATION_CANDIDATE_APPLY.to_owned()),
+                    previous_trust_class: None,
+                    new_trust_class: None,
                 })
                 .map_err(|error| DomainError::Storage {
                     message: format!("Failed to write memory level transition audit: {error}"),
@@ -20588,6 +20600,62 @@ mod tests {
             .ok_or_else(|| "memory missing after redacted apply".to_owned())?;
         assert!(memory.content.contains("[REDACTED:"));
         assert!(!memory.content.contains(raw_value));
+        Ok(())
+    }
+
+    #[test]
+    fn apply_curation_candidate_cannot_preserve_peer_attestation_on_changed_content() -> TestResult
+    {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(33)).to_string();
+        let candidate_id = curate_id(34);
+        let connection = seed_candidate_database(
+            &database_path,
+            &workspace_id,
+            &memory_id,
+            &candidate_id,
+            "consolidate",
+            Some("approved"),
+            Some("Locally rewritten team release guidance."),
+        )?;
+        ensure(
+            connection
+                .update_memory_trust_class(&memory_id, TrustClass::PeerHumanAttested.as_str())
+                .map_err(|error| error.to_string())?,
+            "fixture memory trust class should update",
+        )?;
+        connection
+            .execute_raw(&format!(
+                "UPDATE curation_candidates SET proposed_trust_class = NULL WHERE id = '{}'",
+                candidate_id
+            ))
+            .map_err(|error| error.to_string())?;
+
+        let report = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.application.status, "blocked");
+        assert!(report.application.errors.iter().any(|issue| {
+            issue.code == "peer_human_attested_content_change_requires_trust_demotion"
+        }));
+        assert!(!report.mutation.persisted);
+
+        let memory = connection
+            .get_memory(&memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "peer-attested memory missing after blocked curation".to_owned())?;
+        assert_eq!(memory.content, "Run cargo fmt --check before release.");
+        assert_eq!(memory.trust_class, TrustClass::PeerHumanAttested.as_str());
         Ok(())
     }
 

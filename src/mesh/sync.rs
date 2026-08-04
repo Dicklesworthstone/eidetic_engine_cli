@@ -69,6 +69,7 @@ impl SyncMaterialLane {
 pub enum SyncTrustClass {
     HumanExplicit,
     HumanRevised,
+    PeerHumanAttested,
     AgentValidated,
     AgentProposed,
     External,
@@ -80,6 +81,7 @@ impl SyncTrustClass {
         match self {
             Self::HumanExplicit => "human_explicit",
             Self::HumanRevised => "human_revised",
+            Self::PeerHumanAttested => "peer_human_attested",
             Self::AgentValidated => "agent_validated",
             Self::AgentProposed => "agent_proposed",
             Self::External => "external",
@@ -91,6 +93,7 @@ impl SyncTrustClass {
         [
             Self::HumanExplicit,
             Self::HumanRevised,
+            Self::PeerHumanAttested,
             Self::AgentValidated,
             Self::AgentProposed,
             Self::External,
@@ -101,9 +104,13 @@ impl SyncTrustClass {
 
     #[must_use]
     pub fn reviewed_or_validated() -> BTreeSet<Self> {
-        [Self::HumanRevised, Self::AgentValidated]
-            .into_iter()
-            .collect()
+        [
+            Self::HumanRevised,
+            Self::PeerHumanAttested,
+            Self::AgentValidated,
+        ]
+        .into_iter()
+        .collect()
     }
 }
 
@@ -907,6 +914,36 @@ fn deny_reason(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sync_trust_class_sets_include_peer_human_attested() {
+        assert_eq!(
+            SyncTrustClass::PeerHumanAttested.as_str(),
+            "peer_human_attested"
+        );
+
+        let all = SyncTrustClass::all();
+        assert_eq!(all.len(), 6);
+        assert!(all.contains(&SyncTrustClass::PeerHumanAttested));
+        assert_eq!(
+            all.iter()
+                .copied()
+                .map(SyncTrustClass::as_str)
+                .collect::<Vec<_>>(),
+            vec![
+                "human_explicit",
+                "human_revised",
+                "peer_human_attested",
+                "agent_validated",
+                "agent_proposed",
+                "external",
+            ]
+        );
+
+        let reviewed_or_validated = SyncTrustClass::reviewed_or_validated();
+        assert!(reviewed_or_validated.contains(&SyncTrustClass::PeerHumanAttested));
+        assert!(!reviewed_or_validated.contains(&SyncTrustClass::HumanExplicit));
+    }
 
     fn subscription(profile_id: &str) -> PeerSyncSubscription {
         PeerSyncSubscription::new("peer-a", profile_id)

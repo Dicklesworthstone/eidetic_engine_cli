@@ -826,6 +826,7 @@ fn reuse_basis_points(access_count: u64, reuse_count: u64) -> u16 {
 fn trust_class_basis_points(trust_class: &str) -> u16 {
     match trust_class {
         "human_explicit" => 1000,
+        "peer_human_attested" => 900,
         "agent_validated" => 800,
         "cass_evidence" => 650,
         "agent_assertion" => 500,
@@ -2199,6 +2200,18 @@ mod tests {
     use crate::search::SearchHotsetEntry;
 
     type TestResult = Result<(), String>;
+
+    #[test]
+    fn peer_human_attested_hotset_weight_sits_between_local_human_and_agent_validation() {
+        assert!(
+            trust_class_basis_points("human_explicit")
+                > trust_class_basis_points("peer_human_attested")
+        );
+        assert!(
+            trust_class_basis_points("peer_human_attested")
+                > trust_class_basis_points("agent_validated")
+        );
+    }
 
     fn builder(threshold_gen: u64) -> HotsetManifestBuilder {
         HotsetManifestBuilder::new(

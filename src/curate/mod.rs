@@ -7525,6 +7525,7 @@ pub fn validate_candidate(
     if let Some(ref tc) = input.proposed_trust_class {
         let valid_classes = [
             "human_explicit",
+            "peer_human_attested",
             "agent_validated",
             "agent_assertion",
             "cass_evidence",
@@ -10465,6 +10466,21 @@ Then update src/policy/mod.rs on main."
         assert!(matches!(
             result,
             Err(CandidateValidationError::InvalidProposedTrustClass { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_candidate_rejects_peer_attestation_outside_team_import() {
+        let mut input = valid_input();
+        input.proposed_trust_class = Some("peer_human_attested".to_string());
+        let result = validate_candidate(input, "2026-04-29T12:00:00Z", true);
+        assert!(matches!(
+            result,
+            Err(CandidateValidationError::TrustPromotionEvidenceRejected {
+                trust_class,
+                reason: "peer_human_attested_requires_team_import_path",
+                ..
+            }) if trust_class == "peer_human_attested"
         ));
     }
 
