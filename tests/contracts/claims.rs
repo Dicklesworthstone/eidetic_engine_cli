@@ -561,6 +561,63 @@ fn gate14_cli_claim_commands_parse_and_verify_real_files() -> TestResult {
     )
 }
 
+/// GH#24 regression: `ee claim verify all` must exit 0 only when every claim
+/// passes, and exit 9 (eval failure) when any claim fails, so
+/// `ee claim verify all && deploy`-style gates cannot go green on red claims.
+#[test]
+fn gate14_cli_claim_verify_exit_codes_reflect_claim_outcomes() -> TestResult {
+    let fixture = write_evidence_claim_fixture("cli_exit_code_contract", "2999-01-01T00:00:00Z")?;
+    let workspace = fixture.workspace.display().to_string();
+    let verify_args = |workspace: &str| {
+        vec![
+            "--workspace".to_string(),
+            workspace.to_string(),
+            "--json".to_string(),
+            "claim".to_string(),
+            "verify".to_string(),
+            "all".to_string(),
+        ]
+    };
+
+    let passing = run_ee(&verify_args(&workspace))?;
+    ensure(
+        passing.status.code() == Some(0),
+        format!(
+            "all-pass claim verify should exit 0, got {:?}",
+            passing.status.code()
+        ),
+    )?;
+    let passing_json = parse_stdout_json(&passing)?;
+    ensure(
+        passing_json["data"]["failedCount"] == json!(0),
+        "all-pass run reports zero failed claims",
+    )?;
+
+    fs::write(
+        fixture.workspace.join("evidence").join("payload.txt"),
+        b"tampered\n",
+    )
+    .map_err(|error| format!("failed to tamper evidence payload: {error}"))?;
+
+    let failing = run_ee(&verify_args(&workspace))?;
+    ensure(
+        failing.status.code() == Some(9),
+        format!(
+            "failing claim verify should exit 9 (eval failure), got {:?}",
+            failing.status.code()
+        ),
+    )?;
+    let failing_json = parse_stdout_json(&failing)?;
+    ensure(
+        failing_json["success"] == json!(false),
+        "failing run reports success=false",
+    )?;
+    ensure(
+        failing_json["data"]["failedCount"] == json!(1),
+        "failing run reports one failed claim",
+    )
+}
+
 #[test]
 fn gate14_core_claim_verify_reports_hash_mismatch_from_real_manifest() -> TestResult {
     let fixture = write_real_claim_fixture("core_hash_mismatch", Some("0".repeat(64)), true)?;
