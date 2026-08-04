@@ -207,6 +207,8 @@ pub struct RememberMemoryReport {
     pub level: MemoryLevel,
     /// Canonical memory kind.
     pub kind: MemoryKind,
+    /// Canonical typed sidecar fields selected for this write.
+    pub typed_fields: Option<serde_json::Value>,
     /// Validated confidence score.
     pub confidence: f32,
     /// Canonical tags.
@@ -643,7 +645,7 @@ pub fn remember_memory(
     options: &RememberMemoryOptions<'_>,
 ) -> Result<RememberMemoryReport, DomainError> {
     let mut id_source = RememberIdSource::Ambient;
-    remember_memory_inner(options, &mut id_source, None, false)
+    remember_memory_inner(options, &mut id_source, None, false, &[])
 }
 
 /// [`remember_memory`] with the search-index publish optionally deferred
@@ -652,9 +654,16 @@ pub fn remember_memory(
 fn remember_memory_with_index_mode(
     options: &RememberMemoryOptions<'_>,
     defer_index_processing: bool,
+    typed_field_assignments: &[String],
 ) -> Result<RememberMemoryReport, DomainError> {
     let mut id_source = RememberIdSource::Ambient;
-    remember_memory_inner(options, &mut id_source, None, defer_index_processing)
+    remember_memory_inner(
+        options,
+        &mut id_source,
+        None,
+        defer_index_processing,
+        typed_field_assignments,
+    )
 }
 
 pub fn remember_memory_seeded(
@@ -662,7 +671,7 @@ pub fn remember_memory_seeded(
     determinism: &mut Deterministic<Seed>,
 ) -> Result<RememberMemoryReport, DomainError> {
     let mut id_source = RememberIdSource::Seeded(determinism);
-    remember_memory_inner(options, &mut id_source, None, false)
+    remember_memory_inner(options, &mut id_source, None, false, &[])
 }
 
 /// Build a dry-run-first memory candidate from a git commit or diff.
@@ -1372,8 +1381,16 @@ fn remember_memory_inner(
     id_source: &mut RememberIdSource<'_>,
     audit_lane: Option<&AuditLaneHandle>,
     defer_index_processing: bool,
+    typed_field_assignments: &[String],
 ) -> Result<RememberMemoryReport, DomainError> {
-    remember_memory_inner_with_store(options, id_source, audit_lane, defer_index_processing, None)
+    remember_memory_inner_with_store(
+        options,
+        id_source,
+        audit_lane,
+        defer_index_processing,
+        None,
+        typed_field_assignments,
+    )
 }
 
 fn remember_memory_inner_with_store(
@@ -1382,10 +1399,17 @@ fn remember_memory_inner_with_store(
     audit_lane: Option<&AuditLaneHandle>,
     defer_index_processing: bool,
     store_override: Option<&RememberStoreOverride>,
+    typed_field_assignments: &[String],
 ) -> Result<RememberMemoryReport, DomainError> {
-    let prepared =
-        prepare_remember_memory_with_store(options, id_source.next_memory_id(), store_override)?;
+    let prepared = prepare_remember_memory_with_store(
+        options,
+        id_source.next_memory_id(),
+        store_override,
+        typed_field_assignments,
+    )?;
     if options.dry_run {
+        let typed_fields =
+            remember_typed_fields_value(&prepared.kind, prepared.typed_fields_json.as_deref())?;
         return Ok(RememberMemoryReport {
             version: env!("CARGO_PKG_VERSION"),
             memory_id: prepared.memory_id,
@@ -1396,6 +1420,7 @@ fn remember_memory_inner_with_store(
             workflow_id: prepared.workflow_id,
             level: prepared.level,
             kind: prepared.kind,
+            typed_fields,
             confidence: prepared.confidence,
             tags: prepared.tags,
             source: prepared.provenance_uri,
@@ -1482,12 +1507,7 @@ fn remember_memory_inner_with_store(
         .as_ref()
         .map(|_| generate_memory_link_id());
     let audit_details = remember_audit_details(&memory_id, &memory_input, policy_bypass.as_ref());
-    let typed_fields_json = crate::models::memory::extract_typed_memory_fields_json_with_redactor(
-        &prepared.kind,
-        &prepared.content,
-        |value| crate::policy::redact_secret_like_content(value).content,
-    )
-    .map_err(|error| remember_usage_error(format!("typed field extraction failed: {error}")))?;
+    let typed_fields_json = prepared.typed_fields_json.clone();
 
     let write_operation = crate::core::write_owner::WriteOperation::MemoryCreate {
         workspace_id: prepared.workspace_id.clone(),
@@ -1706,6 +1726,8 @@ fn remember_memory_inner_with_store(
 
     write_replay_guard.mark_clean()?;
 
+    let typed_fields =
+        remember_typed_fields_value(&prepared.kind, prepared.typed_fields_json.as_deref())?;
     let report = RememberMemoryReport {
         version: env!("CARGO_PKG_VERSION"),
         memory_id: prepared.memory_id,
@@ -1716,6 +1738,7 @@ fn remember_memory_inner_with_store(
         workflow_id: prepared.workflow_id,
         level: prepared.level,
         kind: prepared.kind,
+        typed_fields,
         confidence: prepared.confidence,
         tags: prepared.tags,
         source: prepared.provenance_uri,
@@ -2161,6 +2184,7 @@ struct PreparedRememberMemory {
     workflow_id: Option<String>,
     level: MemoryLevel,
     kind: MemoryKind,
+    typed_fields_json: Option<String>,
     confidence: f32,
     tags: Vec<String>,
     provenance_uri: Option<String>,
@@ -2264,13 +2288,14 @@ fn prepare_remember_memory(
     options: &RememberMemoryOptions<'_>,
     memory_id: MemoryId,
 ) -> Result<PreparedRememberMemory, DomainError> {
-    prepare_remember_memory_with_store(options, memory_id, None)
+    prepare_remember_memory_with_store(options, memory_id, None, &[])
 }
 
 fn prepare_remember_memory_with_store(
     options: &RememberMemoryOptions<'_>,
     memory_id: MemoryId,
     store_override: Option<&RememberStoreOverride>,
+    typed_field_assignments: &[String],
 ) -> Result<PreparedRememberMemory, DomainError> {
     let caller_workspace_path = resolve_workspace_path(options.workspace_path, options.dry_run)?;
     let default_database_path = options
@@ -2293,16 +2318,50 @@ fn prepare_remember_memory_with_store(
         .map_err(|error| remember_usage_error(error.to_string()))?
         .as_str()
         .to_owned();
-    let policy_bypass = validate_remember_policy(
-        &content,
-        &caller_workspace_path,
-        options.allow_secret_mention,
-    )?;
     let workflow_id = parse_workflow_id(options.workflow_id)?;
     let level = MemoryLevel::from_str(options.level)
         .map_err(|error| remember_usage_error(error.to_string()))?;
     let kind = MemoryKind::from_str(options.kind)
         .map_err(|error| remember_usage_error(error.to_string()))?;
+    let explicit_unredacted =
+        crate::models::memory::canonicalize_typed_memory_field_assignments_json_with_redactor(
+            &kind,
+            typed_field_assignments,
+            str::to_owned,
+        )
+        .map_err(|error| {
+            remember_usage_error(format!("invalid typed field assignment: {error}"))
+        })?;
+    let policy_input = explicit_unredacted
+        .as_ref()
+        .map(|typed_fields| format!("{content}\n{typed_fields}"));
+    let policy_bypass = validate_remember_policy(
+        policy_input.as_deref().unwrap_or(&content),
+        &caller_workspace_path,
+        options.allow_secret_mention,
+    )?;
+    let extracted_typed_fields =
+        crate::models::memory::extract_typed_memory_fields_json_with_redactor(
+            &kind,
+            &content,
+            |value| crate::policy::redact_secret_like_content(value).content,
+        )
+        .map_err(|error| remember_usage_error(format!("typed field extraction failed: {error}")))?;
+    let explicit_typed_fields =
+        crate::models::memory::canonicalize_typed_memory_field_assignments_json_with_redactor(
+            &kind,
+            typed_field_assignments,
+            |value| crate::policy::redact_secret_like_content(value).content,
+        )
+        .map_err(|error| {
+            remember_usage_error(format!("invalid typed field assignment: {error}"))
+        })?;
+    let typed_fields_json = crate::models::memory::merge_typed_memory_fields_json(
+        &kind,
+        extracted_typed_fields.as_deref(),
+        explicit_typed_fields.as_deref(),
+    )
+    .map_err(|error| remember_usage_error(format!("typed field merge failed: {error}")))?;
     let confidence = UnitScore::parse(options.confidence)
         .map_err(|error| remember_usage_error(error.to_string()))?
         .into_inner();
@@ -2327,6 +2386,7 @@ fn prepare_remember_memory_with_store(
         workflow_id,
         level,
         kind,
+        typed_fields_json,
         confidence,
         tags,
         provenance_uri,
@@ -3660,12 +3720,7 @@ fn build_prepared_remember_txn_write(
         .as_ref()
         .map(|_| generate_memory_link_id());
     let audit_details = remember_audit_details(&memory_id, &memory_input, policy_bypass.as_ref());
-    let typed_fields_json = crate::models::memory::extract_typed_memory_fields_json_with_redactor(
-        &prepared.kind,
-        &prepared.content,
-        |value| crate::policy::redact_secret_like_content(value).content,
-    )
-    .map_err(|error| remember_usage_error(format!("typed field extraction failed: {error}")))?;
+    let typed_fields_json = prepared.typed_fields_json.clone();
 
     Ok(PreparedRememberTxnWrite {
         finish: RememberFinishInput {
@@ -3695,7 +3750,8 @@ pub(crate) fn prepare_remember_txn_write_for_connection(
     defer_index_processing: bool,
 ) -> Result<PreparedRememberTxnWrite, DomainError> {
     let mut id_source = RememberIdSource::Ambient;
-    let prepared = prepare_remember_memory_with_store(options, id_source.next_memory_id(), None)?;
+    let prepared =
+        prepare_remember_memory_with_store(options, id_source.next_memory_id(), None, &[])?;
     if options.dry_run {
         return Err(DomainError::Usage {
             message: "daemon remember batching cannot persist a dry-run request".to_owned(),
@@ -4086,6 +4142,8 @@ fn finish_remember_memory_after_primary_commit(
 
     write_replay_guard.mark_clean()?;
 
+    let typed_fields =
+        remember_typed_fields_value(&prepared.kind, prepared.typed_fields_json.as_deref())?;
     Ok(RememberMemoryReport {
         version: env!("CARGO_PKG_VERSION"),
         memory_id: prepared.memory_id,
@@ -4096,6 +4154,7 @@ fn finish_remember_memory_after_primary_commit(
         workflow_id: prepared.workflow_id,
         level: prepared.level,
         kind: prepared.kind,
+        typed_fields,
         confidence: prepared.confidence,
         tags: prepared.tags,
         source: prepared.provenance_uri,
@@ -5879,6 +5938,51 @@ fn remember_content_hash(content: &str) -> String {
     format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex())
 }
 
+fn remember_request_hash(
+    options: &RememberMemoryOptions<'_>,
+    typed_field_assignments: &[String],
+) -> Result<String, DomainError> {
+    let content = MemoryContent::parse(options.content)
+        .map_err(|error| remember_usage_error(error.to_string()))?
+        .as_str()
+        .to_owned();
+    if typed_field_assignments.is_empty() {
+        return Ok(remember_content_hash(&content));
+    }
+    let kind = MemoryKind::from_str(options.kind)
+        .map_err(|error| remember_usage_error(error.to_string()))?;
+    let typed_fields =
+        crate::models::memory::canonicalize_typed_memory_field_assignments_json_with_redactor(
+            &kind,
+            typed_field_assignments,
+            str::to_owned,
+        )
+        .map_err(|error| remember_usage_error(format!("invalid typed field assignment: {error}")))?
+        .ok_or_else(|| remember_usage_error("typed field assignments were empty".to_owned()))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.remember.request.v1\0");
+    hasher.update(&(content.len() as u64).to_le_bytes());
+    hasher.update(content.as_bytes());
+    hasher.update(&(typed_fields.len() as u64).to_le_bytes());
+    hasher.update(typed_fields.as_bytes());
+    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+}
+
+fn remember_typed_fields_value(
+    kind: &MemoryKind,
+    typed_fields_json: Option<&str>,
+) -> Result<Option<serde_json::Value>, DomainError> {
+    typed_fields_json
+        .map(|raw| {
+            crate::models::memory::typed_memory_fields_from_json(kind, raw)
+                .map(|fields| serde_json::json!(fields))
+                .map_err(|error| {
+                    remember_usage_error(format!("invalid canonical typed fields: {error}"))
+                })
+        })
+        .transpose()
+}
+
 fn remember_duplicate_similarity_threshold(workspace_path: &Path) -> f32 {
     crate::config::workspace_config(workspace_path)
         .and_then(|config| config.curation.duplicate_similarity)
@@ -6239,13 +6343,14 @@ fn apply_remember_reinforce(
 fn record_remember_idempotency_key(
     report: &RememberMemoryReport,
     idempotency_key: &str,
+    request_hash: &str,
 ) -> Result<(), DomainError> {
     let connection = open_remember_database_with_retry(&report.database_path)?;
     connection
         .insert_remember_idempotency_key(&CreateRememberIdempotencyKeyInput {
             workspace_id: report.workspace_id.clone(),
             idempotency_key: idempotency_key.to_owned(),
-            content_hash: remember_content_hash(&report.content),
+            content_hash: request_hash.to_owned(),
             memory_id: report.memory_id.to_string(),
         })
         .map_err(|error| DomainError::Storage {
@@ -6265,9 +6370,28 @@ pub fn remember_memory_with_controls(
     options: &RememberMemoryOptions<'_>,
     controls: &RememberWriteControls<'_>,
 ) -> Result<RememberOutcome, DomainError> {
+    remember_memory_with_controls_and_typed_fields(options, controls, &[])
+}
+
+/// Controlled remember write with explicit registry-backed typed fields.
+pub fn remember_memory_with_controls_and_typed_fields(
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+    typed_field_assignments: &[String],
+) -> Result<RememberOutcome, DomainError> {
+    if controls.reinforce && !typed_field_assignments.is_empty() {
+        return Err(remember_usage_error(
+            "--field cannot be combined with --reinforce because reinforcement does not mutate the surviving memory's typed sidecar"
+                .to_owned(),
+        ));
+    }
     let idempotency_key = controls
         .idempotency_key
         .map(validate_remember_idempotency_key)
+        .transpose()?;
+    let idempotency_request_hash = idempotency_key
+        .as_ref()
+        .map(|_| remember_request_hash(options, typed_field_assignments))
         .transpose()?;
 
     if idempotency_key.is_some() || controls.reinforce {
@@ -6295,7 +6419,10 @@ pub fn remember_memory_with_controls(
                         repair: Some("ee doctor --json".to_owned()),
                     })?;
                 if let Some(existing) = existing {
-                    if existing.content_hash == content_hash {
+                    if idempotency_request_hash
+                        .as_deref()
+                        .is_some_and(|request_hash| existing.content_hash == request_hash)
+                    {
                         return Ok(RememberOutcome::AlreadyRecorded(
                             RememberAlreadyRecordedReport {
                                 version: env!("CARGO_PKG_VERSION"),
@@ -6344,11 +6471,18 @@ pub fn remember_memory_with_controls(
         }
     }
 
-    let report = remember_memory_with_index_mode(options, controls.defer_index_processing)?;
+    let report = remember_memory_with_index_mode(
+        options,
+        controls.defer_index_processing,
+        typed_field_assignments,
+    )?;
     if let Some(key) = idempotency_key.as_deref()
         && !options.dry_run
     {
-        record_remember_idempotency_key(&report, key)?;
+        let request_hash = idempotency_request_hash.as_deref().ok_or_else(|| {
+            remember_usage_error("idempotency request hash was not prepared".to_owned())
+        })?;
+        record_remember_idempotency_key(&report, key, request_hash)?;
     }
     Ok(RememberOutcome::Created(Box::new(report)))
 }
@@ -6362,6 +6496,16 @@ pub fn remember_memory_with_controls(
 pub fn remember_global_memory_with_controls(
     options: &RememberMemoryOptions<'_>,
     controls: &RememberWriteControls<'_>,
+) -> Result<RememberOutcome, DomainError> {
+    remember_global_memory_with_controls_and_typed_fields(options, controls, &[])
+}
+
+/// Global-store counterpart to
+/// [`remember_memory_with_controls_and_typed_fields`].
+pub fn remember_global_memory_with_controls_and_typed_fields(
+    options: &RememberMemoryOptions<'_>,
+    controls: &RememberWriteControls<'_>,
+    typed_field_assignments: &[String],
 ) -> Result<RememberOutcome, DomainError> {
     if controls.reinforce {
         return Err(remember_usage_error(
@@ -6415,12 +6559,11 @@ pub fn remember_global_memory_with_controls(
         .idempotency_key
         .map(validate_remember_idempotency_key)
         .transpose()?;
+    let idempotency_request_hash = idempotency_key
+        .as_ref()
+        .map(|_| remember_request_hash(&global_options, typed_field_assignments))
+        .transpose()?;
     if let Some(key) = idempotency_key.as_deref() {
-        let canonical_content = MemoryContent::parse(global_options.content)
-            .map_err(|error| remember_usage_error(error.to_string()))?
-            .as_str()
-            .to_owned();
-        let content_hash = remember_content_hash(&canonical_content);
         if paths.database_path.exists() {
             let connection = open_remember_database_with_retry(&paths.database_path)?;
             migrate_remember_database_with_retry(&connection)?;
@@ -6431,7 +6574,10 @@ pub fn remember_global_memory_with_controls(
                     repair: Some("ee doctor --json".to_owned()),
                 })?
             {
-                if existing.content_hash == content_hash {
+                if idempotency_request_hash
+                    .as_deref()
+                    .is_some_and(|request_hash| existing.content_hash == request_hash)
+                {
                     return Ok(RememberOutcome::AlreadyRecorded(
                         RememberAlreadyRecordedReport {
                             version: env!("CARGO_PKG_VERSION"),
@@ -6455,11 +6601,15 @@ pub fn remember_global_memory_with_controls(
         None,
         controls.defer_index_processing,
         Some(&store_override),
+        typed_field_assignments,
     )?;
     if let Some(key) = idempotency_key.as_deref()
         && !global_options.dry_run
     {
-        record_remember_idempotency_key(&report, key)?;
+        let request_hash = idempotency_request_hash.as_deref().ok_or_else(|| {
+            remember_usage_error("idempotency request hash was not prepared".to_owned())
+        })?;
+        record_remember_idempotency_key(&report, key, request_hash)?;
     }
     Ok(RememberOutcome::Created(Box::new(report)))
 }
@@ -6663,6 +6813,7 @@ struct RememberBatchLineDraft {
     valid_to: Option<String>,
     idempotency_key: Option<String>,
     reinforce: Option<bool>,
+    typed_field_assignments: Vec<String>,
 }
 
 struct RememberBatchLineError {
@@ -6717,6 +6868,52 @@ fn remember_batch_bool_field(
         }
     }
     Ok(None)
+}
+
+fn remember_batch_typed_field_assignments(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Vec<String>, RememberBatchLineError> {
+    let Some(value) = object.get("fields") else {
+        return Ok(Vec::new());
+    };
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let fields = value.as_object().ok_or_else(|| {
+        RememberBatchLineError::new(
+            "remember_invalid_json",
+            "`fields` must be an object whose values are strings or arrays of strings",
+        )
+    })?;
+    let mut names = fields.keys().collect::<Vec<_>>();
+    names.sort_unstable();
+    let mut assignments = Vec::new();
+    for name in names {
+        match fields.get(name) {
+            Some(serde_json::Value::String(value)) => {
+                assignments.push(format!("{name}={value}"));
+            }
+            Some(serde_json::Value::Array(values)) => {
+                for value in values {
+                    let Some(value) = value.as_str() else {
+                        return Err(RememberBatchLineError::new(
+                            "remember_invalid_json",
+                            format!("`fields.{name}` must contain only strings"),
+                        ));
+                    };
+                    assignments.push(format!("{name}={value}"));
+                }
+            }
+            Some(_) => {
+                return Err(RememberBatchLineError::new(
+                    "remember_invalid_json",
+                    format!("`fields.{name}` must be a string or an array of strings"),
+                ));
+            }
+            None => {}
+        }
+    }
+    Ok(assignments)
 }
 
 fn parse_remember_batch_line(line: &str) -> Result<RememberBatchLineDraft, RememberBatchLineError> {
@@ -6803,6 +7000,7 @@ fn parse_remember_batch_line(line: &str) -> Result<RememberBatchLineDraft, Remem
         valid_to: remember_batch_string_field(object, "validTo", "valid_to")?,
         idempotency_key: remember_batch_string_field(object, "idempotencyKey", "idempotency_key")?,
         reinforce: remember_batch_bool_field(object, "reinforce", "reinforce")?,
+        typed_field_assignments: remember_batch_typed_field_assignments(object)?,
     })
 }
 
@@ -6905,7 +7103,11 @@ pub fn remember_memory_batch_stdin(
         // Per-line independent persistence: each line runs its own full
         // remember flow, so a failure here reports on this line without
         // touching earlier or later lines.
-        match remember_memory_with_controls(&line_options, &line_controls) {
+        match remember_memory_with_controls_and_typed_fields(
+            &line_options,
+            &line_controls,
+            &draft.typed_field_assignments,
+        ) {
             Ok(RememberOutcome::Created(report)) => {
                 stored_count += 1;
                 results.push(RememberBatchLineResult {
@@ -12577,6 +12779,75 @@ mod tests {
     }
 
     #[test]
+    fn remember_memory_persists_explicit_typed_fields_and_reports_them() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+        let options = RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "The remote verification lane won the storage decision.",
+            workflow_id: None,
+            level: "semantic",
+            kind: "decision",
+            tags: Some("typed-field,decision"),
+            confidence: 0.9,
+            source: Some("test://remember/explicit-typed-fields"),
+            allow_secret_mention: false,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: false,
+            propose_candidates: false,
+        };
+        let assignments = vec![
+            "chosen=RCH remote".to_owned(),
+            "options=local Cargo".to_owned(),
+            "options=RCH remote".to_owned(),
+            "rationale=avoid local build artifacts".to_owned(),
+        ];
+        let report = match remember_memory_with_controls_and_typed_fields(
+            &options,
+            &RememberWriteControls::default(),
+            &assignments,
+        )
+        .map_err(|error| error.message())?
+        {
+            RememberOutcome::Created(report) => report,
+            other => return Err(format!("expected created outcome, got {other:?}")),
+        };
+
+        let reported = report
+            .typed_fields
+            .as_ref()
+            .ok_or_else(|| "remember report omitted typed fields".to_owned())?;
+        ensure(
+            reported["chosen"].as_str(),
+            Some("RCH remote"),
+            "reported chosen field",
+        )?;
+        ensure(
+            reported["options"].as_array().map(Vec::len),
+            Some(2),
+            "reported options",
+        )?;
+
+        let connection = crate::db::DbConnection::open_file(&report.database_path)
+            .map_err(|error| error.to_string())?;
+        let stored = connection
+            .get_memory_typed_fields_json(&report.memory_id.to_string())
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "stored typed fields missing".to_owned())?;
+        let stored: serde_json::Value =
+            serde_json::from_str(&stored).map_err(|error| error.to_string())?;
+        ensure(
+            stored["fields"]["chosen"].as_str(),
+            Some("RCH remote"),
+            "stored chosen field",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
     fn remember_memory_validates_and_stores_temporal_validity_window() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
@@ -15241,6 +15512,40 @@ mod tests {
     }
 
     #[test]
+    fn remember_batch_accepts_registry_fields_object() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let input = concat!(
+            "{\"content\":\"Remote verification decision.\",\"kind\":\"decision\",\"fields\":{\"chosen\":\"RCH remote\",\"options\":[\"local Cargo\",\"RCH remote\"],\"rationale\":\"avoid local artifacts\"}}\n",
+        );
+        let report = remember_memory_batch_stdin(&upgrade_batch_options(temp.path(), false), input)
+            .map_err(|error| error.message())?;
+        ensure(report.stored_count, 1, "stored typed batch row")?;
+        ensure(report.failed_count, 0, "typed batch failures")?;
+
+        let memory_id = report.results[0]
+            .memory_id
+            .as_deref()
+            .ok_or_else(|| "typed batch memory id missing".to_owned())?;
+        let connection = open_upgrade_test_db(temp.path())?;
+        let stored = connection
+            .get_memory_typed_fields_json(memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "typed batch sidecar missing".to_owned())?;
+        let stored: serde_json::Value =
+            serde_json::from_str(&stored).map_err(|error| error.to_string())?;
+        ensure(
+            stored["fields"]["chosen"].as_str(),
+            Some("RCH remote"),
+            "typed batch chosen",
+        )?;
+        ensure(
+            stored["fields"]["options"].as_array().map(Vec::len),
+            Some(2),
+            "typed batch options",
+        )
+    }
+
+    #[test]
     fn remember_batch_isolates_invalid_lines() -> TestResult {
         let temp = upgrade_test_workspace()?;
         let input = concat!(
@@ -15379,6 +15684,49 @@ mod tests {
                 "same key with different content is a per-line usage error",
             ),
             other => Err(format!("expected idempotency conflict, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn remember_idempotency_identity_includes_explicit_typed_fields() -> TestResult {
+        let temp = upgrade_test_workspace()?;
+        let content = "Remote verification won the storage decision.";
+        let mut options = upgrade_remember_options(temp.path(), content, 0.8, None, false);
+        options.kind = "decision";
+        let controls = RememberWriteControls {
+            reinforce: false,
+            idempotency_key: Some("typed-decision-001"),
+            defer_index_processing: false,
+        };
+        let original_fields = vec!["chosen=RCH remote".to_owned()];
+
+        let created = upgrade_created_report(
+            remember_memory_with_controls_and_typed_fields(&options, &controls, &original_fields)
+                .map_err(|error| error.message())?,
+            "typed first write",
+        )?;
+        let replay =
+            remember_memory_with_controls_and_typed_fields(&options, &controls, &original_fields)
+                .map_err(|error| error.message())?;
+        match replay {
+            RememberOutcome::AlreadyRecorded(report) => ensure(
+                report.memory_id,
+                created.memory_id.to_string(),
+                "typed replay returns the original memory id",
+            )?,
+            other => return Err(format!("expected typed replay, got {other:?}")),
+        }
+
+        let changed_fields = vec!["chosen=local Cargo".to_owned()];
+        match remember_memory_with_controls_and_typed_fields(&options, &controls, &changed_fields) {
+            Err(DomainError::UsageCodeWithDetails { code, .. }) => ensure(
+                code,
+                REMEMBER_IDEMPOTENCY_CONFLICT_CODE,
+                "same key and content with changed typed fields conflicts",
+            ),
+            other => Err(format!(
+                "expected typed-field idempotency conflict, got {other:?}"
+            )),
         }
     }
 

@@ -1143,21 +1143,8 @@ fn typed_memory_filter_separator(raw: &str) -> Option<(usize, TypedMemoryFieldOp
 }
 
 fn normalize_typed_memory_filter_field(raw: &str) -> Result<String, String> {
-    let field = raw.trim().replace('-', "_");
-    if field.is_empty() {
-        return Err("typed memory field filter name must not be empty".to_owned());
-    }
-    if field
-        .bytes()
-        .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_'))
-    {
-        Ok(field)
-    } else {
-        Err(format!(
-            "typed memory field filter name `{}` must be lowercase snake_case",
-            raw.trim()
-        ))
-    }
+    crate::models::memory::normalize_typed_memory_field_name(raw)
+        .map_err(|error| error.replace("typed memory field", "typed memory field filter"))
 }
 
 pub fn normalize_memory_kind_filter(raw: &str) -> Result<String, String> {

@@ -176,8 +176,9 @@ use crate::core::memory::{
     RememberMemoryReport, RememberOutcome, RememberWriteControls, ReviseMemoryOptions,
     ReviseReason, WorkflowCloseOptions, WorkflowCloseReport, WorkflowCreateOptions,
     build_memory_timeline, close_workflow, create_workflow, expire_memory, get_memory_details,
-    list_memories, remember_git_capture_candidate_from_repo, remember_global_memory_with_controls,
-    remember_memory_batch_stdin, remember_memory_with_controls, revise_memory, update_memory_level,
+    list_memories, remember_git_capture_candidate_from_repo,
+    remember_global_memory_with_controls_and_typed_fields, remember_memory_batch_stdin,
+    remember_memory_with_controls_and_typed_fields, revise_memory, update_memory_level,
     update_memory_link, update_memory_tags,
 };
 use crate::core::orient::{OrientDecisionOptions, orient_decisions};
@@ -9269,6 +9270,10 @@ pub struct RememberArgs {
     #[arg(long, short = 'k', default_value = "fact")]
     pub kind: String,
 
+    /// Set a registry-backed typed sidecar field. Repeat list-valued fields.
+    #[arg(long = "field", value_name = "NAME=VALUE", action = ArgAction::Append)]
+    pub typed_field_assignments: Vec<String>,
+
     /// Tags to apply (comma-separated).
     #[arg(long, short = 't')]
     pub tags: Option<String>,
@@ -9395,6 +9400,10 @@ pub struct NoteArgs {
     /// Override inferred memory kind.
     #[arg(long, short = 'k')]
     pub kind: Option<String>,
+
+    /// Set a registry-backed typed sidecar field. Repeat list-valued fields.
+    #[arg(long = "field", value_name = "NAME=VALUE", action = ArgAction::Append)]
+    pub typed_field_assignments: Vec<String>,
 
     /// Tags to apply (comma-separated).
     #[arg(long, short = 't')]
@@ -48966,6 +48975,9 @@ impl RememberMemoryReport {
         if let Some(workflow_id) = &self.workflow_id {
             output.push_str(&format!("  Workflow: {workflow_id}\n"));
         }
+        if let Some(typed_fields) = &self.typed_fields {
+            output.push_str(&format!("  Typed fields: {typed_fields}\n"));
+        }
         if !self.dry_run && !self.auto_links.is_empty() {
             output.push_str(&format!("  Auto links: {}\n", self.auto_links.len()));
         }
@@ -49028,6 +49040,10 @@ impl RememberMemoryReport {
             format!("\"{}\"", escape_json_string(s))
         });
         let producer_json = self.producer.to_json_string_lossy();
+        let typed_fields_json = self
+            .typed_fields
+            .as_ref()
+            .map_or_else(String::new, |fields| format!(",\"typedFields\":{fields}"));
         let valid_from_json = self.valid_from.as_ref().map_or("null".to_string(), |s| {
             format!("\"{}\"", escape_json_string(s))
         });
@@ -49064,7 +49080,7 @@ impl RememberMemoryReport {
         let response_degraded_json = self.remember_response_degraded_json();
 
         let mut json = format!(
-            r#"{{"schema":"ee.response.v2","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","memoryId":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"producer":{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"near_duplicates":{},"redaction_status":"{}","policy_bypass_used":{},"policy_bypass":{},"degraded":{}}}"#,
+            r#"{{"schema":"ee.response.v2","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","memoryId":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}"{},"confidence":{},"tags":[{}],"source":{}{},"producer":{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"near_duplicates":{},"redaction_status":"{}","policy_bypass_used":{},"policy_bypass":{},"degraded":{}}}"#,
             self.version,
             self.memory_id,
             self.memory_id,
@@ -49074,6 +49090,7 @@ impl RememberMemoryReport {
             workflow_id_json,
             self.level.as_str(),
             self.kind.as_str(),
+            typed_fields_json,
             self.confidence,
             tags_json,
             source_json,
@@ -49512,6 +49529,7 @@ fn note_to_remember_args(args: &NoteArgs) -> RememberArgs {
             .kind
             .clone()
             .unwrap_or_else(|| inferred_kind.to_string()),
+        typed_field_assignments: args.typed_field_assignments.clone(),
         tags: args.tags.clone(),
         workflow: args.workflow.clone(),
         no_auto_link: args.no_auto_link,
@@ -50028,9 +50046,17 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, Do
             defer_index_processing: false,
         };
         let outcome = if args.global {
-            remember_global_memory_with_controls(&options, &controls)
+            remember_global_memory_with_controls_and_typed_fields(
+                &options,
+                &controls,
+                &args.typed_field_assignments,
+            )
         } else {
-            remember_memory_with_controls(&options, &controls)
+            remember_memory_with_controls_and_typed_fields(
+                &options,
+                &controls,
+                &args.typed_field_assignments,
+            )
         }?;
         if let RememberOutcome::Created(ref report) = outcome {
             persist_remember_sentinels(args, report)?;
@@ -50067,9 +50093,17 @@ fn handle_remember(cli: &Cli, args: &RememberArgs) -> Result<RememberOutcome, Do
         defer_index_processing: false,
     };
     let outcome = if args.global {
-        remember_global_memory_with_controls(&options, &controls)
+        remember_global_memory_with_controls_and_typed_fields(
+            &options,
+            &controls,
+            &args.typed_field_assignments,
+        )
     } else {
-        remember_memory_with_controls(&options, &controls)
+        remember_memory_with_controls_and_typed_fields(
+            &options,
+            &controls,
+            &args.typed_field_assignments,
+        )
     }?;
     let RememberOutcome::Created(ref report) = outcome else {
         return Ok(outcome);
@@ -50184,6 +50218,12 @@ where
         let error = usage(
             "--idempotency-key applies to single-memory mode; put `idempotencyKey` on each \
              JSONL line instead",
+        );
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    if !args.typed_field_assignments.is_empty() {
+        let error = usage(
+            "--field applies to single-memory mode; put a `fields` object on each JSONL line instead",
         );
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
@@ -62052,6 +62092,7 @@ mod tests {
             workflow_id: None,
             level: crate::models::MemoryLevel::Procedural,
             kind: crate::models::MemoryKind::Rule,
+            typed_fields: None,
             confidence: 0.88,
             tags: vec!["release".to_owned()],
             source: None,

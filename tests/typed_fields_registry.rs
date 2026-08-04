@@ -1,12 +1,24 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)] // test code may unwrap/expect
 use ee::core::search::{TypedMemoryFieldFilter, TypedMemoryFieldOperator};
 use ee::db::StoredMemory;
-use ee::models::MemoryKind;
 use ee::models::memory::{
     TYPED_MEMORY_FIELDS_SCHEMA_V2, canonicalize_typed_memory_fields_json,
     typed_memory_index_metadata_from_json,
 };
+use ee::models::{MemoryKind, ProcessExitCode};
 use ee::search::MemoryDocumentBuilder;
+use std::ffi::OsString;
+
+fn invoke(args: &[&str]) -> (ProcessExitCode, String, String) {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let exit = ee::cli::run(args.iter().map(OsString::from), &mut stdout, &mut stderr);
+    (
+        exit,
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+    )
+}
 
 #[test]
 fn typed_fields_registry_v2_validates_new_fields_and_v1_sidecars() {
@@ -112,4 +124,86 @@ fn typed_fields_registry_filter_parser_supports_three_operators() {
     assert_eq!(prefix.field, "reverted_at_sha");
     assert_eq!(prefix.value, "9af3c21~literal=kept");
     assert_eq!(prefix.operator, TypedMemoryFieldOperator::Prefix);
+}
+
+#[test]
+fn remember_and_note_explicit_fields_round_trip_through_public_cli() {
+    let temp = tempfile::tempdir().expect("temporary typed-field workspace");
+    let workspace = temp.path().to_string_lossy().into_owned();
+    let (exit, _stdout, stderr) = invoke(&["ee", "--workspace", &workspace, "init", "--json"]);
+    assert_eq!(exit, ProcessExitCode::Success, "init stderr: {stderr}");
+
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--workspace",
+        &workspace,
+        "remember",
+        "Prefetch regression evidence survives explicit capture.",
+        "--kind",
+        "failure",
+        "--field",
+        "family=aggressive-prefetch",
+        "--field",
+        "cause=cache pollution",
+        "--json",
+    ]);
+    assert_eq!(exit, ProcessExitCode::Success, "remember stderr: {stderr}");
+    let remembered: serde_json::Value =
+        serde_json::from_str(&stdout).expect("remember JSON response");
+    assert_eq!(
+        remembered["data"]["typedFields"]["family"],
+        "aggressive-prefetch"
+    );
+    assert_eq!(
+        remembered["data"]["typedFields"]["cause"],
+        "cache pollution"
+    );
+    let memory_id = remembered["data"]["memoryId"]
+        .as_str()
+        .expect("remember memoryId");
+
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--workspace",
+        &workspace,
+        "search",
+        "prefetch regression evidence",
+        "--kind",
+        "failure",
+        "--field",
+        "family=aggressive-prefetch",
+        "--json",
+    ]);
+    assert_eq!(exit, ProcessExitCode::Success, "search stderr: {stderr}");
+    let search: serde_json::Value = serde_json::from_str(&stdout).expect("search JSON response");
+    assert!(
+        search["data"]["results"]
+            .as_array()
+            .expect("search results")
+            .iter()
+            .any(|result| {
+                result["memoryId"].as_str() == Some(memory_id)
+                    || result["docId"].as_str() == Some(memory_id)
+            }),
+        "explicit typed-field search did not return remembered memory: {search}"
+    );
+
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--workspace",
+        &workspace,
+        "note",
+        "A second prefetch failure.",
+        "--kind",
+        "failure",
+        "--field",
+        "family=note-prefetch",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(exit, ProcessExitCode::Success, "note stderr: {stderr}");
+    let note: serde_json::Value = serde_json::from_str(&stdout).expect("note JSON response");
+    assert_eq!(note["data"]["typedFields"]["family"], "note-prefetch");
+    assert_eq!(note["data"]["dry_run"], true);
+    assert_eq!(note["data"]["persisted"], false);
 }

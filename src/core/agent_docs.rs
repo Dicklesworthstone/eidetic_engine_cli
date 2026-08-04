@@ -610,8 +610,8 @@ pub const EXAMPLES: &[ExampleEntry] = &[
     },
     ExampleEntry {
         title: "Store typed failure evidence",
-        description: "Record a failure body that ee can parse into typed fields such as family, cause, and reverted_at_sha",
-        command: "ee remember \"Reverted at SHA 9af3c21. Family: aggressive-prefetch. Cause: cache pollution.\" --level episodic --kind failure --json",
+        description: "Record validated typed fields directly without encoding them into prose",
+        command: "ee remember \"Prefetch regressed and was reverted.\" --level episodic --kind failure --field family=aggressive-prefetch --field \"cause=cache pollution\" --field reverted-at-sha=9af3c21 --json",
         category: "memory",
     },
     ExampleEntry {
@@ -1113,7 +1113,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
     AgentDocsRecipeEntry {
         id: "typed-memory-search",
         title: "Filter typed memory fields",
-        description: "Use extraction-first typed memory sidecars to find failures, decisions, commands, or risks by structured fields without matching raw prose.",
+        description: "Use explicitly assigned or body-extracted typed memory sidecars to find failures, decisions, commands, or risks without matching raw prose.",
         category: "search",
         command: "ee search \"prefetch regression\" --workspace . --kind failure --field family=aggressive-prefetch --json",
         jq: r#".data.results[]? | {memoryId, kind, typedFields: (.typedFields // .memory.typedFields // {})}"#,
@@ -1918,8 +1918,9 @@ mod tests {
             .find(|recipe| recipe.id == "typed-memory-search")
             .ok_or_else(|| "typed memory search recipe is documented".to_string())?;
         ensure(
-            recipe.description.contains("extraction-first"),
-            "typed search recipe documents extraction-first behavior",
+            recipe.description.contains("explicitly assigned")
+                && recipe.description.contains("body-extracted"),
+            "typed search recipe documents both typed-field capture paths",
         )?;
         ensure(
             recipe.command.contains("--kind failure") && recipe.command.contains("--field family="),
@@ -1928,6 +1929,16 @@ mod tests {
         ensure(
             recipe.jq.contains("typedFields"),
             "typed search recipe extracts typed field output",
+        )?;
+
+        let capture = EXAMPLES
+            .iter()
+            .find(|example| example.title == "Store typed failure evidence")
+            .ok_or_else(|| "typed memory capture example is documented".to_string())?;
+        ensure(
+            capture.command.contains("--field family=")
+                && capture.command.contains("--field reverted-at-sha="),
+            "typed capture example documents repeatable write assignments",
         )
     }
 
