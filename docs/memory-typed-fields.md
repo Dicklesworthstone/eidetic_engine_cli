@@ -183,5 +183,5 @@ ee memory show <memory-id> --json
 ```
 
 Machine readers should read `data.memory.typedFields` when present. Absence of
-`typedFields` means the memory body did not contain explicit extractable fields
-or the kind is not registry-backed.
+`typedFields` means no explicit assignments or extractable body labels produced
+fields, or the kind is not registry-backed.

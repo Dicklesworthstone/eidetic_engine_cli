@@ -616,7 +616,7 @@ pub const EXAMPLES: &[ExampleEntry] = &[
     },
     ExampleEntry {
         title: "Search typed memory fields",
-        description: "Filter memories by typed sidecar fields extracted from structured memory bodies",
+        description: "Filter memories by explicitly assigned or body-extracted typed sidecar fields",
         command: "ee search \"prefetch regression\" --kind failure --field family=aggressive-prefetch --json",
         category: "search",
     },

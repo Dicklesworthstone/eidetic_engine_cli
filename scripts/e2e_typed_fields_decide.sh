@@ -125,7 +125,7 @@ assert_jq "$family_search" '.success == true' "failure family exact field search
 assert_search_returns_memory "$family_search" "$failure_id" "failure family exact search returns fielded memory"
 
 step "remember fielded command memory"
-command_body="Use the remote verification wrapper before closing typed-fields work."
+command_body="Use scripts/rch_verify.sh as the remote proof before closing typed-fields work."
 command_out="$(remember_fielded_memory "command" "$command_body" "test://typed-fields-decide/command" \
     --field "command=scripts/rch_verify.sh -- cargo check --all-targets" \
     --field "when-to-use=before closing typed-fields decide work" \
@@ -262,7 +262,7 @@ assert_jq_arg "$second_show" "first_id" "$first_id" \
 step "remember batch JSONL writes explicit fields objects and indexes them"
 batch_payload="$LOG_DIR/typed-fields-batch.jsonl"
 printf '%s\n' \
-    '{"content":"Inspect current decision heads with the canonical command.","level":"procedural","kind":"command","fields":{"command":"ee decide list --json","when_to_use":"inspect current decision heads","exit_meaning":"0 means listed"},"source":"test://typed-fields-decide/batch-command"}' \
+    '{"content":"Inspect current decision heads with ee decide list --json.","level":"procedural","kind":"command","fields":{"command":"ee decide list --json","when_to_use":"inspect current decision heads","exit_meaning":"0 means listed"},"source":"test://typed-fields-decide/batch-command"}' \
     '{"content":"Protect the typed field batch regression.","level":"procedural","kind":"rule","fields":{"condition":"typed field batch regression","action":"run scripts/e2e_typed_fields_decide.sh","exceptions":["docs only"]},"source":"test://typed-fields-decide/batch-rule"}' \
     >"$batch_payload"
 e2e_log_note "command remember batch --stdin payload=$batch_payload"

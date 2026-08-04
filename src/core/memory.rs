@@ -5730,9 +5730,10 @@ fn remember_usage_error(message: String) -> DomainError {
 //    bounded Bayesian confidence bump + `memory.reinforce` audit row)
 //    instead of inserting a new row. Below threshold falls through to the
 //    normal create path.
-// 3. Idempotency keys: replaying the same key + content hash returns the
-//    original memory id with `status=already_recorded` (mirrors the
-//    `ee outcome --event-id` idempotency pattern).
+// 3. Idempotency keys: replaying the same key + canonical request hash
+//    (content plus explicit typed fields, when present) returns the original
+//    memory id with `status=already_recorded` (mirrors the `ee outcome
+//    --event-id` idempotency pattern).
 // =============================================================================
 
 /// Max JSONL lines accepted by `ee remember --batch --stdin` per invocation
@@ -5746,7 +5747,7 @@ pub const REMEMBER_DEFAULT_DUPLICATE_SIMILARITY: f32 = 0.92;
 /// Audit details schema for `memory.reinforce` rows.
 pub const REMEMBER_REINFORCE_AUDIT_SCHEMA_V1: &str = "ee.audit.memory_reinforce.v1";
 
-/// Per-line error code for an idempotency key replayed with different content.
+/// Per-line error code for an idempotency key replayed with a different request.
 pub const REMEMBER_IDEMPOTENCY_CONFLICT_CODE: &str = "remember_idempotency_conflict";
 
 /// Metadata schema for evidence spans attached by `ee remember --reinforce`.
@@ -6014,10 +6015,10 @@ fn remember_idempotency_conflict_error(idempotency_key: &str) -> DomainError {
     DomainError::UsageCodeWithDetails {
         code: REMEMBER_IDEMPOTENCY_CONFLICT_CODE,
         message: format!(
-            "idempotency key already exists with different content: {idempotency_key}"
+            "idempotency key already exists with different content or typed fields: {idempotency_key}"
         ),
         repair: Some(
-            "Replay the original content for this key, or supply a new --idempotency-key."
+            "Replay the original content and typed fields for this key, or supply a new --idempotency-key."
                 .to_owned(),
         ),
         details_json: serde_json::json!({ "idempotencyKey": idempotency_key }).to_string(),
@@ -6872,6 +6873,7 @@ fn remember_batch_bool_field(
 
 fn remember_batch_typed_field_assignments(
     object: &serde_json::Map<String, serde_json::Value>,
+    kind: &str,
 ) -> Result<Vec<String>, RememberBatchLineError> {
     let Some(value) = object.get("fields") else {
         return Ok(Vec::new());
@@ -6885,32 +6887,89 @@ fn remember_batch_typed_field_assignments(
             "`fields` must be an object whose values are strings or arrays of strings",
         )
     })?;
-    let mut names = fields.keys().collect::<Vec<_>>();
-    names.sort_unstable();
+    if fields.is_empty() || fields.values().all(serde_json::Value::is_null) {
+        return Ok(Vec::new());
+    }
+
+    let mut normalized_fields = serde_json::Map::new();
+    for (raw_name, value) in fields {
+        let name = crate::models::memory::normalize_typed_memory_field_name(raw_name)
+            .map_err(|error| RememberBatchLineError::new("remember_validation_failed", error))?;
+        if value.as_str().is_some_and(|text| text.trim().is_empty()) {
+            return Err(RememberBatchLineError::new(
+                "remember_validation_failed",
+                format!("`fields.{name}` must not be empty"),
+            ));
+        }
+        if let Some(items) = value.as_array()
+            && (items.is_empty()
+                || items
+                    .iter()
+                    .any(|item| item.as_str().is_some_and(|text| text.trim().is_empty())))
+        {
+            return Err(RememberBatchLineError::new(
+                "remember_validation_failed",
+                format!("`fields.{name}` must contain at least one non-empty string"),
+            ));
+        }
+        if normalized_fields
+            .insert(name.clone(), value.clone())
+            .is_some()
+        {
+            return Err(RememberBatchLineError::new(
+                "remember_validation_failed",
+                format!("`fields` contains more than one spelling of `{name}`"),
+            ));
+        }
+    }
+
+    let kind = MemoryKind::from_str(kind).map_err(|error| {
+        RememberBatchLineError::new("remember_validation_failed", error.to_string())
+    })?;
+    let raw_json = serde_json::to_string(&normalized_fields).map_err(|error| {
+        RememberBatchLineError::new(
+            "remember_invalid_json",
+            format!("failed to encode `fields`: {error}"),
+        )
+    })?;
+    let canonical = crate::models::memory::canonicalize_typed_memory_fields_json(&kind, &raw_json)
+        .map_err(|error| {
+            RememberBatchLineError::new(
+                "remember_validation_failed",
+                format!("invalid `fields` object: {error}"),
+            )
+        })?;
+    let fields = crate::models::memory::typed_memory_fields_from_json(&kind, &canonical).map_err(
+        |error| {
+            RememberBatchLineError::new(
+                "remember_validation_failed",
+                format!("invalid canonical `fields` object: {error}"),
+            )
+        },
+    )?;
     let mut assignments = Vec::new();
-    for name in names {
-        match fields.get(name) {
-            Some(serde_json::Value::String(value)) => {
+    for (name, value) in fields {
+        match value {
+            serde_json::Value::String(value) => {
                 assignments.push(format!("{name}={value}"));
             }
-            Some(serde_json::Value::Array(values)) => {
+            serde_json::Value::Array(values) => {
                 for value in values {
                     let Some(value) = value.as_str() else {
                         return Err(RememberBatchLineError::new(
-                            "remember_invalid_json",
-                            format!("`fields.{name}` must contain only strings"),
+                            "remember_validation_failed",
+                            format!("canonical `fields.{name}` contained a non-string item"),
                         ));
                     };
                     assignments.push(format!("{name}={value}"));
                 }
             }
-            Some(_) => {
+            _ => {
                 return Err(RememberBatchLineError::new(
-                    "remember_invalid_json",
-                    format!("`fields.{name}` must be a string or an array of strings"),
+                    "remember_validation_failed",
+                    format!("canonical `fields.{name}` was not a string or string array"),
                 ));
             }
-            None => {}
         }
     }
     Ok(assignments)
@@ -6982,10 +7041,14 @@ fn parse_remember_batch_line(line: &str) -> Result<RememberBatchLineDraft, Remem
         }
     };
 
+    let kind = remember_batch_string_field(object, "kind", "kind")?;
+    let typed_field_assignments =
+        remember_batch_typed_field_assignments(object, kind.as_deref().unwrap_or("fact"))?;
+
     Ok(RememberBatchLineDraft {
         content,
         level: remember_batch_string_field(object, "level", "level")?,
-        kind: remember_batch_string_field(object, "kind", "kind")?,
+        kind,
         tags,
         workflow: remember_batch_string_field(object, "workflow", "workflow")?,
         confidence,
@@ -7000,7 +7063,7 @@ fn parse_remember_batch_line(line: &str) -> Result<RememberBatchLineDraft, Remem
         valid_to: remember_batch_string_field(object, "validTo", "valid_to")?,
         idempotency_key: remember_batch_string_field(object, "idempotencyKey", "idempotency_key")?,
         reinforce: remember_batch_bool_field(object, "reinforce", "reinforce")?,
-        typed_field_assignments: remember_batch_typed_field_assignments(object)?,
+        typed_field_assignments,
     })
 }
 
@@ -15540,6 +15603,59 @@ mod tests {
             stored["fields"]["options"].as_array().map(Vec::len),
             Some(2),
             "typed batch options",
+        )
+    }
+
+    #[test]
+    fn remember_batch_fields_enforce_registry_shapes_and_normalized_names() -> TestResult {
+        let scalar_array = parse_remember_batch_line(
+            r#"{"content":"Failure evidence.","kind":"failure","fields":{"family":["one"]}}"#,
+        )
+        .expect_err("scalar fields reject arrays even when they contain one item");
+        ensure(
+            scalar_array.code,
+            "remember_validation_failed",
+            "scalar array error code",
+        )?;
+
+        let list_scalar = parse_remember_batch_line(
+            r#"{"content":"Decision evidence.","kind":"decision","fields":{"options":"remote"}}"#,
+        )
+        .expect_err("list fields reject scalar strings");
+        ensure(
+            list_scalar.code,
+            "remember_validation_failed",
+            "list scalar error code",
+        )?;
+
+        let empty_list = parse_remember_batch_line(
+            r#"{"content":"Decision evidence.","kind":"decision","fields":{"options":[]}}"#,
+        )
+        .expect_err("list fields reject empty arrays");
+        ensure(
+            empty_list.code,
+            "remember_validation_failed",
+            "empty list error code",
+        )?;
+
+        let smuggled_name = parse_remember_batch_line(
+            r#"{"content":"Failure evidence.","kind":"failure","fields":{"family=prefix":"value"}}"#,
+        )
+        .expect_err("an equals sign in an object key cannot alter assignment parsing");
+        ensure(
+            smuggled_name.code,
+            "remember_validation_failed",
+            "smuggled name error code",
+        )?;
+
+        let normalized = parse_remember_batch_line(
+            r#"{"content":"Decision evidence.","kind":"decision","fields":{"revisit-by":"2026-09-15T00:00:00Z"}}"#,
+        )
+        .map_err(|error| error.message)?;
+        ensure(
+            normalized.typed_field_assignments,
+            vec!["revisit_by=2026-09-15T00:00:00Z".to_owned()],
+            "batch field name normalization",
         )
     }
 

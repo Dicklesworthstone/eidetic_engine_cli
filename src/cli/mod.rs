@@ -9270,7 +9270,8 @@ pub struct RememberArgs {
     #[arg(long, short = 'k', default_value = "fact")]
     pub kind: String,
 
-    /// Set a registry-backed typed sidecar field. Repeat list-valued fields.
+    /// Set a typed sidecar field declared by ee.memory.typed_fields.v2.
+    /// See `ee schema list`; repeat list-valued fields.
     #[arg(long = "field", value_name = "NAME=VALUE", action = ArgAction::Append)]
     pub typed_field_assignments: Vec<String>,
 
@@ -9401,7 +9402,8 @@ pub struct NoteArgs {
     #[arg(long, short = 'k')]
     pub kind: Option<String>,
 
-    /// Set a registry-backed typed sidecar field. Repeat list-valued fields.
+    /// Set a typed sidecar field declared by ee.memory.typed_fields.v2.
+    /// See `ee schema list`; repeat list-valued fields.
     #[arg(long = "field", value_name = "NAME=VALUE", action = ArgAction::Append)]
     pub typed_field_assignments: Vec<String>,
 
