@@ -5701,9 +5701,10 @@ mod tests {
     #[test]
     fn rule_update_cannot_preserve_peer_attestation_on_locally_changed_content() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let workspace_path = tempdir.path();
+        let workspace_path =
+            resolve_workspace_path(tempdir.path(), false).map_err(|error| error.message())?;
         let database_path = workspace_path.join("ee.db");
-        let workspace_id = stable_workspace_id(workspace_path);
+        let workspace_id = stable_workspace_id(&workspace_path);
         let rule_id = "rule_01234567890123456789054321";
         let connection =
             DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
@@ -5739,7 +5740,7 @@ mod tests {
         connection.close().map_err(|error| error.to_string())?;
 
         let error = update_rule(&RuleUpdateOptions {
-            workspace_path,
+            workspace_path: &workspace_path,
             database_path: Some(&database_path),
             rule_id,
             content: Some("Run a locally rewritten release procedure."),
@@ -5759,9 +5760,10 @@ mod tests {
             actor: Some("test"),
         })
         .expect_err("local content rewrite must not retain peer attestation");
+        let error_message = error.message();
         ensure(
-            error.message().contains("explicit lower --trust-class"),
-            "error must require an explicit trust downgrade",
+            error_message.contains("explicit lower --trust-class"),
+            format!("error must require an explicit trust downgrade, got `{error_message}`"),
         )?;
 
         let connection =
