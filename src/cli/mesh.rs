@@ -3667,7 +3667,7 @@ fn mesh_secret_export_denied_error(
 
 /// Load policy and durable lane grants through a caller-owned connection and
 /// return the exact config bytes that authorized the resulting registry.
-fn load_mesh_peer_policy_registry(
+pub(crate) fn load_mesh_peer_policy_registry(
     cli: &Cli,
     database_override: Option<&Path>,
     connection: &DbConnection,
