@@ -9194,16 +9194,16 @@ mod tests {
         PackHotsetEntryKind, PackItemRedaction, PackOmissionReason, PackProvenance,
         PackRejectionStage, PackResourceProfile, PackRevisionMeshMetadata, PackScoreBreakdown,
         PackSection, PackSelectedItem, PackSelectionAudit, PackSelectionObjective,
-        PackSelectionPhase, PackTrustSignal, PackValidationError, SectionQuota, SectionQuotas,
-        TokenBudget, TokenEstimationStrategy, WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR,
-        WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR, assemble_draft,
-        assemble_draft_with_cache_governor, assemble_draft_with_profile,
+        PackSelectionPhase, PackTrustPosture, PackTrustSignal, PackValidationError, SectionQuota,
+        SectionQuotas, TokenBudget, TokenEstimationStrategy,
+        WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR, WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR,
+        assemble_draft, assemble_draft_with_cache_governor, assemble_draft_with_profile,
         assemble_draft_with_profile_and_options, assemble_draft_with_profile_and_options_seeded,
         assemble_draft_with_profile_and_options_seeded_in_workspace, candidate_similarity,
         escape_markdown_text, estimate_character_heuristic_tokens, estimate_tokens,
         estimate_tokens_default, estimate_word_heuristic_tokens, facility_similarity,
         pack_item_provenance_json, prewarm_pack_hotset, render_context_markdown_with_analysis,
-        subsystem_name,
+        subsystem_name, trust_class_rank_milli,
     };
     use crate::cache::{CacheBudget, MemoryPressure};
     use crate::config::MeshCommandMode;
@@ -14616,7 +14616,8 @@ mod tests {
     }
 
     #[test]
-    fn peer_human_attested_is_authoritative_and_ranked_between_local_human_and_agent() {
+    fn peer_human_attested_is_authoritative_and_ranked_between_local_human_and_agent() -> TestResult
+    {
         ensure_equal(
             &PackTrustPosture::for_class(TrustClass::PeerHumanAttested),
             &PackTrustPosture::Authoritative,

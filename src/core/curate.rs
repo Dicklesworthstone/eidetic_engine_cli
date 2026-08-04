@@ -14924,7 +14924,10 @@ mod tests {
     use crate::models::degradation::{
         ADVISORY_LOCK_TIMEOUT_CODE, GRAPH_CURATE_DISCONNECTED_GRAPH_CODE,
     };
-    use crate::models::{CandidateId, DomainError, EvidenceId, MemoryId, RuleId, SessionId};
+    use crate::models::{
+        CandidateId, DomainError, EvidenceId, MemoryId, RuleId, SessionId, TrustClass,
+    };
+    use crate::testing::ensure;
 
     type TestResult = Result<(), String>;
 
