@@ -43,6 +43,7 @@ struct LaneGrantFixture {
     workspace: String,
     workspace_id: String,
     peer_id: String,
+    memory_id: String,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -358,13 +359,15 @@ fn set_up_fixture(label: &str) -> Result<LaneGrantFixture, String> {
             "--json",
         ],
     )?;
-    success_json(&remember, "ee remember")?;
+    let remember_json = success_json(&remember, "ee remember")?;
+    let memory_id = json_string(&remember_json, "/data/memory_id", "ee remember")?;
 
     Ok(LaneGrantFixture {
         _tempdir: tempdir,
         workspace,
         workspace_id,
         peer_id,
+        memory_id,
     })
 }
 
@@ -1658,7 +1661,7 @@ fn concurrent_double_apply_commits_once_and_stales_the_loser() -> TestResult {
                         )
                         .map_err(|error| format!("audit insert failed: {error}"))?;
                     effect_count.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
+                    Ok::<(), String>(())
                 },
             );
             match transaction {
