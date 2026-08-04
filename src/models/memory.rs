@@ -397,10 +397,17 @@ where
     let mut fields = BTreeMap::<String, JsonValue>::new();
     for assignment in assignments {
         let Some((raw_field, raw_value)) = assignment.split_once('=') else {
-            return Err(MemoryValidationError::InvalidTypedFieldsJson {
-                message: format!(
-                    "typed field assignment `{assignment}` must use NAME=VALUE; `~` and `^` are search-only operators"
-                ),
+            let separator = assignment
+                .char_indices()
+                .find_map(|(index, character)| matches!(character, '~' | '^').then_some(index))
+                .unwrap_or(assignment.len());
+            let raw_field = assignment[..separator].trim();
+            let field = normalize_typed_memory_field_name(raw_field)
+                .unwrap_or_else(|_| raw_field.to_owned());
+            return Err(MemoryValidationError::TypedFieldInvalid {
+                field,
+                reason: "assignment must use NAME=VALUE; `~` and `^` are search-only separators"
+                    .to_owned(),
             });
         };
         let field = normalize_typed_memory_field_name(raw_field).map_err(|reason| {
@@ -2028,7 +2035,8 @@ mod tests {
         .expect_err("search operator is not a write assignment");
         assert!(matches!(
             search_operator,
-            MemoryValidationError::InvalidTypedFieldsJson { .. }
+            MemoryValidationError::TypedFieldInvalid { field, reason }
+                if field == "family" && reason.contains("NAME=VALUE")
         ));
     }
 

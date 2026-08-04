@@ -271,4 +271,35 @@ fn remember_typed_field_errors_are_stable_and_structured() {
             .is_some_and(|reason| reason.contains("RFC 3339")),
         "invalid-field response omitted the actionable reason: {invalid}"
     );
+
+    let secret_like_value = "sk-FAKEabc123def456ghi789jkl012";
+    let malformed_later_assignment = format!("cause~{secret_like_value}");
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--workspace",
+        &workspace,
+        "remember",
+        "A failure with a malformed later assignment.",
+        "--kind",
+        "failure",
+        "--field",
+        "family=prefetch",
+        "--field",
+        &malformed_later_assignment,
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(
+        exit,
+        ProcessExitCode::Usage,
+        "malformed later field stderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains(secret_like_value) && !stderr.contains(secret_like_value),
+        "typed-field errors must not reflect malformed values: stdout={stdout:?} stderr={stderr:?}"
+    );
+    let malformed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("malformed-field JSON response");
+    assert_eq!(malformed["error"]["code"], "typed_field_invalid");
+    assert_eq!(malformed["error"]["details"]["field"], "cause");
 }
