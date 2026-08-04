@@ -651,18 +651,21 @@ mod tests {
     }
 
     #[test]
-    fn tampering_and_wrong_context_are_invalid_before_snapshot_comparison() {
+    fn every_envelope_byte_tamper_and_wrong_context_are_invalid_before_snapshot_comparison() {
         let (_directory, root) = root();
         let issued = issue_deterministic(&root, b"canonical-preview", 0x22);
-        let mut bearer = issued.token().expose_bearer().into_bytes();
-        let final_byte = bearer.last_mut().expect("bearer byte");
-        *final_byte = if *final_byte == b'A' { b'B' } else { b'A' };
-        let tampered = String::from_utf8(bearer).expect("ASCII bearer");
-
-        assert!(matches!(
-            verify_authentic(&root, WORKSPACE, SURFACE, &tampered, NOW),
-            Err(ApprovalTokenError::Invalid)
-        ));
+        for byte_index in 0..ENVELOPE_LEN {
+            let mut envelope = issued.token.envelope;
+            envelope[byte_index] ^= 0x01;
+            let tampered = ApprovalToken { envelope }.expose_bearer();
+            assert!(
+                matches!(
+                    verify_authentic(&root, WORKSPACE, SURFACE, &tampered, NOW),
+                    Err(ApprovalTokenError::Invalid)
+                ),
+                "tampering envelope byte {byte_index} must be invalid",
+            );
+        }
         let authentic_bearer = issued.token().expose_bearer();
         assert!(matches!(
             verify_authentic(&root, "ws_other", SURFACE, &authentic_bearer, NOW),

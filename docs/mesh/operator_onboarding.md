@@ -101,7 +101,7 @@ ee mesh peers --workspace . --json
 
 PEER_ID=peer_example123
 ee mesh preview-grant "$PEER_ID" --lane metadata --workspace . --json
-ee mesh preview-grant "$PEER_ID" --lane revision_notice --workspace . --json
+ee mesh preview-grant "$PEER_ID" --lane revision-notice --workspace . --json
 ```
 
 The policy should deny bodies and embeddings until a later explicit review.

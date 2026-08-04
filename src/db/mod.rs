@@ -30489,6 +30489,56 @@ mod tests {
     }
 
     #[test]
+    fn workspace_generation_fences_in_place_lane_preview_candidate_mutations() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_lanefence00000000000000000";
+        let sampled_id = "mem_lanefence00000000000000001";
+        let unsampled_id = "mem_lanefence00000000000000002";
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/tmp/lane-preview-generation-fence".to_owned(),
+                name: Some("lane preview generation fence".to_owned()),
+            },
+        )?;
+        connection.insert_memory(
+            sampled_id,
+            &test_memory_input(workspace_id, "Representative sampled memory."),
+        )?;
+        connection.insert_memory(
+            unsampled_id,
+            &test_memory_input(workspace_id, "Candidate outside a one-row sample."),
+        )?;
+
+        let before_tag_mutation = workspace_generation(&connection, workspace_id)?;
+        connection.add_memory_tags(unsampled_id, &["private".to_owned()])?;
+        let after_tag_mutation = workspace_generation(&connection, workspace_id)?;
+        ensure(
+            after_tag_mutation > before_tag_mutation,
+            "an in-place tag mutation must advance the lane-preview revision fence",
+        )?;
+
+        ensure(
+            connection.update_memory_trust_class(unsampled_id, "agent_assertion")?,
+            "in-place trust mutation must find the unsampled memory",
+        )?;
+        let after_trust_mutation = workspace_generation(&connection, workspace_id)?;
+        ensure(
+            after_trust_mutation > after_tag_mutation,
+            "an in-place trust mutation must advance the lane-preview revision fence",
+        )?;
+        let stored = connection
+            .get_memory(unsampled_id)?
+            .ok_or_else(|| TestFailure::new("unsampled candidate disappeared"))?;
+        ensure_equal(
+            &stored.id.as_str(),
+            &unsampled_id,
+            "the mutation fence must advance even when the memory ID is unchanged",
+        )
+    }
+
+    #[test]
     fn error_fingerprint_generation_repair_catches_pre_trigger_rows() -> TestResult {
         let connection = DbConnection::open_memory()?;
         seed_migrations_through(&connection, 82)?;

@@ -265,6 +265,13 @@ pub struct CandidateRevision {
 pub struct LaneGrantApprovalContext<'a> {
     pub target_peer_id: &'a str,
     pub grant_generation: u64,
+    /// Monotonic workspace mutation generation used as the candidate-set
+    /// revision fence. Memory rows are not universally immutable yet: content,
+    /// trust, tombstones, and tags can change in place. The workspace generation
+    /// advances for each of those source mutations, so incorporating it into
+    /// every revision pin makes even an unsampled change stale without exposing
+    /// a body/content hash in the public preview.
+    pub candidate_revision_generation: u64,
     pub current_policy_generation: &'a str,
     pub proposed_policy_generation: &'a str,
 }
@@ -414,6 +421,7 @@ pub fn compute_lane_grant_preview(input: &LaneGrantPreviewInput<'_>) -> LaneGran
         &LaneGrantApprovalContext {
             target_peer_id: input.peer_node_key,
             grant_generation: 0,
+            candidate_revision_generation: 0,
             current_policy_generation: "policy:unspecified",
             proposed_policy_generation: "policy:unspecified",
         },
@@ -460,7 +468,7 @@ pub fn compute_lane_grant_preview_with_context(
     let sample_rows: Vec<PreviewRow> = would_expose
         .iter()
         .take(effective_limit)
-        .map(|memory| build_preview_row(memory, true))
+        .map(|memory| build_preview_row(memory, true, context.candidate_revision_generation))
         .collect();
 
     let cautions = collect_cautions(
@@ -477,7 +485,10 @@ pub fn compute_lane_grant_preview_with_context(
         .iter()
         .map(|memory| CandidateRevision {
             memory_id: memory.memory_id.to_owned(),
-            revision_id: memory.memory_id.to_owned(),
+            revision_id: candidate_revision_id(
+                memory.memory_id,
+                context.candidate_revision_generation,
+            ),
         })
         .collect::<Vec<_>>();
     candidate_set.sort();
@@ -529,10 +540,14 @@ fn effective_limit(requested: usize) -> usize {
     baseline.min(LANE_GRANT_PREVIEW_MAX_LIMIT)
 }
 
-fn build_preview_row(memory: &MemoryView<'_>, would_expose: bool) -> PreviewRow {
+fn build_preview_row(
+    memory: &MemoryView<'_>,
+    would_expose: bool,
+    candidate_revision_generation: u64,
+) -> PreviewRow {
     PreviewRow {
         memory_id: memory.memory_id.to_owned(),
-        revision_id: memory.memory_id.to_owned(),
+        revision_id: candidate_revision_id(memory.memory_id, candidate_revision_generation),
         level: memory.level.to_owned(),
         kind: memory.kind.to_owned(),
         content_preview: truncate_chars(memory.content, LANE_GRANT_PREVIEW_CONTENT_PREVIEW_CHARS),
@@ -542,6 +557,15 @@ fn build_preview_row(memory: &MemoryView<'_>, would_expose: bool) -> PreviewRow 
         redacted_fields: memory.redacted_fields.to_vec(),
         would_expose_under_proposed_policy: would_expose,
     }
+}
+
+fn candidate_revision_id(memory_id: &str, candidate_revision_generation: u64) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.mesh.lane_grant.candidate_revision.v1");
+    hasher.update(&(memory_id.len() as u64).to_le_bytes());
+    hasher.update(memory_id.as_bytes());
+    hasher.update(&candidate_revision_generation.to_le_bytes());
+    format!("revwg1_{}", hasher.finalize().to_hex())
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> String {
@@ -685,13 +709,30 @@ fn collect_cautions(
         });
     }
 
-    if redacted_blocked > 0 {
+    let field_redacted_memory_count = input
+        .memories
+        .iter()
+        .filter(|memory| !memory.redacted_fields.is_empty())
+        .count() as u64;
+    if redacted_blocked > 0 || field_redacted_memory_count > 0 {
+        let message = match (redacted_blocked, field_redacted_memory_count) {
+            (blocked, 0) => format!(
+                "{blocked} memor{plural} would not be exposed because existing redaction-class rules block that lane",
+                plural = if blocked == 1 { "y" } else { "ies" }
+            ),
+            (0, field_redacted) => format!(
+                "{field_redacted} memor{plural} had sensitive fields redacted before preview or exposure; the listed redaction rules remain active",
+                plural = if field_redacted == 1 { "y" } else { "ies" }
+            ),
+            (blocked, field_redacted) => format!(
+                "{blocked} memor{blocked_plural} would not be exposed because redaction-class rules block the lane, and {field_redacted} memor{field_plural} had sensitive fields redacted before preview or exposure",
+                blocked_plural = if blocked == 1 { "y" } else { "ies" },
+                field_plural = if field_redacted == 1 { "y" } else { "ies" },
+            ),
+        };
         cautions.push(Caution {
             kind: caution_kinds::REDACTION_ACTIVE.to_owned(),
-            message: format!(
-                "{redacted_blocked} memor{plural} would not be exposed because existing redaction-class rules block that lane",
-                plural = if redacted_blocked == 1 { "y" } else { "ies" }
-            ),
+            message,
             severity: "info".to_owned(),
         });
     }
@@ -872,6 +913,280 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workspace_generation_revision_pin_fences_unsampled_candidate_mutation() {
+        let no_tags = empty_strings();
+        let no_redacted = empty_strings();
+        let memories = [
+            build_memory(
+                "sampled",
+                TrustClass::AgentAssertion,
+                &no_tags,
+                2,
+                false,
+                false,
+                &no_redacted,
+            ),
+            build_memory(
+                "unsampled",
+                TrustClass::AgentAssertion,
+                &no_tags,
+                1,
+                false,
+                false,
+                &no_redacted,
+            ),
+        ];
+        let redaction_rules = empty_strings();
+        let input = LaneGrantPreviewInput {
+            peer_node_key: "nodekey:test",
+            peer_in_group: true,
+            lane: Lane::Body,
+            workspace_id: "ws-1",
+            current_policy: IntendedLanePolicy::conservative_default(),
+            proposed_policy: body_grant_proposed(),
+            memories: &memories,
+            sample_strategy: SampleStrategy::MostRecent,
+            limit: 1,
+            redaction_rules: &redaction_rules,
+            sample_random_seed: 0,
+        };
+        let before = compute_lane_grant_preview_with_context(
+            &input,
+            &LaneGrantApprovalContext {
+                target_peer_id: "peer-1",
+                grant_generation: 3,
+                candidate_revision_generation: 41,
+                current_policy_generation: "policy-current",
+                proposed_policy_generation: "policy-proposed",
+            },
+        );
+        let after_unsampled_mutation = compute_lane_grant_preview_with_context(
+            &input,
+            &LaneGrantApprovalContext {
+                target_peer_id: "peer-1",
+                grant_generation: 3,
+                candidate_revision_generation: 42,
+                current_policy_generation: "policy-current",
+                proposed_policy_generation: "policy-proposed",
+            },
+        );
+
+        assert_eq!(before.preview_sample.len(), 1);
+        assert_eq!(before.preview_sample[0].memory_id, "sampled");
+        let before_unsampled = before
+            .candidate_set
+            .iter()
+            .find(|candidate| candidate.memory_id == "unsampled")
+            .expect("complete candidate set includes unsampled memory");
+        let after_unsampled = after_unsampled_mutation
+            .candidate_set
+            .iter()
+            .find(|candidate| candidate.memory_id == "unsampled")
+            .expect("complete candidate set still includes unsampled memory");
+        assert_ne!(before_unsampled.revision_id, after_unsampled.revision_id);
+        assert!(before_unsampled.revision_id.starts_with("revwg1_"));
+        assert!(!before_unsampled.revision_id.contains("unsampled"));
+        assert_ne!(
+            before.canonical_approval_snapshot_bytes().unwrap(),
+            after_unsampled_mutation
+                .canonical_approval_snapshot_bytes()
+                .unwrap(),
+            "an unsampled source mutation must stale the authenticated snapshot",
+        );
+    }
+
+    #[test]
+    fn every_public_canonical_field_is_bound_but_bearer_projection_is_not() {
+        let sensitive_tags = tags(&["private"]);
+        let redacted_fields = tags(&["content:api_key"]);
+        let memories = [build_memory(
+            "m1",
+            TrustClass::HumanExplicit,
+            &sensitive_tags,
+            1,
+            false,
+            false,
+            &redacted_fields,
+        )];
+        let redaction_rules = tags(&["api_key"]);
+        let already_allowed = body_grant_proposed();
+        let base = compute_lane_grant_preview_with_context(
+            &LaneGrantPreviewInput {
+                peer_node_key: "nodekey:test",
+                peer_in_group: false,
+                lane: Lane::Body,
+                workspace_id: "ws-1",
+                current_policy: already_allowed,
+                proposed_policy: already_allowed,
+                memories: &memories,
+                sample_strategy: SampleStrategy::Random,
+                limit: 1,
+                redaction_rules: &redaction_rules,
+                sample_random_seed: 7,
+            },
+            &LaneGrantApprovalContext {
+                target_peer_id: "peer-1",
+                grant_generation: 3,
+                candidate_revision_generation: 41,
+                current_policy_generation: "policy-current",
+                proposed_policy_generation: "policy-proposed",
+            },
+        );
+        let canonical = base.canonical_approval_snapshot_bytes().unwrap();
+
+        macro_rules! assert_field_drift {
+            ($label:literal, $mutation:expr) => {{
+                let mut changed = base.clone();
+                $mutation(&mut changed);
+                assert_ne!(
+                    changed.canonical_approval_snapshot_bytes().unwrap(),
+                    canonical,
+                    "{} must be authenticated by the canonical snapshot",
+                    $label,
+                );
+            }};
+        }
+
+        assert_field_drift!("schema", |value: &mut LaneGrantPreview| value.schema =
+            "ee.mesh.lane_grant_preview.test");
+        assert_field_drift!("copyVersion", |value: &mut LaneGrantPreview| value
+            .copy_version =
+            "ee.mesh.lane_grant_preview.copy.test");
+        assert_field_drift!("workspaceId", |value: &mut LaneGrantPreview| value
+            .workspace_id
+            .push('x'));
+        assert_field_drift!("target.adapterVersion", |value: &mut LaneGrantPreview| {
+            value.target.adapter_version.push('x')
+        });
+        assert_field_drift!("target.peerId", |value: &mut LaneGrantPreview| value
+            .target
+            .peer_id
+            .push('x'));
+        assert_field_drift!("lane", |value: &mut LaneGrantPreview| value.lane.push('x'));
+        assert_field_drift!("grantGeneration", |value: &mut LaneGrantPreview| value
+            .grant_generation +=
+            1);
+        assert_field_drift!(
+            "currentPolicy.generation",
+            |value: &mut LaneGrantPreview| value.current_policy.generation.push('x')
+        );
+        assert_field_drift!("currentPolicy.lane", |value: &mut LaneGrantPreview| value
+            .current_policy
+            .lane
+            .push('x'));
+        assert_field_drift!("currentPolicy.decision", |value: &mut LaneGrantPreview| {
+            value.current_policy.decision.push('x')
+        });
+        assert_field_drift!(
+            "proposedPolicy.generation",
+            |value: &mut LaneGrantPreview| value.proposed_policy.generation.push('x')
+        );
+        assert_field_drift!("proposedPolicy.lane", |value: &mut LaneGrantPreview| value
+            .proposed_policy
+            .lane
+            .push('x'));
+        assert_field_drift!("proposedPolicy.decision", |value: &mut LaneGrantPreview| {
+            value.proposed_policy.decision.push('x')
+        });
+        assert_field_drift!("candidateSet.memoryId", |value: &mut LaneGrantPreview| {
+            value.candidate_set[0].memory_id.push('x')
+        });
+        assert_field_drift!("candidateSet.revisionId", |value: &mut LaneGrantPreview| {
+            value.candidate_set[0].revision_id.push('x')
+        });
+        assert_field_drift!("affectedMemoryCount", |value: &mut LaneGrantPreview| {
+            value.affected_memory_count += 1
+        });
+        assert_field_drift!(
+            "redactedFromExposureCount",
+            |value: &mut LaneGrantPreview| value.redacted_from_exposure_count += 1
+        );
+        assert_field_drift!("previewSampleStrategy", |value: &mut LaneGrantPreview| {
+            value.preview_sample_strategy.push('x')
+        });
+        assert_field_drift!("previewSampleLimit", |value: &mut LaneGrantPreview| {
+            value.preview_sample_limit += 1
+        });
+        assert_field_drift!("previewSample.memoryId", |value: &mut LaneGrantPreview| {
+            value.preview_sample[0].memory_id.push('x')
+        });
+        assert_field_drift!(
+            "previewSample.revisionId",
+            |value: &mut LaneGrantPreview| value.preview_sample[0].revision_id.push('x')
+        );
+        assert_field_drift!("previewSample.level", |value: &mut LaneGrantPreview| value
+            .preview_sample[0]
+            .level
+            .push('x'));
+        assert_field_drift!("previewSample.kind", |value: &mut LaneGrantPreview| value
+            .preview_sample[0]
+            .kind
+            .push('x'));
+        assert_field_drift!(
+            "previewSample.contentPreview",
+            |value: &mut LaneGrantPreview| value.preview_sample[0].content_preview.push('x')
+        );
+        assert_field_drift!("previewSample.tags", |value: &mut LaneGrantPreview| value
+            .preview_sample[0]
+            .tags
+            .push("extra".to_owned()));
+        assert_field_drift!(
+            "previewSample.trustClass",
+            |value: &mut LaneGrantPreview| value.preview_sample[0].trust_class.push('x')
+        );
+        assert_field_drift!(
+            "previewSample.hasSensitiveTags",
+            |value: &mut LaneGrantPreview| {
+                let row = &mut value.preview_sample[0];
+                row.has_sensitive_tags = !row.has_sensitive_tags;
+            }
+        );
+        assert_field_drift!(
+            "previewSample.redactedFields",
+            |value: &mut LaneGrantPreview| value.preview_sample[0]
+                .redacted_fields
+                .push("tag:jwt".to_owned())
+        );
+        assert_field_drift!(
+            "previewSample.wouldExposeUnderProposedPolicy",
+            |value: &mut LaneGrantPreview| value.preview_sample[0]
+                .would_expose_under_proposed_policy = false
+        );
+        assert_field_drift!("redactionRulesApplied", |value: &mut LaneGrantPreview| {
+            value.redaction_rules_applied.push("jwt".to_owned())
+        });
+        assert_field_drift!("cautionCodes", |value: &mut LaneGrantPreview| value
+            .caution_codes
+            .push("extra".to_owned()));
+        assert_field_drift!("cautions.kind", |value: &mut LaneGrantPreview| value
+            .cautions[0]
+            .kind
+            .push('x'));
+        assert_field_drift!("cautions.message", |value: &mut LaneGrantPreview| value
+            .cautions[0]
+            .message
+            .push('x'));
+        assert_field_drift!("cautions.severity", |value: &mut LaneGrantPreview| value
+            .cautions[0]
+            .severity
+            .push('x'));
+
+        let mut projected = base.clone();
+        projected.approval_token = Some(ApprovalTokenProjection {
+            schema: "ee.mesh.approval_token.v1".to_owned(),
+            sensitive: true,
+            bearer: "eeap1_redacted-test-bearer".to_owned(),
+            expires_at: "2026-08-04T08:15:00Z".to_owned(),
+            external_recorder_residual: "External logs may retain this token.".to_owned(),
+        });
+        assert_eq!(
+            projected.canonical_approval_snapshot_bytes().unwrap(),
+            canonical,
+            "the bearer projection must not recursively authenticate itself",
+        );
+    }
+
     // ---- Read-only invariant: tombstoned + blocked are excluded ------------
 
     #[test]
@@ -945,6 +1260,45 @@ mod tests {
                 .message
                 .contains("redaction-class rules block that lane")
         );
+    }
+
+    #[test]
+    fn field_level_redaction_emits_redaction_active_without_blocking_exposure() {
+        let no_tags = empty_strings();
+        let redacted_fields = tags(&["content:api_key"]);
+        let memories = [build_memory(
+            "redacted",
+            TrustClass::AgentAssertion,
+            &no_tags,
+            1,
+            false,
+            false,
+            &redacted_fields,
+        )];
+        let redaction_rules = tags(&["api_key"]);
+        let preview = compute_lane_grant_preview(&LaneGrantPreviewInput {
+            peer_node_key: "nodekey:test",
+            peer_in_group: true,
+            lane: Lane::Body,
+            workspace_id: "ws-1",
+            current_policy: IntendedLanePolicy::conservative_default(),
+            proposed_policy: body_grant_proposed(),
+            memories: &memories,
+            sample_strategy: SampleStrategy::Random,
+            limit: 25,
+            redaction_rules: &redaction_rules,
+            sample_random_seed: 42,
+        });
+
+        assert_eq!(preview.affected_memory_count, 1);
+        assert_eq!(preview.redacted_from_exposure_count, 0);
+        assert_eq!(preview.preview_sample[0].redacted_fields, redacted_fields);
+        let caution = preview
+            .cautions
+            .iter()
+            .find(|caution| caution.kind == caution_kinds::REDACTION_ACTIVE)
+            .expect("field redaction must emit redaction_active");
+        assert!(caution.message.contains("had sensitive fields redacted"));
     }
 
     // ---- Caution: high trust exposure --------------------------------------

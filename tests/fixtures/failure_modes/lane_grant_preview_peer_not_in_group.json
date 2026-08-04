@@ -11,12 +11,13 @@
   "severity": "info",
   "repair_present": true,
   "trigger": {
-    "description": "A lane-grant preview targets a node key that is not currently a member of the workspace's peer group, so the preview warns that materializing the grant would also require enrollment.",
+    "description": "A lane-grant preview targets an enrolled opaque peer ID that is not currently named by the workspace's peer-group bindings, so the preview warns that materializing the grant would also require group membership.",
     "setup_commands": [
       "ee init --workspace . --json",
-      "run preview-grant against a node key that was never enrolled as a peer"
+      "enroll/configure peer_example but omit it from [[mesh.peer_group_bindings]]",
+      "run preview-grant against the enrolled opaque peer ID"
     ],
-    "invocation": "ee mesh preview-grant nodekey:00... --lane metadata --workspace . --json"
+    "invocation": "ee mesh preview-grant peer_example --lane metadata --workspace . --json"
   },
   "expected_emission": {
     "code": "lane_grant_preview_peer_not_in_group",

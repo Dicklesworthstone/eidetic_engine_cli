@@ -208,7 +208,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 256,
-          "description": "Immutable entity revision selected at preview time. In the current store, a revised memory receives a new memory ID, so memoryId and revisionId may be identical."
+          "description": "Opaque exposure-revision pin formed from the memory ID and the workspace's monotonic source-mutation generation. It changes when candidate-affecting memory or tag state changes, including in-place updates, without exposing a body-content hash."
         }
       }
     },

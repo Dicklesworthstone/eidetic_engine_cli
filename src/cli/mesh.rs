@@ -1000,7 +1000,8 @@ where
         preview: prepared.preview,
     };
     let human = render_lane_grant_preview_human(&report.preview);
-    write_mesh_report(cli, &report, &human, stdout)
+    let degraded = lane_grant_preview_degraded(&report.preview);
+    write_mesh_report_with_degraded(cli, &report, &human, &degraded, stdout)
 }
 
 fn handle_mesh_grant<W, E>(
@@ -1051,7 +1052,6 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let lane = preview_lane(args.lane);
-    let now = chrono::Utc::now().timestamp();
 
     let (authenticated, target_adapter, current_state) = if cli.wants_json() {
         let token = match read_bounded_token(&mut std::io::stdin().lock()) {
@@ -1066,7 +1066,7 @@ where
             &snapshot.workspace_id,
             MESH_GRANT_SCHEMA_V1,
             &token,
-            now,
+            chrono::Utc::now().timestamp(),
         ) {
             Ok(authenticated) => authenticated,
             Err(error) => {
@@ -1152,12 +1152,13 @@ where
                 return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
             }
         };
+        let issuance_now = chrono::Utc::now().timestamp();
         let issued = match issue(
             &root,
             &snapshot.workspace_id,
             MESH_GRANT_SCHEMA_V1,
             &canonical_snapshot,
-            now,
+            issuance_now,
         ) {
             Ok(issued) => issued,
             Err(error) => {
@@ -1170,7 +1171,7 @@ where
             &snapshot.workspace_id,
             MESH_GRANT_SCHEMA_V1,
             issued.token(),
-            now,
+            issuance_now,
         ) {
             Ok(authenticated) => authenticated,
             Err(error) => {
@@ -1593,6 +1594,15 @@ fn prepare_lane_grant_preview_for_state(
         proposed_generation,
         &proposed_policy,
     );
+    let candidate_revision_generation = connection
+        .get_workspace_generation(workspace_id)
+        .map_err(|error| {
+            storage_error(
+                "Failed to load the lane-preview candidate revision generation",
+                error,
+            )
+        })?
+        .unwrap_or(0);
     let (memories, redaction_rules) =
         lane_grant_preview_memories(connection, workspace_id, &current_peer_policy, lane)?;
     let memory_views = memories
@@ -1621,6 +1631,7 @@ fn prepare_lane_grant_preview_for_state(
         &LaneGrantApprovalContext {
             target_peer_id: peer_id,
             grant_generation,
+            candidate_revision_generation,
             current_policy_generation: &current_policy_generation,
             proposed_policy_generation: &proposed_policy_generation,
         },
@@ -5001,6 +5012,20 @@ where
     W: Write,
     T: Serialize,
 {
+    write_mesh_report_with_degraded(cli, report, human_output, &[], stdout)
+}
+
+fn write_mesh_report_with_degraded<W, T>(
+    cli: &Cli,
+    report: &T,
+    human_output: &str,
+    degraded: &[serde_json::Value],
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+    T: Serialize,
+{
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, human_output),
         output::Renderer::Toon => {
@@ -5037,10 +5062,56 @@ where
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
-                "degraded": [],
+                "degraded": degraded,
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
+    }
+}
+
+fn lane_grant_preview_degraded(
+    preview: &crate::mesh::lane_grant_preview::LaneGrantPreview,
+) -> Vec<serde_json::Value> {
+    use crate::mesh::lane_grant_preview::{
+        LANE_GRANT_PREVIEW_LANE_ALREADY_GRANTED_CODE, LANE_GRANT_PREVIEW_PEER_NOT_IN_GROUP_CODE,
+        caution_kinds,
+    };
+
+    preview
+        .cautions
+        .iter()
+        .filter_map(|caution| match caution.kind.as_str() {
+            caution_kinds::PEER_NOT_IN_GROUP => Some(json!({
+                "code": LANE_GRANT_PREVIEW_PEER_NOT_IN_GROUP_CODE,
+                "severity": "info",
+                "message": caution.message,
+                "repair": format!(
+                    "Review peer enrollment with `ee mesh peers --json`, then re-run `ee mesh preview-grant {} --lane {} --json`.",
+                    super::shell_quote_cli_arg(&preview.target.peer_id),
+                    lane_cli_value_from_wire(&preview.lane),
+                ),
+            })),
+            caution_kinds::LANE_ALREADY_GRANTED => Some(json!({
+                "code": LANE_GRANT_PREVIEW_LANE_ALREADY_GRANTED_CODE,
+                "severity": "info",
+                "message": caution.message,
+                "repair": format!(
+                    "Review current exposure with `ee mesh preview-grant {} --lane {} --json`; use `ee mesh revoke-lane` if the lane should be closed.",
+                    super::shell_quote_cli_arg(&preview.target.peer_id),
+                    lane_cli_value_from_wire(&preview.lane),
+                ),
+            })),
+            _ => None,
+        })
+        .collect()
+}
+
+fn lane_cli_value_from_wire(lane: &str) -> &str {
+    match lane {
+        "graph_link" => "graph-link",
+        "curation_signal" => "curation-signal",
+        "revision_notice" => "revision-notice",
+        other => other,
     }
 }
 
@@ -5783,6 +5854,51 @@ mod tests {
             envelope["data"]["autoEnrollment"]["discovery"]["schema"],
             crate::mesh::tailscale_autodiscovery::TAILSCALE_AUTODISCOVERY_SCHEMA_V1
         );
+    }
+
+    #[test]
+    fn lane_grant_preview_cautions_project_to_catalogued_degraded_entries() {
+        use crate::mesh::auto_enrollment_safety::{IntendedLanePolicy, LaneDecision};
+        use crate::mesh::lane_grant_preview::{
+            LANE_GRANT_PREVIEW_LANE_ALREADY_GRANTED_CODE,
+            LANE_GRANT_PREVIEW_PEER_NOT_IN_GROUP_CODE, Lane, LaneGrantPreviewInput, SampleStrategy,
+            compute_lane_grant_preview,
+        };
+
+        let mut already_allowed = IntendedLanePolicy::conservative_default();
+        already_allowed.body = LaneDecision::Allow;
+        let redaction_rules = Vec::new();
+        let memories = Vec::new();
+        let preview = compute_lane_grant_preview(&LaneGrantPreviewInput {
+            peer_node_key: "peer-not-in-group",
+            peer_in_group: false,
+            lane: Lane::Body,
+            workspace_id: "wsp-test",
+            current_policy: already_allowed,
+            proposed_policy: already_allowed,
+            memories: &memories,
+            sample_strategy: SampleStrategy::Random,
+            limit: 25,
+            redaction_rules: &redaction_rules,
+            sample_random_seed: 0,
+        });
+
+        let degraded = lane_grant_preview_degraded(&preview);
+        assert_eq!(degraded.len(), 2);
+        assert_eq!(
+            degraded[0]["code"],
+            LANE_GRANT_PREVIEW_PEER_NOT_IN_GROUP_CODE
+        );
+        assert_eq!(
+            degraded[1]["code"],
+            LANE_GRANT_PREVIEW_LANE_ALREADY_GRANTED_CODE
+        );
+        assert!(degraded.iter().all(|entry| entry["severity"] == "info"));
+        assert!(degraded.iter().all(|entry| {
+            entry["repair"]
+                .as_str()
+                .is_some_and(|repair| repair.contains("ee mesh"))
+        }));
     }
 
     #[test]

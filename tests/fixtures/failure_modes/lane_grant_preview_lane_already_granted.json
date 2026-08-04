@@ -16,7 +16,7 @@
       "enroll a peer with the metadata lane already allowed",
       "preview the same metadata lane for that peer"
     ],
-    "invocation": "ee mesh preview-grant <enrolled-node-key> --lane metadata --workspace . --json"
+    "invocation": "ee mesh preview-grant <peer-id> --lane metadata --workspace . --json"
   },
   "expected_emission": {
     "code": "lane_grant_preview_lane_already_granted",
