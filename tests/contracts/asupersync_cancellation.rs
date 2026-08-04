@@ -155,13 +155,15 @@ fn run_lab_cancel_probe(seed: u64) -> Result<LabCancelProbeReport, String> {
     )?;
 
     let reason = CancelReason::timeout().with_message("EE-208 LabRuntime cancellation");
-    let tasks_to_cancel = lab.state.cancel_request(root, &reason, None);
+    let (tasks_to_cancel, cancellation_wakes) =
+        lab.state.cancel_request(root, &reason, None).into_parts();
     {
         let mut scheduler = lab.scheduler.lock();
         for (task_id, priority) in tasks_to_cancel {
             scheduler.schedule_cancel(task_id, priority);
         }
     }
+    cancellation_wakes.dispatch();
 
     let report = lab.run_until_quiescent_with_report();
     Ok(LabCancelProbeReport {
@@ -402,9 +404,14 @@ fn daemon_foreground_loop_cancels_between_maintenance_ticks() -> TestResult {
     )?;
 
     let reason = CancelReason::user("daemon contract cancellation");
-    for (cancelled_task, priority) in lab.state.cancel_request(root, &reason, None) {
-        lab.scheduler.lock().schedule(cancelled_task, priority);
+    let (tasks_to_cancel, cancellation_wakes) =
+        lab.state.cancel_request(root, &reason, None).into_parts();
+    for (cancelled_task, priority) in tasks_to_cancel {
+        lab.scheduler
+            .lock()
+            .schedule_cancel(cancelled_task, priority);
     }
+    cancellation_wakes.dispatch();
     lab.scheduler.lock().schedule(task_id, 0);
     lab.advance_time(1_000_000_000);
     let report = lab.run_until_quiescent_with_report();

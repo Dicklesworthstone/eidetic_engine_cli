@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_peer_key_rotation_invalid_key",
+  "introduced_by": {
+    "bead": "bd-1x87h",
+    "epic_letter": "SRR6.24"
+  },
+  "surfaces": [
+    "mesh peer rotate"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A peer key rotation is attempted with an empty or malformed replacement key fingerprint, so the rotation is denied without touching the stored key generation.",
+    "setup_commands": [
+      "enroll a mesh peer",
+      "run rotate with an empty replacement fingerprint"
+    ],
+    "invocation": "ee mesh peer rotate <node-key> --fingerprint \"\" --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_peer_key_rotation_invalid_key",
+    "severity": "medium",
+    "message_contains": [
+      "key"
+    ],
+    "repair_contains": "ee mesh peer rotate"
+  }
+}

@@ -24,6 +24,7 @@
     "message_contains": [
       "--diff selector degraded to an empty path set",
       "git was unavailable"
-    ]
+    ],
+    "repair_contains": "git on PATH"
   }
 }

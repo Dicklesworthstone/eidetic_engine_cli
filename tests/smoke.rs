@@ -11,6 +11,7 @@ use std::process::{Command, Output};
 #[cfg(unix)]
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use ee::core::agent_docs::AgentDocsTopic;
 #[cfg(unix)]
 use ee::db::{
     CreateCurationCandidateInput, CreateMemoryLinkInput, CreateModelRegistryInput, DatabaseConfig,
@@ -4539,9 +4540,15 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
     )?;
     ensure(
         spans.iter().all(|span| {
-            span.cass_span_id.starts_with(session_arg.as_str()) && !span.content_hash.is_empty()
+            span.cass_span_id.starts_with("blake3:")
+                && span.cass_span_id.len() == 71
+                && span.upstream_ref_hash.as_deref() == Some(span.cass_span_id.as_str())
+                && span.producer_kind == "cass_import"
+                && span.search_eligibility == "admitted"
+                && !span.cass_span_id.contains(session_arg.as_str())
+                && !span.content_hash.is_empty()
         }),
-        "evidence spans must retain CASS source IDs and content hashes",
+        "evidence spans must retain only hashed upstream references with admitted CASS posture",
     )?;
     let stored_session_id = sessions[0].id.clone();
     connection.close().map_err(|e| e.to_string())?;
@@ -8224,21 +8231,8 @@ fn contract_drift_schema_format_is_valid() -> TestResult {
 #[test]
 fn contract_drift_agent_docs_all_topics_valid() -> TestResult {
     // Verify that all agent docs topics produce valid output
-    let topics = [
-        "guide",
-        "commands",
-        "contracts",
-        "schemas",
-        "paths",
-        "env",
-        "exit-codes",
-        "fields",
-        "errors",
-        "formats",
-        "examples",
-    ];
-
-    for topic in topics {
+    for topic in AgentDocsTopic::all() {
+        let topic = topic.as_str();
         let output = run_ee(&["agent-docs", topic, "--json"])?;
         ensure(
             output.status.success(),

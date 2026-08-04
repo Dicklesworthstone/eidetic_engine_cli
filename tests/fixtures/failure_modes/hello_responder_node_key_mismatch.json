@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "hello_responder_node_key_mismatch",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.8",
+    "epic_letter": "SRR6.46.8"
+  },
+  "surfaces": [
+    "daemon hello responder",
+    "mesh hello-responder status"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The daemon refuses to bind the hello responder because the current Tailscale node key no longer matches the node key recorded in the workspace's mesh identity binding (for example after the workspace data moved onto a different machine).",
+    "setup_commands": [
+      "materialize a mesh auto-enrollment binding on one node identity",
+      "bring the workspace up on a machine whose tailscaled reports a different node key"
+    ],
+    "invocation": "ee mesh hello-responder status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "hello_responder_node_key_mismatch",
+    "severity": "medium",
+    "message_contains": [
+      "node key"
+    ],
+    "repair_contains": "ee mesh disable"
+  }
+}

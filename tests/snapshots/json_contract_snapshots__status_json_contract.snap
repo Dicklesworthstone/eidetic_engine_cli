@@ -4,19 +4,9 @@ expression: status
 ---
 {
   "data": {
-    "agentInventory": {
-      "degraded": [],
-      "formatVersion": 1,
-      "inspectionCommand": "ee agent status --json",
-      "schema": "ee.agent.status.v1",
-      "status": "not_inspected",
-      "summary": {
-        "detectedCount": 0,
-        "totalCount": 22
-      }
-    },
     "capabilities": {
       "agentDetection": "ready",
+      "mesh": "pending",
       "output": {
         "toon": "ready"
       },
@@ -25,113 +15,45 @@ expression: status
       "storage": "ready"
     },
     "command": "status",
-    "curationHealth": {
-      "acceptedCount": 0,
-      "autoPromoteEnabledCount": 0,
-      "blockedCount": 0,
-      "dueCount": 0,
-      "escalationCount": 0,
-      "meanReviewLatencyDays": null,
-      "nextScheduledAt": null,
-      "oldestPendingAgeDays": null,
-      "pendingCount": 0,
-      "policyCount": 4,
-      "promptCount": 0,
-      "rejectedCount": 0,
-      "snoozedCount": 0,
-      "status": "empty",
-      "totalCount": 0
+    "flightRecorder": {
+      "directory": "[WORKSPACE]/obs/flight_recorder",
+      "enabled": false,
+      "maxBytes": 268435456,
+      "reason": null,
+      "redactionLevel": "strict",
+      "repair": null,
+      "retentionDays": 7,
+      "schema": "ee.flight_recorder.status.v1",
+      "status": "disabled",
+      "writing": false
     },
-    "degraded": [],
-    "derivedAssets": [
-      {
-        "assetHighWatermark": 1,
-        "highWatermarkLag": 0,
-        "kind": "persisted_index",
-        "name": "search_index",
-        "path": ".ee/index",
-        "sourceHighWatermark": 1,
-        "status": "current"
-      },
-      {
-        "assetHighWatermark": null,
-        "highWatermarkLag": 0,
-        "kind": "persisted_snapshot",
-        "lastBuiltAt": null,
-        "memoryGraph": {
-          "availability": "live_compute_available",
-          "edgeCount": 0,
-          "generation": 0,
-          "matchesDbGeneration": false,
-          "nodeCount": 0
-        },
-        "name": "graph_snapshot_artifact",
-        "path": ".ee/graph",
-        "sourceHighWatermark": 0,
-        "status": "empty"
-      }
-    ],
-    "feedbackHealth": {
-      "harmfulBurstWindowSeconds": 3600,
-      "harmfulPerSourcePerHour": 5,
-      "lastInversionEvent": null,
-      "nextDeterministicAction": "monitor harmful feedback rates",
-      "perSourceHarmfulCounts": [],
-      "protectedRuleCount": 0,
-      "quarantineQueueDepth": 0,
-      "status": "healthy"
-    },
-    "graphCompute": {
-      "availableAlgorithms": [
-        "pagerank",
-        "betweenness",
-        "hits",
-        "louvain",
-        "communities",
-        "k_core",
-        "articulation",
-        "path",
-        "explain_link",
-        "centrality_refresh",
-        "feature_enrichment",
-        "neighborhood"
+    "hostCalibration": {
+      "budgetDeltas": [
+        "[HOST_DEPENDENT]"
       ],
-      "fnxRuntimeVersion": "0.1.0",
-      "lastUsedAt": null,
-      "liveComputeSupported": true,
-      "status": "available"
-    },
-    "graphSnapshotArtifact": {
-      "lastBuiltAt": null,
-      "memoryGraph": {
-        "availability": "live_compute_available",
-        "edgeCount": 0,
-        "generation": 0,
-        "matchesDbGeneration": false,
-        "nodeCount": 0
-      },
-      "nextRefreshVia": "ee graph centrality-refresh --workspace .",
-      "snapshotGeneration": null,
-      "snapshotPath": null,
-      "status": "empty"
-    },
-    "memoryHealth": {
-      "activeCount": 1,
-      "averageConfidence": 0.92,
-      "healthScore": 0.92,
-      "provenanceCoverage": 1.0,
-      "scoreComponents": {
-        "activeRatio": 1.0,
-        "confidenceScore": 0.92,
-        "freshnessScore": 0,
-        "provenanceScore": 1.0,
-        "sourcedFrom": "decay_v1",
-        "tombstonePenalty": 0.0
-      },
-      "staleCount": 0,
-      "status": "healthy",
-      "tombstonedCount": 0,
-      "totalCount": 1
+      "calibrationFreshness": "[HOST_DEPENDENT]",
+      "confidence": "[HOST_DEPENDENT]",
+      "configuredProfile": "[HOST_DEPENDENT]",
+      "degraded": [
+        "[HOST_DEPENDENT]"
+      ],
+      "effectiveProfile": "[HOST_DEPENDENT]",
+      "hostClass": "[HOST_DEPENDENT]",
+      "hostProfileSchema": "ee.host_profile.v1",
+      "profileCeiling": "[HOST_DEPENDENT]",
+      "reasonCodes": [
+        "[HOST_DEPENDENT]"
+      ],
+      "recommendedProfile": "[HOST_DEPENDENT]",
+      "redactionStatus": "label_only_paths_presence_only_env_no_raw_values",
+      "repairActions": [
+        "[HOST_DEPENDENT]"
+      ],
+      "schema": "ee.host_calibration.posture.v1",
+      "targetDirPosture": "[HOST_DEPENDENT]",
+      "topologyWarnings": [
+        "[HOST_DEPENDENT]"
+      ]
     },
     "posture": {
       "overall": "ok",
@@ -148,6 +70,13 @@ expression: status
           "fallback": null,
           "id": "storage",
           "reason": null,
+          "status": "ok"
+        },
+        {
+          "checksPassed": 1,
+          "fallback": null,
+          "id": "shard_fanout",
+          "reason": "shard_fanout_disabled",
           "status": "ok"
         },
         {
@@ -195,6 +124,27 @@ expression: status
         {
           "checksPassed": 1,
           "fallback": null,
+          "id": "singleflight",
+          "reason": null,
+          "status": "ok"
+        },
+        {
+          "checksPassed": 1,
+          "fallback": null,
+          "id": "flight_recorder",
+          "reason": null,
+          "status": "ok"
+        },
+        {
+          "checksPassed": 1,
+          "fallback": null,
+          "id": "rch_worker_pressure",
+          "reason": null,
+          "status": "ok"
+        },
+        {
+          "checksPassed": 1,
+          "fallback": null,
           "id": "maintenance",
           "reason": null,
           "status": "ok"
@@ -208,7 +158,9 @@ expression: status
         }
       ],
       "thisOperation": {
-        "degradationsApplied": [],
+        "degradationsApplied": [
+          "graph_feature_disabled"
+        ],
         "status": "ok",
         "subsystemsSkipped": [
           "pack"
@@ -216,11 +168,15 @@ expression: status
         "subsystemsUsed": [
           "runtime",
           "storage",
+          "shard_fanout",
           "search",
           "memory",
           "graph_compute",
           "curate",
           "feedback",
+          "singleflight",
+          "flight_recorder",
+          "rch_worker_pressure",
           "maintenance",
           "agent_detection"
         ]
@@ -234,50 +190,113 @@ expression: status
         }
       }
     },
-    "runtime": {
-      "asyncBoundary": "core",
-      "engine": "asupersync",
-      "profile": "current_thread",
-      "workerThreads": 1
+    "qos": {
+      "backgroundActiveCount": 0,
+      "backgroundWorkActive": false,
+      "degraded": [],
+      "foregroundActiveCount": 0,
+      "foregroundPressure": false,
+      "maintenanceActiveCount": 0,
+      "registryHealthy": true,
+      "schema": "ee.qos.active_lane_summary.v1",
+      "staleIgnoredCount": 0,
+      "verificationActiveCount": 0,
+      "workspaceHash": "[HASH]"
     },
-    "search": {
-      "lexicalRamTier": {
-        "attempted": false,
-        "bytesMmapped": 0,
-        "degradedCodes": [
-          "lexical_ram_tier_disabled"
-        ],
-        "enabled": false,
-        "fallbackPath": "disabled_by_operator",
-        "hugepagesGranted": false,
-        "hugepagesRequested": false,
-        "indexPath": "[INDEX]/lexical",
-        "indexRevision": null,
-        "pageFaultsPost": 0,
-        "pageFaultsPre": 0,
-        "platform": "linux",
-        "populateRequested": true,
-        "schema": "ee.status.search.lexical_ram_tier.v1",
-        "succeeded": false,
-        "supported": true
-      }
+    "rchWorkerPressure": {
+      "blockedWorkerCount": 0,
+      "schema": "ee.rch.worker_pressure.v1",
+      "staleWorkerCount": 0,
+      "status": "pressure_unknown",
+      "unknownWorkerCount": 0,
+      "usableWorkerCount": 0,
+      "workerCount": 0,
+      "workers": []
     },
-    "version": "0.1.0",
+    "singleFlight": {
+      "activeLeaderCount": 0,
+      "configuredSurfaceCount": 1,
+      "followerTimeoutCount": 0,
+      "followerWaitCount": 0,
+      "leaderFailureCount": 0,
+      "leaderStartCount": 0,
+      "reusedResultCount": 0,
+      "schema": "ee.singleflight.posture.v1",
+      "status": "idle",
+      "surfaces": [
+        {
+          "activeLeaderCount": 0,
+          "completedLeaderCount": 0,
+          "configured": true,
+          "followerJoinCount": 0,
+          "followerTimeoutCount": 0,
+          "followerTimeoutMs": 0,
+          "lastKey": null,
+          "leaderFailureCount": 0,
+          "leaderStartCount": 0,
+          "reusedResultCount": 0,
+          "statePoisonedCount": 0,
+          "status": "idle",
+          "suggestedAction": "no action; single-flight is available for duplicate read-heavy work",
+          "surface": "graph_feature_enrichment"
+        }
+      ]
+    },
+    "verificationLedger": {
+      "activeBlockerCount": 0,
+      "blockerRefs": [],
+      "ledgerAvailable": true,
+      "localFallbackRefused": false,
+      "localFallbackRefusedCount": 0,
+      "newestRetryAfter": null,
+      "oldestRetryAfter": null,
+      "recoveryActions": [],
+      "schema": "ee.rch.verify.ledger_status.v1",
+      "status": "clear"
+    },
+    "verificationPosture": {
+      "advisoryCounts": {
+        "localDisallowed": 0,
+        "missingArtifactManifest": 0,
+        "remoteFailed": 0,
+        "remoteInFlight": 0,
+        "remoteSuccess": 0,
+        "topologyBlocked": 0
+      },
+      "evidenceHealth": {
+        "issueCount": 0,
+        "ledgerAvailable": true,
+        "localDisallowedCount": 0,
+        "malformedTimestampCount": 0,
+        "missingArtifactManifestCount": 0,
+        "reason": "no_verification_evidence_recorded",
+        "status": "empty",
+        "topologyBlockedCount": 0
+      },
+      "inFlightEquivalentCommandCount": 0,
+      "recentReusableRunCount": 0,
+      "recentRunCount": 0,
+      "recordCount": 0,
+      "recoveryActions": [
+        {
+          "command": "ee verify broker lookup --runs-jsonl <j1.jsonl> --command-hash <hash> --json",
+          "kind": "import_j1_log",
+          "message": "Inspect retained J1 test-event logs so artifact manifests can back verification reuse.",
+          "priority": 1,
+          "relatedBeadId": null
+        }
+      ],
+      "schema": "ee.verification.posture.v1",
+      "staleRunCount": 0,
+      "status": "no_evidence",
+      "unknownAgeCount": 0,
+      "windowHours": 24
+    },
+    "version": "0.13.0",
     "workspace": {
       "canonicalRoot": "[WORKSPACE]",
       "configDir": "[WORKSPACE]/.ee",
-      "diagnostics": [
-        {
-          "code": "workspace_selected_differs_from_discovered",
-          "conflictingRoot": "[REPO]",
-          "conflictingSource": "discovered",
-          "message": "The selected workspace differs from the nearest initialized workspace discovered from the current directory.",
-          "repair": "Confirm --workspace/EE_WORKSPACE before running mutating commands.",
-          "selectedRoot": "[WORKSPACE]",
-          "selectedSource": "explicit",
-          "severity": "warning"
-        }
-      ],
+      "diagnostics": [],
       "fingerprint": "[HASH]",
       "markerPresent": true,
       "repositoryFingerprint": null,
@@ -286,9 +305,41 @@ expression: status
       "scopeKind": "standalone",
       "source": "explicit",
       "subprojectPath": null
+    },
+    "writeGroupCommit": {
+      "avgBatchSize": 0.0,
+      "batches": 0,
+      "commitLatencyP50Us": 0,
+      "commitLatencyP99Us": 0,
+      "enabled": false,
+      "fallbackCount": 0,
+      "fallbackReasons": {
+        "degraded": 0,
+        "disabled": 0,
+        "oversized": 0,
+        "single_writer": 0
+      },
+      "fsyncCount": 0,
+      "fsyncSaved": 0,
+      "generatedAt": "[TIMESTAMP]",
+      "redactionStatus": "counts_latencies_no_content",
+      "schema": "ee.write_group_commit.v1",
+      "writesCoalesced": 0
     }
   },
-  "fields": "standard",
+  "degraded": [
+    {
+      "code": "graph_feature_disabled",
+      "message": "Knowledge skyline status is disabled by graph.feature.skyline.enabled.",
+      "repair": "ee config set graph.feature.skyline.enabled true",
+      "repairKind": "actionable",
+      "severity": "medium",
+      "sources": [
+        "status"
+      ]
+    }
+  ],
+  "fields": "summary",
   "schema": "ee.response.v2",
   "success": true
 }

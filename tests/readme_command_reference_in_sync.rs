@@ -20,11 +20,26 @@ use std::collections::BTreeSet;
 
 use clap::Parser;
 use clap::error::ErrorKind;
+use ee::cass::CassImportReport;
 use ee::cli::Cli;
+use ee::models::{IMPORT_CASS_SCHEMA_V1, RESPONSE_SCHEMA_V2};
+use serde_json::json;
 
 type TestResult = Result<(), String>;
 
 const README: &str = include_str!("../README.md");
+const README_CASS_IMPORT_COMMAND: &str = "$ ee import cass --workspace . --limit 50 --json | jq '.data | {schema, status, sessionsDiscovered, sessionsImported, sessionsSkipped, spansImported, indexJobsQueued, indexRequiredAction}'";
+const README_CASS_IMPORT_SELECTOR: &str = ".data | {schema, status, sessionsDiscovered, sessionsImported, sessionsSkipped, spansImported, indexJobsQueued, indexRequiredAction}";
+const README_CASS_IMPORT_FIELDS: &[&str] = &[
+    "schema",
+    "status",
+    "sessionsDiscovered",
+    "sessionsImported",
+    "sessionsSkipped",
+    "spansImported",
+    "indexJobsQueued",
+    "indexRequiredAction",
+];
 
 /// Top-level commands that intentionally do not appear in the
 /// README Command Reference. Each entry needs a one-line justification
@@ -451,6 +466,108 @@ fn every_top_level_command_variant_is_documented_or_internal() -> TestResult {
             missing.join("\n  - ")
         ))
     }
+}
+
+#[test]
+fn readme_cass_import_example_matches_response_contract() -> TestResult {
+    let quick_example = README
+        .split_once("## Quick Example")
+        .and_then(|(_, rest)| rest.split_once("\n---").map(|(section, _)| section))
+        .ok_or_else(|| "README Quick Example section is missing or malformed".to_owned())?;
+    let command_line = quick_example
+        .lines()
+        .find(|line| line.trim() == README_CASS_IMPORT_COMMAND)
+        .ok_or_else(|| {
+            format!(
+                "README Quick Example must contain the contract-pinned CASS command:\n{README_CASS_IMPORT_COMMAND}"
+            )
+        })?
+        .trim();
+
+    let shell_pipeline = command_line
+        .strip_prefix("$ ")
+        .ok_or_else(|| "README CASS command must use the `$ ` prompt prefix".to_owned())?;
+    let (ee_command, jq_argument) = shell_pipeline
+        .split_once(" | jq ")
+        .ok_or_else(|| "README CASS command must pipe its v2 response to jq".to_owned())?;
+    let selector = jq_argument
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+        .ok_or_else(|| "README CASS jq selector must be single-quoted".to_owned())?;
+    if selector != README_CASS_IMPORT_SELECTOR {
+        return Err(format!(
+            "README CASS jq selector drifted:\nexpected: {README_CASS_IMPORT_SELECTOR}\nactual:   {selector}"
+        ));
+    }
+
+    Cli::try_parse_from(ee_command.split_ascii_whitespace())
+        .map_err(|error| format!("README CASS import command does not parse: {error}"))?;
+
+    let report = CassImportReport {
+        schema: IMPORT_CASS_SCHEMA_V1,
+        workspace_path: "/fixture/workspace".to_owned(),
+        database_path: Some("/fixture/workspace/.ee/ee.db".to_owned()),
+        source_id: "cass://fixture".to_owned(),
+        ledger_id: Some("imp_fixture".to_owned()),
+        dry_run: false,
+        since: None,
+        sessions_discovered: 50,
+        sessions_imported: 47,
+        sessions_skipped: 3,
+        spans_imported: 312,
+        index_jobs_queued: 47,
+        index_required_action: Some(
+            "ee index rebuild --workspace /fixture/workspace --database /fixture/workspace/.ee/ee.db"
+                .to_owned(),
+        ),
+        status: "completed".to_owned(),
+        sessions: Vec::new(),
+    };
+    let response = json!({
+        "schema": RESPONSE_SCHEMA_V2,
+        "success": true,
+        "degraded": [],
+        "data": report.data_json(),
+    });
+    if response["schema"].as_str() != Some(RESPONSE_SCHEMA_V2) {
+        return Err("CASS import sample is not wrapped in ee.response.v2".to_owned());
+    }
+    if !quick_example.contains(&format!("\"schema\": \"{IMPORT_CASS_SCHEMA_V1}\"")) {
+        return Err(format!(
+            "README CASS example must identify its `.data` schema as {IMPORT_CASS_SCHEMA_V1}"
+        ));
+    }
+    let data = response["data"]
+        .as_object()
+        .ok_or_else(|| "CASS import response has no object at `.data`".to_owned())?;
+    for field in README_CASS_IMPORT_FIELDS {
+        if !data.contains_key(*field) {
+            return Err(format!(
+                "README CASS jq selector names `{field}`, but CassImportReport::data_json() does not emit it"
+            ));
+        }
+        if !quick_example.contains(&format!("\"{field}\":")) {
+            return Err(format!(
+                "README CASS example output omits selected field `{field}`"
+            ));
+        }
+    }
+
+    for stale in [
+        ".summary",
+        "\"sessions_imported\"",
+        "\"evidence_spans\"",
+        "\"candidates_proposed\"",
+        "\"duration_ms\"",
+    ] {
+        if quick_example.contains(stale) {
+            return Err(format!(
+                "README CASS example still contains obsolete response field or path `{stale}`"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 #[test]

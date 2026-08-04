@@ -37,7 +37,7 @@ use crate::core::primer::{
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
     CreateAuditInput, CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateSessionInput,
-    DbConnection, StoredMemory, audit_actions, generate_audit_id,
+    DbConnection, EvidenceProducerKind, StoredMemory, audit_actions, generate_audit_id,
 };
 use crate::models::{CandidateId, DomainError};
 use crate::search::HashEmbedder;
@@ -1523,25 +1523,34 @@ fn apply_import_proposals(
     };
     let imported_at = Utc::now().to_rfc3339();
     for proposal in proposals {
+        let screening = crate::policy::screen_external_text_for_ingestion(&proposal.content_draft);
+        let screened_content = screening.content;
+        let inherited_redaction_classes = screening.redacted_reasons;
+        let source_path_hash = format!("blake3:{}", blake3::hash(display_path.as_bytes()).to_hex());
+        let canonical_source_ref = format!(
+            "agentsmd://{}#L{}",
+            source_path_hash.trim_start_matches("blake3:"),
+            proposal.line_number
+        );
         let candidate_id = import_candidate_id(
             workspace_id,
             proposal.action,
             proposal.kind,
-            display_path,
-            &proposal.content_draft,
+            &source_path_hash,
+            &screened_content,
         );
         let span_id = deterministic_agentsmd_id(
             "ev_",
             &[
                 workspace_id,
                 "agentsmd_import",
-                display_path,
-                &proposal.content_draft,
+                &source_path_hash,
+                &screened_content,
             ],
         );
         let statement_hash = format!(
             "blake3:{}",
-            blake3::hash(proposal.content_draft.as_bytes()).to_hex()
+            blake3::hash(screened_content.as_bytes()).to_hex()
         );
         let candidate_input = if proposal.action == "reinforce_existing" {
             CreateCurationCandidateInput {
@@ -1560,7 +1569,7 @@ fn apply_import_proposals(
                     proposal.target_memory_id.as_deref().unwrap_or("unknown"),
                     proposal.dedup_similarity.unwrap_or_default(),
                     duplicate_threshold,
-                    proposal.evidence.join(", "),
+                    canonical_source_ref,
                 ),
                 confidence: AGENTSMD_IMPORT_CONFIDENCE,
                 status: Some(CandidateStatus::Pending.as_str().to_owned()),
@@ -1591,8 +1600,9 @@ fn apply_import_proposals(
                     "producer": "agentsmd_import",
                     "producerPayload": {
                         "proposalId": &proposal.proposal_id,
-                        "evidence": &proposal.evidence,
-                        "file": display_path,
+                        "evidenceSpanId": &span_id,
+                        "sourceRef": &canonical_source_ref,
+                        "sourcePathHash": &source_path_hash,
                         "lineNumber": proposal.line_number,
                         "modality": proposal.modality,
                     },
@@ -1603,16 +1613,14 @@ fn apply_import_proposals(
                 workspace_id: workspace_id.to_owned(),
                 candidate_type: CandidateType::CreateDerivedMemory.as_str().to_owned(),
                 target_memory_id: None,
-                proposed_content: Some(proposal.content_draft.clone()),
+                proposed_content: Some(screened_content.clone()),
                 proposed_confidence: Some(AGENTSMD_IMPORT_CONFIDENCE),
                 proposed_trust_class: Some("agent_assertion".to_owned()),
                 source_type: CandidateSource::AgentInference.as_str().to_owned(),
                 source_id: Some("agentsmd_import".to_owned()),
                 reason: format!(
                     "AGENTS.md bridge import: {} statement extracted from {}. Evidence: {}",
-                    proposal.kind,
-                    display_path,
-                    proposal.evidence.join(", "),
+                    proposal.kind, "AGENTS.md", canonical_source_ref,
                 ),
                 confidence: AGENTSMD_IMPORT_CONFIDENCE,
                 status: Some(CandidateStatus::Pending.as_str().to_owned()),
@@ -1632,7 +1640,7 @@ fn apply_import_proposals(
             "candidateId": &candidate_id,
             "level": "procedural",
             "kind": proposal.kind,
-            "evidence": &proposal.evidence,
+            "evidence": [&canonical_source_ref],
             "dedup": {
                 "nearestMemoryId": &proposal.dedup_nearest_memory_id,
                 "similarity": &proposal.dedup_similarity,
@@ -1667,8 +1675,8 @@ fn apply_import_proposals(
                         let metadata_json = serde_json::json!({
                             "schema": AGENTSMD_IMPORT_EVIDENCE_SCHEMA_V1,
                             "command": "ee import agentsmd --apply",
-                            "fileUri": proposal.evidence.first(),
-                            "file": display_path,
+                            "sourceRef": &canonical_source_ref,
+                            "sourcePathHash": &source_path_hash,
                             "lineNumber": proposal.line_number,
                             "modality": proposal.modality,
                         })
@@ -1679,19 +1687,18 @@ fn apply_import_proposals(
                                 workspace_id: workspace_id.to_owned(),
                                 session_id: session_id.to_owned(),
                                 memory_id: None,
-                                cass_span_id: format!(
-                                    "agentsmd:{display_path}#L{}",
-                                    proposal.line_number
-                                ),
+                                producer_kind: EvidenceProducerKind::AgentsmdImport,
+                                cass_span_id: canonical_source_ref.clone(),
                                 span_kind: "summary".to_owned(),
                                 start_line: line,
                                 end_line: line,
                                 start_byte: None,
                                 end_byte: None,
                                 role: Some("agentsmd_import".to_owned()),
-                                excerpt: proposal.content_draft.clone(),
+                                excerpt: screened_content.clone(),
                                 content_hash: statement_hash.clone(),
                                 metadata_json: Some(metadata_json),
+                                inherited_redaction_classes: inherited_redaction_classes.clone(),
                             },
                         )?;
                     }

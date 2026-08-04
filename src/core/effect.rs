@@ -1708,7 +1708,7 @@ impl EffectManifest {
             ),
             CommandEffect::read_only_db(
                 "share preview",
-                "Preview outbound mesh sharing without exporting data or recording consent",
+                "Preview outbound mesh sharing without exporting data",
             ),
             CommandEffect::read_only_db("show", "Show a persisted memory or artifact"),
             CommandEffect::read_only(
@@ -1828,6 +1828,11 @@ impl EffectManifest {
                 "Rebuild semantic embeddings from database records",
             ),
             CommandEffect::derived_write(
+                "search --recalibrate-now",
+                vec![".ee/search/calibration.jsonl"],
+                "Rewrite the derived search score calibration artifact from persisted feedback",
+            ),
+            CommandEffect::derived_write(
                 "graph centrality-refresh",
                 vec![".ee/graph/"],
                 "Refresh derived graph centrality metrics",
@@ -1927,20 +1932,13 @@ impl EffectManifest {
             ),
             CommandEffect::external_io_write(
                 "mesh auto-enroll",
-                vec!["mesh_peers", "mesh_audit_events", "audit_log"],
+                vec!["mesh_peers", "audit_log"],
                 vec![
-                    ".ee/mesh/auto_enroll_overrides.json",
-                    ".ee/mesh/discovery_denylist.txt",
+                    ".ee/auto_enroll_overrides.toml",
+                    ".ee/discovery_denylist.toml",
                 ],
                 "tailscale peer set hash plus workspace id",
                 "Probe mesh peers and persist reviewed auto-enrollment state",
-            ),
-            CommandEffect::external_io_write(
-                "mesh sync",
-                vec!["mesh_peers", "mesh_import_ledger", "search_index_jobs"],
-                vec!["peer mesh transport"],
-                "origin peer cursor plus event content hash",
-                "Contact mesh peers and import authorized memory events",
             ),
             CommandEffect::external_io_write(
                 "model fetch",
@@ -2057,16 +2055,20 @@ impl EffectManifest {
                 "Create an external reflection request artifact and non-secret replay ledger row",
             ),
             CommandEffect::append_only_write(
-                "share preview --record-consent",
-                vec!["audit_log"],
-                "target peer id plus preview hash plus actor and reason",
-                "Record reviewed share-preview consent without exporting data",
-            ),
-            CommandEffect::append_only_write(
                 "mesh import",
                 vec!["mesh_peers", "mesh_import_ledger", "search_index_jobs"],
                 "origin peer cursor plus event content hash",
                 "Import a mesh artifact by replaying idempotent peer events",
+            ),
+            // Honest classification (bd-6dmhw): the production sync transport
+            // is a deliberate no-op until M1 real transport lands
+            // (bd-tc-epic-qzk7o.3.x); the command performs no peer network
+            // I/O today. Restore external_io_write with the transport.
+            CommandEffect::append_only_write(
+                "mesh sync",
+                vec!["mesh_peers", "mesh_import_ledger", "search_index_jobs"],
+                "origin peer cursor plus event content hash",
+                "Run one foreground sync cycle over locally available peer state; network transport is deferred",
             ),
             CommandEffect::append_only_write(
                 "verification ingest",
@@ -2382,33 +2384,33 @@ impl EffectManifest {
             ),
             CommandEffect::durable_write_with_workspace_files(
                 "mesh discovery-policy",
-                vec!["mesh_audit_events", "audit_log"],
+                vec!["audit_log"],
                 vec![
-                    ".ee/mesh/discovery_policy.json",
-                    ".ee/mesh/discovery_allowlist.txt",
-                    ".ee/mesh/discovery_denylist.txt",
+                    ".ee/discovery_policy.toml",
+                    ".ee/discovery_allowlist.toml",
+                    ".ee/discovery_denylist.toml",
                 ],
                 "Persist mesh discovery policy files and audit the policy change",
             ),
             CommandEffect::durable_write_with_workspace_files(
                 "mesh export",
-                vec!["mesh_audit_events", "audit_log"],
+                vec!["audit_log"],
                 vec!["<--out path>"],
                 "Export authorized mesh material to an explicit side-path artifact",
             ),
             CommandEffect::durable_write(
                 "mesh peer add",
-                vec!["mesh_peers", "mesh_audit_events", "audit_log"],
+                vec!["mesh_peers", "audit_log"],
                 "Add a mesh peer with audited policy metadata",
             ),
             CommandEffect::durable_write(
                 "mesh peer revoke",
-                vec!["mesh_peers", "mesh_audit_events", "audit_log"],
+                vec!["mesh_peers", "audit_log"],
                 "Revoke a mesh peer with audited policy metadata",
             ),
             CommandEffect::durable_write(
                 "mesh peer rotate",
-                vec!["mesh_peers", "mesh_audit_events", "audit_log"],
+                vec!["mesh_peers", "audit_log"],
                 "Rotate mesh peer credentials with audited policy metadata",
             ),
             CommandEffect::durable_write(
@@ -2641,13 +2643,13 @@ impl EffectManifest {
             ),
             CommandEffect::config_write(
                 "mesh disable",
-                vec![".ee/config.toml", ".ee/mesh/emergency_disable.json"],
+                vec![".ee/config.toml"],
                 "workspace id plus mesh disable reason",
                 "Disable mesh synchronization for a workspace",
             ),
             CommandEffect::config_write(
                 "mesh reenable",
-                vec![".ee/config.toml", ".ee/mesh/emergency_disable.json"],
+                vec![".ee/config.toml"],
                 "workspace id plus mesh reenable reason",
                 "Re-enable mesh synchronization for a workspace",
             ),

@@ -326,7 +326,7 @@ TODO in `src/core/curate.rs` has since been deleted; `CandidateType::CreateDeriv
 is the live struct definition). bd-2d32o is referenced as the precursor in
 the bead that implemented this slice.
 
-The producer output changes too: `ee.review.session.v1` must stop emitting the
+The v2 producer output changes too: `ee.review.session.v2` stops emitting the
 empty-string `targetMemoryId` sentinel for bootstrap candidates. Bootstrap
 review candidates should serialize `candidateType = "create_derived_memory"`,
 `candidateKind = "propose_new_memory"`, and `targetMemoryId = null`; the prior
@@ -455,7 +455,7 @@ schema, and the contract test for the extended candidate envelope passes.
   `CreateCurationCandidateInput` to carry the new fields — see that
   bead's tests rather than a free-standing schema_v2 file.
 - **Response contract test**: `ee.curate.candidates.v1`,
-  `ee.curate.validate.v1`, `ee.curate.apply.v1`, and `ee.review.session.v1`
+  `ee.curate.validate.v1`, `ee.curate.apply.v1`, and `ee.review.session.v2`
   all serialize `targetMemoryId: null` for `create_derived_memory` bootstrap
   candidates; `curate apply` surfaces the new id as `createdMemoryId`, keeps
   target before/after null, and never returns the created memory id as

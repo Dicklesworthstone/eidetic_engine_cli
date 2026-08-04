@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ee.dev/schemas/ee.ask.v1.json",
+  "$id": "https://eidetic-engine/schemas/ee.ask.v1.json",
   "title": "ee.ask.v1",
   "description": "Deterministic extractive question answering with citations and honest abstention (ADR 0067, bd-169v0.1). Carried under ee.response.v2 data.answer. Every emitted answer sentence byte-equals a cited span of a stored memory — machine-checkable extractiveness invariant.",
   "x-ee-status": "shipped:true",
@@ -98,6 +98,44 @@
       "$ref": "#/$defs/queryAssist",
       "description": "Deterministic query-assist guidance emitted when ask abstains."
     }
+  },
+  "field_presets": {
+    "minimal": [
+      "schema",
+      "question",
+      "abstained",
+      "answerText",
+      "confidence",
+      "citations"
+    ],
+    "summary": [
+      "schema",
+      "question",
+      "abstained",
+      "answerText",
+      "confidence",
+      "confidenceComponents",
+      "citations",
+      "candidatesScanned",
+      "nearestEvidence",
+      "counterfactualHint",
+      "queryAssist"
+    ],
+    "standard": [
+      "schema",
+      "question",
+      "abstained",
+      "answerText",
+      "confidence",
+      "confidenceComponents",
+      "citations",
+      "sides",
+      "nearestEvidence",
+      "counterfactualHint",
+      "candidatesScanned",
+      "queryAssist"
+    ],
+    "full": ["*"]
   },
   "$defs": {
     "span": {

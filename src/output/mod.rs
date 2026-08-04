@@ -1545,6 +1545,14 @@ fn command_name_from_schema(schema: &str) -> String {
     // underscores. Accept both forms; the production emit values are what
     // matters.
     match schema {
+        "ee.learn.gaps.v1" => "learn gaps".to_string(),
+        "ee.session_budget.plan.v1" => "session-budget plan".to_string(),
+        "ee.decide.record.v1" => "decide record".to_string(),
+        "ee.decide.list.v1" => "decide list".to_string(),
+        "ee.decide.revisit.v1" => "decide revisit".to_string(),
+        "ee.toolchain_provenance.v1" => "diag toolchain-provenance".to_string(),
+        "ee.ask.v1" => "ask".to_string(),
+        "ee.recall.v1" => "recall".to_string(),
         "ee.swarm.brief.v1" | "ee.swarm_brief.v1" => "swarm brief".to_string(),
         "ee.swarm.next_action.v1" | "ee.swarm.next-action.v1" | "ee.swarm_next_action.v1" => {
             "swarm next-action".to_string()
@@ -1611,6 +1619,280 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "items",
                 "pagination",
                 "degraded",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "learn gaps" => match preset {
+            FieldProfile::Minimal => &["schema", "workspaceId", "clusterCount"],
+            FieldProfile::Summary => &[
+                "schema",
+                "workspaceId",
+                "retentionDays",
+                "effectiveSince",
+                "scannedMissCount",
+                "clusterCount",
+                "gaps",
+                "degraded",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "success",
+                "workspaceId",
+                "retentionDays",
+                "requestedSince",
+                "effectiveSince",
+                "scannedMissCount",
+                "clusterCount",
+                "gaps",
+                "degraded",
+                "generatedAt",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "curate doctor" => match preset {
+            FieldProfile::Minimal => &["schema", "command", "summary"],
+            FieldProfile::Summary => &[
+                "schema",
+                "command",
+                "version",
+                "workspaceId",
+                "filter",
+                "summary",
+                "degraded",
+                "trend",
+                "nextActions",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "command",
+                "version",
+                "workspaceId",
+                "workspacePath",
+                "databasePath",
+                "generatedAt",
+                "filter",
+                "summary",
+                "queue",
+                "degraded",
+                "trend",
+                "nextActions",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "session-budget plan" => match preset {
+            FieldProfile::Minimal => &["schema", "advisory", "recommendation"],
+            FieldProfile::Summary => &[
+                "schema",
+                "workspaceFingerprint",
+                "advisory",
+                "taskHint",
+                "recommendation",
+                "fallbacks",
+                "refusals",
+                "ledgerSummary",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "generatedAt",
+                "workspaceFingerprint",
+                "advisory",
+                "taskHint",
+                "recommendation",
+                "fallbacks",
+                "refusals",
+                "ledgerSummary",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "decide record" => match preset {
+            FieldProfile::Minimal => &["schema", "version", "status", "dryRun", "persisted"],
+            FieldProfile::Summary => &[
+                "schema",
+                "version",
+                "status",
+                "dryRun",
+                "persisted",
+                "workspaceId",
+                "decision",
+                "superseded",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "version",
+                "status",
+                "dryRun",
+                "persisted",
+                "workspaceId",
+                "databasePath",
+                "decision",
+                "superseded",
+                "memoryAuditId",
+                "memoryIndexJobId",
+                "linkAuditId",
+                "expireAuditId",
+                "subscribe",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "decide list" => match preset {
+            FieldProfile::Minimal => &["schema", "version", "returnedCount", "truncated"],
+            FieldProfile::Summary => &[
+                "schema",
+                "version",
+                "about",
+                "includeSuperseded",
+                "totalCount",
+                "returnedCount",
+                "truncated",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "version",
+                "workspaceId",
+                "databasePath",
+                "about",
+                "includeSuperseded",
+                "totalCount",
+                "returnedCount",
+                "truncated",
+                "decisions",
+                "subscribe",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "decide revisit" => match preset {
+            FieldProfile::Minimal => &[
+                "schema",
+                "version",
+                "dueCount",
+                "returnedCount",
+                "truncated",
+            ],
+            FieldProfile::Summary => &[
+                "schema",
+                "version",
+                "now",
+                "warningDays",
+                "windowEnd",
+                "dueCount",
+                "returnedCount",
+                "truncated",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "version",
+                "workspaceId",
+                "databasePath",
+                "now",
+                "warningDays",
+                "windowEnd",
+                "dueCount",
+                "returnedCount",
+                "truncated",
+                "decisions",
+                "subscribe",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "diag toolchain-provenance" => match preset {
+            FieldProfile::Minimal => &[
+                "schema",
+                "workspaceFingerprint",
+                "redactionStatus",
+                "degraded",
+            ],
+            FieldProfile::Summary => &[
+                "schema",
+                "collectedAt",
+                "workspaceFingerprint",
+                "redactionStatus",
+                "tools",
+                "degraded",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "collectedAt",
+                "workspaceFingerprint",
+                "redactionStatus",
+                "tools",
+                "scriptHashes",
+                "degraded",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "ask" => match preset {
+            FieldProfile::Minimal => &[
+                "schema",
+                "question",
+                "abstained",
+                "answerText",
+                "confidence",
+                "citations",
+            ],
+            FieldProfile::Summary => &[
+                "schema",
+                "question",
+                "abstained",
+                "answerText",
+                "confidence",
+                "confidenceComponents",
+                "citations",
+                "candidatesScanned",
+                "nearestEvidence",
+                "counterfactualHint",
+                "queryAssist",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "question",
+                "abstained",
+                "answerText",
+                "confidence",
+                "confidenceComponents",
+                "citations",
+                "sides",
+                "nearestEvidence",
+                "counterfactualHint",
+                "candidatesScanned",
+                "queryAssist",
+            ],
+            FieldProfile::Full => &["*"],
+        },
+        "recall" => match preset {
+            FieldProfile::Minimal => &["schema", "query", "memoryId", "score"],
+            FieldProfile::Summary => &[
+                "schema",
+                "query",
+                "totalMatched",
+                "truncated",
+                "memoryId",
+                "level",
+                "kind",
+                "contentPreview",
+                "score",
+                "freshnessState",
+            ],
+            FieldProfile::Standard => &[
+                "schema",
+                "query",
+                "items",
+                "indexGeneration",
+                "dbGeneration",
+                "totalMatched",
+                "truncated",
+                "droppedCount",
+                "continuationCursor",
+                "memoryId",
+                "level",
+                "kind",
+                "contentPreview",
+                "tags",
+                "score",
+                "scoreComponents",
+                "freshnessState",
+                "provenance",
+                "anchor",
+                "repair",
             ],
             FieldProfile::Full => &["*"],
         },
@@ -1913,6 +2195,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "resourcePressure",
                 "hostProfile",
                 "agentInventory",
+                "toolchainProvenance",
                 "recommendations",
                 "degraded",
             ],
@@ -2104,8 +2387,8 @@ fn conflicting_presets_error(selector: &FieldSelector) -> DomainError {
 
 pub struct ResponseEnvelope {
     builder: JsonBuilder,
-    success: bool,
     degraded_written: bool,
+    inferred_degraded_json: Option<String>,
 }
 
 impl ResponseEnvelope {
@@ -2116,8 +2399,8 @@ impl ResponseEnvelope {
         builder.field_bool("success", true);
         Self {
             builder,
-            success: true,
             degraded_written: false,
+            inferred_degraded_json: None,
         }
     }
 
@@ -2128,8 +2411,8 @@ impl ResponseEnvelope {
         builder.field_bool("success", false);
         Self {
             builder,
-            success: false,
             degraded_written: false,
+            inferred_degraded_json: None,
         }
     }
 
@@ -2137,11 +2420,16 @@ impl ResponseEnvelope {
     where
         F: FnOnce(&mut JsonBuilder),
     {
-        self.builder.field_object("data", build);
+        let mut data = JsonBuilder::new();
+        build(&mut data);
+        let raw_json = data.finish();
+        self.inferred_degraded_json = response_degraded_from_data_raw(&raw_json);
+        self.builder.field_raw("data", &raw_json);
         self
     }
 
     pub fn data_raw(mut self, raw_json: &str) -> Self {
+        self.inferred_degraded_json = response_degraded_from_data_raw(raw_json);
         self.builder.field_raw("data", raw_json);
         self
     }
@@ -2158,11 +2446,107 @@ impl ResponseEnvelope {
 
     #[must_use]
     pub fn finish(mut self) -> String {
-        if self.success && !self.degraded_written {
-            self.builder.field_raw("degraded", "[]");
+        if !self.degraded_written {
+            self.builder.field_raw(
+                "degraded",
+                self.inferred_degraded_json.as_deref().unwrap_or("[]"),
+            );
         }
         self.builder.finish()
     }
+}
+
+fn response_degraded_from_data_raw(raw_json: &str) -> Option<String> {
+    if !raw_json.contains("\"degraded\"") {
+        return None;
+    }
+    let data: serde_json::Value = serde_json::from_str(raw_json).ok()?;
+    let degraded = response_degraded_from_data(&data);
+    serde_json::to_string(&degraded).ok()
+}
+
+/// Normalize report-local degradations into the closed top-level
+/// `ee.response.v2` degradation schema.
+///
+/// Entries with invalid required fields are omitted rather than emitting a
+/// response that contradicts its schema. Valid siblings are still mirrored.
+/// Optional report-only or malformed fields are omitted; the original report
+/// data remains untouched.
+#[must_use]
+pub fn response_degraded_from_data(data: &serde_json::Value) -> serde_json::Value {
+    let Some(degraded) = data.get("degraded").and_then(serde_json::Value::as_array) else {
+        return serde_json::json!([]);
+    };
+    let normalized = degraded
+        .iter()
+        .filter_map(normalize_response_degradation)
+        .collect();
+    serde_json::Value::Array(normalized)
+}
+
+fn normalize_response_degradation(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let source = value.as_object()?;
+    let code = source.get("code")?.as_str()?;
+    let severity = source.get("severity")?.as_str()?;
+    let message = source.get("message")?.as_str()?;
+    if !matches!(
+        severity,
+        "info" | "low" | "warning" | "medium" | "high" | "critical"
+    ) {
+        return None;
+    }
+
+    let mut normalized = serde_json::Map::new();
+    normalized.insert(
+        "code".to_string(),
+        serde_json::Value::String(code.to_string()),
+    );
+    normalized.insert(
+        "severity".to_string(),
+        serde_json::Value::String(severity.to_string()),
+    );
+    normalized.insert(
+        "message".to_string(),
+        serde_json::Value::String(message.to_string()),
+    );
+
+    if let Some(repair) = source.get("repair").and_then(serde_json::Value::as_str) {
+        normalized.insert(
+            "repair".to_string(),
+            serde_json::Value::String(repair.to_string()),
+        );
+    }
+    if let Some(repair_kind) = source
+        .get("repairKind")
+        .and_then(serde_json::Value::as_str)
+        .filter(|repair_kind| {
+            matches!(
+                *repair_kind,
+                "actionable" | "template" | "placeholder" | "unknown" | "empty"
+            )
+        })
+    {
+        normalized.insert(
+            "repairKind".to_string(),
+            serde_json::Value::String(repair_kind.to_string()),
+        );
+    }
+    if let Some(sources) = source.get("sources").and_then(serde_json::Value::as_array)
+        && sources.iter().all(serde_json::Value::is_string)
+    {
+        normalized.insert(
+            "sources".to_string(),
+            serde_json::Value::Array(sources.clone()),
+        );
+    }
+    if let Some(details) = source.get("details").and_then(serde_json::Value::as_object) {
+        normalized.insert(
+            "details".to_string(),
+            serde_json::Value::Object(details.clone()),
+        );
+    }
+
+    Some(serde_json::Value::Object(normalized))
 }
 
 // ============================================================================
@@ -2733,10 +3117,7 @@ fn context_response_cached_json_with_top_level_degraded(cached_json: &str) -> St
     }
     let degraded = object
         .get("data")
-        .and_then(|data| data.get("degraded"))
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .map(serde_json::Value::Array)
+        .map(response_degraded_from_data)
         .unwrap_or_else(|| serde_json::json!([]));
     object.insert("degraded".to_string(), degraded);
     serde_json::to_string(&value).unwrap_or_else(|_| cached_json.to_owned())
@@ -5858,8 +6239,9 @@ pub fn render_why_json(report: &WhyReport) -> String {
             "verificationEvidence": verification_evidence,
             "coordinationFallbackEvidence": coordination_fallback_evidence,
             "attestationBundle": report.attestation_manifest.clone(),
-            "degraded": degraded,
-        }
+            "degraded": degraded.clone(),
+        },
+        "degraded": degraded,
     });
     if let Some(load_bearing) = load_bearing
         && let Some(data) = json
@@ -6810,6 +7192,7 @@ fn render_blocked_feature(obj: &mut JsonBuilder, feature: &DependencyBlockedFeat
 /// Render a quarantine report as JSON (ee.response.v2 envelope).
 #[must_use]
 pub fn render_quarantine_json(report: &QuarantineReport) -> String {
+    let degraded = aggregate_quarantine_degradations(&report.degraded);
     let mut b = JsonBuilder::with_capacity(1024);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
@@ -6848,9 +7231,9 @@ pub fn render_quarantine_json(report: &QuarantineReport) -> String {
             &report.blocked_sources,
             build_quarantine_entry,
         );
-        let degraded = aggregate_quarantine_degradations(&report.degraded);
         d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     });
+    b.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     b.finish()
 }
 
@@ -6977,6 +7360,7 @@ pub fn render_quarantine_entry_json(entry: &crate::db::StoredTrustQuarantine) ->
         d.field_str("createdAt", &entry.created_at);
         d.field_str("updatedAt", &entry.updated_at);
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -7058,7 +7442,8 @@ pub fn render_graph_diag_json(readiness: &crate::graph::GraphModuleReadiness) ->
             "readyCount": readiness.capabilities().iter().filter(|c| c.status() == CapabilityStatus::Ready).count(),
             "pendingCount": readiness.capabilities().iter().filter(|c| c.status() == CapabilityStatus::Pending).count(),
             "capabilities": capabilities,
-        }
+        },
+        "degraded": [],
     })
     .to_string()
 }
@@ -7123,6 +7508,7 @@ pub fn render_streams_json(report: &crate::core::streams::StreamsReport) -> Stri
         d.field_str("stderrProbeMessage", &report.stderr_probe_message);
         d.field_bool("healthy", report.is_healthy());
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -7324,10 +7710,12 @@ pub fn render_structural_health_json(report: &StructuralHealthReport) -> String 
     let Ok(report_value) = serde_json::to_value(&report) else {
         return r#"{"schema":"ee.error.v2","error":{"code":"serialization_failed","message":"Failed to serialize response","severity":"high","details":{"recovery":[]},"nonRecoverable":false}}"#.to_owned();
     };
+    let degraded = response_degraded_from_data(&report_value);
     serde_json::json!({
         "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report_value,
+        "degraded": degraded,
     })
     .to_string()
 }
@@ -8077,7 +8465,7 @@ pub fn render_memory_drift_report_json(
     report: &crate::core::memory_drift::MemoryDriftReport,
 ) -> String {
     let data = serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({}));
-    let degraded = serde_json::to_value(&report.degraded).unwrap_or_else(|_| serde_json::json!([]));
+    let degraded = response_degraded_from_data(&data);
     serde_json::json!({
         "schema": "ee.response.v2",
         "success": true,
@@ -9474,6 +9862,7 @@ pub fn render_eval_report_json(report: &EvaluationReport, scenario_id: Option<&s
         }
         d.field_array_of_objects("results", &report.results, render_scenario_result_json);
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -9604,6 +9993,7 @@ pub fn render_eval_list_json(entries: &[FixtureListEntry], fixture_dir: Option<&
             );
         }
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -9905,9 +10295,16 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
         SchemaEntry {
             id: crate::core::curate::CAPTURE_SUGGESTIONS_SCHEMA_V1,
             version: "1",
-            description: "Read-only ambient capture suggestions with explicit curation accept/reject commands",
+            description: "Legacy ambient capture suggestions contract (superseded by v2 canonical provenance)",
             category: "curate",
-            definition: capture_suggestions_schema_definition,
+            definition: capture_suggestions_v1_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::core::curate::CAPTURE_SUGGESTIONS_SCHEMA_V2,
+            version: "2",
+            description: "Read-only ambient capture suggestions with canonical opaque provenance",
+            category: "curate",
+            definition: capture_suggestions_v2_schema_definition,
         },
         SchemaEntry {
             id: crate::core::curate::CURATE_AUTO_PROMOTE_SCHEMA_V1,
@@ -11259,8 +11656,12 @@ fn curate_candidates_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.curate.candidates.v1.json").to_string()
 }
 
-fn capture_suggestions_schema_definition() -> String {
+fn capture_suggestions_v1_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.capture_suggestions.v1.json").to_string()
+}
+
+fn capture_suggestions_v2_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.capture_suggestions.v2.json").to_string()
 }
 
 fn curate_auto_promote_schema_definition() -> String {
@@ -12176,6 +12577,7 @@ pub fn render_mcp_manifest_json() -> String {
         d.field_array_of_objects("schemas", public_schemas(), render_public_schema_entry);
         d.field_raw("degraded", "[]");
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -12409,6 +12811,7 @@ pub fn help_json() -> String {
             }
         });
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -12546,7 +12949,19 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         subcommands: &[],
         args: &[CommandArg {
             name: "TOPIC",
-            description: "Documentation topic (guide, commands, contracts, schemas, paths, env, exit-codes, fields, errors, formats, examples)",
+            description: "Documentation topic (guide, commands, contracts, schemas, paths, env, exit-codes, fields, errors, formats, examples, recipes)",
+            required: false,
+            default: None,
+        }],
+    },
+    CommandEntry {
+        name: "ask",
+        description: "Answer a direct question with citations or honest abstention",
+        available: true,
+        subcommands: &[],
+        args: &[CommandArg {
+            name: "QUESTION",
+            description: "Question to answer extractively from stored memories",
             required: false,
             default: None,
         }],
@@ -13555,6 +13970,7 @@ pub fn render_introspect_json() -> String {
             }
         });
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -13718,6 +14134,7 @@ pub fn render_agent_detect_json(report: &InstalledAgentDetectionReport) -> Strin
             obj.field_raw("rootPaths", &strings_to_json_array(&agent.root_paths));
         });
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -13752,6 +14169,7 @@ pub fn render_agent_detect_toon(report: &InstalledAgentDetectionReport) -> Strin
 
 #[must_use]
 pub fn render_agent_status_json(report: &AgentInventoryReport) -> String {
+    let degraded = aggregate_agent_inventory_degradations(&report.degraded);
     let mut b = JsonBuilder::with_capacity(2048);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool(
@@ -13763,6 +14181,7 @@ pub fn render_agent_status_json(report: &AgentInventoryReport) -> String {
         d.field_str("version", env!("CARGO_PKG_VERSION"));
         render_agent_inventory_json(d, "inventory", report, true);
     });
+    b.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     b.finish()
 }
 
@@ -13807,8 +14226,9 @@ pub fn render_agent_status_toon(report: &AgentInventoryReport) -> String {
 }
 
 use crate::core::agent_docs::{
-    AGENT_DOC_RECIPES, AgentDocsReport, AgentDocsTopic, CONTRACTS, DEFAULT_PATHS, EXAMPLES,
-    EXIT_CODES, FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS, env_var_entries,
+    AGENT_CORE_COMMANDS, AGENT_DOC_RECIPES, AgentDocsReport, AgentDocsTopic, CONTRACTS,
+    DEFAULT_PATHS, EXAMPLES, EXIT_CODES, FIELD_LEVELS, GUIDE_SECTIONS, OUTPUT_FORMATS,
+    env_var_entries,
 };
 
 #[must_use]
@@ -13833,12 +14253,11 @@ pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
                 "primaryWorkflow",
                 "ee pack \"<task>\" --workspace . --max-tokens 4000 --json",
             );
-            d.field_array_of_strs(
-                "coreCommands",
-                &[
-                    "init", "remember", "search", "ask", "pack", "lens", "orient", "why", "status",
-                ],
-            );
+            let core_commands = AGENT_CORE_COMMANDS
+                .iter()
+                .map(|command| command.name)
+                .collect::<Vec<_>>();
+            d.field_array_of_strs("coreCommands", &core_commands);
             d.field_str("recipeCatalogCommand", "ee agent-docs recipes --json");
             d.field_raw("recipeCount", &AGENT_DOC_RECIPES.len().to_string());
             d.field_array_of_strs(
@@ -14717,6 +15136,7 @@ pub fn render_check_json_filtered(report: &CheckReport, profile: FieldProfile) -
 /// Render a quarantine report as JSON with field filtering.
 #[must_use]
 pub fn render_quarantine_json_filtered(report: &QuarantineReport, profile: FieldProfile) -> String {
+    let degraded = aggregate_quarantine_degradations(&report.degraded);
     let mut b = JsonBuilder::with_capacity(1024);
     b.field_str("schema", RESPONSE_SCHEMA_V2);
     b.field_bool("success", true);
@@ -14762,10 +15182,10 @@ pub fn render_quarantine_json_filtered(report: &QuarantineReport, profile: Field
             );
             d.field_array_of_objects("atRiskSources", &report.at_risk_sources, build_entry);
             d.field_array_of_objects("blockedSources", &report.blocked_sources, build_entry);
-            let degraded = aggregate_quarantine_degradations(&report.degraded);
             d.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
         }
     });
+    b.field_array_of_objects("degraded", &degraded, build_aggregated_degradation);
     b.finish()
 }
 
@@ -15948,7 +16368,8 @@ pub fn render_lab_capture_json(report: &CaptureReport) -> String {
             "wal_retention_kind": report.wal_retention_kind,
             "dry_run": report.dry_run,
             "captured_at": report.captured_at,
-        }
+        },
+        "degraded": [],
     });
     json.to_string()
 }
@@ -16382,7 +16803,8 @@ pub fn render_preflight_close_json(report: &CloseReport) -> String {
             "feedback": report.feedback,
             "dry_run": report.dry_run,
             "closed_at": report.closed_at,
-        }
+        },
+        "degraded": [],
     });
     json.to_string()
 }
@@ -16599,7 +17021,8 @@ pub fn render_procedure_export_json(report: &ProcedureExportReport) -> String {
             "installMode": report.install_mode,
             "warnings": report.warnings,
             "exportedAt": report.exported_at,
-        }
+        },
+        "degraded": [],
     })
     .to_string()
 }
@@ -16658,7 +17081,8 @@ pub fn render_procedure_promote_json(report: &ProcedurePromoteReport) -> String 
             "warnings": report.warnings,
             "nextActions": report.next_actions,
             "generatedAt": report.generated_at,
-        }
+        },
+        "degraded": [],
     })
     .to_string()
 }
@@ -16798,7 +17222,8 @@ pub fn render_procedure_retire_json(report: &ProcedureRetireReport) -> String {
             "auditId": report.audit_id,
             "reason": report.reason,
             "retiredAt": report.retired_at,
-        }
+        },
+        "degraded": [],
     })
     .to_string()
 }
@@ -16853,7 +17278,8 @@ pub fn render_procedure_verify_json(report: &ProcedureVerifyReport) -> String {
             "dryRun": report.dry_run,
             "confidence": report.confidence,
             "nextActions": report.next_actions,
-        }
+        },
+        "degraded": [],
     })
     .to_string()
 }
@@ -16897,7 +17323,8 @@ pub fn render_procedure_drift_json(report: &ProcedureDriftReport) -> String {
             "counts": report.counts,
             "signals": report.signals,
             "nextActions": report.next_actions,
-        }
+        },
+        "degraded": [],
     })
     .to_string()
 }
@@ -18134,6 +18561,7 @@ pub fn render_diag_claims_json(report: &crate::core::claims::DiagClaimsReport) -
         });
         d.field_array_of_strings("repairActions", &report.repair_actions);
     });
+    b.field_raw("degraded", "[]");
     b.finish()
 }
 
@@ -18215,34 +18643,36 @@ mod tests {
         ContextJsonRenderOptions, Degradation, DegradationSeverity, FieldProfile, JsonBuilder,
         OutputContext, OutputEnvironment, Renderer, ResponseEnvelope, SHADOW_RUN_SCHEMA_V1,
         ShadowRunComparison, ShadowRunReport, build_aggregated_degradation, error_response_json,
-        escape_json_string, help_text, human_status, render_agent_docs_json,
+        escape_json_string, help_json, help_text, human_status, render_agent_docs_json,
         render_agent_docs_toon, render_capabilities_json, render_capabilities_json_filtered,
         render_check_json, render_check_json_filtered, render_context_response_json,
         render_context_response_json_with_options, render_context_response_markdown,
         render_context_response_toon, render_dependency_diagnostics_json,
         render_doctor_concise_json, render_doctor_concise_toon, render_doctor_json,
-        render_doctor_json_filtered, render_doctor_toon, render_fix_plan_json,
+        render_doctor_json_filtered, render_doctor_toon, render_eval_list_json,
+        render_eval_report_json, render_fix_plan_json, render_graph_diag_json,
         render_handoff_create_json, render_handoff_create_toon, render_handoff_inspect_json,
         render_handoff_inspect_toon, render_handoff_preview_json, render_handoff_preview_toon,
         render_handoff_resume_json, render_handoff_resume_toon, render_health_json,
-        render_health_toon, render_integrity_diagnostics_json, render_learn_cluster_json,
-        render_learn_experiment_proposal_human, render_learn_experiment_proposal_json,
-        render_learn_experiment_proposal_toon, render_memory_history_json,
-        render_memory_history_toon, render_memory_impact_analysis_json,
-        render_memory_impact_analysis_markdown, render_memory_impact_analysis_toon,
-        render_memory_list_json, render_memory_show_human, render_memory_show_json,
-        render_pack_dna_json, render_pack_dna_markdown, render_pack_dna_toon,
-        render_preflight_run_json, render_preflight_show_json, render_proximity_json,
-        render_proximity_markdown, render_proximity_toon, render_quarantine_entry_human,
-        render_quarantine_entry_json, render_quarantine_entry_toon, render_quarantine_human,
-        render_quarantine_json, render_quarantine_json_filtered, render_quarantine_toon,
-        render_schema_export_json, render_schema_list_json, render_shadow_run_human,
-        render_shadow_run_json, render_shadow_run_toon, render_status_json,
-        render_status_json_filtered, render_status_json_with_meta, render_status_skyline_json,
-        render_status_skyline_markdown, render_status_skyline_toon, render_status_toon,
-        render_structural_health_json, render_structural_health_markdown,
-        render_structural_health_toon, render_version_json, render_why_causal_json,
-        render_why_causal_markdown, render_why_causal_toon, schema_json, status_response_json,
+        render_health_toon, render_integrity_diagnostics_json, render_introspect_json,
+        render_learn_cluster_json, render_learn_experiment_proposal_human,
+        render_learn_experiment_proposal_json, render_learn_experiment_proposal_toon,
+        render_mcp_manifest_json, render_memory_history_json, render_memory_history_toon,
+        render_memory_impact_analysis_json, render_memory_impact_analysis_markdown,
+        render_memory_impact_analysis_toon, render_memory_list_json, render_memory_show_human,
+        render_memory_show_json, render_pack_dna_json, render_pack_dna_markdown,
+        render_pack_dna_toon, render_preflight_run_json, render_preflight_show_json,
+        render_proximity_json, render_proximity_markdown, render_proximity_toon,
+        render_quarantine_entry_human, render_quarantine_entry_json, render_quarantine_entry_toon,
+        render_quarantine_human, render_quarantine_json, render_quarantine_json_filtered,
+        render_quarantine_toon, render_schema_export_json, render_schema_list_json,
+        render_shadow_run_human, render_shadow_run_json, render_shadow_run_toon,
+        render_status_json, render_status_json_filtered, render_status_json_with_meta,
+        render_status_skyline_json, render_status_skyline_markdown, render_status_skyline_toon,
+        render_status_toon, render_streams_json, render_structural_health_json,
+        render_structural_health_markdown, render_structural_health_toon, render_version_json,
+        render_why_causal_json, render_why_causal_markdown, render_why_causal_toon, schema_json,
+        status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
     use crate::core::degraded_aggregation::AggregatedDegradation;
@@ -18890,10 +19320,18 @@ mod tests {
 
     #[test]
     fn quarantine_report_output_redacts_sensitive_source_id() -> TestResult {
-        let report = output_test_quarantine_report(
+        let mut report = output_test_quarantine_report(
             "file:///Volumes/USBNVME16TB/private/quarantine.json#token=redaction-fixture"
                 .to_owned(),
         );
+        report
+            .degraded
+            .push(crate::core::quarantine::QuarantineDegradation {
+                code: "quarantine_state_unavailable",
+                severity: "medium",
+                message: "Quarantine state was only partially inspected.".to_owned(),
+                repair: "Run ee diag quarantine --json",
+            });
 
         for (surface, rendered) in [
             ("json", render_quarantine_json(&report)),
@@ -18914,6 +19352,17 @@ mod tests {
                     && !rendered.contains("redaction-fixture"),
                 format!("quarantine report {surface} leaked sensitive source id: {rendered}"),
             )?;
+        }
+
+        for (context, rendered) in [
+            ("quarantine JSON", render_quarantine_json(&report)),
+            (
+                "filtered quarantine JSON",
+                render_quarantine_json_filtered(&report, FieldProfile::Full),
+            ),
+        ] {
+            let value = parse_rendered_json(&rendered, context)?;
+            ensure_top_level_degraded_mirrors_data_degraded(&value, context)?;
         }
         Ok(())
     }
@@ -19093,6 +19542,7 @@ mod tests {
         assert_eq!(parsed["schema"], RESPONSE_SCHEMA_V2);
         assert_eq!(parsed["success"], true);
         assert_eq!(parsed["data"]["command"], "procedure retire");
+        assert_eq!(parsed["degraded"], serde_json::json!([]));
         assert_eq!(
             parsed["data"]["schema"],
             crate::core::procedure::PROCEDURE_RETIRE_REPORT_SCHEMA_V1
@@ -19476,6 +19926,13 @@ mod tests {
 
         let capabilities = crate::core::capabilities::CapabilitiesReport::gather();
         let check = crate::core::check::CheckReport::gather();
+        let streams = crate::core::streams::StreamsReport {
+            stdout_isolated: true,
+            stderr_received_probe: true,
+            stderr_probe_message: "test probe".to_owned(),
+            version: env!("CARGO_PKG_VERSION"),
+        };
+        let eval = crate::eval::EvaluationReport::new();
         for (context, json) in [
             ("capabilities JSON", render_capabilities_json(&capabilities)),
             (
@@ -19487,6 +19944,16 @@ mod tests {
                 "filtered check JSON",
                 render_check_json_filtered(&check, FieldProfile::Standard),
             ),
+            (
+                "graph diagnostics JSON",
+                render_graph_diag_json(&crate::graph::module_readiness()),
+            ),
+            ("streams diagnostics JSON", render_streams_json(&streams)),
+            ("evaluation JSON", render_eval_report_json(&eval, None)),
+            ("evaluation list JSON", render_eval_list_json(&[], None)),
+            ("MCP manifest JSON", render_mcp_manifest_json()),
+            ("help JSON", help_json()),
+            ("introspect JSON", render_introspect_json()),
             ("schema list JSON", render_schema_list_json()),
         ] {
             let value = parse_rendered_json(&json, context)?;
@@ -20368,11 +20835,13 @@ mod tests {
             })
             .degraded_array(&degradations, |obj, (code, msg)| {
                 obj.field_str("code", code);
+                obj.field_str("severity", "warning");
                 obj.field_str("message", msg);
             })
             .finish();
         ensure_contains(&json, "\"degraded\":[{", "degraded array start")?;
-        ensure_contains(&json, "\"code\":\"code1\"", "degradation code")
+        ensure_contains(&json, "\"code\":\"code1\"", "degradation code")?;
+        ensure_contains(&json, "\"severity\":\"warning\"", "degradation severity")
     }
 
     #[test]
@@ -20541,12 +21010,12 @@ mod tests {
     }
 
     #[test]
-    fn context_response_json_renders_provenance() -> TestResult {
+    fn pack_response_json_renders_provenance() -> TestResult {
         let response = context_response_fixture()?;
         let json = render_context_response_json(&response);
 
         ensure_starts_with(&json, "{\"schema\":\"ee.response.v2\"", "schema")?;
-        ensure_contains(&json, "\"command\":\"context\"", "command")?;
+        ensure_contains(&json, "\"command\":\"pack\"", "command")?;
         ensure_contains(
             &json,
             "\"provenance\":[{\"uri\":\"file://AGENTS.md#L42\",\"scheme\":\"file\",\"label\":\"AGENTS.md:L42\",\"locator\":\"L42\",\"note\":\"source evidence\"}]",
@@ -22431,7 +22900,8 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             &Some("degraded"),
             "inner summary.status must be preserved verbatim from the sample report",
-        )
+        )?;
+        ensure_top_level_degraded_mirrors_data_degraded(&value, "structural health JSON envelope")
     }
 
     #[test]

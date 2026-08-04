@@ -1,28 +1,241 @@
 # Changelog
 
-This changelog was reconstructed from the repository, not from memory. Sources
-used for this pass were `AGENTS.md`, `README.md`, Cargo metadata, source module
-entrypoints, tests, docs, checked-in Beads records, tags, and non-merge git
-history through the audit head linked below on 2026-05-20.
+This changelog is a research artifact, not a marketing page. Sources for the
+current head are git history, annotated tags, published GitHub Releases,
+`AGENTS.md`, `README.md`, ADRs under `docs/adr/`, Cargo metadata, and
+checked-in Beads records. The durable research ledger is
+[`CHANGELOG_RESEARCH.md`](./CHANGELOG_RESEARCH.md).
 
-Scope window: first commit on 2026-04-29 through
-[`050602500c566e1e2603bb36a1f1cdcae1d292c3`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/050602500c566e1e2603bb36a1f1cdcae1d292c3)
-on 2026-05-20.
+## Scope and methodology
 
-Release status:
+| Window | Coverage |
+| --- | --- |
+| 2026-04-29 → 2026-05-20 | Full archaeology pass that created this file (see historical note below). |
+| 2026-05-15 → 2026-06-16 | Published GitHub Releases `v0.1.0` … `v0.12.0` (assets on GitHub; detailed prose below is still incomplete for `0.4.0`–`0.12.0`). |
+| 2026-06-16 → 2026-07-30 | **`0.13.0`** fully researched below (`v0.12.0`..`HEAD`, 673 non-merge commits). |
 
-- The repository has one git tag: [`v0.1.0`](https://github.com/Dicklesworthstone/eidetic_engine_cli/tree/v0.1.0), tagged on 2026-05-15.
-- `gh release list` returned no GitHub Release rows at the time of this audit. The tag exists; a GitHub Release page with assets/notes does not.
-- Source install is the live path. GitHub binary releases, Homebrew, and crates.io remain planned surfaces in `README.md`.
+Release surface (as of 2026-07-30):
 
-Evidence scale:
+- Latest **published** GitHub Release before this cut: [`v0.12.0`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.12.0) (2026-06-16).
+- `Cargo.toml` already carried `version = "0.13.0"` from
+  [`861d5fb7`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/861d5fb7) (2026-06-21); this cut tags and ships that version with post-bump fixes.
+- Install path: `curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash -s -- --easy-mode --verify`
 
-- 3,516 non-merge commits were reviewed at the history level.
-- `.beads/issues.jsonl` showed 2,113 closed issues, 150 open issues, 67 blocked issues, 3 in-progress issues, and 1 deferred issue during this audit.
-- There was no root `CHANGELOG.md` before this pass.
-- The detailed audit ledger lives in [`CHANGELOG_RESEARCH.md`](./CHANGELOG_RESEARCH.md).
+### Version timeline (tags and GitHub Releases)
+
+| Version | Date | GitHub Release | Notes |
+| --- | --- | --- | --- |
+| [0.13.0](#0130---2026-07-30) | 2026-07-30 | this cut | User-global store, Learn→Pack loop, pack-ledger integrity, group-commit / incremental index, installer hardening |
+| [0.12.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.12.0) | 2026-06-16 | yes | Contention observability, RCH topology canary, ask/decide/session-budget wave |
+| [0.11.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.11.0) | 2026-06-15 | yes | `ee decide`, `ee ask`, memory-debt doctor, scale envelope |
+| [0.10.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.10.0) | 2026-06-15 | yes | See release notes on GitHub |
+| [0.9.1](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.9.1) | 2026-06-12 | yes | Patch after 0.9.0 |
+| [0.9.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.9.0) | 2026-06-12 | yes | Anchored recall, workspace primer, output governor, swarm claim-gate |
+| [0.8.1](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.8.1) | 2026-06-09 | yes | Patch |
+| [0.8.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.8.0) | 2026-06-08 | yes | See GitHub |
+| [0.7.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.7.0) | 2026-06-07 | yes | See GitHub |
+| [0.6.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.6.0) | 2026-06-06 | yes | See GitHub |
+| [0.5.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.5.0) | 2026-06-04 | yes | See GitHub |
+| [0.4.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.4.0) | 2026-06-02 | tag present | Expand prose in a later pass if needed |
+| [0.3.9](#039---2026-06-01) | 2026-06-01 | yes | Detailed below |
+| … | … | … | Earlier entries remain below through [0.1.0](#010---2026-05-15) |
+
+Versions `0.4.0`–`0.12.0` are **real published releases** (or tags). Prefer the
+GitHub Release page for asset lists and the original generated notes until a
+future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
+
+_Nothing staged beyond 0.13.0 at cut time._
+
+## [0.13.0] - 2026-07-30
+
+Durable, local-first, explainable memory for coding agents. This release rolls
+up **673 commits** since [`v0.12.0`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.12.0)
+(~102 `feat`, ~232 `fix`, ~130 `test`) across the core memory loop, search
+index corpus, pack integrity, daemon write path, installer, and agent
+contracts. Minor bump per the pre-1.0 convention (features land as minor).
+
+Version was set in-tree by
+[`861d5fb7`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/861d5fb7)
+on 2026-06-21; this cut tags `v0.13.0` on current `main` so post-bump
+storage, index-publication, and installer fixes ship in the same binary.
+
+### Highlights
+
+#### User-global memory store (ADR 0083)
+
+- Separate local store at the user data root (`…/global/`) with schema/migration
+  parity to a workspace store.
+- Normal verbs operate on it via `--global` (selector conflicts with
+  `--database`; workspace-id guard keeps stores isolated).
+- Replaces the earlier policy-only / write-mostly global tier with real open,
+  migrate, remember, and list paths
+  ([`09ecf4f8`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/09ecf4f8),
+  [`919caaf7`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/919caaf7);
+  [ADR 0083](docs/adr/0083-user-global-memory-store.md)).
+
+#### Learn → Retrieve → Pack loop closed for rules and evidence
+
+- Procedural rules join the derived search corpus and hydrate into pack
+  candidates through source-memory linkage
+  ([`b19d8075`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/b19d8075),
+  [`f96deb2d`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/f96deb2d);
+  bd-3h6bz).
+- Imported CASS evidence spans become searchable documents and hydrate when
+  distilled; undistilled spans degrade honestly
+  (`context_evidence_hit_unhydrated`) instead of looking like pack items
+  ([`dba0cf30`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/dba0cf30),
+  [`0e438e14`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/0e438e14);
+  bd-16imy).
+- Typed pack entity identity work (ADR 0085) keeps memory / rule / evidence
+  identities distinct for pack, replay, and why surfaces
+  ([ADR 0085](docs/adr/0085-typed-pack-entity-identity.md)).
+
+#### Pack ledger integrity and public replay (v2 contracts)
+
+- Pack history reads prefer the integrity-verified selection ledger over
+  denormalized convenience rows (V084 profile domain + ledger read APIs)
+  ([`910b872d`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/910b872d)).
+- Public ID projection and replay-text redaction so support bundles, handoff,
+  and swarm surfaces never echo raw secret-shaped values
+  ([`f78c9963`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/f78c9963)).
+- Wire schemas and handlers:
+  `ee.pack.replay.v2`, `ee.pack.diff.v2`, `ee.context.delta.v2`,
+  support-bundle pack-replay summary v2, and public attestation projection
+  ([`31fb02ea`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/31fb02ea),
+  [`9789f684`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/9789f684),
+  [`900ab215`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/900ab215),
+  [`a62b7e95`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/a62b7e95),
+  [`2b0b5667`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/2b0b5667)).
+- Top-level JSON envelopes surface `degraded[]` even under minimal field
+  profiles so agents can plan recovery without the full `data` tree
+  ([`4f07392f`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/4f07392f)).
+- `--schema-version` selects response **renderer generation** (`v1` = current
+  `ee.response.v2` wire shape; `v0` = legacy compatibility)
+  ([`248bfb12`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/248bfb12)).
+
+#### Hot-path write + index intake (ADRs 0077 / 0078)
+
+- Group-commit write intake contract, config, telemetry, and daemon write-owner
+  path (`ee.daemon.write`, journal coalescing, `ee.daemon.write_journal`)
+  ([ADR 0077](docs/adr/0077-group-commit-write-intake.md);
+  [`80c250f3`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/80c250f3),
+  [`a47b71e7`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/a47b71e7),
+  [`7f86703f`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/7f86703f)).
+- Coalesced-batch **incremental** index intake when the touched set is safe;
+  otherwise full rebuild remains the audited fallback
+  ([ADR 0078](docs/adr/0078-incremental-index-intake.md);
+  [`306272ed`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/306272ed)).
+- Corpus publication stamps a deterministic corpus revision and exact
+  per-source/per-tier counts; legacy memory-only generations cannot be
+  relabeled as current after rule/evidence expansion
+  ([`6ad42dd5`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/6ad42dd5);
+  bd-1zfau). Migrations V080–V087 cover generation floors, audit timeline,
+  memory-debt snapshots, pack profiles, evidence security posture, rule
+  generations, and evidence storage rebuild.
+
+#### Search, capture, and swarm authority
+
+- Rerank `auto|off` + top-k config; first-use reranker auto-provision with
+  honest fusion-only degradation offline
+  ([`ff9c87e0`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/ff9c87e0),
+  [`638998b5`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/638998b5)).
+- Ambient capture command wiring and coverage-gap / capture-demand reporting
+  ([`b8526743`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/b8526743)).
+- CASS prefetch coordinator with gated schedule, budget accounting, and
+  per-workspace metrics
+  ([`884de00a`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/884de00a)).
+- Agent Mail snapshot v1 freshness and workspace-binding authority for swarm
+  brief / claim evidence
+  ([`9dacddeb`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/9dacddeb)).
+- Insights unscoped bundle carries per-section pagination so truncation is
+  visible (GH#15)
+  ([`3c444c5e`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/3c444c5e)).
+
+#### Installer
+
+- Bash 3.2-safe empty-array expansion under `set -u` (proxy, agent detection,
+  box rendering, archive candidates) so proxy-free macOS installs resolve the
+  latest release and agent-less hosts no longer fail post-install config
+  ([`7c107614`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/7c107614)).
+- Compatible GNU archive retry when preferred musl is absent on x86_64 Linux;
+  one-byte network preflight instead of downloading the archive twice (already
+  staged in Unreleased and carried into this release).
+
+### Fixed
+
+- Evidence rescreen / rebuild atomicity and V087 registry realignment so
+  corrupt or legacy evidence rows do not poison publication
+  (see `fix(db):` series culminating in
+  [`5f2aea8c`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/5f2aea8c),
+  [`efa2f4e5`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/efa2f4e5)).
+- Search preserves unfiltered evidence hits when admission filters would drop
+  the only supporting document
+  ([`9b492289`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/9b492289)).
+- RCH / verify path: pinned Franken-stack topology, Cargo config provenance
+  attestation, worker-pressure classification, and portable pinned bundles
+  (verify series on main after the version bump).
+- Envelope / golden isolation: host topology, process env, and degraded
+  mirrors no longer leak machine-specific fields into contract tests.
+
+### Migrations agents may need
+
+```bash
+ee migrate run --workspace .
+ee index rebuild --workspace .   # if doctor/status report index stale or corpus revision mismatch
+```
+
+Schema versions of note: V084 (pack profiles / ledger), V085–V087 (evidence
+security posture and storage rebuild), V086 (rule index generations).
+
+### Platforms
+
+Same matrix as recent releases: macOS (`aarch64`, `x86_64`), Linux
+(`aarch64`/`x86_64` gnu; musl when published), Windows (`x86_64`). Prefer the
+**maintained** installer on `main` rather than any stale `install.sh` asset
+bundled with an older release.
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash -s -- --easy-mode --verify
+ee --version   # ee 0.13.0
+ee doctor --json
+```
+
+### Closed workstreams (representative)
+
+| Theme | Beads / ADRs | Representative commits |
+| --- | --- | --- |
+| User-global store | bd-2vq2z.13, ADR 0083 | [`09ecf4f8`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/09ecf4f8), [`919caaf7`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/919caaf7) |
+| Rules in search/pack | bd-3h6bz | [`b19d8075`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/b19d8075), [`f96deb2d`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/f96deb2d) |
+| Evidence in search/pack | bd-16imy | [`dba0cf30`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/dba0cf30), [`0e438e14`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/0e438e14) |
+| Pack ledger / replay v2 | V084, schemas | [`910b872d`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/910b872d), [`9789f684`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/9789f684) |
+| Group-commit + daemon write | bd-d67os.*, bd-wx6ou.* | [`80c250f3`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/80c250f3), [`306272ed`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/306272ed) |
+| Corpus publication | bd-1zfau | [`6ad42dd5`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/6ad42dd5) |
+| Installer Bash 3.2 | installer tests | [`7c107614`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/7c107614) |
+
+### Notes for agents
+
+- Prefer `ee pack` over the soft-deprecated `ee context` alias.
+- Treat non-empty `degraded[]` as actionable; do not assume empty under
+  minimal profiles after this release.
+- After upgrade, run `ee doctor --json` before assuming the index corpus
+  includes rules and evidence.
+- Swarm claim gates must still see a fresh, workspace-bound Agent Mail
+  snapshot; stale/foreign snapshots are no longer authoritative.
+
+---
+
+## Historical archaeology note (2026-05-20)
+
+The original changelog body below was reconstructed from the repository, not
+from memory. Sources for that pass were `AGENTS.md`, `README.md`, Cargo
+metadata, source module entrypoints, tests, docs, checked-in Beads records,
+tags, and non-merge git history through
+[`050602500c566e1e2603bb36a1f1cdcae1d292c3`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/050602500c566e1e2603bb36a1f1cdcae1d292c3)
+on 2026-05-20. At that time only `v0.1.0` existed as a tag and GitHub Releases
+had not yet been cut for later versions. The detailed audit ledger remains in
+[`CHANGELOG_RESEARCH.md`](./CHANGELOG_RESEARCH.md).
 
 ## [0.3.9] - 2026-06-01
 

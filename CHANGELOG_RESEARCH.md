@@ -294,3 +294,56 @@ Ops, safety, and mesh:
   tracker records are not exposed as stable GitHub issue URLs.
 - The repository was already in a multi-agent dirty state. The changelog pass
   intentionally avoided modifying existing source/docs/test files.
+
+---
+
+## Chunk: 0.13.0 release window (2026-07-30)
+
+Status: distilled → shipped in CHANGELOG.md `[0.13.0]`
+
+### Range
+
+- Base: `v0.12.0` (GitHub Release 2026-06-16)
+- Head: `772106382fd6701cfad28d3f42a2d7cf281bd53b` (2026-07-30)
+- Cargo version already `0.13.0` since `861d5fb7` (2026-06-21); tag cut later with post-bump fixes
+
+### Counts
+
+```text
+total non-merge: 673
+feat: ~102
+fix: ~232
+test: ~130
+```
+
+### Sources
+
+- `git log v0.12.0..HEAD`
+- `gh release list` / `gh release view v0.12.0`
+- ADRs 0077, 0078, 0083, 0085
+- Unreleased installer/corpus bullets already staged in CHANGELOG.md
+- Conventional-commit scopes: index, db, pack, swarm, daemon, installer, memory, search
+
+### Capability waves distilled into CHANGELOG
+
+1. User-global memory store (ADR 0083)
+2. Rules + evidence in search/pack (bd-3h6bz, bd-16imy)
+3. Pack ledger integrity + v2 replay/diff/context-delta/attest
+4. Group-commit + incremental index intake (ADR 0077/0078)
+5. Corpus publication fail-closed (bd-1zfau)
+6. Installer Bash 3.2 / musl→gnu retry
+7. Swarm Agent Mail snapshot authority
+8. Rerank config + ambient capture + CASS prefetch
+
+### Gaps deliberately left open
+
+- Full prose for published releases `0.4.0`–`0.12.0` still points at GitHub Release pages via the version timeline table; not re-audited commit-by-commit in this pass.
+- Mesh team-memory confederation remains docs-only at head (`docs(mesh): plan team memory confederation`).
+
+### Validation checklist (0.13.0 section)
+
+- [x] Scope window explicit
+- [x] Live commit URLs for representatives
+- [x] Release vs tag distinguished for prior versions
+- [x] Capability waves not raw commit dump
+- [x] Agent notes + migrations called out

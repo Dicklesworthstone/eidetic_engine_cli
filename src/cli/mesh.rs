@@ -48,8 +48,8 @@ use crate::mesh::foreground_cli::{
     MESH_EXPORT_ARTIFACT_SCHEMA_V1, MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE, MeshCliDegradation,
     MeshCliExportReport, MeshCliImportReport, MeshCliPeersReport, MeshCliStatusReport,
     MeshCliSyncReport, MeshExportArtifact, MeshForegroundSnapshot, MeshStorageCounts,
-    MeshSyncSupervisorOptions, MeshSyncSupervisorReport, foreground_degradations,
-    run_mesh_sync_supervisor_supervised,
+    MeshSyncSupervisorOptions, MeshSyncSupervisorReport, apply_outbound_export_policy,
+    foreground_degradations, run_mesh_sync_supervisor_supervised,
 };
 use crate::mesh::hello_responder::HelloResponderStatusReport;
 use crate::mesh::peer::{
@@ -64,7 +64,10 @@ use crate::mesh::tailscale_autodiscovery::{
 };
 use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
-use crate::policy::{MESH_SECRET_EXPORT_DENIED_CODE, MeshExportSecretScanReport};
+use crate::policy::{
+    MESH_SECRET_EXPORT_DENIED_CODE, MeshExportSecretScanReport, OsSecretFindingRandom,
+    decorate_export_secret_findings,
+};
 
 use super::{Cli, write_domain_error, write_stdout};
 
@@ -594,6 +597,13 @@ pub struct MeshExportArgs {
     /// Write the mesh export artifact to this local file.
     #[arg(long = "out", value_name = "PATH")]
     pub out: Option<PathBuf>,
+
+    /// Target peer id whose outbound policy (`[[mesh.peer_policies]]`) governs
+    /// what may be exported. When set, each event is filtered per record and
+    /// lane: records the peer may not receive are dropped, and bodies are
+    /// stripped when the body lane is denied. Omit for an unfiltered self-export.
+    #[arg(long = "peer", value_name = "PEER_ID")]
+    pub peer: Option<String>,
 }
 
 /// Arguments for `ee mesh import`.
@@ -1806,7 +1816,16 @@ where
     };
     let checked_export = match snapshot.checked_export_artifact() {
         Ok(checked_export) => checked_export,
-        Err(secret_scan) => {
+        Err(mut secret_scan) => {
+            // Decorate the denial report's findings with fresh opaque IDs from
+            // the OS CSPRNG at this effectful boundary. A randomness failure is
+            // an ee.error.v2, never a hash-shaped or fallback identifier.
+            if let Err(error) =
+                decorate_export_secret_findings(&mut secret_scan, &mut OsSecretFindingRandom)
+            {
+                let domain_error = mesh_secret_finding_random_error(&error);
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
             let audit_id = match record_mesh_export_secret_scan_audit(
                 cli,
                 args.database.as_deref(),
@@ -1820,7 +1839,20 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
-    let artifact = checked_export.artifact;
+    let mut artifact = checked_export.artifact;
+    // When a target peer is named, its outbound policy governs what may leave:
+    // drop records the peer may not receive and strip denied bodies. This is
+    // the production entry point that makes [[mesh.peer_policies]] load-bearing.
+    if let Some(peer_id) = args.peer.as_deref() {
+        let registry = load_mesh_peer_policy_registry(cli, args.database.as_deref());
+        let filtered = apply_outbound_export_policy(
+            std::mem::take(&mut artifact.events),
+            &registry,
+            &snapshot.workspace_id,
+            peer_id,
+        );
+        artifact.events = filtered.events;
+    }
     let secret_scan = checked_export.secret_scan;
     let audit_id = match record_mesh_export_secret_scan_audit(
         cli,
@@ -1895,6 +1927,60 @@ fn mesh_secret_export_denied_error(
                 .to_owned(),
         ),
         details_json,
+    }
+}
+
+/// Build the peer-policy registry from the effective workspace config. A
+/// missing or unparseable `config.toml` yields an empty registry, so a named
+/// peer with no configured policy fails closed (every record is denied) rather
+/// than leaking an unfiltered export.
+pub(crate) fn load_mesh_peer_policy_registry(
+    cli: &Cli,
+    database_override: Option<&Path>,
+) -> crate::mesh::policy::MeshPeerPolicyRegistry {
+    let workspace_path = cli.resolve_workspace();
+    let config_path = database_override
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| workspace_path.join(".ee"))
+        .join("config.toml");
+    let config = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|contents| crate::config::ConfigFile::parse(&contents).ok())
+        .unwrap_or_default();
+    crate::mesh::policy::MeshPeerPolicyRegistry::from_config(&config)
+}
+
+/// Load the workspace peer-group bindings from the effective config. A missing
+/// or unparseable `config.toml` yields an empty binding set, so an inbound
+/// event whose producer is not an enrolled peer-group member fails closed
+/// (denied) rather than being admitted to local truth. This is the inbound
+/// membership-layer analog of [`load_mesh_peer_policy_registry`] (ADR 0086
+/// TC-D3, plan P0.2/T1.3).
+pub(crate) fn load_mesh_peer_group_bindings(
+    cli: &Cli,
+    database_override: Option<&Path>,
+) -> Vec<crate::config::MeshPeerGroupBinding> {
+    let workspace_path = cli.resolve_workspace();
+    let config_path = database_override
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| workspace_path.join(".ee"))
+        .join("config.toml");
+    std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|contents| crate::config::ConfigFile::parse(&contents).ok())
+        .map(|config| config.mesh.peer_group_bindings.unwrap_or_default())
+        .unwrap_or_default()
+}
+
+fn mesh_secret_finding_random_error(
+    error: &crate::policy::SecretFindingRandomError,
+) -> DomainError {
+    DomainError::Storage {
+        message: format!(
+            "mesh export could not decorate secret findings with secure identifiers: {}",
+            error.message
+        ),
+        repair: Some("Retry on a host with a healthy OS CSPRNG.".to_owned()),
     }
 }
 
@@ -3112,13 +3198,17 @@ fn import_mesh_artifact(
     }
     let connection = open_mesh_connection(&database_path)?;
     let workspace_id = resolve_mesh_workspace_id(&connection, &workspace_path)?;
-    import_mesh_artifact_into_connection(&connection, &workspace_id, artifact)
+    let bindings = load_mesh_peer_group_bindings(cli, database_override);
+    let registry = load_mesh_peer_policy_registry(cli, database_override);
+    import_mesh_artifact_into_connection(&connection, &workspace_id, artifact, &bindings, &registry)
 }
 
 fn import_mesh_artifact_into_connection(
     connection: &DbConnection,
     workspace_id: &str,
     artifact: &MeshExportArtifact,
+    bindings: &[crate::config::MeshPeerGroupBinding],
+    registry: &crate::mesh::policy::MeshPeerPolicyRegistry,
 ) -> Result<(usize, usize, usize), DomainError> {
     let mut imported_peer_count = 0;
     for peer in &artifact.peers {
@@ -3181,6 +3271,7 @@ fn import_mesh_artifact_into_connection(
             )
             .map_err(|error| storage_error("Failed to inspect existing mesh event", error))?;
         let changed = existing.is_none();
+        let decision = decide_import_event(workspace_id, event, bindings, registry);
         connection
             .insert_mesh_import_ledger_event(&InsertMeshImportLedgerEventInput {
                 workspace_id: workspace_id.to_owned(),
@@ -3197,17 +3288,22 @@ fn import_mesh_artifact_into_connection(
                 material_lane: event.material_lane.clone(),
                 redaction_class: event.redaction_class.clone(),
                 trust_lane: event.trust_lane.clone(),
-                import_decision: event.import_decision.clone(),
+                import_decision: decision.import_decision.clone(),
                 local_memory_id: event.local_memory_id.clone(),
                 body_cache_key: event.body_cache_key.clone(),
-                policy_failure_surface_json: event.policy_failure_surface_json.clone(),
-                policy_decision_json: event.policy_decision_json.clone(),
+                policy_failure_surface_json: decision.policy_failure_surface_json.clone(),
+                policy_decision_json: decision.policy_decision_json.clone(),
                 event_json: event.event_json.clone(),
                 imported_at: Some(event.imported_at.clone()),
             })
             .map_err(|error| storage_error("Failed to import mesh event", error))?;
         if changed {
-            enqueue_mesh_import_index_job(connection, workspace_id, event)?;
+            // Deny/quarantine/reject still records the ledger row (the honest
+            // import record) but performs no local-truth side effects: only an
+            // admitted event enqueues an index job / memory-side upsert.
+            if decision.admits {
+                enqueue_mesh_import_index_job(connection, workspace_id, event)?;
+            }
             imported_event_count += 1;
         }
     }
@@ -3216,6 +3312,156 @@ fn import_mesh_artifact_into_connection(
         imported_cursor_count,
         imported_event_count,
     ))
+}
+
+/// The effective inbound decision for one replayed mesh event, ready to write
+/// into the import ledger. `admits` gates every local-truth side effect
+/// (search/index enqueue and any memory-side upsert).
+struct ImportEventDecision {
+    import_decision: String,
+    policy_decision_json: Option<String>,
+    policy_failure_surface_json: Option<String>,
+    admits: bool,
+}
+
+/// Peer-supplied events may not claim trust classes above the `agent_validated`
+/// ceiling; a claim of operator, CASS, or legacy authority is rejected so a
+/// peer cannot launder elevated trust into the local store (ADR 0086 TC-D3).
+const MESH_IMPORT_REJECTED_TRUST_CLAIMS: [&str; 3] =
+    ["human_explicit", "cass_evidence", "legacy_import"];
+
+/// Compose the two-layer inbound authority for one replayed event: the
+/// peer-group membership gate (`[[mesh.peer_group_bindings]]` via
+/// `decide_mesh_import`) followed by the authoritative peer policy
+/// (`[[mesh.peer_policies]]` via `decide_inbound`), under an outer trust-claim
+/// ceiling. Only a bound peer-group member whose policy admits the lane admits
+/// to local truth; everything else records a ledger denial/rejection and
+/// admits nothing. The recorded decision is always computed locally — the
+/// transported `import_decision`/`policy_decision_json` on the event are never
+/// trusted (ADR 0086 TC-D3, plan P0.2/T1.3).
+fn decide_import_event(
+    workspace_id: &str,
+    event: &crate::mesh::foreground_cli::MeshEventRow,
+    bindings: &[crate::config::MeshPeerGroupBinding],
+    registry: &crate::mesh::policy::MeshPeerPolicyRegistry,
+) -> ImportEventDecision {
+    use crate::core::memory_scope::{
+        MeshEventValidity, MeshImportDecisionInput, MeshPeerPolicyDecisionInput,
+        decide_mesh_import, parse_mesh_lane,
+    };
+
+    let denied = |reason: &str| ImportEventDecision {
+        import_decision: "deny".to_owned(),
+        policy_decision_json: Some(
+            json!({
+                "schema": "ee.mesh.policy_decision.v1",
+                "direction": "inbound",
+                "action": "deny",
+                "reason": reason,
+                "materialLane": event.material_lane,
+            })
+            .to_string(),
+        ),
+        policy_failure_surface_json: Some(
+            json!({
+                "schema": "ee.mesh.policy_failure_surface.v1",
+                "code": "mesh_peer_policy_denied",
+                "reason": reason,
+            })
+            .to_string(),
+        ),
+        admits: false,
+    };
+
+    // Outer ceiling: reject an over-claimed trust lane before any policy work.
+    if MESH_IMPORT_REJECTED_TRUST_CLAIMS.contains(&event.trust_lane.as_str()) {
+        return ImportEventDecision {
+            import_decision: "reject".to_owned(),
+            policy_decision_json: Some(
+                json!({
+                    "schema": "ee.mesh.policy_decision.v1",
+                    "direction": "inbound",
+                    "action": "reject",
+                    "reason": "peer_trust_claim_exceeds_ceiling",
+                    "claimedTrustLane": event.trust_lane,
+                })
+                .to_string(),
+            ),
+            policy_failure_surface_json: Some(
+                json!({
+                    "schema": "ee.mesh.policy_failure_surface.v1",
+                    "code": "mesh_peer_policy_rejected",
+                    "reason": "peer_trust_claim_exceeds_ceiling",
+                })
+                .to_string(),
+            ),
+            admits: false,
+        };
+    }
+
+    // Fail closed on an unparseable lane (mirrors the outbound export filter).
+    let Some(lane) = parse_mesh_lane(&event.material_lane) else {
+        return denied("unparseable_material_lane");
+    };
+
+    let origin = event.origin_workspace_id.as_str();
+    let producer = event.producer_peer_id.as_deref().unwrap_or("");
+
+    // Layer 1 — peer-group membership gate.
+    let membership = decide_mesh_import(
+        &MeshImportDecisionInput {
+            local_workspace_id: workspace_id,
+            origin_workspace_id: origin,
+            producer_peer_id: producer,
+            material_lane: lane,
+            event_validity: MeshEventValidity::Valid,
+        },
+        bindings,
+    );
+    if !membership.permits_local_truth_side_effects() {
+        return ImportEventDecision {
+            import_decision: membership.workspace_scope_decision.as_str().to_owned(),
+            policy_decision_json: Some(
+                json!({
+                    "schema": "ee.mesh.policy_decision.v1",
+                    "direction": "inbound",
+                    "layer": "peer_group_membership",
+                    "action": membership.workspace_scope_decision.as_str(),
+                    "reason": membership.reason,
+                    "membership": membership.to_log_fields(),
+                })
+                .to_string(),
+            ),
+            policy_failure_surface_json: Some(
+                json!({
+                    "schema": "ee.mesh.policy_failure_surface.v1",
+                    "code": "mesh_peer_policy_denied",
+                    "reason": membership.reason,
+                })
+                .to_string(),
+            ),
+            admits: false,
+        };
+    }
+
+    // Layer 2 — authoritative peer policy (lane / redaction / trust cap).
+    let policy = registry.decide_inbound(&MeshPeerPolicyDecisionInput {
+        local_workspace_id: workspace_id,
+        origin_workspace_id: origin,
+        producer_peer_id: producer,
+        material_lane: lane,
+        event_validity: MeshEventValidity::Valid,
+        requested_body_bytes: None,
+        body_fetch_consent: false,
+    });
+    ImportEventDecision {
+        import_decision: policy.import.workspace_scope_decision.as_str().to_owned(),
+        policy_decision_json: Some(policy.to_json().to_string()),
+        policy_failure_surface_json: policy
+            .failure_surface()
+            .map(|surface| surface.to_json().to_string()),
+        admits: policy.import.permits_local_truth_side_effects(),
+    }
 }
 
 fn enqueue_mesh_import_index_job(
@@ -4406,6 +4652,171 @@ mod tests {
         assert!(!revocations[0].enabled);
     }
 
+    /// Config that admits `peer_mesh_replay_counts` (origin
+    /// `wsp_remote…0001`) into `wsp_meshreplay…0001` on the metadata lane
+    /// through BOTH layers: a peer-group binding (membership) and a peer
+    /// policy (lane/redaction/trust). Body/embedding stay denied.
+    fn admitting_replay_config() -> crate::config::ConfigFile {
+        crate::config::ConfigFile::parse(
+            r#"
+[[mesh.peer_group_bindings]]
+workspace_id = "wsp_meshreplay0000000000000001"
+peer_group_id = "pg_replay_counts"
+peer_ids = ["peer_mesh_replay_counts"]
+origin_workspace_ids = ["wsp_remote00000000000000000001"]
+default_action = "deny"
+
+[mesh.peer_group_bindings.lanes]
+metadata = "allow"
+body = "deny"
+embedding = "deny"
+graph_link = "allow"
+revision_notice = "allow"
+curation_signal = "allow"
+
+[[mesh.peer_policies]]
+policy_id = "pol_replay_counts"
+workspace_id = "wsp_meshreplay0000000000000001"
+peer_id = "peer_mesh_replay_counts"
+origin_workspace_ids = ["wsp_remote00000000000000000001"]
+trust_lane = "peerAgent"
+import_trust_class = "agent_validated"
+default_action = "deny"
+
+[mesh.peer_policies.allowed_lanes]
+metadata = "allow"
+body = "deny"
+embedding = "deny"
+graph_link = "allow"
+revision_notice = "allow"
+curation_signal = "allow"
+
+[mesh.peer_policies.redaction]
+metadata = "share"
+preview = "redact"
+body = "deny"
+embedding = "deny"
+
+[mesh.peer_policies.body_fetch]
+allowed = false
+requires_consent = true
+max_bytes = 0
+"#,
+        )
+        .expect("admitting replay config parses")
+    }
+
+    fn admitting_replay_authority() -> (
+        Vec<crate::config::MeshPeerGroupBinding>,
+        crate::mesh::policy::MeshPeerPolicyRegistry,
+    ) {
+        let config = admitting_replay_config();
+        let bindings = config.mesh.peer_group_bindings.clone().unwrap_or_default();
+        let registry = crate::mesh::policy::MeshPeerPolicyRegistry::from_config(&config);
+        (bindings, registry)
+    }
+
+    fn replay_event(
+        material_lane: &str,
+        trust_lane: &str,
+    ) -> crate::mesh::foreground_cli::MeshEventRow {
+        crate::mesh::foreground_cli::MeshEventRow {
+            event_id: "mesh_evt_decide_00000000000000000001".to_string(),
+            origin_node_id: "node_mesh_replay_counts".to_string(),
+            origin_workspace_id: "wsp_remote00000000000000000001".to_string(),
+            producer_peer_id: Some("peer_mesh_replay_counts".to_string()),
+            seq: 1,
+            prev_event_hash: None,
+            event_hash: hash_for_test('c'),
+            event_kind: "create".to_string(),
+            logical_memory_id: "mem_mesh_decide".to_string(),
+            content_hash: hash_for_test('d'),
+            material_lane: material_lane.to_string(),
+            redaction_class: "metadataOnly".to_string(),
+            trust_lane: trust_lane.to_string(),
+            import_decision: "allow".to_string(),
+            local_memory_id: None,
+            body_cache_key: None,
+            policy_failure_surface_json: None,
+            policy_decision_json: None,
+            event_json: r#"{"schema":"ee.mesh.event.v1","eventKind":"create"}"#.to_string(),
+            policy_attestation: None,
+            imported_at: "2026-05-21T19:50:02Z".to_string(),
+        }
+    }
+
+    fn failure_code(decision: &ImportEventDecision) -> Option<String> {
+        let raw = decision.policy_failure_surface_json.as_ref()?;
+        serde_json::from_str::<serde_json::Value>(raw)
+            .ok()?
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    }
+
+    const REPLAY_WORKSPACE_ID: &str = "wsp_meshreplay0000000000000001";
+
+    #[test]
+    fn import_event_decision_admits_configured_member_metadata() {
+        let (bindings, registry) = admitting_replay_authority();
+        let event = replay_event("metadata", "peerAgent");
+        let decision = decide_import_event(REPLAY_WORKSPACE_ID, &event, &bindings, &registry);
+        assert!(decision.admits, "configured member metadata must admit");
+        assert_eq!(decision.import_decision, "allow");
+        assert!(decision.policy_failure_surface_json.is_none());
+    }
+
+    #[test]
+    fn import_event_decision_denies_body_lane_under_metadata_only_policy() {
+        let (bindings, registry) = admitting_replay_authority();
+        let event = replay_event("body", "peerAgent");
+        let decision = decide_import_event(REPLAY_WORKSPACE_ID, &event, &bindings, &registry);
+        assert!(!decision.admits, "body lane is denied, admits nothing");
+        assert_eq!(decision.import_decision, "deny");
+        assert_eq!(
+            failure_code(&decision).as_deref(),
+            Some("mesh_peer_policy_denied")
+        );
+    }
+
+    #[test]
+    fn import_event_decision_denies_non_member_peer() {
+        // No bindings => membership gate fails closed regardless of policy.
+        let (_bindings, registry) = admitting_replay_authority();
+        let event = replay_event("metadata", "peerAgent");
+        let decision = decide_import_event(REPLAY_WORKSPACE_ID, &event, &[], &registry);
+        assert!(!decision.admits, "non-member must admit nothing");
+        assert_eq!(decision.import_decision, "deny");
+    }
+
+    #[test]
+    fn import_event_decision_rejects_over_claimed_trust() {
+        let (bindings, registry) = admitting_replay_authority();
+        for claim in ["human_explicit", "cass_evidence", "legacy_import"] {
+            let event = replay_event("metadata", claim);
+            let decision = decide_import_event(REPLAY_WORKSPACE_ID, &event, &bindings, &registry);
+            assert!(
+                !decision.admits,
+                "over-claimed trust ({claim}) must not admit"
+            );
+            assert_eq!(decision.import_decision, "reject", "claim {claim}");
+            assert_eq!(
+                failure_code(&decision).as_deref(),
+                Some("mesh_peer_policy_rejected"),
+                "claim {claim}"
+            );
+        }
+    }
+
+    #[test]
+    fn import_event_decision_fails_closed_on_unparseable_lane() {
+        let (bindings, registry) = admitting_replay_authority();
+        let event = replay_event("not_a_real_lane", "peerAgent");
+        let decision = decide_import_event(REPLAY_WORKSPACE_ID, &event, &bindings, &registry);
+        assert!(!decision.admits, "unparseable lane fails closed");
+        assert_eq!(decision.import_decision, "deny");
+    }
+
     #[test]
     fn mesh_import_counts_only_effective_replay_changes() {
         let connection = DbConnection::open_memory().expect("open memory db");
@@ -4422,12 +4833,27 @@ mod tests {
             .expect("insert workspace");
 
         let artifact = mesh_export_artifact_for_import_counts();
-        let first = import_mesh_artifact_into_connection(&connection, workspace_id, &artifact)
-            .expect("first import");
+        let config = admitting_replay_config();
+        let bindings = config.mesh.peer_group_bindings.clone().unwrap_or_default();
+        let registry = crate::mesh::policy::MeshPeerPolicyRegistry::from_config(&config);
+        let first = import_mesh_artifact_into_connection(
+            &connection,
+            workspace_id,
+            &artifact,
+            &bindings,
+            &registry,
+        )
+        .expect("first import");
         assert_eq!(first, (1, 1, 1));
 
-        let duplicate = import_mesh_artifact_into_connection(&connection, workspace_id, &artifact)
-            .expect("duplicate import");
+        let duplicate = import_mesh_artifact_into_connection(
+            &connection,
+            workspace_id,
+            &artifact,
+            &bindings,
+            &registry,
+        )
+        .expect("duplicate import");
         assert_eq!(
             duplicate,
             (0, 0, 0),
@@ -4451,6 +4877,112 @@ mod tests {
         assert_eq!(
             index_jobs[0].document_id.as_deref(),
             Some(artifact.events[0].event_id.as_str())
+        );
+    }
+
+    #[test]
+    fn mesh_import_records_denial_and_admits_nothing_for_non_member() {
+        let connection = DbConnection::open_memory().expect("open memory db");
+        connection.migrate().expect("migrate db");
+        let workspace_id = "wsp_meshreplay0000000000000001";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-mesh-replay-deny".to_string(),
+                    name: Some("mesh replay deny".to_string()),
+                },
+            )
+            .expect("insert workspace");
+
+        // No peer-group bindings and an empty policy registry => the producer
+        // is not a bound member, so the membership gate denies before policy.
+        let artifact = mesh_export_artifact_for_import_counts();
+        let empty_registry = crate::mesh::policy::MeshPeerPolicyRegistry::from_config(
+            &crate::config::ConfigFile::default(),
+        );
+        let counts = import_mesh_artifact_into_connection(
+            &connection,
+            workspace_id,
+            &artifact,
+            &[],
+            &empty_registry,
+        )
+        .expect("import");
+        assert_eq!(
+            counts,
+            (1, 1, 1),
+            "peer/cursor/event ledger rows are still recorded honestly"
+        );
+
+        let events = connection
+            .list_mesh_import_ledger_events_for_workspace(workspace_id)
+            .expect("list events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].import_decision, "deny");
+        assert!(
+            events[0]
+                .policy_failure_surface_json
+                .as_deref()
+                .is_some_and(|json| json.contains("mesh_peer_policy_denied")),
+            "denial must record the mesh_peer_policy_denied failure surface: {:?}",
+            events[0].policy_failure_surface_json
+        );
+
+        let index_jobs = connection
+            .list_search_index_jobs(workspace_id, None)
+            .expect("list index jobs");
+        assert!(
+            index_jobs.is_empty(),
+            "a denied event admits nothing: no import index job may be enqueued"
+        );
+    }
+
+    #[test]
+    fn mesh_import_denies_body_lane_under_metadata_only_authority() {
+        let connection = DbConnection::open_memory().expect("open memory db");
+        connection.migrate().expect("migrate db");
+        let workspace_id = "wsp_meshreplay0000000000000001";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-mesh-replay-body".to_string(),
+                    name: Some("mesh replay body".to_string()),
+                },
+            )
+            .expect("insert workspace");
+
+        // The configured member is admitted for metadata but the body lane is
+        // denied by both layers; the event records a denial and admits nothing.
+        let mut artifact = mesh_export_artifact_for_import_counts();
+        artifact.events[0].material_lane = "body".to_string();
+        let config = admitting_replay_config();
+        let bindings = config.mesh.peer_group_bindings.clone().unwrap_or_default();
+        let registry = crate::mesh::policy::MeshPeerPolicyRegistry::from_config(&config);
+        let counts = import_mesh_artifact_into_connection(
+            &connection,
+            workspace_id,
+            &artifact,
+            &bindings,
+            &registry,
+        )
+        .expect("import");
+        assert_eq!(counts, (1, 1, 1));
+
+        let events = connection
+            .list_mesh_import_ledger_events_for_workspace(workspace_id)
+            .expect("list events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].material_lane, "body");
+        assert_eq!(events[0].import_decision, "deny");
+
+        let index_jobs = connection
+            .list_search_index_jobs(workspace_id, None)
+            .expect("list index jobs");
+        assert!(
+            index_jobs.is_empty(),
+            "body lane is denied; nothing is admitted to local truth"
         );
     }
 

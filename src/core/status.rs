@@ -24,9 +24,10 @@ use crate::db::{
     StoredCurationTtlPolicy, StoredMemory, StoredMemoryLink, WalStatus, audit_actions,
     default_curation_ttl_policy_id_for_review_state,
     read_pool::{
-        CheckpointBlocker, PoolStats, READ_POOL_ACQUIRE_TIMEOUT_CODE, READ_POOL_UNDERSIZED_CODE,
-        READ_POOL_UNDERSIZED_P99_THRESHOLD, READ_POOL_UNDERSIZED_SAMPLE_FLOOR,
-        SnapshotPinReleaseState, process_read_pool_stats_for_database,
+        CheckpointBlocker, PoolConfig, PoolStats, READ_POOL_ACQUIRE_TIMEOUT_CODE,
+        READ_POOL_UNDERSIZED_CODE, READ_POOL_UNDERSIZED_P99_THRESHOLD,
+        READ_POOL_UNDERSIZED_SAMPLE_FLOOR, SnapshotPinReleaseState,
+        process_read_pool_stats_for_database, registered_process_read_pool,
     },
     shard::{
         ShardFanoutPosture, ShardFanoutResolverInput, ShardFanoutStatusReport,
@@ -922,7 +923,7 @@ impl StatusSkylineReport {
     pub fn gather_for_workspace(workspace_path: Option<&Path>) -> Self {
         let skyline_feature_enabled = status_skyline_feature_enabled(workspace_path);
         let gathered_skyline = if skyline_feature_enabled == Some(true) {
-            gather_status_skyline(workspace_path)
+            gather_status_skyline_snapshot(workspace_path)
         } else {
             None
         };
@@ -1196,7 +1197,7 @@ fn probe_storage_capability_with_connection(
         };
     }
 
-    match DbConnection::open_file(&database_path).and_then(|connection| {
+    match DbConnection::open_file_read_only(&database_path).and_then(|connection| {
         connection.ping()?;
         connection.needs_migration()
     }) {
@@ -1260,14 +1261,6 @@ fn workspace_database_path(workspace_path: &Path) -> PathBuf {
     workspace_path.join(".ee").join("ee.db")
 }
 
-fn open_status_connection(workspace_path: Option<&Path>) -> Option<DbConnection> {
-    let database_path = workspace_path.map(workspace_database_path)?;
-    if !database_path.exists() {
-        return None;
-    }
-    DbConnection::open_file(database_path).ok()
-}
-
 #[must_use]
 pub fn probe_cass_capability() -> CapabilityStatus {
     cass_discovery_to_capability(crate::cass::discover_import_binary(None))
@@ -1314,9 +1307,18 @@ pub fn probe_mesh_capability() -> CapabilityStatus {
         return CapabilityStatus::Unimplemented;
     }
 
-    match read_env_var(EnvVar::MeshEnabled).as_deref() {
-        Some("true") => CapabilityStatus::Unimplemented,
-        _ => CapabilityStatus::Pending,
+    // Accept every documented truthy form (`true`/`1`/`yes`/`on`), not just
+    // the literal "true" — `EE_MESH_ENABLED=1` must not silently read as off.
+    mesh_capability_from_flag(read_env_bool(EnvVar::MeshEnabled))
+}
+
+/// Pure decision half of [`probe_mesh_capability`], split out because env
+/// mutation is untestable under `forbid(unsafe_code)`.
+const fn mesh_capability_from_flag(enabled: Option<bool>) -> CapabilityStatus {
+    if matches!(enabled, Some(true)) {
+        CapabilityStatus::Unimplemented
+    } else {
+        CapabilityStatus::Pending
     }
 }
 
@@ -1535,7 +1537,7 @@ impl WalStatusReport {
                 },
             };
         }
-        let Ok(connection) = DbConnection::open_file(&database_path) else {
+        let Ok(connection) = DbConnection::open_file_read_only(&database_path) else {
             return Self {
                 checkpoint_threshold_bytes: threshold,
                 ..Self::default()
@@ -1867,7 +1869,7 @@ impl ScaleEnvelopeStoreProbe {
         let connection = if let Some(connection) = connection {
             Some(connection)
         } else if database_path.exists() {
-            match DbConnection::open_file(&database_path) {
+            match DbConnection::open_file_read_only(&database_path) {
                 Ok(connection) => {
                     owned_connection = connection;
                     Some(&owned_connection)
@@ -1984,10 +1986,56 @@ pub struct ScaleEnvelopeReport {
 impl ScaleEnvelopeReport {
     #[must_use]
     pub fn gather_for_workspace(workspace_path: &Path) -> Self {
-        let status_report = StatusReport::gather_for_workspace(workspace_path);
-        let status_connection = open_status_connection(Some(workspace_path));
-        let store_probe =
-            ScaleEnvelopeStoreProbe::gather(Some(workspace_path), status_connection.as_ref());
+        let options = StatusOptions {
+            workspace_path: Some(workspace_path.to_path_buf()),
+        };
+        let database_path = workspace_database_path(workspace_path);
+        if database_path.exists() {
+            let read_pool = registered_process_read_pool(
+                DatabaseConfig::file(database_path.clone()),
+                PoolConfig::default_single(),
+            );
+            match read_pool.pin_snapshot() {
+                Ok(snapshot) => match snapshot.checked_connection() {
+                    Ok(connection) => {
+                        let status_report =
+                            StatusReport::gather_with_connection(&options, Some(connection));
+                        let store_probe =
+                            ScaleEnvelopeStoreProbe::gather(Some(workspace_path), Some(connection));
+                        let report =
+                            Self::from_status_report(&status_report, &store_probe, Utc::now());
+                        if let Err(error) = snapshot.commit() {
+                            tracing::warn!(
+                                target: "ee::status",
+                                database_path = %database_path.display(),
+                                error = %error,
+                                "scale-envelope read snapshot release failed"
+                            );
+                        }
+                        return report;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "ee::status",
+                            database_path = %database_path.display(),
+                            error = %error,
+                            "scale-envelope read snapshot became unavailable"
+                        );
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        target: "ee::status",
+                        database_path = %database_path.display(),
+                        error = %error,
+                        "scale-envelope read snapshot could not be acquired"
+                    );
+                }
+            }
+        }
+
+        let status_report = StatusReport::gather_with_connection(&options, None);
+        let store_probe = ScaleEnvelopeStoreProbe::gather(Some(workspace_path), None);
         Self::from_status_report(&status_report, &store_probe, Utc::now())
     }
 
@@ -2152,8 +2200,56 @@ impl StatusReport {
     /// Gather current subsystem status with explicit options.
     #[must_use]
     pub fn gather_with_options(options: &StatusOptions) -> Self {
-        let status_connection = open_status_connection(options.workspace_path.as_deref());
-        let status_connection_ref = status_connection.as_ref();
+        let Some(workspace_path) = options.workspace_path.as_deref() else {
+            return Self::gather_with_connection(options, None);
+        };
+        let database_path = workspace_database_path(workspace_path);
+        if !database_path.exists() {
+            return Self::gather_with_connection(options, None);
+        }
+        let read_pool = registered_process_read_pool(
+            DatabaseConfig::file(database_path.clone()),
+            PoolConfig::default_single(),
+        );
+        let read_snapshot = match read_pool.pin_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(
+                    target: "ee::status",
+                    database_path = %database_path.display(),
+                    error = %error,
+                    "status read snapshot could not be acquired"
+                );
+                return Self::gather_with_connection(options, None);
+            }
+        };
+        let report = match read_snapshot.checked_connection() {
+            Ok(connection) => Self::gather_with_connection(options, Some(connection)),
+            Err(error) => {
+                tracing::warn!(
+                    target: "ee::status",
+                    database_path = %database_path.display(),
+                    error = %error,
+                    "status read snapshot became unavailable"
+                );
+                Self::gather_with_connection(options, None)
+            }
+        };
+        if let Err(error) = read_snapshot.commit() {
+            tracing::warn!(
+                target: "ee::status",
+                database_path = %database_path.display(),
+                error = %error,
+                "status read snapshot release failed"
+            );
+        }
+        report
+    }
+
+    fn gather_with_connection(
+        options: &StatusOptions,
+        status_connection_ref: Option<&DbConnection>,
+    ) -> Self {
         let index_status =
             gather_status_index_status(options.workspace_path.as_deref(), status_connection_ref);
         let capabilities = CapabilityReport::gather_with_workspace_connection_and_index(
@@ -2202,7 +2298,10 @@ impl StatusReport {
         let skyline_feature_enabled =
             status_skyline_feature_enabled(options.workspace_path.as_deref());
         let skyline_community_count = if skyline_feature_enabled == Some(true) {
-            gather_status_skyline_community_count(options.workspace_path.as_deref())
+            gather_status_skyline_community_count(
+                options.workspace_path.as_deref(),
+                status_connection_ref,
+            )
         } else {
             None
         };
@@ -2936,7 +3035,7 @@ fn gather_mesh_storage_status_with_connection(
     if let Some(connection) = connection {
         return gather_mesh_storage_status_from_connection(connection, workspace_path);
     }
-    let connection = DbConnection::open_file(&database_path).ok()?;
+    let connection = DbConnection::open_file_read_only(&database_path).ok()?;
     gather_mesh_storage_status_from_connection(&connection, workspace_path)
 }
 
@@ -2991,7 +3090,7 @@ fn gather_pack_budget_buckets_with_connection(
         };
         return pack_budget_buckets_from_audit_entries(&entries, Utc::now());
     }
-    let Ok(connection) = DbConnection::open_file(&database_path) else {
+    let Ok(connection) = DbConnection::open_file_read_only(&database_path) else {
         return PackBudgetBucketReport::default();
     };
     let Ok(entries) = connection.list_audit_entries(Some(&workspace_id), None) else {
@@ -3100,7 +3199,7 @@ pub fn gather_rch_verify_ledger_status_with_connection(
     let connection = if let Some(connection) = connection {
         connection
     } else {
-        match DbConnection::open_file(&database_path) {
+        match DbConnection::open_file_read_only(&database_path) {
             Ok(connection) => {
                 owned_connection = connection;
                 &owned_connection
@@ -4170,26 +4269,59 @@ fn push_toon_output_capability_degradation(
     }
 }
 
-fn gather_status_skyline_community_count(workspace_path: Option<&Path>) -> Option<usize> {
-    gather_status_skyline(workspace_path).map(|skyline| skyline.community_count)
+fn gather_status_skyline_community_count(
+    workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
+) -> Option<usize> {
+    gather_status_skyline(workspace_path, connection).map(|skyline| skyline.community_count)
 }
 
-fn gather_status_skyline(workspace_path: Option<&Path>) -> Option<GatheredStatusSkyline> {
+fn gather_status_skyline_snapshot(workspace_path: Option<&Path>) -> Option<GatheredStatusSkyline> {
+    let workspace_path = workspace_path?;
+    let database_path = workspace_database_path(workspace_path);
+    if !database_path.exists() {
+        return None;
+    }
+    let read_pool = registered_process_read_pool(
+        DatabaseConfig::file(database_path),
+        PoolConfig::default_single(),
+    );
+    let snapshot = read_pool.pin_snapshot().ok()?;
+    let skyline = {
+        let connection = snapshot.checked_connection().ok()?;
+        gather_status_skyline(Some(workspace_path), Some(connection))
+    };
+    if snapshot.commit().is_err() {
+        return None;
+    }
+    skyline
+}
+
+fn gather_status_skyline(
+    workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
+) -> Option<GatheredStatusSkyline> {
     let workspace_path = workspace_path?;
     #[cfg(feature = "graph")]
     {
-        let database_path = workspace_path.join(".ee").join("ee.db");
-        if !database_path.exists() {
-            return None;
-        }
-        let connection = DbConnection::open_file(&database_path).ok()?;
+        let owned_connection;
+        let connection = if let Some(connection) = connection {
+            connection
+        } else {
+            let database_path = workspace_path.join(".ee").join("ee.db");
+            if !database_path.exists() {
+                return None;
+            }
+            owned_connection = DbConnection::open_file_read_only(&database_path).ok()?;
+            &owned_connection
+        };
         let links = status_visible_memory_links(connection.list_all_memory_links(None).ok()?);
-        let memories = status_skyline_memories_for_workspace(&connection, workspace_path);
+        let memories = status_skyline_memories_for_workspace(connection, workspace_path);
         Some(status_skyline_from_links(&links, &memories, Utc::now()))
     }
     #[cfg(not(feature = "graph"))]
     {
-        let _ = workspace_path;
+        let _ = (workspace_path, connection);
         None
     }
 }
@@ -4530,7 +4662,7 @@ fn gather_graph_algorithm_result_cache_with_connection(
     let connection = if let Some(connection) = connection {
         connection
     } else {
-        let Ok(opened) = DbConnection::open_file(&database_path) else {
+        let Ok(opened) = DbConnection::open_file_read_only(&database_path) else {
             return GraphAlgorithmResultCacheReport::unavailable();
         };
         owned_connection = opened;
@@ -4627,7 +4759,7 @@ fn gather_graph_snapshot_artifact_with_connection(
         return gather_graph_snapshot_artifact_from_connection(connection, workspace_path);
     }
 
-    let connection = match DbConnection::open_file(&database_path) {
+    let connection = match DbConnection::open_file_read_only(&database_path) {
         Ok(connection) => connection,
         Err(_) => {
             return graph_snapshot_artifact_report(
@@ -4910,7 +5042,7 @@ fn gather_memory_health_with_connection(
     let connection = if let Some(connection) = connection {
         connection
     } else {
-        match DbConnection::open_file(&database_path) {
+        match DbConnection::open_file_read_only(&database_path) {
             Ok(connection) => {
                 owned_connection = connection;
                 &owned_connection
@@ -5145,7 +5277,7 @@ fn gather_curation_health_with_connection(
     let connection = if let Some(connection) = connection {
         connection
     } else {
-        match DbConnection::open_file(&database_path) {
+        match DbConnection::open_file_read_only(&database_path) {
             Ok(connection) => {
                 owned_connection = connection;
                 &owned_connection
@@ -5225,7 +5357,7 @@ fn gather_feedback_health_with_connection(
     let connection = if let Some(connection) = connection {
         connection
     } else {
-        match DbConnection::open_file(&database_path) {
+        match DbConnection::open_file_read_only(&database_path) {
             Ok(connection) => {
                 owned_connection = connection;
                 &owned_connection
@@ -5854,6 +5986,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mesh_capability_flag_decision_covers_documented_truthy_forms() -> TestResult {
+        // Every documented truthy form parses to Some(true) via the shared
+        // parser; the decision half must then report the honest gap. `=1`
+        // regressing to Pending is bd-y6o13.
+        for raw in ["true", "1", "yes", "on"] {
+            ensure(
+                mesh_capability_from_flag(crate::config::parse_env_bool_flag(raw)),
+                CapabilityStatus::Unimplemented,
+                &format!("truthy `{raw}`"),
+            )?;
+        }
+        for parsed in [Some(false), None] {
+            ensure(
+                mesh_capability_from_flag(parsed),
+                CapabilityStatus::Pending,
+                "falsy/absent flag",
+            )?;
+        }
+        ensure(
+            mesh_capability_from_flag(crate::config::parse_env_bool_flag("maybe")),
+            CapabilityStatus::Pending,
+            "unparseable flag stays pending",
+        )
+    }
+
     fn unique_test_dir(label: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -6450,6 +6608,80 @@ mod tests {
             storage.reason,
             Some("uncommitted_write_replay_required"),
             "storage replay reason",
+        )
+    }
+
+    #[test]
+    fn status_memory_health_uses_one_consistent_snapshot_across_writer_commit() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee_dir = temp.path().join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let database_path = ee_dir.join("ee.db");
+        let writer = DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        writer.migrate().map_err(|error| error.to_string())?;
+        let canonical_workspace = temp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| temp.path().to_path_buf());
+        let workspace_id = stable_workspace_id(&canonical_workspace);
+        writer
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: canonical_workspace.display().to_string(),
+                    name: Some("status-snapshot-consistency".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let read_pool = registered_process_read_pool(
+            DatabaseConfig::file(database_path.clone()),
+            PoolConfig::default_single(),
+        );
+        let snapshot = read_pool
+            .pin_snapshot()
+            .map_err(|error| error.to_string())?;
+        let connection = snapshot
+            .checked_connection()
+            .map_err(|error| error.to_string())?;
+        let (before, _) = gather_memory_health_with_connection(Some(temp.path()), Some(connection));
+        ensure(before.total_count, 0_u32, "snapshot starts empty")?;
+
+        writer
+            .insert_memory(
+                "mem_00000000000000000000000041",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Status must report one coherent database generation.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let (during, _) = gather_memory_health_with_connection(Some(temp.path()), Some(connection));
+        ensure(
+            during.total_count,
+            0_u32,
+            "pinned status snapshot excludes concurrent commit",
+        )?;
+        snapshot.commit().map_err(|error| error.to_string())?;
+
+        let (after, _) = gather_memory_health_with_connection(Some(temp.path()), None);
+        ensure(
+            after.total_count,
+            1_u32,
+            "new status snapshot observes committed memory",
         )
     }
 
@@ -7133,8 +7365,18 @@ mod tests {
             index_size_bytes: 128,
             db_memory_count: 4,
             db_session_count: 1,
+            db_artifact_count: 0,
+            db_rule_count: 0,
+            db_evidence_count: 0,
+            db_evidence_admitted_count: 0,
+            db_evidence_quarantined_count: 0,
+            db_evidence_denied_count: 0,
             db_generation: Some(12),
             index_generation: Some(9),
+            expected_corpus_revision: "blake3:test".to_owned(),
+            actual_corpus_revision: Some("blake3:legacy".to_owned()),
+            index_document_count: Some(5),
+            index_document_counts: None,
             last_rebuild_at: Some("2026-04-30T12:00:00Z".to_string()),
             last_check_error: None,
             repair_hint: Some("ee index rebuild --workspace ."),
@@ -7181,8 +7423,18 @@ mod tests {
             index_size_bytes: 0,
             db_memory_count: 0,
             db_session_count: 0,
+            db_artifact_count: 0,
+            db_rule_count: 0,
+            db_evidence_count: 0,
+            db_evidence_admitted_count: 0,
+            db_evidence_quarantined_count: 0,
+            db_evidence_denied_count: 0,
             db_generation: Some(0),
             index_generation: None,
+            expected_corpus_revision: "blake3:test".to_owned(),
+            actual_corpus_revision: Some("blake3:test".to_owned()),
+            index_document_count: Some(0),
+            index_document_counts: None,
             last_rebuild_at: None,
             last_check_error: None,
             repair_hint: None,

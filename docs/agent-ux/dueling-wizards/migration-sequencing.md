@@ -5,8 +5,8 @@ This registry is the human-facing companion to
 owned by `bd-1n0np.23.1` and enforced by
 `tests/contracts/dueling_wizards_migration_registry.rs`.
 
-The current compiled migration tail in `src/db/mod.rs` is `V084`. The next
-planned allocation starts at `V085`. Every dueling-wizards schema task must
+The current compiled migration tail in `src/db/mod.rs` is `V087`. The next
+planned allocation starts at `V088`. Every dueling-wizards schema task must
 allocate from the registry before adding a runtime migration, then keep the
 runtime `MIGRATIONS` array contiguous. The registry is a plan artifact, not a
 substitute for the real migration constants.
@@ -19,9 +19,14 @@ scope), `V074_JOURNAL_ENTRIES`, `V075_REMEMBER_IDEMPOTENCY_KEYS`,
 `V080_WORKSPACE_GENERATION_FLOOR_REBUILD` (forward-only V071 bootstrap repair),
 `V081_AUDIT_LOG_WORKSPACE_TIMELINE_INDEX`, `V082_MEMORY_DEBT_SNAPSHOTS`,
 `V083_ERROR_FINGERPRINT_GENERATION_TRIGGERS` (forward-only V072 generation
-repair), and `V084_PACK_RECORD_PROFILE_DOMAIN` (forward-only canonical pack
-profile/check repair) landed between the initiative's implemented allocations and the
-compiled tail. Implemented allocations therefore record historical fact (two
+repair), `V084_PACK_RECORD_PROFILE_DOMAIN` (forward-only canonical pack
+profile/check repair), `V085_EVIDENCE_SECURITY_POSTURE` (forward-only
+fail-closed evidence admission and provenance-integrity repair),
+`V086_RULE_INDEX_GENERATIONS` (forward-only procedural-rule generation
+tracking and source-row repair), and `V087_EVIDENCE_STORAGE_REBUILD`
+(forward-only canonical evidence-table rebuild and generation repair) landed
+between the initiative's implemented allocations and the compiled tail.
+Implemented allocations therefore record historical fact (two
 allocations may share one compiled migration, as the sentinel pair does under
 `V069_MEMORY_SENTINELS`), while planned allocations stay strictly contiguous
 from `nextPlannedMigration`.
@@ -34,8 +39,63 @@ rollback must never be required for ordinary repair. A task that adds durable
 or derived storage must also name the backup/export/restore asset class and the
 boundary migration coverage path before source work starts.
 
-Do not reuse migration numbers. If the compiled tail moves past `V084`, update
+Do not reuse migration numbers. If the compiled tail moves past `V087`, update
 this registry in the same change that adds the runtime migration.
+
+### V085 legacy-evidence remediation
+
+`V085_EVIDENCE_SECURITY_POSTURE` immediately denies pre-migration evidence and
+removes its raw upstream references. It does not silently infer trust or
+rewrite stored excerpts. An operator can then re-screen legacy rows through the
+bounded maintenance job:
+
+```bash
+# Apply the fail-closed posture before requesting a rescreen preview.
+ee migrate run --workspace . --json
+
+# Preview the next deterministic batch; this never writes evidence or audit rows.
+ee job run evidence_rescreen --workspace . --item-limit 500 --dry-run --json
+
+# Apply exactly one preview-sized batch in a transaction.
+ee job run evidence_rescreen --workspace . --item-limit 500 --json
+```
+
+Repeat the apply command while `pendingAfter` is greater than zero. Each
+rewritten row gets one redaction-safe `evidence.security_rescreen` audit record;
+reruns skip completed rows. Recognized producers are re-screened under the
+current policy, supporting evidence remains denied from direct retrieval, and
+ambiguous, malformed, instruction-like, or cross-workspace rows remain
+quarantined. The report exposes IDs, dispositions, reason codes, and counts,
+never the raw excerpt or upstream path.
+
+Applying the job can permanently replace secrets in legacy excerpts with
+redaction markers, while the V085 migration itself permanently replaces raw
+upstream references. Before migrating or applying the job, create a protected
+offline snapshot of the entire workspace `.ee` state if exact byte-for-byte
+recovery is required. Stop all writers first and keep the database, WAL, and
+shared-memory files together. The normal `ee backup create` artifact is still
+recommended for logical source-of-truth recovery, but it is intentionally
+redacted and does not preserve raw legacy evidence as an in-place rollback
+mechanism.
+
+There is no automatic in-place rollback because restoring the old evidence
+would reintroduce the unsafe bytes. If recovery is required, validate the
+protected snapshot in an isolated side path and make the restore decision
+explicit. After the final applied batch—and after any explicit restore—rebuild
+the derived index so stale pre-remediation bytes cannot remain searchable:
+
+```bash
+ee index rebuild --workspace . --json
+```
+
+`V087_EVIDENCE_STORAGE_REBUILD` materializes the full post-V085 evidence row
+shape in one canonical table. It copies every row in deterministic row order,
+recreates the evidence indexes and integrity/generation triggers, and advances
+the generation of each workspace containing evidence. The migration does not
+grant admission or reinterpret legacy provenance; V085-denied rows remain
+denied until the explicit bounded rescreen above evaluates them. Because the
+table replacement is forward-only, the same protected offline-snapshot posture
+applies before migration when byte-for-byte recovery is required.
 
 ## Allocations
 
@@ -49,9 +109,9 @@ this registry in the same change that adds the runtime migration.
 | `V070` | `typed_memory_kind_sidecar` | implemented | `bd-1n0np.12.1` | Optional validated per-kind memory JSON sidecar fields (landed as `V070_MEMORY_TYPED_FIELDS` on `memories`). |
 | `V071` | `workspace_generations` | implemented | `bd-1n0np.8.2` | Monotonic workspace and derived-asset generation state. |
 | `V072` | `error_fingerprints` | implemented | `bd-1n0np.4.3` | Error fingerprints plus repair, proof, and outcome links (`error_repair_links` landed separately as `V073_ERROR_REPAIR_LINKS`). |
-| `V085` | `attestation_bundles` | planned | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
-| `V086` | `query_miss_ledger` | planned | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
-| `V087` | `source_write_stats` | planned | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
+| `V088` | `attestation_bundles` | planned | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
+| `V089` | `query_miss_ledger` | planned | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
+| `V090` | `source_write_stats` | planned | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
 
 `V084_PACK_RECORD_PROFILE_DOMAIN` is covered by the FrankenSQLite regression
 `db::tests::v084_pack_profile_rebuild_preserves_parent_children_indexes_and_order`.
@@ -63,7 +123,7 @@ proves all six canonical profiles plus `contradiction_suppressed` persist.
 
 The manifest's `transitionMatrix` mirrors the allocation table one-for-one.
 This is the implementation gate: `implemented` rows must name the compiled
-migration constant and stay at or behind the current compiled tail (`V084` at
+migration constant and stay at or behind the current compiled tail (`V087` at
 the time of this registry). `planned` rows must stay ahead of the compiled tail
 and keep `migrationConstant`, `boundaryMigrationEvidence`, and
 `backupCoverageEvidence` set to `required_before_implemented`.
@@ -82,7 +142,7 @@ same change.
 `scripts/e2e_cross_cutting.sh` statically pins the registry's conservative
 posture before runtime proof is available. The shell gate pins the exact
 implemented version layout (`V066` through `V072`, with the sentinel pair
-sharing `V069`) plus the planned reservations (`V085` through `V087`),
+sharing `V069`) plus the planned reservations (`V088` through `V090`),
 transition rows mirror allocation rows by ID, version, and status, implemented
 rows stay at or behind the compiled tail, planned rows stay at or beyond the
 next allocation, and backup assets mirror each allocation's asset kind,

@@ -126,6 +126,21 @@ fn schema_field_presets_match_runtime_matrix() -> TestResult {
 }
 
 #[test]
+fn deprecated_context_alias_shares_canonical_pack_presets() -> TestResult {
+    for (_, profile) in PRESETS {
+        let canonical = field_preset_names_for_command("pack", *profile);
+        let alias = field_preset_names_for_command("context", *profile);
+        if canonical != alias {
+            return Err(format!(
+                "deprecated context alias diverged from canonical pack {profile:?} fields: \
+                 pack={canonical:?} context={alias:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn field_selector_presets_apply_to_every_matrix_row() -> TestResult {
     for surface in matrix_surfaces()? {
         let schema = read_json(schema_path(&surface.schema_file))?;
@@ -361,6 +376,7 @@ fn explicit_list_and_preset_additions_are_precise() -> TestResult {
             "workspace",
             "posture",
             "singleFlight",
+            "writeGroupCommit",
             "flightRecorder",
             "qos",
             "rchWorkerPressure",
@@ -492,7 +508,9 @@ fn collect_selected_names(
 fn synthetic_response(schema: &Value, command: &str) -> Result<String, String> {
     let data_schema = response_data_schema(schema)?;
     let mut data = sample_object_from_schema(data_schema);
-    data.insert("command".to_string(), Value::String(command.to_string()));
+    if data_schema.pointer("/properties/command").is_some() {
+        data.insert("command".to_string(), Value::String(command.to_string()));
+    }
     enrich_surface_samples(command, &mut data);
     let response = json!({
         "schema": "ee.response.v2",

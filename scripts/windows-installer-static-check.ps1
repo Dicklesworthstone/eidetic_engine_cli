@@ -43,7 +43,7 @@ function Write-ConformanceEvent {
         schema = "ee.test_event.v1"
         kind = "windows_installer_static_conformance"
         bead_id = "bd-3tprq.2"
-        related_bead_ids = @("bd-3tprq.2", "bd-3tprq.4", "bd-3tprq.5")
+        related_bead_ids = @("bd-3tprq.2", "bd-3tprq.4", "bd-3tprq.5", "bd-xww0x")
         surface = "install_ps1_parser_static"
         assertion = $Assertion
         result = $Result
@@ -245,6 +245,85 @@ if (Test-Path $installPath) {
         -Condition ($arrayAssignmentIndex -ge 0 -and $countReadIndex -gt $arrayAssignmentIndex -and $functionText -match '\$other\s*=\s*@\(\s*@\(') `
         -Diagnosis "Show-AgentIntegration must wrap optional-agent Where-Object results in @() before reading .Count under Set-StrictMode -Version Latest"
     Assert-True `
+        -Assertion "installer_guidance_uses_canonical_pack_surface" `
+        -Condition ($installText -match 'ee pack' -and $installText -notmatch 'ee context') `
+        -Diagnosis "install.ps1 must introduce new users to canonical ee pack, not the soft-deprecated ee context alias"
+
+    $testInstalledVersion = $ast.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq "Test-InstalledVersion"
+    }, $true)
+    $testInstalledVersionText = if ($null -eq $testInstalledVersion) { "" } else { $testInstalledVersion.Extent.Text }
+    Assert-True `
+        -Assertion "installed_version_requires_successful_native_exit" `
+        -Condition (
+            $testInstalledVersionText -match '\$versionExitCode\s*=\s*\$LASTEXITCODE' -and
+            $testInstalledVersionText -match 'if\s*\(\$versionExitCode\s+-ne\s+0\)\s*\{\s*return\s+\$false'
+        ) `
+        -Diagnosis "Test-InstalledVersion must reject version-looking output from an ee.exe process that exited nonzero"
+
+    $installCompletions = $ast.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq "Install-Completions"
+    }, $true)
+    $installCompletionsText = if ($null -eq $installCompletions) { "" } else { $installCompletions.Extent.Text }
+    Assert-True `
+        -Assertion "completion_generation_checks_native_exit" `
+        -Condition (
+            $installCompletionsText -match '\$completionExitCode\s*=\s*\$LASTEXITCODE' -and
+            $installCompletionsText -match 'Failed to write PowerShell completions \(exit code \$completionExitCode\)'
+        ) `
+        -Diagnosis "Install-Completions must not report success when native completion generation exits nonzero"
+
+    $selfTest = $ast.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq "Invoke-SelfTest"
+    }, $true)
+    $selfTestText = if ($null -eq $selfTest) { "" } else { $selfTest.Extent.Text }
+    Assert-True `
+        -Assertion "self_test_version_failure_is_fatal" `
+        -Condition (
+            $selfTestText -match '\$versionExitCode\s*=\s*\$LASTEXITCODE' -and
+            $selfTestText -match 'ee --version failed with exit code' -and
+            $selfTestText -match 'Write-ErrorExit'
+        ) `
+        -Diagnosis "Invoke-SelfTest must fail the installer when ee.exe --version exits nonzero"
+    Assert-True `
+        -Assertion "self_test_doctor_degradation_remains_advisory" `
+        -Condition (
+            $selfTestText -match 'doctor --json' -and
+            $selfTestText -match 'Write-Warning2 "ee doctor reported issues' -and
+            $selfTestText -notmatch 'Write-ErrorExit "ee doctor'
+        ) `
+        -Diagnosis "Invoke-SelfTest must warn, not fail, when ee doctor reports a degraded first-run posture"
+
+    $mainFunction = $ast.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq "Main"
+    }, $true)
+    $mainFunctionText = if ($null -eq $mainFunction) { "" } else { $mainFunction.Extent.Text }
+    $shortCircuitStart = $mainFunctionText.IndexOf("# Already-installed short-circuit")
+    $shortCircuitEnd = $mainFunctionText.IndexOf("# Lock.", [Math]::Max(0, $shortCircuitStart))
+    $pathRepairIndex = $mainFunctionText.IndexOf('Update-UserPath -Dir $InstallDir', [Math]::Max(0, $shortCircuitStart))
+    $completionIndex = $mainFunctionText.IndexOf('Install-Completions -BinaryPath $binaryPath', [Math]::Max(0, $shortCircuitStart))
+    $verifyIndex = $mainFunctionText.IndexOf('if ($Verify) { Invoke-SelfTest -BinaryPath $binaryPath }', [Math]::Max(0, $shortCircuitStart))
+    Assert-True `
+        -Assertion "matching_version_short_circuit_repairs_integration_and_verifies" `
+        -Condition (
+            $shortCircuitStart -ge 0 -and
+            $shortCircuitEnd -gt $shortCircuitStart -and
+            $pathRepairIndex -gt $shortCircuitStart -and
+            $completionIndex -gt $pathRepairIndex -and
+            $verifyIndex -gt $completionIndex -and
+            $verifyIndex -lt $shortCircuitEnd
+        ) `
+        -Diagnosis "The matching-version branch must repair user PATH, regenerate completions, and honor -Verify before the installer lock"
+
+    Assert-True `
         -Assertion "install_ps1_semantic_smoke_warn_require_contract" `
         -Condition (
             $installText -match 'function Get-InstallSemanticSmokeMode' -and
@@ -317,7 +396,7 @@ if (Test-Path $releaseWorkflowPath) {
 
 if (Test-Path $conformancePath) {
     $conformanceText = Get-Content -Raw -Path $conformancePath
-    foreach ($rowId in @("WIN-PS1-003", "WIN-PS1-004", "WIN-PS1-005", "WIN-PS1-006", "WIN-PS1-007", "WIN-PS1-008", "WIN-PS1-009", "WIN-PS1-010", "WIN-PS1-012", "WIN-PS1-013")) {
+    foreach ($rowId in @("WIN-PS1-003", "WIN-PS1-004", "WIN-PS1-005", "WIN-PS1-006", "WIN-PS1-007", "WIN-PS1-008", "WIN-PS1-009", "WIN-PS1-010", "WIN-PS1-012", "WIN-PS1-013", "WIN-PS1-014", "WIN-PS1-015")) {
         Assert-True `
             -Assertion "conformance_matrix_includes_$rowId" `
             -Condition ($conformanceText -match [regex]::Escape($rowId)) `

@@ -31,6 +31,14 @@ fn ensure_equal<T: std::fmt::Debug + PartialEq>(
     }
 }
 
+fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
+    if condition {
+        Ok(())
+    } else {
+        Err(message.into())
+    }
+}
+
 #[test]
 fn display_for_cass_command_includes_command_exit_and_stderr() -> TestResult {
     let error = CassImportError::CassCommand {
@@ -103,31 +111,31 @@ fn display_for_io_includes_path_and_message() -> TestResult {
     };
     ensure_equal(
         &format!("{error}"),
-        &"I/O error at /tmp/missing: permission denied".to_string(),
+        &"I/O error at [REDACTED_PATH]: permission denied".to_string(),
         "Io Display",
     )
 }
 
 #[test]
-fn display_for_cass_delegates_to_inner_cass_error_display() -> TestResult {
-    // Wrapper must surface the inner CassError verbatim. The inner Display
-    // contract is pinned separately by bd-hzk96's cass_error_display_contract.
+fn display_for_cass_safely_wraps_inner_cass_error_display() -> TestResult {
+    // The wrapper preserves non-sensitive CassError wording while applying
+    // the public path/secret boundary before the text reaches ee.error.v2.
     let inner = CassError::BinaryNotFound {
         binary: PathBuf::from("/usr/local/bin/cass"),
     };
-    let expected = format!("{inner}");
     let wrapped = CassImportError::Cass(inner);
     ensure_equal(
         &format!("{wrapped}"),
-        &expected,
-        "Cass(inner) Display equals inner Display",
+        &"cass binary not found at '[REDACTED_PATH]'".to_string(),
+        "Cass(inner) Display is path-safe",
     )
 }
 
 #[test]
-fn display_for_storage_delegates_to_inner_db_error_display() -> TestResult {
-    // Storage variant must surface the inner DbError verbatim — the wrapper
-    // should not add a "storage error:" prefix or other framing.
+fn display_for_storage_preserves_safe_inner_wording() -> TestResult {
+    // The storage boundary preserves non-sensitive DbError wording without
+    // adding a prefix, while production still applies public redaction and
+    // length bounds to sensitive values.
     let inner = DbError::MalformedRow {
         operation: DbOperation::Query,
         message: "synthetic storage error for Display contract".to_string(),
@@ -139,4 +147,57 @@ fn display_for_storage_delegates_to_inner_db_error_display() -> TestResult {
         &expected,
         "Storage(inner) Display equals inner Display",
     )
+}
+
+#[test]
+fn display_redacts_unix_windows_unc_file_uri_and_secret_material() -> TestResult {
+    let secret = format!("sk_live_{}", "1234567890abcdef1234567890abcdef");
+    let cases = [
+        CassImportError::CassCommand {
+            command: format!(
+                r#"cass view "C:\Users\Alice\private\session.jsonl" --api-key {secret}"#
+            ),
+            exit_code: Some(2),
+            stderr: format!(
+                r"failed \\fileserver\profiles\Alice\trace.jsonl; fallback file:///C:/Users/Alice/fallback.jsonl; token={secret}"
+            ),
+            timed_out: false,
+            stderr_truncated: false,
+            stdout_line_count: None,
+            peak_stdout_line_bytes: None,
+            peak_stdout_buffer_bytes: None,
+        },
+        CassImportError::InvalidJson {
+            source: "cass view",
+            message: format!(
+                "malformed source `/mnt/private/session.jsonl`; mirror `\\\\fileserver\\profiles\\Alice\\trace.jsonl`; token={secret}"
+            ),
+        },
+        CassImportError::Io {
+            path: PathBuf::from("/opt/private/cass.db"),
+            message: format!("fallback file:///C:/Users/Alice/private.db token={secret}"),
+        },
+    ];
+
+    for error in cases {
+        let rendered = error.to_string();
+        for forbidden in [
+            r"C:\Users\Alice",
+            r"\\fileserver\profiles\Alice",
+            "C:/Users/Alice",
+            "/mnt/private",
+            "/opt/private",
+            secret.as_str(),
+        ] {
+            ensure(
+                !rendered.contains(forbidden),
+                format!("forbidden public error material {forbidden:?} escaped: {rendered}"),
+            )?;
+        }
+        ensure(
+            rendered.contains("[REDACTED_PATH]"),
+            format!("redaction-safe Display should retain a path marker: {rendered}"),
+        )?;
+    }
+    Ok(())
 }

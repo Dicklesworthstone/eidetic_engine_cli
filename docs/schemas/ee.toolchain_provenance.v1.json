@@ -45,6 +45,27 @@
       "items": {"$ref": "#/$defs/degradedEntry"}
     }
   },
+  "field_presets": {
+    "minimal": ["schema", "workspaceFingerprint", "redactionStatus", "degraded"],
+    "summary": [
+      "schema",
+      "collectedAt",
+      "workspaceFingerprint",
+      "redactionStatus",
+      "tools",
+      "degraded"
+    ],
+    "standard": [
+      "schema",
+      "collectedAt",
+      "workspaceFingerprint",
+      "redactionStatus",
+      "tools",
+      "scriptHashes",
+      "degraded"
+    ],
+    "full": ["*"]
+  },
   "$defs": {
     "freshnessState": {
       "type": "string",

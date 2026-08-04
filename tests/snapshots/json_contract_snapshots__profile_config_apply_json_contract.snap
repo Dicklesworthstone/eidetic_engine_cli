@@ -45,7 +45,7 @@ expression: profile_config_apply
       },
       "command": "profile config apply",
       "configExists": false,
-      "configPath": "[WORKSPACE]/.ee/config.toml",
+      "configPath": "[WORKSPACE]/.ee/profile-contract.toml",
       "conflicts": [],
       "degraded": [
         {
@@ -206,95 +206,88 @@ expression: profile_config_apply
           "physicalCores": null,
           "source": "std_thread_available_parallelism"
         },
-        "degraded": [
-          {
-            "code": "memory_probe_unavailable",
-            "message": "Host memory totals could not be inspected.",
-            "repair": "Run on a platform with /proc/meminfo or provide explicit profile config.",
-            "severity": "warning"
-          }
-        ],
+        "degraded": [],
         "environment": {
-          "cargoTargetDirConfigured": true,
+          "cargoTargetDirConfigured": false,
           "rchHintConfigured": false,
           "redaction": "presence_only",
-          "tmpdirConfigured": true
+          "tmpdirConfigured": false
         },
         "memory": {
-          "availableBytes": null,
+          "availableBytes": 0,
           "cgroupLimitBytes": null,
-          "source": "unavailable",
-          "totalBytes": null
+          "source": "[HOST_MEMORY_SOURCE]",
+          "totalBytes": 0
         },
         "paths": [
           {
             "availableBytes": 0,
-            "exists": true,
+            "exists": false,
             "label": "workspace",
             "nearestExistingAncestor": false,
             "redaction": "path_not_emitted",
             "role": "workspace_root",
-            "sameFilesystemAsWorkspace": true,
+            "sameFilesystemAsWorkspace": false,
             "totalBytes": 0
           },
           {
             "availableBytes": 0,
-            "exists": true,
+            "exists": false,
             "label": "ee_state",
             "nearestExistingAncestor": false,
             "redaction": "path_not_emitted",
             "role": "workspace_state_dir",
-            "sameFilesystemAsWorkspace": true,
+            "sameFilesystemAsWorkspace": false,
             "totalBytes": 0
           },
           {
             "availableBytes": 0,
-            "exists": true,
+            "exists": false,
             "label": "database",
             "nearestExistingAncestor": false,
             "redaction": "path_not_emitted",
             "role": "frankensqlite_database",
-            "sameFilesystemAsWorkspace": true,
+            "sameFilesystemAsWorkspace": false,
             "totalBytes": 0
           },
           {
             "availableBytes": 0,
-            "exists": true,
+            "exists": false,
             "label": "index",
             "nearestExistingAncestor": false,
             "redaction": "path_not_emitted",
             "role": "frankensearch_index",
-            "sameFilesystemAsWorkspace": true,
+            "sameFilesystemAsWorkspace": false,
             "totalBytes": 0
           },
           {
             "availableBytes": 0,
             "exists": false,
             "label": "cache",
-            "nearestExistingAncestor": true,
+            "nearestExistingAncestor": false,
             "redaction": "path_not_emitted",
             "role": "derived_cache",
-            "sameFilesystemAsWorkspace": true,
+            "sameFilesystemAsWorkspace": false,
             "totalBytes": 0
           },
           {
             "availableBytes": 0,
-            "exists": true,
+            "exists": false,
             "label": "temp",
             "nearestExistingAncestor": false,
             "redaction": "path_not_emitted",
             "role": "temporary_directory",
-            "sameFilesystemAsWorkspace": true,
+            "sameFilesystemAsWorkspace": false,
             "totalBytes": 0
           },
           {
             "availableBytes": 0,
-            "exists": true,
+            "exists": false,
             "label": "cargo_target",
             "nearestExistingAncestor": false,
             "redaction": "path_not_emitted",
             "role": "build_cache_directory",
-            "sameFilesystemAsWorkspace": true,
+            "sameFilesystemAsWorkspace": false,
             "totalBytes": 0
           }
         ],
@@ -303,12 +296,12 @@ expression: profile_config_apply
         "sideEffectFree": true,
         "tools": [
           {
-            "available": true,
+            "available": false,
             "name": "cargo",
             "source": "path_lookup_presence_only"
           },
           {
-            "available": true,
+            "available": false,
             "name": "rustfmt",
             "source": "path_lookup_presence_only"
           },
@@ -318,34 +311,34 @@ expression: profile_config_apply
             "source": "path_lookup_presence_only"
           },
           {
-            "available": true,
+            "available": false,
             "name": "br",
             "source": "path_lookup_presence_only"
           },
           {
-            "available": true,
+            "available": false,
             "name": "bv",
             "source": "path_lookup_presence_only"
           },
           {
-            "available": true,
+            "available": false,
             "name": "rch",
             "source": "path_lookup_presence_only"
           },
           {
-            "available": true,
+            "available": false,
             "name": "gh",
             "source": "path_lookup_presence_only"
           }
         ],
         "topology": {
           "rch": {
-            "available": true,
-            "message": "RCH binary is present on PATH; worker health is checked by RCH-specific diagnostics.",
-            "posture": "ok",
-            "repair": null,
+            "available": false,
+            "message": "[HOST_RCH_MESSAGE]",
+            "posture": "[HOST_RCH_POSTURE]",
+            "repair": "[HOST_RCH_REPAIR]",
             "source": "path_lookup_presence_only",
-            "status": "available_not_queried"
+            "status": "[HOST_RCH_STATUS]"
           }
         },
         "workspace": {
@@ -355,7 +348,7 @@ expression: profile_config_apply
         }
       },
       "profile": {
-        "confidence": "medium",
+        "confidence": "[HOST_CONFIDENCE]",
         "effective": "[PROFILE]",
         "reasons": [
           "[HOST_REASON]"
@@ -419,7 +412,7 @@ expression: profile_config_apply
       },
       "command": "profile config apply",
       "configExists": true,
-      "configPath": "[WORKSPACE]/.ee/config.toml",
+      "configPath": "[WORKSPACE]/.ee/profile-contract.toml",
       "conflicts": [],
       "degraded": [
         {
@@ -580,95 +573,88 @@ expression: profile_config_apply
           "physicalCores": null,
           "source": "std_thread_available_parallelism"
         },
-        "degraded": [
-          {
-            "code": "memory_probe_unavailable",
-            "message": "Host memory totals could not be inspected.",
-            "repair": "Run on a platform with /proc/meminfo or provide explicit profile config.",
-            "severity": "warning"
-          }
-        ],
+        "degraded": [],
         "environment": {
-          "cargoTargetDirConfigured": true,
+          "cargoTargetDirConfigured": false,
           "rchHintConfigured": false,
           "redaction": "presence_only",
-          "tmpdirConfigured": true
+          "tmpdirConfigured": false
         },
         "memory": {
-          "availableBytes": null,
+          "availableBytes": 0,
           "cgroupLimitBytes": null,
-          "source": "unavailable",
-          "totalBytes": null
+          "source": "[HOST_MEMORY_SOURCE]",
+          "totalBytes": 0
         },
         "paths": [
           {
             "availableBytes": 0,
-            "exists": true,
+            "exists": false,
             "label": "workspace",
             "nearestExistingAncestor": false,
             "redaction": "path_not_emitted",
             "role": "workspace_root",
-            "sameFilesystemAsWorkspace": true,
+            "sameFilesystemAsWorkspace": false,
             "totalBytes": 0
           },
           {
             "availableBytes": 0,
-            "exists": true,
+            "exists": false,
             "label": "ee_state",
             "nearestExistingAncestor": false,
             "redaction": "path_not_emitted",
             "role": "workspace_state_dir",
-            "sameFilesystemAsWorkspace": true,
+            "sameFilesystemAsWorkspace": false,
             "totalBytes": 0
           },
           {
             "availableBytes": 0,
-            "exists": true,
+            "exists": false,
             "label": "database",
             "nearestExistingAncestor": false,
             "redaction": "path_not_emitted",
             "role": "frankensqlite_database",
-            "sameFilesystemAsWorkspace": true,
+            "sameFilesystemAsWorkspace": false,
             "totalBytes": 0
           },
           {
             "availableBytes": 0,
-            "exists": true,
+            "exists": false,
             "label": "index",
             "nearestExistingAncestor": false,
             "redaction": "path_not_emitted",
             "role": "frankensearch_index",
-            "sameFilesystemAsWorkspace": true,
+            "sameFilesystemAsWorkspace": false,
             "totalBytes": 0
           },
           {
             "availableBytes": 0,
             "exists": false,
             "label": "cache",
-            "nearestExistingAncestor": true,
+            "nearestExistingAncestor": false,
             "redaction": "path_not_emitted",
             "role": "derived_cache",
-            "sameFilesystemAsWorkspace": true,
+            "sameFilesystemAsWorkspace": false,
             "totalBytes": 0
           },
           {
             "availableBytes": 0,
-            "exists": true,
+            "exists": false,
             "label": "temp",
             "nearestExistingAncestor": false,
             "redaction": "path_not_emitted",
             "role": "temporary_directory",
-            "sameFilesystemAsWorkspace": true,
+            "sameFilesystemAsWorkspace": false,
             "totalBytes": 0
           },
           {
             "availableBytes": 0,
-            "exists": true,
+            "exists": false,
             "label": "cargo_target",
             "nearestExistingAncestor": false,
             "redaction": "path_not_emitted",
             "role": "build_cache_directory",
-            "sameFilesystemAsWorkspace": true,
+            "sameFilesystemAsWorkspace": false,
             "totalBytes": 0
           }
         ],
@@ -677,12 +663,12 @@ expression: profile_config_apply
         "sideEffectFree": true,
         "tools": [
           {
-            "available": true,
+            "available": false,
             "name": "cargo",
             "source": "path_lookup_presence_only"
           },
           {
-            "available": true,
+            "available": false,
             "name": "rustfmt",
             "source": "path_lookup_presence_only"
           },
@@ -692,34 +678,34 @@ expression: profile_config_apply
             "source": "path_lookup_presence_only"
           },
           {
-            "available": true,
+            "available": false,
             "name": "br",
             "source": "path_lookup_presence_only"
           },
           {
-            "available": true,
+            "available": false,
             "name": "bv",
             "source": "path_lookup_presence_only"
           },
           {
-            "available": true,
+            "available": false,
             "name": "rch",
             "source": "path_lookup_presence_only"
           },
           {
-            "available": true,
+            "available": false,
             "name": "gh",
             "source": "path_lookup_presence_only"
           }
         ],
         "topology": {
           "rch": {
-            "available": true,
-            "message": "RCH binary is present on PATH; worker health is checked by RCH-specific diagnostics.",
-            "posture": "ok",
-            "repair": null,
+            "available": false,
+            "message": "[HOST_RCH_MESSAGE]",
+            "posture": "[HOST_RCH_POSTURE]",
+            "repair": "[HOST_RCH_REPAIR]",
             "source": "path_lookup_presence_only",
-            "status": "available_not_queried"
+            "status": "[HOST_RCH_STATUS]"
           }
         },
         "workspace": {
@@ -729,7 +715,7 @@ expression: profile_config_apply
         }
       },
       "profile": {
-        "confidence": "medium",
+        "confidence": "[HOST_CONFIDENCE]",
         "effective": "[PROFILE]",
         "reasons": [
           "[HOST_REASON]"

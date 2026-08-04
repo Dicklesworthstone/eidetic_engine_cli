@@ -25,7 +25,7 @@ use super::{
 use crate::db::{
     CompleteImportLedgerInput, CreateAuditInput, CreateEvidenceSpanInput, CreateImportLedgerInput,
     CreateSearchIndexJobInput, CreateSessionInput, CreateWorkspaceInput, DatabaseConfig,
-    DbConnection, DbError, DbOperation, SearchIndexJobType,
+    DbConnection, DbError, DbOperation, EvidenceProducerKind, SearchIndexJobType,
 };
 use crate::models::{
     AuditId, CASS_EVIDENCE_SPAN_SCHEMA_V1, CASS_SESSION_SCHEMA_V1, EvidenceId,
@@ -200,54 +200,75 @@ fn redact_import_report_source_ref(value: &str) -> String {
 
 fn redact_import_report_path_like_segments(value: &str) -> String {
     const REDACTED_PATH: &str = "[REDACTED_PATH]";
-    const PREFIXES: &[&str] = &[
-        "/Users/",
-        "/Volumes/",
-        "/private/",
-        "/var/",
-        "/tmp/",
-        "/home/",
-        "/data/",
-        "/dp/",
-        "/workspace/",
-        "/repo/",
-        "/etc/",
-    ];
 
     let mut output = String::with_capacity(value.len());
     let mut cursor = 0;
     while cursor < value.len() {
-        let Some((relative_index, _)) = value[cursor..].char_indices().find(|(_, ch)| *ch == '/')
+        let Some(start) = value[cursor..]
+            .char_indices()
+            .map(|(relative, _)| cursor + relative)
+            .find(|start| import_report_path_starts_at(value, *start))
         else {
             output.push_str(&value[cursor..]);
             break;
         };
-        let start = cursor + relative_index;
-        if !PREFIXES
-            .iter()
-            .any(|prefix| value[start..].starts_with(prefix))
-        {
-            output.push_str(&value[cursor..=start]);
-            cursor = start + 1;
-            continue;
-        }
 
         output.push_str(&value[cursor..start]);
         output.push_str(REDACTED_PATH);
         cursor = value[start..]
             .char_indices()
+            .skip(1)
             .find_map(|(index, ch)| import_report_source_path_boundary(ch).then_some(start + index))
             .unwrap_or(value.len());
     }
     output
 }
 
+fn import_report_path_starts_at(value: &str, start: usize) -> bool {
+    let candidate = &value[start..];
+    if candidate
+        .get(.."file://".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
+    {
+        return true;
+    }
+
+    let token_boundary_before = value[..start].chars().next_back().is_none_or(|previous| {
+        previous.is_whitespace() || matches!(previous, '"' | '\'' | '`' | '(' | '[' | '{' | '=')
+    });
+    if candidate.starts_with('/') && token_boundary_before {
+        return true;
+    }
+
+    let bytes = candidate.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\')
+    {
+        return true;
+    }
+
+    let unc_prefix = candidate.starts_with(r"\\") || candidate.starts_with("//");
+    unc_prefix && token_boundary_before
+}
+
 fn import_report_source_path_boundary(ch: char) -> bool {
-    ch.is_whitespace()
-        || matches!(
-            ch,
-            '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';' | '&'
-        )
+    matches!(
+        ch,
+        '\n' | '\r' | '?' | '#' | '"' | '\'' | '`' | ')' | ']' | '}' | ',' | ';' | '&'
+    )
+}
+
+fn bounded_public_cass_text(value: &str, max_chars: usize) -> String {
+    const TRUNCATED: &str = "[TRUNCATED]";
+    let redacted = redact_import_report_source_ref(value);
+    if redacted.chars().count() <= max_chars {
+        return redacted;
+    }
+    let mut bounded = redacted.chars().take(max_chars).collect::<String>();
+    bounded.push_str(TRUNCATED);
+    bounded
 }
 
 /// Error produced by CASS import.
@@ -326,26 +347,39 @@ impl CassImportError {
 impl fmt::Display for CassImportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Cass(error) => write!(formatter, "{error}"),
+            Self::Cass(error) => {
+                formatter.write_str(&bounded_public_cass_text(&error.to_string(), 2_048))
+            }
             Self::CassCommand {
                 command,
                 exit_code,
                 stderr,
                 ..
-            } => write!(
-                formatter,
-                "cass command `{command}` failed with exit {exit_code:?}: {stderr}",
-            ),
+            } => {
+                let command = bounded_public_cass_text(command, 512);
+                let stderr = bounded_public_cass_text(stderr, 2_048);
+                write!(
+                    formatter,
+                    "cass command `{command}` failed with exit {exit_code:?}: {stderr}",
+                )
+            }
             Self::InvalidJson { source, message } => {
+                let message = bounded_public_cass_text(message, 2_048);
                 write!(formatter, "invalid CASS {source} JSON: {message}")
             }
             Self::InvalidSince { value, message } => {
+                let value = bounded_public_cass_text(value, 512);
+                let message = bounded_public_cass_text(message, 2_048);
                 write!(formatter, "invalid --since value `{value}`: {message}")
             }
             Self::Io { path, message } => {
-                write!(formatter, "I/O error at {}: {message}", path.display())
+                let path = bounded_public_cass_text(path.to_string_lossy().as_ref(), 1_024);
+                let message = bounded_public_cass_text(message, 2_048);
+                write!(formatter, "I/O error at {path}: {message}")
             }
-            Self::Storage(error) => write!(formatter, "{error}"),
+            Self::Storage(error) => {
+                formatter.write_str(&bounded_public_cass_text(&error.to_string(), 2_048))
+            }
         }
     }
 }
@@ -461,6 +495,7 @@ fn cass_command_subprocess_diagnostics_json(
     peak_stdout_line_bytes: Option<usize>,
     peak_stdout_buffer_bytes: Option<usize>,
 ) -> JsonValue {
+    let command = bounded_public_cass_text(command, 512);
     json!({
         "schema": CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1,
         "outcome": if timed_out { "timeout" } else { "cass_command_failure" },
@@ -1515,7 +1550,6 @@ fn parse_view_line_value(
         .iter()
         .map(|reason| (*reason).to_string())
         .collect();
-    let excerpt = redaction.content;
     Ok(CassViewSpanForImport {
         cass_span_id: format!("{source_path}:{line_number}"),
         span_kind,
@@ -1526,8 +1560,8 @@ fn parse_view_line_value(
         // derivation-source-package validation (curate::is_canonical_blake3_content_hash)
         // accepts them on the persist path (`ee review session --propose`). `blake3_hex`
         // returns a BARE hex digest, so prefix it here. See issue #10.
-        content_hash: format!("blake3:{}", blake3_hex(&excerpt)),
-        excerpt,
+        content_hash: format!("blake3:{}", blake3_hex(&raw_excerpt)),
+        excerpt: raw_excerpt,
         redacted,
         redacted_reasons,
     })
@@ -1713,8 +1747,12 @@ fn complete_ledger(
 }
 
 fn import_cursor_json(cursor: &ImportCursor, error: Option<&CassImportError>) -> JsonValue {
+    let last_source_path = cursor
+        .last_source_path
+        .as_deref()
+        .map(redact_import_report_source_ref);
     let mut cursor_json = json!({
-        "lastSourcePath": cursor.last_source_path,
+        "lastSourcePath": last_source_path,
         "lastLine": cursor.last_line,
         "sessionsDiscovered": cursor.sessions_discovered,
         "sessionsImported": cursor.sessions_imported,
@@ -1800,6 +1838,7 @@ fn evidence_input(
         workspace_id: workspace_id.to_string(),
         session_id: session_id.to_string(),
         memory_id: None,
+        producer_kind: EvidenceProducerKind::CassImport,
         cass_span_id: span.cass_span_id.clone(),
         span_kind: span.span_kind.as_str().to_string(),
         start_line: span.start_line,
@@ -1817,6 +1856,7 @@ fn evidence_input(
             })
             .to_string(),
         ),
+        inherited_redaction_classes: Vec::new(),
     }
 }
 
@@ -1836,7 +1876,16 @@ fn cass_redaction_audit_input(
             json!({
                 "schema": CASS_REDACTION_AUDIT_SCHEMA_V1,
                 "sessionId": session_id,
-                "cassSpanId": span.cass_span_id,
+                "evidenceSpanId": evidence_id,
+                "provenanceUri": format!(
+                    "cass-session://{session_id}#L{}-{}",
+                    span.start_line,
+                    span.end_line
+                ),
+                "upstreamRefHash": format!(
+                    "blake3:{}",
+                    blake3::hash(span.cass_span_id.as_bytes()).to_hex()
+                ),
                 "redactionClasses": span.redacted_reasons,
             })
             .to_string(),
@@ -2310,6 +2359,115 @@ mod tests {
             &diagnostics["peakStreamedStdoutLineBufferBytes"],
             &json!(256),
             "peak buffer bytes",
+        )
+    }
+
+    #[test]
+    fn public_cass_source_ref_redaction_covers_unix_windows_unc_and_file_uris() -> TestResult {
+        for (raw, forbidden) in [
+            ("/Users/Alice/private/session.jsonl", "/Users/Alice"),
+            ("/mnt/cass/private/session.jsonl", "/mnt/cass"),
+            ("/opt/ee/private/session.jsonl", "/opt/ee"),
+            ("/root/.cass/session.jsonl", "/root/.cass"),
+            ("/srv/cass/session.jsonl", "/srv/cass"),
+            ("/usr/local/share/cass/session.jsonl", "/usr/local"),
+            (
+                r"C:\Users\Alice\.codex\sessions\session.jsonl",
+                r"C:\Users\Alice",
+            ),
+            (
+                r"\\fileserver\profiles\Alice\session.jsonl",
+                r"\\fileserver\profiles",
+            ),
+            (
+                "file:///C:/Users/Alice/.codex/sessions/session.jsonl",
+                "C:/Users/Alice",
+            ),
+            (
+                "file://fileserver/profiles/Alice/session.jsonl",
+                "fileserver/profiles/Alice",
+            ),
+        ] {
+            let redacted = redact_import_report_source_ref(raw);
+            ensure(
+                redacted.contains("[REDACTED_PATH]"),
+                format!("expected path placeholder for {raw:?}, got {redacted:?}"),
+            )?;
+            ensure(
+                !redacted.contains(forbidden),
+                format!("forbidden path {forbidden:?} escaped as {redacted:?}"),
+            )?;
+        }
+
+        ensure_equal(
+            &redact_import_report_source_ref("cass://safe-source"),
+            &"cass://safe-source".to_owned(),
+            "non-file URI remains intact",
+        )
+    }
+
+    #[test]
+    fn cass_command_public_error_diagnostics_and_cursor_are_path_secret_safe() -> TestResult {
+        let secret = format!("sk_live_{}", "1234567890abcdef1234567890abcdef");
+        let command_path = r"C:\Users\Alice\private\session.jsonl";
+        let stderr_path = r"\\fileserver\profiles\Alice\private\trace.jsonl";
+        let error = CassImportError::CassCommand {
+            command: format!(r#"cass view "{command_path}" --api-key {secret}"#),
+            exit_code: Some(2),
+            stderr: format!(
+                "failed to read {stderr_path}\nsecondary source file:///C:/Users/Alice/private/fallback.jsonl token={secret}"
+            ),
+            timed_out: false,
+            stderr_truncated: false,
+            stdout_line_count: Some(0),
+            peak_stdout_line_bytes: Some(0),
+            peak_stdout_buffer_bytes: Some(0),
+        };
+
+        let public_message = error.to_string();
+        let diagnostics = error
+            .subprocess_diagnostics_json()
+            .ok_or_else(|| "command failure should expose safe diagnostics".to_owned())?;
+        let diagnostics_text =
+            serde_json::to_string(&diagnostics).map_err(|error| error.to_string())?;
+        for rendered in [&public_message, &diagnostics_text] {
+            ensure(
+                !rendered.contains(command_path),
+                format!("Windows drive path escaped public error surface: {rendered}"),
+            )?;
+            ensure(
+                !rendered.contains(stderr_path),
+                format!("UNC path escaped public error surface: {rendered}"),
+            )?;
+            ensure(
+                !rendered.contains("C:/Users/Alice"),
+                format!("file URI path escaped public error surface: {rendered}"),
+            )?;
+            ensure(
+                !rendered.contains(&secret),
+                format!("secret escaped public error surface: {rendered}"),
+            )?;
+        }
+        ensure(
+            public_message.contains("[REDACTED_PATH]"),
+            "public error message should retain a path-redaction marker",
+        )?;
+        ensure(
+            diagnostics_text.contains("[REDACTED_PATH]"),
+            "diagnostics command should retain a path-redaction marker",
+        )?;
+
+        let mut cursor = ImportCursor::new();
+        cursor.record_discovered();
+        cursor.record_imported(stderr_path);
+        let cursor_text = import_cursor_json(&cursor, Some(&error)).to_string();
+        ensure(
+            !cursor_text.contains(stderr_path) && !cursor_text.contains(&secret),
+            format!("import ledger cursor leaked private source material: {cursor_text}"),
+        )?;
+        ensure(
+            cursor_text.contains("[REDACTED_PATH]"),
+            "import ledger cursor should retain a path-redaction marker",
         )
     }
 

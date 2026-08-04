@@ -3848,8 +3848,23 @@ mod tests {
         fs::write(
             index_dir.join("meta.json"),
             serde_json::json!({
-                "schema": "ee.index_metadata.v1",
+                "schema": crate::core::index::INDEX_METADATA_SCHEMA_V2,
                 "sourceGeneration": source_generation,
+                "corpusRevision": crate::core::index::expected_index_corpus_revision().as_str(),
+                "evidenceSecurityPolicyEpoch": crate::db::EVIDENCE_SECURITY_POLICY_EPOCH,
+                "documentCount": 0,
+                "documentCounts": {
+                    "memories": 0,
+                    "sessions": 0,
+                    "artifacts": 0,
+                    "rules": 0,
+                    "evidence": 0
+                },
+                "tierDocumentCounts": {
+                    "fast": 0,
+                    "quality": null,
+                    "lexical": cfg!(feature = "lexical-bm25").then_some(0)
+                },
                 "lastRebuildAt": "2026-01-01T00:00:00Z",
                 "storedDimension": 128,
                 "storedDistanceMetric": "cosine",
@@ -4516,8 +4531,18 @@ mod tests {
             index_size_bytes: 128,
             db_memory_count: 7,
             db_session_count: 0,
+            db_artifact_count: 0,
+            db_rule_count: 0,
+            db_evidence_count: 0,
+            db_evidence_admitted_count: 0,
+            db_evidence_quarantined_count: 0,
+            db_evidence_denied_count: 0,
             db_generation: Some(11),
             index_generation: Some(11),
+            expected_corpus_revision: "blake3:test".to_owned(),
+            actual_corpus_revision: Some("blake3:test".to_owned()),
+            index_document_count: Some(7),
+            index_document_counts: None,
             last_rebuild_at: Some("2026-06-18T00:00:00Z".to_owned()),
             last_check_error: None,
             repair_hint: None,

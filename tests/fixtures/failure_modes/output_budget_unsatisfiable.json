@@ -23,6 +23,7 @@
     "message_contains": [
       "Output budget unsatisfiable",
       "payload withheld"
-    ]
+    ],
+    "repair_contains": "Raise --max-output-tokens"
   }
 }

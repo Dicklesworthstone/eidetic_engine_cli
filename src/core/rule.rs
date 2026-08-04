@@ -29,6 +29,13 @@ use crate::models::{
     RuleLifecycleTransition, RuleLifecycleTrigger, RuleMaturity, RuleScope, Tag, TrustClass,
     UnitScore, WorkspaceId,
 };
+use crate::policy::import_auth::{
+    ArtifactContext, AuthenticatedHeader, ImportAuthOutcome, PLAYBOOK_ARTIFACT_FAMILY,
+    PLAYBOOK_RECORD_ENCODING_V1, RecordsRootBuilder, STORE_KEY_NAMESPACE_V1, authenticate_artifact,
+    canonical_record_hash, verify_artifact,
+};
+use crate::policy::store_auth::{MacDomain, StoreAuthError, StoreAuthRoot, workspace_keys_dir};
+use crate::search::normalize_rule_scope_pattern;
 
 /// Stable schema for `ee rule add` response data.
 pub const RULE_ADD_SCHEMA_V1: &str = "ee.rule.add.v1";
@@ -756,6 +763,7 @@ pub struct RuleProtectReport {
     pub changed: bool,
     pub dry_run: bool,
     pub audit_id: Option<String>,
+    pub index_job_id: Option<String>,
     #[serde(serialize_with = "serialize_rule_protect_degradations")]
     pub degraded: Vec<RuleAddDegradation>,
 }
@@ -936,6 +944,11 @@ pub struct PlaybookPortableDocument {
     pub workspace_path: String,
     pub rule_count: usize,
     pub rules: Vec<PlaybookPortableRule>,
+    /// Store-local authentication block (ADR 0086 TC-D14). Present only when
+    /// the exporting store MAC'd the rules' records root; import caps
+    /// `human_explicit` rules at `agent_validated` when absent or invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication: Option<AuthenticatedHeader>,
 }
 
 /// Result of listing playbook-portable rules.
@@ -1130,10 +1143,11 @@ impl RuleProtectReport {
             )
         } else {
             format!(
-                "{verb} procedural rule\n  ID: {}\n  Changed: {}\n  Audit: {}\n",
+                "{verb} procedural rule\n  ID: {}\n  Changed: {}\n  Audit: {}\n  Index job: {}\n",
                 self.rule_id,
                 self.changed,
-                self.audit_id.as_deref().unwrap_or("none")
+                self.audit_id.as_deref().unwrap_or("none"),
+                self.index_job_id.as_deref().unwrap_or("none")
             )
         }
     }
@@ -1520,20 +1534,33 @@ pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectRepor
             changed,
             true,
             None,
+            None,
+        ));
+    }
+
+    if !changed {
+        return Ok(rule_protect_report(
+            &prepared,
+            &rule_id,
+            options.protected,
+            previous_protected,
+            false,
+            false,
+            None,
+            None,
         ));
     }
 
     let audit_id = generate_audit_id();
+    let index_job_id = generate_search_index_job_id();
     let details = rule_protect_audit_details(&rule_id, previous_protected, options.protected);
     connection
         .with_transaction(|| {
-            if changed {
-                connection.update_procedural_rule_protected(
-                    &rule_id,
-                    &prepared.workspace_id,
-                    options.protected,
-                )?;
-            }
+            connection.update_procedural_rule_protected(
+                &rule_id,
+                &prepared.workspace_id,
+                options.protected,
+            )?;
             connection.insert_audit(
                 &audit_id,
                 &CreateAuditInput {
@@ -1546,6 +1573,16 @@ pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectRepor
                     target_type: Some("rule".to_owned()),
                     target_id: Some(rule_id.clone()),
                     details: Some(details.clone()),
+                },
+            )?;
+            connection.insert_search_index_job(
+                &index_job_id,
+                &CreateSearchIndexJobInput {
+                    workspace_id: prepared.workspace_id.clone(),
+                    job_type: SearchIndexJobType::SingleDocument,
+                    document_source: Some("rule".to_owned()),
+                    document_id: Some(rule_id.clone()),
+                    documents_total: 1,
                 },
             )
         })
@@ -1562,6 +1599,7 @@ pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectRepor
         changed,
         false,
         Some(audit_id),
+        Some(index_job_id),
     ))
 }
 
@@ -2093,6 +2131,34 @@ pub fn export_playbook(
     )?;
     let snapshot = load_playbook_snapshot(&prepared, options.include_tombstoned, options.limit, 0)?;
     let exported_at = Utc::now().to_rfc3339();
+
+    // TC-D14: MAC the rules' records root under the playbook subkey so
+    // `ee playbook import` can honor human_explicit only for artifacts this
+    // store actually produced. A store-auth fault degrades the export (high)
+    // and the document ships unauthenticated instead of blocking.
+    let mut degraded = Vec::new();
+    let records_root = playbook_records_root(&snapshot.rules)?;
+    let authentication =
+        match StoreAuthRoot::open_or_create(workspace_keys_dir(&prepared.workspace_path)) {
+            Ok(root) => match authenticate_artifact(
+                &root,
+                MacDomain::PlaybookImportRecordsRoot,
+                &playbook_artifact_context(&prepared.workspace_id),
+                &records_root.finalize(),
+                records_root.count(),
+            ) {
+                Ok(header) => Some(header),
+                Err(error) => {
+                    degraded.push(store_auth_degradation(&error));
+                    None
+                }
+            },
+            Err(error) => {
+                degraded.push(store_auth_degradation(&error));
+                None
+            }
+        };
+
     let document = PlaybookPortableDocument {
         schema: PLAYBOOK_PORTABLE_SCHEMA_V1.to_owned(),
         exported_at,
@@ -2101,6 +2167,7 @@ pub fn export_playbook(
         workspace_path: prepared.workspace_path.display().to_string(),
         rule_count: snapshot.rules.len(),
         rules: snapshot.rules,
+        authentication,
     };
     let bytes = serde_json::to_vec_pretty(&document).map_err(|error| DomainError::Storage {
         message: format!("failed to serialize playbook export: {error}"),
@@ -2132,8 +2199,85 @@ pub fn export_playbook(
         no_overwrite: true,
         redaction_status: "metadata_and_rule_text_only_no_memory_content".to_owned(),
         document,
-        degraded: Vec::new(),
+        degraded,
     })
+}
+
+/// Ordered records root over the rules' compact serde_json serialization —
+/// the encoding both exporter and importer reproduce from the shared struct.
+fn playbook_records_root(
+    rules: &[PlaybookPortableRule],
+) -> Result<RecordsRootBuilder, DomainError> {
+    let mut builder = RecordsRootBuilder::new();
+    for rule in rules {
+        let bytes = serde_json::to_vec(rule).map_err(|error| DomainError::Storage {
+            message: format!("failed to serialize playbook rule for authentication: {error}"),
+            repair: Some("inspect rule content and retry".to_owned()),
+        })?;
+        builder.push(
+            rule.source_rule_id.as_deref().unwrap_or(""),
+            &canonical_record_hash(&bytes),
+        );
+    }
+    Ok(builder)
+}
+
+fn playbook_artifact_context(workspace_id: &str) -> ArtifactContext<'_> {
+    ArtifactContext {
+        artifact_family: PLAYBOOK_ARTIFACT_FAMILY,
+        record_encoding_version: PLAYBOOK_RECORD_ENCODING_V1,
+        source_key_namespace: STORE_KEY_NAMESPACE_V1,
+        workspace_scope: workspace_id,
+    }
+}
+
+fn store_auth_degradation(error: &StoreAuthError) -> RuleAddDegradation {
+    RuleAddDegradation {
+        code: error.degraded_code().to_owned(),
+        severity: "high".to_owned(),
+        message: error.message(),
+        repair: error.repair(),
+    }
+}
+
+/// Whether a playbook artifact authenticates under this store's playbook
+/// subkey for trust-preserving import (ADR 0086 TC-D14).
+enum PlaybookAuthState {
+    Authenticated,
+    Unauthenticated { reason: String },
+    StoreUnavailable { error: StoreAuthError },
+}
+
+fn playbook_auth_state(
+    document: &PlaybookPortableDocument,
+    workspace_path: &Path,
+    workspace_id: &str,
+) -> Result<PlaybookAuthState, DomainError> {
+    let Some(authentication) = document.authentication.as_ref() else {
+        return Ok(PlaybookAuthState::Unauthenticated {
+            reason: "the playbook carries no store-local authentication block".to_owned(),
+        });
+    };
+    let root = match StoreAuthRoot::open(workspace_keys_dir(workspace_path)) {
+        Ok(root) => root,
+        Err(error) => return Ok(PlaybookAuthState::StoreUnavailable { error }),
+    };
+    let records_root = playbook_records_root(&document.rules)?;
+    let state = match verify_artifact(
+        &root,
+        MacDomain::PlaybookImportRecordsRoot,
+        &playbook_artifact_context(workspace_id),
+        authentication,
+        &records_root.finalize(),
+        records_root.count(),
+    ) {
+        Ok(ImportAuthOutcome::Authenticated { .. }) => PlaybookAuthState::Authenticated,
+        Ok(outcome) => PlaybookAuthState::Unauthenticated {
+            reason: format!("the playbook authentication block does not verify ({outcome:?})"),
+        },
+        Err(error) => PlaybookAuthState::StoreUnavailable { error },
+    };
+    Ok(state)
 }
 
 /// Import a portable playbook artifact into procedural rules.
@@ -2156,6 +2300,8 @@ pub fn import_playbook(
             ),
         })?;
     validate_playbook_document(&document)?;
+    let auth_state =
+        playbook_auth_state(&document, &prepared.workspace_path, &prepared.workspace_id)?;
 
     let existing = load_playbook_snapshot(&prepared, true, MAX_RULE_LIST_LIMIT, 0)?;
     let mut existing_contents = existing
@@ -2218,6 +2364,23 @@ pub fn import_playbook(
         }
         let maturity = import_maturity.unwrap_or(RuleMaturity::Candidate.as_str());
 
+        // TC-D14: human_explicit survives import only when the playbook
+        // authenticates under this store's playbook subkey; otherwise the
+        // rule is capped at agent_validated (store faults fail closed too).
+        let mut effective_trust_class = rule.trust_class.as_str();
+        if effective_trust_class == "human_explicit"
+            && !matches!(auth_state, PlaybookAuthState::Authenticated)
+        {
+            issue_codes.push(match &auth_state {
+                PlaybookAuthState::StoreUnavailable { .. } => {
+                    crate::policy::store_auth::MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE.to_owned()
+                }
+                _ => "playbook_trust_capped_unauthenticated".to_owned(),
+            });
+            downgraded_count += 1;
+            effective_trust_class = "agent_validated";
+        }
+
         if options.dry_run {
             existing_contents.insert(normalized);
             decisions.push(PlaybookImportDecision {
@@ -2242,7 +2405,7 @@ pub fn import_playbook(
             confidence: Some(rule.confidence),
             utility: rule.utility,
             importance: rule.importance,
-            trust_class: &rule.trust_class,
+            trust_class: effective_trust_class,
             protected: rule.protected,
             tags: &rule.tags,
             source_memory_ids: &[],
@@ -2277,6 +2440,37 @@ pub fn import_playbook(
         "no_changes"
     };
 
+    // Surface WHY human_explicit rules were capped (TC-D14): a store fault is
+    // a high degradation of this response; a merely-unauthenticated artifact
+    // degrades only when it actually cost a rule its trust class.
+    let mut degraded = Vec::new();
+    let trust_was_capped = decisions.iter().any(|decision| {
+        decision.issue_codes.iter().any(|code| {
+            code == "playbook_trust_capped_unauthenticated"
+                || code == crate::policy::store_auth::MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE
+        })
+    });
+    if trust_was_capped {
+        match &auth_state {
+            PlaybookAuthState::Authenticated => {}
+            PlaybookAuthState::StoreUnavailable { error } => {
+                degraded.push(store_auth_degradation(error));
+            }
+            PlaybookAuthState::Unauthenticated { reason } => {
+                degraded.push(RuleAddDegradation {
+                    code: "playbook_trust_capped_unauthenticated".to_owned(),
+                    severity: "warning".to_owned(),
+                    message: format!(
+                        "human_explicit playbook rules were capped at agent_validated: {reason}"
+                    ),
+                    repair: "Re-export the playbook from this workspace (ee playbook export) so \
+                             it carries a valid store-local MAC, or accept the capped trust class."
+                        .to_owned(),
+                });
+            }
+        }
+    }
+
     Ok(PlaybookImportReport {
         schema: PLAYBOOK_IMPORT_SCHEMA_V1,
         command: "playbook import",
@@ -2300,7 +2494,7 @@ pub fn import_playbook(
         downgraded_count,
         durable_mutation: !options.dry_run && imported_count > 0,
         decisions,
-        degraded: Vec::new(),
+        degraded,
     })
 }
 
@@ -3477,7 +3671,12 @@ fn prepare_rule_update(
     } else {
         previous.scope_pattern.clone()
     };
-    let scope_pattern = prepare_scope_pattern(scope, candidate_scope_pattern.as_deref())?;
+    let scope_pattern = prepare_scope_pattern(
+        &prepared.workspace_path,
+        scope,
+        candidate_scope_pattern.as_deref(),
+        "ee rule update --help",
+    )?;
     let trust_class = options
         .trust_class
         .map(TrustClass::from_str)
@@ -3701,7 +3900,12 @@ fn prepare_rule_add(options: &RuleAddOptions<'_>) -> Result<PreparedRuleAdd, Dom
 
     let scope =
         RuleScope::from_str(options.scope).map_err(|error| rule_usage_error(error.to_string()))?;
-    let scope_pattern = prepare_scope_pattern(scope, options.scope_pattern)?;
+    let scope_pattern = prepare_scope_pattern(
+        &workspace_path,
+        scope,
+        options.scope_pattern,
+        "ee rule add --help",
+    )?;
     let maturity = RuleMaturity::from_str(options.maturity)
         .map_err(|error| rule_usage_error(error.to_string()))?;
     if maturity.is_terminal() {
@@ -3763,23 +3967,20 @@ fn prepare_rule_add(options: &RuleAddOptions<'_>) -> Result<PreparedRuleAdd, Dom
 }
 
 fn prepare_scope_pattern(
+    workspace_path: &Path,
     scope: RuleScope,
     raw: Option<&str>,
+    repair: &str,
 ) -> Result<Option<String>, DomainError> {
-    let pattern = raw.map(str::trim).filter(|value| !value.is_empty());
-    if scope.requires_pattern() && pattern.is_none() {
-        return Err(rule_usage_error(format!(
-            "scope `{}` requires --scope-pattern",
-            scope.as_str()
-        )));
-    }
-    if !scope.requires_pattern() && pattern.is_some() {
-        return Err(rule_usage_error(format!(
-            "scope `{}` does not accept --scope-pattern",
-            scope.as_str()
-        )));
-    }
-    Ok(pattern.map(str::to_owned))
+    normalize_rule_scope_pattern(workspace_path, scope, raw).map_err(|error| {
+        rule_read_usage_error(
+            format!(
+                "invalid --scope-pattern for scope `{}`: {error}",
+                scope.as_str()
+            ),
+            repair,
+        )
+    })
 }
 
 fn parse_tags(raw_tags: &[String]) -> Result<Vec<String>, DomainError> {
@@ -4091,6 +4292,7 @@ fn rule_protect_report(
     changed: bool,
     dry_run: bool,
     audit_id: Option<String>,
+    index_job_id: Option<String>,
 ) -> RuleProtectReport {
     RuleProtectReport {
         schema: RULE_PROTECT_SCHEMA_V1,
@@ -4112,6 +4314,7 @@ fn rule_protect_report(
         changed,
         dry_run,
         audit_id,
+        index_job_id,
         degraded: Vec::new(),
     }
 }
@@ -4349,6 +4552,144 @@ mod tests {
             validation_contradictions_delta(RuleLifecycleTrigger::OutcomeHelpful, &outcome_helpful)
                 == 0,
             "outcome_helpful must not bump validation contradictions",
+        )
+    }
+
+    #[test]
+    fn protect_rule_is_noop_safe_and_rolls_back_when_index_enqueue_fails() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(workspace_path);
+        let rule_id = "rule_01234567890123456789012345";
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("rule-protect-rollback".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_procedural_rule(
+                rule_id,
+                &CreateProceduralRuleInput {
+                    workspace_id: workspace_id.clone(),
+                    content: "Keep index metadata synchronized with rule protection.".to_owned(),
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.6,
+                    trust_class: "human_explicit".to_owned(),
+                    scope: "workspace".to_owned(),
+                    scope_pattern: None,
+                    maturity: "candidate".to_owned(),
+                    protected: false,
+                    source_memory_ids: Vec::new(),
+                    tags: Vec::new(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let generation_before = connection
+            .get_workspace_generation(&workspace_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "workspace generation missing".to_owned())?;
+        connection
+            .execute_raw(
+                "CREATE TRIGGER fail_rule_index_enqueue
+                 BEFORE INSERT ON search_index_jobs
+                 WHEN NEW.document_source = 'rule'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'intentional rule index enqueue failure');
+                 END",
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let unchanged = protect_rule(&RuleProtectOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            rule_id,
+            protected: false,
+            dry_run: false,
+            actor: Some("test"),
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(
+            unchanged.status == "unchanged"
+                && !unchanged.changed
+                && unchanged.audit_id.is_none()
+                && unchanged.index_job_id.is_none(),
+            format!("true no-op must not audit or enqueue: {unchanged:?}"),
+        )?;
+
+        let error = protect_rule(&RuleProtectOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            rule_id,
+            protected: true,
+            dry_run: false,
+            actor: Some("test"),
+        })
+        .expect_err("index enqueue failure must fail the whole protect mutation");
+        ensure(
+            matches!(error, DomainError::Storage { .. }),
+            format!("expected storage failure, got {error:?}"),
+        )?;
+
+        let verification =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let stored = verification
+            .get_procedural_rule(rule_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "rule missing after rollback".to_owned())?;
+        ensure(
+            !stored.protected,
+            "failed index enqueue must roll back the protected marker",
+        )?;
+        ensure(
+            verification
+                .get_workspace_generation(&workspace_id)
+                .map_err(|error| error.to_string())?
+                == Some(generation_before),
+            "failed index enqueue must roll back the generation trigger",
+        )?;
+        ensure(
+            verification
+                .list_audit_by_target("rule", rule_id, None)
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            "failed and no-op protect paths must not leave audit rows",
+        )
+    }
+
+    #[test]
+    fn prepare_scope_pattern_normalizes_public_rule_writes() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let normalized = prepare_scope_pattern(
+            workspace.path(),
+            RuleScope::FilePattern,
+            Some("src//./**/*.rs"),
+            "ee rule add --help",
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            normalized.as_deref() == Some("src/**/*.rs"),
+            format!("unexpected normalized scope pattern: {normalized:?}"),
+        )?;
+        let traversal = prepare_scope_pattern(
+            workspace.path(),
+            RuleScope::Directory,
+            Some("../outside"),
+            "ee rule update --help",
+        )
+        .expect_err("parent traversal must fail");
+        ensure(
+            traversal.message().contains("parent traversal"),
+            format!("unexpected traversal error: {traversal:?}"),
         )
     }
 
@@ -4718,6 +5059,7 @@ mod tests {
                 created_at: Some("2026-05-16T00:00:00Z".to_owned()),
                 updated_at: None,
             }],
+            authentication: None,
         };
 
         let err = match validate_playbook_document(&document) {
@@ -4786,6 +5128,7 @@ mod tests {
             workspace_path: "/source".to_owned(),
             rule_count: 2,
             rules: vec![valid_rule, invalid_rule],
+            authentication: None,
         };
         let source_path = workspace_path.join("invalid-playbook.json");
         fs::write(
@@ -4810,7 +5153,10 @@ mod tests {
             "expected import error",
         )?;
         ensure(
-            err.message().contains("scope `directory` requires"),
+            // fcd181f1 rewrote the inner message; pin the stable outer wrap
+            // ("invalid --scope-pattern for scope `directory`: <inner>").
+            err.message()
+                .contains("invalid --scope-pattern for scope `directory`"),
             "error should include invalid rule reason",
         )?;
         let connection =
@@ -4821,6 +5167,233 @@ mod tests {
         ensure(
             rules.is_empty(),
             "preflight failure must not persist valid prefix",
+        )
+    }
+
+    /// Workspace fixture for playbook trust-cap tests: canonical path, a
+    /// migrated DB with a workspace row, and the stable workspace id.
+    fn playbook_auth_workspace(
+        tempdir: &tempfile::TempDir,
+    ) -> Result<(PathBuf, PathBuf, String), String> {
+        let workspace_path = tempdir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = stable_workspace_id(&workspace_path);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("playbook-auth".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        Ok((workspace_path, database_path, workspace_id))
+    }
+
+    fn human_explicit_portable_document(workspace_id: &str) -> PlaybookPortableDocument {
+        PlaybookPortableDocument {
+            schema: PLAYBOOK_PORTABLE_SCHEMA_V1.to_owned(),
+            exported_at: "2026-08-02T00:00:00Z".to_owned(),
+            ee_version: env!("CARGO_PKG_VERSION").to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            workspace_path: "/source".to_owned(),
+            rule_count: 1,
+            rules: vec![PlaybookPortableRule {
+                source_rule_id: Some("rule_01234567890123456789012345".to_owned()),
+                content: "Run cargo fmt --check before release.".to_owned(),
+                maturity: RuleMaturity::Candidate.as_str().to_owned(),
+                scope: RuleScope::Workspace.as_str().to_owned(),
+                scope_pattern: None,
+                trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                protected: false,
+                confidence: 0.8,
+                utility: 0.5,
+                importance: 0.6,
+                tags: vec!["release".to_owned()],
+                source_memory_ids: Vec::new(),
+                source_memory_count: 0,
+                created_at: Some("2026-08-02T00:00:00Z".to_owned()),
+                updated_at: None,
+            }],
+            authentication: None,
+        }
+    }
+
+    fn authenticate_playbook_document(
+        document: &mut PlaybookPortableDocument,
+        workspace_path: &Path,
+        workspace_id: &str,
+    ) -> TestResult {
+        let root = StoreAuthRoot::open_or_create(workspace_keys_dir(workspace_path))
+            .map_err(|error| error.message())?;
+        let records_root =
+            playbook_records_root(&document.rules).map_err(|error| error.message())?;
+        document.authentication = Some(
+            authenticate_artifact(
+                &root,
+                MacDomain::PlaybookImportRecordsRoot,
+                &playbook_artifact_context(workspace_id),
+                &records_root.finalize(),
+                records_root.count(),
+            )
+            .map_err(|error| error.message())?,
+        );
+        Ok(())
+    }
+
+    fn run_playbook_import(
+        workspace_path: &Path,
+        database_path: &Path,
+        document: &PlaybookPortableDocument,
+    ) -> Result<PlaybookImportReport, String> {
+        let source_path = workspace_path.join("playbook-import.json");
+        fs::write(
+            &source_path,
+            serde_json::to_vec_pretty(document).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        import_playbook(&PlaybookImportOptions {
+            workspace_path,
+            database_path: Some(database_path),
+            source_path: &source_path,
+            dry_run: false,
+            actor: Some("test"),
+        })
+        .map_err(|error| error.message())
+    }
+
+    fn imported_rule_trust_class(
+        database_path: &Path,
+        workspace_id: &str,
+    ) -> Result<String, String> {
+        let connection =
+            DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+        let rules = connection
+            .list_procedural_rules(workspace_id, None, None, true)
+            .map_err(|error| error.to_string())?;
+        rules
+            .first()
+            .map(|rule| rule.trust_class.clone())
+            .ok_or_else(|| "expected one imported rule".to_owned())
+    }
+
+    #[test]
+    fn playbook_import_caps_unauthenticated_human_explicit() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&tempdir)?;
+        let document = human_explicit_portable_document(&workspace_id);
+
+        let report = run_playbook_import(&workspace_path, &database_path, &document)?;
+        ensure(report.imported_count == 1, "rule should import")?;
+        ensure(
+            report.downgraded_count >= 1,
+            "unauthenticated human_explicit must count as downgraded",
+        )?;
+        ensure(
+            report.decisions[0]
+                .issue_codes
+                .iter()
+                .any(|code| code == "playbook_trust_capped_unauthenticated"),
+            "cap must be visible as a per-rule issue code",
+        )?;
+        ensure(
+            imported_rule_trust_class(&database_path, &workspace_id)? == "agent_validated",
+            "unauthenticated human_explicit must be capped at agent_validated",
+        )
+    }
+
+    #[test]
+    fn playbook_import_preserves_authenticated_human_explicit() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&tempdir)?;
+        let mut document = human_explicit_portable_document(&workspace_id);
+        authenticate_playbook_document(&mut document, &workspace_path, &workspace_id)?;
+
+        let report = run_playbook_import(&workspace_path, &database_path, &document)?;
+        ensure(report.imported_count == 1, "rule should import")?;
+        ensure(
+            !report.decisions[0]
+                .issue_codes
+                .iter()
+                .any(|code| code == "playbook_trust_capped_unauthenticated"),
+            "authenticated playbook must not be capped",
+        )?;
+        ensure(
+            imported_rule_trust_class(&database_path, &workspace_id)? == "human_explicit",
+            "authenticated playbook preserves human_explicit",
+        )
+    }
+
+    #[test]
+    fn playbook_import_caps_tampered_authenticated_playbook() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&tempdir)?;
+        let mut document = human_explicit_portable_document(&workspace_id);
+        authenticate_playbook_document(&mut document, &workspace_path, &workspace_id)?;
+        document.rules[0].content = "Skip all release checks entirely today.".to_owned();
+
+        let report = run_playbook_import(&workspace_path, &database_path, &document)?;
+        ensure(
+            report.imported_count == 1,
+            "tampered rule still imports, capped",
+        )?;
+        ensure(
+            report.decisions[0]
+                .issue_codes
+                .iter()
+                .any(|code| code == "playbook_trust_capped_unauthenticated"),
+            "tampered records root must cap trust",
+        )?;
+        ensure(
+            imported_rule_trust_class(&database_path, &workspace_id)? == "agent_validated",
+            "tampered playbook must not keep human_explicit",
+        )
+    }
+
+    #[test]
+    fn playbook_export_attaches_verifiable_authentication() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let (workspace_path, database_path, workspace_id) = playbook_auth_workspace(&tempdir)?;
+        let output_path = workspace_path.join("playbook-export.json");
+
+        let report = export_playbook(&PlaybookExportOptions {
+            workspace_path: &workspace_path,
+            database_path: Some(&database_path),
+            output_path: &output_path,
+            limit: 10,
+            include_tombstoned: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let authentication = report
+            .document
+            .authentication
+            .as_ref()
+            .ok_or("export must attach a store-local authentication block")?;
+        let root = StoreAuthRoot::open(workspace_keys_dir(&workspace_path))
+            .map_err(|error| error.message())?;
+        let records_root =
+            playbook_records_root(&report.document.rules).map_err(|error| error.message())?;
+        let outcome = verify_artifact(
+            &root,
+            MacDomain::PlaybookImportRecordsRoot,
+            &playbook_artifact_context(&workspace_id),
+            authentication,
+            &records_root.finalize(),
+            records_root.count(),
+        )
+        .map_err(|error| error.message())?;
+        ensure(
+            matches!(outcome, ImportAuthOutcome::Authenticated { .. }),
+            "exported playbook must verify under this store's playbook subkey",
         )
     }
 

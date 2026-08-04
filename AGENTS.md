@@ -1224,20 +1224,19 @@ to remote execution and avoids direct `rch exec -- cargo ...` fallback paths
 that can inherit the Mac USB `TMPDIR` or run local Cargo.
 
 ```bash
-TMPDIR=/Volumes/USBNVME16TB/temp_agent_space/tmp \
 RCH_VISIBILITY=summary \
-RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel/projects \
-RCH_ALIAS_PROJECT_ROOT=/data/projects \
-scripts/rch_verify.sh --summary --no-write \
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --summary --no-write \
   --rch-bin /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 -- \
-  cargo test --lib
+  cargo test --locked --lib
 ```
 
 Do not call `/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch`
 directly from this Mac; that path can contain a Linux worker artifact and fail
-with `exec format error`. Prefer `scripts/rch_verify.sh -- cargo ...`, or the
-current Mach-O sidecar above when a low-level RCH incident/debug command is
-needed.
+with `exec format error`. Prefer the pinned
+`scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo
+... --locked` lane, or the current Mach-O sidecar above when a low-level RCH
+incident/debug command is needed.
 
 Quick commands:
 ```bash
@@ -1494,11 +1493,12 @@ Mutation and audit rules:
   `actionCountDelta`, `sameTargetSha`, `finishedAtTransition`, and
   `statusTransition`. Read-only.
 - `ee doctor --fix --json` invokes the runtime chokepoint (lock,
-  `<workspace>/.doctor/runs/<run-id>/` allocation, `RunContext::finish`) and
-  emits `ee.doctor.fix_summary.v1`. Until the per-FM fixer dispatch table
-  lands (`bd-tu4s8`), this surface returns `actionCount: 0` and
-  `fixerDispatchPending: true`. Pair with `--undo <run-id>` to release the
-  run state.
+  `<workspace>/.doctor/runs/<run-id>/` allocation, registered fixer dispatch,
+  `RunContext::finish`) and emits `ee.response.v2` with typed
+  `ee.doctor.fix_summary.v1` content under `data`. Read
+  `data.actionCount` for the actions actually recorded by the run;
+  `data.fixerDispatchPending` is `false`. Pair with `--undo <run-id>` to
+  reverse recorded actions and release the run state.
 - `ee doctor --undo <run-id> --json` replays a prior doctor run's undo log
   through `src/core/doctor_runtime::replay_undo`. Per RULE NUMBER 1, undo
   never deletes files; files created by the original run are quarantined by

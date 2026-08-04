@@ -37,6 +37,33 @@
     },
     "generatedAt": { "type": "string" }
   },
+  "field_presets": {
+    "minimal": ["schema", "workspaceId", "clusterCount"],
+    "summary": [
+      "schema",
+      "workspaceId",
+      "retentionDays",
+      "effectiveSince",
+      "scannedMissCount",
+      "clusterCount",
+      "gaps",
+      "degraded"
+    ],
+    "standard": [
+      "schema",
+      "success",
+      "workspaceId",
+      "retentionDays",
+      "requestedSince",
+      "effectiveSince",
+      "scannedMissCount",
+      "clusterCount",
+      "gaps",
+      "degraded",
+      "generatedAt"
+    ],
+    "full": ["*"]
+  },
   "$defs": {
     "gap": {
       "type": "object",

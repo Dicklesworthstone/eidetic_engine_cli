@@ -17,6 +17,7 @@
         "parserVersion",
         "runId",
         "workspacePath",
+        "includeGlobs",
         "sourceCount",
         "sourceBytes",
         "maxSourceBytes",
@@ -33,6 +34,12 @@
         "parserVersion": {"type": "string", "const": "docs-bootstrap-v1"},
         "runId": {"type": "string", "minLength": 1},
         "workspacePath": {"type": "string", "minLength": 1},
+        "includeGlobs": {
+          "type": "array",
+          "description": "Sorted, deduplicated workspace-relative include globs bound into runId and required again on bootstrap apply.",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
         "sourceCount": {"type": "integer", "minimum": 0},
         "sourceBytes": {"type": "integer", "minimum": 0},
         "maxSourceBytes": {"type": "integer", "minimum": 0},
@@ -68,6 +75,7 @@
         "candidateId",
         "sourcePath",
         "sourceHash",
+        "sourceKind",
         "sourceSpan",
         "proposedContent",
         "redacted",
@@ -85,6 +93,10 @@
         "candidateId": {"type": "string", "minLength": 1},
         "sourcePath": {"type": "string", "minLength": 1},
         "sourceHash": {"type": "string", "minLength": 1},
+        "sourceKind": {
+          "type": "string",
+          "enum": ["root_policy", "readme", "adr", "schema", "env_vars", "failure_mode_fixture", "reference_doc"]
+        },
         "sourceSpan": {"$ref": "#/$defs/sourceSpan"},
         "proposedContent": {"type": "string"},
         "redacted": {"type": "boolean"},
@@ -119,6 +131,7 @@
         "target",
         "sourcePath",
         "sourceHash",
+        "sourceKind",
         "sourceSpan",
         "candidateKind",
         "redactedContentHash",
@@ -137,6 +150,10 @@
         "target": {"type": "string"},
         "sourcePath": {"type": "string", "minLength": 1},
         "sourceHash": {"type": "string", "minLength": 1},
+        "sourceKind": {
+          "type": "string",
+          "enum": ["root_policy", "readme", "adr", "schema", "env_vars", "failure_mode_fixture", "reference_doc"]
+        },
         "sourceSpan": {"$ref": "#/$defs/sourceSpan"},
         "candidateKind": {"type": "string"},
         "redactedContentHash": {"type": "string"},
@@ -162,7 +179,10 @@
       "additionalProperties": false,
       "properties": {
         "relativePath": {"type": "string", "minLength": 1},
-        "sourceKind": {"type": "string"},
+        "sourceKind": {
+          "type": "string",
+          "enum": ["root_policy", "readme", "adr", "schema", "env_vars", "failure_mode_fixture", "reference_doc"]
+        },
         "contentHash": {"type": "string", "minLength": 1},
         "byteCount": {"type": "integer", "minimum": 0},
         "lineCount": {"type": "integer", "minimum": 0},

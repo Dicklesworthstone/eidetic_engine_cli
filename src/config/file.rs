@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use regex_lite::Regex;
-use toml_edit::{DocumentMut, Item, Table, Value};
+use toml_edit::{DocumentMut, Item, Table, TableLike, Value};
 
 use crate::models::{
     MAX_WORKSPACE_TASK_LENSES, RedactionLevel, TASK_LENS_VERSION, TaskLens, TaskLensInput,
@@ -84,8 +84,8 @@ impl ConfigFile {
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigParseError`] when TOML syntax is invalid or a known
-    /// key has the wrong type/value.
+    /// Returns [`ConfigParseError`] when TOML syntax is invalid, a key is
+    /// unknown, or a known key has the wrong type/value.
     pub fn parse(input: &str) -> Result<Self, ConfigParseError> {
         Self::parse_inner(input, None)
     }
@@ -94,8 +94,8 @@ impl ConfigFile {
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigParseError`] when TOML syntax is invalid, a known
-    /// key has the wrong type/value, or path expansion fails.
+    /// Returns [`ConfigParseError`] when TOML syntax is invalid, a key is
+    /// unknown, a known key has the wrong type/value, or path expansion fails.
     pub fn parse_with_expander(
         input: &str,
         expander: &PathExpander,
@@ -110,7 +110,7 @@ impl ConfigFile {
                 message: source.to_string(),
             })?;
 
-        Ok(Self {
+        let parsed = Self {
             storage: StorageConfig::parse(&document, expander)?,
             runtime: RuntimeConfig::parse(&document)?,
             write: WriteConfig::parse(&document)?,
@@ -133,7 +133,10 @@ impl ConfigFile {
             policy: PolicyConfig::parse(&document)?,
             privacy: PrivacyConfig::parse(&document)?,
             trust: TrustConfig::parse(&document)?,
-        })
+        };
+
+        validate_config_keys(&document)?;
+        Ok(parsed)
     }
 }
 
@@ -1375,6 +1378,10 @@ pub enum ConfigParseError {
         key: String,
         source: PathExpansionError,
     },
+    UnknownKey {
+        key: String,
+        suggestion: Option<String>,
+    },
 }
 
 impl fmt::Display for ConfigParseError {
@@ -1395,6 +1402,13 @@ impl fmt::Display for ConfigParseError {
             Self::PathExpansion { key, source } => {
                 write!(formatter, "failed to expand config path `{key}`: {source}")
             }
+            Self::UnknownKey { key, suggestion } => {
+                write!(formatter, "unknown config key `{key}`")?;
+                if let Some(suggestion) = suggestion {
+                    write!(formatter, "; did you mean `{suggestion}`?")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -1403,9 +1417,389 @@ impl std::error::Error for ConfigParseError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::PathExpansion { source, .. } => Some(source),
-            Self::Toml { .. } | Self::InvalidType { .. } | Self::InvalidValue { .. } => None,
+            Self::Toml { .. }
+            | Self::InvalidType { .. }
+            | Self::InvalidValue { .. }
+            | Self::UnknownKey { .. } => None,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum ConfigKeyPolicy {
+    Closed(&'static [&'static str]),
+    Open,
+}
+
+fn config_key_policy(table_path: &str) -> Option<ConfigKeyPolicy> {
+    let policy = match table_path {
+        "" => ConfigKeyPolicy::Closed(&[
+            "storage",
+            "runtime",
+            "write",
+            "cass",
+            "search",
+            "pack",
+            "task_lens",
+            "handoff",
+            "cache",
+            "mesh",
+            "swarm",
+            "graph",
+            "curation",
+            "journal",
+            "primer",
+            "decide",
+            "learn",
+            "feedback",
+            "redaction",
+            "policy",
+            "privacy",
+            "trust",
+            "profile",
+        ]),
+        "storage" => {
+            ConfigKeyPolicy::Closed(&["database_path", "index_dir", "jsonl_export", "read_pool"])
+        }
+        "storage.read_pool" => ConfigKeyPolicy::Closed(&[
+            "size",
+            "idle_timeout_seconds",
+            "max_pin_duration_seconds",
+            "acquire_timeout_ms",
+            "pin_snapshot",
+        ]),
+        "runtime" => ConfigKeyPolicy::Closed(&["daemon", "job_budget_ms", "import_batch_size"]),
+        "write" => ConfigKeyPolicy::Closed(&[
+            "group_commit_enabled",
+            "batch_window_ms",
+            "max_batch_size",
+            "max_inflight_bytes",
+        ]),
+        "cass" => {
+            ConfigKeyPolicy::Closed(&["enabled", "binary", "since", "subprocess_timeout_secs"])
+        }
+        "search" => ConfigKeyPolicy::Closed(&[
+            "default_speed",
+            "lexical_weight",
+            "semantic_weight",
+            "graph_weight",
+            "rerank",
+            "rerank_top_k",
+            "query_miss_retention_days",
+            "lexical_ram_tier",
+        ]),
+        "search.lexical_ram_tier" => {
+            ConfigKeyPolicy::Closed(&["enabled", "request_hugepages", "populate_on_open"])
+        }
+        "pack" => ConfigKeyPolicy::Closed(&[
+            "default_profile",
+            "default_format",
+            "default_max_tokens",
+            "adaptive_budget",
+            "mmr_lambda",
+            "candidate_pool",
+            "memory_tier_admission",
+            "lod_full_basis_points",
+            "lod_truncated_preview_basis_points",
+            "lod_link_only_basis_points",
+            "baseline_ledger_max_rows",
+        ]),
+        "task_lens" => ConfigKeyPolicy::Closed(&["overrides"]),
+        "task_lens.overrides[]" => ConfigKeyPolicy::Closed(&[
+            "id",
+            "version",
+            "description",
+            "context_profile",
+            "source_mode",
+            "strict_source_mode",
+            "pack_profile",
+            "resource_profile",
+            "redaction",
+            "memory_scope",
+            "max_tokens",
+            "candidate_pool",
+            "max_results",
+            "coverage_facets",
+            "allowed_kinds",
+            "deprioritized_kinds",
+        ]),
+        "handoff" => ConfigKeyPolicy::Closed(&["stale_threshold"]),
+        "handoff.stale_threshold" => ConfigKeyPolicy::Closed(&[
+            "memories_added",
+            "any_expired_in_pack",
+            "content_drift_score",
+            "memories_revised",
+        ]),
+        "cache" => ConfigKeyPolicy::Closed(&["pack_l2"]),
+        "cache.pack_l2" => {
+            ConfigKeyPolicy::Closed(&["enabled", "directory", "max_bytes", "max_age_days"])
+        }
+        "mesh" => ConfigKeyPolicy::Closed(&[
+            "enabled",
+            "command_mode",
+            "last_containment_schema",
+            "peer_group_bindings",
+            "peer_policies",
+        ]),
+        "mesh.peer_group_bindings[]" => ConfigKeyPolicy::Closed(&[
+            "workspace_id",
+            "workspace_alias",
+            "peer_group_id",
+            "peer_group_label",
+            "peer_ids",
+            "origin_workspace_ids",
+            "lanes",
+            "default_action",
+        ]),
+        "mesh.peer_group_bindings[].lanes" | "mesh.peer_policies[].allowed_lanes" => {
+            ConfigKeyPolicy::Closed(&[
+                "metadata",
+                "body",
+                "embedding",
+                "graph_link",
+                "revision_notice",
+                "curation_signal",
+            ])
+        }
+        "mesh.peer_policies[]" => ConfigKeyPolicy::Closed(&[
+            "policy_id",
+            "workspace_id",
+            "workspace_alias",
+            "peer_id",
+            "peer_alias",
+            "origin_workspace_ids",
+            "trust_lane",
+            "import_trust_class",
+            "allowed_lanes",
+            "redaction",
+            "body_fetch",
+            "default_action",
+        ]),
+        "mesh.peer_policies[].redaction" => {
+            ConfigKeyPolicy::Closed(&["metadata", "preview", "body", "embedding"])
+        }
+        "mesh.peer_policies[].body_fetch" => {
+            ConfigKeyPolicy::Closed(&["allowed", "requires_consent", "max_bytes"])
+        }
+        "swarm" => ConfigKeyPolicy::Closed(&["adaptive"]),
+        "swarm.adaptive" => ConfigKeyPolicy::Closed(&[
+            "enabled",
+            "prefetch_top_k",
+            "prefetch_budget_ms",
+            "similarity_threshold",
+            "noisy_neighbor_p99_ms",
+            "noisy_neighbor_backoff_ms",
+        ]),
+        "graph" => ConfigKeyPolicy::Closed(&[
+            "ppr",
+            "health",
+            "curate",
+            "hits",
+            "causal",
+            "pack_dna",
+            "gomory_hu",
+            "memory",
+            "witnesses",
+            "feature",
+        ]),
+        "graph.ppr" => ConfigKeyPolicy::Closed(&["alpha"]),
+        "graph.health" => ConfigKeyPolicy::Closed(&["contradiction_threshold"]),
+        "graph.curate" => {
+            ConfigKeyPolicy::Closed(&["onion_decay_max", "articulation_protection_multiplier"])
+        }
+        "graph.hits" => ConfigKeyPolicy::Closed(&["profile_boost"]),
+        "graph.causal" => ConfigKeyPolicy::Closed(&["min_cost_normalization"]),
+        "graph.pack_dna" => ConfigKeyPolicy::Closed(&["max_items", "max_edges"]),
+        "graph.gomory_hu" => ConfigKeyPolicy::Closed(&["sample_threshold", "sample_size"]),
+        "graph.memory" => ConfigKeyPolicy::Closed(&[
+            "snapshot_cap_mb",
+            "per_algorithm_cap_mb",
+            "degraded_below_pct",
+            "growth_multiplier_basis_points",
+        ]),
+        "graph.witnesses" => ConfigKeyPolicy::Closed(&["retention_days", "algorithm_ttl_days"]),
+        "graph.witnesses.algorithm_ttl_days" => ConfigKeyPolicy::Open,
+        "graph.feature" => ConfigKeyPolicy::Closed(&[
+            "ppr",
+            "pack_dna",
+            "causal_explain",
+            "structural_health",
+            "structural_decay",
+            "proximity",
+            "revision_dominance",
+            "skyline",
+            "load_bearing",
+            "hits_profiles",
+        ]),
+        "graph.feature.ppr"
+        | "graph.feature.pack_dna"
+        | "graph.feature.causal_explain"
+        | "graph.feature.structural_health"
+        | "graph.feature.structural_decay"
+        | "graph.feature.proximity"
+        | "graph.feature.revision_dominance"
+        | "graph.feature.skyline"
+        | "graph.feature.load_bearing"
+        | "graph.feature.hits_profiles" => ConfigKeyPolicy::Closed(&["enabled"]),
+        "curation" => ConfigKeyPolicy::Closed(&[
+            "duplicate_similarity",
+            "harmful_weight",
+            "decay_half_life_days",
+            "specificity_min",
+        ]),
+        "journal" => ConfigKeyPolicy::Closed(&["enabled", "retention_days"]),
+        "primer" => ConfigKeyPolicy::Closed(&["default_tokens"]),
+        "decide" => ConfigKeyPolicy::Closed(&["revisit_warning_days"]),
+        "learn" => ConfigKeyPolicy::Closed(&["cluster_coherence_threshold", "decay"]),
+        "learn.decay" => ConfigKeyPolicy::Closed(&[
+            "demote_threshold",
+            "forget_threshold",
+            "working_half_life_days",
+            "episodic_event_half_life_days",
+            "episodic_failure_half_life_days",
+            "semantic_fact_half_life_days",
+            "procedural_rule_half_life_days",
+            "default_half_life_days",
+        ]),
+        "feedback" => ConfigKeyPolicy::Closed(&[
+            "harmful_per_source_per_hour",
+            "harmful_burst_window_seconds",
+        ]),
+        "redaction" => ConfigKeyPolicy::Closed(&["defaults"]),
+        "redaction.defaults" => {
+            ConfigKeyPolicy::Closed(&["export", "handoff_create", "context_json", "support_bundle"])
+        }
+        "policy" => ConfigKeyPolicy::Closed(&["secret_detector", "output_redaction"]),
+        "policy.secret_detector" => ConfigKeyPolicy::Closed(&["allow_phrases", "allow_regex"]),
+        "policy.output_redaction" => ConfigKeyPolicy::Closed(&["enabled"]),
+        "privacy" => ConfigKeyPolicy::Closed(&["redact_secrets", "redaction_classes"]),
+        "trust" => {
+            ConfigKeyPolicy::Closed(&["default_class", "prompt_injection_guard", "team_members"])
+        }
+        "profile" => ConfigKeyPolicy::Closed(&["selected", "budgets"]),
+        "profile.budgets" => ConfigKeyPolicy::Closed(&[
+            "search_candidate_limit",
+            "search_concurrent_index_readers",
+            "search_stale_index_tolerance",
+            "pack_max_tokens",
+            "pack_max_candidate_memories",
+            "pack_explanation_verbosity",
+            "cache_memory_cap_mb",
+            "cache_entry_cap",
+            "cache_hotset_prewarm_limit",
+            "write_spool_queue_cap",
+            "write_spool_batch_cap",
+            "write_spool_retry_budget",
+            "steward_maintenance_window_ms",
+            "steward_graph_refresh_budget",
+            "steward_daemon_prewarm",
+            "verification_recipe",
+            "verification_target_dir_posture",
+            "verification_timeout_class",
+            "verification_heavy_strategy",
+            "diagnostics_support_bundle_profile",
+            "diagnostics_redaction",
+        ]),
+        _ => return None,
+    };
+    Some(policy)
+}
+
+fn validate_config_keys(document: &DocumentMut) -> Result<(), ConfigParseError> {
+    validate_config_table(document.as_table(), "", "")
+}
+
+fn validate_config_table(
+    table: &dyn TableLike,
+    schema_path: &str,
+    display_path: &str,
+) -> Result<(), ConfigParseError> {
+    let Some(policy) = config_key_policy(schema_path) else {
+        return Ok(());
+    };
+    let ConfigKeyPolicy::Closed(allowed_keys) = policy else {
+        return Ok(());
+    };
+
+    for (key, item) in table.iter() {
+        if !allowed_keys.contains(&key) {
+            let suggestion = closest_config_key(key, allowed_keys)
+                .map(|candidate| append_config_path(display_path, candidate));
+            return Err(ConfigParseError::UnknownKey {
+                key: append_config_path(display_path, key),
+                suggestion,
+            });
+        }
+
+        let child_schema_path = append_config_path(schema_path, key);
+        let child_display_path = append_config_path(display_path, key);
+        if let Some(tables) = item.as_array_of_tables() {
+            let array_schema_path = format!("{child_schema_path}[]");
+            if config_key_policy(&array_schema_path).is_some() {
+                for (index, child) in tables.iter().enumerate() {
+                    validate_config_table(
+                        child,
+                        &array_schema_path,
+                        &format!("{child_display_path}[{index}]"),
+                    )?;
+                }
+            }
+        } else if let Some(child) = item.as_table_like()
+            && config_key_policy(&child_schema_path).is_some()
+        {
+            validate_config_table(child, &child_schema_path, &child_display_path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn append_config_path(parent: &str, child: &str) -> String {
+    if parent.is_empty() {
+        child.to_string()
+    } else {
+        format!("{parent}.{child}")
+    }
+}
+
+fn closest_config_key(unknown: &str, candidates: &'static [&'static str]) -> Option<&'static str> {
+    let mut best_candidate = None;
+    let mut best_distance = usize::MAX;
+    let mut tied = false;
+
+    for &candidate in candidates {
+        let distance = ascii_edit_distance(unknown, candidate);
+        if distance < best_distance {
+            best_candidate = Some(candidate);
+            best_distance = distance;
+            tied = false;
+        } else if distance == best_distance {
+            tied = true;
+        }
+    }
+
+    let maximum_distance = if unknown.len() <= 4 { 1 } else { 2 };
+    best_candidate.filter(|_| best_distance <= maximum_distance && !tied)
+}
+
+fn ascii_edit_distance(left: &str, right: &str) -> usize {
+    let left = left.to_ascii_lowercase();
+    let right = right.to_ascii_lowercase();
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+
+    for (left_index, left_byte) in left.bytes().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_byte) in right.bytes().enumerate() {
+            let deletion = previous[right_index + 1] + 1;
+            let insertion = current[right_index] + 1;
+            let substitution = previous[right_index] + usize::from(left_byte != right_byte);
+            current[right_index + 1] = deletion.min(insertion).min(substitution);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+
+    previous[right.len()]
 }
 
 fn item<'a>(document: &'a DocumentMut, section: &str, key: &str) -> Option<&'a Item> {
@@ -3345,6 +3739,127 @@ deprioritized_kinds = ["fact"]
     }
 
     #[test]
+    fn rejects_unknown_task_lens_key_with_indexed_suggestion() -> TestResult {
+        let error = expect_config_error(
+            r#"
+[[task_lens.overrides]]
+id = "bugfix"
+description = "Bug-fixing lens."
+allowed_kind = ["failure"]
+"#,
+        )?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::UnknownKey {
+                    ref key,
+                    suggestion: Some(ref suggestion),
+                } if key == "task_lens.overrides[0].allowed_kind"
+                    && suggestion == "task_lens.overrides[0].allowed_kinds"
+            ),
+            format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn rejects_unknown_root_table_without_misleading_suggestion() -> TestResult {
+        let error = expect_config_error("[lens.math_verify]\nenabled = true\n")?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::UnknownKey {
+                    ref key,
+                    suggestion: None,
+                } if key == "lens"
+            ),
+            format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn rejects_unknown_inline_table_key() -> TestResult {
+        let error = expect_config_error(
+            "search = { default_speed = \"balanced\", default_speeed = \"fast\" }\n",
+        )?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::UnknownKey {
+                    ref key,
+                    suggestion: Some(ref suggestion),
+                } if key == "search.default_speeed" && suggestion == "search.default_speed"
+            ),
+            format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn rejects_unknown_nested_mesh_key_with_indexed_suggestion() -> TestResult {
+        let error = expect_config_error(
+            r#"
+[[mesh.peer_group_bindings]]
+workspace_id = "workspace-local"
+
+[mesh.peer_group_bindings.lanes]
+metdata = "allow"
+"#,
+        )?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::UnknownKey {
+                    ref key,
+                    suggestion: Some(ref suggestion),
+                } if key == "mesh.peer_group_bindings[0].lanes.metdata"
+                    && suggestion == "mesh.peer_group_bindings[0].lanes.metadata"
+            ),
+            format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn accepts_dynamic_graph_witness_algorithm_keys() -> TestResult {
+        let config = ConfigFile::parse(
+            r#"
+[graph.witnesses.algorithm_ttl_days]
+ppr = 7
+custom_ranker = 21
+"#,
+        )
+        .map_err(|error| format!("dynamic witness keys should parse: {error}"))?;
+        let expected = BTreeMap::from([("custom_ranker".to_string(), 21), ("ppr".to_string(), 7)]);
+
+        ensure_equal(
+            &config.graph.witnesses.algorithm_ttl_days,
+            &Some(expected),
+            "algorithm TTL map",
+        )
+    }
+
+    #[test]
+    fn accepts_externally_owned_profile_keys() -> TestResult {
+        ConfigFile::parse(
+            r#"
+[profile]
+selected = "portable"
+
+[profile.budgets]
+search_candidate_limit = 100
+pack_max_tokens = 4000
+steward_daemon_prewarm = false
+verification_recipe = "standard"
+diagnostics_redaction = "strict"
+"#,
+        )
+        .map(|_| ())
+        .map_err(|error| format!("profile-generated config should parse: {error}"))
+    }
+
+    #[test]
     fn rejects_bad_task_lens_workspace_override() -> TestResult {
         let error = expect_config_error(
             r#"
@@ -3369,6 +3884,21 @@ source_mode = "random"
     #[test]
     fn rejects_wrong_type_for_known_key() -> TestResult {
         let error = expect_config_error("[runtime]\njob_budget_ms = \"slow\"\n")?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::InvalidType { ref key, expected }
+                    if key == "runtime.job_budget_ms" && expected == "an integer"
+            ),
+            format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn known_type_errors_precede_unknown_key_errors() -> TestResult {
+        let error =
+            expect_config_error("[runtime]\njob_budget_ms = \"slow\"\njob_budget_mss = 5000\n")?;
 
         ensure(
             matches!(

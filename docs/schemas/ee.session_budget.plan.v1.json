@@ -57,6 +57,31 @@
       "description": "Aggregate statistics from the opt-in session-budget ledger."
     }
   },
+  "field_presets": {
+    "minimal": ["schema", "advisory", "recommendation"],
+    "summary": [
+      "schema",
+      "workspaceFingerprint",
+      "advisory",
+      "taskHint",
+      "recommendation",
+      "fallbacks",
+      "refusals",
+      "ledgerSummary"
+    ],
+    "standard": [
+      "schema",
+      "generatedAt",
+      "workspaceFingerprint",
+      "advisory",
+      "taskHint",
+      "recommendation",
+      "fallbacks",
+      "refusals",
+      "ledgerSummary"
+    ],
+    "full": ["*"]
+  },
   "$defs": {
     "planEntry": {
       "type": "object",

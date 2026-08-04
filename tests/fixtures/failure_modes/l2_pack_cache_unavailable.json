@@ -2,17 +2,18 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "l2_pack_cache_unavailable",
   "introduced_by": {"bead": "bd-ndzfg.4", "epic_letter": "L"},
-  "surfaces": ["context"],
+  "surfaces": ["pack"],
   "severity": "low",
   "repair_present": true,
   "trigger": {
-    "description": "ee context is configured to use the L2 pack cache, but the cache key or cache directory cannot be read or written. The command assembles a fresh context pack instead of failing.",
+    "description": "ee pack is configured to use the L2 pack cache, but the cache key or cache directory cannot be read or written. The command assembles a fresh context pack instead of failing.",
     "setup_commands": [
       "ee init --workspace .",
       "ee remember 'Run cargo fmt before release.' --workspace . --level procedural --kind rule",
-      "ee config set cache.pack_l2.directory /root/ee-pack-cache"
+      "printf 'not a directory\\n' > \"$PWD/.ee/l2-cache-root-is-file\"",
+      "export EE_L2_PACK_CACHE_DIR=\"$PWD/.ee/l2-cache-root-is-file\"; export EE_L2_PACK_CACHE_DISABLE=0"
     ],
-    "invocation": "ee context 'prepare release' --workspace . --json"
+    "invocation": "ee pack 'prepare release' --workspace . --json"
   },
   "expected_emission": {
     "code": "l2_pack_cache_unavailable",

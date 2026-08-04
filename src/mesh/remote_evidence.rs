@@ -1,10 +1,11 @@
 //! SRR6.36 remote evidence, artifact, and session-reference materialization.
 //!
-//! This module is a pure planning surface for cached peer evidence. It never
-//! opens remote files, calls CASS, or persists bodies. Callers index the
-//! reference, check policy, and then perform any permitted lazy fetch elsewhere.
+//! This module plans cached peer evidence and owns the bounded streaming
+//! primitive that fetch adapters must use. It never opens remote files, calls
+//! CASS, or persists bodies on its own.
 
 use std::fmt;
+use std::io::{self, Read, Write};
 
 use serde::Serialize;
 
@@ -19,6 +20,15 @@ pub const REMOTE_EVIDENCE_REF_INDEXED_EVENT: &str = "evidence_ref_indexed";
 pub const REMOTE_EVIDENCE_FETCH_ALLOWED_EVENT: &str = "evidence_fetch_allowed";
 pub const REMOTE_EVIDENCE_FETCH_DENIED_EVENT: &str = "evidence_fetch_denied";
 pub const REMOTE_EVIDENCE_HASH_VERIFIED_EVENT: &str = "evidence_hash_verified";
+pub const REMOTE_EVIDENCE_BODY_QUARANTINED_EVENT: &str = "evidence_body_quarantined";
+
+const REMOTE_EVIDENCE_STREAM_BUFFER_BYTES: usize = 16 * 1024;
+
+pub mod degraded_codes {
+    pub const BODY_SIZE_EXCEEDS_POLICY: &str = "mesh_remote_evidence_body_size_exceeds_policy";
+    pub const DECLARED_SIZE_MISMATCH: &str = "mesh_remote_evidence_declared_size_mismatch";
+    pub const FETCHED_BODY_HASH_MISMATCH: &str = "mesh_fetched_body_hash_mismatch";
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,6 +80,7 @@ pub enum MeshRemoteEvidenceFetchStatus {
     Unavailable,
     HashVerified,
     HashMismatch,
+    Quarantined,
 }
 
 impl MeshRemoteEvidenceFetchStatus {
@@ -81,6 +92,7 @@ impl MeshRemoteEvidenceFetchStatus {
             Self::Unavailable => "unavailable",
             Self::HashVerified => "hash_verified",
             Self::HashMismatch => "hash_mismatch",
+            Self::Quarantined => "quarantined",
         }
     }
 }
@@ -181,7 +193,7 @@ pub struct MeshRemoteEvidenceFetchPolicy {
     pub allow_artifact: bool,
     pub allow_session_reference: bool,
     pub requires_consent: bool,
-    pub max_bytes: Option<u64>,
+    pub max_bytes: u64,
 }
 
 impl MeshRemoteEvidenceFetchPolicy {
@@ -193,7 +205,7 @@ impl MeshRemoteEvidenceFetchPolicy {
             allow_artifact: false,
             allow_session_reference: false,
             requires_consent: true,
-            max_bytes: Some(0),
+            max_bytes: 0,
         }
     }
 
@@ -205,7 +217,7 @@ impl MeshRemoteEvidenceFetchPolicy {
             allow_artifact: false,
             allow_session_reference: true,
             requires_consent: true,
-            max_bytes: Some(0),
+            max_bytes: 0,
         }
     }
 
@@ -217,7 +229,7 @@ impl MeshRemoteEvidenceFetchPolicy {
             allow_artifact: true,
             allow_session_reference: true,
             requires_consent: true,
-            max_bytes: Some(max_bytes),
+            max_bytes,
         }
     }
 
@@ -251,6 +263,9 @@ pub struct MeshRemoteEvidenceMaterializationPlan {
     pub placeholder: String,
     pub expected_content_hash: Option<String>,
     pub actual_content_hash: Option<String>,
+    pub declared_size_bytes: Option<u64>,
+    pub actual_size_bytes: Option<u64>,
+    pub degraded_codes: Vec<&'static str>,
     pub provenance_note: String,
     pub why: String,
     pub logs: Vec<MeshRemoteEvidenceLog>,
@@ -289,6 +304,110 @@ impl fmt::Display for MeshRemoteEvidenceUriError {
 }
 
 impl std::error::Error for MeshRemoteEvidenceUriError {}
+
+#[derive(Debug)]
+pub enum MeshRemoteEvidenceStreamError {
+    Read(io::Error),
+    Write(io::Error),
+    SizeLimitExceeded { max_bytes: u64 },
+}
+
+impl MeshRemoteEvidenceStreamError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Read(_) | Self::Write(_) => "mesh_remote_evidence_stream_io_failed",
+            Self::SizeLimitExceeded { .. } => degraded_codes::BODY_SIZE_EXCEEDS_POLICY,
+        }
+    }
+}
+
+impl fmt::Display for MeshRemoteEvidenceStreamError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read(error) => write!(formatter, "failed to read remote evidence body: {error}"),
+            Self::Write(error) => {
+                write!(
+                    formatter,
+                    "failed to write staged remote evidence body: {error}"
+                )
+            }
+            Self::SizeLimitExceeded { max_bytes } => write!(
+                formatter,
+                "remote evidence body exceeds the {max_bytes}-byte policy limit"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MeshRemoteEvidenceStreamError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read(error) | Self::Write(error) => Some(error),
+            Self::SizeLimitExceeded { .. } => None,
+        }
+    }
+}
+
+/// Copy a remote body through a hard streaming cap.
+///
+/// The reader is consumed through at most `max_bytes + 1` bytes. The extra
+/// byte is an overflow probe and is never written. On error, the destination
+/// can contain a partial body and must remain private staging material.
+///
+/// `reader` must be scoped to exactly one framed body. The overflow probe
+/// consumes one byte when the body is too large, so passing a reader that also
+/// exposes the next protocol frame would consume that frame's first byte when
+/// an exact-cap body is followed by more traffic.
+pub fn copy_remote_evidence_body_bounded(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    max_bytes: u64,
+) -> Result<u64, MeshRemoteEvidenceStreamError> {
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; REMOTE_EVIDENCE_STREAM_BUFFER_BYTES];
+
+    loop {
+        if copied == max_bytes {
+            let mut overflow_probe = [0_u8; 1];
+            let overflow_bytes = read_remote_evidence_chunk(reader, &mut overflow_probe)?;
+            return if overflow_bytes == 0 {
+                Ok(copied)
+            } else {
+                Err(MeshRemoteEvidenceStreamError::SizeLimitExceeded { max_bytes })
+            };
+        }
+
+        let remaining = max_bytes - copied;
+        let read_budget = remaining.min(REMOTE_EVIDENCE_STREAM_BUFFER_BYTES as u64);
+        let read_budget =
+            usize::try_from(read_budget).unwrap_or(REMOTE_EVIDENCE_STREAM_BUFFER_BYTES);
+        let bytes_read = read_remote_evidence_chunk(reader, &mut buffer[..read_budget])?;
+        if bytes_read == 0 {
+            return Ok(copied);
+        }
+
+        writer
+            .write_all(&buffer[..bytes_read])
+            .map_err(MeshRemoteEvidenceStreamError::Write)?;
+        let bytes_read = u64::try_from(bytes_read)
+            .map_err(|_| MeshRemoteEvidenceStreamError::SizeLimitExceeded { max_bytes })?;
+        copied += bytes_read;
+    }
+}
+
+fn read_remote_evidence_chunk(
+    reader: &mut impl Read,
+    buffer: &mut [u8],
+) -> Result<usize, MeshRemoteEvidenceStreamError> {
+    loop {
+        match reader.read(buffer) {
+            Ok(bytes_read) => return Ok(bytes_read),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(MeshRemoteEvidenceStreamError::Read(error)),
+        }
+    }
+}
 
 #[must_use]
 pub const fn policy_class_for_kind(kind: MeshRemoteEvidenceKind) -> MeshRemoteEvidencePolicyClass {
@@ -341,7 +460,12 @@ pub fn plan_remote_evidence_materialization(
         "remote_reference_indexed_without_body_copy",
     )];
 
-    if let Some(reason) = denial_reason(reference, input.policy, input.fetch_consent) {
+    if let Some(reason) = denial_reason(
+        reference,
+        input.policy,
+        input.fetch_consent,
+        input.fetched_body.is_none(),
+    ) {
         logs.push(log_for(
             REMOTE_EVIDENCE_FETCH_DENIED_EVENT,
             reference,
@@ -353,6 +477,8 @@ pub fn plan_remote_evidence_materialization(
             MeshRemoteEvidenceFetchStatus::Denied,
             false,
             None,
+            None,
+            Vec::new(),
             logs,
             reason,
         );
@@ -371,10 +497,72 @@ pub fn plan_remote_evidence_materialization(
             MeshRemoteEvidenceFetchStatus::Fetchable,
             false,
             None,
+            None,
+            Vec::new(),
             logs,
             "lazy_fetch_required",
         );
     };
+    let actual_size_bytes = match u64::try_from(fetched_body.len()) {
+        Ok(actual_size_bytes) => actual_size_bytes,
+        Err(_) => {
+            logs.push(log_for(
+                REMOTE_EVIDENCE_BODY_QUARANTINED_EVENT,
+                reference,
+                MeshRemoteEvidenceFetchStatus::Quarantined,
+                "fetched_body_size_exceeds_policy",
+            ));
+            return plan_with(
+                reference,
+                MeshRemoteEvidenceFetchStatus::Quarantined,
+                false,
+                None,
+                None,
+                vec![degraded_codes::BODY_SIZE_EXCEEDS_POLICY],
+                logs,
+                "fetched_body_size_exceeds_policy",
+            );
+        }
+    };
+    if actual_size_bytes > input.policy.max_bytes {
+        logs.push(log_for(
+            REMOTE_EVIDENCE_BODY_QUARANTINED_EVENT,
+            reference,
+            MeshRemoteEvidenceFetchStatus::Quarantined,
+            "fetched_body_size_exceeds_policy",
+        ));
+        return plan_with(
+            reference,
+            MeshRemoteEvidenceFetchStatus::Quarantined,
+            false,
+            None,
+            Some(actual_size_bytes),
+            vec![degraded_codes::BODY_SIZE_EXCEEDS_POLICY],
+            logs,
+            "fetched_body_size_exceeds_policy",
+        );
+    }
+    if reference
+        .size_bytes
+        .is_some_and(|declared_size_bytes| declared_size_bytes != actual_size_bytes)
+    {
+        logs.push(log_for(
+            REMOTE_EVIDENCE_BODY_QUARANTINED_EVENT,
+            reference,
+            MeshRemoteEvidenceFetchStatus::Quarantined,
+            "declared_size_mismatch",
+        ));
+        return plan_with(
+            reference,
+            MeshRemoteEvidenceFetchStatus::Quarantined,
+            false,
+            None,
+            Some(actual_size_bytes),
+            vec![degraded_codes::DECLARED_SIZE_MISMATCH],
+            logs,
+            "declared_size_mismatch",
+        );
+    }
     let actual_hash = blake3_content_hash(fetched_body);
     let hash_matches = reference
         .content_hash
@@ -392,15 +580,25 @@ pub fn plan_remote_evidence_materialization(
             MeshRemoteEvidenceFetchStatus::HashVerified,
             true,
             Some(actual_hash),
+            Some(actual_size_bytes),
+            Vec::new(),
             logs,
             "content_hash_verified",
         )
     } else {
+        logs.push(log_for(
+            REMOTE_EVIDENCE_BODY_QUARANTINED_EVENT,
+            reference,
+            MeshRemoteEvidenceFetchStatus::HashMismatch,
+            "content_hash_mismatch",
+        ));
         plan_with(
             reference,
             MeshRemoteEvidenceFetchStatus::HashMismatch,
             false,
             Some(actual_hash),
+            Some(actual_size_bytes),
+            vec![degraded_codes::FETCHED_BODY_HASH_MISMATCH],
             logs,
             "content_hash_mismatch",
         )
@@ -436,6 +634,7 @@ fn denial_reason(
     reference: &MeshRemoteEvidenceRef,
     policy: MeshRemoteEvidenceFetchPolicy,
     fetch_consent: bool,
+    enforce_declared_size_preflight: bool,
 ) -> Option<&'static str> {
     if reference.redaction == MeshRemoteEvidenceRedaction::Denied {
         return Some("redaction_policy_denied");
@@ -446,8 +645,11 @@ fn denial_reason(
     if policy.requires_consent && !fetch_consent {
         return Some("fetch_consent_required");
     }
-    if let (Some(size_bytes), Some(max_bytes)) = (reference.size_bytes, policy.max_bytes) {
-        if size_bytes > max_bytes {
+    if let Some(size_bytes) = reference
+        .size_bytes
+        .filter(|_| enforce_declared_size_preflight)
+    {
+        if size_bytes > policy.max_bytes {
             return Some("size_exceeds_policy");
         }
     }
@@ -459,6 +661,8 @@ fn plan_with(
     status: MeshRemoteEvidenceFetchStatus,
     body_persist_allowed: bool,
     actual_content_hash: Option<String>,
+    actual_size_bytes: Option<u64>,
+    degraded_codes: Vec<&'static str>,
     logs: Vec<MeshRemoteEvidenceLog>,
     reason: &'static str,
 ) -> MeshRemoteEvidenceMaterializationPlan {
@@ -472,6 +676,9 @@ fn plan_with(
         placeholder: placeholder_for(reference, status),
         expected_content_hash: reference.content_hash.clone(),
         actual_content_hash,
+        declared_size_bytes: reference.size_bytes,
+        actual_size_bytes,
+        degraded_codes,
         provenance_note: format!(
             "Remote evidence {} for memory {} is {} via {} from peer {}; reason={reason}.",
             reference.ref_id,
@@ -519,6 +726,10 @@ fn why_for(
             "The fetched remote {} evidence is quarantined because {reason}.",
             reference.kind.as_str()
         ),
+        MeshRemoteEvidenceFetchStatus::Quarantined => format!(
+            "The fetched remote {} evidence is quarantined because {reason}.",
+            reference.kind.as_str()
+        ),
         MeshRemoteEvidenceFetchStatus::Unavailable => format!(
             "The remote {} evidence reference is indexed, but the body is unavailable.",
             reference.kind.as_str()
@@ -543,7 +754,45 @@ fn log_for(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use super::*;
+
+    #[test]
+    fn bounded_stream_accepts_exact_cap_and_never_writes_probe_bytes() {
+        let body = b"exactly";
+        let mut reader = Cursor::new(body);
+        let mut staged = Vec::new();
+
+        let copied = match copy_remote_evidence_body_bounded(&mut reader, &mut staged, 7) {
+            Ok(copied) => copied,
+            Err(error) => panic!("exact-cap body should pass: {error}"),
+        };
+
+        assert_eq!(copied, 7);
+        assert_eq!(staged, body);
+        assert_eq!(reader.position(), 7);
+    }
+
+    #[test]
+    fn bounded_stream_stops_at_cap_plus_one_without_writing_overflow() {
+        let body = b"12345";
+        let mut reader = Cursor::new(body);
+        let mut staged = Vec::new();
+
+        let error = match copy_remote_evidence_body_bounded(&mut reader, &mut staged, 4) {
+            Ok(copied) => panic!("cap+1 body must fail, copied {copied} bytes"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), degraded_codes::BODY_SIZE_EXCEEDS_POLICY);
+        assert!(matches!(
+            error,
+            MeshRemoteEvidenceStreamError::SizeLimitExceeded { max_bytes: 4 }
+        ));
+        assert_eq!(reader.position(), 5);
+        assert_eq!(staged, b"1234");
+    }
 
     #[test]
     fn normalizes_cass_session_references_without_copying_body() {

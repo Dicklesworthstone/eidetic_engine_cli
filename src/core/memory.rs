@@ -36,9 +36,9 @@ use crate::db::{
     AdvisoryLockId, ApplyMemoryLevelTransitionInput, CreateAuditInput,
     CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateMemoryInput,
     CreateMemoryLinkInput, CreateRememberIdempotencyKeyInput, CreateSearchIndexJobInput,
-    CreateSessionInput, CreateWorkspaceInput, DbConnection, DbOperation, MemoryContentSimHash,
-    MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType, StoredMemory, StoredMemoryLink,
-    audit_actions, generate_audit_id, generate_audit_id_seeded,
+    CreateSessionInput, CreateWorkspaceInput, DbConnection, DbOperation, EvidenceProducerKind,
+    MemoryContentSimHash, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType, StoredMemory,
+    StoredMemoryLink, audit_actions, generate_audit_id, generate_audit_id_seeded,
 };
 use crate::models::{
     DomainError, GLOBAL_MEMORY_SCOPE_TAG, MAX_TAG_BYTES, MemoryContent, MemoryId, MemoryKind,
@@ -6121,6 +6121,7 @@ fn apply_remember_reinforce(
         workspace_id: context.workspace_id.to_owned(),
         session_id: session_id.clone(),
         memory_id: Some(context.target_memory_id.to_owned()),
+        producer_kind: EvidenceProducerKind::RememberReinforcement,
         cass_span_id: format!("reinforce:{evidence_span_id}"),
         span_kind: "summary".to_owned(),
         start_line: 1,
@@ -6131,6 +6132,7 @@ fn apply_remember_reinforce(
         excerpt: context.canonical_content.to_owned(),
         content_hash: context.content_hash.to_owned(),
         metadata_json: Some(evidence_metadata),
+        inherited_redaction_classes: Vec::new(),
     };
     let audit_details = serde_json::json!({
         "schema": REMEMBER_REINFORCE_AUDIT_SCHEMA_V1,
@@ -7664,24 +7666,24 @@ fn memory_command_not_found(memory_id: &str) -> DomainError {
 
 /// Resolve the workspace id a memory verb should scope to.
 ///
-/// Prefers the opened database's own path-keyed workspace row (GH#23): the
-/// user-global store (ADR 0083) records its store root as the workspace path,
-/// so resolving through the row keeps the curation verbs
-/// (`ee memory list/expire/revise/... --global`) in agreement with the
-/// `ee remember --global` write path even when the root is reached through a
-/// symlink or the recorded id predates canonicalization. Falls back to the
-/// canonical-path hash — the historical derivation — when no row matches, so
-/// workspace stores behave exactly as before (`ee init` keys the row by the
-/// same path and hash).
+/// Prefers the opened database's canonical path-keyed workspace row (GH#23):
+/// `remember` and search canonicalize workspace paths, so memory verbs must do
+/// the same before considering a legacy lexical alias. A database may contain
+/// both rows after a path-naive command registers `./relative-path`; choosing
+/// the raw alias first can silently scope reads to an empty workspace while the
+/// canonical row owns every memory. The raw path remains a fallback for older
+/// databases and the user-global store (ADR 0083), where the recorded root may
+/// predate canonicalization. When no row matches, use the canonical-path hash,
+/// preserving the historical workspace-ID derivation.
 pub(crate) fn workspace_id_for_database(conn: &DbConnection, workspace_path: &Path) -> String {
-    if let Ok(Some(row)) = conn.get_workspace_by_path(&workspace_path.to_string_lossy()) {
-        return row.id;
-    }
     let canonical = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
+    if let Ok(Some(row)) = conn.get_workspace_by_path(&canonical.to_string_lossy()) {
+        return row.id;
+    }
     if canonical != workspace_path
-        && let Ok(Some(row)) = conn.get_workspace_by_path(&canonical.to_string_lossy())
+        && let Ok(Some(row)) = conn.get_workspace_by_path(&workspace_path.to_string_lossy())
     {
         return row.id;
     }
@@ -10658,6 +10660,112 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
         Ok(workspace_id)
+    }
+
+    #[test]
+    fn list_memories_prefers_populated_canonical_workspace_over_empty_lexical_alias() -> TestResult
+    {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("campaign");
+        std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        let canonical_workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let lexical_workspace = workspace.join("..").join("campaign");
+        ensure(
+            lexical_workspace != canonical_workspace,
+            true,
+            "lexical alias retains its parent component",
+        )?;
+
+        let database_path = temp.path().join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+
+        let canonical_workspace_id = stable_workspace_id(&canonical_workspace);
+        connection
+            .insert_workspace(
+                &canonical_workspace_id,
+                &CreateWorkspaceInput {
+                    path: canonical_workspace.to_string_lossy().into_owned(),
+                    name: Some("canonical campaign".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                "wsp_000000000000000000000alias",
+                &CreateWorkspaceInput {
+                    path: lexical_workspace.to_string_lossy().into_owned(),
+                    name: Some("empty lexical alias".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000001",
+                &remember_test_memory_input(&canonical_workspace_id, "canonical memory one"),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_00000000000000000000000002",
+                &remember_test_memory_input(&canonical_workspace_id, "canonical memory two"),
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = list_memories(&ListMemoriesOptions {
+            database_path: &database_path,
+            workspace_path: &lexical_workspace,
+            level: None,
+            tag: None,
+            limit: 1,
+            include_tombstoned: true,
+        });
+
+        ensure(report.error, None, "list report error")?;
+        ensure(report.total_count, 2, "canonical workspace memory count")?;
+        ensure(report.truncated, true, "limit reports truncation")?;
+        ensure(
+            report.filter.include_tombstoned,
+            true,
+            "include-tombstoned filter",
+        )?;
+        ensure(report.memories.len(), 1, "limited memory count")?;
+        ensure(
+            report.memories[0].id.as_str(),
+            "mem_00000000000000000000000001",
+            "canonical workspace first memory",
+        )
+    }
+
+    #[test]
+    fn workspace_id_for_database_preserves_legacy_lexical_only_row() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = temp.path().join("legacy-global-root");
+        std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        let lexical_workspace = workspace.join("..").join("legacy-global-root");
+        let legacy_workspace_id = "wsp_00000000000000000000legacy";
+
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                legacy_workspace_id,
+                &CreateWorkspaceInput {
+                    path: lexical_workspace.to_string_lossy().into_owned(),
+                    name: Some("legacy lexical workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        ensure(
+            workspace_id_for_database(&connection, &lexical_workspace),
+            legacy_workspace_id.to_owned(),
+            "legacy lexical workspace fallback",
+        )
     }
 
     fn peer_conflict_memory<'a>(

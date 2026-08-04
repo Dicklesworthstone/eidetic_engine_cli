@@ -41,6 +41,36 @@
     "expireAuditId": {"type": ["string", "null"]},
     "subscribe": {"$ref": "#/$defs/subscribe"}
   },
+  "field_presets": {
+    "minimal": ["schema", "version", "status", "dryRun", "persisted"],
+    "summary": [
+      "schema",
+      "version",
+      "status",
+      "dryRun",
+      "persisted",
+      "workspaceId",
+      "decision",
+      "superseded"
+    ],
+    "standard": [
+      "schema",
+      "version",
+      "status",
+      "dryRun",
+      "persisted",
+      "workspaceId",
+      "databasePath",
+      "decision",
+      "superseded",
+      "memoryAuditId",
+      "memoryIndexJobId",
+      "linkAuditId",
+      "expireAuditId",
+      "subscribe"
+    ],
+    "full": ["*"]
+  },
   "$defs": {
     "decisionItem": {
       "type": "object",

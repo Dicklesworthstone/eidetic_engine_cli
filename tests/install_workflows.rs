@@ -7,6 +7,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 type TestResult = Result<(), String>;
 
+const FRANKEN_STACK_LOCK: &str = include_str!("../franken-stack.lock");
+const FRANKEN_STACK_BASH: &str = include_str!("../scripts/checkout-franken-stack.sh");
+const FRANKEN_STACK_POWERSHELL: &str = include_str!("../scripts/checkout-franken-stack.ps1");
+const CI_WORKFLOW: &str = include_str!("../.github/workflows/ci.yml");
+const RELEASE_WORKFLOW: &str = include_str!("../.github/workflows/release.yml");
+const MACOS_ARTIFACT_WORKFLOW: &str = include_str!("../.github/workflows/macos-ee-artifact.yml");
+
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
@@ -43,6 +50,30 @@ fn ensure_equal<T: std::fmt::Debug + PartialEq>(
     } else {
         Err(format!("{context}: expected {expected:?}, got {actual:?}"))
     }
+}
+
+#[test]
+fn readme_recommends_verified_idempotent_installers_without_claiming_hook_mutation() -> TestResult {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md");
+    let readme = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+
+    ensure(
+        readme.matches("| bash -s -- --easy-mode --verify").count() >= 2,
+        "README should recommend PATH repair and executable verification in both Unix install examples",
+    )?;
+    ensure(
+        readme.contains(
+            "raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1?cache=",
+        ) && readme.contains("& $f -Verify"),
+        "README should fetch the current Windows installer and recommend executable verification",
+    )?;
+    ensure(
+        readme.contains("settings remain untouched")
+            && readme.contains("without changing agent settings")
+            && !readme.contains("auto-configures the Claude Code"),
+        "README must describe the informational agent scan without claiming installer-side hook mutation",
+    )
 }
 
 fn parse_stdout(output: &Output) -> Result<serde_json::Value, String> {
@@ -222,6 +253,848 @@ fn installer_archive_binary_selection_refuses_ambiguous_fallbacks() -> TestResul
         !script.contains("chmod u+x \"$BIN\" 2>/dev/null || true"),
         "installer must not silently ignore chmod fallback failure",
     )
+}
+
+#[cfg(unix)]
+#[test]
+fn installer_proxy_forwarding_is_bash_3_2_nounset_safe() -> TestResult {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+    let installer = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let section_start = installer
+        .find("PROXY_ARGS=()")
+        .ok_or_else(|| "installer proxy section start is missing".to_owned())?;
+    let section_end = installer[section_start..]
+        .find("\nusage() {")
+        .map(|offset| section_start + offset)
+        .ok_or_else(|| "installer proxy section end is missing".to_owned())?;
+    let proxy_section = &installer[section_start..section_end];
+
+    let safe_forwarding = r#""${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"}" "$@""#;
+    ensure(
+        proxy_section.contains(safe_forwarding),
+        "installer must use Bash 3.2-safe forwarding for an empty proxy array under set -u",
+    )?;
+
+    let harness = format!(
+        r#"set -euo pipefail
+{proxy_section}
+curl() {{
+  local empty=0
+  local proxy=""
+  local last=""
+  local arg=""
+  for arg in "$@"; do
+    [ -n "$arg" ] || empty=1
+    last="$arg"
+  done
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--proxy" ]; then
+      proxy="${{2:-}}"
+      shift 2
+    else
+      shift
+    fi
+  done
+  printf 'empty=%s proxy=<%s> last=<%s>\n' "$empty" "$proxy" "$last"
+}}
+
+unset HTTPS_PROXY HTTP_PROXY
+setup_proxy
+ee_curl https://example.invalid/direct
+
+HTTPS_PROXY=https://proxy.invalid:8443
+HTTP_PROXY=http://ignored.invalid:8080
+setup_proxy
+ee_curl https://example.invalid/proxied
+"#
+    );
+    let output = Command::new("/bin/bash")
+        .arg("-c")
+        .arg(harness)
+        .env_remove("BASH_ENV")
+        .output()
+        .map_err(|error| format!("failed to run installer proxy harness: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        output.status.success(),
+        &format!(
+            "installer proxy harness failed with status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status.code()
+        ),
+    )?;
+    ensure_equal(
+        stdout.as_ref(),
+        concat!(
+            "empty=0 proxy=<> last=<https://example.invalid/direct>\n",
+            "empty=0 proxy=<https://proxy.invalid:8443> ",
+            "last=<https://example.invalid/proxied>\n"
+        ),
+        "installer proxy forwarding",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn installer_has_no_bash_3_2_unsafe_empty_array_expansions() -> TestResult {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+    let installer = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    let mut unsafe_expansions = Vec::new();
+
+    for (line_index, line) in installer.lines().enumerate() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        let mut array_names = Vec::new();
+        let mut cursor = 0;
+        while let Some(relative_start) = line[cursor..].find("${") {
+            let start = cursor + relative_start + 2;
+            let Some(relative_end) = line[start..].find("[@]}") else {
+                cursor = start;
+                continue;
+            };
+            let name = &line[start..start + relative_end];
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|character| character == '_' || character.is_ascii_alphanumeric())
+            {
+                array_names.push(name);
+            }
+            cursor = start;
+        }
+
+        let mut remainder = line.to_owned();
+        array_names.sort_unstable();
+        array_names.dedup();
+        for name in array_names {
+            let safe = ["${", name, "[@]+\"${", name, "[@]}\"}"].concat();
+            remainder = remainder.replace(&safe, "");
+            let unsafe_form = ["${", name, "[@]}"].concat();
+            if remainder.contains(&unsafe_form) {
+                unsafe_expansions.push(format!("{}: {}", line_index + 1, line.trim()));
+            }
+        }
+    }
+
+    ensure(
+        unsafe_expansions.is_empty(),
+        &format!(
+            "install.sh contains empty-array expansions that fail under `set -u` on Bash 3.2: {}",
+            unsafe_expansions.join("; ")
+        ),
+    )?;
+
+    let function_start = installer
+        .find("is_agent_detected() {")
+        .ok_or_else(|| "installer is_agent_detected function is missing".to_owned())?;
+    let function_end = installer[function_start..]
+        .find("\n}\n\n# ─")
+        .map(|offset| function_start + offset + 2)
+        .ok_or_else(|| "installer is_agent_detected function end is missing".to_owned())?;
+    let function = &installer[function_start..function_end];
+    let harness = format!(
+        r#"set -euo pipefail
+DETECTED_AGENTS=()
+{function}
+if is_agent_detected codex-cli; then
+  exit 10
+fi
+DETECTED_AGENTS=("claude-code" "codex-cli")
+is_agent_detected codex-cli
+if is_agent_detected missing-agent; then
+  exit 11
+fi
+printf 'empty-and-populated-agent-scan-ok\n'
+"#
+    );
+    let output = Command::new("/bin/bash")
+        .arg("-c")
+        .arg(harness)
+        .env_remove("BASH_ENV")
+        .output()
+        .map_err(|error| format!("failed to run installer empty-array harness: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        output.status.success(),
+        &format!(
+            "installer empty-array harness failed with status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status.code()
+        ),
+    )?;
+    ensure_equal(
+        stdout.as_ref(),
+        "empty-and-populated-agent-scan-ok\n",
+        "installer empty-array agent scan",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn installer_retries_compatible_linux_archive_without_crossing_trust_inputs() -> TestResult {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+    let installer = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    ensure(
+        installer.contains("--connect-timeout 3 --max-time 5 --range 0-0 -o /dev/null \"$URL\""),
+        "installer network preflight should probe one byte instead of downloading the archive",
+    )?;
+    ensure(
+        installer.contains(
+            "explicit artifact/checksum inputs forbid automatic retargeting or source fallback",
+        ),
+        "installer should fail closed when a caller-pinned artifact cannot be downloaded",
+    )?;
+
+    let platform_start = installer
+        .find("OS=\"\"\nARCH=\"\"\nTARGET=\"\"")
+        .ok_or_else(|| "installer platform section start is missing".to_owned())?;
+    let platform_end = installer[platform_start..]
+        .find("# Version resolution and artifact URL")
+        .map(|offset| platform_start + offset)
+        .ok_or_else(|| "installer platform section end is missing".to_owned())?;
+    let artifact_start = installer
+        .find("TAR=\"\"\nURL=\"\"")
+        .ok_or_else(|| "installer artifact section start is missing".to_owned())?;
+    let artifact_end = installer[artifact_start..]
+        .find("# Preflight checks")
+        .map(|offset| artifact_start + offset)
+        .ok_or_else(|| "installer artifact section end is missing".to_owned())?;
+    let platform_section = &installer[platform_start..platform_end];
+    let artifact_section = &installer[artifact_start..artifact_end];
+
+    let harness = format!(
+        r#"set -euo pipefail
+FROM_SOURCE=0
+ARTIFACT_URL=""
+CHECKSUM=""
+CHECKSUM_URL=""
+VERSION="v0.12.0"
+OWNER="Dicklesworthstone"
+REPO="eidetic_engine_cli"
+TMP="/tmp/ee-installer-fallback-harness"
+info() {{ :; }}
+warn() {{ printf 'warning=%s\n' "$*"; }}
+uname() {{
+  case "$1" in
+    -s) printf 'Linux\n' ;;
+    -m) printf 'x86_64\n' ;;
+    *) return 1 ;;
+  esac
+}}
+ee_curl() {{
+  case "$1" in
+    *x86_64-unknown-linux-musl*) printf 'attempt=musl\n'; return 22 ;;
+    *x86_64-unknown-linux-gnu*) printf 'attempt=gnu\n'; return 0 ;;
+    *) printf 'attempt=unexpected:%s\n' "$1"; return 23 ;;
+  esac
+}}
+
+{platform_section}
+{artifact_section}
+
+detect_platform
+set_artifact_url
+download_release_artifact
+printf 'selected=%s tar=%s\n' "$TARGET" "$TAR"
+
+printf '%s\n' '-- explicit-checksum --'
+OS=""
+ARCH=""
+TARGET=""
+FALLBACK_TARGET=""
+CHECKSUM="caller-pinned-checksum"
+detect_platform
+set_artifact_url
+if download_release_artifact; then
+  printf 'explicit-checksum=unexpected-success\n'
+  exit 1
+fi
+printf 'explicit-checksum=failed-closed selected=%s\n' "$TARGET"
+"#
+    );
+    let output = Command::new("/bin/bash")
+        .arg("-c")
+        .arg(harness)
+        .env_remove("BASH_ENV")
+        .output()
+        .map_err(|error| format!("failed to run installer target-fallback harness: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        output.status.success(),
+        &format!(
+            "installer target-fallback harness failed with status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status.code()
+        ),
+    )?;
+    ensure(
+        stdout.contains("attempt=musl\n")
+            && stdout.contains("attempt=gnu\n")
+            && stdout.contains(
+                "selected=x86_64-unknown-linux-gnu tar=ee-x86_64-unknown-linux-gnu.tar.xz",
+            ),
+        "installer should retry and select the compatible GNU release archive",
+    )?;
+
+    let explicit_checksum = stdout
+        .split("-- explicit-checksum --\n")
+        .nth(1)
+        .ok_or_else(|| "explicit-checksum harness output is missing".to_owned())?;
+    ensure(
+        explicit_checksum.contains("attempt=musl\n")
+            && !explicit_checksum.contains("attempt=gnu\n")
+            && explicit_checksum
+                .contains("explicit-checksum=failed-closed selected=x86_64-unknown-linux-musl"),
+        "installer must not retarget a caller-pinned checksum to the GNU fallback",
+    )
+}
+
+#[cfg(unix)]
+fn write_installer_fixture_script(path: &Path, content: &str) -> TestResult {
+    fs::write(path, content).map_err(|error| error.to_string())?;
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| error.to_string())?
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions).map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+fn matching_version_installer_command(
+    installer: &Path,
+    root: &Path,
+    fail_version_at: Option<u32>,
+) -> Result<Command, String> {
+    let home = root.join("home");
+    let dest = root.join("bin");
+    let mock_bin = root.join("mock-bin");
+    let ee_log = root.join("ee-invocations.log");
+    let mkdir_log = root.join("mkdir-invocations.log");
+    let curl_log = root.join("curl-invocations.log");
+    let version_count = root.join("version-count");
+
+    fs::create_dir_all(&home).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&dest).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&mock_bin).map_err(|error| error.to_string())?;
+
+    write_installer_fixture_script(
+        &dest.join("ee"),
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$EE_TEST_EE_LOG"
+case "${1:-}" in
+  --version)
+    count=0
+    if [ -f "$EE_TEST_VERSION_COUNT" ]; then
+      count=$(sed -n '1p' "$EE_TEST_VERSION_COUNT")
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$EE_TEST_VERSION_COUNT"
+    printf 'ee 0.13.0\n'
+    if [ -n "${EE_TEST_FAIL_VERSION_AT:-}" ] &&
+       [ "$count" -ge "$EE_TEST_FAIL_VERSION_AT" ]; then
+      exit 23
+    fi
+    ;;
+  completion)
+    case "${2:-}" in
+      --help) exit 0 ;;
+      zsh) printf '#compdef ee\n' ;;
+      *) exit 2 ;;
+    esac
+    ;;
+  doctor)
+    printf '{"schema":"ee.response.v2","success":true,"degraded":[{"code":"fixture"}]}\n'
+    exit 6
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+"#,
+    )?;
+    write_installer_fixture_script(
+        &mock_bin.join("curl"),
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$EE_TEST_CURL_LOG"
+exit 97
+"#,
+    )?;
+    write_installer_fixture_script(
+        &mock_bin.join("mkdir"),
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$EE_TEST_MKDIR_LOG"
+exec /bin/mkdir "$@"
+"#,
+    )?;
+
+    // Keep the destination active in this process PATH while leaving the
+    // fresh HOME without any shell rc files. `--easy-mode` must still create
+    // and persist the active shell's startup file rather than returning early.
+    let path = format!(
+        "{}:{}:/usr/bin:/bin:/usr/sbin:/sbin",
+        mock_bin.display(),
+        dest.display()
+    );
+    let mut command = Command::new("/bin/bash");
+    command
+        .arg(installer)
+        .args([
+            "--version",
+            "v0.13.0",
+            "--dest",
+            dest.to_str()
+                .ok_or_else(|| "installer destination was not UTF-8".to_owned())?,
+            "--easy-mode",
+            "--verify",
+            "--offline",
+            "--no-gum",
+            "--no-configure",
+        ])
+        .env("HOME", &home)
+        .env("SHELL", "/bin/zsh")
+        .env("PATH", path)
+        .env("EE_INSTALLER_AGENT_VERSIONS", "0")
+        .env("EE_TEST_EE_LOG", ee_log)
+        .env("EE_TEST_MKDIR_LOG", mkdir_log)
+        .env("EE_TEST_CURL_LOG", curl_log)
+        .env("EE_TEST_VERSION_COUNT", version_count)
+        .env_remove("BASH_ENV")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("HTTP_PROXY")
+        .env_remove("EE_VERSION")
+        .env_remove("VERSION")
+        .env_remove("EE_INSTALL_DIR")
+        .env_remove("DEST")
+        .env_remove("EE_SKIP_VERIFY")
+        .env_remove("EE_REQUIRE_PROVENANCE")
+        .env_remove("EE_INSTALL_REQUIRE_KEYLESS")
+        .env_remove("EE_OFFLINE")
+        .env_remove("ARTIFACT_URL")
+        .env_remove("CHECKSUM")
+        .env_remove("CHECKSUM_URL");
+    if let Some(call) = fail_version_at {
+        command.env("EE_TEST_FAIL_VERSION_AT", call.to_string());
+    } else {
+        command.env_remove("EE_TEST_FAIL_VERSION_AT");
+    }
+    Ok(command)
+}
+
+#[cfg(unix)]
+#[test]
+fn matching_version_installer_rerun_repairs_integration_without_acquisition() -> TestResult {
+    let root = unique_artifact_dir("matching-version-rerun")?;
+    let installer = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+    let mut first = matching_version_installer_command(&installer, &root, None)?;
+    let first_output = first
+        .output()
+        .map_err(|error| format!("failed to run matching-version installer: {error}"))?;
+    let first_stdout = String::from_utf8_lossy(&first_output.stdout);
+    let first_stderr = String::from_utf8_lossy(&first_output.stderr);
+    ensure(
+        first_output.status.success(),
+        &format!(
+            "matching-version installer failed with status {:?}\nstdout:\n{first_stdout}\nstderr:\n{first_stderr}",
+            first_output.status.code()
+        ),
+    )?;
+    ensure(
+        first_stdout.contains("is already installed")
+            && first_stdout.contains("Running self-test")
+            && first_stderr.contains("ee doctor reported issues"),
+        "matching-version rerun should verify the binary and keep doctor degradation advisory",
+    )?;
+    ensure(
+        !first_stdout.contains("Downloading") && !first_stdout.contains("Building from source"),
+        "matching-version rerun must skip acquisition",
+    )?;
+
+    let zshrc = fs::read_to_string(root.join("home/.zshrc"))
+        .map_err(|error| format!("failed to read repaired .zshrc: {error}"))?;
+    let expected_path_line = format!("export PATH=\"{}:$PATH\"", root.join("bin").display());
+    ensure_equal(
+        zshrc
+            .lines()
+            .filter(|line| *line == expected_path_line.as_str())
+            .count(),
+        1,
+        "matching-version PATH repair count",
+    )?;
+    ensure(
+        !root.join("home/.bashrc").exists(),
+        "fresh zsh integration should create only the active shell startup file",
+    )?;
+    ensure_equal(
+        fs::read_to_string(root.join("home/.local/share/zsh/site-functions/_ee"))
+            .map_err(|error| format!("failed to read generated zsh completion: {error}"))?,
+        "#compdef ee\n".to_owned(),
+        "matching-version completion content",
+    )?;
+
+    let ee_log = fs::read_to_string(root.join("ee-invocations.log"))
+        .map_err(|error| format!("failed to read fake ee log: {error}"))?;
+    ensure(
+        ee_log.contains("completion --help")
+            && ee_log.contains("completion zsh")
+            && ee_log.contains("doctor --json"),
+        "matching-version rerun should regenerate completions and run requested verification",
+    )?;
+    ensure(
+        !root.join("curl-invocations.log").exists(),
+        "matching-version rerun must not invoke curl",
+    )?;
+    let mkdir_log = fs::read_to_string(root.join("mkdir-invocations.log"))
+        .map_err(|error| format!("failed to read mkdir log: {error}"))?;
+    ensure(
+        !mkdir_log.contains("ee-install.lock.d"),
+        "matching-version rerun must not acquire the installer lock",
+    )?;
+
+    let mut second = matching_version_installer_command(&installer, &root, None)?;
+    let second_output = second
+        .output()
+        .map_err(|error| format!("failed to rerun matching-version installer: {error}"))?;
+    ensure(
+        second_output.status.success(),
+        "second matching-version rerun should remain idempotent",
+    )?;
+    let zshrc = fs::read_to_string(root.join("home/.zshrc"))
+        .map_err(|error| format!("failed to reread repaired .zshrc: {error}"))?;
+    ensure_equal(
+        zshrc
+            .lines()
+            .filter(|line| *line == expected_path_line.as_str())
+            .count(),
+        1,
+        "idempotent matching-version PATH repair count",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn matching_version_installer_verify_fails_on_nonzero_version_command() -> TestResult {
+    let root = unique_artifact_dir("matching-version-broken-binary")?;
+    let installer = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+    let output = matching_version_installer_command(&installer, &root, Some(3))?
+        .output()
+        .map_err(|error| format!("failed to run broken-binary installer fixture: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    ensure(
+        !output.status.success(),
+        "matching-version --verify must fail when ee --version exits nonzero",
+    )?;
+    ensure(
+        stderr.contains("ee --version failed with exit code 23"),
+        &format!("fatal version failure was not explained\nstdout:\n{stdout}\nstderr:\n{stderr}"),
+    )?;
+    let ee_log = fs::read_to_string(root.join("ee-invocations.log"))
+        .map_err(|error| format!("failed to read broken-binary ee log: {error}"))?;
+    ensure(
+        !ee_log.contains("doctor --json"),
+        "doctor must not mask a fatal ee --version failure",
+    )?;
+    ensure(
+        !root.join("curl-invocations.log").exists(),
+        "failed matching-version verification must remain acquisition-free",
+    )?;
+    let mkdir_log = fs::read_to_string(root.join("mkdir-invocations.log"))
+        .map_err(|error| format!("failed to read broken-binary mkdir log: {error}"))?;
+    ensure(
+        !mkdir_log.contains("ee-install.lock.d"),
+        "failed matching-version verification must remain lock-free",
+    )
+}
+
+#[test]
+fn installers_recommend_the_canonical_pack_surface() -> TestResult {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for installer in ["install.sh", "install.ps1"] {
+        let content = fs::read_to_string(root.join(installer))
+            .map_err(|error| format!("failed to read {installer}: {error}"))?;
+        ensure(
+            content.contains("ee pack"),
+            &format!("{installer} should recommend the canonical ee pack surface"),
+        )?;
+        ensure(
+            !content.contains("ee context"),
+            &format!(
+                "{installer} should not introduce new users to the soft-deprecated ee context alias"
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn source_installers_fail_closed_on_missing_or_non_tagged_requested_versions() -> TestResult {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let unix_installer = fs::read_to_string(root.join("install.sh"))
+        .map_err(|error| format!("failed to read install.sh: {error}"))?;
+    let helper_start = unix_installer
+        .find("clone_source_tree() {")
+        .ok_or_else(|| "Unix source-clone helper is missing".to_owned())?;
+    let helper_end = unix_installer[helper_start..]
+        .find("\nensure_rust() {")
+        .map(|offset| helper_start + offset)
+        .ok_or_else(|| "Unix source-clone helper boundary is missing".to_owned())?;
+    let helper = &unix_installer[helper_start..helper_end];
+
+    ensure(
+        helper.contains("--branch \"$VERSION\" --single-branch"),
+        "Unix source install should clone only the requested release ref",
+    )?;
+    ensure(
+        helper.contains("\"refs/tags/${VERSION}^{commit}\""),
+        "Unix source install should require the requested name to resolve as a tag",
+    )?;
+    ensure(
+        helper.contains("[ \"$head_commit\" != \"$requested_commit\" ]"),
+        "Unix source install should prove HEAD matches the requested tag commit",
+    )?;
+
+    let harness = format!(
+        r#"set -euo pipefail
+OWNER="Dicklesworthstone"
+REPO="eidetic_engine_cli"
+VERSION="v999.0.0"
+err() {{ printf 'error=%s\n' "$*"; }}
+git() {{
+  printf 'git=%s\n' "$*" >&2
+  case "$GIT_MODE" in
+    missing)
+      return 42
+      ;;
+    non-tag)
+      [ "$1" = "clone" ] && return 0
+      return 1
+      ;;
+    matching-tag)
+      [ "$1" = "clone" ] && return 0
+      printf '0123456789abcdef0123456789abcdef01234567\n'
+      return 0
+      ;;
+    *)
+      return 99
+      ;;
+  esac
+}}
+
+{helper}
+
+GIT_MODE="missing"
+if clone_source_tree /tmp/ee-source-clone-must-not-exist; then
+  printf 'missing-tag=unexpected-success\n'
+  exit 1
+fi
+printf 'missing-tag=failed-closed\n'
+
+GIT_MODE="non-tag"
+if clone_source_tree /tmp/ee-source-clone-must-not-exist; then
+  printf 'non-tag=unexpected-success\n'
+  exit 1
+fi
+printf 'non-tag=failed-closed\n'
+
+GIT_MODE="matching-tag"
+clone_source_tree /tmp/ee-source-clone-must-not-exist
+printf 'matching-tag=accepted\n'
+"#
+    );
+    let output = Command::new("/bin/bash")
+        .arg("-c")
+        .arg(harness)
+        .env_remove("BASH_ENV")
+        .output()
+        .map_err(|error| format!("failed to run pinned source-clone harness: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure(
+        output.status.success(),
+        &format!(
+            "pinned source-clone harness failed with status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            output.status.code()
+        ),
+    )?;
+    ensure_equal(
+        stderr.matches("git=clone ").count(),
+        3,
+        "each source-clone scenario should make exactly one clone attempt",
+    )?;
+    ensure(
+        stdout.contains("missing-tag=failed-closed")
+            && stdout.contains("non-tag=failed-closed")
+            && stdout.contains("matching-tag=accepted"),
+        "source clone helper should reject missing/non-tag refs and accept an exact matching tag",
+    )?;
+    ensure(
+        stdout.contains("Refusing to build a different revision")
+            && stdout.contains("Refusing to build a branch or different revision"),
+        "rejected source revisions should explain the fail-closed behavior",
+    )?;
+
+    let windows_installer = fs::read_to_string(root.join("install.ps1"))
+        .map_err(|error| format!("failed to read install.ps1: {error}"))?;
+    ensure(
+        windows_installer.contains("clone --depth 1 --branch $VersionTag --single-branch"),
+        "Windows source install should clone only the requested release ref",
+    )?;
+    ensure(
+        windows_installer.contains("rev-parse --verify \"refs/tags/${VersionTag}^{commit}\""),
+        "Windows source install should require the requested name to resolve as a tag",
+    )?;
+    ensure(
+        windows_installer.contains("$headCommit -ne $tagCommit"),
+        "Windows source install should prove HEAD matches the requested tag commit",
+    )?;
+    ensure(
+        !windows_installer.contains("default-branch retry has somewhere to go"),
+        "Windows source install must not retain the missing-tag default-branch fallback",
+    )
+}
+
+#[test]
+fn franken_stack_lock_is_complete_full_sha_and_ci_proven() -> TestResult {
+    const EXPECTED: &[(&str, &str)] = &[
+        ("asupersync", "e464a484cb65c1a55be0d9c925e6e9c20318edcb"),
+        (
+            "franken_agent_detection",
+            "6d24c532667aebdf31ecac8a9ddb457bef32b3f7",
+        ),
+        (
+            "franken_networkx",
+            "8b7dff824838baf0c1cd4277254ef43be6284501",
+        ),
+        ("frankensearch", "4fb891b2838cd3880324e25bafbc0c9e3851be7c"),
+        ("frankensqlite", "6a86c07176830dcab0fd845a71a3dd070694ea28"),
+        ("sqlmodel_rust", "173592d5e5ab0c7adfc8d8b2f83b4aec4e9b6fa4"),
+        ("toon_rust", "48f185768cdfb30b865a3e19a3c040e92519baeb"),
+    ];
+
+    ensure(
+        FRANKEN_STACK_LOCK.contains("GitHub Actions run 29846907389"),
+        "lock should record the CI run that compiled the complete dependency stack",
+    )?;
+    ensure(
+        FRANKEN_STACK_LOCK.contains("verify job 88689705551"),
+        "lock should record the proving CI job",
+    )?;
+
+    let rows = FRANKEN_STACK_LOCK
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let (repository, revision) = line
+                .split_once('\t')
+                .ok_or_else(|| format!("lock row is not tab-delimited: {line:?}"))?;
+            ensure(
+                !revision.contains('\t'),
+                &format!("lock row has extra fields: {line:?}"),
+            )?;
+            ensure(
+                revision.len() == 40
+                    && revision
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+                &format!("{repository} is not locked to a full lowercase commit ID"),
+            )?;
+            Ok((repository, revision))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    ensure_equal(rows, EXPECTED.to_vec(), "locked Franken-stack revisions")
+}
+
+#[test]
+fn all_build_and_install_paths_use_the_locked_franken_stack() -> TestResult {
+    for (name, workflow) in [
+        ("CI", CI_WORKFLOW),
+        ("release", RELEASE_WORKFLOW),
+        ("macOS artifact", MACOS_ARTIFACT_WORKFLOW),
+    ] {
+        ensure(
+            !workflow.contains(
+                "git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git",
+            ),
+            &format!("{name} workflow must not clone moving Franken-stack HEADs"),
+        )?;
+        ensure(
+            workflow.contains("./scripts/checkout-franken-stack.sh"),
+            &format!("{name} workflow should use the locked Bash checkout helper"),
+        )?;
+    }
+    ensure(
+        CI_WORKFLOW.contains("./scripts/checkout-franken-stack.ps1"),
+        "CI Windows lanes should use the locked PowerShell checkout helper",
+    )?;
+    ensure(
+        CI_WORKFLOW.matches("bash -s -- --verify").count() >= 2
+            && !CI_WORKFLOW.contains(r#"| EE_VERSION="${EE_RELEASE_TAG}" sh"#),
+        "CI Unix installer smokes must invoke Bash rather than piping a Bash installer to sh",
+    )?;
+    ensure(
+        RELEASE_WORKFLOW.contains("./scripts/checkout-franken-stack.ps1"),
+        "release Windows lanes should use the locked PowerShell checkout helper",
+    )?;
+
+    let unix_installer =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh"))
+            .map_err(|error| format!("failed to read install.sh: {error}"))?;
+    ensure(
+        unix_installer.contains(r#""$TMP/src/scripts/checkout-franken-stack.sh" "$TMP""#),
+        "install.sh --from-source should provision locked sibling dependencies",
+    )?;
+
+    let windows_installer =
+        fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.ps1"))
+            .map_err(|error| format!("failed to read install.ps1: {error}"))?;
+    ensure(
+        windows_installer.contains(r#"& $checkoutHelper -DestinationRoot $sourceRoot"#),
+        "install.ps1 -FromSource should provision locked sibling dependencies",
+    )
+}
+
+#[test]
+fn franken_stack_helpers_refuse_to_overwrite_existing_work() -> TestResult {
+    for (name, helper) in [
+        ("Bash", FRANKEN_STACK_BASH),
+        ("PowerShell", FRANKEN_STACK_POWERSHELL),
+    ] {
+        ensure(
+            helper.contains("franken-stack.lock"),
+            &format!("{name} helper should consume the central lock"),
+        )?;
+        ensure(
+            helper.contains("status") && helper.contains("--porcelain"),
+            &format!("{name} helper should verify existing checkout cleanliness"),
+        )?;
+        ensure(
+            helper.contains("rev-parse") && helper.contains("HEAD"),
+            &format!("{name} helper should verify the checked-out commit"),
+        )?;
+        ensure(
+            helper.contains("refusing to modify"),
+            &format!("{name} helper should fail closed on an existing mismatch"),
+        )?;
+        ensure(
+            !helper.contains("reset --hard"),
+            &format!("{name} helper must not rewrite an existing checkout"),
+        )?;
+        ensure(
+            !helper.contains("Remove-Item") && !helper.contains("rm -"),
+            &format!("{name} helper must not delete an existing checkout"),
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

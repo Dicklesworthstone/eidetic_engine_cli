@@ -27,7 +27,7 @@ use crate::core::agent_detect::{
     AgentDetectOptions, AgentSourcesOptions, AgentStatusOptions, build_agent_sources_report,
     detect_installed_agents, gather_agent_status,
 };
-use crate::core::agent_docs::{AgentDocsReport, AgentDocsTopic};
+use crate::core::agent_docs::{AGENT_CORE_COMMANDS, AgentDocsReport, AgentDocsTopic};
 use crate::core::artifact::{
     ArtifactInspectOptions, ArtifactListOptions, ArtifactRegisterOptions, inspect_artifact,
     list_artifacts as list_artifact_registry, register_artifact,
@@ -99,7 +99,7 @@ use crate::core::disk_pressure::{
     gather_artifact_retention_report, gather_build_admission_report, gather_disk_pressure_report,
 };
 use crate::core::docs_bootstrap::{
-    ApplyDocsBootstrapOptions, BootstrapApplyReport, CompileDocsBootstrapOptions,
+    ApplyDocsBootstrapOptions, BootstrapApplyReport, BootstrapDocGlob, CompileDocsBootstrapOptions,
     apply_docs_bootstrap, compile_docs_bootstrap,
 };
 use crate::core::doctor::{
@@ -243,9 +243,9 @@ use crate::core::rule::{
 use crate::core::search::{
     SearchDedupMode, SearchDegradation, SearchOptions, SearchReport,
     SearchScoreRecalibrationReport, SearchSourceMode, SimilarError, SimilarOptions, SimilarReport,
-    TypedMemoryFieldFilter, apply_memory_kind_and_typed_field_filters_to_report,
-    elapsed_timing_json, normalize_memory_kind_filter, recalibrate_search_score_calibration,
-    run_diag_search, run_search, run_search_with_performance, run_similar,
+    TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
+    recalibrate_search_score_calibration, run_diag_search, run_search, run_search_with_filters,
+    run_search_with_performance_and_filters, run_similar,
 };
 use crate::core::sentinel::{SentinelCheckContext, observe_sentinel_explicit};
 use crate::core::session_budget::{BudgetPlannerInput, plan_cheapest_next_command};
@@ -293,7 +293,7 @@ use crate::core::verify_ledger::{
     audit_rch_topology_closure, ingest_rch_verify_v1, list_rch_verify_blockers,
     list_rch_verify_runs,
 };
-use crate::core::why::{WhyOptions, explain_memory};
+use crate::core::why::{WhyOptions, explain_memory_with_connection};
 use crate::core::witness_retention::{
     WITNESS_PRUNE_REPORT_SCHEMA_V1, WitnessAction, WitnessRetentionPolicy,
     classify_witnesses_for_pruning,
@@ -320,7 +320,7 @@ use crate::models::{
 use crate::output;
 use crate::pack::{
     ContextPackProfile, ContextRequest, ContextResponse, ContextResponseDegradation,
-    ContextResponseSeverity, PackResourceProfile, PackRevisionMeshMetadata,
+    ContextResponseSeverity, PACK_COMMAND, PackResourceProfile, PackRevisionMeshMetadata,
 };
 use crate::search::plan_cache::{
     DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, process_plan_cache_diag_report,
@@ -351,19 +351,12 @@ const MIGRATION_REPAIR_COMMAND: &str = "ee migrate run --workspace . --json";
 /// Top-level long help prelude rendered by clap above the standard USAGE /
 /// OPTIONS / COMMANDS sections. Bead bd-17c65.6.3 (F3): without this,
 /// `ee --help` prints 40+ subcommands alphabetically and an agent has no
-/// signal for the most-used path. The prelude points at the AGENTS.md
-/// 5-command core path, then groups the rest into stable categories so the
-/// alphabetical detail list below stays useful as a reference.
-const HELP_PRELUDE: &str = concat!(
-    "Most-used commands (start here):\n",
-    "  init          Initialize an ee workspace\n",
-    "  remember      Capture an explicit memory\n",
-    "  search        Fine-grained memory retrieval\n",
-    "  similar       Find semantic neighbors for a memory\n",
-    "  pack          Assemble a task-specific context pack\n",
-    "  primer        Deterministic cached workspace charter (session-start knowledge)\n",
-    "  lens          Inspect reusable task lens policies for pack/search\n",
-    "  why           Explain why a memory was stored or selected\n",
+/// signal for the most-used path. The prelude renders the canonical agent
+/// core path, then groups the rest into stable categories so the alphabetical
+/// detail list below stays useful as a reference.
+const HELP_CORE_COMMAND_COLUMN: usize = 14;
+
+const HELP_PRELUDE_SUFFIX: &str = concat!(
     "\n",
     "Agent shortcuts:\n",
     "  note          Capture a memory with agent-friendly level/kind inference\n",
@@ -371,30 +364,46 @@ const HELP_PRELUDE: &str = concat!(
     "\n",
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
-    "  Inspect:        status, doctor, capabilities, insights, impact, lens, why-not, recall, similar, trust report, memory show, memory history\n",
+    "  Inspect:        doctor, capabilities, insights, impact, why-not, recall, similar, primer, trust report, memory show, memory history\n",
     "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome, journal\n",
+    "  Assert:         claim, certificate, attest, demo, tripwire\n",
+    "  Coordinate:     swarm, handoff, preflight, situation, plan, workflow\n",
     "  Curate:         capture, curate (candidates|validate|apply), reflect, playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
-    "  Maintenance:    maintenance, job, index, steward, daemon\n",
-    "  Import/Export:  import (cass|jsonl|eidetic-legacy|agentsmd), export [agentsmd], backup, handoff\n",
-    "  Diagnostics:    diag, eval, demo, db, analyze, audit, migrate\n",
+    "  Maintenance:    maintenance, job, index, daemon\n",
+    "  Import/Export:  import (cass|jsonl|eidetic-legacy|agentsmd), export [agentsmd], backup\n",
+    "  Diagnostics:    diag, eval, db, analyze, audit, migrate\n",
     "  Configuration:  install, completion, mcp, serve, agent\n",
     "\n",
     "Documentation:\n",
-    "  ee --help                  this view\n",
-    "  ee --agent-docs            long-form agent-oriented documentation\n",
-    "  ee capabilities            feature flags, discovered binaries, env overrides\n",
-    "  ee <subcommand> --help     per-command help\n",
+    "  ee --help                 this view\n",
+    "  ee agent-docs <topic>     focused docs: guide, recipes, contracts, errors, exit-codes\n",
+    "  ee --agent-docs           machine-readable overview and complete topic index\n",
+    "  ee capabilities           feature flags, discovered binaries, env overrides\n",
+    "  ee <subcommand> --help    per-command help\n",
 );
 
-const HELP_LONG_ABOUT: &str = HELP_PRELUDE;
+fn help_prelude() -> String {
+    let mut output = String::from("Most-used commands (start here):\n");
+    for command in AGENT_CORE_COMMANDS {
+        output.push_str("  ");
+        output.push_str(command.name);
+        for _ in command.name.len()..HELP_CORE_COMMAND_COLUMN {
+            output.push(' ');
+        }
+        output.push_str(command.description);
+        output.push('\n');
+    }
+    output.push_str(HELP_PRELUDE_SUFFIX);
+    output
+}
 
 #[derive(Clone, Debug, Parser, PartialEq)]
 #[command(
     name = "ee",
     version,
     about = "Durable, local-first, explainable memory for coding agents.",
-    long_about = HELP_LONG_ABOUT,
+    long_about = help_prelude(),
     disable_colored_help = true,
     color = clap::ColorChoice::Never,
     disable_help_subcommand = true
@@ -915,7 +924,9 @@ pub enum Command {
     /// Graph analytics, snapshots, and export artifacts.
     #[command(subcommand)]
     Graph(GraphCommand),
-    /// Initialize an ee workspace.
+    /// Initialize an ee workspace with a ready zero-document search index.
+    ///
+    /// Retrieval works without a separate `ee index rebuild` step.
     Init(InitArgs),
     /// Import memories and evidence from external sources.
     #[command(subcommand)]
@@ -1576,7 +1587,10 @@ pub enum BackupCommand {
 /// Subcommands for `ee bootstrap`.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub enum BootstrapCommand {
-    /// Compile allowlisted workspace docs into dry-run bootstrap candidates.
+    /// Compile default policy/README docs plus `--include` references into candidates.
+    ///
+    /// The default set is AGENTS.md, README.md, docs/env_vars.md, ADRs, schemas,
+    /// and failure-mode fixtures. Add other reference corpora with `--include`.
     Docs(BootstrapDocsArgs),
     /// Apply a previously approved bootstrap run through curation.
     Apply(BootstrapApplyArgs),
@@ -1588,6 +1602,14 @@ pub struct BootstrapDocsArgs {
     /// Produce a no-mutation candidate report.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+
+    /// Add workspace-relative docs beyond the bounded default set (repeatable).
+    ///
+    /// Supports `*` and `?` within one path component and a whole-component
+    /// `**` for recursive matching. The first component must be literal.
+    /// Repeat the same selectors on `bootstrap apply`.
+    #[arg(long, value_name = "GLOB", action = ArgAction::Append)]
+    pub include: Vec<BootstrapDocGlob>,
 
     /// Maximum bytes to read from any one allowlisted source.
     #[arg(long, value_name = "BYTES")]
@@ -1608,6 +1630,10 @@ pub struct BootstrapApplyArgs {
     /// Only apply candidates already approved through normal curation review.
     #[arg(long, action = ArgAction::SetTrue)]
     pub approved_only: bool,
+
+    /// Reapply a docs include glob used by the preview run (repeatable).
+    #[arg(long, value_name = "GLOB", action = ArgAction::Append)]
+    pub include: Vec<BootstrapDocGlob>,
 
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
@@ -2048,7 +2074,7 @@ pub struct AgentDetectArgs {
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct AgentDocsArgs {
     /// Documentation topic to display. Omit for overview.
-    /// Topics: guide, commands, contracts, schemas, paths, env, exit-codes, fields, errors, formats, examples
+    /// Topics: guide, commands, contracts, schemas, paths, env, exit-codes, fields, errors, formats, examples, recipes
     #[arg(value_name = "TOPIC")]
     pub topic: Option<String>,
 }
@@ -3234,6 +3260,15 @@ pub struct PackArgs {
     /// new pack row per page.
     #[arg(long, value_name = "CURSOR")]
     pub cursor: Option<String>,
+
+    /// Trust lane to apply before packing memories: self, team, global, workspace, verified, or swarm.
+    /// An explicit value overrides any task-lens scope overlay; omitted keeps lens-then-swarm behavior.
+    #[arg(long, value_parser = parse_memory_scope_arg)]
+    pub memory_scope: Option<MemoryScope>,
+
+    /// Fail closed when relevant evidence exists outside the requested memory scope.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_scope: bool,
 }
 
 /// Pack subcommands: build, replay, diff.
@@ -3277,6 +3312,15 @@ pub struct PackBuildArgs {
     /// Fail instead of falling back when the requested retrieval source is unavailable.
     #[arg(long, action = ArgAction::SetTrue)]
     pub strict_source_mode: bool,
+
+    /// Trust lane to apply before packing memories: self, team, global, workspace, verified, or swarm.
+    /// An explicit value overrides any task-lens scope overlay; omitted keeps lens-then-swarm behavior.
+    #[arg(long, value_parser = parse_memory_scope_arg)]
+    pub memory_scope: Option<MemoryScope>,
+
+    /// Fail closed when relevant evidence exists outside the requested memory scope.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_scope: bool,
 
     /// Context profile: compact, balanced, grounding, orientation, thorough, or submodular.
     #[arg(long, short = 'p')]
@@ -3415,6 +3459,8 @@ impl PackArgs {
             speed: self.speed,
             source_mode: self.source_mode,
             strict_source_mode: self.strict_source_mode,
+            memory_scope: self.memory_scope,
+            strict_scope: self.strict_scope,
             profile: self.profile.clone(),
             pack_profile: self.pack_profile,
             resource_profile: self.resource_profile,
@@ -9043,19 +9089,15 @@ pub struct DoctorArgs {
     )]
     pub diff: Vec<String>,
 
-    /// Apply auto-fixers for detected P0/P1 failure modes, routing every
-    /// mutation through the `src/core/doctor_runtime::mutate` chokepoint.
+    /// Apply registered auto-fixers for detected P0/P1 failure modes,
+    /// routing every mutation through the
+    /// `src/core/doctor_runtime::mutate` chokepoint.
     /// Opens a `<workspace>/.doctor/runs/<run-id>/` directory under the
-    /// `RunContext` lock, runs the fixer dispatch table (per-FM fixers
-    /// land via `bd-tu4s8`), and finishes the run with a `RunSummary`
-    /// emitted as `ee.doctor.fix_summary.v1`. Until the fixer dispatch
-    /// table is fully populated by `bd-tu4s8`, the surface is a no-op
-    /// chokepoint scaffold: it acquires the run lock, allocates the
-    /// run dir, finishes with `RunStatus::CompletedOk` and zero
-    /// actions, and emits the run summary so the caller can verify
-    /// runtime reachability + lock semantics from the CLI without any
-    /// file mutations. Pair with `--undo <RUN_ID>` to release the
-    /// run-dir / lock cycle.
+    /// `RunContext` lock, runs the supported fixer dispatch table, and
+    /// finishes the run with a `RunSummary`. JSON mode emits the canonical
+    /// `ee.response.v2` envelope with typed `ee.doctor.fix_summary.v1`
+    /// data. Pair with `--undo <RUN_ID>` to reverse recorded actions and
+    /// release the run-dir / lock cycle.
     #[arg(
         long = "fix",
         action = ArgAction::SetTrue,
@@ -12671,7 +12713,7 @@ where
             ClaimCommand::Verify(args) => handle_claim_verify(&cli, args, stdout, stderr),
         },
         Some(Command::Context(ref args)) => {
-            handle_context_pack_query(&cli, args, "context", true, stdout, stderr)
+            handle_context_pack_query(&cli, args, PACK_COMMAND, true, stdout, stderr)
         }
         Some(Command::Demo(ref demo_cmd)) => match demo_cmd {
             DemoCommand::List(args) => handle_demo_list(&cli, args, stdout, stderr),
@@ -12893,8 +12935,13 @@ where
                 let workspace = cli.workspace.clone().unwrap_or_else(|| {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 });
-                write_stdout(stdout, &(doctor_fix_json(&workspace) + "\n"));
-                return ProcessExitCode::Success;
+                let result = doctor_fix_json(&workspace);
+                let write_exit = write_stdout(stdout, &(result.json + "\n"));
+                return if write_exit == ProcessExitCode::Success {
+                    result.exit_code
+                } else {
+                    write_exit
+                };
             }
             if let Some(run_id) = args.undo.as_deref() {
                 let workspace = cli.workspace.clone().unwrap_or_else(|| {
@@ -15293,7 +15340,8 @@ where
                 "data": {
                     "command": "eval run",
                     "report": reports.first()
-                }
+                },
+                "degraded": [],
             })
         } else {
             serde_json::json!({
@@ -15303,7 +15351,8 @@ where
                     "command": "eval run",
                     "reports": reports,
                     "fixtureCount": reports.len()
-                }
+                },
+                "degraded": [],
             })
         };
         let _ = stdout.write_all(json.to_string().as_bytes());
@@ -15704,7 +15753,8 @@ where
         let json = serde_json::json!({
             "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": passed,
-            "data": data
+            "data": data,
+            "degraded": [],
         });
         let _ = stdout.write_all(json.to_string().as_bytes());
         let _ = stdout.write_all(b"\n");
@@ -16133,7 +16183,9 @@ fn build_eval_search_index_from_memories(
         });
     }
 
+    let documents_total = u32::try_from(documents.len()).unwrap_or(u32::MAX);
     let index_dir = index_dir.to_path_buf();
+    let metadata_index_dir = index_dir.clone();
     crate::core::run_cli_future(async move {
         // Invariant: run_cli_future's block_on installs an ambient runtime Cx.
         #[allow(clippy::expect_used)]
@@ -16155,7 +16207,14 @@ fn build_eval_search_index_from_memories(
     })
     .and_then(|stats| {
         if stats.errors.is_empty() {
-            Ok(())
+            crate::core::index::write_memory_eval_index_metadata(
+                &metadata_index_dir,
+                documents_total,
+            )
+            .map_err(|error| DomainError::SearchIndex {
+                message: format!("failed to finalize eval fixture index metadata: {error}"),
+                repair: Some("Check the temporary index path and retry the evaluation.".to_owned()),
+            })
         } else {
             let details = stats
                 .errors
@@ -17067,17 +17126,12 @@ fn init_report_exit_code(report: &InitReport, write_exit: ProcessExitCode) -> Pr
 
 fn init_response_json(report: &InitReport) -> serde_json::Value {
     let degraded = init_degraded_json(report);
-    let mut response = serde_json::json!({
+    serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": report.status.is_success(),
         "data": report.data_json(),
-    });
-    if !degraded.is_empty()
-        && let Some(object) = response.as_object_mut()
-    {
-        object.insert("degraded".to_string(), serde_json::Value::Array(degraded));
-    }
-    response
+        "degraded": degraded,
+    })
 }
 
 fn init_degraded_json(report: &InitReport) -> Vec<serde_json::Value> {
@@ -18825,11 +18879,7 @@ where
 }
 
 fn top_level_degraded_from_data(data: &serde_json::Value) -> serde_json::Value {
-    data.get("degraded")
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .map(serde_json::Value::Array)
-        .unwrap_or_else(|| serde_json::json!([]))
+    output::response_degraded_from_data(data)
 }
 
 fn response_v2_json_from_data(data: serde_json::Value) -> serde_json::Value {
@@ -19131,8 +19181,9 @@ where
     // all 80+ subcommands, so the discovery view stays scannable. The complete
     // command list and every flag remain one keystroke away via `ee --help`
     // (and `ee help <command>` for a single command). (agent-UX item 7)
+    let prelude = help_prelude();
     let terse = format!(
-        "{HELP_PRELUDE}\nUsage: ee [OPTIONS] [COMMAND]\n\n\
+        "{prelude}\nUsage: ee [OPTIONS] [COMMAND]\n\n\
          Run `ee --help` for the complete command list and all global flags, \
          or `ee help <command>` for one command.\n"
     );
@@ -19808,95 +19859,388 @@ fn doctor_run_diff_json(workspace: &Path, baseline_id: &str, comparison_id: &str
     .to_string()
 }
 
+#[derive(Debug)]
+struct DoctorFixCommandResult {
+    json: String,
+    exit_code: ProcessExitCode,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorFixerResult {
+    finding_code: &'static str,
+    operation: &'static str,
+    path: String,
+    outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action_sequence: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorFixRunEvidence {
+    run_id: String,
+    run_dir: String,
+    action_count: u64,
+    status: crate::core::doctor_runtime::RunStatus,
+}
+
+impl DoctorFixRunEvidence {
+    fn from_summary(summary: &crate::core::doctor_runtime::RunSummary) -> Self {
+        Self {
+            run_id: summary.run_id.clone(),
+            run_dir: summary.run_dir.display().to_string(),
+            action_count: summary.action_count,
+            status: summary.status.clone(),
+        }
+    }
+}
+
 /// Wire the agent-facing `ee doctor --fix` surface onto the runtime
-/// chokepoint. Per bd-3boan pass-2 + AGENTS.md RULE 1, this surface
-/// MUST route every file mutation through
-/// `src/core/doctor_runtime::mutate`. Until the per-FM fixer dispatch
-/// table lands via bd-tu4s8, this scaffold:
+/// chokepoint. Per bd-3boan pass-2 + AGENTS.md RULE 1, this surface MUST route
+/// every file mutation through `src/core/doctor_runtime::mutate`.
 ///
-/// * acquires the doctor run lock via `RunContext::start`,
-/// * allocates the `<workspace>/.doctor/runs/<run-id>/` directory,
-/// * finishes the run with `RunStatus::CompletedOk` and zero actions,
-/// * emits the resulting `RunSummary` as `ee.doctor.fix_summary.v1`
-///   with `actionCount=0`, `fixerDispatchPending=true`, and the
-///   `repair` hint pointing at bd-tu4s8.
-///
-/// The chokepoint reachability is the contract this slice closes; the
-/// actual per-FM repairs come from bd-tu4s8's fixer dispatch.
-fn doctor_fix_json(workspace: &Path) -> String {
+/// Fixers run in the deterministic order emitted by [`DoctorReport`]. The
+/// command uses an explicit fail-fast policy: the first mutation failure is
+/// recorded, all remaining dispatches are marked skipped, and the run is
+/// finalized as `completed_partial`. Start, mutation, and finish failures all
+/// return `ee.error.v2` plus a non-zero process exit.
+fn doctor_fix_json(workspace: &Path) -> DoctorFixCommandResult {
     use crate::core::doctor::DoctorReport;
     use crate::core::doctor_fixers::*;
-    use crate::core::doctor_runtime::{RunContext, RunStatus, default_blast_radius_roots, mutate};
 
     let report = DoctorReport::gather_for_workspace(workspace);
+    let mut dispatches = Vec::new();
+    for check in report.checks {
+        if check.severity.is_healthy() {
+            continue;
+        }
+
+        let dispatch = match check.error_code.map(|error_code| error_code.id) {
+            Some("EE-E301") => Some(fix_search_index_stale(workspace)),
+            Some("EE-E700") => Some(fix_schema_migration_pending(workspace, "V_LATEST")),
+            Some("EE-E507") => Some(fix_cass_integration_drift(workspace)),
+            _ if check.name == "search_index" => Some(fix_search_index_stale(workspace)),
+            _ => None,
+        };
+        if let Some(dispatch) = dispatch {
+            dispatches.push(dispatch);
+        }
+    }
+
+    doctor_fix_dispatches(workspace, dispatches)
+}
+
+fn doctor_fix_dispatches(
+    workspace: &Path,
+    dispatches: Vec<crate::core::doctor_fixers::FixerDispatch>,
+) -> DoctorFixCommandResult {
+    use crate::core::doctor_runtime::{
+        DoctorRuntimeError, RunContext, RunStatus, default_blast_radius_roots, mutate,
+    };
+
     let blast_radius = default_blast_radius_roots(workspace);
-    let target_sha = format!("scaffold-{}", chrono::Utc::now().timestamp());
+    let target_sha = format!("doctor-fix-{}", chrono::Utc::now().timestamp_micros());
 
     match RunContext::start(workspace, target_sha.as_str(), blast_radius, false) {
         Ok(mut ctx) => {
-            for check in report.checks {
-                if check.severity.is_healthy() {
-                    continue;
-                }
-
-                let dispatch = match check.error_code.map(|ec| ec.id) {
-                    Some("EE-E301") => Some(fix_search_index_stale(workspace)),
-                    Some("EE-E700") => Some(fix_schema_migration_pending(workspace, "V_LATEST")),
-                    Some("EE-E507") => Some(fix_cass_integration_drift(workspace)),
-                    // Map other finding codes heuristically if we know them
-                    _ => {
-                        if check.name == "search_index" {
-                            Some(fix_search_index_stale(workspace))
-                        } else {
-                            None
-                        }
+            let mut fixer_results = Vec::with_capacity(dispatches.len());
+            let mut pending = dispatches.into_iter();
+            while let Some(dispatch) = pending.next() {
+                let finding_code = dispatch.finding_code;
+                let operation = dispatch.op.kind_str();
+                let path = dispatch.path.display().to_string();
+                match mutate(&mut ctx, &dispatch.path, dispatch.op) {
+                    Ok(action) => fixer_results.push(DoctorFixerResult {
+                        finding_code,
+                        operation,
+                        path,
+                        outcome: "applied",
+                        action_sequence: Some(action.sequence),
+                        error: None,
+                    }),
+                    Err(DoctorRuntimeError::NoOpIdempotent) => {
+                        fixer_results.push(DoctorFixerResult {
+                            finding_code,
+                            operation,
+                            path,
+                            outcome: "idempotent_noop",
+                            action_sequence: None,
+                            error: None,
+                        });
                     }
-                };
+                    Err(mutation_error) => {
+                        fixer_results.push(DoctorFixerResult {
+                            finding_code,
+                            operation,
+                            path,
+                            outcome: "failed",
+                            action_sequence: None,
+                            error: Some(mutation_error.to_string()),
+                        });
+                        fixer_results.extend(pending.map(|skipped| DoctorFixerResult {
+                            finding_code: skipped.finding_code,
+                            operation: skipped.op.kind_str(),
+                            path: skipped.path.display().to_string(),
+                            outcome: "skipped_after_failure",
+                            action_sequence: None,
+                            error: None,
+                        }));
 
-                if let Some(d) = dispatch {
-                    let target_path = d.path;
-                    let _ = mutate(&mut ctx, &target_path, d.op);
+                        let run_id = ctx.run_id().to_owned();
+                        let run_dir = ctx.run_dir().display().to_string();
+                        let action_count = doctor_fixer_action_count(&fixer_results);
+                        return match ctx.finish(RunStatus::CompletedPartial) {
+                            Ok(summary) => {
+                                let run = DoctorFixRunEvidence::from_summary(&summary);
+                                doctor_runtime_error_result(
+                                    &mutation_error,
+                                    "mutate",
+                                    &fixer_results,
+                                    Some(&run),
+                                    None,
+                                )
+                            }
+                            Err(finish_error) => {
+                                let run = DoctorFixRunEvidence {
+                                    run_id,
+                                    run_dir,
+                                    action_count,
+                                    status: RunStatus::Failed,
+                                };
+                                doctor_runtime_error_result(
+                                    &finish_error,
+                                    "finish",
+                                    &fixer_results,
+                                    Some(&run),
+                                    Some(("mutate", &mutation_error)),
+                                )
+                            }
+                        };
+                    }
                 }
             }
 
+            let run_id = ctx.run_id().to_owned();
+            let run_dir = ctx.run_dir().display().to_string();
+            let action_count = doctor_fixer_action_count(&fixer_results);
             match ctx.finish(RunStatus::CompletedOk) {
-                Ok(summary) => {
-                    let status_str = serde_json::to_value(&summary.status)
-                        .ok()
-                        .and_then(|v| v.as_str().map(str::to_owned))
-                        .unwrap_or_else(|| "unknown".to_owned());
-                    serde_json::json!({
-                        "schema": "ee.doctor.fix_summary.v1",
-                        "doctor_version": env!("CARGO_PKG_VERSION"),
-                        "workspace": workspace.display().to_string(),
-                        "runId": summary.run_id,
-                        "runDir": summary.run_dir.display().to_string(),
-                        "actionCount": summary.action_count,
-                        "status": status_str,
-                        "fixerDispatchPending": false,
-                        "sideEffectFree": false,
-                        "configMutation": "never",
-                    })
-                    .to_string()
+                Ok(summary) => DoctorFixCommandResult {
+                    json: doctor_fix_success_json(workspace, &summary, &fixer_results),
+                    exit_code: ProcessExitCode::Success,
+                },
+                Err(error) => {
+                    let run = DoctorFixRunEvidence {
+                        run_id,
+                        run_dir,
+                        action_count,
+                        status: RunStatus::Failed,
+                    };
+                    doctor_runtime_error_result(&error, "finish", &fixer_results, Some(&run), None)
                 }
-                Err(error) => serde_json::json!({
-                    "schema": "ee.doctor.fix_summary.v1",
-                    "error": error.to_string(),
-                    "phase": "finish",
-                    "repair": "Inspect <workspace>/.ee/.doctor.lock and <workspace>/.doctor/runs/ for partial state.",
-                    "fixerDispatchPending": false,
-                })
-                .to_string(),
             }
         }
-        Err(error) => serde_json::json!({
-            "schema": "ee.doctor.fix_summary.v1",
-            "error": error.to_string(),
-            "phase": "start",
-            "repair": "Concurrency lock at <workspace>/.ee/.doctor.lock blocks a fresh run; release the prior holder or wait for it to finish.",
-            "fixerDispatchPending": false,
+        Err(error) => {
+            let fixer_results = dispatches
+                .iter()
+                .map(|dispatch| DoctorFixerResult {
+                    finding_code: dispatch.finding_code,
+                    operation: dispatch.op.kind_str(),
+                    path: dispatch.path.display().to_string(),
+                    outcome: "not_started",
+                    action_sequence: None,
+                    error: None,
+                })
+                .collect::<Vec<_>>();
+            doctor_runtime_error_result(&error, "start", &fixer_results, None, None)
+        }
+    }
+}
+
+fn doctor_fixer_action_count(results: &[DoctorFixerResult]) -> u64 {
+    results
+        .iter()
+        .filter_map(|result| result.action_sequence)
+        .max()
+        .unwrap_or(0)
+}
+
+fn doctor_fixer_result_counts(results: &[DoctorFixerResult]) -> (usize, usize, usize) {
+    let attempted = results
+        .iter()
+        .filter(|result| matches!(result.outcome, "applied" | "idempotent_noop" | "failed"))
+        .count();
+    let failed = results
+        .iter()
+        .filter(|result| result.outcome == "failed")
+        .count();
+    let skipped = results.len().saturating_sub(attempted);
+    (attempted, failed, skipped)
+}
+
+fn doctor_fix_success_json(
+    workspace: &Path,
+    summary: &crate::core::doctor_runtime::RunSummary,
+    fixer_results: &[DoctorFixerResult],
+) -> String {
+    let status_str = serde_json::to_value(&summary.status)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned());
+    let (attempted, failed, skipped) = doctor_fixer_result_counts(fixer_results);
+    let data = serde_json::json!({
+        "schema": crate::models::DOCTOR_FIX_SUMMARY_SCHEMA_V1,
+        "doctor_version": env!("CARGO_PKG_VERSION"),
+        "workspace": workspace.display().to_string(),
+        "runId": summary.run_id,
+        "runDir": summary.run_dir.display().to_string(),
+        "actionCount": summary.action_count,
+        "status": status_str,
+        "fixerDispatchPending": false,
+        "failurePolicy": "fail_fast",
+        "fixerResultCount": fixer_results.len(),
+        "attemptedFixerCount": attempted,
+        "failedFixerCount": failed,
+        "skippedFixerCount": skipped,
+        "fixerResults": fixer_results,
+        "sideEffectFree": false,
+        "configMutation": "never",
+    });
+
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": [],
+    })
+    .to_string()
+}
+
+fn doctor_runtime_error_result(
+    error: &crate::core::doctor_runtime::DoctorRuntimeError,
+    phase: &'static str,
+    fixer_results: &[DoctorFixerResult],
+    run: Option<&DoctorFixRunEvidence>,
+    caused_by: Option<(
+        &'static str,
+        &crate::core::doctor_runtime::DoctorRuntimeError,
+    )>,
+) -> DoctorFixCommandResult {
+    use crate::core::doctor_runtime::DoctorRuntimeError;
+
+    let (code, severity, repair, exit_code, path) = match error {
+        DoctorRuntimeError::SymlinkedRunRoot { path } => (
+            "doctor_run_root_symlink_refused",
+            "critical",
+            "Replace the symlinked .ee/.doctor lifecycle component with a real directory inside the canonical workspace, then retry.",
+            ProcessExitCode::PolicyDenied,
+            Some(path.display().to_string()),
+        ),
+        DoctorRuntimeError::LifecycleRootChanged { path } => (
+            "doctor_run_root_changed",
+            "critical",
+            "Stop concurrent workspace lifecycle changes, restore the original .ee/.doctor directory bindings, and start a fresh doctor run.",
+            ProcessExitCode::PolicyDenied,
+            Some(path.display().to_string()),
+        ),
+        DoctorRuntimeError::UnsafeLatestEntry { path, .. } => (
+            "doctor_latest_entry_unsafe",
+            "high",
+            "Inspect <workspace>/.doctor/latest and preserve the existing entry; doctor will only publish over an absent entry or a verified symlink.",
+            ProcessExitCode::PolicyDenied,
+            Some(path.display().to_string()),
+        ),
+        DoctorRuntimeError::BlastRadiusExceeded { path, .. } => (
+            "doctor_blast_radius_exceeded",
+            "high",
+            "Narrow the fixer target to one of the declared doctor blast-radius roots.",
+            ProcessExitCode::PolicyDenied,
+            Some(path.display().to_string()),
+        ),
+        DoctorRuntimeError::BackupDirUnwritable { dir, .. } => (
+            "doctor_backup_directory_unwritable",
+            "high",
+            "Restore safe owner-only write access to <workspace>/.doctor/runs/ and retry.",
+            ProcessExitCode::Storage,
+            Some(dir.display().to_string()),
+        ),
+        DoctorRuntimeError::ConcurrencyLost { lock_path, .. } => (
+            "doctor_concurrency_lost",
+            "medium",
+            "Wait for the active doctor run to finish, then inspect ee doctor --list-runs --json before retrying.",
+            ProcessExitCode::Configuration,
+            Some(lock_path.display().to_string()),
+        ),
+        DoctorRuntimeError::Io { .. }
+        | DoctorRuntimeError::ActionsLogCorrupt { .. }
+        | DoctorRuntimeError::UndoStateDrifted { .. }
+        | DoctorRuntimeError::UndoBackupCorrupt { .. } => (
+            "doctor_runtime_io",
+            "high",
+            "Inspect <workspace>/.doctor/runs/ and ee doctor --list-runs --json for partial state before retrying.",
+            ProcessExitCode::Storage,
+            None,
+        ),
+        DoctorRuntimeError::FinishStateUpdateFailed { .. } => (
+            "doctor_finish_state_update_failed",
+            "critical",
+            "Preserve the run directory, restore safe write access to state.json, and inspect the nested finalization failures before retrying.",
+            ProcessExitCode::Storage,
+            None,
+        ),
+        DoctorRuntimeError::NoOpIdempotent => (
+            "doctor_runtime_noop",
+            "info",
+            "Re-run ee doctor --fix-plan --json to confirm no repair remains.",
+            ProcessExitCode::Configuration,
+            None,
+        ),
+    };
+
+    let (attempted, failed, skipped) = doctor_fixer_result_counts(fixer_results);
+    let mut details = serde_json::json!({
+        "phase": phase,
+        "failurePolicy": "fail_fast",
+        "fixerResultCount": fixer_results.len(),
+        "attemptedFixerCount": attempted,
+        "failedFixerCount": failed,
+        "skippedFixerCount": skipped,
+        "fixerResults": fixer_results,
+        "recovery": [{
+            "priority": 0,
+            "kind": "command",
+            "rationale": "Inspect the read-only doctor plan and lifecycle posture before retrying mutation.",
+            "command": "ee doctor --fix-plan --workspace . --json",
+        }],
+    });
+    if let Some(path) = path {
+        details["path"] = serde_json::Value::String(path);
+    }
+    if let Some(run) = run {
+        details["run"] = serde_json::json!(run);
+    }
+    if let Some((cause_phase, cause)) = caused_by {
+        details["causedBy"] = serde_json::json!({
+            "phase": cause_phase,
+            "message": cause.to_string(),
+        });
+    }
+
+    DoctorFixCommandResult {
+        json: serde_json::json!({
+            "schema": crate::models::ERROR_SCHEMA_V2,
+            "error": {
+                "code": code,
+                "message": error.to_string(),
+                "severity": severity,
+                "repair": repair,
+                "details": details,
+            },
         })
         .to_string(),
+        exit_code,
     }
 }
 
@@ -20069,6 +20413,7 @@ where
 
     let workspace_path = cli.resolve_workspace();
     let mut options = CompileDocsBootstrapOptions::for_workspace(workspace_path.as_path());
+    options.include_globs = args.include.as_slice();
     if let Some(max_source_bytes) = args.max_source_bytes {
         options.max_source_bytes = max_source_bytes;
     }
@@ -20095,6 +20440,7 @@ where
     options.database_path = args.database.as_deref();
     options.actor = args.actor.as_deref();
     options.approved_only = args.approved_only;
+    options.include_globs = args.include.as_slice();
     if let Some(max_source_bytes) = args.max_source_bytes {
         options.max_source_bytes = max_source_bytes;
     }
@@ -20117,17 +20463,24 @@ where
     W: Write,
 {
     match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
-            stdout,
-            &format!(
-                "Docs bootstrap dry-run\n  Run: {}\n  Sources: {}\n  Candidates: {}\n  Quarantined: {}\n  Durable mutation: {}\n",
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let include_globs = if run.include_globs.is_empty() {
+                "(defaults only)".to_owned()
+            } else {
+                run.include_globs.join(", ")
+            };
+            let mut rendered = format!(
+                "Docs bootstrap dry-run\n  Run: {}\n  Includes: {}\n  Sources: {}\n  Candidates: {}\n  Quarantined: {}\n  Durable mutation: {}\n",
                 run.run_id,
+                include_globs,
                 run.source_count,
                 run.candidates.len(),
                 run.curate_quarantine.len(),
                 run.durable_mutation
-            ),
-        ),
+            );
+            rendered.push_str(&render_bootstrap_degradations(&run.degraded));
+            write_stdout(stdout, &rendered)
+        }
         output::Renderer::Toon => write_stdout(
             stdout,
             &(output::render_toon_from_json(&run.data_json()) + "\n"),
@@ -20156,19 +20509,26 @@ where
     W: Write,
 {
     match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => write_stdout(
-            stdout,
-            &format!(
-                "Docs bootstrap apply\n  Run: {}\n  Candidates: {}\n  Materialized: {}\n  Approved queued: {}\n  Applied: {}\n  Blocked: {}\n  Durable mutation: {}\n",
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let include_globs = if report.include_globs.is_empty() {
+                "(defaults only)".to_owned()
+            } else {
+                report.include_globs.join(", ")
+            };
+            let mut rendered = format!(
+                "Docs bootstrap apply\n  Run: {}\n  Includes: {}\n  Candidates: {}\n  Materialized: {}\n  Approved queued: {}\n  Applied: {}\n  Blocked: {}\n  Durable mutation: {}\n",
                 report.run_id,
+                include_globs,
                 report.candidate_count,
                 report.materialized_count,
                 report.approved_candidate_count,
                 report.applied_count,
                 report.blocked_count,
                 report.durable_mutation
-            ),
-        ),
+            );
+            rendered.push_str(&render_bootstrap_degradations(&report.degraded));
+            write_stdout(stdout, &rendered)
+        }
         output::Renderer::Toon => write_stdout(
             stdout,
             &(output::render_toon_from_json(&report.data_json()) + "\n"),
@@ -20186,6 +20546,26 @@ where
             write_stdout(stdout, &(response.to_string() + "\n"))
         }
     }
+}
+
+fn render_bootstrap_degradations(
+    degraded: &[crate::core::docs_bootstrap::BootstrapDegradation],
+) -> String {
+    if degraded.is_empty() {
+        return "  Degraded: none\n".to_owned();
+    }
+    let mut rendered = "  Degraded:\n".to_owned();
+    for degradation in degraded {
+        let path = degradation
+            .path
+            .as_deref()
+            .map_or_else(String::new, |path| format!(" [{path}]"));
+        rendered.push_str(&format!(
+            "    - {}{}: {} Repair: {}\n",
+            degradation.code, path, degradation.message, degradation.repair
+        ));
+    }
+    rendered
 }
 
 fn handle_import_cass<W, E>(
@@ -20552,33 +20932,44 @@ where
     };
 
     match rebuild_index(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &format!(
-                    "INDEX_REBUILD|{}|{}|{}|{}\n",
-                    report.status.as_str(),
-                    report.memories_indexed,
-                    report.sessions_indexed,
-                    report.documents_total
+        Ok(report) => {
+            let evidence = crate::core::index::EvidenceAdmissionTotals::from_report(
+                &report.evidence_admission,
+            );
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &report.human_summary())
+                }
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &format!(
+                        "INDEX_REBUILD|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
+                        report.status.as_str(),
+                        report.memories_indexed,
+                        report.sessions_indexed,
+                        report.artifacts_indexed,
+                        report.rules_indexed,
+                        report.evidence_indexed,
+                        evidence.admitted,
+                        evidence.quarantined,
+                        evidence.denied,
+                        report.documents_total
+                    ),
                 ),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V2,
-                    "success": true,
-                    "degraded": [],
-                    "data": report.data_json(),
-                });
-                write_stdout(stdout, &(json.to_string() + "\n"))
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    let json = serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
+                        "success": true,
+                        "degraded": [],
+                        "data": report.data_json(),
+                    });
+                    write_stdout(stdout, &(json.to_string() + "\n"))
+                }
             }
-        },
+        }
         Err(error) => write_index_rebuild_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -20602,33 +20993,46 @@ where
     };
 
     match reembed_index(&options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
-            }
-            output::Renderer::Toon => write_stdout(
-                stdout,
-                &format!(
-                    "INDEX_REEMBED|{}|{}|{}|{}\n",
-                    report.status.as_str(),
-                    report.job_status,
-                    report.documents_total,
-                    report.embedding.fast_model_id
+        Ok(report) => {
+            let evidence = crate::core::index::EvidenceAdmissionTotals::from_report(
+                &report.evidence_admission,
+            );
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &report.human_summary())
+                }
+                output::Renderer::Toon => write_stdout(
+                    stdout,
+                    &format!(
+                        "INDEX_REEMBED|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
+                        report.status.as_str(),
+                        report.job_status,
+                        report.memories_indexed,
+                        report.sessions_indexed,
+                        report.artifacts_indexed,
+                        report.rules_indexed,
+                        report.evidence_indexed,
+                        evidence.admitted,
+                        evidence.quarantined,
+                        evidence.denied,
+                        report.documents_total,
+                        report.embedding.fast_model_id
+                    ),
                 ),
-            ),
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V2,
-                    "success": true,
-                    "degraded": [],
-                    "data": report.data_json(),
-                });
-                write_stdout(stdout, &(json.to_string() + "\n"))
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    let json = serde_json::json!({
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
+                        "success": true,
+                        "degraded": [],
+                        "data": report.data_json(),
+                    });
+                    write_stdout(stdout, &(json.to_string() + "\n"))
+                }
             }
-        },
+        }
         Err(error) => write_index_rebuild_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -20658,11 +21062,17 @@ where
             output::Renderer::Toon => write_stdout(
                 stdout,
                 &format!(
-                    "INDEX_STATUS|{}|{}|{}|{}\n",
+                    "INDEX_STATUS|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
                     report.health.as_str(),
                     report.index_exists,
                     report.db_memory_count,
-                    report.db_session_count
+                    report.db_session_count,
+                    report.db_artifact_count,
+                    report.db_rule_count,
+                    report.db_evidence_count,
+                    report.db_evidence_admitted_count,
+                    report.db_evidence_quarantined_count,
+                    report.db_evidence_denied_count
                 ),
             ),
             output::Renderer::Json
@@ -22240,6 +22650,21 @@ fn open_preflight_token_database(
     open_preflight_token_database_for_workspace(workspace, database)
 }
 
+fn canonical_workspace_row(
+    connection: &crate::db::DbConnection,
+    workspace: &Path,
+) -> crate::db::Result<(PathBuf, Option<crate::db::StoredWorkspace>)> {
+    let canonical_workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let mut existing_workspace =
+        connection.get_workspace_by_path(&canonical_workspace.to_string_lossy())?;
+    if existing_workspace.is_none() && canonical_workspace != workspace {
+        existing_workspace = connection.get_workspace_by_path(&workspace.to_string_lossy())?;
+    }
+    Ok((canonical_workspace, existing_workspace))
+}
+
 fn open_preflight_token_database_for_workspace(
     workspace: PathBuf,
     database: Option<&Path>,
@@ -22264,22 +22689,27 @@ fn open_preflight_token_database_for_workspace(
         repair: Some("ee migrate run --workspace . --json".to_owned()),
     })?;
 
-    let workspace_path = workspace.to_string_lossy().into_owned();
-    let workspace_id = match connection
-        .get_workspace_by_path(&workspace_path)
-        .map_err(|error| DomainError::Storage {
+    // Match init, remember, search, and the memory verbs: a lexical relative
+    // path must resolve to the canonical workspace row before we consider a
+    // legacy raw-path row. Otherwise preflight can create an empty duplicate
+    // workspace whose path is `./...`, and later raw-first readers can report
+    // an empty store even though the canonical row owns all memories.
+    let (canonical_workspace, existing_workspace) =
+        canonical_workspace_row(&connection, &workspace).map_err(|error| DomainError::Storage {
             message: format!("Failed to query workspace row: {error}"),
             repair: Some("ee doctor --json".to_owned()),
-        })? {
+        })?;
+    let canonical_workspace_path = canonical_workspace.to_string_lossy().into_owned();
+    let workspace_id = match existing_workspace {
         Some(workspace) => workspace.id,
         None => {
-            let workspace_id = crate::core::workspace::stable_workspace_id(&workspace);
+            let workspace_id = crate::core::workspace::stable_workspace_id(&canonical_workspace);
             connection
                 .insert_workspace(
                     &workspace_id,
                     &crate::db::CreateWorkspaceInput {
-                        path: workspace_path,
-                        name: workspace
+                        path: canonical_workspace_path,
+                        name: canonical_workspace
                             .file_name()
                             .map(|name| name.to_string_lossy().into_owned()),
                     },
@@ -22292,6 +22722,9 @@ fn open_preflight_token_database_for_workspace(
         }
     };
 
+    // Registry loading, issuer metadata, and symlink policy use the caller's
+    // original path spelling. Canonicalization above is only for database
+    // identity; do not silently change those observable path semantics.
     Ok((connection, workspace_id, workspace))
 }
 
@@ -24347,16 +24780,12 @@ where
             {
                 object.insert("degraded".to_string(), serde_json::json!(degraded.clone()));
             }
-            let mut rendered = serde_json::json!({
+            let rendered = serde_json::json!({
                 "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": !report.has_conflicts(),
                 "data": data,
+                "degraded": degraded,
             });
-            if !degraded.is_empty()
-                && let Some(object) = rendered.as_object_mut()
-            {
-                object.insert("degraded".to_string(), serde_json::json!(degraded));
-            }
             write_stdout(stdout, &(rendered.to_string() + "\n"))
         }
     };
@@ -33004,6 +33433,7 @@ where
                     "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": report.passed,
                     "data": report.data_json(),
+                    "degraded": [],
                 });
                 write_stdout(stdout, &(json.to_string() + "\n"));
             }
@@ -35309,6 +35739,8 @@ where
         .get("degraded")
         .cloned()
         .unwrap_or_else(|| serde_json::json!([]));
+    let top_level_degraded =
+        output::response_degraded_from_data(&serde_json::json!({"degraded": &degraded}));
     let created_by_hash = public_ledger
         .get("createdByHash")
         .and_then(serde_json::Value::as_str)
@@ -35336,9 +35768,10 @@ where
                 "createdByHash": created_by_hash,
                 "items": items_json,
                 "omitted": omitted_json,
-                "degraded": degraded,
+                "degraded": degraded.clone(),
             },
         },
+        "degraded": top_level_degraded,
     });
 
     match cli.renderer() {
@@ -38426,11 +38859,21 @@ fn migration_index_rebuild_audit_details(
     error: Option<&str>,
 ) -> serde_json::Value {
     let report_json = report.map(|report| {
+        let evidence =
+            crate::core::index::EvidenceAdmissionTotals::from_report(&report.evidence_admission);
         serde_json::json!({
             "indexDir": report.index_dir.display().to_string(),
             "memoriesIndexed": report.memories_indexed,
             "sessionsIndexed": report.sessions_indexed,
             "artifactsIndexed": report.artifacts_indexed,
+            "rulesIndexed": report.rules_indexed,
+            "evidenceIndexed": report.evidence_indexed,
+            "evidenceAdmission": &report.evidence_admission,
+            "evidenceAdmissionTotals": {
+                "admitted": evidence.admitted,
+                "quarantined": evidence.quarantined,
+                "denied": evidence.denied,
+            },
             "documentsTotal": report.documents_total,
             "elapsedMs": report.elapsed_ms,
             "dryRun": report.dry_run,
@@ -38504,6 +38947,8 @@ fn migration_index_rebuild_report_json(
     report: &IndexRebuildReport,
     audit_id: &str,
 ) -> serde_json::Value {
+    let evidence =
+        crate::core::index::EvidenceAdmissionTotals::from_report(&report.evidence_admission);
     serde_json::json!({
         "stepId": POST_MIGRATION_INDEX_REBUILD_STEP_ID,
         "required": true,
@@ -38513,6 +38958,14 @@ fn migration_index_rebuild_report_json(
         "memoriesIndexed": report.memories_indexed,
         "sessionsIndexed": report.sessions_indexed,
         "artifactsIndexed": report.artifacts_indexed,
+        "rulesIndexed": report.rules_indexed,
+        "evidenceIndexed": report.evidence_indexed,
+        "evidenceAdmission": &report.evidence_admission,
+        "evidenceAdmissionTotals": {
+            "admitted": evidence.admitted,
+            "quarantined": evidence.quarantined,
+            "denied": evidence.denied,
+        },
         "documentsTotal": report.documents_total,
         "indexDir": report.index_dir.display().to_string(),
         "elapsedMs": report.elapsed_ms,
@@ -38688,6 +39141,8 @@ fn run_post_migration_index_rebuild(
         applied_count = applied.len(),
         documents_total = report.documents_total,
         memories_indexed = report.memories_indexed,
+        rules_indexed = report.rules_indexed,
+        evidence_indexed = report.evidence_indexed,
         index_dir = %report.index_dir.display(),
         "post-migration index rebuild completed"
     );
@@ -39295,8 +39750,11 @@ where
             include_stale: args.include_stale,
             relevance_floor: None,
             mesh_mode: args.mesh_mode,
-            memory_scope: lens_memory_scope.unwrap_or(MemoryScope::Swarm),
-            strict_scope: false,
+            memory_scope: args
+                .memory_scope
+                .or(lens_memory_scope)
+                .unwrap_or(MemoryScope::Swarm),
+            strict_scope: args.strict_scope,
             coordination_snapshot: args.coordination_snapshot.clone(),
             coordination_stale_after_ms: args.coordination_stale_after_ms,
             task_lens: resolved_lens
@@ -39312,7 +39770,7 @@ where
             no_baseline_write: args.no_baseline_write,
             max_delta_bytes: None,
         };
-        return handle_context_pack_query(cli, &context_args, "pack", false, stdout, stderr);
+        return handle_context_pack_query(cli, &context_args, PACK_COMMAND, false, stdout, stderr);
     }
 
     match &args.command {
@@ -39500,8 +39958,11 @@ where
         redaction_level: task_lens_redaction(resolved_lens.as_ref())
             .unwrap_or(BackupRedaction::Minimal)
             .to_model(),
-        memory_scope: lens_memory_scope.unwrap_or(MemoryScope::Swarm),
-        strict_scope: false,
+        memory_scope: args
+            .memory_scope
+            .or(lens_memory_scope)
+            .unwrap_or(MemoryScope::Swarm),
+        strict_scope: args.strict_scope,
         ppr_weight: None,
         changed_symbols: Vec::new(),
         changed_symbols_from_git: false,
@@ -39520,7 +39981,7 @@ where
     let renderer = effective_pack_renderer(cli, request.renderer);
 
     if args.explain_performance {
-        return match run_context_pack_with_performance(&options, "pack") {
+        return match run_context_pack_with_performance(&options, PACK_COMMAND) {
             Ok(run) => write_stdout(stdout, &(run.performance.to_string() + "\n")),
             Err(error) => {
                 let domain_error = context_error_to_domain(&error);
@@ -39529,7 +39990,7 @@ where
         };
     }
 
-    match run_context_pack_with_performance(&options, "pack").map(|run| run.response) {
+    match run_context_pack_with_performance(&options, PACK_COMMAND).map(|run| run.response) {
         Ok(mut response) => {
             response.data.degraded.extend(request.degraded);
             if args.explain_gaps {
@@ -41810,10 +42271,7 @@ fn format_review_session_human(report: &ReviewSessionReport) -> String {
     };
     let mut output = format!(
         "{mode}: review session {}\n\n  evidence spans: {}\n  topics: {}\n  candidates: {}\n",
-        report.cass_session_id,
-        report.evidence_span_count,
-        report.topic_count,
-        report.candidate_count
+        report.session_id, report.evidence_span_count, report.topic_count, report.candidate_count
     );
     for candidate in &report.candidates {
         output.push_str(&format!(
@@ -42135,28 +42593,19 @@ where
 
     if args.explain_performance {
         let core_search_start = Instant::now();
-        return match run_search_with_performance(&options) {
-            Ok(mut run) => {
+        return match run_search_with_performance_and_filters(
+            &options,
+            kind_filter.as_deref(),
+            &typed_field_filters,
+        ) {
+            Ok(run) => {
                 command_timings.push(cli_performance_timing_json(
                     "command::coreSearch",
                     core_search_start.elapsed(),
                 ));
-                let typed_filter_start = Instant::now();
-                if let Err(error) = apply_memory_kind_and_typed_field_filters_to_report(
-                    &options,
-                    &mut run.report,
-                    kind_filter.as_deref(),
-                    &typed_field_filters,
-                ) {
-                    let domain_error = DomainError::SearchIndex {
-                        message: error.to_string(),
-                        repair: error.repair_hint().map(str::to_string),
-                    };
-                    return write_domain_error(&domain_error, true, stdout, stderr);
-                }
                 command_timings.push(cli_performance_timing_json(
                     "command::typedFilterApply",
-                    typed_filter_start.elapsed(),
+                    Duration::ZERO,
                 ));
                 let payload_start = Instant::now();
                 let mut payload = run.report.performance_explain_json_with_trace(
@@ -42193,47 +42642,28 @@ where
         };
     }
 
-    match run_search(&options) {
-        Ok(mut report) => {
-            if let Err(error) = apply_memory_kind_and_typed_field_filters_to_report(
-                &options,
-                &mut report,
-                kind_filter.as_deref(),
-                &typed_field_filters,
-            ) {
-                let domain_error = DomainError::SearchIndex {
-                    message: error.to_string(),
-                    repair: error.repair_hint().map(str::to_string),
-                };
-                return write_domain_error(
-                    &domain_error,
-                    cli.wants_json() || args.explain_performance,
-                    stdout,
-                    stderr,
-                );
+    match run_search_with_filters(&options, kind_filter.as_deref(), &typed_field_filters) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
             }
-            match cli.renderer() {
-                output::Renderer::Human | output::Renderer::Markdown => {
-                    write_stdout(stdout, &report.human_summary())
-                }
-                output::Renderer::Toon => write_stdout(
-                    stdout,
-                    &(format_search_toon_with_mesh(&report, args.mesh_mode) + "\n"),
-                ),
-                output::Renderer::Json
-                | output::Renderer::Jsonl
-                | output::Renderer::Compact
-                | output::Renderer::Hook => write_stdout(
-                    stdout,
-                    &(format_search_json_with_mesh_and_recalibration(
-                        &report,
-                        args.mesh_mode,
-                        recalibration.as_ref(),
-                        args.explain.then_some("data.results"),
-                    ) + "\n"),
-                ),
-            }
-        }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(format_search_toon_with_mesh(&report, args.mesh_mode) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(format_search_json_with_mesh_and_recalibration(
+                    &report,
+                    args.mesh_mode,
+                    recalibration.as_ref(),
+                    args.explain.then_some("data.results"),
+                ) + "\n"),
+            ),
+        },
         Err(error) => {
             let domain_error = DomainError::SearchIndex {
                 message: error.to_string(),
@@ -44670,15 +45100,14 @@ fn open_verify_rch_ledger_database_for_read(
             message: format!("Failed to open RCH verifier ledger database: {error}"),
             repair: Some("ee status --json".to_owned()),
         })?;
-    let workspace_path = workspace.to_string_lossy().into_owned();
-    let workspace_id = connection
-        .get_workspace_by_path(&workspace_path)
-        .map_err(|error| DomainError::Storage {
+    let (canonical_workspace, existing_workspace) =
+        canonical_workspace_row(&connection, &workspace).map_err(|error| DomainError::Storage {
             message: format!("Failed to query workspace row: {error}"),
             repair: Some("ee doctor --json".to_owned()),
-        })?
+        })?;
+    let workspace_id = existing_workspace
         .map(|row| row.id)
-        .unwrap_or_else(|| workspace_core::stable_workspace_id(&workspace));
+        .unwrap_or_else(|| workspace_core::stable_workspace_id(&canonical_workspace));
     Ok(Some((connection, workspace_id)))
 }
 
@@ -46382,7 +46811,49 @@ where
         confidence_threshold: args.confidence_threshold,
     };
 
-    let mut report = explain_memory(&options);
+    let read_pool = crate::db::read_pool::registered_process_read_pool(
+        crate::db::DatabaseConfig::file(database_path.clone()),
+        crate::db::read_pool::PoolConfig::default_single(),
+    );
+    let read_snapshot = match read_pool.pin_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to acquire why read snapshot: {error}"),
+                repair: Some("ee status --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let connection = match read_snapshot.checked_connection() {
+        Ok(connection) => connection,
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Why read snapshot became unavailable: {error}"),
+                repair: Some("ee status --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    match connection.needs_migration() {
+        Ok(false) => {}
+        Ok(true) => {
+            let domain_error = DomainError::MigrationRequired {
+                message: "Database migration is required before read-only why.".to_owned(),
+                repair: Some("ee migrate run --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+        Err(error) => {
+            let domain_error = DomainError::Storage {
+                message: format!("Failed to inspect database migration state before why: {error}"),
+                repair: Some("ee migrate status --workspace . --json".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    }
+
+    let mut report = explain_memory_with_connection(&options, connection);
 
     if let Some(ref error) = report.error {
         let domain_error = DomainError::Storage {
@@ -46403,7 +46874,7 @@ where
 
     if args.causal_explain {
         let causal_explanation = match causal_explain_feature_enabled(cli) {
-            Ok(true) => why_causal_explanation_json(&database_path, &args.memory_id),
+            Ok(true) => why_causal_explanation_json(connection, &args.memory_id),
             Ok(false) => why_causal_explanation_feature_disabled_json(&args.memory_id),
             Err(error) => {
                 let domain_error = config_surface_error_to_domain(error);
@@ -46413,13 +46884,20 @@ where
         report = report.with_causal_explanation(causal_explanation);
     }
     let sentinel_data = if args.include_sentinel {
-        match why_sentinel_data(&database_path, &args.memory_id) {
+        match why_sentinel_data(connection, &args.memory_id) {
             Ok(data) => Some(data),
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         }
     } else {
         None
     };
+    if let Err(error) = read_snapshot.commit() {
+        let domain_error = DomainError::Storage {
+            message: format!("Failed to release why read snapshot: {error}"),
+            repair: Some("ee status --workspace . --json".to_owned()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
 
     if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
         write_stdout(stdout, &(output::render_why_mermaid(&report) + "\n"))
@@ -46452,17 +46930,9 @@ where
 }
 
 fn why_sentinel_data(
-    database_path: &Path,
+    connection: &DbConnection,
     memory_id: &str,
 ) -> Result<serde_json::Value, DomainError> {
-    let connection =
-        DbConnection::open_file(database_path).map_err(|error| DomainError::Storage {
-            message: format!(
-                "Failed to open database {} for sentinel history: {error}",
-                database_path.display()
-            ),
-            repair: Some("ee doctor --workspace . --json".to_string()),
-        })?;
     let specs = connection
         .list_memory_sentinel_specs(memory_id)
         .map_err(|error| DomainError::Storage {
@@ -46906,28 +47376,10 @@ fn format_coverage_gap_human(report: &crate::pack::CoverageGapReport) -> String 
     out
 }
 
-fn why_causal_explanation_json(database_path: &Path, memory_id: &str) -> serde_json::Value {
-    let connection = match crate::db::DbConnection::open_file(database_path) {
-        Ok(connection) => connection,
-        Err(error) => {
-            return empty_why_causal_explanation_json(
-                memory_id,
-                "graph_causal_projection_unavailable",
-                "medium",
-                format!("Failed to open workspace database for causal explanation: {error}"),
-                Some("ee doctor --workspace . --json".to_owned()),
-            );
-        }
-    };
-    if let Err(error) = connection.migrate() {
-        return empty_why_causal_explanation_json(
-            memory_id,
-            "graph_causal_projection_unavailable",
-            "medium",
-            format!("Failed to migrate database before causal explanation: {error}"),
-            Some("ee migrate run --workspace . --json".to_owned()),
-        );
-    }
+fn why_causal_explanation_json(
+    connection: &crate::db::DbConnection,
+    memory_id: &str,
+) -> serde_json::Value {
     let memory = match connection.get_memory(memory_id) {
         Ok(Some(memory)) => memory,
         Ok(None) => {
@@ -47882,8 +48334,9 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "verificationEvidence": verification_evidence,
             "coordinationFallbackEvidence": coordination_fallback_evidence,
             "attestationBundle": report.attestation_manifest.clone(),
-            "degraded": degraded,
-        }
+            "degraded": degraded.clone(),
+        },
+        "degraded": degraded,
     });
     if let Some(load_bearing) = load_bearing
         && let Some(data) = json
@@ -48608,6 +49061,7 @@ impl RememberMemoryReport {
         let near_duplicates_json = self.near_duplicates_json();
         let policy_bypass_json = self.policy_bypass_json();
         let degraded_json = self.remember_degraded_json();
+        let response_degraded_json = self.remember_response_degraded_json();
 
         let mut json = format!(
             r#"{{"schema":"ee.response.v2","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","memoryId":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"producer":{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"near_duplicates":{},"redaction_status":"{}","policy_bypass_used":{},"policy_bypass":{},"degraded":{}}}"#,
@@ -48651,6 +49105,8 @@ impl RememberMemoryReport {
             policy_bypass_json,
             degraded_json
         );
+        json.push_str(",\"degraded\":");
+        json.push_str(&response_degraded_json);
         json.push('}');
         json
     }
@@ -48877,6 +49333,23 @@ impl RememberMemoryReport {
         self.policy_bypass.as_ref().map_or_else(
             || "[]".to_owned(),
             |bypass| format!("[{}]", self.policy_bypass_json_for_degraded(bypass)),
+        )
+    }
+
+    fn remember_response_degraded_json(&self) -> String {
+        self.policy_bypass.as_ref().map_or_else(
+            || "[]".to_owned(),
+            |bypass| {
+                use crate::output::escape_json_string;
+
+                format!(
+                    r#"[{{"code":"{}","severity":"{}","message":"{}","repair":"{}"}}]"#,
+                    escape_json_string(&bypass.code),
+                    escape_json_string(&bypass.severity),
+                    escape_json_string(&bypass.message),
+                    escape_json_string(&bypass.repair),
+                )
+            },
         )
     }
 
@@ -58861,11 +59334,12 @@ fn render_swarm_work_packet_json(
         message: format!("Failed to serialize swarm work-packet: {error}."),
         repair: Some("Fix the swarm work-packet serializer before emitting JSON.".to_string()),
     })?;
+    let degraded = aggregate_swarm_work_packet_degraded_json(&packet.degraded);
     let response = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
-        "degraded": &packet.degraded,
+        "degraded": degraded,
     });
     serde_json::to_string_pretty(&response).map_err(|error| DomainError::Storage {
         message: format!("Failed to serialize swarm work-packet response: {error}."),
@@ -58878,16 +59352,31 @@ fn render_swarm_repair_plan_json(plan: &SwarmRepairPlan) -> Result<String, Domai
         message: format!("Failed to serialize swarm repair-plan: {error}."),
         repair: Some("Fix the swarm repair-plan serializer before emitting JSON.".to_string()),
     })?;
+    let degraded = aggregate_swarm_work_packet_degraded_json(&plan.degraded);
     let response = serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
-        "degraded": &plan.degraded,
+        "degraded": degraded,
     });
     serde_json::to_string_pretty(&response).map_err(|error| DomainError::Storage {
         message: format!("Failed to serialize swarm repair-plan response: {error}."),
         repair: Some("Fix the swarm repair-plan response serializer.".to_string()),
     })
+}
+
+fn aggregate_swarm_work_packet_degraded_json(
+    degraded: &[crate::core::swarm_next_action::SwarmWorkPacketDegradation],
+) -> Vec<serde_json::Value> {
+    aggregate_cli_degraded_json(degraded.iter().map(|entry| {
+        DegradationAggregationInput::new(
+            entry.source.clone(),
+            entry.code.clone(),
+            entry.severity,
+            entry.message.clone(),
+            entry.repair.clone().unwrap_or_default(),
+        )
+    }))
 }
 
 fn render_swarm_repair_plan_markdown(plan: &SwarmRepairPlan) -> String {
@@ -59034,29 +59523,24 @@ fn swarm_work_packet_claim_gate_degraded_json(
         .iter()
         .map(|degradation| degradation.code.as_str())
         .collect::<BTreeSet<_>>();
-    let mut degraded = packet
-        .degraded
+    let packet_degraded = packet.degraded.iter().map(|degradation| {
+        DegradationAggregationInput::new(
+            degradation.source.clone(),
+            degradation.code.clone(),
+            degradation.severity,
+            degradation.message.clone(),
+            degradation.repair.clone().unwrap_or_default(),
+        )
+    });
+    let gate_only_degraded = gate
+        .degraded_codes
         .iter()
-        .map(|degradation| {
-            serde_json::json!({
-                "code": &degradation.code,
-                "source": &degradation.source,
-                "severity": degradation.severity,
-                "message": &degradation.message,
-                "repair": &degradation.repair,
-            })
-        })
-        .collect::<Vec<_>>();
-    degraded.extend(
-        gate.degraded_codes
-            .iter()
-            .filter(|code| !packet_codes.contains(code.as_str()))
-            .map(|code| claim_gate_only_degraded_code_json(code)),
-    );
-    degraded
+        .filter(|code| !packet_codes.contains(code.as_str()))
+        .map(|code| claim_gate_only_degraded_input(code));
+    aggregate_cli_degraded_json(packet_degraded.chain(gate_only_degraded))
 }
 
-fn claim_gate_only_degraded_code_json(code: &str) -> serde_json::Value {
+fn claim_gate_only_degraded_input(code: &str) -> DegradationAggregationInput {
     let (source, severity, message, repair) = match code {
         "actionable_queue_unavailable" => (
             "beads",
@@ -59097,13 +59581,7 @@ fn claim_gate_only_degraded_code_json(code: &str) -> serde_json::Value {
             Some("Inspect data.degradedCodes and claim-gate evidence before claiming work."),
         ),
     };
-    serde_json::json!({
-        "code": code,
-        "source": source,
-        "severity": severity,
-        "message": message,
-        "repair": repair,
-    })
+    DegradationAggregationInput::new(source, code, severity, message, repair.unwrap_or_default())
 }
 
 fn render_swarm_work_packet_claim_gate_markdown(gate: &SwarmWorkPacketClaimGate) -> String {
@@ -60415,6 +60893,9 @@ impl NormalizedInvocation {
                     SchemaCommand::Export { .. } => "schema export".to_string(),
                 },
                 Command::Impact(_) => "impact".to_string(),
+                Command::Search(args) if args.recalibrate_now => {
+                    "search --recalibrate-now".to_string()
+                }
                 Command::Search(_) => "search".to_string(),
                 Command::Similar(_) => "similar".to_string(),
                 Command::Sentinel(command) => match command {
@@ -60422,9 +60903,6 @@ impl NormalizedInvocation {
                     SentinelCommand::Explain => "sentinel explain".to_string(),
                 },
                 Command::Share(share) => match share {
-                    share::ShareCommand::Preview(args) if args.record_consent => {
-                        "share preview --record-consent".to_string()
-                    }
                     share::ShareCommand::Preview(_) => "share preview".to_string(),
                 },
                 Command::Subscribe(sub) => match sub {
@@ -61250,41 +61728,47 @@ mod tests {
     use std::rc::Rc;
 
     use clap::{Parser, error::ErrorKind};
+    use fs4::fs_std::FileExt as Fs4FileExt;
+
+    use crate::core::agent_docs::{AGENT_CORE_COMMANDS, AgentDocsTopic};
 
     use super::{
         AgentCommand, AnalyzeCommand, ArtifactCommand, AttestCommand, AuditCommand, BackupCommand,
-        BackupRedaction, BootstrapCommand, COORDINATION_FALLBACK_INGEST_SCHEMA_V1,
-        COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command, ContextPackError, ContextPackOptions,
-        ContextPackOutputOptions, ContextPackProfile, CurateCommand,
-        DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand, DiagCommand, DiagQuarantineCommand,
-        DiagResourceBudgetArg, DiagResourceCommandClassArg, DiagResourceCostClassArg,
-        DiagResourceDaemonArg, DiagResourceHostCalibrationArg, DiagResourceLanePressureArg,
-        DiagResourceLocalCargoArg, DiagResourceOperatingProfileArg, DiagResourceRchPostureArg,
-        DiagResourceReplayArg, DiagResourceSurfaceArg, DiagResourceWorkloadPressureArg,
-        DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES, EconomyCommand,
-        EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand, GraphSnapshotCommand,
-        HandoffCommand, HookCommand, LabCommand, LabSwarmCommand, LabSwarmWorkloadProfile,
-        LearnCommand, LearnExperimentCommand, LensCommand, MIGRATION_REPAIR_COMMAND,
-        MaintenanceCommand, MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode,
-        MemoryCommand, OutputFormat, PackCommand, PackOutputProfileArg, PlaybookCommand,
-        RedactionLevelSource, ReflectCommand, ReflectRequestLedgerCommand, RegressCommand,
-        RegressExplainArgs, RegressionSurfaceArg, RuleCommand, SESSION_BUDGET_PLAN_SCHEMA_V1,
-        ShadowMode, SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand,
-        SwarmRepairPlanArgs, SwarmWorkPacketArgs, TaskFrameCommand, TaskFrameSubgoalCommand,
-        TrustCommand, VerifyCommand, VerifyRchCommand, WorkflowCommand, WorkspaceCommand,
-        WorkspaceHygieneArgs, WorkspaceHygieneMode, context_request_from_options,
-        context_stream_header_frame, context_stream_options_for_request,
-        db_inspect_redact_source_uri, diag_environment_attestation_response_json,
-        environment_attestation_unavailable_sources, format_impact_json,
-        format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
-        hook_status_response_json, init_report_exit_code, json_with_data_result_path, mesh,
-        orient_next_commands, parse_completion_audit_evidence_input, parse_context_profile,
+        BackupRedaction, BootstrapCommand, BootstrapDocGlob,
+        COORDINATION_FALLBACK_INGEST_SCHEMA_V1, COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command,
+        ContextPackError, ContextPackOptions, ContextPackOutputOptions, ContextPackProfile,
+        CurateCommand, DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS, DaemonCommand, DiagCommand,
+        DiagQuarantineCommand, DiagResourceBudgetArg, DiagResourceCommandClassArg,
+        DiagResourceCostClassArg, DiagResourceDaemonArg, DiagResourceHostCalibrationArg,
+        DiagResourceLanePressureArg, DiagResourceLocalCargoArg, DiagResourceOperatingProfileArg,
+        DiagResourceRchPostureArg, DiagResourceReplayArg, DiagResourceSurfaceArg,
+        DiagResourceWorkloadPressureArg, DomainError, ENVIRONMENT_ATTESTATION_FIXTURE_MAX_BYTES,
+        EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand, GraphCommand,
+        GraphSnapshotCommand, HandoffCommand, HookCommand, LabCommand, LabSwarmCommand,
+        LabSwarmWorkloadProfile, LearnCommand, LearnExperimentCommand, LensCommand,
+        MIGRATION_REPAIR_COMMAND, MaintenanceCommand, MaintenanceWalCheckpointArgs,
+        MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat, PackCommand,
+        PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
+        ReflectRequestLedgerCommand, RegressCommand, RegressExplainArgs, RegressionSurfaceArg,
+        RuleCommand, SESSION_BUDGET_PLAN_SCHEMA_V1, ShadowMode, SituationCommand, StatusArgs,
+        SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmRepairPlanArgs, SwarmWorkPacketArgs,
+        TaskFrameCommand, TaskFrameSubgoalCommand, TrustCommand, VerifyCommand, VerifyRchCommand,
+        WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode,
+        cass_import_domain_error, context_request_from_options, context_stream_header_frame,
+        context_stream_options_for_request, db_inspect_redact_source_uri,
+        diag_environment_attestation_response_json, doctor_fix_dispatches,
+        doctor_runtime_error_result, environment_attestation_unavailable_sources,
+        format_impact_json, format_search_json_with_mesh_and_recalibration,
+        hook_git_readiness_response_json, hook_status_response_json, init_report_exit_code,
+        json_with_data_result_path, mesh, orient_next_commands,
+        parse_completion_audit_evidence_input, parse_context_profile,
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json,
-        read_environment_attestation_fixture_json, run, write_context_stream_terminal_error,
-        write_index_rebuild_error,
+        read_environment_attestation_fixture_json, render_bootstrap_degradations, run,
+        write_context_stream_terminal_error, write_index_rebuild_error,
     };
+    use crate::cass::CassImportError;
     use crate::config::MeshCommandMode;
     use crate::core::impact::{
         IMPACT_SCHEMA_V1, ImpactFallbackStatus, ImpactMatchType, ImpactMemorySummary, ImpactReport,
@@ -61313,6 +61797,46 @@ mod tests {
     use crate::search::plan_cache::{DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, PlanCache};
 
     type TestResult = Result<(), String>;
+
+    #[test]
+    fn cass_import_domain_error_envelope_and_details_are_public_safe() -> TestResult {
+        let secret = format!("sk_live_{}", "1234567890abcdef1234567890abcdef");
+        let windows_path = r"C:\Users\Alice\private\session.jsonl";
+        let unc_path = r"\\fileserver\profiles\Alice\trace.jsonl";
+        let error = CassImportError::CassCommand {
+            command: format!(r#"cass view "{windows_path}" --api-key {secret}"#),
+            exit_code: Some(2),
+            stderr: format!(
+                "failed {unc_path}; fallback file:///C:/Users/Alice/private/fallback.jsonl token={secret}"
+            ),
+            timed_out: false,
+            stderr_truncated: false,
+            stdout_line_count: None,
+            peak_stdout_line_bytes: None,
+            peak_stdout_buffer_bytes: None,
+        };
+        let domain = cass_import_domain_error(&error);
+        let message = domain.message();
+        let details = match &domain {
+            DomainError::ImportWithDetails { details_json, .. } => details_json.as_str(),
+            other => return Err(format!("expected import details error, got {other:?}")),
+        };
+        for rendered in [message.as_str(), details] {
+            for forbidden in [windows_path, unc_path, "C:/Users/Alice", secret.as_str()] {
+                if rendered.contains(forbidden) {
+                    return Err(format!(
+                        "forbidden CASS error material {forbidden:?} escaped ee.error.v2 input: {rendered}"
+                    ));
+                }
+            }
+        }
+        if !message.contains("[REDACTED_PATH]") || !details.contains("[REDACTED_PATH]") {
+            return Err(format!(
+                "CASS error envelope inputs should retain redaction markers: message={message:?} details={details:?}"
+            ));
+        }
+        Ok(())
+    }
 
     #[derive(Clone, Default)]
     struct SharedWriteBuffer {
@@ -61443,6 +61967,25 @@ mod tests {
         } else {
             Err(message.into())
         }
+    }
+
+    fn ensure_persistent_doctor_lock_released(workspace: &Path) -> TestResult {
+        let lock_path = workspace.join(".ee").join(".doctor.lock");
+        ensure(
+            lock_path.is_file(),
+            "persistent doctor lock file must remain present",
+        )?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| format!("open persistent doctor lock: {error}"))?;
+        ensure(
+            Fs4FileExt::try_lock_exclusive(&lock)
+                .map_err(|error| format!("probe persistent doctor lock: {error}"))?,
+            "persistent doctor lock is still held",
+        )?;
+        Fs4FileExt::unlock(&lock).map_err(|error| format!("release test doctor lock: {error}"))
     }
 
     fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult
@@ -62960,6 +63503,46 @@ mod tests {
     }
 
     #[test]
+    fn swarm_work_packet_degraded_entries_use_canonical_root_shape() -> TestResult {
+        let degraded = super::aggregate_swarm_work_packet_degraded_json(&[
+            crate::core::swarm_next_action::SwarmWorkPacketDegradation {
+                code: "swarm_source_unavailable".to_string(),
+                source: "beads".to_string(),
+                severity: "warning",
+                message: "Beads state is unavailable.".to_string(),
+                repair: Some("br ready --json".to_string()),
+            },
+            crate::core::swarm_next_action::SwarmWorkPacketDegradation {
+                code: "swarm_source_unavailable".to_string(),
+                source: "agent_mail".to_string(),
+                severity: "medium",
+                message: "Agent Mail is unavailable.".to_string(),
+                repair: Some("am status".to_string()),
+            },
+        ]);
+
+        ensure_equal(
+            &degraded.len(),
+            &1usize,
+            "duplicate work-packet degraded count",
+        )?;
+        ensure_equal(
+            &degraded[0]["severity"],
+            &serde_json::json!("medium"),
+            "work-packet degraded severity escalates",
+        )?;
+        ensure_equal(
+            &degraded[0]["sources"],
+            &serde_json::json!(["agent_mail", "beads"]),
+            "work-packet degraded sources",
+        )?;
+        ensure(
+            degraded[0].get("source").is_none(),
+            "work-packet root degradation must not expose command-specific source",
+        )
+    }
+
+    #[test]
     fn swarm_work_packet_claim_gate_json_includes_gate_only_degraded_codes() -> TestResult {
         let brief = crate::core::swarm_brief::SwarmBriefReport::empty(Path::new(
             "/tmp/ee-swarm-claim-gate",
@@ -63076,9 +63659,13 @@ mod tests {
             "claim-gate top-level degraded code",
         )?;
         ensure_equal(
-            &degraded[0]["source"],
-            &serde_json::json!("beads"),
-            "claim-gate top-level degraded source",
+            &degraded[0]["sources"],
+            &serde_json::json!(["beads"]),
+            "claim-gate top-level degraded sources",
+        )?;
+        ensure(
+            degraded[0].get("source").is_none(),
+            "claim-gate root degradation must use canonical sources array",
         )
     }
 
@@ -64395,6 +64982,11 @@ mod tests {
             &serde_json::json!(["why"]),
             "top-level why records source",
         )?;
+        ensure_equal(
+            &value["degraded"],
+            &value["data"]["degraded"],
+            "root why degraded mirrors semantic data degraded",
+        )?;
 
         let graph_degraded = value["data"]["graphRetrievalFeatures"]["degraded"]
             .as_array()
@@ -65381,6 +65973,10 @@ mod tests {
             "bootstrap",
             "docs",
             "--dry-run",
+            "--include",
+            "SKILL.md",
+            "--include",
+            "references/**/*.md",
             "--max-source-bytes",
             "1024",
             "--max-total-bytes",
@@ -65391,6 +65987,15 @@ mod tests {
         match parsed.command {
             Some(Command::Bootstrap(BootstrapCommand::Docs(args))) => {
                 ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(
+                    &args
+                        .include
+                        .iter()
+                        .map(BootstrapDocGlob::as_str)
+                        .collect::<Vec<_>>(),
+                    &vec!["SKILL.md", "references/**/*.md"],
+                    "include globs",
+                )?;
                 ensure_equal(&args.max_source_bytes, &Some(1024), "max source bytes")?;
                 ensure_equal(&args.max_total_bytes, &Some(4096), "max total bytes")
             }
@@ -65406,6 +66011,10 @@ mod tests {
             "apply",
             "boot_123",
             "--approved-only",
+            "--include",
+            "SKILL.md",
+            "--include",
+            "references/**/*.md",
             "--database",
             "db.sqlite",
             "--actor",
@@ -65422,6 +66031,15 @@ mod tests {
                 ensure_equal(&args.run_id, &"boot_123".to_string(), "run id")?;
                 ensure_equal(&args.approved_only, &true, "approved only")?;
                 ensure_equal(
+                    &args
+                        .include
+                        .iter()
+                        .map(BootstrapDocGlob::as_str)
+                        .collect::<Vec<_>>(),
+                    &vec!["SKILL.md", "references/**/*.md"],
+                    "include globs",
+                )?;
+                ensure_equal(
                     &args.database,
                     &Some(std::path::PathBuf::from("db.sqlite")),
                     "database",
@@ -65432,6 +66050,52 @@ mod tests {
             }
             other => Err(format!("expected bootstrap apply command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn parser_rejects_docs_bootstrap_include_outside_workspace() -> TestResult {
+        let error = Cli::try_parse_from([
+            "ee",
+            "bootstrap",
+            "docs",
+            "--dry-run",
+            "--include",
+            "../references/**/*.md",
+        ])
+        .expect_err("parent traversal include must be rejected");
+
+        ensure_equal(
+            &error.kind(),
+            &clap::error::ErrorKind::ValueValidation,
+            "invalid include error kind",
+        )
+    }
+
+    #[test]
+    fn bootstrap_docs_help_explains_default_scope_and_reference_includes() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "help", "bootstrap", "docs"]);
+
+        ensure_equal(&exit, &ProcessExitCode::Success, "bootstrap docs help exit")?;
+        ensure(stderr.is_empty(), "bootstrap docs help stderr stays empty")?;
+        ensure_contains(&stdout, "--include <GLOB>", "reference include flag")?;
+        ensure_contains(&stdout, "bounded default set", "default scope")
+    }
+
+    #[test]
+    fn docs_bootstrap_human_degradations_keep_actionable_details() {
+        let rendered =
+            render_bootstrap_degradations(&[crate::core::docs_bootstrap::BootstrapDegradation {
+                code: "docs_bootstrap_source_missing".to_owned(),
+                severity: "low",
+                message: "Requested selector matched no workspace files.".to_owned(),
+                repair: "Check the selector and retry.".to_owned(),
+                path: Some("references/**/*.md".to_owned()),
+            }]);
+
+        assert!(rendered.contains("docs_bootstrap_source_missing"));
+        assert!(rendered.contains("[references/**/*.md]"));
+        assert!(rendered.contains("Requested selector matched no workspace files."));
+        assert!(rendered.contains("Repair: Check the selector and retry."));
     }
 
     #[test]
@@ -66208,6 +66872,23 @@ mod tests {
         connection
             .migrate()
             .map_err(|error| format!("migrate test db: {error}"))?;
+        let canonical_workspace = workspace
+            .canonicalize()
+            .map_err(|error| format!("canonicalize test workspace: {error}"))?;
+        let canonical_workspace_id =
+            crate::core::workspace::stable_workspace_id(&canonical_workspace);
+        connection
+            .insert_workspace(
+                &canonical_workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: canonical_workspace.to_string_lossy().into_owned(),
+                    name: Some("RCH verification workspace".to_owned()),
+                },
+            )
+            .map_err(|error| format!("insert RCH verification workspace: {error}"))?;
+        connection
+            .close()
+            .map_err(|error| format!("close RCH verification workspace: {error}"))?;
 
         let proof_path = tempdir.path().join("rch-proof.json");
         let proof = serde_json::json!({
@@ -66237,7 +66918,11 @@ mod tests {
         });
         fs::write(&proof_path, proof.to_string())
             .map_err(|error| format!("write proof fixture: {error}"))?;
-        let workspace_arg = workspace.to_string_lossy().into_owned();
+        let workspace_arg = canonical_workspace
+            .join("..")
+            .join("workspace")
+            .to_string_lossy()
+            .into_owned();
         let proof_arg = proof_path.to_string_lossy().into_owned();
 
         let (ingest_exit, ingest_stdout, ingest_stderr) = invoke(&[
@@ -66320,6 +67005,17 @@ mod tests {
             &blockers_json["data"]["blockers"][0]["remediationBead"],
             &serde_json::json!("bd-17c65.10.17.1.2"),
             "blocker remediation bead",
+        )?;
+
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| format!("reopen RCH verification workspace: {error}"))?;
+        let workspaces = connection
+            .list_workspaces()
+            .map_err(|error| format!("list RCH verification workspaces: {error}"))?;
+        ensure_equal(
+            &workspaces.len(),
+            &1usize,
+            "RCH verification must not create a lexical workspace alias",
         )
     }
 
@@ -67339,6 +68035,51 @@ mod tests {
             )
             .map_err(|error| format!("insert preflight guard workspace row: {error}"))?;
         Ok(())
+    }
+
+    #[test]
+    fn preflight_database_reuses_canonical_workspace_for_lexical_alias() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let canonical_tempdir = tempdir
+            .path()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let canonical_workspace = canonical_tempdir.join("campaign");
+        seed_preflight_guard_cli_workspace(&canonical_workspace, "canonical campaign")?;
+
+        let lexical_workspace = canonical_workspace.join("..").join("campaign");
+        let expected_resolved_workspace = lexical_workspace.clone();
+        let expected_workspace_id =
+            crate::core::workspace::stable_workspace_id(&canonical_workspace);
+        let canonical_workspace_path = canonical_workspace.to_string_lossy().into_owned();
+
+        let (connection, workspace_id, resolved_workspace) =
+            super::open_preflight_token_database_for_workspace(lexical_workspace, None)
+                .map_err(|error| error.message())?;
+
+        ensure_equal(
+            &workspace_id,
+            &expected_workspace_id,
+            "preflight canonical workspace id",
+        )?;
+        ensure_equal(
+            &resolved_workspace,
+            &expected_resolved_workspace,
+            "preflight preserves caller workspace path",
+        )?;
+        let workspaces = connection
+            .list_workspaces()
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &workspaces.len(),
+            &1usize,
+            "preflight must not create a lexical alias row",
+        )?;
+        ensure_equal(
+            &workspaces[0].path,
+            &canonical_workspace_path,
+            "preflight workspace row path",
+        )
     }
 
     fn preflight_halt_audit_count(workspace: &Path) -> Result<usize, String> {
@@ -69660,13 +70401,51 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Success, "help exit")?;
         ensure_contains(&stdout, "Usage:", "help usage line")?;
         ensure_contains(&stdout, "Most-used commands (start here)", "help prelude")?;
-        for command in ["init", "remember", "search", "pack", "lens", "why"] {
+        for command in AGENT_CORE_COMMANDS {
             ensure_contains(
                 &stdout,
-                &format!("  {command} "),
-                &format!("help promotes {command}"),
+                &format!("  {} ", command.name),
+                &format!("help promotes {}", command.name),
             )?;
         }
+        let most_used = stdout
+            .split_once("Most-used commands (start here):\n")
+            .and_then(|(_, tail)| tail.split_once("\nAgent shortcuts:"))
+            .map(|(section, _)| section)
+            .ok_or_else(|| "help most-used section missing".to_string())?;
+        let promoted_names = most_used
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .collect::<Vec<_>>();
+        let canonical_names = AGENT_CORE_COMMANDS
+            .iter()
+            .map(|command| command.name)
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &promoted_names,
+            &canonical_names,
+            "human help uses canonical agent core command order",
+        )?;
+        for snippet in [
+            "Assert:         claim, certificate, attest, demo, tripwire",
+            "Coordinate:     swarm, handoff, preflight, situation, plan, workflow",
+            "ee agent-docs <topic>",
+            "guide, recipes, contracts, errors, exit-codes",
+        ] {
+            ensure_contains(&stdout, snippet, "help discovery contract")?;
+        }
+        ensure(
+            !most_used.contains("similar") && !most_used.contains("primer"),
+            "non-core similar/primer stay outside Most-used",
+        )?;
+        let curated_prelude = stdout
+            .split_once("Usage:")
+            .map(|(prelude, _)| prelude)
+            .ok_or_else(|| "help prelude boundary missing".to_string())?;
+        ensure(
+            !curated_prelude.contains("steward"),
+            "help must not advertise nonexistent top-level steward command",
+        )?;
         ensure_contains(&stdout, "status", "help status subcommand")?;
         ensure_contains(&stdout, "insights", "help insights subcommand")?;
         ensure_contains(
@@ -69676,6 +70455,9 @@ mod tests {
         )?;
         ensure_contains(&stdout, "  note ", "help lists note shortcut")?;
         ensure_contains(&stdout, "  pack ", "help lists pack shortcut")?;
+        let orient_pos = stdout
+            .find("  orient ")
+            .ok_or_else(|| "help orient position missing".to_string())?;
         let init_pos = stdout
             .find("  init ")
             .ok_or_else(|| "help init position missing".to_string())?;
@@ -69691,6 +70473,7 @@ mod tests {
         let search_pos = stdout
             .find("  search ")
             .ok_or_else(|| "help search position missing".to_string())?;
+        ensure(orient_pos < init_pos, "help lists orient first")?;
         ensure(init_pos < search_pos, "help lists init before search")?;
         ensure(
             remember_pos < search_pos,
@@ -70116,13 +70899,14 @@ mod tests {
         let (exit, stdout, stderr) = invoke(&["ee", "--help-json"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "help-json exit")?;
         ensure(stderr.is_empty(), "help-json stderr must be empty")?;
-        for cmd in &["init", "note", "pack", "lens", "why", "search", "remember"] {
+        for command in AGENT_CORE_COMMANDS {
             ensure_contains(
                 &stdout,
-                &format!("\"name\":\"{cmd}\""),
-                &format!("help-json must list {cmd}"),
+                &format!("\"name\":\"{}\"", command.name),
+                &format!("help-json must list {}", command.name),
             )?;
         }
+        ensure_contains(&stdout, "\"name\":\"note\"", "help-json must list note")?;
         Ok(())
     }
 
@@ -70764,6 +71548,466 @@ mod tests {
             "fix-plan suggested commands",
         )?;
         ensure(stderr.is_empty(), "fix-plan json stderr empty")
+    }
+
+    #[test]
+    fn doctor_fix_success_uses_canonical_response_envelope() -> TestResult {
+        let workspace = Path::new("/workspace");
+        let summary = crate::core::doctor_runtime::RunSummary {
+            run_id: "doctor-run-test".to_owned(),
+            run_dir: workspace
+                .join(".doctor")
+                .join("runs")
+                .join("doctor-run-test"),
+            action_count: 3,
+            status: crate::core::doctor_runtime::RunStatus::CompletedOk,
+        };
+        let raw = super::doctor_fix_success_json(workspace, &summary, &[]);
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "response envelope schema",
+        )?;
+        ensure_equal(&value["success"], &serde_json::json!(true), "success")?;
+        ensure_equal(
+            &value["data"]["schema"],
+            &serde_json::json!(crate::models::DOCTOR_FIX_SUMMARY_SCHEMA_V1),
+            "typed data schema",
+        )?;
+        ensure_equal(
+            &value["data"]["actionCount"],
+            &serde_json::json!(3),
+            "action count lives under data",
+        )?;
+        ensure_equal(
+            &value["data"]["fixerDispatchPending"],
+            &serde_json::json!(false),
+            "fixer dispatch is active",
+        )?;
+        ensure_equal(
+            &value["degraded"],
+            &serde_json::json!([]),
+            "successful fix response has no degradation",
+        )?;
+        ensure(
+            value.get("actionCount").is_none(),
+            "typed fix fields must not leak outside data",
+        )
+    }
+
+    #[test]
+    fn doctor_fix_existing_lock_emits_error_envelope_and_nonzero_exit() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path();
+        let holder = crate::core::doctor_runtime::RunContext::start(
+            workspace,
+            "doctor-fix-lock-holder",
+            crate::core::doctor_runtime::default_blast_radius_roots(workspace),
+            false,
+        )
+        .map_err(|error| error.to_string())?;
+        let lock_path = workspace.join(".ee").join(".doctor.lock");
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace_arg,
+            "doctor",
+            "--fix",
+            "--json",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::Configuration, "held lock exit")?;
+        ensure(stderr.is_empty(), "held-lock JSON stderr must be empty")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "held-lock error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("doctor_concurrency_lost"),
+            "held-lock error code",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["phase"],
+            &serde_json::json!("start"),
+            "held-lock phase",
+        )?;
+        ensure(lock_path.exists(), "the holder must retain its live lock")?;
+
+        holder
+            .finish(crate::core::doctor_runtime::RunStatus::Failed)
+            .map_err(|error| error.to_string())?;
+        ensure_persistent_doctor_lock_released(workspace)
+    }
+
+    #[test]
+    fn doctor_fix_mutation_failure_is_partial_audited_and_undoable() -> TestResult {
+        use crate::core::doctor_fixers::FixerDispatch;
+        use crate::core::doctor_runtime::Op;
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        let outside = root.path().join("outside-doctor-blast-radius");
+        let dispatches = vec![
+            FixerDispatch {
+                finding_code: "test_applied_before_failure",
+                severity: "warning",
+                path: workspace.join(".ee"),
+                op: Op::Manual {
+                    steps: vec!["record deterministic pre-failure action".to_owned()],
+                },
+            },
+            FixerDispatch {
+                finding_code: "test_forced_mutation_failure",
+                severity: "high",
+                path: outside.clone(),
+                op: Op::WriteFile {
+                    bytes: b"must never be written".to_vec(),
+                },
+            },
+            FixerDispatch {
+                finding_code: "test_skipped_after_failure",
+                severity: "warning",
+                path: workspace.join(".ee"),
+                op: Op::Manual {
+                    steps: vec!["must not run after fail-fast boundary".to_owned()],
+                },
+            },
+        ];
+
+        let result = doctor_fix_dispatches(&workspace, dispatches);
+
+        ensure_equal(
+            &result.exit_code,
+            &ProcessExitCode::PolicyDenied,
+            "mutation failure exit",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&result.json).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "mutation failure schema",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["phase"],
+            &serde_json::json!("mutate"),
+            "mutation failure phase",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["failurePolicy"],
+            &serde_json::json!("fail_fast"),
+            "mutation failure policy",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["attemptedFixerCount"],
+            &serde_json::json!(2),
+            "attempted fixer count",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["failedFixerCount"],
+            &serde_json::json!(1),
+            "failed fixer count",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["skippedFixerCount"],
+            &serde_json::json!(1),
+            "skipped fixer count",
+        )?;
+        let outcomes = value["error"]["details"]["fixerResults"]
+            .as_array()
+            .ok_or_else(|| "fixerResults must be an array".to_owned())?
+            .iter()
+            .map(|entry| entry["outcome"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &outcomes,
+            &vec!["applied", "failed", "skipped_after_failure"],
+            "ordered fixer outcomes",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["run"]["status"],
+            &serde_json::json!("completed_partial"),
+            "partial run status",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["run"]["actionCount"],
+            &serde_json::json!(1),
+            "partial run action count",
+        )?;
+        ensure(
+            !outside.exists(),
+            "blast-radius failure must not write the target",
+        )?;
+
+        let run_id = value["error"]["details"]["run"]["runId"]
+            .as_str()
+            .ok_or_else(|| "partial failure runId missing".to_owned())?;
+        let run_dir = PathBuf::from(
+            value["error"]["details"]["run"]["runDir"]
+                .as_str()
+                .ok_or_else(|| "partial failure runDir missing".to_owned())?,
+        );
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(run_dir.join("state.json")).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &state["status"],
+            &serde_json::json!("completed_partial"),
+            "persisted partial status",
+        )?;
+        ensure(
+            state["finished_at"].is_string(),
+            "partial run must persist finished_at",
+        )?;
+        ensure_persistent_doctor_lock_released(&workspace)?;
+
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+        let (undo_exit, undo_stdout, undo_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace_arg,
+            "doctor",
+            "--undo",
+            run_id,
+            "--json",
+        ]);
+        ensure_equal(
+            &undo_exit,
+            &ProcessExitCode::Success,
+            "partial run undo exit",
+        )?;
+        ensure(
+            undo_stderr.is_empty(),
+            "partial run undo JSON stderr must be empty",
+        )?;
+        let undo: serde_json::Value =
+            serde_json::from_str(&undo_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &undo["schema"],
+            &serde_json::json!("ee.doctor.undo_summary.v1"),
+            "partial run undo schema",
+        )?;
+        let undone_state: serde_json::Value = serde_json::from_slice(
+            &fs::read(run_dir.join("state.json")).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &undone_state["status"],
+            &serde_json::json!("undone"),
+            "partial run becomes undone",
+        )
+    }
+
+    #[test]
+    fn doctor_fix_finish_failure_is_failed_nonzero_and_undoable() -> TestResult {
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path().join("workspace");
+        let doctor_dir = workspace.join(".doctor");
+        fs::create_dir_all(&doctor_dir).map_err(|error| error.to_string())?;
+        let latest = doctor_dir.join("latest");
+        let sentinel = b"peer-owned latest entry";
+        fs::write(&latest, sentinel).map_err(|error| error.to_string())?;
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace_arg,
+            "doctor",
+            "--fix",
+            "--json",
+        ]);
+
+        ensure_equal(&exit, &ProcessExitCode::PolicyDenied, "finish failure exit")?;
+        ensure(
+            stderr.is_empty(),
+            "finish-failure JSON stderr must be empty",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "finish failure schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("doctor_latest_entry_unsafe"),
+            "finish failure code",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["phase"],
+            &serde_json::json!("finish"),
+            "finish failure phase",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["run"]["status"],
+            &serde_json::json!("failed"),
+            "finish failure run status",
+        )?;
+        ensure_equal(
+            &fs::read(&latest).map_err(|error| error.to_string())?,
+            &sentinel.to_vec(),
+            "finish failure preserves latest",
+        )?;
+
+        let run_id = value["error"]["details"]["run"]["runId"]
+            .as_str()
+            .ok_or_else(|| "finish failure runId missing".to_owned())?;
+        let run_dir = PathBuf::from(
+            value["error"]["details"]["run"]["runDir"]
+                .as_str()
+                .ok_or_else(|| "finish failure runDir missing".to_owned())?,
+        );
+        let state: serde_json::Value = serde_json::from_slice(
+            &fs::read(run_dir.join("state.json")).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &state["status"],
+            &serde_json::json!("failed"),
+            "finish failure persisted state",
+        )?;
+        ensure(
+            state["finished_at"].is_string(),
+            "finish failure must persist finished_at",
+        )?;
+        ensure_persistent_doctor_lock_released(&workspace)?;
+
+        let (undo_exit, undo_stdout, undo_stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace_arg,
+            "doctor",
+            "--undo",
+            run_id,
+            "--json",
+        ]);
+        ensure_equal(
+            &undo_exit,
+            &ProcessExitCode::Success,
+            "failed run undo exit",
+        )?;
+        ensure(
+            undo_stderr.is_empty(),
+            "failed run undo JSON stderr must be empty",
+        )?;
+        let undo: serde_json::Value =
+            serde_json::from_str(&undo_stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &undo["schema"],
+            &serde_json::json!("ee.doctor.undo_summary.v1"),
+            "failed run undo schema",
+        )?;
+        let undone_state: serde_json::Value = serde_json::from_slice(
+            &fs::read(run_dir.join("state.json")).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &undone_state["status"],
+            &serde_json::json!("undone"),
+            "failed run becomes undone",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_fix_symlinked_run_root_emits_error_envelope_and_nonzero_exit() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = root.path().join("workspace");
+        let external = root.path().join("external-doctor");
+        fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        fs::create_dir(&external).map_err(|error| error.to_string())?;
+        let sentinel = external.join("sentinel");
+        fs::write(&sentinel, b"external doctor target").map_err(|error| error.to_string())?;
+        symlink(&external, workspace.join(".doctor")).map_err(|error| error.to_string())?;
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--workspace",
+            &workspace_arg,
+            "doctor",
+            "--fix",
+            "--json",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::PolicyDenied,
+            "symlink refusal exit",
+        )?;
+        ensure(stderr.is_empty(), "JSON refusal stderr must be empty")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "error envelope schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("doctor_run_root_symlink_refused"),
+            "typed refusal code",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["phase"],
+            &serde_json::json!("start"),
+            "refusal phase",
+        )?;
+        ensure(
+            !workspace.join(".ee").exists(),
+            "start refusal must happen before lock directory creation",
+        )?;
+        ensure_equal(
+            &fs::read(&sentinel).map_err(|error| error.to_string())?,
+            &b"external doctor target".to_vec(),
+            "external sentinel bytes",
+        )
+    }
+
+    #[test]
+    fn doctor_lifecycle_root_change_maps_to_typed_policy_error() -> TestResult {
+        let error = crate::core::doctor_runtime::DoctorRuntimeError::LifecycleRootChanged {
+            path: PathBuf::from("/workspace/.doctor"),
+        };
+        let result = doctor_runtime_error_result(&error, "finish", &[], None, None);
+
+        ensure_equal(
+            &result.exit_code,
+            &ProcessExitCode::PolicyDenied,
+            "lifecycle substitution exit",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&result.json).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "error envelope schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("doctor_run_root_changed"),
+            "typed lifecycle substitution code",
+        )?;
+        ensure_equal(
+            &value["error"]["details"]["phase"],
+            &serde_json::json!("finish"),
+            "lifecycle substitution phase",
+        )
     }
 
     #[test]
@@ -77981,20 +79225,24 @@ demos:
 
     #[test]
     fn agent_docs_all_topics_return_success() -> TestResult {
-        let topics = [
-            "guide",
-            "commands",
-            "contracts",
-            "schemas",
-            "paths",
-            "env",
-            "exit-codes",
-            "fields",
-            "errors",
-            "formats",
-            "examples",
-        ];
-        for topic in topics {
+        let (help_exit, help_stdout, help_stderr) = invoke(&["ee", "agent-docs", "--help"]);
+        ensure_equal(
+            &help_exit,
+            &ProcessExitCode::Success,
+            "agent-docs help exit",
+        )?;
+        ensure(
+            help_stderr.is_empty(),
+            "agent-docs help stderr must be empty",
+        )?;
+
+        for topic in AgentDocsTopic::all() {
+            let topic = topic.as_str();
+            ensure_contains(
+                &help_stdout,
+                topic,
+                &format!("agent-docs help lists {topic}"),
+            )?;
             let (exit, stdout, stderr) = invoke(&["ee", "agent-docs", topic, "--json"]);
             #[allow(clippy::needless_borrows_for_generic_args)]
             {
@@ -78407,11 +79655,49 @@ demos:
     }
 
     #[test]
-    fn share_preview_record_consent_resolves_to_append_only_effect() -> TestResult {
-        // `ee share preview` is a dry-run exposure preview. Adding
-        // `--record-consent` appends an audit row via share.rs, so the
-        // normalized command path must not advertise the consent-writing
-        // variant as a read-only preview.
+    fn search_recalibrate_now_resolves_to_derived_write_effect() -> TestResult {
+        let manifest = crate::core::effect::EffectManifest::build();
+        let effect_for = |argv: &[&str]| -> Result<(String, bool), String> {
+            let cli = Cli::try_parse_from(argv.iter().copied())
+                .map_err(|error| format!("parse {argv:?}: {error}"))?;
+            let args = argv.iter().map(OsString::from).collect::<Vec<_>>();
+            let path = super::NormalizedInvocation::from_cli(&cli, &args).command_path;
+            let effect = manifest
+                .get(&path)
+                .ok_or_else(|| format!("no effect manifest entry for {path:?}"))?;
+            Ok((path, effect.default_effect.is_mutating()))
+        };
+
+        let (read_path, read_mutates) = effect_for(&["ee", "search", "release"])?;
+        ensure_equal(
+            &read_path,
+            &"search".to_owned(),
+            "ordinary search command path",
+        )?;
+        ensure(
+            !read_mutates,
+            "ordinary search must remain a read-only snapshot",
+        )?;
+
+        let (recalibrate_path, recalibrate_mutates) =
+            effect_for(&["ee", "search", "release", "--recalibrate-now"])?;
+        ensure_equal(
+            &recalibrate_path,
+            &"search --recalibrate-now".to_owned(),
+            "recalibrating search command path",
+        )?;
+        ensure(
+            recalibrate_mutates,
+            "search --recalibrate-now must declare its derived artifact write",
+        )
+    }
+
+    #[test]
+    fn share_preview_resolves_to_read_only_effect() -> TestResult {
+        // `ee share preview` is a dry-run exposure preview that never
+        // mutates state. The consent-writing `--record-consent` variant was
+        // removed (ADR 0086 TC-D14/D15), so the only classification is
+        // read-only.
         let manifest = crate::core::effect::EffectManifest::build();
 
         let effect_for = |argv: &[&str]| -> Result<(String, bool), String> {
@@ -78432,28 +79718,7 @@ demos:
             &"share preview".to_string(),
             "plain share preview command_path",
         )?;
-        ensure(
-            !plain_mutates,
-            "share preview without --record-consent must stay read-only",
-        )?;
-
-        let (consent_path, consent_mutates) = effect_for(&[
-            "ee",
-            "share",
-            "preview",
-            "--peer",
-            "peer_alpha",
-            "--record-consent",
-        ])?;
-        ensure_equal(
-            &consent_path,
-            &"share preview --record-consent".to_string(),
-            "record-consent command_path",
-        )?;
-        ensure(
-            consent_mutates,
-            "share preview --record-consent must classify as an audit append",
-        )
+        ensure(!plain_mutates, "share preview must stay read-only")
     }
 
     #[test]

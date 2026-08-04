@@ -107,7 +107,16 @@ fn workspace_args(workspace: &Path) -> Vec<String> {
     ]
 }
 
+/// `data.version` tracks the crate version; scrub it so goldens survive
+/// releases (the May-era snaps pinned "0.1.0" and went born-red at 0.2.0).
+fn scrub_version(value: &mut JsonValue) {
+    if value["data"]["version"].is_string() {
+        value["data"]["version"] = JsonValue::String("<VERSION>".to_owned());
+    }
+}
+
 fn normalize_export_response(mut value: JsonValue) -> JsonValue {
+    scrub_version(&mut value);
     value["data"]["workspacePath"] = JsonValue::String("<WORKSPACE>".to_owned());
     value["data"]["workspaceId"] = JsonValue::String("<WORKSPACE_ID>".to_owned());
     value["data"]["databasePath"] = JsonValue::String("<DATABASE>".to_owned());
@@ -143,6 +152,7 @@ fn scrub_playbook_rule(rule: &mut JsonValue) {
 }
 
 fn normalize_playbook_list_response(mut value: JsonValue) -> JsonValue {
+    scrub_version(&mut value);
     value["data"]["workspaceId"] = JsonValue::String("<WORKSPACE_ID>".to_owned());
     value["data"]["workspacePath"] = JsonValue::String("<WORKSPACE>".to_owned());
     value["data"]["databasePath"] = JsonValue::String("<DATABASE>".to_owned());
@@ -155,12 +165,14 @@ fn normalize_playbook_list_response(mut value: JsonValue) -> JsonValue {
 }
 
 fn normalize_playbook_export_response(mut value: JsonValue) -> JsonValue {
+    scrub_version(&mut value);
     value["data"]["workspaceId"] = JsonValue::String("<WORKSPACE_ID>".to_owned());
     value["data"]["workspacePath"] = JsonValue::String("<WORKSPACE>".to_owned());
     value["data"]["databasePath"] = JsonValue::String("<DATABASE>".to_owned());
     value["data"]["outputPath"] = JsonValue::String("<PLAYBOOK>".to_owned());
     value["data"]["artifactHash"] = JsonValue::String("<ARTIFACT_HASH>".to_owned());
     value["data"]["document"]["exportedAt"] = JsonValue::String("<TIMESTAMP>".to_owned());
+    value["data"]["document"]["eeVersion"] = JsonValue::String("<VERSION>".to_owned());
     value["data"]["document"]["workspaceId"] = JsonValue::String("<WORKSPACE_ID>".to_owned());
     value["data"]["document"]["workspacePath"] = JsonValue::String("<WORKSPACE>".to_owned());
     if let Some(rules) = value["data"]["document"]["rules"].as_array_mut() {
@@ -168,10 +180,19 @@ fn normalize_playbook_export_response(mut value: JsonValue) -> JsonValue {
             scrub_playbook_rule(rule);
         }
     }
+    // The store-local authentication block (TC-D14) has a random key id and a
+    // MAC over rule ids/timestamps, so only its schema and count are stable.
+    let authentication = &mut value["data"]["document"]["authentication"];
+    if authentication.is_object() {
+        authentication["keyId"] = JsonValue::String("<KEY_ID>".to_owned());
+        authentication["recordsRoot"] = JsonValue::String("<RECORDS_ROOT>".to_owned());
+        authentication["mac"] = JsonValue::String("<MAC>".to_owned());
+    }
     value
 }
 
 fn normalize_playbook_import_response(mut value: JsonValue) -> JsonValue {
+    scrub_version(&mut value);
     value["data"]["workspaceId"] = JsonValue::String("<WORKSPACE_ID>".to_owned());
     value["data"]["workspacePath"] = JsonValue::String("<TARGET_WORKSPACE>".to_owned());
     value["data"]["databasePath"] = JsonValue::String("<TARGET_DATABASE>".to_owned());
@@ -190,6 +211,17 @@ fn normalize_playbook_import_response(mut value: JsonValue) -> JsonValue {
             }
             if decision["indexJobId"].is_string() {
                 decision["indexJobId"] = JsonValue::String("<INDEX_JOB_ID>".to_owned());
+            }
+        }
+    }
+    // Trust-cap degradation messages embed the machine-specific key-store
+    // path — scrub both the report copy and the envelope mirror.
+    for pointer in ["/data/degraded", "/degraded"] {
+        if let Some(degraded) = value.pointer_mut(pointer).and_then(JsonValue::as_array_mut) {
+            for entry in degraded {
+                if entry["message"].is_string() {
+                    entry["message"] = JsonValue::String("<DEGRADED_MESSAGE>".to_owned());
+                }
             }
         }
     }

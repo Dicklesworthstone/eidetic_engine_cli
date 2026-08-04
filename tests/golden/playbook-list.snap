@@ -4,7 +4,7 @@
   "data": {
     "schema": "ee.playbook.list.v1",
     "command": "playbook list",
-    "version": "0.1.0",
+    "version": "<VERSION>",
     "workspaceId": "<WORKSPACE_ID>",
     "workspacePath": "<WORKSPACE>",
     "databasePath": "<DATABASE>",
@@ -35,5 +35,6 @@
       }
     ],
     "degraded": []
-  }
+  },
+  "degraded": []
 }

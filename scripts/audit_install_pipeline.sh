@@ -3,7 +3,7 @@
 #
 # Probes the three install paths advertised in README:
 #
-#   - curl-pipe install.sh + Sigstore-verified bundle
+#   - curl-pipe install.sh + SHA-256, with optional/strict Sigstore verification
 #   - brew install Dicklesworthstone/tap/ee
 #   - cargo install eidetic-engine from crates.io
 #

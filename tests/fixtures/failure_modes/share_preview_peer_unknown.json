@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "share_preview_peer_unknown",
+  "introduced_by": {
+    "bead": "bd-tc-epic-qzk7o.2.7",
+    "epic_letter": "team-confed T1.2"
+  },
+  "surfaces": [
+    "share preview"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "An operator runs `ee share preview --peer <peer>` for a peer that has no resolvable outbound mesh policy (no matching [[mesh.peer_policies]] entry for the local workspace, peer id, and origin workspace, or an ambiguous match). Peer resolution fails closed, so every lane denies and nothing would be shared; the preview surfaces the peer as unconfigured rather than showing a misleading allow.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "seed a memory but do NOT add a [[mesh.peer_policies]] entry for the target peer in .ee/config.toml"
+    ],
+    "invocation": "ee share preview --peer peer_alpha --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "share_preview_peer_unknown",
+    "severity": "warning",
+    "message_contains": [
+      "No outbound mesh policy",
+      "fails closed",
+      "nothing would be shared"
+    ],
+    "repair_contains": "mesh.peer_policies"
+  }
+}

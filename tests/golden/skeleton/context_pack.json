@@ -1,7 +1,7 @@
 {
   "schema": "ee.response.v2",
   "api_version": "0.1.0",
-  "command": "context",
+  "command": "pack",
   "success": true,
   "data": {
     "pack_id": "PACK_ID_PLACEHOLDER",

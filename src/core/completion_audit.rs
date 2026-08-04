@@ -3000,32 +3000,35 @@ mod tests {
 
     #[test]
     fn explicit_direct_evidence_overrides_static_only_workspace_proxy() {
-        let bundle = EvidenceBundle {
-            records: vec![
-                record(
-                    "file_read",
-                    "README.md",
-                    "session transcript",
-                    EvidenceRecordStatus::Pass,
-                    "direct",
-                ),
-                record(
-                    "prompt_requirement",
-                    "README.md",
-                    "session transcript",
-                    EvidenceRecordStatus::Pass,
-                    "direct",
-                ),
-            ],
-        };
-
-        let report = build_completion_audit_report_for_workspace(
-            "objective",
-            "Read README.md.",
-            Path::new(env!("CARGO_MANIFEST_DIR")),
-            Some(bundle),
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tempdir.path().join("README.md"), "readme").expect("readme");
+        let checklist = extract_completion_checklist("objective", "Read README.md.");
+        let mut records = Vec::new();
+        push_static_workspace_evidence(
+            &mut records,
+            tempdir.path(),
+            &evidence("file_read", "README.md", "direct"),
         );
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, EvidenceRecordStatus::StaticOnly);
+        records.extend([
+            record(
+                "file_read",
+                "README.md",
+                "session transcript",
+                EvidenceRecordStatus::Pass,
+                "direct",
+            ),
+            record(
+                "prompt_requirement",
+                "README.md",
+                "session transcript",
+                EvidenceRecordStatus::Pass,
+                "direct",
+            ),
+        ]);
 
+        let report = build_completion_audit_report(&checklist, &EvidenceBundle { records });
         assert_eq!(report.completion_verdict, CompletionVerdict::Complete);
         assert!(report.gaps.is_empty());
     }

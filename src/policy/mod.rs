@@ -4,9 +4,11 @@
 //! and import sources. Includes security profiles and file-permission
 //! diagnostics.
 
+pub mod import_auth;
 pub mod memory_decay;
 pub mod producer_normalization;
 pub mod security_profile;
+pub mod store_auth;
 pub mod swarm_slo_attribution;
 pub mod trust_decay;
 
@@ -112,10 +114,14 @@ pub fn redaction_placeholder(scanner_name: &str) -> String {
     format!("[REDACTED:{scanner_name}]")
 }
 pub const TRUST_PROMOTION_EVIDENCE_REJECTED_CODE: &str = "trust_promotion_evidence_rejected";
-pub const SHARE_PREVIEW_SCHEMA_V1: &str = "ee.mesh.share_preview.v1";
-pub const SHARE_PREVIEW_CONSENT_AUDIT_SCHEMA_V1: &str = "ee.mesh.share_consent_audit.v1";
+pub const SHARE_PREVIEW_SCHEMA_V2: &str = "ee.mesh.share_preview.v2";
+/// Degraded code emitted when `ee share preview` targets a peer with no
+/// resolvable outbound policy for the local workspace/origin. The preview
+/// fails closed (every lane denies), so the operator is told the peer is
+/// unconfigured rather than being shown a misleading "allow".
+pub const SHARE_PREVIEW_PEER_UNKNOWN_CODE: &str = "share_preview_peer_unknown";
 pub const MESH_SECRET_EXPORT_DENIED_CODE: &str = "mesh_secret_export_denied";
-pub const MESH_EXPORT_SECRET_SCAN_SCHEMA_V1: &str = "ee.mesh.export_secret_scan.v1";
+pub const MESH_EXPORT_SECRET_SCAN_SCHEMA_V2: &str = "ee.mesh.export_secret_scan.v2";
 pub const MESH_EXPORT_POLICY_ATTESTATION_SCHEMA_V1: &str = "ee.mesh.export_policy_attestation.v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -186,18 +192,6 @@ pub struct SharePreviewExample {
     pub redaction_reasons: Vec<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SharePreviewConsentAudit {
-    pub schema: &'static str,
-    pub target_peer_id: String,
-    pub preview_hash: String,
-    pub consent_recorded: bool,
-    pub export_after_consent: bool,
-    pub dry_run: bool,
-    pub reason: String,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MeshExportSecretScanSubject {
     pub source_surface: String,
@@ -227,7 +221,68 @@ pub struct MeshExportSecretFinding {
     pub pattern_ids: Vec<String>,
     pub match_count: u32,
     pub redacted_preview: String,
-    pub value_hash: String,
+    /// Fresh opaque per-occurrence identifier with ≥128 CSPRNG bits. It is
+    /// **not** derived from the secret bytes: it exists so one emitted report
+    /// or error can correlate with its own audit entry, while repeated and
+    /// chosen-input scans receive unrelated identifiers (no equality or
+    /// chosen-input oracle over the secret value). The pure detector leaves it
+    /// `None`; only the effectful command boundary decorates findings via an
+    /// injected secure-random source ([`decorate_export_secret_findings`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding_id: Option<String>,
+}
+
+/// Injectable secure-random source for decorating secret findings. Production
+/// uses [`OsSecretFindingRandom`] (the OS CSPRNG); tests inject fixed bytes so
+/// the decoration is exercised without any production seed or bypass path.
+pub trait SecretFindingRandom {
+    /// Fill `buffer` with cryptographically secure random bytes, or fail. A
+    /// failure is a hard error, never a hash-shaped or deterministic fallback.
+    fn fill(&mut self, buffer: &mut [u8]) -> Result<(), SecretFindingRandomError>;
+}
+
+/// A randomness failure while decorating secret findings. Surfaced by the CLI
+/// as an `ee.error.v2`; it is never rendered as an identifier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SecretFindingRandomError {
+    pub message: String,
+}
+
+/// Production CSPRNG source backed by `getrandom::fill`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OsSecretFindingRandom;
+
+impl SecretFindingRandom for OsSecretFindingRandom {
+    fn fill(&mut self, buffer: &mut [u8]) -> Result<(), SecretFindingRandomError> {
+        getrandom::fill(buffer).map_err(|error| SecretFindingRandomError {
+            message: format!("failed to read operating-system randomness: {error}"),
+        })
+    }
+}
+
+/// Assign each finding a fresh ≥128-bit opaque `finding_id` from an injected
+/// secure-random source. Called only at the effectful export/preview command
+/// boundary; the pure detector stays ID-free and byte-deterministic. Returns
+/// an error (never a partial or fallback ID) if randomness is unavailable.
+pub fn decorate_export_secret_findings(
+    report: &mut MeshExportSecretScanReport,
+    rng: &mut impl SecretFindingRandom,
+) -> Result<(), SecretFindingRandomError> {
+    for finding in &mut report.findings {
+        let mut bytes = [0_u8; 16];
+        rng.fill(&mut bytes)?;
+        finding.finding_id = Some(format!("mesh_secret_finding_{}", hex_lower(&bytes)));
+    }
+    Ok(())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
+    }
+    out
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -312,7 +367,7 @@ pub fn scan_mesh_export_subjects(
 
     let finding_count = findings.len() as u32;
     let report = MeshExportSecretScanReport {
-        schema: MESH_EXPORT_SECRET_SCAN_SCHEMA_V1.to_owned(),
+        schema: MESH_EXPORT_SECRET_SCAN_SCHEMA_V2.to_owned(),
         code: MESH_SECRET_EXPORT_DENIED_CODE.to_owned(),
         status: if finding_count == 0 {
             "passed".to_owned()
@@ -382,7 +437,9 @@ fn mesh_export_secret_finding(
         pattern_ids,
         match_count: redaction.matches.len().max(1) as u32,
         redacted_preview,
-        value_hash: format!("blake3:{}", blake3::hash(subject.value.as_bytes()).to_hex()),
+        // Pure detector: ID-free and byte-deterministic. The effectful command
+        // boundary decorates via decorate_export_secret_findings.
+        finding_id: None,
     })
 }
 
@@ -467,7 +524,7 @@ pub fn build_share_preview(input: &SharePreviewInput<'_>) -> SharePreviewReport 
     });
 
     let mut report = SharePreviewReport {
-        schema: SHARE_PREVIEW_SCHEMA_V1,
+        schema: SHARE_PREVIEW_SCHEMA_V2,
         target_peer_id: input.target_peer_id.to_owned(),
         export_performed: false,
         consent_required: input.consent_required,
@@ -531,24 +588,6 @@ pub fn share_preview_hash(report: &SharePreviewReport) -> String {
     match serde_json::to_vec(report) {
         Ok(bytes) => format!("blake3:{}", blake3::hash(&bytes).to_hex()),
         Err(error) => format!("serialization_error:{error}"),
-    }
-}
-
-#[must_use]
-pub fn share_preview_consent_audit(
-    report: &SharePreviewReport,
-    consent_recorded: bool,
-    export_after_consent: bool,
-    reason: impl Into<String>,
-) -> SharePreviewConsentAudit {
-    SharePreviewConsentAudit {
-        schema: SHARE_PREVIEW_CONSENT_AUDIT_SCHEMA_V1,
-        target_peer_id: report.target_peer_id.clone(),
-        preview_hash: share_preview_hash(report),
-        consent_recorded,
-        export_after_consent,
-        dry_run: !export_after_consent,
-        reason: reason.into(),
     }
 }
 
@@ -3304,13 +3343,13 @@ mod tests {
 
     use super::{
         INSTRUCTION_LIKE_SCORE_THRESHOLD, InstructionRisk, InstructionSignalKind,
-        MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES, MESH_SECRET_EXPORT_DENIED_CODE,
-        MeshExportSecretScanSubject, SHARE_PREVIEW_CONSENT_AUDIT_SCHEMA_V1,
-        SHARE_PREVIEW_SCHEMA_V1, SharePreviewCandidate, SharePreviewInput,
-        TRUST_PROMOTION_EVIDENCE_REJECTED_CODE, build_share_preview,
-        detect_instruction_like_content, redact_public_replay_field, redact_public_replay_text,
-        redact_secret_like_content, redaction_placeholder, scan_mesh_export_subjects,
-        screen_external_text_for_ingestion, share_preview_consent_audit, share_preview_hash,
+        MAX_PUBLIC_REPLAY_TEXT_SCAN_BYTES, MESH_EXPORT_SECRET_SCAN_SCHEMA_V2,
+        MESH_SECRET_EXPORT_DENIED_CODE, MeshExportSecretScanReport, MeshExportSecretScanSubject,
+        SHARE_PREVIEW_SCHEMA_V2, SecretFindingRandom, SecretFindingRandomError,
+        SharePreviewCandidate, SharePreviewInput, TRUST_PROMOTION_EVIDENCE_REJECTED_CODE,
+        build_share_preview, decorate_export_secret_findings, detect_instruction_like_content,
+        redact_public_replay_field, redact_public_replay_text, redact_secret_like_content,
+        redaction_placeholder, scan_mesh_export_subjects, screen_external_text_for_ingestion,
         subsystem_name, validate_trust_promotion_evidence, workspace_secret_risk_evidence,
         workspace_secret_risk_overrides_safe_classification,
     };
@@ -3348,6 +3387,123 @@ mod tests {
         let rendered = serde_json::to_string(&report).expect("render mesh secret scan report");
         assert!(!rendered.contains(secret));
         assert!(!rendered.contains("id_ed25519"));
+    }
+
+    /// Deterministic scripted randomness: hands out a fixed sequence of 16-byte
+    /// blocks so decoration is exercised without any production seed or bypass.
+    struct ScriptedRandom {
+        blocks: Vec<[u8; 16]>,
+        cursor: usize,
+        fail_after: Option<usize>,
+    }
+
+    impl ScriptedRandom {
+        fn new(blocks: Vec<[u8; 16]>) -> Self {
+            Self {
+                blocks,
+                cursor: 0,
+                fail_after: None,
+            }
+        }
+
+        fn failing_after(fills: usize) -> Self {
+            Self {
+                blocks: Vec::new(),
+                cursor: 0,
+                fail_after: Some(fills),
+            }
+        }
+    }
+
+    impl SecretFindingRandom for ScriptedRandom {
+        fn fill(&mut self, buffer: &mut [u8]) -> Result<(), SecretFindingRandomError> {
+            if let Some(limit) = self.fail_after {
+                if self.cursor >= limit {
+                    return Err(SecretFindingRandomError {
+                        message: "scripted randomness exhausted".to_owned(),
+                    });
+                }
+            }
+            let block = self
+                .blocks
+                .get(self.cursor)
+                .copied()
+                .unwrap_or([self.cursor as u8; 16]);
+            let take = buffer.len().min(block.len());
+            buffer[..take].copy_from_slice(&block[..take]);
+            self.cursor += 1;
+            Ok(())
+        }
+    }
+
+    fn secret_scan_with_one_finding() -> MeshExportSecretScanReport {
+        let subjects = [MeshExportSecretScanSubject::new(
+            "event",
+            "evt_flat",
+            "eventJson",
+            "body API_KEY=sk-FAKEabc123def456ghi789 rotate soon",
+        )];
+        scan_mesh_export_subjects(&subjects)
+    }
+
+    #[test]
+    fn pure_detector_leaves_findings_id_free_and_deterministic() {
+        let first = secret_scan_with_one_finding();
+        let second = secret_scan_with_one_finding();
+        // Byte-identical across runs, and no finding carries an id (no oracle).
+        assert_eq!(
+            serde_json::to_string(&first).expect("render first"),
+            serde_json::to_string(&second).expect("render second")
+        );
+        assert!(
+            first
+                .findings
+                .iter()
+                .all(|finding| finding.finding_id.is_none())
+        );
+        assert!(
+            !serde_json::to_string(&first)
+                .expect("render")
+                .contains("findingId")
+        );
+    }
+
+    #[test]
+    fn decoration_assigns_128_bit_ids_and_uses_the_v2_schema() {
+        let mut report = secret_scan_with_one_finding();
+        assert_eq!(report.schema, MESH_EXPORT_SECRET_SCAN_SCHEMA_V2);
+        let mut rng = ScriptedRandom::new(vec![[0xAB; 16]]);
+        decorate_export_secret_findings(&mut report, &mut rng).expect("decorate");
+        let id = report.findings[0]
+            .finding_id
+            .as_deref()
+            .expect("finding id assigned");
+        assert_eq!(id, "mesh_secret_finding_abababababababababababababababab");
+        // 16 bytes -> 32 hex chars = 128 bits.
+        assert_eq!(id.trim_start_matches("mesh_secret_finding_").len(), 32);
+        let rendered = serde_json::to_string(&report).expect("render");
+        assert!(!rendered.contains("valueHash"));
+    }
+
+    #[test]
+    fn repeat_and_chosen_input_scans_receive_unrelated_ids() {
+        // Same content scanned twice: the ids differ (no equality oracle).
+        let mut a = secret_scan_with_one_finding();
+        let mut b = secret_scan_with_one_finding();
+        let mut rng = ScriptedRandom::new(vec![[0x11; 16], [0x22; 16]]);
+        decorate_export_secret_findings(&mut a, &mut rng).expect("decorate a");
+        decorate_export_secret_findings(&mut b, &mut rng).expect("decorate b");
+        assert_ne!(a.findings[0].finding_id, b.findings[0].finding_id);
+    }
+
+    #[test]
+    fn randomness_failure_is_an_error_never_a_fallback_id() {
+        let mut report = secret_scan_with_one_finding();
+        let mut rng = ScriptedRandom::failing_after(0);
+        let result = decorate_export_secret_findings(&mut report, &mut rng);
+        assert!(result.is_err());
+        // The finding is left un-decorated rather than given a hash-shaped id.
+        assert!(report.findings[0].finding_id.is_none());
     }
 
     #[test]
@@ -3388,7 +3544,7 @@ mod tests {
             max_examples: 4,
         });
 
-        assert_eq!(report.schema, SHARE_PREVIEW_SCHEMA_V1);
+        assert_eq!(report.schema, SHARE_PREVIEW_SCHEMA_V2);
         assert!(!report.export_performed);
         assert!(report.consent_required);
         assert_eq!(report.total_candidates, 2);
@@ -3422,38 +3578,6 @@ mod tests {
                 .redaction_reasons
                 .contains(&"api_key".to_owned())
         );
-    }
-
-    #[test]
-    fn share_preview_consent_audit_is_stable_and_dry_run_safe() {
-        let candidates = [SharePreviewCandidate {
-            memory_id: "mem_a",
-            level: "procedural",
-            kind: "rule",
-            trust_class: "agent_validated",
-            material_lane: "metadata",
-            redaction_class: "redact",
-            policy_action: "allow",
-            content_preview: "Public shape only; no raw body.",
-            estimated_bytes: 42,
-            body_bytes: 0,
-            embedding_bytes: 0,
-        }];
-        let report = build_share_preview(&SharePreviewInput {
-            target_peer_id: "peer_alpha",
-            candidates: &candidates,
-            consent_required: true,
-            max_examples: 1,
-        });
-        let audit = share_preview_consent_audit(&report, true, false, "operator_preview_ack");
-
-        assert_eq!(audit.schema, SHARE_PREVIEW_CONSENT_AUDIT_SCHEMA_V1);
-        assert_eq!(audit.target_peer_id, "peer_alpha");
-        assert_eq!(audit.preview_hash, share_preview_hash(&report));
-        assert!(audit.consent_recorded);
-        assert!(audit.dry_run);
-        assert!(!audit.export_after_consent);
-        assert_eq!(audit.reason, "operator_preview_ack");
     }
 
     #[test]

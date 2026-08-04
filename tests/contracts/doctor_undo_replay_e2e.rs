@@ -1,4 +1,4 @@
-//! Contract test for bd-3boan slice 9: pin the
+//! Contract test for bd-3boan slice 9 and bd-3ak9b: pin the
 //! `scripts/e2e_overhaul/doctor_undo_replay.sh` harness so it can't
 //! regress out of the tree without a corresponding contract update.
 //!
@@ -13,11 +13,14 @@
 //!
 //! 1. The script exists at the canonical path.
 //! 2. It begins with a bash shebang and `set -euo pipefail`.
-//! 3. It declares the bd-3boan bead id in a header comment.
+//! 3. It declares the bd-3boan and bd-3ak9b bead ids in a header comment.
 //! 4. It invokes both `ee doctor --fix` and `ee doctor --undo`.
-//! 5. It asserts the canonical schemas
-//!    `ee.doctor.fix_summary.v1` and `ee.doctor.undo_summary.v1`.
-//! 6. It refuses Cargo/git/destructive shortcuts (no `cargo `, no
+//! 5. It asserts the canonical `ee.response.v2` success envelope for
+//!    `ee.doctor.fix_summary.v1`, plus the canonical
+//!    `ee.doctor.undo_summary.v1` undo surface.
+//! 6. It forces a finalization failure and asserts nonzero `ee.error.v2`,
+//!    failed persisted state, lock cleanup, peer-file preservation, and undo.
+//! 7. It refuses Cargo/git/destructive shortcuts (no `cargo `, no
 //!    `git reset`, no `rm -rf` literal — the harness lives outside
 //!    the per-FM fixture suite and uses a temp workspace it leaves
 //!    behind for operator inspection per AGENTS.md RULE 1).
@@ -74,13 +77,15 @@ fn doctor_undo_replay_script_declares_bash_shebang_and_strict_mode() {
 }
 
 #[test]
-fn doctor_undo_replay_script_declares_bd_3boan_in_header() {
+fn doctor_undo_replay_script_declares_owning_beads_in_header() {
     let body = fs::read_to_string(script_path()).expect("read script");
     let header: String = body.lines().take(40).collect::<Vec<_>>().join("\n");
-    assert!(
-        header.contains("bd-3boan"),
-        "header must name bd-3boan so future audits can locate the owning bead from the script itself"
-    );
+    for bead in ["bd-3boan", "bd-3ak9b"] {
+        assert!(
+            header.contains(bead),
+            "header must name {bead} so future audits can locate the owning bead from the script itself"
+        );
+    }
 }
 
 #[test]
@@ -100,6 +105,8 @@ fn doctor_undo_replay_script_invokes_fix_and_undo() {
 fn doctor_undo_replay_script_asserts_canonical_schemas() {
     let body = fs::read_to_string(script_path()).expect("read script");
     for needle in [
+        "ee.response.v2",
+        "ee.error.v2",
         "ee.doctor.fix_summary.v1",
         "ee.doctor.undo_summary.v1",
         "ee.doctor.run_state.v1",
@@ -107,6 +114,27 @@ fn doctor_undo_replay_script_asserts_canonical_schemas() {
         assert!(
             body.contains(needle),
             "script must assert the {needle} schema"
+        );
+    }
+}
+
+#[test]
+fn doctor_undo_replay_script_asserts_truthful_failure_lifecycle() {
+    let body = fs::read_to_string(script_path()).expect("read script");
+    for needle in [
+        "failure_exit",
+        "doctor_latest_entry_unsafe",
+        "fixerResults",
+        "structured recovery",
+        "machine error leaked to stderr",
+        "doctor lock survived failed finalization",
+        "assert_state_json \"$run_id\" \"failed\"",
+        "run_undo \"$run_id\" \"$FAILURE_WORKSPACE\"",
+        "assert_state_json \"$run_id\" \"undone\"",
+    ] {
+        assert!(
+            body.contains(needle),
+            "doctor failure/undo harness must assert {needle:?}"
         );
     }
 }

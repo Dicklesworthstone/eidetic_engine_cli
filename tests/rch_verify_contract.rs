@@ -5,7 +5,7 @@ use ee::shadow::{
     ResourceQueuePressureSourceState, evaluate_resource_queue_pressure_backoff,
 };
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -44,6 +44,9 @@ fn run_script_with_env_in_dir(
         .arg(script_path())
         .args(args)
         .env("RCH_VERIFY_NOW", "2026-05-16T04:40:00.000000Z")
+        .env("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "0")
+        .env_remove("CARGO_INCREMENTAL")
+        .env_remove("RCH_ENV_ALLOWLIST")
         .current_dir(cwd);
     for (key, value) in envs {
         command.env(key, value);
@@ -148,12 +151,20 @@ Caused by:
 "#
 }
 
-fn unique_tmp_path(label: &str) -> PathBuf {
+fn unique_path_under(base: &Path, label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    target_tmp_dir().join(format!("{label}-{}-{nanos}", std::process::id()))
+    base.join(format!("{label}-{}-{nanos}", std::process::id()))
+}
+
+fn unique_tmp_path(label: &str) -> PathBuf {
+    unique_path_under(&target_tmp_dir(), label)
+}
+
+fn unique_system_tmp_path(label: &str) -> PathBuf {
+    unique_path_under(Path::new("/tmp"), label)
 }
 
 fn git(workspace: &Path, args: &[&str]) -> Result<String, String> {
@@ -200,8 +211,7 @@ fn assert_git_status_unchanged(
     Ok(())
 }
 
-fn seed_git_workspace(label: &str) -> Result<PathBuf, String> {
-    let workspace = unique_tmp_path(label);
+fn seed_git_workspace_at(workspace: PathBuf) -> Result<PathBuf, String> {
     fs::create_dir_all(&workspace)
         .map_err(|error| format!("create workspace {}: {error}", workspace.display()))?;
     git(&workspace, &["init"])?;
@@ -217,6 +227,312 @@ fn seed_git_workspace(label: &str) -> Result<PathBuf, String> {
     git(&workspace, &["add", ".gitignore", "tracked.txt"])?;
     git(&workspace, &["commit", "-m", "seed"])?;
     Ok(workspace)
+}
+
+fn seed_git_workspace(label: &str) -> Result<PathBuf, String> {
+    seed_git_workspace_at(unique_tmp_path(label))
+}
+
+fn seed_system_tmp_git_workspace(label: &str) -> Result<PathBuf, String> {
+    seed_git_workspace_at(unique_system_tmp_path(label))
+}
+
+struct FrankenStackFixture {
+    project: PathBuf,
+    repositories: BTreeMap<String, PathBuf>,
+}
+
+fn write_fixture_file(root: &Path, relative: &str, content: &str) -> Result<(), String> {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create fixture directory {}: {error}", parent.display()))?;
+    }
+    fs::write(&path, content)
+        .map_err(|error| format!("write fixture file {}: {error}", path.display()))
+}
+
+fn seed_franken_repository(
+    dependency_root: &Path,
+    repository: &str,
+    files: &[(&str, &str)],
+) -> Result<(PathBuf, String), String> {
+    let checkout = dependency_root.join(repository);
+    fs::create_dir_all(&checkout)
+        .map_err(|error| format!("create Franken repository {}: {error}", checkout.display()))?;
+    git(&checkout, &["init", "-b", "main"])?;
+    git(&checkout, &["config", "user.name", "RCH Verify Test"])?;
+    git(
+        &checkout,
+        &["config", "user.email", "rch-verify-test@example.invalid"],
+    )?;
+    git(
+        &checkout,
+        &[
+            "remote",
+            "add",
+            "origin",
+            &format!("https://github.com/Dicklesworthstone/{repository}.git"),
+        ],
+    )?;
+    for (relative, content) in files {
+        write_fixture_file(&checkout, relative, content)?;
+    }
+    git(&checkout, &["add", "."])?;
+    git(&checkout, &["commit", "-m", "seed pinned package"])?;
+    let revision = git(&checkout, &["rev-parse", "HEAD"])?.trim().to_owned();
+    Ok((checkout, revision))
+}
+
+fn seed_franken_stack_fixture(
+    label: &str,
+    missing_repository: Option<&str>,
+    version_mismatch_repository: Option<&str>,
+) -> Result<FrankenStackFixture, String> {
+    let dependency_root = unique_tmp_path(label);
+    fs::create_dir_all(&dependency_root).map_err(|error| {
+        format!(
+            "create Franken fixture root {}: {error}",
+            dependency_root.display()
+        )
+    })?;
+    let project = dependency_root.join("eidetic_engine_cli");
+    fs::create_dir_all(project.join("src"))
+        .map_err(|error| format!("create Franken project fixture: {error}"))?;
+
+    let asupersync_version = if version_mismatch_repository == Some("asupersync") {
+        "9.9.9"
+    } else {
+        "0.3.9"
+    };
+    let repository_files: BTreeMap<&str, Vec<(&str, String)>> = BTreeMap::from([
+        (
+            "asupersync",
+            vec![(
+                "Cargo.toml",
+                format!(
+                    "[package]\nname = \"asupersync\"\nversion = \"{asupersync_version}\"\nedition = \"2024\"\n"
+                ),
+            )],
+        ),
+        (
+            "franken_agent_detection",
+            vec![(
+                "Cargo.toml",
+                "[package]\nname = \"franken-agent-detection\"\nversion = \"0.1.10\"\nedition = \"2024\"\n"
+                    .to_owned(),
+            )],
+        ),
+        (
+            "franken_networkx",
+            vec![
+                (
+                    "Cargo.toml",
+                    "[workspace]\nmembers = [\"crates/fnx-algorithms\", \"crates/fnx-classes\", \"crates/fnx-runtime\"]\nresolver = \"3\"\n\n[workspace.package]\nversion = \"0.2.0\"\nedition = \"2024\"\n"
+                        .to_owned(),
+                ),
+                (
+                    "crates/fnx-algorithms/Cargo.toml",
+                    "[package]\nname = \"fnx-algorithms\"\nversion.workspace = true\nedition.workspace = true\n"
+                        .to_owned(),
+                ),
+                (
+                    "crates/fnx-classes/Cargo.toml",
+                    "[package]\nname = \"fnx-classes\"\nversion.workspace = true\nedition.workspace = true\n"
+                        .to_owned(),
+                ),
+                (
+                    "crates/fnx-runtime/Cargo.toml",
+                    "[package]\nname = \"fnx-runtime\"\nversion.workspace = true\nedition.workspace = true\n"
+                        .to_owned(),
+                ),
+            ],
+        ),
+        (
+            "frankensearch",
+            vec![
+                (
+                    "Cargo.toml",
+                    "[workspace]\nmembers = [\"frankensearch\"]\nresolver = \"3\"\n".to_owned(),
+                ),
+                (
+                    "frankensearch/Cargo.toml",
+                    "[package]\nname = \"frankensearch\"\nversion = \"0.3.2\"\nedition = \"2024\"\n"
+                        .to_owned(),
+                ),
+            ],
+        ),
+        (
+            "frankensqlite",
+            vec![
+                (
+                    "Cargo.toml",
+                    "[workspace]\nmembers = [\"crates/fsqlite\", \"crates/fsqlite-core\", \"crates/fsqlite-error\"]\nresolver = \"3\"\n"
+                        .to_owned(),
+                ),
+                (
+                    "crates/fsqlite/Cargo.toml",
+                    "[package]\nname = \"fsqlite\"\nversion = \"0.1.19\"\nedition = \"2024\"\n"
+                        .to_owned(),
+                ),
+                (
+                    "crates/fsqlite-core/Cargo.toml",
+                    "[package]\nname = \"fsqlite-core\"\nversion = \"0.1.19\"\nedition = \"2024\"\n"
+                        .to_owned(),
+                ),
+                (
+                    "crates/fsqlite-error/Cargo.toml",
+                    "[package]\nname = \"fsqlite-error\"\nversion = \"0.1.19\"\nedition = \"2024\"\n"
+                        .to_owned(),
+                ),
+            ],
+        ),
+        (
+            "sqlmodel_rust",
+            vec![
+                (
+                    "Cargo.toml",
+                    "[workspace]\nmembers = [\"crates/sqlmodel-core\", \"crates/sqlmodel-frankensqlite\"]\nresolver = \"3\"\n\n[workspace.package]\nversion = \"0.3.0\"\nedition = \"2024\"\n"
+                        .to_owned(),
+                ),
+                (
+                    "crates/sqlmodel-core/Cargo.toml",
+                    "[package]\nname = \"sqlmodel-core\"\nversion.workspace = true\nedition.workspace = true\n"
+                        .to_owned(),
+                ),
+                (
+                    "crates/sqlmodel-frankensqlite/Cargo.toml",
+                    "[package]\nname = \"sqlmodel-frankensqlite\"\nversion.workspace = true\nedition.workspace = true\n"
+                        .to_owned(),
+                ),
+            ],
+        ),
+        (
+            "toon_rust",
+            vec![(
+                "Cargo.toml",
+                "[package]\nname = \"tru\"\nversion = \"0.2.3\"\nedition = \"2024\"\n"
+                    .to_owned(),
+            )],
+        ),
+    ]);
+
+    let mut revisions = BTreeMap::new();
+    let mut repositories = BTreeMap::new();
+    for (repository, files) in &repository_files {
+        if missing_repository == Some(*repository) {
+            revisions.insert((*repository).to_owned(), "1".repeat(40));
+            continue;
+        }
+        let borrowed_files = files
+            .iter()
+            .map(|(relative, content)| (*relative, content.as_str()))
+            .collect::<Vec<_>>();
+        let (checkout, revision) =
+            seed_franken_repository(&dependency_root, repository, &borrowed_files)?;
+        repositories.insert((*repository).to_owned(), checkout);
+        revisions.insert((*repository).to_owned(), revision);
+    }
+
+    git(&project, &["init", "-b", "main"])?;
+    git(&project, &["config", "user.name", "RCH Verify Test"])?;
+    git(
+        &project,
+        &["config", "user.email", "rch-verify-test@example.invalid"],
+    )?;
+    write_fixture_file(
+        &project,
+        "Cargo.toml",
+        r#"[package]
+name = "rch_franken_stack_fixture"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+asupersync = { version = "=0.3.9", path = "../asupersync" }
+franken-agent-detection = { version = "0.1.3", path = "../franken_agent_detection" }
+fnx-algorithms = { version = "0.2.0", path = "../franken_networkx/crates/fnx-algorithms" }
+frankensearch = { version = "0.3.0", path = "../frankensearch/frankensearch" }
+fsqlite = { version = "0.1.19", path = "../frankensqlite/crates/fsqlite" }
+sqlmodel-core = { version = "0.3.0", path = "../sqlmodel_rust/crates/sqlmodel-core" }
+toon = { package = "tru", version = "0.2.2", path = "../toon_rust" }
+"#,
+    )?;
+    write_fixture_file(&project, "src/lib.rs", "pub fn fixture() {}\n")?;
+    let cargo_lock = r#"version = 4
+
+[[package]]
+name = "asupersync"
+version = "0.3.9"
+
+[[package]]
+name = "franken-agent-detection"
+version = "0.1.10"
+
+[[package]]
+name = "fnx-algorithms"
+version = "0.2.0"
+
+[[package]]
+name = "fnx-classes"
+version = "0.2.0"
+
+[[package]]
+name = "fnx-runtime"
+version = "0.2.0"
+
+[[package]]
+name = "frankensearch"
+version = "0.3.2"
+
+[[package]]
+name = "fsqlite"
+version = "0.1.19"
+
+[[package]]
+name = "fsqlite-core"
+version = "0.1.19"
+
+[[package]]
+name = "fsqlite-error"
+version = "0.1.19"
+
+[[package]]
+name = "sqlmodel-core"
+version = "0.3.0"
+
+[[package]]
+name = "sqlmodel-frankensqlite"
+version = "0.3.0"
+
+[[package]]
+name = "tru"
+version = "0.2.3"
+"#;
+    write_fixture_file(&project, "Cargo.lock", cargo_lock)?;
+    let mut stack_lock = String::from("# ee.franken-stack.lock.v1\n");
+    for repository in [
+        "asupersync",
+        "franken_agent_detection",
+        "franken_networkx",
+        "frankensearch",
+        "frankensqlite",
+        "sqlmodel_rust",
+        "toon_rust",
+    ] {
+        let revision = revisions
+            .get(repository)
+            .ok_or_else(|| format!("missing fixture revision for {repository}"))?;
+        stack_lock.push_str(&format!("{repository}\t{revision}\n"));
+    }
+    write_fixture_file(&project, "franken-stack.lock", &stack_lock)?;
+    git(&project, &["add", "."])?;
+    git(&project, &["commit", "-m", "seed pinned ee source"])?;
+
+    Ok(FrankenStackFixture {
+        project,
+        repositories,
+    })
 }
 
 fn write_fake_rch(name: &str, body: &str) -> Result<PathBuf, String> {
@@ -512,6 +828,49 @@ fn dry_run_accepts_focused_cargo_test_and_builds_cargo_argv() -> TestResult {
     }
     if invocation_text.contains("/Volumes/USBNVME16TB") {
         return Err("dry-run remote invocation leaked Mac-only USB path".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn dry_run_wraps_explicit_remote_env_before_cargo_argv() -> TestResult {
+    let report = run_json(&[
+        "--dry-run",
+        "--env",
+        "EE_EMBED_DOWNLOAD=off",
+        "--",
+        "cargo",
+        "test",
+        "--lib",
+        "remote_env_smoke",
+    ])?;
+
+    if report["command"] != serde_json::json!(["cargo", "test", "--lib", "remote_env_smoke"])
+        || report["remote_env"] != serde_json::json!(["EE_EMBED_DOWNLOAD=off"])
+    {
+        return Err(format!(
+            "explicit remote env must remain separate from canonical command identity: {report}"
+        ));
+    }
+    let invocation = report["rch_invocation"]
+        .as_array()
+        .ok_or_else(|| "missing rch invocation".to_owned())?;
+    let invocation_text = invocation
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !invocation_text
+        .contains("rch exec -- env EE_EMBED_DOWNLOAD=off cargo test --lib remote_env_smoke")
+    {
+        return Err(format!(
+            "explicit remote env must use the env executable before Cargo: {invocation_text}"
+        ));
+    }
+    if invocation_text.contains("exec -- EE_EMBED_DOWNLOAD=off cargo") {
+        return Err(format!(
+            "bare assignment argv would be executed as a command remotely: {invocation_text}"
+        ));
     }
     Ok(())
 }
@@ -1481,6 +1840,536 @@ printf '[RCH] remote trj (0.1s)\n'
 }
 
 #[test]
+fn cargo_config_provenance_refuses_external_patch_before_source_attested_locked_rch() -> TestResult
+{
+    let workspace = seed_system_tmp_git_workspace("rch-cargo-config-blocked")?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+    let cargo_home = unique_system_tmp_path("rch-cargo-home-patched");
+    fs::create_dir_all(&cargo_home)
+        .map_err(|error| format!("create patched Cargo home: {error}"))?;
+    fs::write(
+        cargo_home.join("config.toml"),
+        "[patch.crates-io]\nserde = { path = \"../fixture-serde\" }\n",
+    )
+    .map_err(|error| format!("write patched Cargo config: {error}"))?;
+
+    let export_base = unique_system_tmp_path("rch-cargo-config-export");
+    let invocation_log = unique_system_tmp_path("rch-cargo-config-blocked-invocations");
+    let ledger_path = unique_system_tmp_path("rch-cargo-config-blocked-ledger.jsonl");
+    let event_log_path = unique_system_tmp_path("rch-cargo-config-blocked-events.jsonl");
+    let fake_rch = write_fake_rch(
+        "fake-rch-cargo-config-must-not-run.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+
+    let cargo_home_arg = cargo_home
+        .to_str()
+        .ok_or_else(|| "Cargo home path is not utf-8".to_owned())?;
+    let export_base_arg = export_base
+        .to_str()
+        .ok_or_else(|| "export base path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let ledger_path_arg = ledger_path
+        .to_str()
+        .ok_or_else(|| "ledger path is not utf-8".to_owned())?;
+    let event_log_path_arg = event_log_path
+        .to_str()
+        .ok_or_else(|| "event log path is not utf-8".to_owned())?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake RCH path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--skip-known-blocker",
+            "--summary",
+            "--ledger",
+            ledger_path_arg,
+            "--event-log",
+            event_log_path_arg,
+            "--committed-tree",
+            "--treeish",
+            "HEAD",
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "cargo_config_provenance_blocked_smoke",
+        ],
+        &[
+            ("CARGO_HOME", cargo_home_arg),
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_COMMITTED_TREE_BASE", export_base_arg),
+        ],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(
+        &workspace,
+        &before_status,
+        "blocked Cargo config provenance preflight",
+    )?;
+    if status.success() || status.code() != Some(1) {
+        return Err(format!(
+            "patched Cargo home should fail closed with exit 1, got {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code()
+        ));
+    }
+    if !remote_exec_invocation_lines(&invocation_log)?.is_empty()
+        || !read_invocation_lines(&invocation_log)?.is_empty()
+    {
+        return Err("Cargo config refusal must occur before any fake RCH probe".to_owned());
+    }
+    if stdout.contains(cargo_home_arg) {
+        return Err(format!(
+            "Cargo config proof leaked the physical Cargo home path: {stdout}"
+        ));
+    }
+
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse blocked Cargo config report: {error}"))?;
+    let provenance = &report["cargo_config_provenance"];
+    if report["status"] != "rch_environment_failure"
+        || report["verification_attribution"] != "committed_tree"
+        || report["rch_invocation"] != serde_json::json!([])
+        || provenance["schema"] != "ee.rch.cargo_config_provenance.v1"
+        || provenance["status"] != "blocked"
+        || provenance["source_attested"] != true
+        || provenance["command_locked"] != true
+        || provenance["cargo_home"] != "<cargo_home>"
+        || provenance["cargo_home_explicit"] != true
+    {
+        return Err(format!(
+            "unexpected blocked Cargo config provenance: {report}"
+        ));
+    }
+    if !degraded_contains(&report, "rch_verify_cargo_config_provenance_blocked")?
+        || worker_degraded_contains(&report, "rch_verify_cargo_config_provenance_blocked")?
+    {
+        return Err(format!(
+            "Cargo config refusal must be a verifier-environment code, not worker state: {report}"
+        ));
+    }
+
+    let sources = provenance["sources"]
+        .as_array()
+        .ok_or_else(|| format!("missing Cargo config sources: {provenance}"))?;
+    let source = sources
+        .iter()
+        .find(|item| item["path"] == "<cargo_home>/config.toml")
+        .ok_or_else(|| format!("missing redacted Cargo home config source: {provenance}"))?;
+    if source["external"] != true
+        || source["effective"] != true
+        || source["parse_status"] != "ok"
+        || source["resolution_controls"] != serde_json::json!(["patch.crates-io"])
+    {
+        return Err(format!("unexpected Cargo home source record: {source}"));
+    }
+    let external_sources = provenance["external_resolution_sources"]
+        .as_array()
+        .ok_or_else(|| format!("missing external resolution sources: {provenance}"))?;
+    let blocking_sources = provenance["blocking_sources"]
+        .as_array()
+        .ok_or_else(|| format!("missing blocking Cargo sources: {provenance}"))?;
+    if external_sources.len() != 1 || blocking_sources.len() != 1 {
+        return Err(format!(
+            "expected exactly one external blocking source: {provenance}"
+        ));
+    }
+    for pointer in [
+        "/cargo_config_provenance/provenance_hash",
+        "/cargo_config_provenance/sources/0/path_hash",
+        "/cargo_config_provenance/sources/0/content_hash",
+    ] {
+        let hash = report
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("missing provenance hash at {pointer}: {report}"))?;
+        if !hash.starts_with("sha256:") || hash.len() != 71 {
+            return Err(format!("invalid provenance hash at {pointer}: {hash}"));
+        }
+    }
+    if !provenance["repair"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("isolated CARGO_HOME")
+    {
+        return Err(format!(
+            "missing actionable Cargo config repair: {provenance}"
+        ));
+    }
+
+    let ledger_text = fs::read_to_string(&ledger_path)
+        .map_err(|error| format!("read Cargo config proof ledger: {error}"))?;
+    let ledger_rows: Vec<&str> = ledger_text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect();
+    if ledger_rows.len() != 1 {
+        return Err(format!(
+            "expected one Cargo config ledger row: {ledger_text}"
+        ));
+    }
+    let ledger: Value = serde_json::from_str(ledger_rows[0])
+        .map_err(|error| format!("parse Cargo config ledger row: {error}"))?;
+    if ledger["status"] != "rch_environment_failure"
+        || ledger["cargo_config_provenance"]["status"] != "blocked"
+        || ledger["cargo_config_provenance"]["provenance_hash"] != provenance["provenance_hash"]
+    {
+        return Err(format!(
+            "ledger did not retain Cargo config provenance: {ledger}"
+        ));
+    }
+
+    let event_text = fs::read_to_string(&event_log_path)
+        .map_err(|error| format!("read Cargo config event log: {error}"))?;
+    let event_rows: Vec<&str> = event_text.lines().filter(|line| !line.is_empty()).collect();
+    if event_rows.len() != 1 {
+        return Err(format!("expected one Cargo config event row: {event_text}"));
+    }
+    let event: Value = serde_json::from_str(event_rows[0])
+        .map_err(|error| format!("parse Cargo config event row: {error}"))?;
+    let fields = &event["fields"];
+    if fields["status"] != "rch_environment_failure"
+        || fields["fake_rch_invoked"] != false
+        || fields["fake_rch_invocation_count"] != 0
+        || fields["cargo_config_provenance_status"] != "blocked"
+        || fields["cargo_config_provenance_hash"] != provenance["provenance_hash"]
+        || fields["cargo_config_blocking_source_count"] != 1
+    {
+        return Err(format!(
+            "event did not retain compact Cargo config provenance: {event}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn cargo_config_fallback_refuses_external_patch_without_tomllib() -> TestResult {
+    let workspace = seed_system_tmp_git_workspace("rch-cargo-config-fallback-blocked")?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+    let cargo_home = unique_system_tmp_path("rch-cargo-home-fallback-patched");
+    fs::create_dir_all(&cargo_home)
+        .map_err(|error| format!("create fallback Cargo home: {error}"))?;
+    fs::write(
+        cargo_home.join("config.toml"),
+        "[patch.crates-io]\nserde = { path = \"../fixture-serde\" }\n",
+    )
+    .map_err(|error| format!("write fallback Cargo config: {error}"))?;
+    let invocation_log = unique_system_tmp_path("rch-cargo-config-fallback-invocations");
+    let export_base = unique_system_tmp_path("rch-cargo-config-fallback-export");
+    let fake_rch = write_fake_rch(
+        "fake-rch-cargo-config-fallback-must-not-run.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+"#,
+    )?;
+    let cargo_home_arg = cargo_home
+        .to_str()
+        .ok_or_else(|| "fallback Cargo home path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "fallback invocation log path is not utf-8".to_owned())?;
+    let export_base_arg = export_base
+        .to_str()
+        .ok_or_else(|| "fallback export path is not utf-8".to_owned())?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fallback fake RCH path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--skip-known-blocker",
+            "--skip-build-admission",
+            "--committed-tree",
+            "--treeish",
+            "HEAD",
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "check",
+            "--locked",
+        ],
+        &[
+            ("CARGO_HOME", cargo_home_arg),
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_COMMITTED_TREE_BASE", export_base_arg),
+            ("RCH_VERIFY_FORCE_TOML_FALLBACK", "1"),
+        ],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(
+        &workspace,
+        &before_status,
+        "fallback Cargo config provenance",
+    )?;
+    if status.success() || status.code() != Some(1) {
+        return Err(format!(
+            "fallback parser must block an external patch before RCH, got {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code()
+        ));
+    }
+    if !remote_exec_invocation_lines(&invocation_log)?.is_empty()
+        || !read_invocation_lines(&invocation_log)?.is_empty()
+    {
+        return Err("fallback Cargo config refusal must precede fake RCH".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse fallback Cargo config report: {error}"))?;
+    let provenance = &report["cargo_config_provenance"];
+    let source = provenance["sources"]
+        .as_array()
+        .and_then(|sources| {
+            sources
+                .iter()
+                .find(|item| item["path"] == "<cargo_home>/config.toml")
+        })
+        .ok_or_else(|| format!("missing fallback config source: {provenance}"))?;
+    if report["status"] != "rch_environment_failure"
+        || provenance["status"] != "blocked"
+        || source["parse_status"] != "ok_fallback"
+        || source["resolution_controls"] != serde_json::json!(["patch.crates-io"])
+        || !degraded_contains(&report, "rch_verify_cargo_config_provenance_blocked")?
+    {
+        return Err(format!(
+            "fallback parser did not retain fail-closed patch provenance: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn cargo_config_provenance_accepts_isolated_home_and_committed_project_patch() -> TestResult {
+    let workspace = seed_system_tmp_git_workspace("rch-cargo-config-isolated")?;
+    fs::create_dir_all(workspace.join(".cargo"))
+        .map_err(|error| format!("create project Cargo config directory: {error}"))?;
+    fs::write(
+        workspace.join(".cargo/config.toml"),
+        "[patch.crates-io]\nserde = { path = \"../fixture-serde\" }\n",
+    )
+    .map_err(|error| format!("write project Cargo config: {error}"))?;
+    git(&workspace, &["add", ".cargo/config.toml"])?;
+    git(&workspace, &["commit", "-m", "add project Cargo config"])?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+
+    let cargo_home = unique_system_tmp_path("rch-cargo-home-isolated");
+    fs::create_dir_all(&cargo_home)
+        .map_err(|error| format!("create isolated Cargo home: {error}"))?;
+    let export_base = unique_system_tmp_path("rch-cargo-config-clean-export");
+    let invocation_log = unique_system_tmp_path("rch-cargo-config-clean-invocations");
+    let fake_rch = write_fake_rch(
+        "fake-rch-cargo-config-isolated.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+
+    let cargo_home_arg = cargo_home
+        .to_str()
+        .ok_or_else(|| "isolated Cargo home path is not utf-8".to_owned())?;
+    let export_base_arg = export_base
+        .to_str()
+        .ok_or_else(|| "export base path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake RCH path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--skip-known-blocker",
+            "--skip-build-admission",
+            "--committed-tree",
+            "--treeish",
+            "HEAD",
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "cargo_config_provenance_isolated_smoke",
+        ],
+        &[
+            ("CARGO_HOME", cargo_home_arg),
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_COMMITTED_TREE_BASE", export_base_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(
+        &workspace,
+        &before_status,
+        "isolated Cargo config provenance preflight",
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "isolated Cargo home should permit source-attested locked RCH\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let remote_invocations = remote_exec_invocation_lines(&invocation_log)?;
+    if remote_invocations.len() != 1
+        || !remote_invocations[0]
+            .contains("exec -- cargo test --locked --lib cargo_config_provenance_isolated_smoke")
+    {
+        return Err(format!(
+            "isolated Cargo config run should invoke fake RCH exactly once: {remote_invocations:?}"
+        ));
+    }
+
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse isolated Cargo config report: {error}"))?;
+    let provenance = &report["cargo_config_provenance"];
+    if report["status"] != "remote_pass"
+        || report["verification_attribution"] != "committed_tree"
+        || provenance["status"] != "clean"
+        || provenance["source_attested"] != true
+        || provenance["command_locked"] != true
+        || provenance["external_resolution_sources"] != serde_json::json!([])
+        || provenance["blocking_sources"] != serde_json::json!([])
+    {
+        return Err(format!(
+            "unexpected isolated Cargo config provenance: {report}"
+        ));
+    }
+    let project_config = provenance["sources"]
+        .as_array()
+        .ok_or_else(|| format!("missing project Cargo config sources: {provenance}"))?
+        .iter()
+        .find(|item| item["path"] == "<project>/.cargo/config.toml")
+        .ok_or_else(|| format!("missing committed project Cargo config: {provenance}"))?;
+    if project_config["external"] != false
+        || project_config["parse_status"] != "ok"
+        || project_config["resolution_controls"] != serde_json::json!(["patch.crates-io"])
+    {
+        return Err(format!(
+            "committed project config was not classified correctly: {project_config}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn cargo_config_provenance_observes_unattested_external_patch_without_blocking() -> TestResult {
+    let workspace = seed_system_tmp_git_workspace("rch-cargo-config-observed")?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+    let cargo_home = unique_system_tmp_path("rch-cargo-home-observed");
+    fs::create_dir_all(&cargo_home)
+        .map_err(|error| format!("create observed Cargo home: {error}"))?;
+    fs::write(
+        cargo_home.join("config.toml"),
+        "[patch.crates-io]\nserde = { path = \"../fixture-serde\" }\n",
+    )
+    .map_err(|error| format!("write observed Cargo config: {error}"))?;
+
+    let invocation_log = unique_system_tmp_path("rch-cargo-config-observed-invocations");
+    let fake_rch = write_fake_rch(
+        "fake-rch-cargo-config-observed.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+    let cargo_home_arg = cargo_home
+        .to_str()
+        .ok_or_else(|| "observed Cargo home path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake RCH path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--skip-known-blocker",
+            "--skip-build-admission",
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "cargo_config_provenance_observed_smoke",
+        ],
+        &[
+            ("CARGO_HOME", cargo_home_arg),
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(
+        &workspace,
+        &before_status,
+        "unattested Cargo config provenance observation",
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "unattested external patch should remain observable without refusal\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    if remote_exec_invocation_lines(&invocation_log)?.len() != 1 {
+        return Err(format!(
+            "unattested external patch should still invoke fake RCH: {:?}",
+            read_invocation_lines(&invocation_log)?
+        ));
+    }
+
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse observed Cargo config report: {error}"))?;
+    let provenance = &report["cargo_config_provenance"];
+    if report["status"] != "remote_pass"
+        || provenance["status"] != "observed"
+        || provenance["source_attested"] != false
+        || provenance["command_locked"] != true
+        || provenance["external_resolution_sources"]
+            .as_array()
+            .map(Vec::len)
+            != Some(1)
+        || provenance["blocking_sources"] != serde_json::json!([])
+    {
+        return Err(format!(
+            "unexpected unattested Cargo config observation: {report}"
+        ));
+    }
+    if degraded_contains(&report, "rch_verify_cargo_config_provenance_blocked")? {
+        return Err(format!(
+            "unattested external patch must not emit a refusal code: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn committed_tree_event_log_records_manifest_hash_and_fake_rch_count() -> TestResult {
     let workspace = seed_git_workspace("rch-committed-tree-event-log")?;
     fs::write(workspace.join("tracked.txt"), "dirty live checkout\n")
@@ -1654,6 +2543,559 @@ fn committed_tree_reports_path_dependency_unsupported() -> TestResult {
 }
 
 #[test]
+fn franken_stack_clean_live_graph_reports_remote_source_unverified() -> TestResult {
+    let fixture = seed_franken_stack_fixture("rch-franken-clean", None, None)?;
+    let before_project = git_status_porcelain_v2(&fixture.project)?;
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--dry-run",
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "franken_clean_smoke",
+        ],
+        &[("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1")],
+        &fixture.project,
+    )?;
+    assert_git_status_unchanged(
+        &fixture.project,
+        &before_project,
+        "clean Franken-stack preflight",
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "clean live Franken-stack audit should reach dry-run planning\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse clean Franken-stack report: {error}"))?;
+    let stack = &report["franken_stack"];
+    if report["status"] != "dry_run"
+        || stack["schema"] != "ee.rch.franken_stack.v1"
+        || stack["status"] != "clean_remote_unverified"
+        || stack["mode"] != "live"
+        || stack["remote_source_verified"] != false
+        || stack["cargo_lock_unchanged"] != true
+        || stack["repositories"].as_array().map(Vec::len) != Some(7)
+        || stack["blocking_codes"] != serde_json::json!([])
+    {
+        return Err(format!("unexpected clean Franken-stack proof: {report}"));
+    }
+    if !source_degraded_contains(&report, "rch_verify_franken_stack_remote_source_unverified")? {
+        return Err(format!(
+            "clean live graph must remain explicit about remote source uncertainty: {report}"
+        ));
+    }
+    for repository in stack["repositories"]
+        .as_array()
+        .ok_or_else(|| format!("missing Franken repositories: {stack}"))?
+    {
+        if repository["state"] != "clean"
+            || repository["origin_matches"] != true
+            || repository["revision_matches"] != true
+            || repository["dirty"] != false
+            || repository["packages"]
+                .as_array()
+                .is_none_or(|packages| packages.iter().any(|package| package["matches"] != true))
+        {
+            return Err(format!(
+                "clean Franken repository inventory is incomplete: {repository}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn pinned_franken_stack_requires_cargo_locked_before_materialization() -> TestResult {
+    let workspace = seed_git_workspace("rch-franken-locked-required")?;
+    let before = git_status_porcelain_v2(&workspace)?;
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--pinned-franken-stack",
+            "--treeish",
+            "HEAD",
+            "--dry-run",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "pinned_requires_locked",
+        ],
+        &[("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1")],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(&workspace, &before, "pinned --locked refusal")?;
+    if status.success() {
+        return Err(format!(
+            "pinned Franken-stack mode without --locked should refuse\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse pinned --locked refusal: {error}"))?;
+    if report["status"] != "source_state_refused"
+        || report["franken_stack"]["status"] != "blocked"
+        || report["franken_stack"]["mode"] != "pinned"
+        || report["franken_stack"]["command_locked"] != false
+        || !degraded_contains(&report, "rch_verify_franken_stack_locked_required")?
+        || degraded_contains(&report, "rch_verify_dry_run")?
+    {
+        return Err(format!(
+            "pinned --locked refusal contract drifted: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn franken_stack_missing_repository_refuses_before_rch() -> TestResult {
+    let fixture = seed_franken_stack_fixture("rch-franken-missing", Some("toon_rust"), None)?;
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--dry-run",
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--",
+            "cargo",
+            "check",
+            "--locked",
+        ],
+        &[("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1")],
+        &fixture.project,
+    )?;
+    if status.success() {
+        return Err(format!(
+            "missing Franken repository should refuse before RCH\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse missing Franken repository report: {error}"))?;
+    if report["status"] != "source_state_refused"
+        || report["franken_stack"]["status"] != "blocked"
+        || !degraded_contains(&report, "rch_verify_franken_stack_repository_missing")?
+        || degraded_contains(&report, "rch_verify_dry_run")?
+    {
+        return Err(format!(
+            "missing repository did not fail fast with stable evidence: {report}"
+        ));
+    }
+    let missing = report["franken_stack"]["repositories"]
+        .as_array()
+        .and_then(|repositories| {
+            repositories
+                .iter()
+                .find(|repository| repository["name"] == "toon_rust")
+        })
+        .ok_or_else(|| format!("missing toon_rust inventory row: {report}"))?;
+    if missing["exists"] != false
+        || missing["codes"].as_array().is_none_or(|codes| {
+            !codes
+                .iter()
+                .any(|code| code == "rch_verify_franken_stack_repository_missing")
+        })
+    {
+        return Err(format!("unexpected missing repository row: {missing}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn franken_stack_dirty_repository_refuses_before_rch() -> TestResult {
+    let fixture = seed_franken_stack_fixture("rch-franken-dirty", None, None)?;
+    let dirty_repository = fixture
+        .repositories
+        .get("frankensqlite")
+        .ok_or_else(|| "missing FrankenSQLite fixture".to_owned())?;
+    write_fixture_file(dirty_repository, "local-diagnostic.txt", "untracked\n")?;
+    let dirty_before = git_status_porcelain_v2(dirty_repository)?;
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--dry-run",
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "franken_dirty_smoke",
+        ],
+        &[("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1")],
+        &fixture.project,
+    )?;
+    assert_git_status_unchanged(
+        dirty_repository,
+        &dirty_before,
+        "dirty Franken-stack preflight",
+    )?;
+    if status.success() {
+        return Err(format!(
+            "dirty Franken repository should refuse before RCH\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse dirty Franken report: {error}"))?;
+    if report["status"] != "source_state_refused"
+        || !degraded_contains(&report, "rch_verify_franken_stack_repository_dirty")?
+    {
+        return Err(format!(
+            "dirty repository did not produce stable refusal: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn franken_stack_revision_mismatch_refuses_before_rch() -> TestResult {
+    let fixture = seed_franken_stack_fixture("rch-franken-revision", None, None)?;
+    let checkout = fixture
+        .repositories
+        .get("frankensearch")
+        .ok_or_else(|| "missing Frankensearch fixture".to_owned())?;
+    write_fixture_file(checkout, "revision-drift.txt", "new head\n")?;
+    git(checkout, &["add", "revision-drift.txt"])?;
+    git(checkout, &["commit", "-m", "advance live sibling"])?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--dry-run",
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--",
+            "cargo",
+            "clippy",
+            "--locked",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ],
+        &[("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1")],
+        &fixture.project,
+    )?;
+    if status.success() {
+        return Err(format!(
+            "revision-mismatched sibling should refuse before RCH\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse revision mismatch report: {error}"))?;
+    if report["status"] != "source_state_refused"
+        || !degraded_contains(&report, "rch_verify_franken_stack_revision_mismatch")?
+        || degraded_contains(&report, "rch_verify_franken_stack_version_mismatch")?
+    {
+        return Err(format!(
+            "revision mismatch classification drifted: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn franken_stack_version_mismatch_refuses_before_rch() -> TestResult {
+    let fixture = seed_franken_stack_fixture("rch-franken-version", None, Some("asupersync"))?;
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--dry-run",
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--",
+            "cargo",
+            "check",
+            "--locked",
+            "--all-targets",
+        ],
+        &[("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1")],
+        &fixture.project,
+    )?;
+    if status.success() {
+        return Err(format!(
+            "version-mismatched sibling should refuse before RCH\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse version mismatch report: {error}"))?;
+    if report["status"] != "source_state_refused"
+        || !degraded_contains(&report, "rch_verify_franken_stack_version_mismatch")?
+        || degraded_contains(&report, "rch_verify_franken_stack_revision_mismatch")?
+    {
+        return Err(format!("version mismatch classification drifted: {report}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn pinned_franken_stack_materializes_locked_bundle_without_mutating_siblings() -> TestResult {
+    let fixture = seed_franken_stack_fixture("rch-franken-pinned", None, None)?;
+    let live_frankensqlite = fixture
+        .repositories
+        .get("frankensqlite")
+        .ok_or_else(|| "missing FrankenSQLite fixture".to_owned())?;
+    write_fixture_file(live_frankensqlite, "live-only.txt", "not in locked tree\n")?;
+    git(live_frankensqlite, &["add", "live-only.txt"])?;
+    git(
+        live_frankensqlite,
+        &["commit", "-m", "advance live sibling after lock"],
+    )?;
+    write_fixture_file(
+        live_frankensqlite,
+        "untracked-local-note.txt",
+        "must survive verifier\n",
+    )?;
+
+    let before_project = git_status_porcelain_v2(&fixture.project)?;
+    let before_repositories = fixture
+        .repositories
+        .iter()
+        .map(|(name, path)| Ok((name.clone(), git_status_porcelain_v2(path)?)))
+        .collect::<Result<BTreeMap<_, _>, String>>()?;
+    let invocation_log = unique_tmp_path("rch-franken-pinned-invocations");
+    let expected_export_base = fixture
+        .project
+        .parent()
+        .ok_or_else(|| "pinned fixture project has no parent".to_owned())?
+        .join(".ee-rch-committed-tree");
+    let cargo_home = unique_tmp_path("rch-franken-pinned-cargo-home");
+    fs::create_dir_all(&cargo_home)
+        .map_err(|error| format!("create pinned fallback Cargo home: {error}"))?;
+    write_fixture_file(
+        &cargo_home,
+        "config.toml",
+        "[build]\ntarget-dir = \"/tmp/rch-pinned-fixture-target\"\n",
+    )?;
+    let fake_rch = write_fake_rch(
+        "fake-rch-pinned-franken-stack.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+case " $* " in
+  *" exec -- "*)
+    bundle_root="$(cd .. && pwd -P)"
+    test "$RCH_CANONICAL_PROJECT_ROOT" = "$bundle_root"
+    case "$RCH_ALIAS_PROJECT_ROOT" in
+      /tmp/ee-rch-pinned-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+      *) printf 'unexpected pinned alias: %s\n' "$RCH_ALIAS_PROJECT_ROOT" >&2; exit 1 ;;
+    esac
+    case "$PWD" in
+      "$EXPECTED_PINNED_EXPORT_BASE"/pinned-v1/*/eidetic_engine_cli) ;;
+      *) printf 'pinned bundle escaped project-adjacent cache: %s\n' "$PWD" >&2; exit 1 ;;
+    esac
+    test -f ../asupersync/Cargo.toml
+    test -f ../franken_agent_detection/Cargo.toml
+    test -f ../franken_networkx/crates/fnx-runtime/Cargo.toml
+    test -f ../frankensearch/frankensearch/Cargo.toml
+    test -f ../frankensqlite/crates/fsqlite/Cargo.toml
+    test -f ../sqlmodel_rust/crates/sqlmodel-core/Cargo.toml
+    test -f ../toon_rust/Cargo.toml
+    test ! -e ../frankensqlite/live-only.txt
+    test ! -e ../frankensqlite/untracked-local-note.txt
+    printf 'PWD=%s\n' "$PWD"
+    ;;
+esac
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake pinned RCH path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "pinned invocation log path is not utf-8".to_owned())?;
+    let expected_export_base_arg = expected_export_base
+        .to_str()
+        .ok_or_else(|| "expected pinned export base path is not utf-8".to_owned())?;
+    let cargo_home_arg = cargo_home
+        .to_str()
+        .ok_or_else(|| "pinned Cargo home path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--pinned-franken-stack",
+            "--treeish",
+            "HEAD",
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "pinned_franken_stack_smoke",
+        ],
+        &[
+            ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1"),
+            ("RCH_VERIFY_FORCE_TOML_FALLBACK", "1"),
+            ("EXPECTED_PINNED_EXPORT_BASE", expected_export_base_arg),
+            ("CARGO_HOME", cargo_home_arg),
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
+        &fixture.project,
+    )?;
+    assert_git_status_unchanged(
+        &fixture.project,
+        &before_project,
+        "pinned Franken project materialization",
+    )?;
+    for (name, path) in &fixture.repositories {
+        let before = before_repositories
+            .get(name)
+            .ok_or_else(|| format!("missing before status for {name}"))?;
+        assert_git_status_unchanged(path, before, "pinned Franken sibling materialization")?;
+    }
+    if !status.success() {
+        return Err(format!(
+            "pinned Franken-stack fake RCH proof should pass\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let remote_invocations = remote_exec_invocation_lines(&invocation_log)?;
+    if remote_invocations.len() != 1
+        || !remote_invocations[0]
+            .contains("exec -- cargo test --locked --lib pinned_franken_stack_smoke")
+    {
+        return Err(format!(
+            "pinned stack should launch exactly one Cargo verifier: {:?}",
+            read_invocation_lines(&invocation_log)?
+        ));
+    }
+
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse pinned Franken report: {error}"))?;
+    let stack = &report["franken_stack"];
+    let cargo_provenance = &report["cargo_config_provenance"];
+    if report["status"] != "remote_pass"
+        || report["verification_attribution"] != "pinned_franken_stack"
+        || report["source_materialization"] != "git_archive_with_pinned_franken_stack"
+        || report["remote_source_materialized"] != true
+        || report["source_bundle_hash"]
+            .as_str()
+            .is_none_or(|hash| !hash.starts_with("sha256:"))
+        || stack["status"] != "pinned"
+        || stack["mode"] != "pinned"
+        || stack["remote_source_verified"] != true
+        || stack["cargo_lock_unchanged"] != true
+        || stack["blocking_codes"] != serde_json::json!([])
+        || stack["bundle_cache"]["schema"] != "ee.rch.pinned_bundle_cache.v1"
+        || stack["bundle_cache"]["status"] != "created"
+        || stack["bundle_cache"]["validation"] != "full_content_hash"
+        || stack["bundle_cache"]["content_hash"]
+            .as_str()
+            .is_none_or(|hash| !hash.starts_with("sha256:"))
+        || cargo_provenance["status"] != "clean"
+        || cargo_provenance["external_resolution_sources"] != serde_json::json!([])
+    {
+        return Err(format!("unexpected pinned Franken proof: {report}"));
+    }
+    let fallback_config = cargo_provenance["sources"]
+        .as_array()
+        .and_then(|sources| {
+            sources
+                .iter()
+                .find(|source| source["path"] == "<cargo_home>/config.toml")
+        })
+        .ok_or_else(|| format!("missing fallback Cargo config proof: {cargo_provenance}"))?;
+    if fallback_config["parse_status"] != "ok_fallback"
+        || fallback_config["resolution_controls"] != serde_json::json!([])
+    {
+        return Err(format!(
+            "stock-Python Cargo config fallback misclassified harmless settings: {fallback_config}"
+        ));
+    }
+    for repository in stack["repositories"]
+        .as_array()
+        .ok_or_else(|| format!("missing pinned repositories: {stack}"))?
+    {
+        let materialized = &repository["materialized"];
+        if materialized["revision"] != repository["expected_revision"]
+            || materialized["tree"].as_str().map(str::len) != Some(40)
+            || materialized["file_count"]
+                .as_u64()
+                .is_none_or(|count| count == 0)
+            || materialized["packages"]
+                .as_array()
+                .is_none_or(|packages| packages.iter().any(|package| package["matches"] != true))
+        {
+            return Err(format!(
+                "pinned dependency source attribution is incomplete: {repository}"
+            ));
+        }
+    }
+
+    let (second_status, second_stdout, second_stderr) = run_script_with_env_in_dir(
+        &[
+            "--pinned-franken-stack",
+            "--treeish",
+            "HEAD",
+            "--skip-build-admission",
+            "--skip-known-blocker",
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--locked",
+            "--lib",
+            "pinned_franken_stack_smoke",
+        ],
+        &[
+            ("RCH_VERIFY_FRANKEN_STACK_PREFLIGHT", "1"),
+            ("EXPECTED_PINNED_EXPORT_BASE", expected_export_base_arg),
+            ("CARGO_HOME", cargo_home_arg),
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
+        &fixture.project,
+    )?;
+    if !second_status.success() {
+        return Err(format!(
+            "validated pinned bundle reuse should pass\nstdout:\n{second_stdout}\nstderr:\n{second_stderr}"
+        ));
+    }
+    let second_report: Value = serde_json::from_str(&second_stdout)
+        .map_err(|error| format!("parse reused pinned Franken report: {error}"))?;
+    let second_stack = &second_report["franken_stack"];
+    if second_report["status"] != "remote_pass"
+        || second_report["source_bundle_hash"] != report["source_bundle_hash"]
+        || second_stack["manifest_hash"] != stack["manifest_hash"]
+        || second_stack["bundle_cache"]["status"] != "reused"
+        || second_stack["bundle_cache"]["content_hash"] != stack["bundle_cache"]["content_hash"]
+    {
+        return Err(format!(
+            "content-addressed pinned bundle reuse proof drifted:\nfirst={report}\nsecond={second_report}"
+        ));
+    }
+    if remote_exec_invocation_lines(&invocation_log)?.len() != 2 {
+        return Err(format!(
+            "created and reused pinned bundles should each reach fake RCH exactly once: {:?}",
+            read_invocation_lines(&invocation_log)?
+        ));
+    }
+    for (name, path) in &fixture.repositories {
+        let before = before_repositories
+            .get(name)
+            .ok_or_else(|| format!("missing before status for {name}"))?;
+        assert_git_status_unchanged(path, before, "reused pinned Franken bundle")?;
+    }
+    Ok(())
+}
+
+#[test]
 fn committed_tree_unresolved_ref_refuses_before_rch() -> TestResult {
     let workspace = seed_git_workspace("rch-committed-tree-missing-ref")?;
     let before_status = git_status_porcelain_v2(&workspace)?;
@@ -1743,6 +3185,8 @@ printf 'RCH_BUILD_TIMEOUT_SEC=%s\n' "${RCH_BUILD_TIMEOUT_SEC:-}"
 printf 'RCH_TEST_TIMEOUT_SEC=%s\n' "${RCH_TEST_TIMEOUT_SEC:-}"
 printf 'RCH_CANONICAL_PROJECT_ROOT=%s\n' "${RCH_CANONICAL_PROJECT_ROOT:-}"
 printf 'RCH_ALIAS_PROJECT_ROOT=%s\n' "${RCH_ALIAS_PROJECT_ROOT:-}"
+printf 'CARGO_INCREMENTAL=%s\n' "${CARGO_INCREMENTAL:-}"
+printf 'RCH_ENV_ALLOWLIST=%s\n' "${RCH_ENV_ALLOWLIST:-}"
 printf '[RCH] remote trj (0.1s)\n'
 "#,
     )?;
@@ -1764,6 +3208,9 @@ printf '[RCH] remote trj (0.1s)\n'
             ("RCH_SOCKET_PATH", "/tmp/rch-alt-test.sock"),
             ("RCH_BUILD_TIMEOUT_SEC", "1200"),
             ("RCH_TEST_TIMEOUT_SEC", "1500"),
+            ("RCH_CANONICAL_PROJECT_ROOT", "/data/projects"),
+            ("RCH_ALIAS_PROJECT_ROOT", "/data"),
+            ("RCH_ENV_ALLOWLIST", "RUST_BACKTRACE"),
             ("RCH_VERIFY_CONFIGURED_WORKERS", "css,trj"),
             ("RCH_VERIFY_DAEMON_WORKERS", "css,trj,csd"),
         ],
@@ -1804,14 +3251,7 @@ printf '[RCH] remote trj (0.1s)\n'
             "first invocation did not receive RCH_TEST_TIMEOUT_SEC: {report}"
         ));
     }
-    let expected_canonical_root = repo_root()
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| "repo root has no parent".to_owned())?
-        .display()
-        .to_string();
-    let expected_canonical_line = format!("RCH_CANONICAL_PROJECT_ROOT={expected_canonical_root}");
-    if !stdout_tail.contains(&expected_canonical_line) {
+    if !stdout_tail.contains("RCH_CANONICAL_PROJECT_ROOT=/data/projects") {
         return Err(format!(
             "first invocation did not receive project-root topology: {report}"
         ));
@@ -1821,9 +3261,70 @@ printf '[RCH] remote trj (0.1s)\n'
             "first invocation did not receive worker alias topology: {report}"
         ));
     }
+    if !stdout_tail.contains("CARGO_INCREMENTAL=0") {
+        return Err(format!(
+            "first invocation did not disable cold incremental state: {report}"
+        ));
+    }
+    if !stdout_tail
+        .contains("RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,CARGO_INCREMENTAL,RUST_BACKTRACE")
+    {
+        return Err(format!(
+            "first invocation did not forward required and caller env: {report}"
+        ));
+    }
     if degraded_contains(&report, "rch_verify_worker_filter_ignored")? {
         return Err(format!(
             "requested worker should not trip filter ignored: {report}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn remote_compile_preserves_explicit_incremental_override() -> TestResult {
+    let fake_rch = write_fake_rch(
+        "fake-rch-incremental-override.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'CARGO_INCREMENTAL=%s\n' "${CARGO_INCREMENTAL:-}"
+printf 'RCH_ENV_ALLOWLIST=%s\n' "${RCH_ENV_ALLOWLIST:-}"
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "check",
+            "--all-targets",
+        ],
+        &[
+            ("CARGO_INCREMENTAL", "1"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "explicit incremental override failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse incremental override proof: {error}"))?;
+    let stdout_tail = report["stdout_tail"]
+        .as_str()
+        .ok_or_else(|| "missing stdout_tail".to_owned())?;
+    if !stdout_tail.contains("CARGO_INCREMENTAL=1")
+        || !stdout_tail.contains("RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,CARGO_INCREMENTAL")
+    {
+        return Err(format!(
+            "explicit incremental override was not forwarded: {report}"
         ));
     }
     Ok(())
@@ -2123,6 +3624,52 @@ fn synthetic_remote_transcript_extracts_worker_id() -> TestResult {
 }
 
 #[test]
+fn successful_test_name_does_not_trigger_active_project_exclusion() -> TestResult {
+    let (status, stdout, stderr) = run_script_with_env(
+        &["--summary", "--no-write", "--", "cargo", "test", "--lib"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "running 1 test\ntest selector_admission_probe_classifies_active_project_exclusion ... ok\n\n\
+                 test result: ok. 1 passed; 0 failed\n[RCH] remote trj (0.1s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "100"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "successful transcript containing the test name failed with {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            status.code()
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout).map_err(|error| {
+        format!("parse successful active-project-name transcript: {error}\nstderr:\n{stderr}")
+    })?;
+    if report["status"] != "remote_pass" {
+        return Err(format!(
+            "successful transcript should remain a remote pass: {report}"
+        ));
+    }
+    if degraded_contains(&report, "rch_verify_capacity_or_timeout")? {
+        return Err(format!(
+            "test-name text was misclassified as capacity pressure: {report}"
+        ));
+    }
+    let probe = selector_probe(&report)?;
+    if probe["status"] != "selected"
+        || probe["selected_worker"] != "trj"
+        || !probe["selection_failure_reason"].is_null()
+        || !probe["admission_blocker"].is_null()
+    {
+        return Err(format!(
+            "selected worker gained a false admission blocker: {probe}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn client_daemon_version_skew_refuses_before_rch() -> TestResult {
     let invocation_log = unique_tmp_path("rch-version-skew-invocations");
     let fake_rch = write_fake_rch(
@@ -2130,7 +3677,7 @@ fn client_daemon_version_skew_refuses_before_rch() -> TestResult {
         r#"#!/usr/bin/env bash
 set -euo pipefail
 if [ "${1:-}" = "--version" ]; then
-  printf 'rch 1.0.24\n'
+  printf 'rch 1.0.24 (commit 40beb520c1f3)\n'
   exit 0
 fi
 if [ "${1:-}" = "status" ]; then
@@ -3461,6 +5008,62 @@ fn selector_admission_probe_classifies_active_project_exclusion() -> TestResult 
 }
 
 #[test]
+fn selector_admission_probe_classifies_explicit_worker_pressure() -> TestResult {
+    let (status, stdout, stderr) = run_script_with_env(
+        &["--summary", "--no-write", "--", "cargo", "test", "--lib"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "[RCH] local (no admissible workers: critical_pressure=1)\n\
+                 [RCH] remote required; refusing local fallback (no worker assigned)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "11"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1149989"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "vmi1149989"),
+        ],
+    )?;
+    if status.success() {
+        return Err("critical-pressure selector refusal should preserve non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout).map_err(|error| {
+        format!("parse critical-pressure selector report: {error}\nstderr:\n{stderr}")
+    })?;
+    if report["status"] != "capacity_or_timeout" {
+        return Err(format!(
+            "critical-pressure refusal should be worker capacity: {report}"
+        ));
+    }
+    for expected in [
+        "rch_verify_remote_command_failed",
+        "rch_verify_capacity_or_timeout",
+        "rch_verify_local_fallback_refused",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!(
+                "missing {expected} in critical-pressure proof: {report}"
+            ));
+        }
+    }
+    if degraded_contains(&report, "rch_verify_remote_marker_missing")? {
+        return Err(format!(
+            "explicit critical-pressure refusal should not claim a missing marker: {report}"
+        ));
+    }
+    let probe = selector_probe(&report)?;
+    if probe["status"] != "selection_failed"
+        || probe["selection_failure_reason"] != "capacity_or_timeout"
+        || probe["workers_vs_selection_contradiction"] != false
+        || probe["local_fallback_refused"] != true
+    {
+        return Err(format!(
+            "selector probe did not preserve critical-pressure capacity: {probe}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn active_project_known_blocker_refusal_keeps_selector_evidence() -> TestResult {
     let store =
         unique_tmp_path("rch-active-project-known-blocker-store").join("known_blockers.jsonl");
@@ -3838,6 +5441,48 @@ fn synthetic_remote_test_failure_with_timeout_env_is_remote_failure() -> TestRes
         .any(|code| code == "rch_verify_capacity_or_timeout")
     {
         return Err(format!("remote test failure was misclassified: {report}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn selected_remote_failure_ignores_nested_selector_fixtures() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &["--", "cargo", "test", "--test", "rch_verify_contract"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "test selector_admission_probe_classifies_active_project_exclusion ... FAILED\n\
+                 Error: \"fixture: {\\\"evidence\\\":\\\"[RCH] selection blocked: active_project_exclusion=1; [RCH] local (no admissible workers: critical_pressure=1)\\\"}\"\n\
+                 [RCH] remote trj failed (exit 101)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "101"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "200"),
+        ],
+    )?;
+    if status.success() {
+        return Err("selected remote test failure should preserve non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse nested active-project fixture failure: {error}"))?;
+    if report["status"] != "remote_failure" || report["worker_id"] != "trj" {
+        return Err(format!(
+            "selected Rust failure was misclassified as worker capacity: {report}"
+        ));
+    }
+    if degraded_contains(&report, "rch_verify_capacity_or_timeout")? {
+        return Err(format!(
+            "nested selector fixture text created capacity degradation: {report}"
+        ));
+    }
+    let probe = selector_probe(&report)?;
+    if probe["status"] != "selected"
+        || probe["selected_worker"] != "trj"
+        || !probe["admission_blocker"].is_null()
+    {
+        return Err(format!(
+            "selected Rust failure gained a false admission blocker: {probe}"
+        ));
     }
     Ok(())
 }

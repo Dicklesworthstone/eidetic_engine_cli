@@ -19,6 +19,7 @@
         "workspacePath",
         "databasePath",
         "approvedOnly",
+        "includeGlobs",
         "candidateCount",
         "materializedCount",
         "approvedCandidateCount",
@@ -40,6 +41,12 @@
         "workspacePath": {"type": "string", "minLength": 1},
         "databasePath": {"type": "string", "minLength": 1},
         "approvedOnly": {"type": "boolean", "const": true},
+        "includeGlobs": {
+          "type": "array",
+          "description": "Sorted, deduplicated workspace-relative include globs replayed from the reviewed dry run.",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
         "candidateCount": {"type": "integer", "minimum": 0},
         "materializedCount": {"type": "integer", "minimum": 0},
         "approvedCandidateCount": {"type": "integer", "minimum": 0},
@@ -71,6 +78,7 @@
         "evidenceId",
         "sourcePath",
         "sourceHash",
+        "sourceKind",
         "status",
         "action"
       ],
@@ -81,6 +89,10 @@
         "evidenceId": {"type": "string", "minLength": 1},
         "sourcePath": {"type": "string", "minLength": 1},
         "sourceHash": {"type": "string", "minLength": 1},
+        "sourceKind": {
+          "type": "string",
+          "enum": ["root_policy", "readme", "adr", "schema", "env_vars", "failure_mode_fixture", "reference_doc"]
+        },
         "status": {"type": "string"},
         "action": {"type": "string"}
       }

@@ -32,6 +32,7 @@
     "message_contains": [
       "trailing element(s)",
       "declared truncation point"
-    ]
+    ],
+    "repair_contains": "Resume with --cursor"
   }
 }

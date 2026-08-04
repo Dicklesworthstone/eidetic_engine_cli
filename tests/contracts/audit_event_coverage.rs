@@ -1,9 +1,9 @@
 //! G8 audit event coverage contract test (eidetic_engine_cli bd-17c65.7.7).
 //!
-//! Asserts that each read surface (ee search, ee context, ee why, ee memory
-//! show) writes the expected audit_log rows on a successful invocation. The
-//! test runs the real surfaces against a real DbConnection so producer-side
-//! instrumentation is checked end-to-end, not via mock.
+//! Asserts that canonical no-write reads (`ee search` and `ee why`) do not
+//! append audit rows, while enclosing mutating surfaces (`ee context` with
+//! pack persistence and `ee memory show`) retain their declared audit
+//! coverage. The test runs the real surfaces against a real DbConnection.
 //!
 //! Privacy contract: every audit row written for a read surface stores a
 //! BLAKE3 query_hash (or `surface` tag for whys/shows), NEVER the raw query
@@ -31,7 +31,10 @@ type TestResult = Result<(), String>;
 
 fn build_workspace() -> Result<(TempDir, PathBuf, PathBuf, String), String> {
     let dir = tempfile::tempdir().map_err(|error| format!("tempdir failed: {error}"))?;
-    let workspace = dir.path().to_path_buf();
+    let workspace = dir
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize temp workspace failed: {error}"))?;
     let database = workspace.join(".ee").join("ee.db");
     std::fs::create_dir_all(database.parent().expect("db parent"))
         .map_err(|error| format!("mkdir parent failed: {error}"))?;
@@ -88,7 +91,7 @@ fn count_action(audit: &[(String, Option<String>)], action: &str) -> usize {
 }
 
 #[test]
-fn ee_search_writes_search_executed_and_returned_mem_rows() -> TestResult {
+fn ee_search_does_not_write_search_audit_rows() -> TestResult {
     let (_dir, workspace, database, _memory_id) =
         build_workspace().map_err(|error| format!("setup: {error}"))?;
     let report = run_search(&SearchOptions {
@@ -122,23 +125,21 @@ fn ee_search_writes_search_executed_and_returned_mem_rows() -> TestResult {
     let audit = audit_actions_for(&database);
     let executed_count = count_action(&audit, audit_actions::SEARCH_EXECUTED);
     let returned_count = count_action(&audit, audit_actions::SEARCH_RETURNED_MEM);
-    if executed_count != 1 {
+    if executed_count != 0 {
         return Err(format!(
-            "expected exactly one search.executed row, got {executed_count}"
+            "read-only search wrote {executed_count} search.executed rows"
         ));
     }
-    if returned_count != report.results.len() {
+    if returned_count != 0 {
         return Err(format!(
-            "expected {} search.returned_mem rows (one per result), got {}",
-            report.results.len(),
-            returned_count
+            "read-only search wrote {returned_count} search.returned_mem rows"
         ));
     }
     Ok(())
 }
 
 #[test]
-fn ee_search_audit_row_carries_query_hash_not_raw_query() -> TestResult {
+fn ee_search_does_not_persist_raw_or_hashed_query_audit_payloads() -> TestResult {
     let (_dir, workspace, database, _memory_id) =
         build_workspace().map_err(|error| format!("setup: {error}"))?;
     let raw_query = "secret-flag-marker-text-for-coverage";
@@ -165,19 +166,26 @@ fn ee_search_audit_row_carries_query_hash_not_raw_query() -> TestResult {
     .map_err(|error| format!("run_search: {error:?}"))?;
 
     let audit = audit_actions_for(&database);
-    let executed_details = audit
+    let search_details = audit
         .iter()
-        .find(|(a, _)| a == audit_actions::SEARCH_EXECUTED)
-        .and_then(|(_, d)| d.clone())
-        .ok_or_else(|| "missing search.executed row".to_string())?;
-    if executed_details.contains(raw_query) {
+        .filter(|(action, _)| {
+            action == audit_actions::SEARCH_EXECUTED
+                || action == audit_actions::SEARCH_MISS_RECORDED
+                || action == audit_actions::SEARCH_RETURNED_MEM
+        })
+        .filter_map(|(_, details)| details.as_deref())
+        .collect::<Vec<_>>();
+    if search_details
+        .iter()
+        .any(|details| details.contains(raw_query))
+    {
         return Err(format!(
-            "audit details leak raw query text: {executed_details}"
+            "read-only search audit details leak raw query text: {search_details:?}"
         ));
     }
-    if !executed_details.contains("queryHash") || !executed_details.contains("blake3:") {
+    if !search_details.is_empty() {
         return Err(format!(
-            "audit details missing queryHash field: {executed_details}"
+            "read-only search persisted unexpected audit payloads: {search_details:?}"
         ));
     }
     Ok(())
@@ -272,7 +280,7 @@ fn ee_context_writes_pack_assembled_and_included_mem_rows() -> TestResult {
 }
 
 #[test]
-fn ee_why_writes_why_inspected_row() -> TestResult {
+fn ee_why_does_not_write_why_inspected_row() -> TestResult {
     let (_dir, workspace, database, memory_id) =
         build_workspace().map_err(|error| format!("setup: {error}"))?;
     let _ = &workspace; // suppress unused
@@ -284,9 +292,9 @@ fn ee_why_writes_why_inspected_row() -> TestResult {
 
     let audit = audit_actions_for(&database);
     let why_count = count_action(&audit, audit_actions::WHY_INSPECTED);
-    if why_count != 1 {
+    if why_count != 0 {
         return Err(format!(
-            "expected one why.inspected row after ee why, got {why_count}"
+            "read-only why wrote {why_count} why.inspected rows"
         ));
     }
     Ok(())

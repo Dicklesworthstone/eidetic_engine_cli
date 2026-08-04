@@ -2283,7 +2283,10 @@ fn inspect_persisted_claim_evidence(
         }
     };
     let evidence_id = source_id.strip_prefix("evidence://").unwrap_or(source_id);
-    let evidence = match store.connection.get_evidence_span(evidence_id) {
+    let evidence = match store
+        .connection
+        .get_derivation_admitted_evidence_span(evidence_id, &store.workspace_id)
+    {
         Ok(Some(evidence)) => evidence,
         Ok(None) => return None,
         Err(error) => {
@@ -3941,7 +3944,7 @@ mod tests {
     use super::*;
     use crate::db::{
         CreateEvidenceSpanInput, CreateRecorderRunInput, CreateSessionInput, CreateWorkspaceInput,
-        DbConnection,
+        DbConnection, EvidenceProducerKind,
     };
     use std::fs;
 
@@ -5389,6 +5392,7 @@ mod tests {
                     workspace_id,
                     session_id: session_id.to_owned(),
                     memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
                     cass_span_id: "span_verify_claim".to_owned(),
                     span_kind: "summary".to_owned(),
                     start_line: 10,
@@ -5397,8 +5401,13 @@ mod tests {
                     end_byte: None,
                     role: Some("assistant".to_owned()),
                     excerpt: "The verification command passed against real evidence.".to_owned(),
-                    content_hash: "blake3:claimverify".to_owned(),
+                    content_hash: format!(
+                        "blake3:{}",
+                        blake3::hash(b"The verification command passed against real evidence.")
+                            .to_hex()
+                    ),
                     metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -5470,6 +5479,7 @@ mod tests {
                     workspace_id,
                     session_id: session_id.to_owned(),
                     memory_id: None,
+                    producer_kind: EvidenceProducerKind::CassImport,
                     cass_span_id: "span_verify_claim_query_error".to_owned(),
                     span_kind: "summary".to_owned(),
                     start_line: 1,
@@ -5478,8 +5488,13 @@ mod tests {
                     end_byte: None,
                     role: Some("assistant".to_owned()),
                     excerpt: "Evidence exists before the table is made unreadable.".to_owned(),
-                    content_hash: "blake3:claimqueryerror".to_owned(),
+                    content_hash: format!(
+                        "blake3:{}",
+                        blake3::hash(b"Evidence exists before the table is made unreadable.")
+                            .to_hex()
+                    ),
                     metadata_json: None,
+                    inherited_redaction_classes: Vec::new(),
                 },
             )
             .map_err(|error| error.to_string())?;

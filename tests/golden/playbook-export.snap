@@ -4,7 +4,7 @@
   "data": {
     "schema": "ee.playbook.export.v1",
     "command": "playbook export",
-    "version": "0.1.0",
+    "version": "<VERSION>",
     "status": "exported",
     "dryRun": false,
     "workspaceId": "<WORKSPACE_ID>",
@@ -20,7 +20,7 @@
     "document": {
       "schema": "ee.playbook.portable.v1",
       "exportedAt": "<TIMESTAMP>",
-      "eeVersion": "0.1.0",
+      "eeVersion": "<VERSION>",
       "workspaceId": "<WORKSPACE_ID>",
       "workspacePath": "<WORKSPACE>",
       "ruleCount": 1,
@@ -44,8 +44,16 @@
           "createdAt": "<TIMESTAMP>",
           "updatedAt": "<TIMESTAMP>"
         }
-      ]
+      ],
+      "authentication": {
+        "schema": "ee.mesh.native_import_auth.v1",
+        "keyId": "<KEY_ID>",
+        "recordCount": 1,
+        "recordsRoot": "<RECORDS_ROOT>",
+        "mac": "<MAC>"
+      }
     },
     "degraded": []
-  }
+  },
+  "degraded": []
 }

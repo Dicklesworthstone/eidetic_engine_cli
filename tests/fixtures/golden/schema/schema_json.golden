@@ -4,7 +4,7 @@
   "title": "ee.response.v2",
   "description": "Canonical success or degraded-success response envelope for ee commands. Command-specific schemas constrain the data payload.",
   "type": "object",
-  "required": ["schema", "success", "data"],
+  "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
     "schema": {
@@ -28,8 +28,8 @@
     }
   },
   "field_presets": {
-    "minimal": ["schema", "success", "data"],
-    "summary": ["schema", "success", "fields", "data"],
+    "minimal": ["schema", "success", "data", "degraded"],
+    "summary": ["schema", "success", "fields", "data", "degraded"],
     "standard": ["schema", "success", "fields", "data", "degraded"],
     "full": ["*"]
   },

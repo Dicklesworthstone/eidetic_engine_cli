@@ -20,13 +20,14 @@
 //!    `ee audit timeline`, `ee audit verify`, `ee procedure list`, and
 //!    `ee learn agenda`.
 
+use std::collections::BTreeSet;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use ee::db::{CreateEvidenceSpanInput, DbConnection, SearchIndexJobStatus};
+use ee::db::{CreateEvidenceSpanInput, DbConnection, EvidenceProducerKind, SearchIndexJobStatus};
 use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
@@ -518,12 +519,42 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
         &review
             .pointer("/data/candidateCount")
             .and_then(JsonValue::as_u64),
-        &Some(1),
-        "review session proposed one linting candidate",
+        &Some(4),
+        "review session proposed the linked, bootstrap, and paired arc candidates",
     )?;
-    let candidate = review
-        .pointer("/data/candidates/0")
-        .ok_or_else(|| "review missing first candidate".to_owned())?;
+    let review_candidates = review
+        .pointer("/data/candidates")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| "review missing /data/candidates".to_owned())?;
+    let candidate_kinds = review_candidates
+        .iter()
+        .filter_map(|candidate| candidate.get("candidateKind").and_then(JsonValue::as_str))
+        .collect::<BTreeSet<_>>();
+    ensure_equal(
+        &candidate_kinds,
+        &BTreeSet::from([
+            "failure",
+            "propose_new_memory",
+            "session_arc_anti_pattern",
+            "session_arc_rule",
+        ]),
+        "review session candidate kinds",
+    )?;
+    let candidate = review_candidates
+        .iter()
+        .find(|candidate| {
+            candidate.get("topicKey").and_then(JsonValue::as_str) == Some("linting")
+                && candidate.get("candidateType").and_then(JsonValue::as_str) == Some("rule")
+                && candidate.get("candidateKind").and_then(JsonValue::as_str) == Some("failure")
+                && candidate.get("targetMemoryId").and_then(JsonValue::as_str)
+                    == Some(failure_memory_id.as_str())
+        })
+        .ok_or_else(|| {
+            format!(
+                "review missing linked linting failure candidate for {failure_memory_id}: \
+                 {review_candidates:?}"
+            )
+        })?;
     let candidate_id = candidate
         .get("candidateId")
         .and_then(JsonValue::as_str)
@@ -569,15 +600,19 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
         &queued
             .pointer("/data/totalCount")
             .and_then(JsonValue::as_u64),
-        &Some(1),
-        "curate candidates lists the proposed rule candidate",
+        &Some(4),
+        "curate candidates lists every review proposal",
     )?;
-    ensure_equal(
-        &queued
-            .pointer("/data/candidates/0/id")
-            .and_then(JsonValue::as_str),
-        &Some(candidate_id.as_str()),
-        "curate candidates surfaces review candidate",
+    ensure(
+        queued
+            .pointer("/data/candidates")
+            .and_then(JsonValue::as_array)
+            .is_some_and(|candidates| {
+                candidates.iter().any(|candidate| {
+                    candidate.get("id").and_then(JsonValue::as_str) == Some(candidate_id.as_str())
+                })
+            }),
+        format!("curate candidates must surface linked review candidate {candidate_id}: {queued}"),
     )?;
 
     let validate = run_ee_json(&[
@@ -718,6 +753,158 @@ fn north_star_procedural_distillation_full_chain_review_curate_apply() -> TestRe
                     .is_some_and(|content| content.contains(rule_content.as_str()))
         }),
         format!("search should return applied rule {rule_id} by its own content: {results:?}"),
+    )?;
+
+    let ready_before_protect = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "status"])?;
+    ensure_equal(
+        &ready_before_protect
+            .pointer("/data/health")
+            .and_then(JsonValue::as_str),
+        &Some("ready"),
+        "rule index is ready before protection mutation",
+    )?;
+
+    let protect = run_ee_json(&[
+        "--workspace",
+        &ws_arg,
+        "--json",
+        "rule",
+        "protect",
+        &rule_id,
+        "--actor",
+        "north-star-e2e",
+    ])?;
+    ensure_equal(
+        &protect
+            .pointer("/data/changed")
+            .and_then(JsonValue::as_bool),
+        &Some(true),
+        "rule protect mutates the indexed projection",
+    )?;
+    ensure(
+        protect
+            .pointer("/data/indexJobId")
+            .is_some_and(JsonValue::is_string),
+        format!("rule protect must queue a rule index job: {protect}"),
+    )?;
+
+    let stale_after_protect = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "status"])?;
+    ensure_equal(
+        &stale_after_protect
+            .pointer("/data/health")
+            .and_then(JsonValue::as_str),
+        &Some("stale"),
+        "rule protect makes the older published index stale",
+    )?;
+
+    let coalesce = run_ee_json(&[
+        "--workspace",
+        &ws_arg,
+        "--json",
+        "job",
+        "run",
+        "index_coalesce",
+    ])?;
+    ensure_equal(
+        &coalesce.pointer("/success").and_then(JsonValue::as_bool),
+        &Some(true),
+        "public index coalesce processes the rule mutation",
+    )?;
+    let ready_after_coalesce = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "status"])?;
+    ensure_equal(
+        &ready_after_coalesce
+            .pointer("/data/health")
+            .and_then(JsonValue::as_str),
+        &Some("ready"),
+        "index becomes ready only after truthful rule publication",
+    )?;
+
+    let refreshed_search = run_ee_json(&[
+        "--workspace",
+        &ws_arg,
+        "--json",
+        "search",
+        &rule_content,
+        "--limit",
+        "20",
+    ])?;
+    let refreshed_hit = refreshed_search
+        .pointer("/data/results")
+        .and_then(JsonValue::as_array)
+        .and_then(|hits| {
+            hits.iter()
+                .find(|hit| hit.get("docId").and_then(JsonValue::as_str) == Some(rule_id.as_str()))
+        })
+        .ok_or_else(|| format!("refreshed search missing rule {rule_id}: {refreshed_search}"))?;
+    ensure_equal(
+        &refreshed_hit
+            .pointer("/metadata/protected")
+            .and_then(JsonValue::as_str),
+        &Some("true"),
+        "refreshed rule metadata contains protected state",
+    )?;
+    ensure(
+        refreshed_hit
+            .pointer("/metadata/source_memory_ids")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|ids| ids.split(',').any(|id| id == failure_memory_id.as_str())),
+        format!("refreshed rule metadata missing source provenance: {refreshed_hit}"),
+    )?;
+    ensure(
+        refreshed_hit
+            .pointer("/metadata/entity_revision")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|revision| revision.len() == 71 && revision.starts_with("blake3:")),
+        format!("refreshed rule metadata missing canonical revision: {refreshed_hit}"),
+    )?;
+    for exact_numeric in ["confidence", "utility", "importance"] {
+        let expected = rule
+            .pointer(&format!("/data/rule/{exact_numeric}"))
+            .and_then(JsonValue::as_f64)
+            .map(|value| (value as f32).to_string())
+            .ok_or_else(|| format!("rule show missing numeric {exact_numeric}: {rule}"))?;
+        ensure_equal(
+            &refreshed_hit
+                .pointer(&format!("/metadata/{exact_numeric}"))
+                .and_then(JsonValue::as_str),
+            &Some(expected.as_str()),
+            &format!("refreshed rule metadata preserves exact {exact_numeric}"),
+        )?;
+    }
+
+    let protect_noop = run_ee_json(&[
+        "--workspace",
+        &ws_arg,
+        "--json",
+        "rule",
+        "protect",
+        &rule_id,
+        "--actor",
+        "north-star-e2e",
+    ])?;
+    ensure_equal(
+        &protect_noop
+            .pointer("/data/status")
+            .and_then(JsonValue::as_str),
+        &Some("unchanged"),
+        "repeated protect is idempotent",
+    )?;
+    ensure(
+        protect_noop
+            .pointer("/data/auditId")
+            .is_some_and(JsonValue::is_null)
+            && protect_noop
+                .pointer("/data/indexJobId")
+                .is_some_and(JsonValue::is_null),
+        format!("no-op protect must not audit or enqueue: {protect_noop}"),
+    )?;
+    let ready_after_noop = run_ee_json(&["--workspace", &ws_arg, "--json", "index", "status"])?;
+    ensure_equal(
+        &ready_after_noop
+            .pointer("/data/health")
+            .and_then(JsonValue::as_str),
+        &Some("ready"),
+        "no-op protect leaves the published index ready",
     )?;
 
     let memory = run_ee_json(&[
@@ -911,6 +1098,7 @@ fn persist_linked_review_spans(
                     workspace_id: workspace_id.to_owned(),
                     session_id: session_id.to_owned(),
                     memory_id: Some(memory_id.to_owned()),
+                    producer_kind: EvidenceProducerKind::CassImport,
                     cass_span_id: cass_span_id.to_owned(),
                     span_kind: "message".to_owned(),
                     start_line: line,
@@ -921,6 +1109,7 @@ fn persist_linked_review_spans(
                     excerpt: excerpt.to_owned(),
                     content_hash: format!("blake3:{}", blake3::hash(excerpt.as_bytes()).to_hex()),
                     metadata_json: Some(r#"{"schema":"lpb5.review_span.v1"}"#.to_owned()),
+                    inherited_redaction_classes: Vec::new(),
                 },
             )
             .map_err(|error| format!("insert linked evidence span {id}: {error}"))?;

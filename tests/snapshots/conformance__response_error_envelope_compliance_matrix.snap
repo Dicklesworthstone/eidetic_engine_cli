@@ -7,11 +7,12 @@ expression: expected_conformance_matrix(&base_cases)
 | init | success | ee.response.v2.json | no | required |
 | remember | success | ee.response.v2.json | no | required |
 | search | success | ee.response.v2.json | no | required |
+| pack | success | ee.response.v2.json | no | required |
 | context | success | ee.response.v2.json | no | required |
 | why | success | ee.response.v2.json | no | required |
 | status | success | ee.response.v2.json | no | required |
 | doctor | success | ee.response.v2.json | no | required |
-| context missing database | error | ee.error.v2.json | yes | required |
+| pack missing database | error | ee.error.v2.json | yes | required |
 | curate show | error | ee.error.v2.json | no | required |
 | reflect propose | error | ee.error.v2.json | no | required |
 | reflect request-ledger diagnostics | success | ee.response.v2.json | no | required |

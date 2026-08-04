@@ -14,7 +14,7 @@
           "expectedExitCode": 0,
           "expectedStdoutSchema": "ee.response.v2",
           "expectedStdoutContains": [
-            "\"command\":\"context\""
+            "\"command\":\"pack\""
           ],
           "artifactOutputs": [
             {

@@ -54,10 +54,10 @@
     Build from source via git + cargo instead of downloading.
 
 .EXAMPLE
-    # One-liner: download the installer to a file, then run it. (Do NOT pipe an
-    # iwr `.Content` into iex — GitHub serves release assets as
-    # application/octet-stream, so `.Content` is a byte[], not a string.)
-    $f = Join-Path $env:TEMP 'install-ee.ps1'; iwr -useb https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest/download/install.ps1 -OutFile $f; & $f
+    # One-liner: download the current installer to a file, then run it. Keeping
+    # the script inspectable also avoids fragile Invoke-Expression/content-type
+    # behavior.
+    $f = Join-Path $env:TEMP 'install-ee.ps1'; $u = "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.ps1?cache=$([guid]::NewGuid())"; iwr -useb $u -OutFile $f; & $f -Verify
 
 .EXAMPLE
     .\install.ps1 -Version 0.1.0 -Verify
@@ -478,7 +478,10 @@ function Test-InstalledVersion {
     param([string]$BinaryPath, [string]$TargetVersion)
     if (-not (Test-Path $BinaryPath)) { return $false }
     try {
-        $raw = (& $BinaryPath --version 2>$null | Select-Object -First 1)
+        $versionOutput = @(& $BinaryPath --version 2>$null)
+        $versionExitCode = $LASTEXITCODE
+        if ($versionExitCode -ne 0) { return $false }
+        $raw = ($versionOutput | Select-Object -First 1)
         if (-not $raw) { return $false }
         if ($raw -match '([0-9]+\.[0-9]+\.[0-9]+)') {
             $installed = $Matches[1]
@@ -618,6 +621,11 @@ function Install-Completions {
     $target = Join-Path $profileDir "ee-completion.ps1"
     try {
         & $BinaryPath completion powershell > $target 2>$null
+        $completionExitCode = $LASTEXITCODE
+        if ($completionExitCode -ne 0) {
+            Write-Warning2 "Failed to write PowerShell completions (exit code $completionExitCode)"
+            return
+        }
         Write-Ok "PowerShell completions written to $target"
         Write-Info "Add this to your `$PROFILE: . `"$target`""
     } catch {
@@ -634,6 +642,13 @@ function Invoke-SelfTest {
     Write-Info "Running self-test"
     try {
         $version = & $BinaryPath --version 2>&1
+        $versionExitCode = $LASTEXITCODE
+        if ($versionExitCode -ne 0) {
+            Write-ErrorExit "ee --version failed with exit code ${versionExitCode}: $version"
+        }
+        if ([string]::IsNullOrWhiteSpace(($version | Out-String))) {
+            Write-ErrorExit "ee --version returned no output"
+        }
         Write-Host "  $version"
     } catch {
         Write-ErrorExit "Failed to run ee --version: $_"
@@ -729,25 +744,41 @@ function Invoke-FromSource {
     if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
         Write-ErrorExit "cargo not found — install Rust nightly via https://rustup.rs/ before using -FromSource"
     }
-    $src = Join-Path $env:TEMP "ee-src-$([guid]::NewGuid().ToString('N'))"
+    $sourceRoot = Join-Path $env:TEMP "ee-source-$([guid]::NewGuid().ToString('N'))"
+    $src = Join-Path $sourceRoot "eidetic_engine_cli"
+    New-Item -ItemType Directory -Path $sourceRoot | Out-Null
     try {
         Write-Info "Cloning $Script:RepoOwner/$Script:RepoName ..."
         if ($VersionTag) {
-            & git clone --depth 1 --branch $VersionTag "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
+            & git -c core.longpaths=true clone --depth 1 --branch $VersionTag --single-branch "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
             if ($LASTEXITCODE -ne 0) {
-                # Git refuses to clone into a non-empty directory. The pinned
-                # clone may have partially populated $src before failing
-                # (e.g., wrong tag); wipe it before the fallback so the
-                # default-branch retry has somewhere to go.
-                Remove-Item -Recurse -Force $src -ErrorAction SilentlyContinue
-                & git clone --depth 1 "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
+                Write-ErrorExit "Could not clone requested release tag $VersionTag. Refusing to build a different revision; verify the version and try again."
+            }
+
+            # --branch accepts a branch as well as a tag. Prove that the
+            # requested name is an exact release tag and that the checked-out
+            # HEAD resolves to that tag's commit before compiling anything.
+            $tagCommit = (& git -C $src rev-parse --verify "refs/tags/${VersionTag}^{commit}" 2>$null) -join ""
+            if ($LASTEXITCODE -ne 0 -or -not $tagCommit) {
+                Write-ErrorExit "Requested source revision $VersionTag is not an exact release tag. Refusing to build a branch or different revision."
+            }
+            $headCommit = (& git -C $src rev-parse --verify HEAD 2>$null) -join ""
+            if ($LASTEXITCODE -ne 0 -or -not $headCommit -or $headCommit -ne $tagCommit) {
+                Write-ErrorExit "Source checkout for $VersionTag does not match its release tag. Refusing to build an unverified revision."
             }
         } else {
-            & git clone --depth 1 "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
+            & git -c core.longpaths=true clone --depth 1 "https://github.com/$Script:RepoOwner/$Script:RepoName.git" $src 2>&1 | Out-Null
         }
         if ($LASTEXITCODE -ne 0) {
             Write-ErrorExit "git clone failed."
         }
+        Write-Info "Checking out locked Franken-stack source dependencies ..."
+        $checkoutHelper = Join-Path $src "scripts\checkout-franken-stack.ps1"
+        if (-not (Test-Path -LiteralPath $checkoutHelper -PathType Leaf)) {
+            Write-ErrorExit "Source checkout is missing $checkoutHelper"
+        }
+        & $checkoutHelper -DestinationRoot $sourceRoot
+
         Write-Info "Building ee (release profile)…"
         Push-Location $src
         try {
@@ -781,7 +812,7 @@ function Invoke-FromSource {
         Copy-Item $built (Join-Path $DestDir $BinaryName) -Force
         Write-Ok "Installed to $DestDir\$BinaryName (built from source)"
     } finally {
-        Remove-Item -Recurse -Force $src -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $sourceRoot -ErrorAction SilentlyContinue
     }
 }
 
@@ -812,13 +843,13 @@ function Show-AgentIntegration {
         Write-Host "      Before risky shell commands:"
         Write-Host "        ee preflight check --cmd `"<shell command>`" --workspace . --json"
         Write-Host "      Before substantial work:"
-        Write-Host "        ee context `"<task>`" --workspace . --max-tokens 4000 --format markdown"
+        Write-Host "        ee pack `"<task>`" --workspace . --max-tokens 4000 --format markdown"
         Write-Host ""
     }
     if ($Agents -contains "Codex CLI") {
         if ($Script:Color) { Write-Host "  -> Codex CLI" -ForegroundColor Cyan } else { Write-Host "  -> Codex CLI" }
         Write-Host "      Before substantial work:"
-        Write-Host "        ee context `"<task>`" --workspace . --json"
+        Write-Host "        ee pack `"<task>`" --workspace . --json"
         Write-Host "      Optional risk guard:"
         Write-Host "        ee preflight check --cmd `"<command>`" --workspace . --json"
         Write-Host ""
@@ -827,7 +858,7 @@ function Show-AgentIntegration {
         if ($Script:Color) { Write-Host "  -> Gemini CLI" -ForegroundColor Cyan } else { Write-Host "  -> Gemini CLI" }
         Write-Host "      For BeforeTool integration, see docs/agent-ux/auto_enrollment_onboarding.md"
         Write-Host "      For context packs:"
-        Write-Host "        ee context `"<task>`" --workspace . --json"
+        Write-Host "        ee pack `"<task>`" --workspace . --json"
         Write-Host ""
     }
     if ($Agents -contains "Cursor IDE") {
@@ -844,7 +875,7 @@ function Show-AgentIntegration {
     if ($other.Count -gt 0) {
         if ($Script:Color) { Write-Host "  -> Aider / Continue / Copilot CLI" -ForegroundColor Cyan } else { Write-Host "  -> Aider / Continue / Copilot CLI" }
         Write-Host "      No documented PreToolUse surface for ee yet. Call directly from your prompt setup:"
-        Write-Host "        ee context `"<task>`" --workspace . --json"
+        Write-Host "        ee pack `"<task>`" --workspace . --json"
         Write-Host ""
     }
 }
@@ -869,7 +900,7 @@ function Show-Summary {
     Write-Host ""
     Write-Host "  Get started:"
     Write-Host "    ee init --workspace ."
-    Write-Host "    ee context `"<task>`" --workspace . --max-tokens 4000"
+    Write-Host "    ee pack `"<task>`" --workspace . --max-tokens 4000"
     Write-Host "    ee --help"
     Write-Host ""
     Write-Host "  Inspect health: ee doctor --json"
@@ -942,11 +973,14 @@ function Main {
 
     $binaryPath = Join-Path $InstallDir $Script:BinaryName
 
-    # Already-installed short-circuit.
+    # Already-installed short-circuit. Acquisition and locking stay skipped,
+    # but idempotent shell integration and explicit verification still run.
     if (-not $FromSource -and -not $Force -and $Version -and (Test-InstalledVersion -BinaryPath $binaryPath -TargetVersion $Version)) {
         Write-Ok "$Script:ProjectName $Version is already installed at $binaryPath"
         Write-Info "Use -Force to reinstall"
+        Update-UserPath -Dir $InstallDir
         Install-Completions -BinaryPath $binaryPath
+        if ($Verify) { Invoke-SelfTest -BinaryPath $binaryPath }
         return
     }
 
@@ -974,6 +1008,7 @@ function Main {
                     }
                     Write-Warning2 "Falling back to -FromSource"
                     Invoke-FromSource -DestDir $InstallDir -BinaryName $Script:BinaryName -VersionTag $Version
+                    Update-UserPath -Dir $InstallDir
                     Install-Completions -BinaryPath $binaryPath
                     if ($Verify) { Invoke-SelfTest -BinaryPath $binaryPath }
                     Invoke-SemanticFirstUseSmoke -BinaryPath $binaryPath -SmokeRoot $tempDir

@@ -182,3 +182,34 @@ mod windows {
 #[cfg(not(windows))]
 #[test]
 fn windows_msvc_cli_smoke_is_windows_only() {}
+
+#[test]
+fn powershell_smoke_preserves_machine_stream_and_artifact_contracts() {
+    let script = include_str!("../scripts/e2e_windows_smoke.ps1");
+
+    assert!(
+        script.contains("& $EeBinary @allArgs 1> $stdoutPath 2> $stderrPath"),
+        "PowerShell smoke must capture native stdout and stderr separately"
+    );
+    assert!(
+        !script.contains("$output = & $EeBinary @allArgs 2>&1"),
+        "PowerShell smoke must not merge diagnostics into machine JSON"
+    );
+    assert!(
+        script.contains("$json.schema -ne \"ee.response.v2\"")
+            && script.contains("$json.success -ne $true"),
+        "PowerShell smoke must validate the canonical success envelope"
+    );
+    assert!(
+        script.contains("Invoke-Ee -Name \"04-pack\" -Arguments @(\"pack\""),
+        "PowerShell smoke must exercise the canonical pack command"
+    );
+    assert!(
+        script.contains("remember response did not contain data.memory_id"),
+        "PowerShell smoke must fail clearly when remember omits its identifier"
+    );
+    assert!(
+        !script.contains("Remove-Item"),
+        "PowerShell smoke must refuse stale artifacts instead of deleting them"
+    );
+}

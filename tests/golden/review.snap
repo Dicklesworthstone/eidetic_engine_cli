@@ -2,7 +2,7 @@
 source: src/core/curate.rs
 assertion: review session propose uses persisted evidence spans
 schema:
-  session: ee.review.session.v1
+  session: ee.review.session.v2
 contracts:
   - empty session returns no candidates
   - single-topic session with fewer than 2 spans returns no candidates

@@ -4,7 +4,7 @@
   "data": {
     "schema": "ee.playbook.import.v1",
     "command": "playbook import",
-    "version": "0.1.0",
+    "version": "<VERSION>",
     "status": "imported",
     "dryRun": false,
     "workspaceId": "<WORKSPACE_ID>",
@@ -17,7 +17,7 @@
     "importedCount": 1,
     "duplicateCount": 0,
     "skippedCount": 0,
-    "downgradedCount": 0,
+    "downgradedCount": 1,
     "durableMutation": true,
     "decisions": [
       {
@@ -27,9 +27,32 @@
         "importedRuleId": "<IMPORTED_RULE_ID>",
         "auditId": "<AUDIT_ID>",
         "indexJobId": "<INDEX_JOB_ID>",
-        "issueCodes": []
+        "issueCodes": [
+          "mesh_store_authentication_unavailable"
+        ]
       }
     ],
-    "degraded": []
-  }
+    "degraded": [
+      {
+        "code": "mesh_store_authentication_unavailable",
+        "severity": "high",
+        "message": "<DEGRADED_MESSAGE>",
+        "repair": "Initialize the store-authentication root before importing at native trust.",
+        "sources": [
+          "playbook_import"
+        ]
+      }
+    ]
+  },
+  "degraded": [
+    {
+      "code": "mesh_store_authentication_unavailable",
+      "severity": "high",
+      "message": "<DEGRADED_MESSAGE>",
+      "repair": "Initialize the store-authentication root before importing at native trust.",
+      "sources": [
+        "playbook_import"
+      ]
+    }
+  ]
 }

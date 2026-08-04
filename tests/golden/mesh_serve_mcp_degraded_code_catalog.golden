@@ -5,9 +5,9 @@
 #   mesh_serve_mcp_degraded_code_catalog -- --exact; review the diff.
 #
 # Total codes:                52
-# With failure-mode fixture:  33
-# In docs/degraded_code_taxonomy.md: 34
-# In docs/degraded_codes.md (## header): 33
+# With failure-mode fixture:  52
+# In docs/degraded_code_taxonomy.md: 52
+# In docs/degraded_codes.md (## header): 52
 #
 # Columns: code | fixture | taxonomy | gen-docs | const | source
 #
@@ -27,39 +27,39 @@ discovery_cache_invalidated_tailnet_changed          ✓         ✓          �
 discovery_cache_stale_due_to_workspace_mismatch      ✓         ✓          ✓      DISCOVERY_CACHE_WORKSPACE_MISMATCH_CODE :: src/mesh/discovery_cache.rs
 discovery_policy_empty_allowlist                     ✓         ✓          ✓      DISCOVERY_POLICY_EMPTY_ALLOWLIST_CODE :: src/mesh/discovery_policy.rs
 discovery_policy_no_ee_mesh_tag                      ✓         ✓          ✓      DISCOVERY_POLICY_NO_EE_MESH_TAG_CODE :: src/mesh/discovery_policy.rs
-drift_grace_soft_stale_peer_count_high               ·         ✓          ·      DRIFT_GRACE_SOFT_STALE_PEER_COUNT_HIGH_CODE :: src/mesh/peer_state.rs
+drift_grace_soft_stale_peer_count_high               ✓         ✓          ✓      DRIFT_GRACE_SOFT_STALE_PEER_COUNT_HIGH_CODE :: src/mesh/peer_state.rs
 hello_responder_crash_loop                           ✓         ✓          ✓      HELLO_RESPONDER_CRASH_LOOP_CODE :: src/mesh/hello_responder.rs
 hello_responder_no_tailscale_ip                      ✓         ✓          ✓      HELLO_RESPONDER_NO_TAILSCALE_IP_CODE :: src/mesh/hello_responder.rs
-hello_responder_node_key_mismatch                    ·         ·          ·      HELLO_RESPONDER_NODE_KEY_MISMATCH_CODE :: src/mesh/identity_change_guard.rs
+hello_responder_node_key_mismatch                    ✓         ✓          ✓      HELLO_RESPONDER_NODE_KEY_MISMATCH_CODE :: src/mesh/identity_change_guard.rs
 hello_responder_not_running                          ✓         ✓          ✓      HELLO_RESPONDER_NOT_RUNNING_CODE :: src/mesh/hello_responder.rs
 hello_responder_port_in_use                          ✓         ✓          ✓      HELLO_RESPONDER_PORT_IN_USE_CODE :: src/mesh/hello_responder.rs
 hello_responder_rate_limited_storm                   ✓         ✓          ✓      HELLO_RESPONDER_RATE_LIMITED_STORM_CODE :: src/mesh/hello_responder.rs
-lane_grant_preview_lane_already_granted              ·         ·          ·      LANE_GRANT_PREVIEW_LANE_ALREADY_GRANTED_CODE :: src/mesh/lane_grant_preview.rs
-lane_grant_preview_peer_not_in_group                 ·         ·          ·      LANE_GRANT_PREVIEW_PEER_NOT_IN_GROUP_CODE :: src/mesh/lane_grant_preview.rs
+lane_grant_preview_lane_already_granted              ✓         ✓          ✓      LANE_GRANT_PREVIEW_LANE_ALREADY_GRANTED_CODE :: src/mesh/lane_grant_preview.rs
+lane_grant_preview_peer_not_in_group                 ✓         ✓          ✓      LANE_GRANT_PREVIEW_PEER_NOT_IN_GROUP_CODE :: src/mesh/lane_grant_preview.rs
 mesh_audit_ledger_corrupt                            ✓         ✓          ✓      MESH_AUDIT_LEDGER_CORRUPT_CODE :: src/mesh/audit.rs
 mesh_audit_ledger_missing                            ✓         ✓          ✓      MESH_AUDIT_LEDGER_MISSING_CODE :: src/mesh/audit.rs
 mesh_cursor_repair_required                          ✓         ✓          ✓      MESH_CURSOR_REPAIR_REQUIRED_CODE :: src/mesh/anti_entropy_model.rs
-mesh_disabled                                        ·         ·          ·      MESH_DISABLED_POSTURE_CODE :: src/mesh/foreground_cli.rs
+mesh_disabled                                        ✓         ✓          ✓      MESH_DISABLED_POSTURE_CODE :: src/mesh/foreground_cli.rs
 mesh_event_quarantined                               ✓         ✓          ✓      MESH_EVENT_QUARANTINED_CODE :: src/mesh/anti_entropy_model.rs
-mesh_peer_capability_handshake_mismatch              ·         ·          ·      PEER_ENROLLMENT_CAPABILITY_MISMATCH_CODE :: src/mesh/peer.rs
-mesh_peer_explicit_consent_required                  ·         ·          ·      PEER_ENROLLMENT_EXPLICIT_CONSENT_REQUIRED_CODE :: src/mesh/peer.rs
-mesh_peer_handshake_denied                           ·         ·          ·      PEER_ENROLLMENT_HANDSHAKE_DENIED_CODE :: src/mesh/peer.rs
-mesh_peer_key_rotation_invalid_key                   ·         ·          ·      PEER_KEY_ROTATION_INVALID_KEY_CODE :: src/mesh/peer.rs
-mesh_peer_key_rotation_revoked                       ·         ·          ·      PEER_KEY_ROTATION_REVOKED_CODE :: src/mesh/peer.rs
-mesh_peer_key_rotation_unchanged                     ·         ·          ·      PEER_KEY_ROTATION_UNCHANGED_CODE :: src/mesh/peer.rs
-mesh_peer_network_only_denied                        ·         ·          ·      PEER_ENROLLMENT_NETWORK_ONLY_DENIED_CODE :: src/mesh/peer.rs
-mesh_peer_unknown_attempt_denied                     ·         ·          ·      PEER_UNKNOWN_ATTEMPT_DENIED_CODE :: src/mesh/peer.rs
-mesh_sync_once_network_deferred                      ·         ·          ·      MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE :: src/mesh/foreground_cli.rs
+mesh_peer_capability_handshake_mismatch              ✓         ✓          ✓      PEER_ENROLLMENT_CAPABILITY_MISMATCH_CODE :: src/mesh/peer.rs
+mesh_peer_explicit_consent_required                  ✓         ✓          ✓      PEER_ENROLLMENT_EXPLICIT_CONSENT_REQUIRED_CODE :: src/mesh/peer.rs
+mesh_peer_handshake_denied                           ✓         ✓          ✓      PEER_ENROLLMENT_HANDSHAKE_DENIED_CODE :: src/mesh/peer.rs
+mesh_peer_key_rotation_invalid_key                   ✓         ✓          ✓      PEER_KEY_ROTATION_INVALID_KEY_CODE :: src/mesh/peer.rs
+mesh_peer_key_rotation_revoked                       ✓         ✓          ✓      PEER_KEY_ROTATION_REVOKED_CODE :: src/mesh/peer.rs
+mesh_peer_key_rotation_unchanged                     ✓         ✓          ✓      PEER_KEY_ROTATION_UNCHANGED_CODE :: src/mesh/peer.rs
+mesh_peer_network_only_denied                        ✓         ✓          ✓      PEER_ENROLLMENT_NETWORK_ONLY_DENIED_CODE :: src/mesh/peer.rs
+mesh_peer_unknown_attempt_denied                     ✓         ✓          ✓      PEER_UNKNOWN_ATTEMPT_DENIED_CODE :: src/mesh/peer.rs
+mesh_sync_once_network_deferred                      ✓         ✓          ✓      MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE :: src/mesh/foreground_cli.rs
 mesh_sync_supervisor_backpressure                    ✓         ✓          ✓      MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE :: src/mesh/foreground_cli.rs
 mesh_sync_supervisor_budget_exhausted                ✓         ✓          ✓      MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE :: src/mesh/foreground_cli.rs
 mesh_sync_supervisor_runtime_error                   ✓         ✓          ✓      MESH_SYNC_SUPERVISOR_RUNTIME_ERROR_CODE :: src/mesh/foreground_cli.rs
-mesh_workspace_uninitialized                         ·         ·          ·      MESH_WORKSPACE_UNINITIALIZED_CODE :: src/mesh/foreground_cli.rs
+mesh_workspace_uninitialized                         ✓         ✓          ✓      MESH_WORKSPACE_UNINITIALIZED_CODE :: src/mesh/foreground_cli.rs
 no_ee_peers_on_tailnet                               ✓         ✓          ✓      NO_EE_PEERS_ON_TAILNET_CODE :: src/mesh/tailscale_autodiscovery.rs
 peer_discovery_budget_exhausted                      ✓         ✓          ✓      PEER_DISCOVERY_BUDGET_EXHAUSTED_CODE :: src/mesh/tailscale_autodiscovery.rs
 peer_discovery_workspace_mismatch                    ✓         ✓          ✓      PEER_DISCOVERY_WORKSPACE_MISMATCH_CODE :: src/mesh/tailscale_autodiscovery.rs
-size_limit_exceeded                                  ·         ·          ·      MCP_SIZE_LIMIT_EXCEEDED_CODE :: src/mcp.rs
-steward_auto_enroll_consecutive_failures             ·         ·          ·      STEWARD_AUTO_ENROLL_CONSECUTIVE_FAILURES_CODE :: src/mesh/steward_decision.rs
-steward_auto_enroll_daily_cap_reached                ·         ·          ·      STEWARD_AUTO_ENROLL_DAILY_CAP_REACHED_CODE :: src/mesh/steward_decision.rs
-steward_auto_enroll_disabled                         ·         ·          ·      STEWARD_AUTO_ENROLL_DISABLED_CODE :: src/mesh/steward_decision.rs
+size_limit_exceeded                                  ✓         ✓          ✓      MCP_SIZE_LIMIT_EXCEEDED_CODE :: src/mcp.rs
+steward_auto_enroll_consecutive_failures             ✓         ✓          ✓      STEWARD_AUTO_ENROLL_CONSECUTIVE_FAILURES_CODE :: src/mesh/steward_decision.rs
+steward_auto_enroll_daily_cap_reached                ✓         ✓          ✓      STEWARD_AUTO_ENROLL_DAILY_CAP_REACHED_CODE :: src/mesh/steward_decision.rs
+steward_auto_enroll_disabled                         ✓         ✓          ✓      STEWARD_AUTO_ENROLL_DISABLED_CODE :: src/mesh/steward_decision.rs
 tailscale_peer_list_unavailable                      ✓         ✓          ✓      TAILSCALE_PEER_LIST_UNAVAILABLE_CODE :: src/mesh/tailscale_autodiscovery.rs
 tailscale_peer_probe_timeout                         ✓         ✓          ✓      TAILSCALE_PEER_PROBE_TIMEOUT_CODE :: src/mesh/tailscale_autodiscovery.rs

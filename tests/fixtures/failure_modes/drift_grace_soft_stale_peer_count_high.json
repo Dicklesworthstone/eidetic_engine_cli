@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "drift_grace_soft_stale_peer_count_high",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.13",
+    "epic_letter": "SRR6.46.13"
+  },
+  "surfaces": [
+    "mesh status"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A high fraction of enrolled peers sit in the soft_stale drift-grace state (one missed probe past the grace window each) without crossing into hard_stale, indicating broad transient unreachability rather than individual peer churn.",
+    "setup_commands": [
+      "enroll multiple mesh peers",
+      "let probes to most of them miss once past EE_MESH_DRIFT_SOFT_STALE_AFTER_SECONDS"
+    ],
+    "invocation": "ee mesh status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "drift_grace_soft_stale_peer_count_high",
+    "severity": "warning",
+    "message_contains": [
+      "soft_stale"
+    ],
+    "repair_contains": "ee mesh status"
+  }
+}

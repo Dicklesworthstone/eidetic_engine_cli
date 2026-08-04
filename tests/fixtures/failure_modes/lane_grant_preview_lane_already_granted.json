@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "lane_grant_preview_lane_already_granted",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.17",
+    "epic_letter": "SRR6.46.17"
+  },
+  "surfaces": [
+    "mesh preview-grant"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "A lane-grant preview targets a lane the current policy already grants to that peer, so the preview reports current exposure instead of a widening delta.",
+    "setup_commands": [
+      "enroll a peer with the metadata lane already allowed",
+      "preview the same metadata lane for that peer"
+    ],
+    "invocation": "ee mesh preview-grant <enrolled-node-key> --lane metadata --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "lane_grant_preview_lane_already_granted",
+    "severity": "info",
+    "message_contains": [
+      "already granted",
+      "currently exposed"
+    ],
+    "repair_contains": "ee mesh preview-grant"
+  }
+}

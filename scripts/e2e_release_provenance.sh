@@ -91,9 +91,10 @@ static_contract() {
   require_contains "$installer" "provenance is missing Cargo.lock blake3 dependency"
   require_contains "$installer" "cosign verify-blob"
 
-  require_contains "$readme" "SHA-256 checksum and Sigstore bundle"
-  require_contains "$readme" 'Pass `--require-provenance` to also'
-  require_contains "$readme" "verify the SLSA provenance attestation"
+  require_contains "$readme" "always verifies its"
+  require_contains "$readme" 'Pass `--require-provenance` to require both'
+  require_contains "$readme" "verified SLSA provenance attestation"
+  require_contains "$readme" "missing bundle is reported"
   require_contains "$checklist" "Signed release provenance ready"
   require_contains "$audit" "release_verifies_provenance_before_publish"
   require_contains "$audit" "unix_installer_supports_required_provenance"

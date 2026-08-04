@@ -47,14 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           project_root="$GITHUB_WORKSPACE/.ci/franken-stack/projects"
-          mkdir -p "$project_root"
-          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$project_root/asupersync"
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git "$project_root/franken_agent_detection"
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git "$project_root/franken_networkx"
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git "$project_root/frankensearch"
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git "$project_root/frankensqlite"
-          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git "$project_root/sqlmodel_rust"
-          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$project_root/toon_rust"
+          ./scripts/checkout-franken-stack.sh "$project_root"
           # Cargo.toml uses ../<sibling-repo>/... paths to match the local
           # Mac/Linux dev checkout layout where ee lives next to the franken
           # sibling crates. CI clones the siblings under the workspace and
@@ -149,14 +142,7 @@ jobs:
         run: |
           set -euo pipefail
           project_root="$GITHUB_WORKSPACE/.ci/franken-stack/projects"
-          mkdir -p "$project_root"
-          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$project_root/asupersync"
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git "$project_root/franken_agent_detection"
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git "$project_root/franken_networkx"
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git "$project_root/frankensearch"
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git "$project_root/frankensqlite"
-          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git "$project_root/sqlmodel_rust"
-          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$project_root/toon_rust"
+          ./scripts/checkout-franken-stack.sh "$project_root"
           CARGO_PATH_ROOT=".ci/franken-stack/projects" perl -0pi -e '
             s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
             s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
@@ -284,14 +270,7 @@ jobs:
         run: |
           set -euo pipefail
           project_root="$GITHUB_WORKSPACE/.ci/franken-stack/projects"
-          mkdir -p "$project_root"
-          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$project_root/asupersync"
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git "$project_root/franken_agent_detection"
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git "$project_root/franken_networkx"
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git "$project_root/frankensearch"
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git "$project_root/frankensqlite"
-          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git "$project_root/sqlmodel_rust"
-          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$project_root/toon_rust"
+          ./scripts/checkout-franken-stack.sh "$project_root"
           # See the verify job for the rationale on accepting both
           # ../<sibling> and /data/projects/<sibling> prefixes here.
           CARGO_PATH_ROOT="$project_root" perl -0pi -e '
@@ -307,14 +286,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           git config --global core.longpaths true
           $projectRoot = Join-Path $env:GITHUB_WORKSPACE ".ci\franken-stack\projects"
-          New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
-          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git (Join-Path $projectRoot "asupersync")
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git (Join-Path $projectRoot "franken_agent_detection")
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git (Join-Path $projectRoot "franken_networkx")
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git (Join-Path $projectRoot "frankensearch")
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git (Join-Path $projectRoot "frankensqlite")
-          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git (Join-Path $projectRoot "sqlmodel_rust")
-          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git (Join-Path $projectRoot "toon_rust")
+          & ./scripts/checkout-franken-stack.ps1 -DestinationRoot $projectRoot
           $fsqliteManifest = Join-Path $projectRoot "frankensqlite\crates\fsqlite\Cargo.toml"
           if (-not (Test-Path $fsqliteManifest)) {
             Write-Error "MISSING: $fsqliteManifest"
@@ -536,14 +508,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           git config --global core.longpaths true
           $projectRoot = Join-Path $env:RUNNER_TEMP "franken-stack\projects"
-          New-Item -ItemType Directory -Force -Path $projectRoot | Out-Null
-          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git (Join-Path $projectRoot "asupersync")
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git (Join-Path $projectRoot "franken_agent_detection")
-          git clone --depth 1 https://github.com/Dicklesworthstone/franken_networkx.git (Join-Path $projectRoot "franken_networkx")
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensearch.git (Join-Path $projectRoot "frankensearch")
-          git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git (Join-Path $projectRoot "frankensqlite")
-          git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git (Join-Path $projectRoot "sqlmodel_rust")
-          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git (Join-Path $projectRoot "toon_rust")
+          & ./scripts/checkout-franken-stack.ps1 -DestinationRoot $projectRoot
           $fsqliteManifest = Join-Path $projectRoot "frankensqlite\crates\fsqlite\Cargo.toml"
           if (-not (Test-Path $fsqliteManifest)) {
             Write-Error "MISSING: $fsqliteManifest"
@@ -645,7 +610,7 @@ jobs:
               apt-get update
               apt-get install -y curl ca-certificates xz-utils
               curl -fsSL "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/${EE_RELEASE_TAG}/install.sh" \
-                | EE_VERSION="${EE_RELEASE_TAG}" sh
+                | EE_VERSION="${EE_RELEASE_TAG}" bash -s -- --verify
               export PATH="$HOME/.local/bin:$PATH"
               EE_EXPECTED_VERSION="${EE_RELEASE_TAG#v}"
               ee --version | grep -F "$EE_EXPECTED_VERSION"
@@ -659,7 +624,8 @@ jobs:
         run: |
           set -euo pipefail
           curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/${{ steps.audit.outputs.latest_tag }}/install.sh \
-            | EE_VERSION="${{ steps.audit.outputs.latest_tag }}" EE_INSTALL_DIR="$RUNNER_TEMP/ee-bin" sh
+            | EE_VERSION="${{ steps.audit.outputs.latest_tag }}" EE_INSTALL_DIR="$RUNNER_TEMP/ee-bin" \
+                /bin/bash -s -- --verify
           export PATH="$RUNNER_TEMP/ee-bin:$PATH"
           EE_EXPECTED_VERSION="${{ steps.audit.outputs.latest_tag }}"
           EE_EXPECTED_VERSION="${EE_EXPECTED_VERSION#v}"

@@ -494,6 +494,8 @@ pub enum JobType {
     CurationReview,
     /// Inspect quarantined harmful feedback rows.
     QuarantineSweep,
+    /// Re-screen a bounded batch of fail-closed legacy evidence rows.
+    EvidenceRescreen,
     /// Run health checks and generate diagnostics.
     HealthCheck,
     /// Prune derived caches without deleting source-of-truth data.
@@ -532,6 +534,7 @@ impl JobType {
             Self::ConsolidationPass => "consolidation_pass",
             Self::CurationReview => "curation_review",
             Self::QuarantineSweep => "quarantine_sweep",
+            Self::EvidenceRescreen => "evidence_rescreen",
             Self::HealthCheck => "health_check",
             Self::CachePruning => "cache_pruning",
             Self::GraphSnapshotPrune => "graph_snapshot_prune",
@@ -557,6 +560,7 @@ impl JobType {
             Self::ConsolidationPass,
             Self::CurationReview,
             Self::QuarantineSweep,
+            Self::EvidenceRescreen,
             Self::HealthCheck,
             Self::CachePruning,
             Self::GraphSnapshotPrune,
@@ -584,6 +588,9 @@ impl JobType {
             }
             Self::CurationReview => "Process pending curation candidates",
             Self::QuarantineSweep => "Inspect quarantined harmful feedback rows",
+            Self::EvidenceRescreen => {
+                "Re-screen a bounded batch of fail-closed legacy evidence rows"
+            }
             Self::HealthCheck => "Run health checks and generate diagnostics",
             Self::CachePruning => "Prune derived caches without deleting source-of-truth data",
             Self::GraphSnapshotPrune => {
@@ -637,6 +644,7 @@ impl FromStr for JobType {
             "consolidation_pass" => Ok(Self::ConsolidationPass),
             "curation_review" => Ok(Self::CurationReview),
             "quarantine_sweep" => Ok(Self::QuarantineSweep),
+            "evidence_rescreen" => Ok(Self::EvidenceRescreen),
             "health_check" => Ok(Self::HealthCheck),
             "cache_pruning" => Ok(Self::CachePruning),
             "graph_snapshot_prune" => Ok(Self::GraphSnapshotPrune),
@@ -1884,6 +1892,10 @@ pub fn default_budgets_for_job_type(job_type: JobType) -> Vec<ResourceBudget> {
         JobType::QuarantineSweep => vec![
             ResourceBudget::time_limit_ms(60_000), // 1 minute
             ResourceBudget::item_limit(10_000),
+        ],
+        JobType::EvidenceRescreen => vec![
+            ResourceBudget::time_limit_ms(60_000), // 1 minute
+            ResourceBudget::item_limit(500),
         ],
         JobType::HealthCheck => vec![
             ResourceBudget::time_soft_limit_ms(10_000), // 10 seconds soft
@@ -3396,6 +3408,7 @@ impl ManualRunner {
             JobType::ConsolidationPass => self.execute_consolidation_pass(budget),
             JobType::CurationReview => self.execute_curation_review(budget),
             JobType::QuarantineSweep => self.execute_quarantine_sweep(budget),
+            JobType::EvidenceRescreen => self.execute_evidence_rescreen(budget),
             JobType::HealthCheck => self.execute_health_check(budget),
             JobType::CachePruning => self.execute_cache_pruning(budget),
             JobType::GraphSnapshotPrune => self.execute_graph_snapshot_prune(budget),
@@ -4835,6 +4848,177 @@ impl ManualRunner {
                 "dryRun": self.options.dry_run,
                 "durableMutation": false,
             })),
+        )
+    }
+
+    fn execute_evidence_rescreen(
+        &self,
+        budget: &mut JobBudgetState,
+    ) -> (RunOutcome, Option<u64>, Option<String>, Option<JsonValue>) {
+        let opened = match self.open_workspace_database_for_job(
+            "ee.steward.evidence_rescreen.error.v1",
+            "evidence_rescreen",
+            "ee migrate run --workspace . --json",
+        ) {
+            Ok(opened) => opened,
+            Err(result) => return result,
+        };
+        let max_limit = u64::from(crate::db::EVIDENCE_SECURITY_RESCREEN_MAX_BATCH);
+        let requested_limit = self.options.item_limit.unwrap_or(max_limit);
+        if requested_limit == 0 || requested_limit > max_limit {
+            let message = format!(
+                "Evidence rescreen item limit must be between 1 and {max_limit}; got \
+                 {requested_limit}"
+            );
+            return steward_job_failure(
+                "ee.steward.evidence_rescreen.error.v1",
+                "evidence_rescreen_item_limit_invalid",
+                message,
+                self.options.dry_run,
+                Some(&opened.database_path),
+                "ee job run evidence_rescreen --item-limit 500 --dry-run --json",
+            );
+        }
+        let limit = match u32::try_from(requested_limit) {
+            Ok(limit) => limit,
+            Err(_) => {
+                return steward_job_failure(
+                    "ee.steward.evidence_rescreen.error.v1",
+                    "evidence_rescreen_item_limit_invalid",
+                    "Evidence rescreen item limit does not fit the supported range.".to_owned(),
+                    self.options.dry_run,
+                    Some(&opened.database_path),
+                    "ee job run evidence_rescreen --item-limit 500 --dry-run --json",
+                );
+            }
+        };
+        let required_schema_version = crate::db::V085_EVIDENCE_SECURITY_POSTURE.version();
+        let observed_schema_version = match opened.connection.schema_version() {
+            Ok(Some(version)) => version,
+            Ok(None) => 0,
+            Err(error) => {
+                return steward_job_failure(
+                    "ee.steward.evidence_rescreen.error.v1",
+                    "evidence_rescreen_schema_inspection_failed",
+                    format!("Failed to inspect the evidence database schema: {error}"),
+                    self.options.dry_run,
+                    Some(&opened.database_path),
+                    "ee migrate run --workspace . --json",
+                );
+            }
+        };
+        if observed_schema_version < required_schema_version {
+            return steward_job_failure(
+                "ee.steward.evidence_rescreen.error.v1",
+                "evidence_rescreen_migration_required",
+                format!(
+                    "Evidence rescreen requires database schema V{required_schema_version} or \
+                     newer; found V{observed_schema_version}"
+                ),
+                self.options.dry_run,
+                Some(&opened.database_path),
+                "ee migrate run --workspace . --json",
+            );
+        }
+
+        let details = |report: &crate::db::EvidenceSecurityRescreenReport, status: &str| {
+            let mut value = serde_json::to_value(report).unwrap_or_else(|error| {
+                json!({
+                    "schema": "ee.evidence.security_rescreen.serialization_failed.v1",
+                    "message": error.to_string(),
+                })
+            });
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "jobType".to_owned(),
+                    JsonValue::String(JobType::EvidenceRescreen.as_str().to_owned()),
+                );
+                object.insert("status".to_owned(), JsonValue::String(status.to_owned()));
+                object.insert(
+                    "databasePath".to_owned(),
+                    JsonValue::String(opened.database_path.display().to_string()),
+                );
+                object.insert(
+                    "nextCommand".to_owned(),
+                    JsonValue::String(if report.pending_after > 0 {
+                        "ee job run evidence_rescreen --workspace . --json".to_owned()
+                    } else if report.index_rebuild_required {
+                        "ee index rebuild --workspace . --json".to_owned()
+                    } else {
+                        "ee index status --workspace . --json".to_owned()
+                    }),
+                );
+            }
+            value
+        };
+
+        let started = Instant::now();
+        let preview = match opened.connection.rescreen_legacy_evidence_for_workspace(
+            &opened.workspace_id,
+            limit,
+            false,
+            self.options.actor.as_deref(),
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("Failed to preview legacy evidence rescreen: {error}");
+                return steward_job_failure(
+                    "ee.steward.evidence_rescreen.error.v1",
+                    "evidence_rescreen_preview_failed",
+                    message,
+                    self.options.dry_run,
+                    Some(&opened.database_path),
+                    "ee migrate run --workspace . --json",
+                );
+            }
+        };
+        budget.record(ResourceType::Items, preview.selected);
+        budget.record(ResourceType::TimeMs, millis_to_u64(started.elapsed()));
+
+        if self.cancellation_requested() || budget_cancels_before_mutation(budget) {
+            return (
+                RunOutcome::Cancelled,
+                Some(preview.selected),
+                Some("Evidence rescreen cancelled before durable mutation".to_owned()),
+                Some(details(&preview, "previewed")),
+            );
+        }
+        if self.options.dry_run {
+            return (
+                RunOutcome::Success,
+                Some(preview.selected),
+                None,
+                Some(details(&preview, "previewed")),
+            );
+        }
+
+        let apply_started = Instant::now();
+        let applied = match opened.connection.rescreen_legacy_evidence_for_workspace(
+            &opened.workspace_id,
+            limit,
+            true,
+            Some(self.options.actor.as_deref().unwrap_or("ee-maintenance")),
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                let message = format!("Failed to apply legacy evidence rescreen: {error}");
+                return steward_job_failure(
+                    "ee.steward.evidence_rescreen.error.v1",
+                    "evidence_rescreen_apply_failed",
+                    message,
+                    false,
+                    Some(&opened.database_path),
+                    "ee job run evidence_rescreen --workspace . --dry-run --json",
+                );
+            }
+        };
+        budget.record(ResourceType::TimeMs, millis_to_u64(apply_started.elapsed()));
+
+        (
+            RunOutcome::Success,
+            Some(applied.updated),
+            None,
+            Some(details(&applied, "applied")),
         )
     }
 
@@ -8613,7 +8797,12 @@ mod tests {
             true,
             "all() includes PrimerRefresh",
         )?;
-        ensure(all.len(), 19, "all() lists every JobType variant")?;
+        ensure(
+            all.contains(&JobType::EvidenceRescreen),
+            true,
+            "all() includes EvidenceRescreen",
+        )?;
+        ensure(all.len(), 20, "all() lists every JobType variant")?;
         Ok(())
     }
 
@@ -9883,6 +10072,154 @@ mod tests {
     }
 
     #[test]
+    fn manual_runner_evidence_rescreen_previews_then_applies_one_bounded_batch() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        let session_id =
+            crate::models::SessionId::from_uuid(uuid::Uuid::from_u128(0x85_900)).to_string();
+        let evidence_id =
+            crate::models::EvidenceId::from_uuid(uuid::Uuid::from_u128(0x85_901)).to_string();
+        {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    SCORE_WORKSPACE_ID,
+                    &CreateWorkspaceInput {
+                        path: temp.path().to_string_lossy().into_owned(),
+                        name: Some("evidence-rescreen-runner".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .insert_session(
+                    &session_id,
+                    &crate::db::CreateSessionInput {
+                        workspace_id: SCORE_WORKSPACE_ID.to_owned(),
+                        cass_session_id: "legacy-rescreen-runner-session".to_owned(),
+                        source_path: None,
+                        agent_name: Some("codex".to_owned()),
+                        model: Some("gpt-5".to_owned()),
+                        started_at: Some("2026-07-27T00:00:00Z".to_owned()),
+                        ended_at: Some("2026-07-27T00:01:00Z".to_owned()),
+                        message_count: 1,
+                        token_count: Some(8),
+                        content_hash:
+                            "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                                .to_owned(),
+                        metadata_json: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            connection
+                .execute_raw(&format!(
+                    "INSERT INTO evidence_spans (
+                        id, workspace_id, session_id, cass_span_id, span_kind,
+                        start_line, end_line, role, excerpt, content_hash,
+                        metadata_json, created_at, updated_at
+                     ) VALUES (
+                        '{evidence_id}', '{SCORE_WORKSPACE_ID}', '{session_id}',
+                        '/Users/alice/raw/session.jsonl:1', 'message',
+                        1, 1, 'assistant',
+                        'Legacy build evidence passed verification.',
+                        'legacy-hash',
+                        '{{\"sourcePath\":\"/Users/alice/raw/session.jsonl\"}}',
+                        '2026-07-27T00:00:00Z',
+                        '2026-07-27T00:00:00Z'
+                     )"
+                ))
+                .map_err(|error| error.to_string())?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+
+        let preview_options = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_item_limit(1)
+            .with_dry_run(true)
+            .with_actor("evidence-rescreen-runner-test");
+        let mut preview_runner = ManualRunner::new(preview_options);
+        let preview =
+            preview_runner.run_job_type(JobType::EvidenceRescreen, Some("preview".to_owned()));
+        ensure(preview.outcome, RunOutcome::Success, "preview outcome")?;
+        ensure(preview.items_processed, Some(1), "preview items")?;
+        let preview_details = preview
+            .details
+            .ok_or_else(|| "evidence rescreen preview details missing".to_owned())?;
+        ensure(
+            preview_details["schema"].as_str(),
+            Some(crate::db::EVIDENCE_SECURITY_RESCREEN_REPORT_SCHEMA_V1),
+            "preview schema",
+        )?;
+        ensure(
+            preview_details["status"].as_str(),
+            Some("previewed"),
+            "preview status",
+        )?;
+        ensure(
+            preview_details["updated"].as_u64(),
+            Some(0),
+            "preview update count",
+        )?;
+
+        let apply_options = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_item_limit(1)
+            .with_actor("evidence-rescreen-runner-test");
+        let mut apply_runner = ManualRunner::new(apply_options);
+        let applied =
+            apply_runner.run_job_type(JobType::EvidenceRescreen, Some("apply".to_owned()));
+        ensure(applied.outcome, RunOutcome::Success, "apply outcome")?;
+        ensure(applied.items_processed, Some(1), "apply items")?;
+        let applied_details = applied
+            .details
+            .ok_or_else(|| "evidence rescreen apply details missing".to_owned())?;
+        ensure(
+            applied_details["status"].as_str(),
+            Some("applied"),
+            "apply status",
+        )?;
+        ensure(
+            applied_details["pendingAfter"].as_u64(),
+            Some(0),
+            "apply pending count",
+        )?;
+        ensure(
+            applied_details["nextCommand"].as_str(),
+            Some("ee index rebuild --workspace . --json"),
+            "apply rebuild command",
+        )?;
+
+        let connection =
+            DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+        let span = connection
+            .get_evidence_span(&evidence_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "rescreened evidence row missing".to_owned())?;
+        ensure(
+            span.producer_kind.as_str(),
+            "cass_import",
+            "applied producer",
+        )?;
+        ensure(
+            span.search_eligibility.as_str(),
+            "admitted",
+            "applied admission",
+        )?;
+        let audits = connection
+            .list_audit_by_action(audit_actions::EVIDENCE_SECURITY_RESCREEN, None)
+            .map_err(|error| error.to_string())?;
+        ensure(audits.len(), 1, "rescreen audit count")?;
+        ensure(
+            audits[0].actor.as_deref(),
+            Some("evidence-rescreen-runner-test"),
+            "rescreen audit actor",
+        )
+    }
+
+    #[test]
     fn manual_runner_consolidation_pass_inserts_canonical_candidate_metadata() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let database_path = temp.path().join("ee.db");
@@ -10559,9 +10896,14 @@ mod tests {
         )?;
 
         let reason = CancelReason::user("daemon cancellation test");
-        for (cancelled_task, priority) in lab.state.cancel_request(root, &reason, None) {
-            lab.scheduler.lock().schedule(cancelled_task, priority);
+        let (tasks_to_cancel, cancellation_wakes) =
+            lab.state.cancel_request(root, &reason, None).into_parts();
+        for (cancelled_task, priority) in tasks_to_cancel {
+            lab.scheduler
+                .lock()
+                .schedule_cancel(cancelled_task, priority);
         }
+        cancellation_wakes.dispatch();
         lab.scheduler.lock().schedule(task_id, 0);
         lab.advance_time(1_000_000_000);
         lab.run_until_quiescent();

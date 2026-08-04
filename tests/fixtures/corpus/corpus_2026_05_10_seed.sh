@@ -64,6 +64,16 @@ if [ ! -f "$CORPUS_FILE" ]; then
     exit 2
 fi
 
+# Keep diagnostics inspectable without mixing them into the machine-readable
+# response body. `ee` correctly reserves stdout for JSON and may emit progress
+# or degraded-capability notes on stderr; combining the streams makes valid
+# success envelopes look like parse failures.
+STDERR_LOG="$WORKSPACE/corpus_seed.stderr.log"
+if ! : >"$STDERR_LOG"; then
+    echo "cannot create corpus seed stderr log: $STDERR_LOG" >&2
+    exit 2
+fi
+
 SEEDED=0
 REJECTED=0
 LINE_NO=0
@@ -101,8 +111,10 @@ PYEOF
         cmd+=(--tags "$tags")
     fi
 
-    # Run remember and capture exit + body.
-    body=$("${cmd[@]}" 2>&1)
+    # Parse only the documented machine-readable stdout contract. Retain
+    # stderr, with per-record boundaries, as an ordinary workspace artifact.
+    printf '[seed_line_%d]\n' "$LINE_NO" >>"$STDERR_LOG"
+    body=$("${cmd[@]}" 2>>"$STDERR_LOG")
     rc=$?
 
     if [ $rc -eq 0 ]; then

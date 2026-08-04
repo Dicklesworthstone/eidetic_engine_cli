@@ -25,6 +25,8 @@ const RESPONSE_SCHEMA: &str = "ee.response.v2";
 const RESPONSE_SCHEMA_FILE: &str = "ee.response.v2.json";
 const ERROR_SCHEMA: &str = "ee.error.v2";
 const ERROR_SCHEMA_FILE: &str = "ee.error.v2.json";
+const STREAMS_STDERR_PROBE: &str =
+    "ee diag streams: stderr probe for stream isolation verification\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EnvelopeKind {
@@ -37,6 +39,12 @@ enum Enforcement {
     Required,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StderrExpectation {
+    Clean,
+    Exact(&'static str),
+}
+
 #[derive(Clone, Debug)]
 struct CommandCase {
     id: &'static str,
@@ -46,6 +54,7 @@ struct CommandCase {
     schema_file: &'static str,
     enforcement: Enforcement,
     require_recovery: bool,
+    stderr_expectation: StderrExpectation,
 }
 
 #[derive(Clone, Debug)]
@@ -56,7 +65,7 @@ struct ObservedCase {
     enforcement: Enforcement,
     exit_code: Option<i32>,
     stdout_json: bool,
-    stderr_clean: bool,
+    stderr_valid: bool,
     schema: Option<String>,
     schema_file_valid: bool,
     envelope_valid: bool,
@@ -83,6 +92,10 @@ fn run_ee(args: &[String]) -> Result<Output, String> {
         .args(args)
         .env_remove(WORKSPACE_ENV_VAR)
         .env_remove(WORKSPACE_REGISTRY_ENV_VAR)
+        // Envelope conformance must not depend on a worker's model cache or
+        // trigger a 506 MB network download. The offline fallback exercises
+        // the same response envelope while keeping stderr deterministic.
+        .env("EE_EMBED_DOWNLOAD", "off")
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
@@ -134,6 +147,20 @@ fn success_case(
         schema_file: RESPONSE_SCHEMA_FILE,
         enforcement,
         require_recovery: false,
+        stderr_expectation: StderrExpectation::Clean,
+    }
+}
+
+fn success_case_with_stderr(
+    id: &'static str,
+    surface: &'static str,
+    args: Vec<String>,
+    enforcement: Enforcement,
+    stderr_expectation: StderrExpectation,
+) -> CommandCase {
+    CommandCase {
+        stderr_expectation,
+        ..success_case(id, surface, args, enforcement)
     }
 }
 
@@ -151,6 +178,38 @@ fn error_case(
         schema_file: ERROR_SCHEMA_FILE,
         enforcement: Enforcement::Required,
         require_recovery,
+        stderr_expectation: StderrExpectation::Clean,
+    }
+}
+
+fn validate_stderr(case: &CommandCase, stderr: &[u8]) -> TestResult {
+    let stderr = std::str::from_utf8(stderr)
+        .map_err(|error| format!("{}: stderr was not UTF-8: {error}", case.id))?;
+    match case.stderr_expectation {
+        StderrExpectation::Clean if stderr.is_empty() => Ok(()),
+        StderrExpectation::Clean => Err(format!(
+            "{}: stderr must be empty, got {:?}",
+            case.id,
+            bounded_diagnostic(stderr)
+        )),
+        StderrExpectation::Exact(expected) if stderr == expected => Ok(()),
+        StderrExpectation::Exact(expected) => Err(format!(
+            "{}: stderr mismatch: expected {:?}, got {:?}",
+            case.id,
+            expected,
+            bounded_diagnostic(stderr)
+        )),
+    }
+}
+
+fn bounded_diagnostic(text: &str) -> String {
+    const MAX_CHARS: usize = 512;
+    let mut chars = text.chars();
+    let bounded = chars.by_ref().take(MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{bounded}…")
+    } else {
+        bounded
     }
 }
 
@@ -163,6 +222,7 @@ fn response_envelope_harness_uses_shared_command_inventory() -> TestResult {
         "remember",
         "search",
         "pack",
+        "context",
         "why",
         "status",
         "doctor",
@@ -206,10 +266,15 @@ fn response_envelope_harness_uses_shared_command_inventory() -> TestResult {
 
 fn assess_case(case: &CommandCase) -> Result<(ObservedCase, Option<Value>), String> {
     let output = run_ee(&case.args)?;
-    let stderr_clean = output.stderr.is_empty();
+    let stderr_result = validate_stderr(case, &output.stderr);
+    let stderr_valid = stderr_result.is_ok();
+    let stderr_failure = stderr_result.err();
     let value = match stdout_value(&output, case.id) {
         Ok(value) => value,
         Err(error) => {
+            let failure = stderr_failure.map_or(error.clone(), |stderr_error| {
+                format!("{error}; {stderr_error}")
+            });
             return Ok((
                 ObservedCase {
                     id: case.id,
@@ -218,12 +283,12 @@ fn assess_case(case: &CommandCase) -> Result<(ObservedCase, Option<Value>), Stri
                     enforcement: case.enforcement,
                     exit_code: output.status.code(),
                     stdout_json: false,
-                    stderr_clean,
+                    stderr_valid,
                     schema: None,
                     schema_file_valid: false,
                     envelope_valid: false,
                     recovery_valid: None,
-                    failure: Some(error),
+                    failure: Some(failure),
                 },
                 None,
             ));
@@ -235,7 +300,11 @@ fn assess_case(case: &CommandCase) -> Result<(ObservedCase, Option<Value>), Stri
         .and_then(Value::as_str)
         .map(str::to_owned);
     let schema_doc = read_json(&schema_path(case.schema_file))?;
-    let schema_file_valid = validate_json_schema(&value, &schema_doc, &schema_doc, "$").is_ok();
+    let schema_result = validate_json_schema(&value, &schema_doc, &schema_doc, "$");
+    let schema_file_valid = schema_result.is_ok();
+    let schema_failure = schema_result
+        .err()
+        .map(|error| format!("docs schema validation failed: {error}"));
     let envelope_result = validate_envelope(case, &value, output.status.code());
     let recovery_valid = match case.expected {
         EnvelopeKind::Success => None,
@@ -268,15 +337,17 @@ fn assess_case(case: &CommandCase) -> Result<(ObservedCase, Option<Value>), Stri
         EnvelopeKind::Error => None,
     };
 
-    let envelope_valid = envelope_result.is_ok() && recovery_valid.unwrap_or(true);
-    let failure = envelope_result
-        .err()
-        .or_else(|| (!schema_file_valid).then(|| "docs schema validation failed".to_owned()))
-        .or_else(|| {
-            (case.require_recovery && recovery_valid != Some(true)).then(|| {
-                "error.details.recovery did not satisfy structured recovery contract".to_owned()
-            })
-        });
+    let envelope_failure = envelope_result.err();
+    let envelope_valid = envelope_failure.is_none() && recovery_valid.unwrap_or(true);
+    let mut failures = Vec::new();
+    failures.extend(envelope_failure);
+    failures.extend(schema_failure);
+    failures.extend(stderr_failure);
+    if case.require_recovery && recovery_valid != Some(true) {
+        failures
+            .push("error.details.recovery did not satisfy structured recovery contract".to_owned());
+    }
+    let failure = (!failures.is_empty()).then(|| failures.join("; "));
 
     Ok((
         ObservedCase {
@@ -286,7 +357,7 @@ fn assess_case(case: &CommandCase) -> Result<(ObservedCase, Option<Value>), Stri
             enforcement: case.enforcement,
             exit_code: output.status.code(),
             stdout_json: true,
-            stderr_clean,
+            stderr_valid,
             schema,
             schema_file_valid,
             envelope_valid,
@@ -325,9 +396,11 @@ fn validate_envelope(case: &CommandCase, value: &Value, exit_code: Option<i32>) 
                     case.id
                 ));
             }
-            if let Some(degraded) = value.get("degraded") {
-                ensure_degraded_array(degraded, case.id)?;
-            }
+            let degraded = value
+                .get("degraded")
+                .ok_or_else(|| format!("{}: success envelope must include degraded", case.id))?;
+            ensure_degraded_array(degraded, case.id)?;
+            validate_pack_command_identity(case, value)?;
         }
         EnvelopeKind::Error => {
             if exit_code == Some(EXIT_SUCCESS) {
@@ -358,6 +431,46 @@ fn validate_envelope(case: &CommandCase, value: &Value, exit_code: Option<i32>) 
         }
     }
     Ok(())
+}
+
+fn validate_pack_command_identity(case: &CommandCase, value: &Value) -> TestResult {
+    if !matches!(case.id, "ENV-PACK" | "ENV-CONTEXT-ALIAS") {
+        return Ok(());
+    }
+    if string_at(value, "/data/command", case.id)? != "pack" {
+        return Err(format!(
+            "{}: canonical and alias pack responses must set data.command=pack",
+            case.id
+        ));
+    }
+
+    let root_has_alias = degradation_has_code(value, "/degraded", "deprecated_alias", case.id)?;
+    let data_has_alias =
+        degradation_has_code(value, "/data/degraded", "deprecated_alias", case.id)?;
+    match case.id {
+        "ENV-CONTEXT-ALIAS" if root_has_alias && data_has_alias => Ok(()),
+        "ENV-CONTEXT-ALIAS" => Err(format!(
+            "{}: deprecated context alias must mirror deprecated_alias in data.degraded and top-level degraded",
+            case.id
+        )),
+        "ENV-PACK" if !root_has_alias && !data_has_alias => Ok(()),
+        "ENV-PACK" => Err(format!(
+            "{}: canonical pack response must not emit deprecated_alias",
+            case.id
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn degradation_has_code(
+    value: &Value,
+    pointer: &str,
+    code: &str,
+    case_id: &str,
+) -> Result<bool, String> {
+    Ok(array_at(value, pointer, case_id)?
+        .iter()
+        .any(|entry| entry.get("code").and_then(Value::as_str) == Some(code)))
 }
 
 fn ensure_degraded_array(value: &Value, case_id: &str) -> TestResult {
@@ -405,10 +518,16 @@ fn case_catalog(cases: &[CommandCase]) -> Value {
 }
 
 fn scrub_arg(arg: &str) -> String {
-    let repo = env!("CARGO_MANIFEST_DIR");
+    scrub_arg_with_temp_root(arg, &std::env::temp_dir())
+}
+
+fn scrub_arg_with_temp_root(arg: &str, temp_root: &Path) -> String {
+    let arg_path = Path::new(arg);
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
     if arg.starts_with("mem_") {
         "[MEMORY_ID]".to_owned()
-    } else if arg.starts_with(repo)
+    } else if arg_path.starts_with(repo)
+        || arg_path.starts_with(temp_root)
         || arg.starts_with("/var/folders/")
         || arg.starts_with("/tmp/")
         || arg.starts_with("/private/tmp/")
@@ -417,6 +536,22 @@ fn scrub_arg(arg: &str) -> String {
     } else {
         arg.to_owned()
     }
+}
+
+#[test]
+fn scrub_arg_uses_runtime_temp_root_without_hiding_unrelated_paths() {
+    let runtime_temp = Path::new("/worker/project/.rch-tmp");
+    assert_eq!(
+        scrub_arg_with_temp_root(
+            "/worker/project/.rch-tmp/.tmp-response-envelope",
+            runtime_temp,
+        ),
+        "[WORKSPACE]"
+    );
+    assert_eq!(
+        scrub_arg_with_temp_root("/opt/ee/fixtures/config.toml", runtime_temp),
+        "/opt/ee/fixtures/config.toml"
+    );
 }
 
 fn expected_conformance_matrix(cases: &[CommandCase]) -> String {
@@ -485,7 +620,7 @@ fn recovery_cell(value: Option<bool>) -> &'static str {
 impl ObservedCase {
     fn conforms(&self) -> bool {
         self.stdout_json
-            && self.stderr_clean
+            && self.stderr_valid
             && self.schema_file_valid
             && self.envelope_valid
             && self.recovery_valid.unwrap_or(true)
@@ -561,13 +696,27 @@ fn cli_json_envelopes_conform_to_response_v2_and_error_v2() -> TestResult {
             Enforcement::Required,
         ),
         success_case(
-            "ENV-CONTEXT",
-            "context",
+            "ENV-PACK",
+            "pack",
             vec![
                 "--json".to_owned(),
                 "--workspace".to_owned(),
                 workspace.clone(),
                 "pack".to_owned(),
+                "conformance response envelope".to_owned(),
+                "--max-tokens".to_owned(),
+                "1200".to_owned(),
+            ],
+            Enforcement::Required,
+        ),
+        success_case(
+            "ENV-CONTEXT-ALIAS",
+            "context",
+            vec![
+                "--json".to_owned(),
+                "--workspace".to_owned(),
+                workspace.clone(),
+                "context".to_owned(),
                 "conformance response envelope".to_owned(),
                 "--max-tokens".to_owned(),
                 "1200".to_owned(),
@@ -610,8 +759,8 @@ fn cli_json_envelopes_conform_to_response_v2_and_error_v2() -> TestResult {
             Enforcement::Required,
         ),
         error_case(
-            "ENV-CONTEXT-STORAGE-ERROR",
-            "context missing database",
+            "ENV-PACK-STORAGE-ERROR",
+            "pack missing database",
             vec![
                 "--json".to_owned(),
                 "--workspace".to_owned(),
@@ -718,7 +867,7 @@ fn cli_json_envelopes_conform_to_response_v2_and_error_v2() -> TestResult {
             ],
             Enforcement::Required,
         ),
-        success_case(
+        success_case_with_stderr(
             "ENV-DIAG-STREAMS",
             "diag streams",
             vec![
@@ -729,6 +878,7 @@ fn cli_json_envelopes_conform_to_response_v2_and_error_v2() -> TestResult {
                 "streams".to_owned(),
             ],
             Enforcement::Required,
+            StderrExpectation::Exact(STREAMS_STDERR_PROBE),
         ),
         success_case(
             "ENV-DIAG-PLAN-CACHE",

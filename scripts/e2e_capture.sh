@@ -246,7 +246,7 @@ if capture_suggest_available; then
     assert_jq "$suggest_out" '.schema == "ee.response.v2" and .success == true' \
         "capture suggest succeeds for fixture session"
     assert_jq "$suggest_out" '
-        .data.schema == "ee.capture_suggestions.v1"
+        .data.schema == "ee.capture_suggestions.v2"
         and .data.readOnly == true
         and .data.durableMutation == false
         and .data.candidateCount == 1
@@ -280,7 +280,7 @@ if review_session_available; then
     assert_jq "$review_dry" '.schema == "ee.response.v2" and .success == true' \
         "review session dry-run succeeds"
     assert_jq "$review_dry" '
-        .data.schema == "ee.review.session.v1"
+        .data.schema == "ee.review.session.v2"
         and .data.dryRun == true
         and .data.durableMutation == false
         and (.data.candidateCount // 0) >= 1
@@ -294,7 +294,7 @@ if review_session_available; then
     assert_jq "$review_apply" '.schema == "ee.response.v2" and .success == true' \
         "review session propose succeeds"
     assert_jq "$review_apply" '
-        .data.schema == "ee.review.session.v1"
+        .data.schema == "ee.review.session.v2"
         and .data.durableMutation == true
         and (.data.candidateCount // 0) >= 1
     ' "review session writes only curation proposals"
@@ -426,7 +426,7 @@ if capture_suggest_available; then
     assert_jq "$rerun_out" '.schema == "ee.response.v2" and .success == true' \
         "capture suggest rerun succeeds"
     assert_jq "$rerun_out" '
-        .data.schema == "ee.capture_suggestions.v1"
+        .data.schema == "ee.capture_suggestions.v2"
         and .data.readOnly == true
         and .data.durableMutation == false
         and ((.data.suppressedCount // 0) >= 1 or (.data.candidateCount // 0) <= 1)

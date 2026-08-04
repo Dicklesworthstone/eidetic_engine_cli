@@ -31,16 +31,6 @@ expression: canonical_json(value)
       "sources": [
         "insights"
       ]
-    },
-    {
-      "code": "insights_section_unavailable",
-      "message": "One or more registered insights sections do not have DB-backed evidence yet.",
-      "repair": "Use sections with non-empty evidence, or implement the unavailable section builder.",
-      "severity": "info",
-      "sources": [
-        "kCore",
-        "kTruss"
-      ]
     }
   ],
   "explainCommand": null,
@@ -95,7 +85,6 @@ expression: canonical_json(value)
       "items": [],
       "name": "comprehensiveRules",
       "nextCommands": [
-        "ee rule list --workspace . --json",
         "ee curate candidates --workspace . --json"
       ],
       "summary": "Rule memories with broad provenance coverage and high reuse potential.",
@@ -136,7 +125,8 @@ expression: canonical_json(value)
       "items": [],
       "name": "kCore",
       "nextCommands": [
-        "ee insights --section kCore --workspace . --json"
+        "ee insights --section kCore --workspace . --json",
+        "ee graph k-core --workspace . --json"
       ],
       "summary": "Core-number membership for densely connected memory regions.",
       "title": "K-Core",
@@ -146,7 +136,8 @@ expression: canonical_json(value)
       "items": [],
       "name": "kTruss",
       "nextCommands": [
-        "ee insights --section kTruss --workspace . --json"
+        "ee insights --section kTruss --workspace . --json",
+        "ee health --robot-insights --workspace . --json"
       ],
       "summary": "Triangle-supported structural health findings for support subgraphs.",
       "title": "K-Truss",

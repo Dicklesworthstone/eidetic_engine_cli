@@ -2412,10 +2412,14 @@ pub fn render_insights_json(report: &InsightsReport) -> String {
     // Insights was the last v1 holdout — leaving it on v1 caused
     // `render_serve_sse_event` (src/serve.rs) to double-wrap insights
     // payloads under a fresh v2 envelope when streaming over SSE.
+    let degraded = crate::output::response_degraded_from_data(
+        &serde_json::json!({"degraded": &report.degraded_signals}),
+    );
     serde_json::json!({
         "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report,
+        "degraded": degraded,
     })
     .to_string()
 }

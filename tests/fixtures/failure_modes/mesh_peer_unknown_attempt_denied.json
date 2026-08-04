@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_peer_unknown_attempt_denied",
+  "introduced_by": {
+    "bead": "bd-1x87h",
+    "epic_letter": "SRR6.24"
+  },
+  "surfaces": [
+    "mesh peer unknown-attempt"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "An unknown-attempt check is run for a node key that is not an enrolled peer of the workspace, so the attempt is classified as denied and recorded for audit.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "run unknown-attempt with a node key that was never enrolled"
+    ],
+    "invocation": "ee mesh peer unknown-attempt <unknown-node-key> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_peer_unknown_attempt_denied",
+    "severity": "medium",
+    "message_contains": [
+      "unknown"
+    ],
+    "repair_contains": "ee mesh peer add"
+  }
+}

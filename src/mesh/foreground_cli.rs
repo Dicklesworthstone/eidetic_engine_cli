@@ -11,6 +11,8 @@ use asupersync::time::sleep as asupersync_sleep;
 use asupersync::{CancelReason, Cx, Outcome};
 use serde::{Deserialize, Serialize};
 
+use crate::config::MeshLane;
+use crate::core::memory_scope::{MeshOutboundPolicyDecisionInput, parse_mesh_lane};
 use crate::db::{
     MeshStorageStatus, StoredMeshImportLedgerEvent, StoredMeshPeer, StoredMeshPeerCursor,
 };
@@ -22,6 +24,7 @@ use crate::mesh::identity_change_guard::{
     CurrentIdentity, IdentityGuardVerdict, evaluate_identity_guard,
 };
 use crate::mesh::peer::{MESH_PEER_RECORD_SCHEMA_V1, MeshPeerRecord};
+use crate::mesh::policy::MeshPeerPolicyRegistry;
 use crate::mesh::repair_action_graph::{
     ActionKind, ExecutionContext, ExpectedOutcome, Priority, REPAIR_ACTION_GRAPH_SCHEMA_V1,
     RepairAction, RepairActionGraph, build_repair_action_graph,
@@ -246,6 +249,133 @@ pub struct MeshEventRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_attestation: Option<MeshExportPolicyAttestation>,
     pub imported_at: String,
+}
+
+/// Per-event verdict from applying a target peer's outbound policy to an
+/// export artifact. Included in the artifact so an operator can audit exactly
+/// which records were dropped or body-stripped and why.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshOutboundExportEventDecision {
+    pub event_id: String,
+    pub material_lane: String,
+    pub origin_workspace_id: String,
+    /// One of `allow`, `deny`, `reject`, `quarantine`.
+    pub action: String,
+    pub reason: String,
+    pub event_dropped: bool,
+    pub body_stripped: bool,
+}
+
+/// Result of applying outbound policy to export events: the retained (and where
+/// necessary body-stripped) events plus the per-event decision ledger.
+pub struct MeshOutboundExportFilter {
+    pub events: Vec<MeshEventRow>,
+    pub decisions: Vec<MeshOutboundExportEventDecision>,
+}
+
+fn mesh_export_redaction_is_redacted(redaction_class: &str) -> bool {
+    matches!(
+        redaction_class,
+        "redacted" | "body_redacted" | "strict" | "paranoid"
+    )
+}
+
+/// Apply `target_peer_id`'s outbound policy to export events, per record and
+/// lane. This is the first production caller of the outbound policy engine, so
+/// `[[mesh.peer_policies]]` becomes load-bearing here:
+///
+/// - An event whose own material lane is not permitted for export to that peer
+///   is dropped (its material never leaves).
+/// - A permitted non-body event that references a body is stripped of its body
+///   reference when the body lane is not permitted (a configured `body: deny`
+///   policy observably strips bodies from the artifact).
+/// - An event whose lane string is unparseable is dropped fail-closed.
+///
+/// Missing or ambiguous policy for an event denies it (the registry's outbound
+/// lookup is fail-closed), so an unknown peer strips everything rather than
+/// leaking.
+#[must_use]
+pub fn apply_outbound_export_policy(
+    events: Vec<MeshEventRow>,
+    registry: &MeshPeerPolicyRegistry,
+    local_workspace_id: &str,
+    target_peer_id: &str,
+) -> MeshOutboundExportFilter {
+    let mut kept = Vec::new();
+    let mut decisions = Vec::new();
+
+    for mut event in events {
+        let Some(lane) = parse_mesh_lane(&event.material_lane) else {
+            decisions.push(MeshOutboundExportEventDecision {
+                event_id: event.event_id.clone(),
+                material_lane: event.material_lane.clone(),
+                origin_workspace_id: event.origin_workspace_id.clone(),
+                action: "reject".to_owned(),
+                reason: "unparseable_material_lane".to_owned(),
+                event_dropped: true,
+                body_stripped: false,
+            });
+            continue;
+        };
+
+        let payload_is_redacted = mesh_export_redaction_is_redacted(&event.redaction_class);
+        let decision = registry.decide_outbound(&MeshOutboundPolicyDecisionInput {
+            local_workspace_id,
+            target_peer_id,
+            origin_workspace_id: &event.origin_workspace_id,
+            material_lane: lane,
+            payload_is_redacted,
+        });
+
+        if !decision.permits_payload_export() {
+            decisions.push(MeshOutboundExportEventDecision {
+                event_id: event.event_id.clone(),
+                material_lane: event.material_lane.clone(),
+                origin_workspace_id: event.origin_workspace_id.clone(),
+                action: decision.action.as_str().to_owned(),
+                reason: decision.reason.to_owned(),
+                event_dropped: true,
+                body_stripped: false,
+            });
+            continue;
+        }
+
+        // The event's own lane is exportable. If it references a body under a
+        // non-body lane, gate the body lane separately and strip on denial.
+        let mut body_stripped = false;
+        if event.body_cache_key.is_some() && lane != MeshLane::Body {
+            let body_permitted = registry
+                .decide_outbound(&MeshOutboundPolicyDecisionInput {
+                    local_workspace_id,
+                    target_peer_id,
+                    origin_workspace_id: &event.origin_workspace_id,
+                    material_lane: MeshLane::Body,
+                    payload_is_redacted,
+                })
+                .permits_payload_export();
+            if !body_permitted {
+                event.body_cache_key = None;
+                body_stripped = true;
+            }
+        }
+
+        decisions.push(MeshOutboundExportEventDecision {
+            event_id: event.event_id.clone(),
+            material_lane: event.material_lane.clone(),
+            origin_workspace_id: event.origin_workspace_id.clone(),
+            action: decision.action.as_str().to_owned(),
+            reason: decision.reason.to_owned(),
+            event_dropped: false,
+            body_stripped,
+        });
+        kept.push(event);
+    }
+
+    MeshOutboundExportFilter {
+        events: kept,
+        decisions,
+    }
 }
 
 impl From<&StoredMeshImportLedgerEvent> for MeshEventRow {
@@ -1991,16 +2121,155 @@ mod tests {
         MESH_AUTO_STATUS_SCHEMA_V1, MESH_EXPORT_ARTIFACT_SCHEMA_V1,
         MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE, MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE,
         MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE, MESH_WORKSPACE_UNINITIALIZED_CODE,
-        MeshAutoStatusSignals, MeshCliDegradation, MeshForegroundSnapshot,
+        MeshAutoStatusSignals, MeshCliDegradation, MeshEventRow, MeshForegroundSnapshot,
         MeshForegroundSyncPeerOutcome, MeshForegroundSyncRequest, MeshForegroundSyncTransport,
         MeshPeerRow, MeshStorageCounts, MeshSyncSupervisorOptions, REPAIR_ACTION_GRAPH_SCHEMA_V1,
-        auto_enrollment_status_for_snapshot, run_mesh_sync_supervisor_supervised,
-        run_mesh_sync_supervisor_supervised_with_transport,
+        apply_outbound_export_policy, auto_enrollment_status_for_snapshot,
+        run_mesh_sync_supervisor_supervised, run_mesh_sync_supervisor_supervised_with_transport,
     };
+    use crate::config::ConfigFile;
     use crate::mesh::peer::{
         MESH_PEER_RECORD_SCHEMA_V1, MeshPeerCapabilities, MeshPeerCapabilityProfile,
         MeshPeerEndpoint, MeshPeerHandshake, MeshPeerKey, MeshPeerRecord, MeshPeerState,
     };
+    use crate::mesh::policy::MeshPeerPolicyRegistry;
+
+    /// A `[[mesh.peer_policies]]` entry that allows metadata for `peer_target`
+    /// but denies the body lane — the canonical body:deny export policy.
+    fn body_deny_registry() -> MeshPeerPolicyRegistry {
+        let config = ConfigFile::parse(
+            r#"
+[[mesh.peer_policies]]
+policy_id = "pol_export"
+workspace_id = "wsp_local"
+peer_id = "peer_target"
+origin_workspace_ids = ["wsp_origin"]
+trust_lane = "peerAgent"
+import_trust_class = "agent_validated"
+default_action = "deny"
+
+[mesh.peer_policies.allowed_lanes]
+metadata = "allow"
+body = "deny"
+embedding = "deny"
+graph_link = "allow"
+revision_notice = "allow"
+curation_signal = "allow"
+
+[mesh.peer_policies.redaction]
+metadata = "share"
+preview = "redact"
+body = "deny"
+embedding = "deny"
+
+[mesh.peer_policies.body_fetch]
+allowed = false
+requires_consent = true
+max_bytes = 0
+"#,
+        )
+        .expect("body-deny policy config should parse");
+        MeshPeerPolicyRegistry::from_config(&config)
+    }
+
+    fn export_event(event_id: &str, lane: &str, body_key: Option<&str>) -> MeshEventRow {
+        MeshEventRow {
+            event_id: event_id.to_owned(),
+            origin_node_id: "node_origin".to_owned(),
+            origin_workspace_id: "wsp_origin".to_owned(),
+            producer_peer_id: None,
+            seq: 1,
+            prev_event_hash: None,
+            event_hash: "blake3:evhash".to_owned(),
+            event_kind: "create".to_owned(),
+            logical_memory_id: "mem_x".to_owned(),
+            content_hash: "blake3:content".to_owned(),
+            material_lane: lane.to_owned(),
+            redaction_class: "none".to_owned(),
+            trust_lane: "peerAgent".to_owned(),
+            import_decision: "allow".to_owned(),
+            local_memory_id: None,
+            body_cache_key: body_key.map(str::to_owned),
+            policy_failure_surface_json: None,
+            policy_decision_json: None,
+            event_json: "{}".to_owned(),
+            policy_attestation: None,
+            imported_at: "2026-07-31T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn body_deny_policy_drops_body_events_and_strips_body_refs() {
+        let events = vec![
+            export_event("meta_no_body", "metadata", None),
+            export_event("meta_with_body", "metadata", Some("bodykey-1")),
+            export_event("pure_body", "body", Some("bodykey-2")),
+        ];
+        let registry = body_deny_registry();
+        let filtered = apply_outbound_export_policy(events, &registry, "wsp_local", "peer_target");
+
+        // The body-lane event is dropped; both metadata events are kept.
+        let kept_ids: Vec<&str> = filtered
+            .events
+            .iter()
+            .map(|event| event.event_id.as_str())
+            .collect();
+        assert_eq!(kept_ids, vec!["meta_no_body", "meta_with_body"]);
+
+        // The metadata event that referenced a body has it stripped.
+        let with_body = filtered
+            .events
+            .iter()
+            .find(|event| event.event_id == "meta_with_body")
+            .expect("kept metadata event");
+        assert!(
+            with_body.body_cache_key.is_none(),
+            "body ref must be stripped"
+        );
+
+        // The decision ledger records the drop and the strip.
+        let dropped = filtered
+            .decisions
+            .iter()
+            .find(|decision| decision.event_id == "pure_body")
+            .expect("pure_body decision");
+        assert!(dropped.event_dropped);
+        let stripped = filtered
+            .decisions
+            .iter()
+            .find(|decision| decision.event_id == "meta_with_body")
+            .expect("meta_with_body decision");
+        assert!(stripped.body_stripped && !stripped.event_dropped);
+    }
+
+    #[test]
+    fn unknown_peer_denies_everything_fail_closed() {
+        let events = vec![export_event("meta", "metadata", None)];
+        let registry = body_deny_registry();
+        // No policy matches peer_other -> outbound lookup is fail-closed.
+        let filtered = apply_outbound_export_policy(events, &registry, "wsp_local", "peer_other");
+        assert!(filtered.events.is_empty());
+        assert!(filtered.decisions[0].event_dropped);
+    }
+
+    #[test]
+    fn unparseable_lane_is_dropped_fail_closed() {
+        let events = vec![export_event("weird", "bogus_lane", None)];
+        let registry = body_deny_registry();
+        let filtered = apply_outbound_export_policy(events, &registry, "wsp_local", "peer_target");
+        assert!(filtered.events.is_empty());
+        assert_eq!(filtered.decisions[0].reason, "unparseable_material_lane");
+    }
+
+    #[test]
+    fn allowed_lane_without_body_is_kept_unchanged() {
+        let events = vec![export_event("graph", "graphLink", None)];
+        let registry = body_deny_registry();
+        let filtered = apply_outbound_export_policy(events, &registry, "wsp_local", "peer_target");
+        assert_eq!(filtered.events.len(), 1);
+        assert!(!filtered.decisions[0].event_dropped);
+        assert!(!filtered.decisions[0].body_stripped);
+    }
     use crate::mesh::tailscale_autodiscovery::{
         TAILSCALE_AUTODISCOVERY_SCHEMA_V1, TailscaleAutodiscoveryReport,
     };
@@ -2465,9 +2734,14 @@ mod tests {
         assert!(!handle.is_finished());
 
         let reason = CancelReason::user("mesh sync cancellation test");
-        for (cancelled_task, priority) in lab.state.cancel_request(root, &reason, None) {
-            lab.scheduler.lock().schedule(cancelled_task, priority);
+        let (tasks_to_cancel, cancellation_wakes) =
+            lab.state.cancel_request(root, &reason, None).into_parts();
+        for (cancelled_task, priority) in tasks_to_cancel {
+            lab.scheduler
+                .lock()
+                .schedule_cancel(cancelled_task, priority);
         }
+        cancellation_wakes.dispatch();
         lab.scheduler.lock().schedule(task_id, 0);
         lab.advance_time(1_000_000_000);
         lab.run_until_quiescent();

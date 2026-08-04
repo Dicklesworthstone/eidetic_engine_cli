@@ -84,6 +84,47 @@
       "maxItems": 32
     }
   },
+  "field_presets": {
+    "minimal": [
+      "schema",
+      "workspaceFingerprint",
+      "source",
+      "redactionStatus",
+      "corpusProfile",
+      "indexPosture",
+      "degradedCodes"
+    ],
+    "summary": [
+      "schema",
+      "generatedAt",
+      "workspaceFingerprint",
+      "source",
+      "redactionStatus",
+      "corpusProfile",
+      "storePosture",
+      "pageCacheWalPosture",
+      "indexPosture",
+      "commandSlos",
+      "degradedCodes",
+      "recoveryActions"
+    ],
+    "standard": [
+      "schema",
+      "generatedAt",
+      "workspaceFingerprint",
+      "source",
+      "redactionStatus",
+      "corpusProfile",
+      "storePosture",
+      "pageCacheWalPosture",
+      "indexPosture",
+      "commandSlos",
+      "degradedCodes",
+      "recoveryActions",
+      "provenance"
+    ],
+    "full": ["*"]
+  },
   "x-ee-status": {
     "shipped": true,
     "tracking_bead": "bd-ssoco.1",

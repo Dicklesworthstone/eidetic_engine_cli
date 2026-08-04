@@ -3,9 +3,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use ee::core::index::{INDEX_METADATA_SCHEMA_V2, expected_index_corpus_revision};
 use ee::core::model::build_model_lifecycle_report_for_workspace;
 use ee::core::recall::{RecallQuery, run_recall};
-use ee::db::{CreateMemoryInput, CreateModelRegistryInput, CreateWorkspaceInput, DbConnection};
+use ee::db::{
+    CreateMemoryInput, CreateModelRegistryInput, CreateWorkspaceInput, DbConnection,
+    EVIDENCE_SECURITY_POLICY_EPOCH,
+};
 use ee::models::model_registry::{
     EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider, ModelPurpose, ModelRegistryStatus,
 };
@@ -103,8 +107,23 @@ fn write_index_metadata(workspace_path: &Path, stored_dimension: u32) -> TestRes
     write_index_metadata_value(
         workspace_path,
         serde_json::json!({
-            "schema": "ee.index_metadata.v1",
+            "schema": INDEX_METADATA_SCHEMA_V2,
             "sourceGeneration": 0,
+            "corpusRevision": expected_index_corpus_revision().as_str(),
+            "evidenceSecurityPolicyEpoch": EVIDENCE_SECURITY_POLICY_EPOCH,
+            "documentCount": 0,
+            "documentCounts": {
+                "memories": 0,
+                "sessions": 0,
+                "artifacts": 0,
+                "rules": 0,
+                "evidence": 0
+            },
+            "tierDocumentCounts": {
+                "fast": 0,
+                "quality": null,
+                "lexical": cfg!(feature = "lexical-bm25").then_some(0)
+            },
             "lastRebuildAt": "2026-01-01T00:00:00Z",
             "storedDimension": stored_dimension,
             "storedDistanceMetric": "cosine"
@@ -203,8 +222,23 @@ fn write_ready_semantic_index(fixture: &WorkspaceFixture, model_hash: &str) -> T
     write_index_metadata_value(
         &fixture.workspace_path,
         serde_json::json!({
-            "schema": "ee.index_metadata.v1",
+            "schema": INDEX_METADATA_SCHEMA_V2,
             "sourceGeneration": source_generation,
+            "corpusRevision": expected_index_corpus_revision().as_str(),
+            "evidenceSecurityPolicyEpoch": EVIDENCE_SECURITY_POLICY_EPOCH,
+            "documentCount": 0,
+            "documentCounts": {
+                "memories": 0,
+                "sessions": 0,
+                "artifacts": 0,
+                "rules": 0,
+                "evidence": 0
+            },
+            "tierDocumentCounts": {
+                "fast": 0,
+                "quality": null,
+                "lexical": cfg!(feature = "lexical-bm25").then_some(0)
+            },
             "lastRebuildAt": "2026-06-15T00:00:01Z",
             "storedModelId": OFFLINE_MODEL_ID,
             "storedModelRevision": OFFLINE_MODEL_REVISION,

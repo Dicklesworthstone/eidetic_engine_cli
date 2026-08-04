@@ -4,7 +4,7 @@
 # Durable, local-first, explainable memory for coding agents.
 #
 # One-liner install (cache-busted):
-#   curl -fsSL "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest/download/install.sh?$(date +%s)" | bash
+#   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash
 #
 # Pinned version:
 #   curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.sh | EE_VERSION=v0.1.0 bash
@@ -13,7 +13,7 @@
 #   --version vX.Y.Z   Install specific version (default: latest)
 #   --dest DIR         Install to DIR (default: ~/.local/bin)
 #   --system           Install to /usr/local/bin (requires sudo)
-#   --easy-mode        Auto-update PATH in ~/.zshrc/~/.bashrc
+#   --easy-mode        Persist PATH in the active zsh/bash startup file
 #   --verify           Run `ee --version` and `ee doctor --json` self-test
 #   --from-source      Build from source instead of downloading binary
 #   --quiet, -q        Suppress non-error output
@@ -38,6 +38,10 @@
 set -euo pipefail
 umask 022
 shopt -s lastpipe 2>/dev/null || true
+
+# Apple still ships Bash 3.2, which treats an empty "${array[@]}" expansion
+# as an unbound variable under `set -u`. Every expansion of a possibly empty
+# array in this installer must use "${array[@]+"${array[@]}"}" instead.
 
 # ───────────────────────────────────────────────────────────────────────────
 # Defaults & CLI state
@@ -112,8 +116,6 @@ h3VXjvm63PcMNKFcvqq39g3UIGwQMLdNPwkiPHM4lqE2vrQOoAHcRIXf4Q==
 verify_blob_against_anchors() {
   local bundle="$1" payload="$2"
 
-  SIGSTORE_VERIFIED_VIA=""
-
   # Path 1..N: keyless identity-bound certs (CI builds + device-flow).
   local i
   for i in "${!CERT_IDENTITY_REGEXPS[@]}"; do
@@ -123,7 +125,6 @@ verify_blob_against_anchors() {
           --certificate-identity-regexp "${CERT_IDENTITY_REGEXPS[$i]}" \
           --certificate-oidc-issuer "${CERT_OIDC_ISSUERS[$i]}" \
           "$payload" >/dev/null 2>&1; then
-      SIGSTORE_VERIFIED_VIA="keyless:${i}"
       return 0
     fi
   done
@@ -141,7 +142,6 @@ verify_blob_against_anchors() {
         --insecure-ignore-tlog=false \
         --key "$pubkey_file" \
         "$payload" >/dev/null 2>&1; then
-    SIGSTORE_VERIFIED_VIA="pinned-key"
     info "Sigstore verified via pinned-key fallback for $(basename "$payload")"
     return 0
   fi
@@ -153,7 +153,6 @@ EASY=0
 QUIET=0
 VERIFY=0
 FROM_SOURCE=0
-SYSTEM=0
 NO_GUM=0
 NO_CONFIGURE=0
 NO_CHECKSUM="${EE_SKIP_VERIFY:-0}"
@@ -234,7 +233,7 @@ draw_box() {
   esc=$(printf '\033')
   local strip_ansi_sed="s/${esc}\\[[0-9;]*m//g"
 
-  for line in "${lines[@]}"; do
+  for line in "${lines[@]+"${lines[@]}"}"; do
     local stripped
     stripped=$(printf '%b' "$line" | LC_ALL=C sed "$strip_ansi_sed")
     local len=${#stripped}
@@ -251,7 +250,7 @@ draw_box() {
   done
 
   printf "\033[%sm╔%s╗\033[0m\n" "$color" "$border"
-  for line in "${lines[@]}"; do
+  for line in "${lines[@]+"${lines[@]}"}"; do
     local stripped
     stripped=$(printf '%b' "$line" | LC_ALL=C sed "$strip_ansi_sed")
     local len=${#stripped}
@@ -293,12 +292,16 @@ setup_proxy() {
 # largest expected tarball download on a slow link without letting a stuck
 # server pin the installer past a normal operator's patience window.
 ee_curl() {
+  # Stock macOS ships Bash 3.2, where expanding an empty array under
+  # `set -u` raises "unbound variable". The `+word` form expands to zero
+  # arguments when PROXY_ARGS is empty and preserves both proxy arguments
+  # when it is populated.
   curl -fsSL \
     --connect-timeout 15 \
     --max-time 600 \
     --retry 2 \
     --retry-delay 1 \
-    "${PROXY_ARGS[@]}" "$@"
+    "${PROXY_ARGS[@]+"${PROXY_ARGS[@]}"}" "$@"
 }
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -316,7 +319,7 @@ Options:
   --version vX.Y.Z   Install specific version (default: latest GitHub release)
   --dest DIR         Install to DIR (default: ~/.local/bin)
   --system           Install to /usr/local/bin (requires write permission)
-  --easy-mode        Auto-update PATH in ~/.zshrc and ~/.bashrc
+  --easy-mode        Persist PATH in zsh/bash startup files, creating the active one if absent
   --verify           Run \`ee --version\` and \`ee doctor --json\` after install
   --artifact-url URL Override the tarball download URL
   --checksum HEX     Use this SHA256 instead of fetching <url>.sha256
@@ -357,7 +360,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --version) require_option_value "$1" "${2:-}"; VERSION="$2"; shift 2;;
     --dest) require_option_value "$1" "${2:-}"; DEST="$2"; shift 2;;
-    --system) SYSTEM=1; DEST="/usr/local/bin"; shift;;
+    --system) DEST="/usr/local/bin"; shift;;
     --easy-mode) EASY=1; shift;;
     --verify) VERIFY=1; shift;;
     --artifact-url) require_option_value "$1" "${2:-}"; ARTIFACT_URL="$2"; shift 2;;
@@ -527,7 +530,7 @@ print_detected_agents() {
     echo ""
     echo -e "\033[1;39mDetected AI Coding Agent${plural}:\033[0m"
   fi
-  for agent in "${DETECTED_AGENTS[@]}"; do
+  for agent in "${DETECTED_AGENTS[@]+"${DETECTED_AGENTS[@]}"}"; do
     case "$agent" in
       claude-code)        render "Claude Code"        "$CLAUDE_VERSION" ;;
       codex-cli)          render "Codex CLI"          "$CODEX_VERSION" ;;
@@ -543,7 +546,7 @@ print_detected_agents() {
 
 is_agent_detected() {
   local target="$1"
-  for agent in "${DETECTED_AGENTS[@]}"; do
+  for agent in "${DETECTED_AGENTS[@]+"${DETECTED_AGENTS[@]}"}"; do
     [[ "$agent" == "$target" ]] && return 0
   done
   return 1
@@ -556,10 +559,13 @@ is_agent_detected() {
 OS=""
 ARCH=""
 TARGET=""
+FALLBACK_TARGET=""
 
 detect_platform() {
-  OS=$(uname -s | tr 'A-Z' 'a-z')
+  OS=$(uname -s | tr '[:upper:]' '[:lower:]')
   ARCH=$(uname -m)
+  TARGET=""
+  FALLBACK_TARGET=""
   case "$ARCH" in
     x86_64|amd64) ARCH="x86_64" ;;
     arm64|aarch64) ARCH="aarch64" ;;
@@ -573,9 +579,12 @@ detect_platform() {
 
   case "${OS}-${ARCH}" in
     linux-x86_64)
-      # Release pipeline builds both gnu and musl; musl is statically linked
-      # and works on every glibc generation we care about. Prefer musl.
+      # Prefer the portable musl artifact, but retain the glibc build as a
+      # compatible release fallback. Some historical releases (including
+      # v0.12.0) shipped only the GNU archive; those installs must not turn
+      # into an unexpected local Rust build.
       TARGET="x86_64-unknown-linux-musl"
+      FALLBACK_TARGET="x86_64-unknown-linux-gnu"
       ;;
     linux-aarch64)
       # Release pipeline ships only gnu for aarch64-linux.
@@ -652,6 +661,39 @@ set_artifact_url() {
   URL="https://github.com/${OWNER}/${REPO}/releases/download/${VERSION}/${TAR}"
 }
 
+select_compatible_fallback_target() {
+  [ -n "$FALLBACK_TARGET" ] || return 1
+
+  # A caller-provided URL or checksum is bound to one exact artifact. Never
+  # silently retarget those trust inputs to a different release archive.
+  if [ -n "$ARTIFACT_URL" ] || [ -n "$CHECKSUM" ] || [ -n "$CHECKSUM_URL" ]; then
+    return 1
+  fi
+
+  local failed_target="$TARGET"
+  TARGET="$FALLBACK_TARGET"
+  FALLBACK_TARGET=""
+  set_artifact_url
+  warn "Release artifact for ${failed_target} was unavailable; trying compatible ${TARGET} artifact"
+  return 0
+}
+
+download_release_artifact() {
+  info "Downloading $URL"
+  if ee_curl "$URL" -o "$TMP/$TAR"; then
+    return 0
+  fi
+
+  if select_compatible_fallback_target; then
+    info "Downloading $URL"
+    if ee_curl "$URL" -o "$TMP/$TAR"; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 # ───────────────────────────────────────────────────────────────────────────
 # Preflight checks
 # ───────────────────────────────────────────────────────────────────────────
@@ -702,7 +744,10 @@ check_network() {
   [ "$FROM_SOURCE" -eq 1 ] && return 0
   [ -z "$URL" ] && return 0
   command -v curl >/dev/null 2>&1 || { warn "curl not found; skipping network check"; return 0; }
-  if ! ee_curl --connect-timeout 3 --max-time 5 -o /dev/null "$URL" 2>/dev/null; then
+  # Probe a single byte rather than downloading the full release archive once
+  # here and then again during installation. GitHub Release assets honor range
+  # requests; mirrors that ignore the range still remain bounded by max-time.
+  if ! ee_curl --connect-timeout 3 --max-time 5 --range 0-0 -o /dev/null "$URL" 2>/dev/null; then
     warn "Network check failed for $URL — continuing; download may fail"
   fi
 }
@@ -722,12 +767,16 @@ preflight_checks() {
 check_installed_version() {
   local target="$1"
   [ -x "$DEST/$BINARY" ] || return 1
+  local version_output=""
   local installed
+  if ! version_output=$("$DEST/$BINARY" --version 2>/dev/null); then
+    return 1
+  fi
   # BSD sed (macOS) treats `\+` as literal `+`, not the GNU "one or more"
   # quantifier — so the prior regex silently failed to match on macOS,
   # making check_installed_version always return 1 (broken short-circuit,
   # benign re-install). Use portable POSIX BRE: `[[:space:]][[:space:]]*`.
-  installed=$("$DEST/$BINARY" --version 2>/dev/null | head -1 \
+  installed=$(printf '%s\n' "$version_output" | head -1 \
     | sed -n -e 's/.*ee[[:space:]][[:space:]]*v\{0,1\}\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
              -e 's/^[[:space:]]*v\{0,1\}\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)[[:space:]]*$/\1/p' \
     | head -1)
@@ -742,33 +791,62 @@ check_installed_version() {
 # ───────────────────────────────────────────────────────────────────────────
 
 maybe_add_path() {
+  local path_active=0
   case ":$PATH:" in
-    *:"$DEST":*) return 0 ;;
-    *)
-      if [ "$EASY" -eq 1 ]; then
-        local appended=0
-        local rc_existed=0
-        for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
-          if [ -e "$rc" ] && [ -w "$rc" ]; then
-            rc_existed=1
-            if ! grep -F "$DEST" "$rc" >/dev/null 2>&1; then
-              echo "export PATH=\"$DEST:\$PATH\"" >> "$rc"
-              appended=1
-            fi
-          fi
-        done
-        if [ "$appended" -eq 1 ]; then
-          warn "PATH updated in ~/.zshrc/.bashrc — restart your shell to use $BINARY"
-        elif [ "$rc_existed" -eq 1 ]; then
-          info "PATH already configured in ~/.zshrc/.bashrc — restart your shell to use $BINARY"
-        else
-          warn "Add $DEST to PATH to use $BINARY (no writable ~/.zshrc or ~/.bashrc found)"
-        fi
-      else
-        warn "Add $DEST to PATH to use $BINARY (or re-run with --easy-mode to auto-update)"
-      fi
-      ;;
+    *:"$DEST":*) path_active=1 ;;
   esac
+
+  if [ "$EASY" -ne 1 ]; then
+    if [ "$path_active" -eq 0 ]; then
+      warn "Add $DEST to PATH to use $BINARY (or re-run with --easy-mode to auto-update)"
+    fi
+    return 0
+  fi
+
+  # `--easy-mode` promises persistent integration, so do not return merely
+  # because this process inherited DEST on PATH. A transient PATH entry must
+  # not hide a missing startup-file entry on a matching-version repair run.
+  local preferred_rc=""
+  case "${SHELL:-}" in
+    */zsh) preferred_rc="$HOME/.zshrc" ;;
+    */bash) preferred_rc="$HOME/.bashrc" ;;
+  esac
+
+  # Brand-new macOS/Linux accounts may not have an rc file yet. Create only
+  # the active supported shell's file, refuse dangling symlinks, and use a
+  # private creation mode. Existing writable zsh/bash files are still kept in
+  # sync for users who switch between the two shells.
+  if [ -n "$preferred_rc" ] && [ ! -e "$preferred_rc" ] && [ ! -L "$preferred_rc" ] \
+     && [ -d "$HOME" ] && [ -w "$HOME" ]; then
+    (umask 077; : > "$preferred_rc") 2>/dev/null || true
+  fi
+
+  local appended=0
+  local configured=0
+  local path_line="export PATH=\"$DEST:\$PATH\""
+  local rc
+  for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    if [ -f "$rc" ] && [ -w "$rc" ]; then
+      if grep -F "$DEST" "$rc" >/dev/null 2>&1; then
+        configured=1
+      elif printf '%s\n' "$path_line" >> "$rc"; then
+        appended=1
+        configured=1
+      else
+        warn "Could not update PATH in $rc"
+      fi
+    fi
+  done
+
+  if [ "$appended" -eq 1 ]; then
+    warn "PATH updated in shell startup files — restart your shell to use $BINARY"
+  elif [ "$configured" -eq 1 ]; then
+    info "PATH already configured in shell startup files — restart your shell to use $BINARY"
+  elif [ "$path_active" -eq 1 ]; then
+    warn "$DEST is active in this shell, but no writable zsh/bash startup file was available to persist it"
+  else
+    warn "Add $DEST to PATH to use $BINARY (no writable zsh/bash startup file was available)"
+  fi
 }
 
 detect_default_shell() {
@@ -821,6 +899,35 @@ maybe_install_completions() {
     return 0
   fi
   install_completions_for_shell "$shell" || true
+}
+
+# `--verify` validates the executable itself strictly while keeping doctor
+# posture advisory. A fresh database or unavailable optional capability can
+# make doctor non-zero without meaning the installed binary is unusable.
+run_install_self_test() {
+  info "Running self-test"
+
+  local version_output=""
+  local version_status=0
+  if version_output=$("$DEST/$BINARY" --version 2>&1); then
+    version_status=0
+  else
+    version_status=$?
+    err "$BINARY --version failed with exit code $version_status"
+    [ -n "$version_output" ] && printf '%s\n' "$version_output" >&2
+    return 1
+  fi
+  if [ -z "$version_output" ]; then
+    err "$BINARY --version returned no output"
+    return 1
+  fi
+  printf '%s\n' "$version_output"
+
+  if "$DEST/$BINARY" doctor --json >/dev/null 2>&1; then
+    ok "ee doctor: pass"
+  else
+    warn "ee doctor reported issues — run 'ee doctor --json | jq .' to inspect"
+  fi
 }
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -1012,7 +1119,7 @@ PY
 # ───────────────────────────────────────────────────────────────────────────
 
 semantic_smoke_mode() {
-  printf '%s' "${EE_INSTALL_SEMANTIC_SMOKE:-0}" | tr 'A-Z' 'a-z'
+  printf '%s' "${EE_INSTALL_SEMANTIC_SMOKE:-0}" | tr '[:upper:]' '[:lower:]'
 }
 
 semantic_smoke_enabled() {
@@ -1088,6 +1195,43 @@ run_semantic_first_use_smoke() {
 # Build-from-source helpers
 # ───────────────────────────────────────────────────────────────────────────
 
+clone_source_tree() {
+  local destination="$1"
+  local repository_url="https://github.com/${OWNER}/${REPO}.git"
+
+  if [ -z "$VERSION" ]; then
+    git clone --depth 1 "$repository_url" "$destination"
+    return
+  fi
+
+  # A requested release is an immutable identity boundary. Never turn a
+  # misspelled/missing tag into a successful build of the default branch:
+  # callers would believe they installed VERSION while receiving unrelated
+  # code. Clone only that ref, then prove both that it is a tag and that HEAD
+  # resolves to the tag's commit (including annotated tags).
+  if ! git clone --depth 1 --branch "$VERSION" --single-branch \
+        "$repository_url" "$destination"; then
+    err "Could not clone requested release tag $VERSION."
+    err "Refusing to build a different revision; verify the version and try again."
+    return 1
+  fi
+
+  local requested_commit=""
+  local head_commit=""
+  if ! requested_commit=$(git -C "$destination" rev-parse --verify \
+        "refs/tags/${VERSION}^{commit}" 2>/dev/null) || [ -z "$requested_commit" ]; then
+    err "Requested source revision $VERSION is not an exact release tag."
+    err "Refusing to build a branch or different revision."
+    return 1
+  fi
+  if ! head_commit=$(git -C "$destination" rev-parse --verify HEAD 2>/dev/null) \
+     || [ -z "$head_commit" ] || [ "$head_commit" != "$requested_commit" ]; then
+    err "Source checkout for $VERSION does not match its release tag."
+    err "Refusing to build an unverified revision."
+    return 1
+  fi
+}
+
 ensure_rust() {
   if [ "${RUSTUP_INIT_SKIP:-0}" != "0" ]; then
     info "Skipping rustup install (RUSTUP_INIT_SKIP set)"
@@ -1130,8 +1274,8 @@ select_extracted_binary() {
 
   if [ "${#executable_candidates[@]}" -gt 1 ]; then
     err "Archive contains multiple executable '$BINARY' candidates:"
-    for candidate in "${executable_candidates[@]}"; do
-      err "  - ${candidate#$TMP/extract/}"
+    for candidate in "${executable_candidates[@]+"${executable_candidates[@]}"}"; do
+      err "  - ${candidate#"$TMP"/extract/}"
     done
     err "Refusing to choose by filesystem traversal order."
     return 1
@@ -1150,21 +1294,21 @@ select_extracted_binary() {
 
   if [ "${#all_candidates[@]}" -gt 1 ]; then
     err "Archive contains multiple matching '$BINARY' candidates without owner-execute mode:"
-    for candidate in "${all_candidates[@]}"; do
-      err "  - ${candidate#$TMP/extract/}"
+    for candidate in "${all_candidates[@]+"${all_candidates[@]}"}"; do
+      err "  - ${candidate#"$TMP"/extract/}"
     done
     err "Refusing to choose by filesystem traversal order."
     return 1
   fi
 
   BIN="${all_candidates[0]}"
-  warn "Extracted '$BINARY' lacks owner-execute mode; applying chmod u+x to ${BIN#$TMP/extract/}"
+  warn "Extracted '$BINARY' lacks owner-execute mode; applying chmod u+x to ${BIN#"$TMP"/extract/}"
   if ! chmod u+x "$BIN" 2>/dev/null; then
-    err "Binary '$BINARY' found but chmod u+x failed: ${BIN#$TMP/extract/}"
+    err "Binary '$BINARY' found but chmod u+x failed: ${BIN#"$TMP"/extract/}"
     return 1
   fi
   if [ ! -x "$BIN" ]; then
-    err "Binary '$BINARY' found but is still not executable after chmod: ${BIN#$TMP/extract/}"
+    err "Binary '$BINARY' found but is still not executable after chmod: ${BIN#"$TMP"/extract/}"
     return 1
   fi
 }
@@ -1213,12 +1357,17 @@ mkdir -p "$DEST" 2>/dev/null || true
 
 preflight_checks
 
-# Already-installed short-circuit (still configure shell completions).
+# Already-installed short-circuit. Acquisition and locking stay skipped, but
+# idempotent shell integration and explicitly requested verification still run.
 if [ "$FROM_SOURCE" -eq 0 ] && [ "$FORCE_INSTALL" -eq 0 ] && [ -n "$VERSION" ] \
    && check_installed_version "$VERSION"; then
   ok "$PROJECT_LABEL $VERSION is already installed at $DEST/$BINARY"
   info "Use --force to reinstall"
+  maybe_add_path
   maybe_install_completions
+  if [ "$VERIFY" -eq 1 ]; then
+    run_install_self_test || exit 1
+  fi
   exit 0
 fi
 
@@ -1281,10 +1430,13 @@ TMP=$(mktemp -d)
 # ───────────────────────────────────────────────────────────────────────────
 
 if [ "$FROM_SOURCE" -eq 0 ]; then
-  info "Downloading $URL"
-  if ! ee_curl "$URL" -o "$TMP/$TAR"; then
+  if ! download_release_artifact; then
     if [ "$REQUIRE_PROVENANCE" = "1" ]; then
       err "Artifact download failed and --require-provenance forbids source fallback"
+      exit 1
+    fi
+    if [ -n "$ARTIFACT_URL" ] || [ -n "$CHECKSUM" ] || [ -n "$CHECKSUM_URL" ]; then
+      err "Artifact download failed; explicit artifact/checksum inputs forbid automatic retargeting or source fallback"
       exit 1
     fi
     warn "Artifact download failed; falling back to build-from-source"
@@ -1300,19 +1452,12 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
     exit 1
   fi
 
-  # First attempt: pinned to the requested tag/branch if any. If that fails
-  # (tag doesn't exist, partial clone left a non-empty dest dir, etc.),
-  # remove the dest and retry without --branch. Git refuses to clone into a
-  # non-empty directory, so the cleanup is required for the fallback to
-  # succeed — the previous version silently lost the fallback when the first
-  # clone partially populated $TMP/src.
-  branch_args=""
-  [ -n "$VERSION" ] && branch_args="--branch $VERSION"
-  # shellcheck disable=SC2086
-  if ! git clone --depth 1 $branch_args "https://github.com/${OWNER}/${REPO}.git" "$TMP/src" 2>/dev/null; then
-    rm -rf "$TMP/src"
-    git clone --depth 1 "https://github.com/${OWNER}/${REPO}.git" "$TMP/src"
+  if ! clone_source_tree "$TMP/src"; then
+    exit 1
   fi
+
+  info "Checking out locked Franken-stack source dependencies"
+  "$TMP/src/scripts/checkout-franken-stack.sh" "$TMP"
 
   (cd "$TMP/src" && run_with_spinner "Building $BINARY (release profile)" cargo build --release)
 
@@ -1393,17 +1538,7 @@ maybe_add_path
 maybe_install_completions
 
 if [ "$VERIFY" -eq 1 ]; then
-  info "Running self-test"
-  if "$DEST/$BINARY" --version >/dev/null 2>&1; then
-    "$DEST/$BINARY" --version || true
-  else
-    warn "$BINARY --version returned non-zero"
-  fi
-  if "$DEST/$BINARY" doctor --json >/dev/null 2>&1; then
-    ok "ee doctor: pass"
-  else
-    warn "ee doctor reported issues — run 'ee doctor --json | jq .' to inspect"
-  fi
+  run_install_self_test || exit 1
 fi
 
 run_semantic_first_use_smoke "$DEST/$BINARY"
@@ -1448,7 +1583,7 @@ Before risky shell commands:
   ee preflight check --cmd \"<shell command>\" --workspace . --json
 
 Before substantial work:
-  ee context \"<task>\" --workspace . --max-tokens 4000 --format markdown
+  ee pack \"<task>\" --workspace . --max-tokens 4000 --format markdown
 
 Or wire as a PreToolUse hook (writes a shell snippet to stdout):
   $DEST/$BINARY hook preflight-shell --shell bash"
@@ -1458,7 +1593,7 @@ Or wire as a PreToolUse hook (writes a shell snippet to stdout):
   if is_agent_detected "codex-cli"; then
     print_integration_snippet "Codex CLI (~/.codex/AGENTS.md)" "\
 Before substantial work:
-  ee context \"<task>\" --workspace . --json
+  ee pack \"<task>\" --workspace . --json
 
 Optional risk guard (call from codex shell hooks):
   ee preflight check --cmd \"<command>\" --workspace . --json"
@@ -1470,7 +1605,7 @@ Optional risk guard (call from codex shell hooks):
 For BeforeTool integration, see the ee docs:
   $DEST/$BINARY hook preflight-shell --shell bash
 For context packs:
-  ee context \"<task>\" --workspace . --json"
+  ee pack \"<task>\" --workspace . --json"
     echo ""
   fi
 
@@ -1487,7 +1622,7 @@ docs/agent-ux/auto_enrollment_onboarding.md for current guidance."
     print_integration_snippet "Aider / Continue / Copilot CLI" "\
 These harnesses don't have a documented PreToolUse hook surface for ee yet.
 You can still call ee directly from your prompt setup:
-  ee context \"<task>\" --workspace . --json"
+  ee pack \"<task>\" --workspace . --json"
     echo ""
   fi
 }
@@ -1511,7 +1646,7 @@ if [ "$HAS_GUM" -eq 1 ] && [ "$NO_GUM" -eq 0 ]; then
     echo ""
     gum style --foreground 245 "Get started:"
     gum style --foreground 39  "  ee init --workspace ."
-    gum style --foreground 39  "  ee context \"<task>\" --workspace . --max-tokens 4000"
+    gum style --foreground 39  "  ee pack \"<task>\" --workspace . --max-tokens 4000"
     gum style --foreground 39  "  ee --help"
     echo ""
     gum style --foreground 245 --italic "Inspect health:  ee doctor --json"
@@ -1526,7 +1661,7 @@ else
   echo ""
   echo -e "  Get started:"
   echo -e "    \033[0;34mee init --workspace .\033[0m"
-  echo -e "    \033[0;34mee context \"<task>\" --workspace . --max-tokens 4000\033[0m"
+  echo -e "    \033[0;34mee pack \"<task>\" --workspace . --max-tokens 4000\033[0m"
   echo -e "    \033[0;34mee --help\033[0m"
   echo ""
   echo -e "  \033[0;90mInspect health:  ee doctor --json\033[0m"

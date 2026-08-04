@@ -2,8 +2,8 @@
 # scripts/verify-idempotence.sh — Phase 5 idempotence test for ee doctor.
 #
 # For each fixture: run `ee doctor --fix` twice. The first run produces
-# actionCount > 0 once real fixers are wired (bd-tu4s8). The second run
-# reports actionCount == 0 — re-running against an already-healthy
+# data.actionCount > 0 when a registered fixer takes action. The second run
+# reports data.actionCount == 0 — re-running against an already-healthy
 # workspace must be a no-op.
 #
 # `--fix` and `--only <FM>` conflict at the CLI level (DoctorArgs marks
@@ -58,21 +58,21 @@ for fm_dir in "$FIXTURES_SRC"/fm-*; do
     # Second run on now-healthy workspace.
     "$EE_BIN" doctor --workspace "$target" --fix --json > "$target/.fix2.json" 2>/dev/null || true
 
-    # Both runs MUST emit the ee.doctor.fix_summary.v1 envelope; if the
-    # CLI rejected the invocation (e.g., flag conflict) we'd see
-    # ee.error.v2 and the jq fallback below would mistakenly read 0.
-    # Defend against that by asserting the schema explicitly.
-    fix1_schema=$(jq -r '.schema // ""' "$target/.fix1.json" 2>/dev/null)
-    fix2_schema=$(jq -r '.schema // ""' "$target/.fix2.json" 2>/dev/null)
-    if [ "$fix1_schema" != "ee.doctor.fix_summary.v1" ] || [ "$fix2_schema" != "ee.doctor.fix_summary.v1" ]; then
+    # Both runs MUST emit a successful ee.response.v2 envelope with typed
+    # ee.doctor.fix_summary.v1 data. If the CLI rejected the invocation
+    # (for example, due to a flag conflict), it would emit ee.error.v2.
+    fix1_contract=$(jq -r '[.schema // "", (.success // false | tostring), .data.schema // ""] | join("|")' "$target/.fix1.json" 2>/dev/null)
+    fix2_contract=$(jq -r '[.schema // "", (.success // false | tostring), .data.schema // ""] | join("|")' "$target/.fix2.json" 2>/dev/null)
+    expected_contract="ee.response.v2|true|ee.doctor.fix_summary.v1"
+    if [ "$fix1_contract" != "$expected_contract" ] || [ "$fix2_contract" != "$expected_contract" ]; then
         FAIL=$((FAIL + 1))
-        FAILED_FMS="$FAILED_FMS $fm_id(schema_drift:$fix1_schema,$fix2_schema)"
-        echo "verify-idempotence[$fm_id]: expected ee.doctor.fix_summary.v1, got run1=$fix1_schema run2=$fix2_schema" >&2
+        FAILED_FMS="$FAILED_FMS $fm_id(contract_drift:$fix1_contract,$fix2_contract)"
+        echo "verify-idempotence[$fm_id]: expected $expected_contract, got run1=$fix1_contract run2=$fix2_contract" >&2
         continue
     fi
 
     # Second invocation must report zero new actions taken (re-running is a no-op).
-    second_count=$(jq -r '.actionCount // .data.actionCount // ""' "$target/.fix2.json" 2>/dev/null || echo "")
+    second_count=$(jq -r '.data.actionCount // ""' "$target/.fix2.json" 2>/dev/null || echo "")
     if [ "$second_count" = "0" ]; then
         PASS=$((PASS + 1))
     else

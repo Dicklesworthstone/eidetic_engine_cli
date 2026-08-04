@@ -7,11 +7,14 @@
 //! any of those crate names appears in the resolved cargo tree under the
 //! default feature set or under `--all-features`.
 //!
-//! The test shells out to `cargo tree --prefix none --edges normal,build,dev`
-//! and matches the first whitespace-separated token of each non-empty line
-//! against the forbidden list. The test is deterministic and offline as
-//! long as the local cargo cache already has the manifest's resolved
-//! dependencies; it does not perform new network resolution.
+//! The test shells out to
+//! `cargo tree --locked --prefix none --edges normal,build,dev` and matches
+//! the first whitespace-separated token of each non-empty line against the
+//! forbidden list. `--locked` is mandatory so an audit cannot rewrite
+//! `Cargo.lock` while inspecting drifted path dependencies. The test is
+//! deterministic and offline as long as the local cargo cache already has the
+//! manifest's resolved dependencies; it does not perform new network
+//! resolution.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)] // test code may unwrap/expect
 use std::collections::BTreeSet;
@@ -39,12 +42,14 @@ const FORBIDDEN_CRATES: &[&str] = &[
 /// update the audit before it can land, so forbidden transitive dependencies
 /// pulled by new algorithm modules are reviewed through the same gate.
 const AUDITED_FNX_ALGORITHM_CALLS: &[&str] = &[
+    "all_pairs_lowest_common_ancestor",
     "articulation_points",
     "betweenness_centrality_directed",
     "dominance_frontiers",
     "ego_graph",
     "find_cycle_directed",
     "gomory_hu_tree",
+    "hits_centrality",
     "hits_centrality_directed",
     "immediate_dominators",
     "k_core",
@@ -52,6 +57,7 @@ const AUDITED_FNX_ALGORITHM_CALLS: &[&str] = &[
     "label_propagation_communities",
     "louvain_communities",
     "min_cost_flow",
+    "number_connected_components",
     "onion_layers",
     "pagerank_directed",
     "pagerank_with_params",
@@ -157,18 +163,24 @@ fn manifest_path() -> String {
     format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"))
 }
 
-fn run_cargo_tree(extra: &[&str]) -> String {
-    let mut args: Vec<&str> = vec![
+fn cargo_tree_args<'a>(manifest: &'a str, extra: &'a [&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
         "tree",
+        "--locked",
         "--edges",
         "normal,build,dev",
         "--prefix",
         "none",
         "--manifest-path",
+        manifest,
     ];
-    let manifest = manifest_path();
-    args.push(manifest.as_str());
     args.extend_from_slice(extra);
+    args
+}
+
+fn run_cargo_tree(extra: &[&str]) -> String {
+    let manifest = manifest_path();
+    let args = cargo_tree_args(manifest.as_str(), extra);
 
     let output = match Command::new(env!("CARGO")).args(&args).output() {
         Ok(value) => value,
@@ -185,6 +197,22 @@ fn run_cargo_tree(extra: &[&str]) -> String {
         Ok(text) => text,
         Err(error) => panic!("`cargo tree` produced non-UTF-8 output: {error}"),
     }
+}
+
+#[test]
+fn every_dependency_audit_is_lockfile_pinned() {
+    let args = cargo_tree_args("/tmp/ee-forbidden-deps/Cargo.toml", &[]);
+    assert_eq!(
+        &args[..2],
+        &["tree", "--locked"],
+        "Rust dependency-tree audits must fail closed on lockfile drift"
+    );
+
+    let shell_audit = include_str!("../scripts/check-forbidden-deps.sh");
+    assert!(
+        shell_audit.contains("cargo metadata --locked --format-version=1"),
+        "shell dependency audit must use lockfile-pinned Cargo metadata"
+    );
 }
 
 fn forbidden_hits(tree_output: &str) -> BTreeSet<&'static str> {

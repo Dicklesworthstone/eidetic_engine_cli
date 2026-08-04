@@ -1,0 +1,67 @@
+{
+  "schema": "ee.capture_suggestions.v2",
+  "command": "capture suggest",
+  "version": "0.0.0-test",
+  "workspaceId": "wsp_demo",
+  "workspacePath": "/workspace/demo",
+  "databasePath": "/workspace/demo/.ee/ee.db",
+  "selection": {
+    "source": "from_recent",
+    "requestedSessionId": null
+  },
+  "readOnly": true,
+  "durableMutation": false,
+  "sessionId": "sess_00000000000000000000000001",
+  "sessionProvenanceUri": "cass-session://sess_00000000000000000000000001",
+  "evidenceSpanCount": 1,
+  "candidateCount": 1,
+  "suppressedCount": 0,
+  "minConfidence": 0.58,
+  "limit": 2,
+  "candidates": [
+    {
+      "candidateId": "curate_demo",
+      "candidateType": "create_derived_memory",
+      "candidateKind": "rule",
+      "topicKey": "cargo",
+      "targetMemoryId": null,
+      "proposedFields": {
+        "level": "procedural",
+        "kind": "rule",
+        "tags": [
+          "ambient-capture",
+          "capture-suggest",
+          "cargo"
+        ],
+        "content": "Run cargo fmt before release verification.",
+        "confidence": 0.76
+      },
+      "evidence": [
+        {
+          "evidenceSpanId": "ev_00000000000000000000000001",
+          "provenanceUri": "cass-session://sess_00000000000000000000000001#L1-1",
+          "role": "assistant",
+          "startLine": 1,
+          "endLine": 1,
+          "contentHash": "blake3:0a7eb6732692c3deee5b78d1e64fb9fe3437115e26fbef5b9f0f59505156bb65",
+          "excerpt": "Run cargo fmt before release verification."
+        }
+      ],
+      "confidence": 0.76,
+      "dedupeStatus": {
+        "status": "unique",
+        "method": "exact_hash_then_lexical_jaccard",
+        "reason": "No active memory or rejected candidate covers this evidence.",
+        "matchedCandidateId": null,
+        "matchedMemoryId": null,
+        "similarity": null
+      },
+      "reviewCommand": "ee review session sess_00000000000000000000000001 --workspace /workspace/demo --propose --json",
+      "acceptCommand": "ee review session sess_00000000000000000000000001 --workspace /workspace/demo --propose --json && ee curate accept curate_demo --workspace /workspace/demo --json",
+      "rejectCommand": "ee review session sess_00000000000000000000000001 --workspace /workspace/demo --propose --json && ee curate reject curate_demo --workspace /workspace/demo --json"
+    }
+  ],
+  "suppressed": [],
+  "degraded": [],
+  "nextAction": "ee review session sess_00000000000000000000000001 --workspace /workspace/demo --propose --json && ee curate accept <candidate-id> --workspace /workspace/demo --json"
+}

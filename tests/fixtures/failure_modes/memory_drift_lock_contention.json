@@ -27,6 +27,7 @@
     "message_contains": [
       "blocked by database read-snapshot contention",
       "NOT inspected"
-    ]
+    ],
+    "repair_contains": "ee doctor"
   }
 }

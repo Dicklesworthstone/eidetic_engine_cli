@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # EE-012 forbidden-dependency audit (build-independent).
 #
-# Scans the resolved cargo metadata for forbidden crate names. Unlike the
-# Rust integration test in `tests/forbidden_deps.rs`, this script does not
-# compile any code, so it produces signal even when an upstream dependency
-# is temporarily broken.
+# Scans the lockfile-pinned cargo metadata for forbidden crate names. Unlike
+# the Rust integration test in `tests/forbidden_deps.rs`, this script does not
+# compile any code, so it produces signal even when an upstream dependency is
+# temporarily broken. `--locked` is mandatory: verification must fail closed
+# on dependency drift instead of rewriting Cargo.lock.
 #
 # Forbidden list comes from AGENTS.md `Forbidden Dependencies (Hard Rule,
 # Audited By CI)`. Keep this list in sync with `deny.toml` and
@@ -110,15 +111,21 @@ if [[ ! -f "${MANIFEST}" ]]; then
     exit 1
 fi
 
-if ! HITS=$(cargo metadata --format-version=1 --manifest-path "${MANIFEST}" |
-    scan_metadata); then
-    echo "error: cargo metadata or dependency scan failed" >&2
+if ! METADATA=$(cargo metadata --locked --format-version=1 --manifest-path "${MANIFEST}"); then
+    echo "error: cargo metadata failed; Cargo.lock was left unchanged" >&2
+    exit 3
+fi
+
+if ! HITS=$(printf '%s\n' "${METADATA}" | scan_metadata); then
+    echo "error: dependency metadata scan failed" >&2
     exit 3
 fi
 
 if [[ -n "${HITS}" ]]; then
     echo "error: forbidden dependencies present in the resolved tree:" >&2
-    echo "${HITS}" | sed 's/^/  - /' >&2
+    while IFS= read -r hit; do
+        printf '  - %s\n' "${hit}" >&2
+    done <<<"${HITS}"
     echo >&2
     echo "Fix: remove the dependency, or quarantine it behind an explicit feature" >&2
     echo "that is disabled by default. See AGENTS.md \`Forbidden Dependencies" >&2

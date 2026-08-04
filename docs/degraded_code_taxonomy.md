@@ -307,7 +307,7 @@ when the applied candidate, audit row, and derived memory agree, `curate apply`
 returns the existing applied result. Missing, duplicate, or mismatched replay
 evidence is classified under the `create_derived_replay_*` conflict codes above.
 
-#### Search and pack quality (60)
+#### Search and pack quality (76)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
 | `adaptive_backoff_applied` | low | bd-16pwc.2 (SRR5) |
@@ -334,6 +334,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `index_corrupt` | high | bd-17c65.2.1 (B1) |
 | `index_missing` | medium | bd-17c65.2.1 (B1) |
 | `index_stale` | high | bd-17c65.2.1 (B1) |
+| `evidence_live_admission_filtered` | warning | bd-4frzq (P0) |
 | `low_recall_after_floor` | info | bd-17c65.2.1 (B1) |
 | `malformed_validity_filtered` | medium | bd-17c65.2.10 (B11) |
 | `memory_drift_source_changed` | medium | bd-1z1fd.3 |
@@ -382,6 +383,22 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `hello_responder_no_tailscale_ip` | medium | bd-36bbk.1.12 |
 | `hello_responder_crash_loop` | high | bd-36bbk.1.12 |
 | `hello_responder_rate_limited_storm` | warning | bd-36bbk.1.12 |
+| `hello_responder_node_key_mismatch` | medium | bd-36bbk.1.8 |
+| `mesh_peer_explicit_consent_required` | medium | bd-1x87h (SRR6.24) |
+| `mesh_peer_handshake_denied` | medium | bd-1x87h (SRR6.24) |
+| `mesh_peer_network_only_denied` | medium | bd-1x87h (SRR6.24) |
+| `mesh_peer_capability_handshake_mismatch` | medium | bd-1x87h (SRR6.24) |
+| `mesh_peer_unknown_attempt_denied` | medium | bd-1x87h (SRR6.24) |
+| `mesh_peer_key_rotation_invalid_key` | medium | bd-1x87h (SRR6.24) |
+| `mesh_peer_key_rotation_revoked` | medium | bd-1x87h (SRR6.24) |
+| `mesh_peer_key_rotation_unchanged` | info | bd-1x87h (SRR6.24) |
+| `lane_grant_preview_peer_not_in_group` | info | bd-36bbk.1.17 |
+| `lane_grant_preview_lane_already_granted` | info | bd-36bbk.1.17 |
+| `share_preview_peer_unknown` | warning | bd-tc-epic-qzk7o.2.7 |
+| `steward_auto_enroll_disabled` | info | bd-36bbk.1.14 |
+| `steward_auto_enroll_daily_cap_reached` | warning | bd-36bbk.1.14 |
+| `steward_auto_enroll_consecutive_failures` | warning | bd-36bbk.1.14 |
+| `size_limit_exceeded` | medium | bd-2612e |
 | `host_calibration_contradictory` | medium | bd-1zb7k.12.3.4 (H3.4) |
 | `host_calibration_missing` | warning | bd-1zb7k.12.3.4 (H3.4) |
 | `host_calibration_partial` | warning | bd-1zb7k.12.3.4 (H3.4) |
@@ -673,9 +690,12 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `mesh_cached_body_hash_mismatch` | high | bd-nw0v3.3 (SRR6.16) |
 | `mesh_secret_export_denied` | high | (TBD) |
 
-#### Mesh foreground sync (3)
+#### Mesh foreground sync (9)
 | Code | Severity | Bead |
 |------|----------|------|
+| `mesh_disabled` | info | bd-2wngl (SRR6.8) |
+| `mesh_workspace_uninitialized` | warning | bd-2wngl (SRR6.8) |
+| `mesh_sync_once_network_deferred` | info | bd-36bbk.2 |
 | `mesh_sync_supervisor_backpressure` | info | bd-1ylr3 (SRR6.10) |
 | `mesh_sync_supervisor_budget_exhausted` | warning | bd-1ylr3 (SRR6.10) |
 | `mesh_sync_supervisor_runtime_error` | warning | bd-1ylr3 (SRR6.10) |
@@ -684,6 +704,19 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `mesh_cursor_repair_required` | critical | (TBD) |
 | `mesh_event_quarantined` | high | (TBD) |
 | `subscribe_cursor_stale` | warning | (TBD) |
+
+#### Store-local artifact authentication (1)
+| Code | Severity | Bead |
+|------|----------|------|
+| `mesh_store_authentication_unavailable` | high | bd-tc-epic-qzk7o.2.4 (TC-D14) |
+
+The store-local authentication root (ADR 0086 TC-D14) could not be
+established or verified: the key store is missing, malformed, symlinked,
+readable beyond the owner, or failed its known-answer/integrity self-check.
+Fail closed: `ee backup create` / `ee export` ship the artifact
+*unauthenticated* (no footer authentication block), and import refuses
+native `human_explicit` trust for unauthenticated artifacts rather than
+trusting a spoofable header. `response_time`.
 
 #### Causal lab (13)
 | Code | Severity | Bead |
@@ -787,8 +820,8 @@ the daemon-side codes onto the canonical `degraded[]` array on fallback.
 bounded-pool `daemon_overloaded` and peer-credential
 `daemon_peer_unauthorized` codes are catalogued under their own concurrency
 and security rows respectively. `daemon_ann_warmload_not_yet_implemented`
-is the historical bd-oja31 context-stub code retained only in the failure-mode
-catalog for archived daemon traces and older clients; current
+is the historical bd-oja31 context-stub code retained as an explicitly retired
+failure-mode fixture for archived daemon traces and older clients; current
 `ee.daemon.context` dispatch executes the canonical pack path instead, and no
 production source should declare a `*_NOT_YET_IMPLEMENTED_CODE` sentinel for
 the closed daemon hot-mode surface.

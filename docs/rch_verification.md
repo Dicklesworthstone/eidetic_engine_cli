@@ -12,11 +12,16 @@ Cargo to finish.
 Examples:
 
 ```bash
-scripts/rch_verify.sh --dry-run -- cargo test --lib output::streaming -- --nocapture
-scripts/rch_verify.sh -- cargo clippy --all-targets -- -D warnings
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --dry-run -- \
+  cargo test --locked --lib output::streaming -- --nocapture
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+  cargo clippy --locked --all-targets -- -D warnings
 scripts/rch_verify.sh -- cargo fmt --check
-scripts/rch_verify.sh --bead-id bd-123 --ledger .ee/derived/rch/runs.jsonl --summary -- cargo test --test mesh_off_no_network -- --nocapture
-scripts/rch_verify.sh --skip-build-admission -- cargo test --lib focused_case -- --nocapture
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --bead-id bd-123 --ledger .ee/derived/rch/runs.jsonl --summary -- \
+  cargo test --locked --test mesh_off_no_network -- --nocapture
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --skip-build-admission -- cargo test --locked --lib focused_case -- --nocapture
 ```
 
 Accepted verifier shapes are `cargo check`, `cargo test`, `cargo bench`,
@@ -32,8 +37,14 @@ The wrapper sets these remote-safe defaults:
 - `RCH_REQUIRE_REMOTE=1`
 - `RCH_QUEUE_WHEN_BUSY=1`
 - `RCH_COMPRESSION=0`
-- `RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,...` so RCH can rewrite worker
-  target/tmp paths without hiding `cargo` behind a leading `env` argv
+- `CARGO_INCREMENTAL=0` unless the caller explicitly overrides it
+- `RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,CARGO_INCREMENTAL,...` so RCH can
+  rewrite worker target/tmp paths and forward the reproducibility control
+  without hiding `cargo` behind a leading `env` argv
+- explicit `--env NAME=VALUE` overrides use
+  `rch exec -- env NAME=VALUE cargo ...`; the literal `env` executable keeps
+  assignment semantics intact through RCH's shell quoting while RCH still
+  classifies and offloads the nested Cargo command
 - RCH binary `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5` when present, then `/Users/jemanuel/.local/bin/rch-33720a8`, then `/Volumes/USBNVME16TB/temp_agent_space/rch-macos-target/debug/rch`, then any host-runnable source-built fallback, then `rch`
 - `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel`
 - `RCH_ALIAS_PROJECT_ROOT=/data`
@@ -96,8 +107,9 @@ does not run Cargo. Treat it as a shell replay-contract check, not as evidence
 that Rust-backed swarm replay code compiled or passed.
 
 Use this as a cheap hygiene check before remote verification. It is not a
-replacement for `scripts/rch_verify.sh -- cargo clippy --all-targets -- -D
-warnings`, and it must not be used to claim a Rust proof when code changed.
+replacement for `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD
+-- cargo clippy --locked --all-targets -- -D warnings`, and it must not be
+used to claim a Rust proof when code changed.
 
 Proof:
 
@@ -203,8 +215,9 @@ honest for the claim you need to make.
 | Mode | Command shape | Runs RCH? | Use when | Proof status to expect |
 |---|---|---:|---|---|
 | Local checkout observed; remote source unknown | `scripts/rch_verify.sh -- cargo test ...` | yes | You need a remote signal but have not exported source through the wrapper. Dirty paths are fingerprinted locally, not proven to have run remotely. | `verification_attribution=local_checkout_observed_remote_source_unknown`; dirty runs include `remote_source_materialized=false` and `rch_verify_dirty_source_not_materialized`. |
-| Strict clean checkout | `scripts/rch_verify.sh --require-clean-tree -- cargo test ...` | only if clean | You need proof that no tracked, Beads, scratch, or unsafe untracked paths influenced the run. | Clean: `strict_clean_tree`; dirty: `source_state_refused` before RCH. |
+| Strict clean checkout | `scripts/rch_verify.sh --require-clean-tree -- cargo test ...` | only if clean and remotely attributable | You need proof that no tracked, Beads, scratch, or unsafe untracked paths influenced a project without unresolved sibling-source authority. | Clean self-contained tree: `strict_clean_tree`; dirty or remotely unverified Franken graph: `source_state_refused` before RCH. |
 | Committed tree export | `scripts/rch_verify.sh --committed-tree --treeish HEAD -- cargo test ...` | yes for safe trees | You need to verify committed source while the shared checkout is dirty. | Safe no-path-dependency trees run from a generated export with `verification_attribution=committed_tree`; unsupported refs/path dependencies refuse before RCH. |
+| Pinned Franken-stack bundle | `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo test --locked ...` | only after the complete bundle is attested | The committed `ee` tree has sibling path dependencies and the proof must use the exact `franken-stack.lock` graph without changing live sibling checkouts. | Clean bundle: `verification_attribution=pinned_franken_stack`, `franken_stack.status=pinned`, and `remote_source_verified=true`; any lock, origin, revision, dirty-state, version, or materialization failure refuses before RCH. |
 
 Strict clean mode is the closeout mode for "this exact checkout is clean and
 remote-verified." Gitignored files (matched by `.gitignore` patterns and not
@@ -220,8 +233,10 @@ materializes that committed tree into a generated source export when the tree is
 safe to represent without path dependencies. If the ref is unresolved or
 `Cargo.toml` contains path dependencies, the proof refuses before RCH with
 `rch_verify_committed_tree_unsupported` and, for path dependencies,
-`rch_verify_committed_tree_path_deps_unsupported`; do not reinterpret that as a
-successful verification of the live checkout.
+`rch_verify_committed_tree_path_deps_unsupported`. The only supported
+path-dependency exception is `--pinned-franken-stack`, which requires a valid
+committed `franken-stack.lock` and Cargo `--locked`; do not reinterpret any
+other committed-tree refusal as successful verification of the live checkout.
 
 Copy-paste examples:
 
@@ -238,7 +253,165 @@ scripts/rch_verify.sh --bead-id bd-XXXX --summary --require-clean-tree -- \
 # source export; path-dependency trees refuse before RCH with an unsupported code.
 scripts/rch_verify.sh --bead-id bd-XXXX --summary --committed-tree --treeish HEAD -- \
   cargo test --test rch_verify_contract committed_tree_ -- --nocapture
+
+# Strongest ee proof. Archives the committed ee tree and all seven exact sibling
+# revisions into one fresh bundle without changing the live sibling checkouts.
+scripts/rch_verify.sh --bead-id bd-XXXX --summary \
+  --pinned-franken-stack --treeish HEAD -- \
+  cargo test --locked --test rch_verify_contract franken_stack_ -- --nocapture
 ```
+
+### Franken-stack source authority
+
+`ee` resolves core dependencies through sibling paths, while
+`franken-stack.lock` records the revisions known to compose with `Cargo.lock`.
+A clean `eidetic_engine_cli` checkout alone is therefore not a complete source
+proof. Before any Cargo RCH dispatch, the default verifier performs a read-only
+inventory of all seven locked repositories:
+
+- the canonical GitHub origin and a privacy-safe canonical-path hash;
+- expected and observed 40-character revisions plus the observed tree;
+- dirty state, dirty-entry count, and a content-free status hash;
+- package versions for every path-dependent crate compared with `Cargo.lock`;
+- the lock-file and Cargo-lock hashes; and
+- a dependency `manifest_hash` folded into the proof's
+  `source_bundle_hash`.
+
+The object uses schema `ee.rch.franken_stack.v1`. A missing repository, dirty
+checkout, unexpected origin, revision mismatch, package-version mismatch,
+malformed lock, or unreadable input returns `status=source_state_refused` before
+the RCH runtime or worker selector is touched. Stable codes include:
+
+- `rch_verify_franken_stack_repository_missing`
+- `rch_verify_franken_stack_repository_dirty`
+- `rch_verify_franken_stack_origin_mismatch`
+- `rch_verify_franken_stack_revision_mismatch`
+- `rch_verify_franken_stack_version_mismatch`
+- `rch_verify_franken_stack_lock_invalid`
+- `rch_verify_franken_stack_cargo_lock_invalid`
+
+A fully matching live graph is still
+`franken_stack.status=clean_remote_unverified`: local Git state cannot prove
+which sibling trees already exist on a worker. The proof carries
+`rch_verify_franken_stack_remote_source_unverified`; use the pinned mode for
+closeout-grade source attribution.
+
+`--pinned-franken-stack` implies `--committed-tree` and refuses unless the
+Cargo command contains `--locked`. The first invocation for a commit creates a
+fresh content-addressed retained bundle with `eidetic_engine_cli` and its seven
+siblings as peers. Later gates reuse that exact source identity only after a
+full path, executable-bit, symlink-target, and file-content hash validates.
+`franken_stack.bundle_cache` reports `created` or `reused`, the content hash,
+and `validation=full_content_hash`; an incomplete or changed entry is never
+trusted as the requested commit. This stable identity also lets RCH reuse its
+remote build cache across focused tests, check, and Clippy.
+
+The verifier defaults `CARGO_INCREMENTAL=0` for this proof lane. A new
+content-addressed commit is a cold project identity, so retaining Cargo's
+incremental dependency graphs can consume far more worker disk than it saves.
+Non-incremental mode still reuses ordinary compiled dependencies and artifacts
+within the same pinned target pool. An explicit caller value is forwarded for
+diagnostics, but `CARGO_INCREMENTAL=1` should only be used when the selected
+worker has enough measured disk headroom for the additional retained state.
+
+Pinned bundles default to `.ee-rch-committed-tree/` beside the canonical
+checkout, not below `TMPDIR`. Keeping the bundle beneath the writable project
+parent gives root and non-root workers the same narrow path namespace without
+syncing all of the developer's home directory. For each physical bundle root,
+the wrapper derives a privacy-safe `/tmp/ee-rch-pinned-<path-hash>` alias.
+RCH's topology preflight creates that missing alias on the selected worker;
+commit- and path-specific aliases prevent concurrent pinned proofs from
+retargeting one another. `RCH_VERIFY_COMMITTED_TREE_BASE`,
+`RCH_CANONICAL_PROJECT_ROOT`, and `RCH_ALIAS_PROJECT_ROOT` remain explicit
+diagnostic overrides.
+
+Each dependency is exported by the locked commit ID from a canonical sibling
+object when available, otherwise from a verifier-managed bare cache populated
+from the canonical origin. The lane uses `git archive`; it never changes a live
+sibling, creates a worktree, switches a branch, or runs cleanup against an
+existing checkout. An unknown or mismatched cache path is refused instead of
+repaired in place.
+
+After materialization, the verifier reads package versions from the archived
+trees, recomputes the complete dependency manifest, and records
+`cargo_lock_hash_after` plus `cargo_lock_unchanged`. RCH starts only when every
+archived revision and package version matches, the dependency manifest is
+complete, and `Cargo.lock` is byte-identical. Focused, all-target, and Clippy
+proofs use the same lane:
+
+```bash
+scripts/rch_verify.sh --bead-id bd-XXXX --summary \
+  --pinned-franken-stack --treeish HEAD -- \
+  cargo test --locked --test property_response_envelope
+
+scripts/rch_verify.sh --bead-id bd-XXXX --summary \
+  --pinned-franken-stack --treeish HEAD -- \
+  cargo check --locked --all-targets
+
+scripts/rch_verify.sh --bead-id bd-XXXX --summary \
+  --pinned-franken-stack --treeish HEAD -- \
+  cargo clippy --locked --all-targets -- -D warnings
+```
+
+### Cargo config provenance for locked source proofs
+
+Cargo merges configuration discovered from the invocation directory through
+all parent directories, then from `CARGO_HOME`; an extensionless
+`.cargo/config` wins over `.cargo/config.toml` when both exist. Config files may
+also recursively include other TOML files. This means a source archive plus
+`Cargo.lock` is not, by itself, proof of the dependency graph: a host-global
+patch, path override, or source replacement can still change resolution.
+
+After any committed-tree materialization, `scripts/rch_verify.sh` fingerprints
+the effective Cargo config search path without invoking Cargo. The top-level
+`cargo_config_provenance` object uses schema
+`ee.rch.cargo_config_provenance.v1` and records:
+
+- `status`: `not_computed`, `not_applicable`, `clean`, `observed`,
+  `indeterminate`, or `blocked`;
+- whether the command is source-attested and contains `--locked`;
+- each discovered or included source with privacy-safe path and content hashes,
+  precedence, legacy-file shadowing, parse status, and project/external origin;
+- `external_resolution_sources` that contain a patch, `paths`, replacement, or
+  source definition capable of changing dependency resolution;
+- `blocking_sources`, the subset that caused the current proof to refuse; and
+- one stable `provenance_hash` for the complete observation.
+
+Physical paths below the project, Cargo home, or user home are rendered as
+`<project>`, `<cargo_home>`, or `<home>` rather than exposing the account name.
+The detector recognizes `paths`, `[patch.*]`, `[replace]`, and source
+replacement/registry/directory/Git controls. A required external include that
+is missing, unreadable, or invalid is indeterminate and therefore also fails
+closed when the proof boundary requires certainty.
+
+The refusal boundary is deliberately narrow. Both of these conditions must be
+true:
+
+1. the verifier is using `--require-clean-tree` or `--committed-tree`; and
+2. the Cargo verifier command contains `--locked`.
+
+An ordinary non-attested run reports an external resolution override as
+`status=observed` and continues. A committed project-owned config is recorded
+but does not count as an external source. When the boundary is crossed,
+verification stops before any RCH client/daemon probe or remote dispatch,
+returns `status=rch_environment_failure`, and emits
+`rch_verify_cargo_config_provenance_blocked`. This code is verifier-environment
+state, not worker state, and is not persisted as a reusable worker
+known-blocker.
+
+The repair is an isolated `CARGO_HOME` plus a project or export ancestry that
+contains no resolution-altering Cargo config. Registry and Git cache
+directories may remain accessible or be linked into that isolated home; the
+config file itself must not be copied or linked. Remember that a checkout below
+the user home may still discover `<home>/.cargo/config.toml` through Cargo's
+parent-directory walk even when `CARGO_HOME` points elsewhere. In that case,
+committed-tree mode can materialize the source under the verifier's temporary
+export root outside the home hierarchy.
+
+Proof ledgers retain the complete `cargo_config_provenance` and
+`franken_stack` objects. Test-event rows retain both hashes and compact status
+fields so later automation can distinguish a source-graph refusal, Cargo
+configuration refusal, and worker outage without replaying raw output.
 
 These modes never authorize `git worktree`, `git stash`, `git reset`,
 `git checkout`, destructive cleanup, or local Cargo fallback. If the proof is
@@ -256,10 +429,10 @@ Ledger rows include `verifier_id`, optional `bead_id`, `command`,
 `remote_project_root`, `remote_target_dir`, `rch_location`, `exit_code`,
 `status`, `first_error_file`, `first_error_line`, `stdout_tail`, `stderr_tail`,
 `transcript_path`, `source_state_degraded_codes`, `worker_state_degraded_codes`,
-and known-blocker fields when a circuit-breaker refusal applies. Retained tails
-redact private `/Users/<name>` prefixes and obvious `token=...` / `secret=...` /
-`password=...` fragments while preserving remote `/data/projects/...` and local
-`/Volumes/...` evidence.
+`cargo_config_provenance`, and known-blocker fields when a circuit-breaker
+refusal applies. Retained tails redact private `/Users/<name>` prefixes and
+obvious `token=...` / `secret=...` / `password=...` fragments while preserving
+remote `/data/projects/...` and local `/Volumes/...` evidence.
 
 `status` is one of `dry_run`, `remote_pass`, `pass_without_remote_marker`,
 `remote_failure`, `rch_environment_failure`, `capacity_or_timeout`,
@@ -290,8 +463,9 @@ Typical agent workflow:
 
 ```bash
 # 1. Generate or capture one ee.rch.verify.v1 proof.
-scripts/rch_verify.sh --bead-id bd-XXXX --summary --no-write -- \
-  cargo test --lib focused_case_name -- --nocapture > proof.json
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --bead-id bd-XXXX --summary --no-write -- \
+  cargo test --locked --lib focused_case_name -- --nocapture > proof.json
 
 # 2. Store the proof in the local verification ledger.
 ee verify rch ingest --workspace . --from-json proof.json --json
@@ -690,7 +864,8 @@ both subtrees sit under one canonical root.
 scripts/rch_lane_doctor.sh --json
 eval "$(scripts/rch_lane_doctor.sh --emit-env)" && \
   TMPDIR=/private/tmp RCH_VISIBILITY=summary RCH_TEST_TIMEOUT_SEC=3600 \
-  scripts/rch_verify.sh --summary -- cargo test --lib
+  scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --summary -- \
+  cargo test --locked --lib
 ```
 
 `--emit-env` prints export lines only when the dual blocker is active (exit
@@ -871,8 +1046,9 @@ capacity waits, daemon timeouts, and local-Cargo hook bypass detection.
 Run the focused contract through RCH:
 
 ```bash
-scripts/rch_verify.sh --bead-id bd-1h8ji.6 --summary -- \
-  cargo test --test rch_verify_control_plane -- --nocapture
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --bead-id bd-1h8ji.6 --summary -- \
+  cargo test --locked --test rch_verify_control_plane -- --nocapture
 ```
 
 The CI-safe e2e driver is `scripts/e2e_overhaul/rch_verify_control_plane.sh`.

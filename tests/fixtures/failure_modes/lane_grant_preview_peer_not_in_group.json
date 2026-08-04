@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "lane_grant_preview_peer_not_in_group",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.17",
+    "epic_letter": "SRR6.46.17"
+  },
+  "surfaces": [
+    "mesh preview-grant"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "A lane-grant preview targets a node key that is not currently a member of the workspace's peer group, so the preview warns that materializing the grant would also require enrollment.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "run preview-grant against a node key that was never enrolled as a peer"
+    ],
+    "invocation": "ee mesh preview-grant nodekey:00... --lane metadata --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "lane_grant_preview_peer_not_in_group",
+    "severity": "info",
+    "message_contains": [
+      "peer"
+    ],
+    "repair_contains": "ee mesh"
+  }
+}

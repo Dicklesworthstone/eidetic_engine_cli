@@ -63,9 +63,10 @@ gains three modes:
 Schema fields: `intake_mode`, `docs_touched`, `base_doc_count`,
 `segment_doc_count` (WAL/uncompacted), `rebuild_avoided_count`, `merge_count`,
 `fallback_to_full` + reason (closed set: `index_absent`, `generation_skew`,
-`tier_unavailable`, `forced_reindex`, `delta_over_threshold`). Redaction-safe —
-counts and modes only, never document content. Registered in `public_schemas()`,
-the `schema_list` golden, and `docs/schemas/ee.index_intake.v1.json`.
+`corpus_revision_mismatch`, `tier_unavailable`, `forced_reindex`,
+`delta_over_threshold`). Redaction-safe — counts and modes only, never document
+content. Registered in `public_schemas()`, the `schema_list` golden, and
+`docs/schemas/ee.index_intake.v1.json`.
 
 ### Generation / staleness contract
 
@@ -83,9 +84,16 @@ Incremental intake must keep existing staleness consumers
   union of base + applied deltas — never a torn read. WAL/segment entries are
   searchable before compaction (proven upstream), so `segment_merge` is a
   size/perf maintenance step, never a correctness gate.
-- Any uncertainty (missing index file, generation skew, tier open failure)
+- Any uncertainty (missing index file, generation skew, corpus revision
+  mismatch, tier open failure)
   fails safe to `full_rebuild` with the corresponding `fallback_to_full` reason;
   silent partial intake is forbidden.
+
+Every active generation carries a mandatory `corpusRevision` derived from the
+canonical search-document schema, admitted source classes, and each source
+projection/eligibility revision. An absent or mismatched revision is never
+eligible for incremental mutation or crash-recovery promotion; it forces one
+complete staged rebuild and atomic publication.
 
 This ADR records the contract for the runtime behavior. The core delta path
 landed in `bd-d67os.6`, integration in `.7`, and the equivalence-property plus

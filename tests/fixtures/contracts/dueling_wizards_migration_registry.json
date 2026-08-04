@@ -4,8 +4,8 @@
   "gateBead": "bd-1n0np.23.1",
   "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
   "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
-  "currentLastCompiledMigration": 84,
-  "nextPlannedMigration": 85,
+  "currentLastCompiledMigration": 87,
+  "nextPlannedMigration": 88,
   "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
   "backupCoverageBead": "bd-1n0np.23.2",
   "policy": {
@@ -27,7 +27,10 @@
         "V081": "V081_AUDIT_LOG_WORKSPACE_TIMELINE_INDEX",
         "V082": "V082_MEMORY_DEBT_SNAPSHOTS",
         "V083": "V083_ERROR_FINGERPRINT_GENERATION_TRIGGERS (forward-only repair for V072 error fingerprint generation tracking)",
-        "V084": "V084_PACK_RECORD_PROFILE_DOMAIN (forward-only canonical pack profile and omission-domain repair)"
+        "V084": "V084_PACK_RECORD_PROFILE_DOMAIN (forward-only canonical pack profile and omission-domain repair)",
+        "V085": "V085_EVIDENCE_SECURITY_POSTURE (forward-only fail-closed evidence admission and provenance-integrity repair)",
+        "V086": "V086_RULE_INDEX_GENERATIONS (forward-only procedural-rule generation tracking and source-row repair)",
+        "V087": "V087_EVIDENCE_STORAGE_REBUILD (forward-only canonical evidence-table rebuild and generation repair)"
       }
     }
   },
@@ -114,7 +117,7 @@
     },
     {
       "id": "attestation_bundles",
-      "version": 85,
+      "version": 88,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -124,7 +127,7 @@
     },
     {
       "id": "query_miss_ledger",
-      "version": 86,
+      "version": 89,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -134,7 +137,7 @@
     },
     {
       "id": "source_write_stats",
-      "version": 87,
+      "version": 90,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -285,8 +288,8 @@
     },
     {
       "id": "attestation_bundles",
-      "version": 85,
-      "migrationName": "V085_ATTESTATION_BUNDLES",
+      "version": 88,
+      "migrationName": "V088_ATTESTATION_BUNDLES",
       "ownerBead": "bd-1n0np.22.1",
       "ownerSurface": "attestation_bundles",
       "status": "planned",
@@ -300,8 +303,8 @@
     },
     {
       "id": "query_miss_ledger",
-      "version": 86,
-      "migrationName": "V086_QUERY_MISS_LEDGER",
+      "version": 89,
+      "migrationName": "V089_QUERY_MISS_LEDGER",
       "ownerBead": "bd-1n0np.6.3",
       "ownerSurface": "gap_honesty",
       "status": "planned",
@@ -314,8 +317,8 @@
     },
     {
       "id": "source_write_stats",
-      "version": 87,
-      "migrationName": "V087_SOURCE_WRITE_STATS",
+      "version": 90,
+      "migrationName": "V090_SOURCE_WRITE_STATS",
       "ownerBead": "bd-1n0np.8.5",
       "ownerSurface": "read_fence",
       "status": "planned",

@@ -14,6 +14,14 @@ FrankenSQLite truth. It also pins the invariants that make mesh-disabled mode
 zero-cost: no listener, no peer config, no network activity, byte-stable local
 command output.
 
+ADR 0086 later narrows this ADR for live team use. Its D9 raw `<peer-key>`
+preview target and `ee.mesh.lane_grant_preview.v1` contract are replaced by
+an enrolled opaque `<peer-id>`, `ee.mesh.lane_grant_preview.v2`, and an
+authenticated, snapshot-bound approval consumed by the grant mutation.
+Zero-touch `tailscale_auto_enrollment` peers remain sync-ineligible. The
+legacy auto-enrollment mechanism and its mesh-off, audit, and fail-closed
+invariants otherwise remain design inputs.
+
 SRR6.46 is the **UX layer** that sits on top of SRR6's primitives:
 
 - SRR6.9 (`bd-1o1v5`) provides the Tailscale transport adapter.
@@ -212,8 +220,11 @@ is an explicit, audited action when the user is ready.
 ### D9: Pre-grant lane visibility preview as a load-bearing safety surface
 
 SRR6.46.17 (`bd-36bbk.1.17`) introduces `ee mesh preview-grant <peer-key>
---lane <lane> [--json]` as a read-only visibility audit. Before granting a
-more-permissive lane (e.g. `body` or `embedding`), the user can see exactly
+--lane <lane> [--json]` as the historical read-only visibility-audit shape.
+ADR 0086/T1.4 supersedes the raw key target and v1 response with an enrolled
+opaque `<peer-id>`, `ee.mesh.lane_grant_preview.v2`, and an authenticated,
+snapshot-bound approval consumed by the later grant mutation. Before granting
+a more-permissive lane (e.g. `body` or `embedding`), the user can see exactly
 which memories would become visible to that peer, with cautions for
 `high_trust_class_exposure`, `large_volume_exposure`, `sensitive_tags_in_exposure`,
 and `cross_workspace_overlap`.
@@ -275,7 +286,7 @@ SRR6.46 reserves the following schemas (each tracked by its owning sub-bead):
 | `ee.mesh.revoke_result.v1` | bd-36bbk.1.9 | per-peer revocation envelope |
 | `ee.mesh.hello_responder.status.v1` | bd-36bbk.1.12 | daemon-side responder posture |
 | `ee.mesh.steward.status.v1` | bd-36bbk.1.14 | periodic reconciliation posture |
-| `ee.mesh.lane_grant_preview.v1` | bd-36bbk.1.17 | pre-grant visibility audit |
+| `ee.mesh.lane_grant_preview.v1` | bd-36bbk.1.17 | Historical pre-grant visibility contract; superseded for the live team/grant path by ADR 0086/T1.4's `ee.mesh.lane_grant_preview.v2`. |
 | `ee.repair_action_graph.v1` | bd-36bbk.1.16 | shared structured repair plan |
 | `ee.doctor.action_graph.v1` | bd-36bbk.1.16 | doctor-specific action-graph wrapper |
 

@@ -33,7 +33,7 @@ const REQUIRED_POLICY_DOC_ANCHORS: &[&str] = &[
 ];
 
 const REQUIRED_SHARE_PREVIEW_SOURCE_ANCHORS: &[&str] = &[
-    "SHARE_PREVIEW_SCHEMA_V1",
+    "SHARE_PREVIEW_SCHEMA_V2",
     "SharePreviewCandidate",
     "redaction_class",
     "build_share_preview",

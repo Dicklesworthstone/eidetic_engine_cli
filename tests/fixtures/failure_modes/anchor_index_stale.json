@@ -25,6 +25,7 @@
     "message_contains": [
       "behind database generation",
       "results may miss recent memories"
-    ]
+    ],
+    "repair_contains": "ee index rebuild"
   }
 }

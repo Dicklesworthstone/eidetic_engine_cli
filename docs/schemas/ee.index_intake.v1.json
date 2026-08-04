@@ -78,6 +78,7 @@
           "enum": [
             "index_absent",
             "generation_skew",
+            "corpus_revision_mismatch",
             "tier_unavailable",
             "forced_reindex",
             "delta_over_threshold"

@@ -8,6 +8,10 @@ const BENCH_SCRIPT: &str = include_str!("../scripts/bench.sh");
 const E2E_SCRIPT: &str = include_str!("../scripts/e2e_overhaul/pack_cache_l2.sh");
 const ZSTD_DICTIONARY_E2E_SCRIPT: &str =
     include_str!("../scripts/e2e_overhaul/zstd_pack_dictionary.sh");
+const L2_CORRUPTION_FIXTURE: &str =
+    include_str!("fixtures/failure_modes/l2_pack_cache_corruption.json");
+const L2_UNAVAILABLE_FIXTURE: &str =
+    include_str!("fixtures/failure_modes/l2_pack_cache_unavailable.json");
 const BUDGETS_TOML: &str = include_str!("../benches/budgets.toml");
 const PERF_BASELINE: &str = include_str!("../benches/baselines/perf_v0_2.json");
 
@@ -26,6 +30,47 @@ fn toml_f64(value: &Item, key: &str) -> TestResult<f64> {
         .as_float()
         .or_else(|| field.as_integer().map(|integer| integer as f64))
         .ok_or_else(|| format!("TOML scalar `{key}` must be numeric"))
+}
+
+fn canonical_pack_failure_fixture_setup(source: &str, label: &str) -> TestResult<String> {
+    let fixture: Value =
+        serde_json::from_str(source).map_err(|error| format!("invalid {label} JSON: {error}"))?;
+    let surfaces = fixture
+        .get("surfaces")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{label} must declare surfaces"))?;
+    if surfaces.len() != 1 || surfaces[0].as_str() != Some("pack") {
+        return Err(format!(
+            "{label} must target only canonical pack, got {surfaces:?}"
+        ));
+    }
+
+    let trigger = fixture
+        .get("trigger")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{label} must declare trigger"))?;
+    let invocation = trigger
+        .get("invocation")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{label} trigger must declare invocation"))?;
+    if !invocation.starts_with("ee pack ") || invocation.contains("ee context ") {
+        return Err(format!(
+            "{label} must invoke canonical ee pack, got `{invocation}`"
+        ));
+    }
+
+    trigger
+        .get("setup_commands")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{label} trigger must declare setup_commands"))?
+        .iter()
+        .map(|command| {
+            command
+                .as_str()
+                .ok_or_else(|| format!("{label} setup commands must be strings"))
+        })
+        .collect::<TestResult<Vec<_>>>()
+        .map(|commands| commands.join("\n"))
 }
 
 #[test]
@@ -100,10 +145,10 @@ fn arena_workspace_reuse_context_benchmark_is_registered() -> TestResult {
     }
 
     for expected in [
-        "run_context_arena_mode_bench",
-        "cargo bench --bench \"$bench\" -- ee_context_arena_mode",
+        "run_context_arena_mode_bench()",
+        "filter=\"/workspace_reuse\"",
+        "cargo bench --bench \"$bench\" -- \"$filter\" $BENCH_ARGS",
         "append_result \"$key\" \"measured\"",
-        "run_context_arena_mode_bench",
     ] {
         if !BENCH_SCRIPT.contains(expected) {
             return Err(format!("scripts/bench.sh missing `{expected}`"));
@@ -120,10 +165,16 @@ fn l2_pack_cache_e2e_harness_covers_runtime_contract() -> TestResult {
         "EE_L2_PACK_CACHE_DIR",
         "EE_L2_PACK_CACHE_BYTES",
         "SEED_JSON_PATH",
+        "ee_workspace pack \"$QUERY\"",
+        "\"$EE_BINARY\" pack \"$QUERY\"",
         "for index in 1 2 3",
         "cmp -s \"$SEED_JSON_PATH\" \"$HIT_PATH\"",
         "l2_pack_cache_corruption",
         "l2_pack_cache_unavailable",
+        "ALIAS_CACHE_ROOT",
+        "deprecated_alias",
+        "pack_cache_l2_context_alias_pack_hash_parity",
+        "pack_cache_l2_context_alias_writes_no_cache_file",
         "pack_cache_l2_summary",
     ] {
         if !E2E_SCRIPT.contains(expected) {
@@ -131,6 +182,35 @@ fn l2_pack_cache_e2e_harness_covers_runtime_contract() -> TestResult {
                 "scripts/e2e_overhaul/pack_cache_l2.sh missing `{expected}`"
             ));
         }
+    }
+
+    let context_invocations = E2E_SCRIPT
+        .lines()
+        .filter(|line| {
+            line.contains("\"$EE_BINARY\" context \"$QUERY\"")
+                || line.contains("ee_workspace context \"$QUERY\"")
+        })
+        .collect::<Vec<_>>();
+    if context_invocations.len() != 1 {
+        return Err(format!(
+            "pack_cache_l2.sh must contain exactly one non-cache deprecated-context parity invocation, found {}: {context_invocations:?}",
+            context_invocations.len()
+        ));
+    }
+    let alias_block = concat!(
+        "EE_L2_PACK_CACHE_DIR=\"$ALIAS_CACHE_ROOT\" \\\n",
+        "    \"$EE_BINARY\" context \"$QUERY\""
+    );
+    if !E2E_SCRIPT.contains(alias_block) {
+        return Err(
+            "the sole context invocation must use the dedicated alias cache root".to_owned(),
+        );
+    }
+    if E2E_SCRIPT.matches(" pack \"$QUERY\"").count() < 4 {
+        return Err(
+            "pack_cache_l2.sh must drive seed, hit, corruption, and unavailable-cache cases through ee pack"
+                .to_owned(),
+        );
     }
 
     Ok(())
@@ -141,6 +221,7 @@ fn zstd_pack_dictionary_e2e_harness_covers_dictionary_contract() -> TestResult {
     for expected in [
         "zstd_pack_dictionary",
         "EE_L2_PACK_CACHE_DIR",
+        "\"$EE_BINARY\" pack \"$QUERY\"",
         "zstd --train",
         "ee.pack.l2_cache.entry.v2",
         "dictionaryId",
@@ -162,6 +243,80 @@ fn zstd_pack_dictionary_e2e_harness_covers_dictionary_contract() -> TestResult {
                 "scripts/e2e_overhaul/zstd_pack_dictionary.sh missing `{expected}`"
             ));
         }
+    }
+
+    if ZSTD_DICTIONARY_E2E_SCRIPT
+        .lines()
+        .any(|line| line.contains("\"$EE_BINARY\" context \"$QUERY\""))
+    {
+        return Err(
+            "zstd_pack_dictionary.sh must not drive L2 cache cases through deprecated ee context"
+                .to_owned(),
+        );
+    }
+    if ZSTD_DICTIONARY_E2E_SCRIPT
+        .matches("\"$EE_BINARY\" pack \"$QUERY\"")
+        .count()
+        < 7
+    {
+        return Err(
+            "zstd_pack_dictionary.sh must drive every cache and rendering probe through ee pack"
+                .to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn l2_corruption_fixture_targets_a_seeded_canonical_entry() -> TestResult {
+    let setup = canonical_pack_failure_fixture_setup(
+        L2_CORRUPTION_FIXTURE,
+        "l2_pack_cache_corruption fixture",
+    )?;
+    for expected in [
+        "ee pack 'prepare release'",
+        "CACHE_ENTRY=\"$(find \"$EE_L2_PACK_CACHE_DIR\"",
+        "test -n \"$CACHE_ENTRY\"",
+        "> \"$CACHE_ENTRY\"",
+    ] {
+        if !setup.contains(expected) {
+            return Err(format!(
+                "l2 corruption fixture setup must discover and overwrite the seeded canonical entry; missing `{expected}`"
+            ));
+        }
+    }
+    if setup.contains("bad.json") || setup.contains("<workspace>") {
+        return Err(
+            "l2 corruption fixture must not write an arbitrary cache filename or placeholder path"
+                .to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn l2_unavailable_fixture_uses_canonical_pack_and_a_real_file_root() -> TestResult {
+    let setup = canonical_pack_failure_fixture_setup(
+        L2_UNAVAILABLE_FIXTURE,
+        "l2_pack_cache_unavailable fixture",
+    )?;
+    for expected in [
+        "l2-cache-root-is-file",
+        "EE_L2_PACK_CACHE_DIR",
+        "EE_L2_PACK_CACHE_DISABLE=0",
+    ] {
+        if !setup.contains(expected) {
+            return Err(format!(
+                "l2 unavailable fixture must bind canonical pack to a deterministic non-directory cache root; missing `{expected}`"
+            ));
+        }
+    }
+    if setup.contains("/root/ee-pack-cache") {
+        return Err(
+            "l2 unavailable fixture must not rely on host user permissions for failure".to_owned(),
+        );
     }
 
     Ok(())

@@ -7,7 +7,7 @@ use ee::db::{
     CreateMemoryInput, CreatePackItemInput, CreatePackRecordInput, CreateWorkspaceInput,
     DbConnection,
 };
-use ee::models::WorkspaceId;
+use ee::models::{PackId, WorkspaceId};
 use insta::assert_json_snapshot;
 use serde_json::{Map, Value, json};
 
@@ -22,6 +22,12 @@ struct JsonContractFixture {
     workspace: PathBuf,
     database: PathBuf,
     index_dir: PathBuf,
+    canonical_workspace: PathBuf,
+    canonical_database: PathBuf,
+    canonical_index_dir: PathBuf,
+    canonical_repo: PathBuf,
+    binary: PathBuf,
+    canonical_binary: PathBuf,
 }
 
 impl JsonContractFixture {
@@ -30,34 +36,73 @@ impl JsonContractFixture {
         let workspace = artifact_dir.join("workspace");
         let database = workspace.join(".ee").join("ee.db");
         let index_dir = workspace.join(".ee").join("index");
+        let runtime_dir = workspace.join(".runtime");
 
-        fs::create_dir_all(&workspace).map_err(|error| {
+        fs::create_dir_all(&runtime_dir).map_err(|error| {
             format!(
-                "failed to create fixture workspace {}: {error}",
-                workspace.display()
+                "failed to create fixture runtime directory {}: {error}",
+                runtime_dir.display()
             )
         })?;
         seed_workspace(&workspace, &database)?;
-        build_search_index(&workspace, &database, &index_dir)?;
+        write_operating_profile_config(&workspace)?;
+
+        let canonical_workspace = canonical_fixture_path(&workspace, "workspace")?;
+        let canonical_database = canonical_fixture_path(&database, "database")?;
+        let canonical_index_dir_input = canonical_workspace.join(".ee").join("index");
+        build_search_index(
+            &canonical_workspace,
+            &canonical_database,
+            &canonical_index_dir_input,
+        )?;
+        let canonical_index_dir =
+            canonical_fixture_path(&canonical_index_dir_input, "index directory")?;
+        let canonical_repo =
+            canonical_fixture_path(Path::new(env!("CARGO_MANIFEST_DIR")), "repository")?;
+        let binary = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
+        let canonical_binary = canonical_fixture_path(&binary, "ee binary")?;
 
         Ok(Self {
             workspace,
             database,
             index_dir,
+            canonical_workspace,
+            canonical_database,
+            canonical_index_dir,
+            canonical_repo,
+            binary,
+            canonical_binary,
         })
     }
 
     fn workspace_arg(&self) -> String {
-        self.workspace.to_string_lossy().into_owned()
+        self.canonical_workspace.to_string_lossy().into_owned()
     }
 
     fn database_arg(&self) -> String {
-        self.database.to_string_lossy().into_owned()
+        self.canonical_database.to_string_lossy().into_owned()
     }
 
     fn index_dir_arg(&self) -> String {
-        self.index_dir.to_string_lossy().into_owned()
+        self.canonical_index_dir.to_string_lossy().into_owned()
     }
+
+    fn profile_config_arg(&self) -> String {
+        self.canonical_workspace
+            .join(".ee")
+            .join("profile-contract.toml")
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+fn canonical_fixture_path(path: &Path, label: &str) -> Result<PathBuf, String> {
+    fs::canonicalize(path).map_err(|error| {
+        format!(
+            "failed to canonicalize fixture {label} {}: {error}",
+            path.display()
+        )
+    })
 }
 
 fn unique_artifact_dir(prefix: &str) -> Result<PathBuf, String> {
@@ -111,8 +156,6 @@ fn schema_example(schema_id: &str) -> Result<Value, String> {
 }
 
 fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
-    let workspace_id = stable_workspace_id(workspace);
-
     if let Some(parent) = database.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!(
@@ -122,13 +165,15 @@ fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
         })?;
     }
 
+    let canonical_workspace = canonical_fixture_path(workspace, "workspace")?;
+    let workspace_id = stable_workspace_id(&canonical_workspace);
     let connection = DbConnection::open_file(database).map_err(|error| error.to_string())?;
     connection.migrate().map_err(|error| error.to_string())?;
     connection
         .insert_workspace(
             &workspace_id,
             &CreateWorkspaceInput {
-                path: workspace.to_string_lossy().into_owned(),
+                path: canonical_workspace.to_string_lossy().into_owned(),
                 name: Some("json-contract-snapshots".to_string()),
             },
         )
@@ -192,6 +237,16 @@ fn seed_workspace(workspace: &Path, database: &Path) -> TestResult {
     connection.close().map_err(|error| error.to_string())
 }
 
+fn write_operating_profile_config(workspace: &Path) -> TestResult {
+    let path = workspace.join(".ee").join("config.toml");
+    fs::write(&path, "profile = { selected = \"portable\" }\n").map_err(|error| {
+        format!(
+            "failed to write fixture profile {}: {error}",
+            path.display()
+        )
+    })
+}
+
 fn stable_workspace_id(workspace: &Path) -> String {
     let canonical_workspace = workspace
         .canonicalize()
@@ -243,15 +298,22 @@ fn build_search_index(workspace: &Path, database: &Path, index_dir: &Path) -> Te
     Ok(())
 }
 
-fn run_ee(args: &[String]) -> Result<Output, String> {
+fn run_ee(fixture: &JsonContractFixture, args: &[String]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
+        .env_remove("EE_PROFILE")
+        .env_remove("EE_WORKSPACE")
+        .env("PATH", "/usr/bin:/bin")
+        .env(
+            "XDG_RUNTIME_DIR",
+            fixture.canonical_workspace.join(".runtime"),
+        )
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
 
 fn run_json_command(fixture: &JsonContractFixture, args: Vec<String>) -> Result<Value, String> {
-    let output = run_ee(&args)?;
+    let output = run_ee(fixture, &args)?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("stdout was not UTF-8 for ee {}: {error}", args.join(" ")))?;
     let stderr = String::from_utf8(output.stderr)
@@ -288,6 +350,9 @@ fn scrub_json_contract(value: &mut Value, fixture: &JsonContractFixture) {
         Value::Object(object) => {
             for (key, child) in object.iter_mut() {
                 scrub_json_contract(child, fixture);
+                if key == "hostCalibration" {
+                    scrub_host_calibration(child);
+                }
                 scrub_value_for_key(key, child);
             }
             let mut entries: Vec<_> = std::mem::take(object).into_iter().collect();
@@ -303,6 +368,39 @@ fn scrub_json_contract(value: &mut Value, fixture: &JsonContractFixture) {
             *text = scrub_string(text, fixture);
         }
         Value::Number(_) | Value::Bool(_) | Value::Null => {}
+    }
+}
+
+fn scrub_host_calibration(value: &mut Value) {
+    const HOST_DEPENDENT: &str = "[HOST_DEPENDENT]";
+
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    for key in [
+        "calibrationFreshness",
+        "confidence",
+        "configuredProfile",
+        "effectiveProfile",
+        "hostClass",
+        "profileCeiling",
+        "recommendedProfile",
+        "targetDirPosture",
+    ] {
+        if let Some(field @ (Value::String(_) | Value::Null)) = object.get_mut(key) {
+            *field = Value::String(HOST_DEPENDENT.to_string());
+        }
+    }
+    for key in [
+        "budgetDeltas",
+        "degraded",
+        "reasonCodes",
+        "repairActions",
+        "topologyWarnings",
+    ] {
+        if let Some(field @ Value::Array(_)) = object.get_mut(key) {
+            *field = json!([HOST_DEPENDENT]);
+        }
     }
 }
 
@@ -376,22 +474,35 @@ fn scrub_string(text: &str, fixture: &JsonContractFixture) -> String {
     if text.starts_with("blake3:") || text.starts_with("sha256:") {
         return "[HASH]".to_string();
     }
-    if text.starts_with("pack_") {
+    if text.parse::<PackId>().is_ok() {
         return "[PACK_ID]".to_string();
     }
     if looks_like_rfc3339(text) {
         return "[TIMESTAMP]".to_string();
     }
 
-    let database = fixture.database.to_string_lossy();
-    let index_dir = fixture.index_dir.to_string_lossy();
-    let workspace = fixture.workspace.to_string_lossy();
-    let scrubbed = text
-        .replace(database.as_ref(), "[DATABASE]")
-        .replace(index_dir.as_ref(), "[INDEX]")
-        .replace(workspace.as_ref(), "[WORKSPACE]")
-        .replace(env!("CARGO_MANIFEST_DIR"), "[REPO]");
+    let mut scrubbed = text.to_string();
+    for (path, replacement) in [
+        (fixture.binary.as_path(), "[EE_BINARY]"),
+        (fixture.canonical_binary.as_path(), "[EE_BINARY]"),
+        (fixture.database.as_path(), "[DATABASE]"),
+        (fixture.canonical_database.as_path(), "[DATABASE]"),
+        (fixture.index_dir.as_path(), "[INDEX]"),
+        (fixture.canonical_index_dir.as_path(), "[INDEX]"),
+        (fixture.workspace.as_path(), "[WORKSPACE]"),
+        (fixture.canonical_workspace.as_path(), "[WORKSPACE]"),
+        (Path::new(env!("CARGO_MANIFEST_DIR")), "[REPO]"),
+        (fixture.canonical_repo.as_path(), "[REPO]"),
+    ] {
+        scrubbed = scrubbed.replace(path.to_string_lossy().as_ref(), replacement);
+    }
     scrub_pack_hash_comments(&scrubbed)
+}
+
+#[test]
+fn pack_id_scrubbing_distinguishes_ids_from_degraded_codes() {
+    assert!(PACK_ID.parse::<PackId>().is_ok());
+    assert!("pack_slot_lock_unavailable".parse::<PackId>().is_err());
 }
 
 fn scrub_pack_hash_comments(text: &str) -> String {
@@ -514,6 +625,10 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "profile".to_string(),
             "config".to_string(),
             "plan".to_string(),
+            "--profile".to_string(),
+            "portable".to_string(),
+            "--config".to_string(),
+            fixture.profile_config_arg(),
         ],
     )?;
     assert_json_snapshot!("profile_config_plan_json_contract", profile_config_plan);
@@ -530,6 +645,8 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "--dry-run".to_string(),
             "--profile".to_string(),
             "portable".to_string(),
+            "--config".to_string(),
+            fixture.profile_config_arg(),
         ],
     )?;
     ensure_profile_apply_dry_run_shape(&missing_config_apply, false, true)?;
@@ -545,6 +662,8 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "apply".to_string(),
             "--profile".to_string(),
             "portable".to_string(),
+            "--config".to_string(),
+            fixture.profile_config_arg(),
         ],
     )?;
     ensure_json_bool(&applied_config, "/data/applied", true)?;
@@ -561,6 +680,8 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "--dry-run".to_string(),
             "--profile".to_string(),
             "portable".to_string(),
+            "--config".to_string(),
+            fixture.profile_config_arg(),
         ],
     )?;
     ensure_profile_apply_dry_run_shape(&existing_config_apply, true, false)?;
@@ -601,7 +722,7 @@ fn run_profile_json_command(
     fixture: &JsonContractFixture,
     args: Vec<String>,
 ) -> Result<Value, String> {
-    let output = run_ee(&args)?;
+    let output = run_ee(fixture, &args)?;
     let stdout = String::from_utf8(output.stdout)
         .map_err(|error| format!("stdout was not UTF-8 for ee {}: {error}", args.join(" ")))?;
     let stderr = String::from_utf8(output.stderr)
@@ -653,6 +774,9 @@ fn scrub_profile_host_specific(value: &mut Value) {
                 if (key == "recommended" || key == "effective") && child.is_string() {
                     *child = Value::String("[PROFILE]".to_string());
                 }
+                if key == "confidence" && child.is_string() {
+                    *child = Value::String("[HOST_CONFIDENCE]".to_string());
+                }
                 // Scrub budget values that scale with profile
                 if is_profile_budget_key(key) && child.is_number() {
                     *child = serde_json::json!(0);
@@ -664,6 +788,9 @@ fn scrub_profile_host_specific(value: &mut Value) {
                     }
                 }
             }
+            if let Some(probe) = object.get_mut("probe") {
+                scrub_profile_probe(probe);
+            }
         }
         Value::Array(items) => {
             for item in items {
@@ -671,6 +798,77 @@ fn scrub_profile_host_specific(value: &mut Value) {
             }
         }
         _ => {}
+    }
+}
+
+fn scrub_profile_probe(value: &mut Value) {
+    let Some(probe) = value.as_object_mut() else {
+        return;
+    };
+
+    probe.insert("complete".to_string(), json!(false));
+    probe.insert("degraded".to_string(), json!([]));
+
+    if let Some(cpu) = probe.get_mut("cpu").and_then(Value::as_object_mut) {
+        cpu.insert("logicalCores".to_string(), json!(0));
+        cpu.insert("physicalCores".to_string(), Value::Null);
+    }
+    if let Some(memory) = probe.get_mut("memory").and_then(Value::as_object_mut) {
+        memory.insert("availableBytes".to_string(), json!(0));
+        memory.insert("cgroupLimitBytes".to_string(), Value::Null);
+        memory.insert(
+            "source".to_string(),
+            Value::String("[HOST_MEMORY_SOURCE]".to_string()),
+        );
+        memory.insert("totalBytes".to_string(), json!(0));
+    }
+    if let Some(environment) = probe.get_mut("environment").and_then(Value::as_object_mut) {
+        environment.insert("cargoTargetDirConfigured".to_string(), json!(false));
+        environment.insert("rchHintConfigured".to_string(), json!(false));
+        environment.insert("tmpdirConfigured".to_string(), json!(false));
+    }
+    if let Some(paths) = probe.get_mut("paths").and_then(Value::as_array_mut) {
+        for path in paths {
+            let Some(path) = path.as_object_mut() else {
+                continue;
+            };
+            path.insert("availableBytes".to_string(), json!(0));
+            path.insert("exists".to_string(), json!(false));
+            path.insert("nearestExistingAncestor".to_string(), json!(false));
+            path.insert("sameFilesystemAsWorkspace".to_string(), json!(false));
+            path.insert("totalBytes".to_string(), json!(0));
+        }
+    }
+    if let Some(tools) = probe.get_mut("tools").and_then(Value::as_array_mut) {
+        for tool in tools {
+            if let Some(tool) = tool.as_object_mut() {
+                tool.insert("available".to_string(), json!(false));
+            }
+        }
+    }
+    if let Some(rch) = probe
+        .get_mut("topology")
+        .and_then(Value::as_object_mut)
+        .and_then(|topology| topology.get_mut("rch"))
+        .and_then(Value::as_object_mut)
+    {
+        rch.insert("available".to_string(), json!(false));
+        rch.insert(
+            "message".to_string(),
+            Value::String("[HOST_RCH_MESSAGE]".to_string()),
+        );
+        rch.insert(
+            "posture".to_string(),
+            Value::String("[HOST_RCH_POSTURE]".to_string()),
+        );
+        rch.insert(
+            "repair".to_string(),
+            Value::String("[HOST_RCH_REPAIR]".to_string()),
+        );
+        rch.insert(
+            "status".to_string(),
+            Value::String("[HOST_RCH_STATUS]".to_string()),
+        );
     }
 }
 

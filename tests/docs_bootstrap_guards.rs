@@ -18,7 +18,9 @@
 use std::fs;
 use std::path::Path;
 
-use ee::core::docs_bootstrap::{CompileDocsBootstrapOptions, compile_docs_bootstrap};
+use ee::core::docs_bootstrap::{
+    BootstrapDocGlob, CompileDocsBootstrapOptions, compile_docs_bootstrap,
+};
 
 fn write_file(root: &Path, relative_path: &str, content: &str) {
     let path = root.join(relative_path);
@@ -210,5 +212,66 @@ fn specificity_is_gated_and_anchors_are_emitted() {
             .iter()
             .any(|candidate| !candidate.anchors.is_empty()),
         "at least one candidate must emit anchors"
+    );
+}
+
+#[test]
+fn explicit_reference_globs_add_only_selected_docs_with_durable_source_tags() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    write_file(tempdir.path(), "AGENTS.md", "# Agent rules\n");
+    write_file(tempdir.path(), "README.md", "# Project\n");
+    write_file(tempdir.path(), "SKILL.md", "# Skill guide\n");
+    write_file(
+        tempdir.path(),
+        "references/operator.md",
+        "# Operator library\n",
+    );
+    write_file(
+        tempdir.path(),
+        "references/deep/failures.md",
+        "# Failure taxonomy\n",
+    );
+    write_file(
+        tempdir.path(),
+        "references/deep/ignored.txt",
+        "# Not selected\n",
+    );
+    let include_globs = [
+        "SKILL.md"
+            .parse::<BootstrapDocGlob>()
+            .expect("exact include"),
+        "references/**/*.md"
+            .parse::<BootstrapDocGlob>()
+            .expect("recursive include"),
+    ];
+    let mut options = CompileDocsBootstrapOptions::for_workspace(tempdir.path());
+    options.include_globs = &include_globs;
+
+    let run = compile_docs_bootstrap(&options);
+
+    assert_eq!(
+        run.sources
+            .iter()
+            .filter(|source| source.source_kind == "reference_doc")
+            .map(|source| source.relative_path.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "SKILL.md",
+            "references/deep/failures.md",
+            "references/operator.md",
+        ]
+    );
+    assert!(run.candidates.iter().any(|candidate| {
+        candidate.source_path == "references/deep/failures.md"
+            && candidate.trust_class == "agent_assertion"
+            && candidate
+                .tags
+                .iter()
+                .any(|tag| tag == "source_kind:reference_doc")
+    }));
+    assert!(
+        run.sources
+            .iter()
+            .all(|source| source.relative_path != "references/deep/ignored.txt")
     );
 }

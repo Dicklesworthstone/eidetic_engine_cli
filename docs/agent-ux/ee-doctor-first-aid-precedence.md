@@ -67,7 +67,12 @@ fallback skill.
 - **Concurrency** — the `mutate()` chokepoint acquires the same
   capability locks the rest of `ee` already uses; running the fixer
   while another agent is mid-commit is safer than running the manual
-  skill steps in parallel.
+  skill steps in parallel. The `.ee/.doctor.lock` file is deliberately
+  persistent: an active fix or undo run is represented by the OS advisory
+  lock held on that exact file handle, not by the pathname's existence.
+  Teardown unlocks the retained handle and never removes or replaces the
+  public path, so a peer process cannot have its replacement lock unlinked.
+  Harnesses should attempt the advisory lock rather than deleting the file.
 - **Discoverability** — `ee doctor --help` and `ee doctor
   --capabilities` are the canonical surfaces agents will check; the
   external skill playbooks are easy to miss until an agent already

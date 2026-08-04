@@ -30,6 +30,7 @@ use ee::core::curate::{
     ReflectionRequestLedgerDiagnosticsReport, ReflectionRequestLedgerExportHygieneReport,
     ReflectionRequestLedgerMigrationSafety, ReflectionRequestLedgerRetentionReport,
 };
+use ee::core::doctor::DoctorReport;
 use ee::core::lab::{SWARM_REPLAY_RESULT_SCHEMA_V1, SWARM_WORKLOAD_SCHEMA_V1};
 use ee::core::learn::{
     LEARN_GAPS_SCHEMA_V1, LearnGapCluster, LearnGapOriginDemand, LearnGapRememberTemplate,
@@ -39,6 +40,7 @@ use ee::core::memory::{
     MemoryDetails, MemoryListFilter, MemoryListReport, MemoryShowReport, MemorySummary,
     MemoryTimelineReport, TimelineChange, TimelineMemory,
 };
+use ee::core::status::StatusReport;
 use ee::core::swarm_next_action::SWARM_NEXT_ACTION_SCHEMA_V1;
 use ee::curate::{
     DerivationSourceKind, DerivationSourceRef, ReflectionChallengeBinding,
@@ -54,9 +56,10 @@ use ee::models::{
     DomainError, IMPORT_CASS_SCHEMA_V1, ProducerMetadata, QUERY_SCHEMA_V1, RESPONSE_SCHEMA_V2,
 };
 use ee::output::{
-    error_response_json, render_curate_candidates_json, render_learn_gaps_json,
-    render_mcp_manifest_json, render_memory_list_json, render_memory_show_json,
-    render_reflect_propose_json, render_schema_export_json,
+    FieldProfile, error_response_json, render_curate_candidates_json, render_doctor_json,
+    render_learn_gaps_json, render_mcp_manifest_json, render_memory_list_json,
+    render_memory_show_json, render_reflect_propose_json, render_schema_export_json,
+    render_status_json_filtered,
 };
 use ee::policy::{
     SWARM_SLO_COORDINATION_EVENT_SCHEMA_V1, SWARM_SLO_RESOURCE_USAGE_EVENT_SCHEMA_V1,
@@ -236,6 +239,14 @@ fn docs_schema_files_are_strict_draft_2020_12_documents() -> TestResult {
         ensure_json_str(&schema, "/title", schema_id)?;
         ensure_json_bool(&schema, "/additionalProperties", false)?;
         ensure_field_presets(schema_id, &schema)?;
+        if schema
+            .pointer("/properties/schema/const")
+            .and_then(Value::as_str)
+            == Some(RESPONSE_SCHEMA_V2)
+        {
+            ensure_json_str(&schema, "/properties/fields/type", "string")?;
+            ensure_json_str(&schema, "/properties/degraded/type", "array")?;
+        }
     }
     Ok(())
 }
@@ -2081,11 +2092,10 @@ fn diag_incident_replay_response_matches_schema() -> TestResult {
 
 #[test]
 fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
+    let status_response = status_conformance_sample()?;
+    let doctor_response = doctor_conformance_sample()?;
     let fixture_cases = [
-        (
-            "ee.response.v2",
-            read_json(&fixture_path("golden/status/status_json.golden"))?,
-        ),
+        ("ee.response.v2", status_response.clone()),
         (
             "ee.pack.v2",
             read_json(&fixture_path("golden/agent/context_pack.json.golden"))?,
@@ -2096,14 +2106,8 @@ fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
                 "golden/agent/search_deterministic_ranking.json.golden",
             ))?,
         ),
-        (
-            "ee.status.v1",
-            read_json(&fixture_path("golden/status/status_json.golden"))?,
-        ),
-        (
-            "ee.doctor.v1",
-            read_json(&fixture_path("golden/doctor/doctor_json.golden"))?,
-        ),
+        ("ee.status.v1", status_response),
+        ("ee.doctor.v1", doctor_response),
         (
             "ee.capabilities.v1",
             read_json(&fixture_path(
@@ -2153,6 +2157,34 @@ fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
     }
 
     Ok(())
+}
+
+#[test]
+fn pack_schema_preserves_canonical_command_for_deprecated_context_alias() -> TestResult {
+    let schema = schema_doc("ee.pack.v2")?;
+    ensure_json_str(&schema, "/properties/data/properties/command/const", "pack")?;
+
+    let mut alias_response = read_json(&fixture_path("golden/agent/context_pack.json.golden"))?;
+    let alias_degradation = json!({
+        "code": "deprecated_alias",
+        "severity": "info",
+        "message": "`ee context` is a soft-deprecated compatibility alias for canonical `ee pack`; both run the same context-pack engine.",
+        "repair": "Use `ee pack \"<task>\" --workspace . --json`.",
+        "repairKind": "template",
+        "sources": ["context"]
+    });
+    alias_response["data"]["degraded"]
+        .as_array_mut()
+        .ok_or("alias fixture data.degraded must be an array")?
+        .push(alias_degradation.clone());
+    alias_response["degraded"]
+        .as_array_mut()
+        .ok_or("alias fixture degraded must be an array")?
+        .push(alias_degradation);
+
+    ensure_json_str(&alias_response, "/data/command", "pack")?;
+    validate_json_schema(&alias_response, &schema, &schema, "$")
+        .map_err(|error| format!("deprecated context alias response: {error}"))
 }
 
 struct MachineSurfaceConformanceCase {
@@ -2324,12 +2356,14 @@ fn search_document_conformance_sample() -> Value {
     json!({
         "docId": "mem_search_document_schema",
         "memoryId": "mem_search_document_schema",
-        "score": 0.91,
+        "score": 0.029836,
+        "relevanceScore": 0.91,
+        "scoreKind": "rrf_fused",
         "scoreInterval": [0.72, 0.97],
         "coverageGuarantee": 0.95,
         "calibrated": true,
         "source": "hybrid",
-        "why": "Selected by hybrid retrieval with score 0.9100.",
+        "why": "Selected by hybrid retrieval with raw RRF score 0.029836.",
         "provenance": [
             {
                 "kind": "provenance_uri",
@@ -2361,6 +2395,44 @@ fn search_document_conformance_sample() -> Value {
             ]
         }
     })
+}
+
+fn status_conformance_sample() -> Result<Value, String> {
+    let workspace =
+        tempfile::tempdir().map_err(|error| format!("create status workspace: {error}"))?;
+    let report = StatusReport::gather_for_workspace(workspace.path());
+    let rendered = render_status_json_filtered(&report, FieldProfile::Standard);
+    let response: Value = serde_json::from_str(&rendered)
+        .map_err(|error| format!("parse rendered status response: {error}"))?;
+    if !response
+        .pointer("/data/workspace")
+        .is_some_and(Value::is_object)
+    {
+        return Err(
+            "rendered status response must retain the public workspace object before schema validation"
+                .to_owned(),
+        );
+    }
+    Ok(response)
+}
+
+fn doctor_conformance_sample() -> Result<Value, String> {
+    let workspace =
+        tempfile::tempdir().map_err(|error| format!("create doctor workspace: {error}"))?;
+    let report = DoctorReport::gather_for_workspace(workspace.path());
+    let response: Value = serde_json::from_str(&render_doctor_json(&report))
+        .map_err(|error| format!("parse rendered doctor response: {error}"))?;
+    if response
+        .pointer("/data/advisories")
+        .and_then(Value::as_array)
+        .is_none()
+    {
+        return Err(
+            "rendered doctor response must retain the public advisories array before schema validation"
+                .to_owned(),
+        );
+    }
+    Ok(response)
 }
 
 fn pack_stream_header_conformance_sample() -> Value {
@@ -2742,6 +2814,7 @@ fn import_cass_sample() -> Value {
         "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report.data_json(),
+        "degraded": [],
     })
 }
 
@@ -2780,7 +2853,8 @@ fn export_sample() -> Value {
             "verificationStatus": "not_run",
             "artifacts": [],
             "degraded": []
-        }
+        },
+        "degraded": []
     })
 }
 
@@ -2830,6 +2904,7 @@ fn graph_export_sample() -> Value {
         "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report.data_json(),
+        "degraded": [],
     })
 }
 

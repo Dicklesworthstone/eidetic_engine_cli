@@ -90,6 +90,36 @@
       "items": { "type": "string", "minLength": 1 }
     }
   },
+  "field_presets": {
+    "minimal": ["schema", "command", "summary"],
+    "summary": [
+      "schema",
+      "command",
+      "version",
+      "workspaceId",
+      "filter",
+      "summary",
+      "degraded",
+      "trend",
+      "nextActions"
+    ],
+    "standard": [
+      "schema",
+      "command",
+      "version",
+      "workspaceId",
+      "workspacePath",
+      "databasePath",
+      "generatedAt",
+      "filter",
+      "summary",
+      "queue",
+      "degraded",
+      "trend",
+      "nextActions"
+    ],
+    "full": ["*"]
+  },
   "$defs": {
     "item": {
       "type": "object",

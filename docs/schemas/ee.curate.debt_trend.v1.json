@@ -12,6 +12,12 @@
       "items": { "$ref": "#/$defs/snapshot" }
     }
   },
+  "field_presets": {
+    "minimal": ["schema", "snapshots"],
+    "summary": ["schema", "snapshots"],
+    "standard": ["schema", "snapshots"],
+    "full": ["*"]
+  },
   "$defs": {
     "snapshot": {
       "type": "object",

@@ -19,8 +19,9 @@ RCH invocation, re-execs from an in-memory copy so long proofs keep running
 even if the checkout script changes, and emits an `ee.rch.verify.v1` JSON proof:
 
 ```bash
-scripts/rch_verify.sh --bead-id bd-XXXX --summary -- \
-  cargo test --lib my_focused_unit_test -- --nocapture
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --bead-id bd-XXXX --summary -- \
+  cargo test --locked --lib my_focused_unit_test -- --nocapture
 ```
 
 Do not bypass this with a bare or hand-written `rch exec` command from the
@@ -32,8 +33,9 @@ If you are debugging RCH itself and must inspect the low-level shape, start with
 `--dry-run`:
 
 ```bash
-scripts/rch_verify.sh --dry-run --skip-build-admission --summary -- \
-  cargo test --lib my_focused_unit_test -- --nocapture
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --dry-run --skip-build-admission --summary -- \
+  cargo test --locked --lib my_focused_unit_test -- --nocapture
 ```
 
 Only then compare against an explicit remote-required low-level command. This
@@ -51,7 +53,8 @@ RCH_ALIAS_PROJECT_ROOT=/data \
 RCH_VISIBILITY=summary \
 RCH_COMPRESSION=0 \
 RCH_BUILD_TIMEOUT_SEC=1200 \
-RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR \
+CARGO_INCREMENTAL=0 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,CARGO_INCREMENTAL \
 /Users/jemanuel/.local/bin/rch-manifestfix-20260605-5 exec -- \
   cargo <your-cargo-subcommand-here> -- --nocapture
 ```
@@ -97,6 +100,7 @@ Before launching RCH, decide what source tree the proof should mean:
 | You are intentionally verifying the current shared checkout, including dirty files. | Live checkout | `scripts/rch_verify.sh --bead-id bd-XXXX -- cargo test --lib my_test -- --nocapture` |
 | You need closeout evidence that no dirty source, Beads churn, or scratch artifacts influenced the run. | Strict clean checkout | `scripts/rch_verify.sh --bead-id bd-XXXX --summary --require-clean-tree -- cargo test --lib my_test -- --nocapture` |
 | You need to verify committed source while other agents have dirty files. | Committed-tree export | `scripts/rch_verify.sh --bead-id bd-XXXX --summary --committed-tree --treeish HEAD -- cargo test --lib my_test -- --nocapture` |
+| You need closeout-grade proof for this repository's sibling path dependencies. | Pinned Franken-stack bundle | `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --bead-id bd-XXXX --summary -- cargo test --locked --lib my_test -- --nocapture` |
 
 Committed-tree mode is deliberately conservative: it resolves `--treeish`,
 records the commit/tree and manifest hash, then materializes that committed tree
@@ -104,7 +108,13 @@ into a generated source export when it can be represented safely. If it reports
 `rch_verify_committed_tree_unsupported`, the ref was unresolved or the committed
 tree could not be exported safely. If it reports
 `rch_verify_committed_tree_path_deps_unsupported`, the committed tree has path
-dependencies that cannot be represented safely by the export alone.
+dependencies that cannot be represented safely by the export alone. For this
+repository, use `--pinned-franken-stack`: it archives all seven
+`franken-stack.lock` revisions beside the committed `ee` export and leaves the
+live sibling checkouts untouched. The first gate creates a content-addressed
+bundle; subsequent gates reuse the same RCH project identity only after a full
+content-hash validation. Inspect `franken_stack.bundle_cache.status` and
+`.content_hash` when diagnosing unexpected cache behavior.
 
 Never use source-proof modes as permission to run `git worktree`, `git stash`,
 `git reset`, `git checkout`, `git clean`, deletion cleanup, or local Cargo. The correct
@@ -114,36 +124,44 @@ response to an ambiguous proof is coordination, not mutation.
 
 | Env var | Why |
 |---|---|
-| `TMPDIR=/tmp` / `RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR` | Mac `~/.zshenv` points TMPDIR at `/Volumes/USBNVME16TB/...`. That path does not exist on Linux workers; Rust's `tempfile::tempdir()` inherits it and panics with `os error 2`. The wrapper lets RCH rewrite target/tmp values for the worker instead of hiding Cargo behind a leading `env` argv. |
+| `TMPDIR=/tmp` / `RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,TMPDIR,CARGO_INCREMENTAL` | Mac `~/.zshenv` points TMPDIR at `/Volumes/USBNVME16TB/...`. That path does not exist on Linux workers; Rust's `tempfile::tempdir()` inherits it and panics with `os error 2`. The wrapper lets RCH rewrite target/tmp values and forward the incremental policy instead of hiding Cargo behind a leading `env` argv. |
+| `scripts/rch_verify.sh --env NAME=VALUE -- cargo ...` | Explicit command-scoped overrides are different from inherited allowlisted values: the wrapper emits `rch exec -- env NAME=VALUE cargo ...`. The literal `env` executable survives RCH's shell quoting; a bare `NAME=VALUE` argv would be treated as the remote executable and fail with exit 127. |
+| `CARGO_INCREMENTAL=0` | Exact-commit bundles are cold project identities. Disabling incremental state prevents one proof from retaining a very large commit-specific dependency graph while preserving normal dependency/artifact reuse within the pinned target pool. The wrapper honors an explicit override, which should be used only with measured worker disk headroom. |
 | `RCH_REQUIRE_REMOTE=1` | Fail-closed when topology preflight fails. Bare `rch exec -- cargo ...` can fall back to **local** Cargo, which burns the Mac SSD and produces unsafe evidence. The repo tripwire denies bare `rch exec` Cargo commands unless this env var is present. |
 | `RCH_QUEUE_WHEN_BUSY=1` | Wait when all workers are busy rather than refusing. |
 | `RCH_TEST_SLOTS=2` | Bound concurrent test slots so heavy benches don't starve focused tests. |
 | `RCH_DAEMON_{WAIT_,}RESPONSE_TIMEOUT_SECS=900` | The full project metadata is large; the 30s default times out and triggers the manifest-fallback path that produces `RCH-E327`. 900s avoids the timeout. |
-| `RCH_CANONICAL_PROJECT_ROOT=/Users/jemanuel` + `RCH_ALIAS_PROJECT_ROOT=/data` | Current Mac wrapper default for the bd-3opmx E327 unblock. Requires `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5` or a newer RCH with the fixed worker preflight and manifest path rewrite; older release binaries apply the local `/data` alias on workers and fail before Cargo. |
+| Pinned bundle topology | `--pinned-franken-stack` retains its content-addressed bundle beside the checkout under `.ee-rch-committed-tree/`, uses that bundle as the narrow canonical root, and derives a unique `/tmp/ee-rch-pinned-<path-hash>` worker alias. This avoids unwritable macOS `TMPDIR` paths, broad home-directory synchronization, and cross-commit alias races. The three topology environment variables remain explicit diagnostic overrides. |
 | `RCH_BUILD_TIMEOUT_SEC=1200` | Large `cargo check` proofs can exceed the default 300s build timeout after remote Cargo starts. The bd-3tmeg proof passed with 1200s; the 300s run failed closed with `RCH-E104` and no local fallback. |
 | `RCH_VISIBILITY=summary` | Less log noise; full transcripts when something goes wrong. |
 | `RCH_COMPRESSION=0` | Compression on the sync pipe occasionally corrupts the manifest header during topology preflight. Disabling has zero throughput cost on the local-network workers. |
-| Absolute RCH binary path | `~/.local/bin/rch` may be stale. The wrapper prefers `/Users/jemanuel/.local/bin/rch-manifestfix-20260605-5`, then newer sidecars or source-built clients known to handle this checkout's path topology. |
+| Absolute RCH binary path | The wrapper prefers the currently installed `~/.local/bin/rch`, then the `PATH` client and known local/source or sidecar fallbacks. Runtime evidence parses semantic versions even when `rch --version` also prints a commit identifier. |
 | Worker-scoped `CARGO_TARGET_DIR` | RCH rewrites this to a worker-scoped path automatically; agents should not bake `/Volumes/USBNVME16TB/...` into remote command argv. |
 | Build-admission preflight | Stops before RCH when local workspace/target/tmp/artifact paths are below threshold. This is why an external `CARGO_TARGET_DIR` is necessary but not sufficient when `/System/Volumes/Data` is critically full. |
 
 ## Allowed Cargo subcommands and their wrapper variants
 
-The wrapper script `scripts/rch_verify.sh` accepts five subcommands:
+The wrapper script `scripts/rch_verify.sh` accepts six subcommands. Rust
+compile/test/bench examples use the pinned source-authority lane; formatting is
+source-local and does not need the dependency bundle:
 
 ```bash
 # Focused unit test (single test by name)
-scripts/rch_verify.sh -- cargo test --lib has_active_owner_conflict_ -- --nocapture
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+  cargo test --locked --lib has_active_owner_conflict_ -- --nocapture
 
 # Integration test (one --test target, optional name filter)
-scripts/rch_verify.sh -- cargo test --test closure_lint_harness -- --nocapture \
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+  cargo test --locked --test closure_lint_harness -- --nocapture \
   closure_lint_requires_inline_unit_tests_for_part_ii_implementations
 
 # Library-only compile check
-scripts/rch_verify.sh -- cargo check --lib
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+  cargo check --locked --lib
 
 # Clippy with -D warnings
-scripts/rch_verify.sh -- cargo clippy --all-targets -- -D warnings
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- \
+  cargo clippy --locked --all-targets -- -D warnings
 
 # Format check (proof.would_offload=false because RCH may decline non-compile)
 scripts/rch_verify.sh -- cargo fmt --check
@@ -153,8 +171,9 @@ For criterion benches, use the compare-only mode rather than a full run:
 
 ```bash
 EE_BENCH_COMPARE_ONLY=1 \
-scripts/rch_verify.sh --bead-id bd-3usjw.46 -- \
-  cargo bench --bench graph_minhash_rank -- --nocapture
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --bead-id bd-3usjw.46 -- \
+  cargo bench --locked --bench graph_minhash_rank -- --nocapture
 ```
 
 ## Shell-only / static verification (no cargo)
@@ -224,7 +243,8 @@ ee preflight check --cmd 'br comment bd-XXXX --message "$(cargo test --lib foo)"
 
 That command exits with policy-denied status and cites
 `builtin:rust_verifier_command_substitution`. Direct wrapper invocations like
-`scripts/rch_verify.sh --bead-id bd-XXXX -- cargo test --lib foo` remain allowed;
+`scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --bead-id bd-XXXX -- cargo test --locked --lib foo`
+remain allowed;
 only shell substitution used as evidence transport is blocked.
 
 If `--probe-processes` returns `status:"bypass_detected"`, do not launch a
@@ -288,8 +308,9 @@ hand-curated prose. Typical closeout flow:
 
 ```bash
 # 1. Generate the proof
-scripts/rch_verify.sh --bead-id bd-XXXX --summary -- \
-  cargo test --test my_harness -- --nocapture > /tmp/proof.json
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --bead-id bd-XXXX --summary -- \
+  cargo test --locked --test my_harness -- --nocapture > /tmp/proof.json
 
 # 2. Pretty-print the human summary and paste into Agent Mail
 jq -r '.summary_markdown' /tmp/proof.json
@@ -298,7 +319,8 @@ jq -r '.summary_markdown' /tmp/proof.json
 br close bd-XXXX --reason "RCH proof: command_hash=<hash>; status=<status>; verification_attribution=<mode>; see /tmp/proof.json"
 
 # 4. Optional: ledger the proof for swarm-wide reuse (bd-1h8ji.3)
-scripts/rch_verify.sh --ledger .ee/derived/rch/runs.jsonl -- <cmd>
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD \
+  --ledger .ee/derived/rch/runs.jsonl -- <locked-cargo-command>
 
 # 5. Durable verifier ledger: store/query proof rows without running Cargo/RCH
 ee verify rch ingest --workspace . --from-json /tmp/proof.json --json
@@ -505,8 +527,8 @@ for health-score decay:
 rch workers capabilities --refresh --json
 RCH_WORKERS=vmi1149989 \
 RCH_VERIFY_ATTEMPT_TIMEOUT_MS=1200000 \
-scripts/rch_verify.sh --summary -- \
-  cargo test --lib blind_spots -- --nocapture
+scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --summary -- \
+  cargo test --locked --lib blind_spots -- --nocapture
 ```
 
 The retry produced `status=remote_pass`, `worker_id=vmi1149989`, `exit_code=0`,
@@ -524,6 +546,23 @@ Symptom: RCH says it's waiting for a slot for >5 minutes.
 - Reduce slot demand: `RCH_TEST_SLOTS=1` for one slice at a time.
 - Check via `rch workers probe --all` to see which workers are saturated.
 - Don't fan out 4 parallel verifications when one bead at a time would work.
+
+### Pinned proof consumes excessive worker disk
+
+**Symptom:** a first proof for a new commit leaves a disproportionately large
+`.rch-target-*` directory, and the worker later refuses selection with
+`no admissible workers: critical_pressure=<n>`.
+
+**Root cause:** each content-addressed pinned bundle has a distinct project
+identity. Cargo incremental state from a cold debug build can therefore become
+large, commit-specific retained data rather than a useful cross-commit cache.
+
+**Fix:** use the repository wrapper, which defaults `CARGO_INCREMENTAL=0` and
+forwards it through `RCH_ENV_ALLOWLIST`. Refresh capability telemetry before
+retrying on a worker with adequate headroom. Treat the top-level
+`critical_pressure` or `insufficient_slots` refusal as
+`status=capacity_or_timeout`; it is not a source or Rust-test failure. Do not
+clean worker storage without the required human authorization.
 
 ### Remote compile error in another agent's reserved file
 
@@ -658,16 +697,16 @@ bash and dash. Confirmed by repro on this Mac (`dash` is installed at
 
 | Task | Command |
 |---|---|
-| Verify one unit test | `scripts/rch_verify.sh -- cargo test --lib <name> -- --nocapture` |
-| Verify one integration test | `scripts/rch_verify.sh -- cargo test --test <crate> -- --nocapture <name>` |
-| Library compile check | `scripts/rch_verify.sh -- cargo check --lib` |
-| Clippy gate | `scripts/rch_verify.sh -- cargo clippy --all-targets -- -D warnings` |
+| Verify one unit test | `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo test --locked --lib <name> -- --nocapture` |
+| Verify one integration test | `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo test --locked --test <crate> -- --nocapture <name>` |
+| Library compile check | `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo check --locked --lib` |
+| Clippy gate | `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo clippy --locked --all-targets -- -D warnings` |
 | Format check | `scripts/rch_verify.sh -- cargo fmt --check` |
-| Compare-only bench | `EE_BENCH_COMPARE_ONLY=1 scripts/rch_verify.sh -- cargo bench --bench <name>` |
+| Compare-only bench | `EE_BENCH_COMPARE_ONLY=1 scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD -- cargo bench --locked --bench <name>` |
 | Detect local-cargo bypass | `scripts/check-local-cargo-tripwire.sh --cmd '<cmd>' --json` |
 | Scan active local Cargo processes | `scripts/check-local-cargo-tripwire.sh --probe-processes --json` |
 | Detect Mac-leak in transcript | `scripts/check-rch-portability.sh --json /path/to/transcript` |
-| Generate closeout proof | `scripts/rch_verify.sh --bead-id <id> --summary --ledger .ee/derived/rch/runs.jsonl -- <cmd>` |
+| Generate closeout proof | `scripts/rch_verify.sh --pinned-franken-stack --treeish HEAD --bead-id <id> --summary --ledger .ee/derived/rch/runs.jsonl -- <locked-cargo-command>` |
 | Ingest verifier proof | `ee verify rch ingest --from-json proof.json --json` |
 | Query active RCH blockers | `ee verify rch blockers --bead-id <id> --json` |
 | Query RCH verifier run history | `ee verify rch runs --bead-id <id> --json` |
