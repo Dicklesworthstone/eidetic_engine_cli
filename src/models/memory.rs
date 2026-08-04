@@ -1557,10 +1557,11 @@ mod tests {
         Confidence, KNOWN_MEMORY_KINDS, MAX_CONTENT_BYTES, MAX_TAG_BYTES,
         MAX_TYPED_MEMORY_FIELD_LIST_ITEMS, MAX_TYPED_MEMORY_FIELD_VALUE_BYTES,
         MAX_TYPED_MEMORY_FIELDS, MemoryContent, MemoryKind, MemoryLevel, MemoryValidationError,
-        TYPED_MEMORY_FIELDS_SCHEMA_V2, Tag, UnitScore, canonicalize_typed_memory_fields_json,
-        canonicalize_typed_memory_fields_json_with_redactor,
-        extract_typed_memory_fields_json_with_redactor, typed_memory_fields_from_json,
-        typed_memory_index_metadata_from_json,
+        TYPED_MEMORY_FIELDS_SCHEMA_V2, Tag, UnitScore,
+        canonicalize_typed_memory_field_assignments_json_with_redactor,
+        canonicalize_typed_memory_fields_json, canonicalize_typed_memory_fields_json_with_redactor,
+        extract_typed_memory_fields_json_with_redactor, merge_typed_memory_fields_json,
+        typed_memory_fields_from_json, typed_memory_index_metadata_from_json,
     };
 
     fn decision_field_text_strategy() -> impl Strategy<Value = String> {
