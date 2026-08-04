@@ -808,6 +808,7 @@ impl SensitiveCassFixture {
         let password = ["password", "-", "roundtrip", "-", "beta"].concat();
         let secret_key = ["aws", "-", "secret", "-", "roundtrip", "-", "delta"].concat();
         let ssh_key = ["ssh", "-", "roundtrip", "-", "epsilon"].concat();
+        let approval_bearer = [["ee", "ap", "1_"].concat(), "a".repeat(151)].concat();
         let jwt = [
             "eyJhbGciOiJIUzI1NiJ9",
             ".",
@@ -819,7 +820,7 @@ impl SensitiveCassFixture {
         let home_path = ["/home/", "cass-redaction-user", "/.ssh/id_rsa"].concat();
 
         let content = format!(
-            "contact={email} api_key={api_key} password={password} jwt={jwt} secret_key={secret_key} ssh_key={ssh_key} opened_file={home_path}"
+            "contact={email} api_key={api_key} password={password} jwt={jwt} secret_key={secret_key} ssh_key={ssh_key} approval={approval_bearer} opened_file={home_path}"
         );
         let session_line = serde_json::json!({
             "type": "user",
@@ -836,15 +837,23 @@ impl SensitiveCassFixture {
             jwt.clone(),
             secret_key.clone(),
             ssh_key.clone(),
+            approval_bearer.clone(),
         ];
         let raw_values = vec![email, home_path]
             .into_iter()
             .chain(secret_values.clone())
             .collect();
-        let secret_placeholders = ["api_key", "password", "jwt_token", "secret_key", "ssh_key"]
-            .into_iter()
-            .map(|class| format!("[REDACTED:{class}]"))
-            .collect();
+        let secret_placeholders = [
+            "api_key",
+            "password",
+            "jwt_token",
+            "secret_key",
+            "ssh_key",
+            "mesh_approval_token",
+        ]
+        .into_iter()
+        .map(|class| format!("[REDACTED:{class}]"))
+        .collect();
 
         Self {
             session_line,

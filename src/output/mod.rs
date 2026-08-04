@@ -62,6 +62,7 @@ use crate::pack::{
     PackOmission, PackOmissionMetrics, PackQualityMetrics, PackSectionMetric, PackSelectedItem,
     PackSelectionAudit, PackSelectionStep, RenderedPackProvenance,
 };
+use crate::policy::{redact_secret_like_content, redaction_placeholder};
 use crate::steward::{
     MAINTENANCE_JOB_LIST_SCHEMA_V1, MAINTENANCE_JOB_ROW_SCHEMA_V1, MAINTENANCE_JOB_SHOW_SCHEMA_V1,
     MAINTENANCE_RUN_SCHEMA_V1, MAINTENANCE_STATUS_SCHEMA_V1,
@@ -14655,6 +14656,59 @@ pub fn render_agent_docs_toon(report: &AgentDocsReport) -> String {
     render_toon_from_json(&render_agent_docs_json(report))
 }
 
+const MESH_APPROVAL_TOKEN_REDACTION_REASON: &str = "mesh_approval_token";
+
+/// Remove mesh approval bearers at a public output boundary without changing
+/// any other secret-like text. Match discovery stays centralized in policy;
+/// this targeted projection consumes only the approval-token spans.
+#[must_use]
+pub(crate) fn redact_mesh_approval_bearers(text: &str) -> String {
+    let scan = redact_secret_like_content(text);
+    let mesh_was_redacted = scan
+        .redacted_reasons
+        .contains(&MESH_APPROVAL_TOKEN_REDACTION_REASON);
+    let mut spans = scan
+        .matches
+        .iter()
+        .filter(|matched| matched.pattern_id == MESH_APPROVAL_TOKEN_REDACTION_REASON)
+        .map(|matched| (matched.start, matched.end))
+        .collect::<Vec<_>>();
+    spans.sort_unstable();
+    spans.dedup();
+
+    if spans.is_empty() {
+        // The canonical scanner normally reports reasons and spans together.
+        // If those views ever drift, do not return text the scanner says held
+        // an approval bearer without a safe range to replace.
+        return if mesh_was_redacted {
+            redaction_placeholder(MESH_APPROVAL_TOKEN_REDACTION_REASON)
+        } else {
+            text.to_owned()
+        };
+    }
+
+    redact_mesh_approval_bearer_spans(text, &spans)
+}
+
+fn redact_mesh_approval_bearer_spans(text: &str, spans: &[(usize, usize)]) -> String {
+    let spans_are_safe = spans.iter().all(|&(start, end)| {
+        start < end
+            && end <= text.len()
+            && text.is_char_boundary(start)
+            && text.is_char_boundary(end)
+    }) && spans.windows(2).all(|window| window[0].1 <= window[1].0);
+    if !spans_are_safe {
+        return redaction_placeholder(MESH_APPROVAL_TOKEN_REDACTION_REASON);
+    }
+
+    let placeholder = redaction_placeholder(MESH_APPROVAL_TOKEN_REDACTION_REASON);
+    let mut redacted = text.to_owned();
+    for &(start, end) in spans.iter().rev() {
+        redacted.replace_range(start..end, &placeholder);
+    }
+    redacted
+}
+
 #[must_use]
 pub fn error_response_json(error: &DomainError) -> String {
     let message = error.message();
@@ -14689,7 +14743,9 @@ pub fn error_response_json(error: &DomainError) -> String {
     if !degraded.is_empty() {
         envelope.field_array_of_objects("degraded", &degraded, render_error_degradation);
     }
-    envelope.finish()
+    // Scrub only after the full envelope exists so caller-provided nested
+    // details and generated recovery fields cross the same egress boundary.
+    redact_mesh_approval_bearers(&envelope.finish())
 }
 
 struct ErrorDegradation {
@@ -18699,9 +18755,10 @@ mod tests {
         ContextJsonRenderOptions, Degradation, DegradationSeverity, FieldProfile, JsonBuilder,
         OutputContext, OutputEnvironment, Renderer, ResponseEnvelope, SHADOW_RUN_SCHEMA_V1,
         ShadowRunComparison, ShadowRunReport, build_aggregated_degradation, error_response_json,
-        escape_json_string, help_json, help_text, human_status, render_agent_docs_json,
-        render_agent_docs_toon, render_capabilities_json, render_capabilities_json_filtered,
-        render_check_json, render_check_json_filtered, render_context_response_json,
+        escape_json_string, help_json, help_text, human_status, redact_mesh_approval_bearer_spans,
+        redact_mesh_approval_bearers, render_agent_docs_json, render_agent_docs_toon,
+        render_capabilities_json, render_capabilities_json_filtered, render_check_json,
+        render_check_json_filtered, render_context_response_json,
         render_context_response_json_with_options, render_context_response_markdown,
         render_context_response_toon, render_dependency_diagnostics_json,
         render_doctor_concise_json, render_doctor_concise_toon, render_doctor_json,
@@ -18797,6 +18854,16 @@ mod tests {
     };
 
     type TestResult = Result<(), String>;
+
+    fn mesh_approval_bearer_canary() -> String {
+        // Keep the recognizable credential prefix out of the source fixture
+        // while retaining the exact fixed-width public bearer shape.
+        format!(
+            "{}{}",
+            ["e", "e", "a", "p", "1", "_"].concat(),
+            "A".repeat(151)
+        )
+    }
 
     fn rch_worker_pressure_fixture() -> RchWorkerPressureReport {
         RchWorkerPressureReport {
@@ -20366,6 +20433,87 @@ mod tests {
         )?;
         ensure_contains(&json, "\"severity\":\"low\"", "error severity")?;
         ensure_contains(&json, "\"repair\":\"ee --help\"", "error repair")
+    }
+
+    #[test]
+    fn error_json_scrubs_mesh_approval_bearers_after_complete_envelope_assembly() -> TestResult {
+        let bearer = mesh_approval_bearer_canary();
+        ensure_equal(
+            &bearer.len(),
+            &crate::mesh::lane_grant::APPROVAL_TOKEN_BEARER_LEN,
+            "approval bearer canary length",
+        )?;
+        let unrelated_secret = format!("{}{}", ["g", "h", "p", "_"].concat(), "B".repeat(36));
+        let error = DomainError::UsageCodeWithDetails {
+            code: "usage",
+            message: format!("request failed with bearer {bearer}; marker {unrelated_secret}"),
+            repair: Some(format!("retry with --approval-token {bearer}")),
+            details_json: serde_json::json!({
+                "nested": {
+                    "example": format!("nested example {bearer}"),
+                },
+                "recovery": [{
+                    "command": format!("ee mesh grant --approval-token {bearer}"),
+                    "rationale": format!("replace leaked bearer {bearer}"),
+                    "example": format!("printf '%s' '{bearer}' | ee mesh grant"),
+                }],
+            })
+            .to_string(),
+        };
+
+        let json = error_response_json(&error);
+        ensure(
+            !json.contains(&bearer),
+            "complete JSON error envelope must not expose the approval bearer",
+        )?;
+        ensure_contains(
+            &json,
+            "[REDACTED:mesh_approval_token]",
+            "approval bearer placeholder",
+        )?;
+        ensure_contains(
+            &json,
+            &unrelated_secret,
+            "targeted approval-token pass must preserve unrelated spans",
+        )?;
+
+        let parsed: serde_json::Value = serde_json::from_str(&json)
+            .map_err(|error| format!("redacted error envelope must remain JSON: {error}"))?;
+        for pointer in [
+            "/error/message",
+            "/error/repair",
+            "/error/details/nested/example",
+            "/error/details/recovery/0/command",
+            "/error/details/recovery/0/rationale",
+            "/error/details/recovery/0/example",
+        ] {
+            let value = parsed
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| format!("missing redaction canary field {pointer}"))?;
+            ensure(
+                value.contains("[REDACTED:mesh_approval_token]") && !value.contains(&bearer),
+                format!("error field {pointer} must be approval-token safe: {value:?}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_approval_bearer_span_replacement_fails_closed_on_invalid_ranges() -> TestResult {
+        let redacted = redact_mesh_approval_bearer_spans("safe text", &[(2, usize::MAX)]);
+        ensure_equal(
+            &redacted,
+            &"[REDACTED:mesh_approval_token]".to_owned(),
+            "invalid approval-token span must redact the whole projection",
+        )?;
+
+        let unrelated_secret = format!("{}{}", ["g", "h", "p", "_"].concat(), "B".repeat(36));
+        ensure_equal(
+            &redact_mesh_approval_bearers(&unrelated_secret),
+            &unrelated_secret,
+            "approval-token egress pass must not replace other secret classes",
+        )
     }
 
     #[test]

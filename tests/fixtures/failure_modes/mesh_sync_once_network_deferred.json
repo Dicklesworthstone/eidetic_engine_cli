@@ -25,6 +25,6 @@
       "did not contact peers",
       "no usable foreground peer transport"
     ],
-    "repair_contains": "ee mesh export"
+    "repair_contains": "ee mesh export --peer <peer-id>"
   }
 }

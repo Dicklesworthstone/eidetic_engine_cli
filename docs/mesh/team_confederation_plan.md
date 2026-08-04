@@ -18,7 +18,7 @@ mesh sync --once` is wired to a no-op transport that always emits
 metadata that no code ever publishes, and the mesh policy engine
 (`decide_mesh_peer_policy` / `decide_mesh_outbound_policy` / `decide_mesh_import`)
 has zero production callers. The working peer data path today is sneakernet:
-`ee mesh export` → copy file → `ee mesh import`.
+`ee mesh export --peer <peer-id>` → copy file → `ee mesh import`.
 
 This plan turns that foundation into **team confederation**: N human users, each
 running `ee` locally on their own machine, forming a trusted mesh over a shared
@@ -162,7 +162,7 @@ map, design docs/ADRs, trust/identity surfaces, beads inventory).
 | Discovery policy: `service_tag` (default) / `auto_admit` / `allowlist` on both caller and responder axes; denylist overrides all; TOML files under `<ws>/.ee/` | `src/mesh/discovery_policy.rs`; CLI `src/cli/mesh.rs:1322–1477` | Real and wired for policy *decisions*. |
 | Auto-enrollment: 13-step fail-closed flow, forensic audit-before-write, tailnet/node-key identity guard, rollback | `src/mesh/auto_enrollment.rs`, `auto_enrollment_safety.rs`, `identity_change_guard.rs`; CLI `src/cli/mesh.rs:1164–1320` | Real, transactional. But see trust dead-end in §3.3. |
 | Mesh policy engine: per-peer per-lane per-origin-workspace inbound/outbound decisions, trust-lane ceilings, side-effect booleans | `src/core/memory_scope.rs:754,999,658`; facade `src/mesh/policy.rs` | Complete + tested; **zero production callers**. |
-| Lane-grant preview (counts, redacted samples, cautions) | `src/mesh/lane_grant_preview.rs` | Complete; CLI feeds it an **empty candidate set** (`src/cli/mesh.rs:795–813`). |
+| Authenticated lane-grant consent (DB-backed counts, revision-pinned candidates, redacted samples, cautions, grant/revoke) | `src/mesh/lane_grant_preview.rs`, `src/mesh/lane_grant.rs`; CLI wiring in `src/cli/mesh.rs` | T1.4 is wired: ordinary previews are deterministic and token-free; explicit robot issuance binds the complete eligible memory and mesh-ledger candidate set, and grant/revoke mutate generation plus audit atomically. |
 | Pre-export secret scan (hard-denies `ee mesh export` with `mesh_secret_export_denied`) | `src/policy/mod.rs:284–350` | Real and enforced, but its error/audit finding exposes an unkeyed `valueHash` of the secret-bearing value—an offline equality/dictionary oracle. |
 | `ee mesh export` / `ee mesh import`: bounded, schema-gated, idempotent, ledger-writing, index-job-enqueuing file exchange | `src/cli/mesh.rs:1793–1872, 1988–2028, 3056–3262` | Real. **This is the only working peer data path today.** |
 | `ee share preview`: DB-backed counts and redacted examples; optional `--record-consent` audit | `src/cli/share.rs`, `src/policy/mod.rs:530–583` | Real, but verdicts are simulated, per-example unkeyed content hashes and the aggregate public hash are offline oracles, serialization failure becomes a string-shaped “hash,” and `--record-consent` mutates a preview without applying any exposure. |
@@ -612,6 +612,10 @@ module-only result already has a response-surface catalog entry.
 `ee mesh export` consults `decide_mesh_outbound_policy` per record and lane;
 `ee mesh import` consults `decide_mesh_import` per event, recording the policy
 decision JSON in the ledger columns that already exist for it (V053/V055).
+`ee mesh export` requires `--peer <peer-id>` naming an enrolled, enabled peer
+and always applies that peer's outbound policy; it has no peer-less self-export
+bypass. Ordinary local backup remains the responsibility of `ee export` and
+`ee backup`.
 This path continues to carry the existing transport-independent
 `ee.mesh.event.v1` file-replay rows as non-origin-authoritative evidence. Its
 policy entry point exposes a versioned normalized request that P1.3 can reuse

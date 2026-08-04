@@ -32,6 +32,7 @@
 use std::cmp::Reverse;
 #[cfg(test)]
 use std::collections::BTreeSet;
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -46,7 +47,28 @@ pub const LANE_GRANT_PREVIEW_SCHEMA_V2: &str = "ee.mesh.lane_grant_preview.v2";
 /// Copy contract bound into every authenticated approval snapshot. Copy
 /// changes are consent changes: a token issued for older operator wording may
 /// not authorize a mutation rendered with newer wording.
-pub const LANE_GRANT_PREVIEW_COPY_VERSION: &str = "ee.mesh.lane_grant_preview.copy.v1";
+pub const LANE_GRANT_PREVIEW_COPY_VERSION: &str = "ee.mesh.lane_grant_preview.copy.v2";
+
+/// Closed candidate-kind vocabulary for the approval-bound complete set.
+pub const LANE_GRANT_MEMORY_CANDIDATE_KIND: &str = "memory";
+pub const LANE_GRANT_MESH_LEDGER_EVENT_CANDIDATE_KIND: &str = "mesh_ledger_event";
+
+/// Deterministic generation of the scanner implementation that prepares
+/// redacted preview rows. The source-derived value makes a binary upgrade that
+/// changes scanner behavior invalidate approvals even when the observed
+/// samples and redaction-reason union happen to remain identical.
+#[must_use]
+pub fn lane_grant_redaction_scanner_generation() -> &'static str {
+    static GENERATION: OnceLock<String> = OnceLock::new();
+    GENERATION
+        .get_or_init(|| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"ee.mesh.lane_grant.redaction_scanner_generation.v1");
+            hasher.update(include_bytes!("../policy/mod.rs"));
+            format!("redscan1_{}", hasher.finalize().to_hex())
+        })
+        .as_str()
+}
 
 /// Versioned opaque-handle adapter persisted with the grant. T2.2/T3.1 can
 /// migrate its private representation when stable node identities land; the
@@ -75,7 +97,7 @@ pub const LANE_GRANT_PREVIEW_MAX_LIMIT: usize = 500;
 
 /// Number of characters of memory body to include per preview row.
 /// The body content is assumed pre-redacted by the caller; this module
-/// only truncates and counts grapheme bytes as a defensive measure.
+/// neutralizes terminal/control formatting hazards before truncating it.
 pub const LANE_GRANT_PREVIEW_CONTENT_PREVIEW_CHARS: usize = 100;
 
 /// Threshold above which `large_volume_exposure` caution fires.
@@ -191,7 +213,8 @@ pub struct MemoryView<'a> {
     pub kind: &'a str,
     /// Caller is responsible for any content redaction (secret-detector
     /// pass, tailscale_metadata strip, etc) before passing the body in.
-    /// This module only truncates to [`LANE_GRANT_PREVIEW_CONTENT_PREVIEW_CHARS`].
+    /// This module neutralizes terminal/control formatting hazards and then
+    /// truncates to [`LANE_GRANT_PREVIEW_CONTENT_PREVIEW_CHARS`].
     pub content: &'a str,
     pub tags: &'a [String],
     pub trust_class: TrustClass,
@@ -226,7 +249,8 @@ pub struct LaneGrantPreviewInput<'a> {
     pub limit: usize,
     /// Names of redaction classes that the upstream pipeline already
     /// applied (e.g. `["api_key", "jwt", "tailscale_metadata"]`).
-    /// Reported into the output unchanged.
+    /// Reported into the output after terminal/control hazards are
+    /// deterministically neutralized.
     pub redaction_rules: &'a [String],
     /// Seed for [`SampleStrategy::Random`]. Pinned by the test layer
     /// and by `--seed` on the future CLI surface for reproducibility.
@@ -251,10 +275,18 @@ pub struct GrantTargetSnapshot {
     pub peer_id: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MeshLedgerEventCandidateView<'a> {
+    /// Immutable public event identity. No event body, body reference, URI,
+    /// policy JSON, or content/event digest crosses this pure-module boundary.
+    pub event_id: &'a str,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CandidateRevision {
-    pub memory_id: String,
+pub struct CandidateRevisionPin {
+    pub candidate_kind: String,
+    pub candidate_id: String,
     pub revision_id: String,
 }
 
@@ -280,10 +312,9 @@ pub struct LaneGrantApprovalContext<'a> {
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalTokenProjection {
     pub schema: String,
-    pub sensitive: bool,
-    pub bearer: String,
+    pub value: String,
     pub expires_at: String,
-    pub external_recorder_residual: String,
+    pub handling: String,
 }
 
 impl std::fmt::Debug for ApprovalTokenProjection {
@@ -291,13 +322,9 @@ impl std::fmt::Debug for ApprovalTokenProjection {
         formatter
             .debug_struct("ApprovalTokenProjection")
             .field("schema", &self.schema)
-            .field("sensitive", &self.sensitive)
-            .field("bearer", &"<redacted>")
+            .field("value", &"<redacted>")
             .field("expires_at", &self.expires_at)
-            .field(
-                "external_recorder_residual",
-                &self.external_recorder_residual,
-            )
+            .field("handling", &self.handling)
             .finish()
     }
 }
@@ -362,9 +389,11 @@ pub struct LaneGrantPreview {
     #[serde(rename = "proposedPolicy")]
     pub proposed_policy: PolicySnapshot,
     #[serde(rename = "candidateSet")]
-    pub candidate_set: Vec<CandidateRevision>,
+    pub candidate_set: Vec<CandidateRevisionPin>,
     #[serde(rename = "affectedMemoryCount")]
     pub affected_memory_count: u64,
+    #[serde(rename = "affectedLedgerEventCount")]
+    pub affected_ledger_event_count: u64,
     #[serde(rename = "redactedFromExposureCount")]
     pub redacted_from_exposure_count: u64,
     #[serde(rename = "previewSampleStrategy")]
@@ -375,6 +404,8 @@ pub struct LaneGrantPreview {
     pub preview_sample: Vec<PreviewRow>,
     #[serde(rename = "redactionRulesApplied")]
     pub redaction_rules_applied: Vec<String>,
+    #[serde(rename = "redactionScannerGeneration")]
+    pub redaction_scanner_generation: String,
     #[serde(rename = "cautionCodes")]
     pub caution_codes: Vec<String>,
     pub cautions: Vec<Caution>,
@@ -414,6 +445,8 @@ impl LaneGrantPreview {
 /// 6. Run the caution detection rules across the entire memory set
 ///    (not just the sample) so volume / tag / trust signals don't
 ///    depend on sampling.
+/// 7. Add every caller-authorized immutable mesh-ledger event identity to the
+///    complete candidate set and report `affectedLedgerEventCount` exactly.
 #[must_use]
 pub fn compute_lane_grant_preview(input: &LaneGrantPreviewInput<'_>) -> LaneGrantPreview {
     compute_lane_grant_preview_with_context(
@@ -433,6 +466,20 @@ pub fn compute_lane_grant_preview(input: &LaneGrantPreviewInput<'_>) -> LaneGran
 pub fn compute_lane_grant_preview_with_context(
     input: &LaneGrantPreviewInput<'_>,
     context: &LaneGrantApprovalContext<'_>,
+) -> LaneGrantPreview {
+    compute_lane_grant_preview_with_context_and_ledger_candidates(input, context, &[])
+}
+
+/// Compute the canonical v2 approval snapshot while binding every mesh-ledger
+/// event whose lane material, or whose retained body reference for a body
+/// grant, the caller's proposed outbound policy authorizes. The caller must
+/// derive this slice through the production outbound policy engine; this module
+/// only pins opaque identities.
+#[must_use]
+pub fn compute_lane_grant_preview_with_context_and_ledger_candidates(
+    input: &LaneGrantPreviewInput<'_>,
+    context: &LaneGrantApprovalContext<'_>,
+    ledger_candidates: &[MeshLedgerEventCandidateView<'_>],
 ) -> LaneGrantPreview {
     let effective_limit = effective_limit(input.limit);
     let current_decision = input.lane.decision_in(&input.current_policy);
@@ -478,49 +525,68 @@ pub fn compute_lane_grant_preview_with_context(
         affected_memory_count,
         tombstoned_blocked,
         redacted_blocked,
-    );
+    )
+    .into_iter()
+    .map(sanitize_preview_caution)
+    .collect::<Vec<_>>();
 
     let mut candidate_set = input
         .memories
         .iter()
-        .map(|memory| CandidateRevision {
-            memory_id: memory.memory_id.to_owned(),
-            revision_id: candidate_revision_id(
+        .map(|memory| CandidateRevisionPin {
+            candidate_kind: LANE_GRANT_MEMORY_CANDIDATE_KIND.to_owned(),
+            candidate_id: sanitize_preview_text(memory.memory_id),
+            revision_id: memory_candidate_revision_id(
                 memory.memory_id,
                 context.candidate_revision_generation,
             ),
         })
         .collect::<Vec<_>>();
+    candidate_set.extend(
+        ledger_candidates
+            .iter()
+            .map(|candidate| CandidateRevisionPin {
+                candidate_kind: LANE_GRANT_MESH_LEDGER_EVENT_CANDIDATE_KIND.to_owned(),
+                candidate_id: sanitize_preview_text(candidate.event_id),
+                revision_id: mesh_ledger_event_revision_id(candidate.event_id),
+            }),
+    );
     candidate_set.sort();
     let caution_codes = cautions.iter().map(|item| item.kind.clone()).collect();
 
     LaneGrantPreview {
         schema: LANE_GRANT_PREVIEW_SCHEMA_V2,
         copy_version: LANE_GRANT_PREVIEW_COPY_VERSION,
-        workspace_id: input.workspace_id.to_owned(),
+        workspace_id: sanitize_preview_text(input.workspace_id),
         target: GrantTargetSnapshot {
             adapter_version: LANE_GRANT_TARGET_ADAPTER_VERSION.to_owned(),
-            peer_id: context.target_peer_id.to_owned(),
+            peer_id: sanitize_preview_text(context.target_peer_id),
         },
         lane: input.lane.as_str().to_owned(),
         grant_generation: context.grant_generation,
         current_policy: PolicySnapshot {
-            generation: context.current_policy_generation.to_owned(),
+            generation: sanitize_preview_text(context.current_policy_generation),
             lane: input.lane.as_str().to_owned(),
             decision: current_decision.as_str().to_owned(),
         },
         proposed_policy: PolicySnapshot {
-            generation: context.proposed_policy_generation.to_owned(),
+            generation: sanitize_preview_text(context.proposed_policy_generation),
             lane: input.lane.as_str().to_owned(),
             decision: proposed_decision.as_str().to_owned(),
         },
         candidate_set,
         affected_memory_count,
+        affected_ledger_event_count: ledger_candidates.len() as u64,
         redacted_from_exposure_count: redacted_blocked,
         preview_sample_strategy: input.sample_strategy.as_str().to_owned(),
         preview_sample_limit: effective_limit,
         preview_sample: sample_rows,
-        redaction_rules_applied: input.redaction_rules.to_vec(),
+        redaction_rules_applied: input
+            .redaction_rules
+            .iter()
+            .map(|rule| sanitize_preview_text(rule))
+            .collect(),
+        redaction_scanner_generation: lane_grant_redaction_scanner_generation().to_owned(),
         caution_codes,
         cautions,
         approval_token: None,
@@ -546,20 +612,31 @@ fn build_preview_row(
     candidate_revision_generation: u64,
 ) -> PreviewRow {
     PreviewRow {
-        memory_id: memory.memory_id.to_owned(),
-        revision_id: candidate_revision_id(memory.memory_id, candidate_revision_generation),
-        level: memory.level.to_owned(),
-        kind: memory.kind.to_owned(),
-        content_preview: truncate_chars(memory.content, LANE_GRANT_PREVIEW_CONTENT_PREVIEW_CHARS),
-        tags: memory.tags.to_vec(),
+        memory_id: sanitize_preview_text(memory.memory_id),
+        revision_id: memory_candidate_revision_id(memory.memory_id, candidate_revision_generation),
+        level: sanitize_preview_text(memory.level),
+        kind: sanitize_preview_text(memory.kind),
+        content_preview: sanitize_preview_content(
+            memory.content,
+            LANE_GRANT_PREVIEW_CONTENT_PREVIEW_CHARS,
+        ),
+        tags: memory
+            .tags
+            .iter()
+            .map(|tag| sanitize_preview_text(tag))
+            .collect(),
         trust_class: memory.trust_class.as_str().to_owned(),
         has_sensitive_tags: memory_has_sensitive_tag(memory),
-        redacted_fields: memory.redacted_fields.to_vec(),
+        redacted_fields: memory
+            .redacted_fields
+            .iter()
+            .map(|field| sanitize_preview_text(field))
+            .collect(),
         would_expose_under_proposed_policy: would_expose,
     }
 }
 
-fn candidate_revision_id(memory_id: &str, candidate_revision_generation: u64) -> String {
+fn memory_candidate_revision_id(memory_id: &str, candidate_revision_generation: u64) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"ee.mesh.lane_grant.candidate_revision.v1");
     hasher.update(&(memory_id.len() as u64).to_le_bytes());
@@ -568,11 +645,82 @@ fn candidate_revision_id(memory_id: &str, candidate_revision_generation: u64) ->
     format!("revwg1_{}", hasher.finalize().to_hex())
 }
 
+/// Pin an immutable ledger event without turning its content/event digest into
+/// an equality oracle. A newly inserted event adds a new pin and therefore
+/// changes the canonical snapshot even though ledger inserts do not advance the
+/// workspace memory generation.
+fn mesh_ledger_event_revision_id(event_id: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.mesh.lane_grant.mesh_ledger_event_revision.v1");
+    hasher.update(&(event_id.len() as u64).to_le_bytes());
+    hasher.update(event_id.as_bytes());
+    format!("revme1_{}", hasher.finalize().to_hex())
+}
+
 fn truncate_chars(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_owned();
     }
     value.chars().take(max_chars).collect()
+}
+
+/// Build terminal-safe preview text without changing ordinary Unicode.
+///
+/// JSON escaping alone is insufficient here: the same value is also rendered
+/// for humans and authenticated as part of the approval snapshot. Replacing
+/// unsafe scalar values before snapshot structs are constructed keeps those
+/// three surfaces byte-for-byte aligned. A visible replacement character is
+/// used instead of silently joining text that was separated by a control.
+fn sanitize_preview_text(value: &str) -> String {
+    value.chars().map(sanitize_preview_character).collect()
+}
+
+fn sanitize_preview_content(value: &str, max_chars: usize) -> String {
+    truncate_chars(value, max_chars)
+        .chars()
+        .map(sanitize_preview_character)
+        .collect()
+}
+
+fn sanitize_preview_character(character: char) -> char {
+    if is_preview_format_hazard(character) {
+        '\u{FFFD}'
+    } else {
+        character
+    }
+}
+
+fn is_preview_format_hazard(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            // Soft/invisible separators and byte-order marks.
+            '\u{00AD}'
+                | '\u{180E}'
+                | '\u{200B}'
+                | '\u{2060}'
+                | '\u{FEFF}'
+                // Bidirectional marks, embeddings, overrides, isolates, and
+                // deprecated directional formatting controls. Ordinary RTL
+                // script characters remain unchanged.
+                | '\u{061C}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{206F}'
+                // Unicode line/paragraph injection and annotation controls.
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                // Invisible tag characters can carry misleading terminal
+                // labels without contributing visible glyphs.
+                | '\u{E0000}'..='\u{E007F}'
+        )
+}
+
+fn sanitize_preview_caution(mut caution: Caution) -> Caution {
+    caution.message = sanitize_preview_text(&caution.message);
+    caution
 }
 
 fn memory_has_sensitive_tag(memory: &MemoryView<'_>) -> bool {
@@ -631,7 +779,7 @@ fn collect_cautions(
         cautions.push(Caution {
             kind: caution_kinds::PEER_NOT_IN_GROUP.to_owned(),
             message: format!(
-                "peer {} is enrolled but is not included in this workspace's peer-group bindings; the preview still runs, but group-authorized data will not flow until the matching binding includes that peer",
+                "peer {} is enrolled but is not included in this workspace's peer-group bindings; if that membership is intended, add it, then review and freshly approve the lane because membership alone does not grant a denied lane",
                 input.peer_node_key
             ),
             severity: "info".to_owned(),
@@ -757,6 +905,27 @@ mod tests {
         Vec::new()
     }
 
+    fn assert_json_strings_are_terminal_safe(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::String(text) => assert!(
+                !text.chars().any(is_preview_format_hazard),
+                "snapshot string retained a terminal/control hazard: {text:?}",
+            ),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    assert_json_strings_are_terminal_safe(item);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for field in fields.values() {
+                    assert_json_strings_are_terminal_safe(field);
+                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
+        }
+    }
+
     fn body_grant_proposed() -> IntendedLanePolicy {
         let mut policy = IntendedLanePolicy::conservative_default();
         policy.body = LaneDecision::Allow;
@@ -787,18 +956,31 @@ mod tests {
     }
 
     #[test]
-    fn approval_token_debug_redacts_bearer() {
+    fn approval_token_debug_redacts_secret_value() {
         let token = ApprovalTokenProjection {
             schema: "ee.mesh.approval_token.v1".to_owned(),
-            sensitive: true,
-            bearer: "eeap1_secret-bearer-material".to_owned(),
+            value: "eeap1_secret-bearer-material".to_owned(),
             expires_at: "2026-08-04T08:15:00Z".to_owned(),
-            external_recorder_residual: "External logs may retain this token.".to_owned(),
+            handling: "secret".to_owned(),
         };
 
         let rendered = format!("{token:?}");
         assert!(rendered.contains("<redacted>"));
         assert!(!rendered.contains("secret-bearer-material"));
+    }
+
+    #[test]
+    fn redaction_scanner_generation_is_stable_and_source_derived() {
+        let first = lane_grant_redaction_scanner_generation();
+        let second = lane_grant_redaction_scanner_generation();
+        assert_eq!(first, second);
+        assert!(first.starts_with("redscan1_"));
+        assert_eq!(first.len(), "redscan1_".len() + 64);
+        assert!(first.strip_prefix("redscan1_").is_some_and(|suffix| {
+            suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        }));
     }
 
     // ---- Lane <-> IntendedLanePolicy decision lookup -----------------------
@@ -856,6 +1038,230 @@ mod tests {
         // 4-byte UTF-8 chars (rocket); each is one char, so 5 chars max
         let s = "🚀🚀🚀🚀🚀🚀";
         assert_eq!(truncate_chars(s, 5).chars().count(), 5);
+    }
+
+    #[test]
+    fn preview_content_neutralizes_terminal_controls_before_snapshot_construction() {
+        let no_tags = empty_strings();
+        let no_redacted = empty_strings();
+        let hostile =
+            "safe\u{1b}[31mRED\u{1b}[0m|\n|\0|\u{202E}rtl\u{202C}|\u{2066}iso\u{2069}|\u{200B}end";
+        let base = build_memory(
+            "hostile",
+            TrustClass::AgentAssertion,
+            &no_tags,
+            1,
+            false,
+            false,
+            &no_redacted,
+        );
+        let memories = [MemoryView {
+            content: hostile,
+            ..base
+        }];
+        let redaction_rules = empty_strings();
+        let preview = compute_lane_grant_preview(&LaneGrantPreviewInput {
+            peer_node_key: "nodekey:test",
+            peer_in_group: true,
+            lane: Lane::Body,
+            workspace_id: "ws-1",
+            current_policy: IntendedLanePolicy::conservative_default(),
+            proposed_policy: body_grant_proposed(),
+            memories: &memories,
+            sample_strategy: SampleStrategy::MostRecent,
+            limit: 1,
+            redaction_rules: &redaction_rules,
+            sample_random_seed: 0,
+        });
+
+        let expected = "safe\u{FFFD}[31mRED\u{FFFD}[0m|\u{FFFD}|\u{FFFD}|\u{FFFD}rtl\u{FFFD}|\u{FFFD}iso\u{FFFD}|\u{FFFD}end";
+        assert_eq!(preview.preview_sample[0].content_preview, expected);
+        assert!(
+            !preview.preview_sample[0]
+                .content_preview
+                .chars()
+                .any(is_preview_format_hazard),
+            "the constructed row must contain no terminal or Unicode formatting hazards",
+        );
+
+        let canonical = preview.canonical_approval_snapshot_bytes().unwrap();
+        let canonical_text = std::str::from_utf8(&canonical).unwrap();
+        for encoded_hazard in [
+            r"\u001b", r"\n", r"\u0000", r"\u202e", r"\u202c", r"\u2066", r"\u2069", r"\u200b",
+        ] {
+            assert!(
+                !canonical_text.contains(encoded_hazard),
+                "canonical approval snapshot retained {encoded_hazard:?}",
+            );
+        }
+        assert!(!canonical_text.chars().any(is_preview_format_hazard));
+
+        let decoded: serde_json::Value = serde_json::from_slice(&canonical).unwrap();
+        assert_eq!(
+            decoded
+                .pointer("/previewSample/0/contentPreview")
+                .and_then(serde_json::Value::as_str),
+            Some(expected),
+        );
+    }
+
+    #[test]
+    fn preview_content_preserves_ordinary_unicode_exactly() {
+        let ordinary = "Café; cafe\u{0301}; עברית; العربية; 👨\u{200D}👩\u{200D}👧\u{200D}👦; 中文";
+        assert_eq!(
+            sanitize_preview_content(ordinary, LANE_GRANT_PREVIEW_CONTENT_PREVIEW_CHARS),
+            ordinary,
+        );
+
+        let no_tags = empty_strings();
+        let no_redacted = empty_strings();
+        let base = build_memory(
+            "ordinary-unicode",
+            TrustClass::AgentAssertion,
+            &no_tags,
+            1,
+            false,
+            false,
+            &no_redacted,
+        );
+        let memories = [MemoryView {
+            content: ordinary,
+            ..base
+        }];
+        let redaction_rules = empty_strings();
+        let preview = compute_lane_grant_preview(&LaneGrantPreviewInput {
+            peer_node_key: "nodekey:test",
+            peer_in_group: true,
+            lane: Lane::Body,
+            workspace_id: "ws-1",
+            current_policy: IntendedLanePolicy::conservative_default(),
+            proposed_policy: body_grant_proposed(),
+            memories: &memories,
+            sample_strategy: SampleStrategy::MostRecent,
+            limit: 1,
+            redaction_rules: &redaction_rules,
+            sample_random_seed: 0,
+        });
+
+        assert_eq!(preview.preview_sample[0].content_preview, ordinary);
+        let canonical = preview.canonical_approval_snapshot_bytes().unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&canonical).unwrap();
+        assert_eq!(
+            decoded
+                .pointer("/previewSample/0/contentPreview")
+                .and_then(serde_json::Value::as_str),
+            Some(ordinary),
+        );
+    }
+
+    #[test]
+    fn every_caller_derived_snapshot_string_is_terminal_safe() {
+        let hostile_tags = tags(&[
+            "private\u{202E}tag",
+            "family-👨\u{200D}👩\u{200D}👧\u{200D}👦",
+        ]);
+        let hostile_redacted_fields = tags(&["body\nsecret", "nom-Café"]);
+        let memories = [MemoryView {
+            memory_id: "memory\u{1B}[31m-red-👨\u{200D}👩",
+            level: "episodic\r-Café",
+            kind: "fact\u{200B}-中文",
+            content: "body\t-Café",
+            tags: &hostile_tags,
+            trust_class: TrustClass::HumanExplicit,
+            redacted_fields: &hostile_redacted_fields,
+            created_at_secs: 1,
+            is_tombstoned: false,
+            blocked_by_redaction_class: false,
+        }];
+        let hostile_redaction_rules = tags(&["api\u{009D}key", "règle"]);
+        let input = LaneGrantPreviewInput {
+            peer_node_key: "node\nkey-עברית",
+            peer_in_group: false,
+            lane: Lane::Body,
+            workspace_id: "workspace\u{1B}[2J-Café",
+            current_policy: IntendedLanePolicy::conservative_default(),
+            proposed_policy: body_grant_proposed(),
+            memories: &memories,
+            sample_strategy: SampleStrategy::MostRecent,
+            limit: 1,
+            redaction_rules: &hostile_redaction_rules,
+            sample_random_seed: 0,
+        };
+        let context = LaneGrantApprovalContext {
+            target_peer_id: "peer\u{202E}spoof\u{202C}-עברית",
+            grant_generation: 4,
+            candidate_revision_generation: 9,
+            current_policy_generation: "current\n-Café",
+            proposed_policy_generation: "proposed\u{2066}iso\u{2069}-中文",
+        };
+        let ledger_candidates = [MeshLedgerEventCandidateView {
+            event_id: "event\u{202E}rtl\u{202C}-العربية",
+        }];
+
+        let preview = compute_lane_grant_preview_with_context_and_ledger_candidates(
+            &input,
+            &context,
+            &ledger_candidates,
+        );
+
+        assert_eq!(preview.workspace_id, "workspace\u{FFFD}[2J-Café");
+        assert_eq!(preview.target.peer_id, "peer\u{FFFD}spoof\u{FFFD}-עברית");
+        assert_eq!(preview.current_policy.generation, "current\u{FFFD}-Café");
+        assert_eq!(
+            preview.proposed_policy.generation,
+            "proposed\u{FFFD}iso\u{FFFD}-中文",
+        );
+
+        let memory_pin = preview
+            .candidate_set
+            .iter()
+            .find(|candidate| candidate.candidate_kind == LANE_GRANT_MEMORY_CANDIDATE_KIND)
+            .expect("memory pin");
+        assert_eq!(
+            memory_pin.candidate_id,
+            "memory\u{FFFD}[31m-red-👨\u{200D}👩"
+        );
+        let ledger_pin = preview
+            .candidate_set
+            .iter()
+            .find(|candidate| {
+                candidate.candidate_kind == LANE_GRANT_MESH_LEDGER_EVENT_CANDIDATE_KIND
+            })
+            .expect("ledger-event pin");
+        assert_eq!(ledger_pin.candidate_id, "event\u{FFFD}rtl\u{FFFD}-العربية",);
+
+        let row = &preview.preview_sample[0];
+        assert_eq!(row.memory_id, "memory\u{FFFD}[31m-red-👨\u{200D}👩");
+        assert_eq!(row.level, "episodic\u{FFFD}-Café");
+        assert_eq!(row.kind, "fact\u{FFFD}-中文");
+        assert_eq!(row.content_preview, "body\u{FFFD}-Café");
+        assert_eq!(
+            row.tags,
+            [
+                "private\u{FFFD}tag".to_owned(),
+                "family-👨\u{200D}👩\u{200D}👧\u{200D}👦".to_owned(),
+            ],
+        );
+        assert_eq!(
+            row.redacted_fields,
+            ["body\u{FFFD}secret".to_owned(), "nom-Café".to_owned()],
+        );
+        assert_eq!(
+            preview.redaction_rules_applied,
+            ["api\u{FFFD}key".to_owned(), "règle".to_owned()],
+        );
+        let peer_caution = preview
+            .cautions
+            .iter()
+            .find(|caution| caution.kind == caution_kinds::PEER_NOT_IN_GROUP)
+            .expect("peer-not-in-group caution");
+        assert!(peer_caution.message.contains("node\u{FFFD}key-עברית"));
+
+        let rendered = serde_json::to_value(&preview).unwrap();
+        assert_json_strings_are_terminal_safe(&rendered);
+        let canonical = preview.canonical_approval_snapshot_bytes().unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&canonical).unwrap();
+        assert_json_strings_are_terminal_safe(&decoded);
     }
 
     // ---- Pure compute: deny → allow lane shows everything ------------------
@@ -977,12 +1383,18 @@ mod tests {
         let before_unsampled = before
             .candidate_set
             .iter()
-            .find(|candidate| candidate.memory_id == "unsampled")
+            .find(|candidate| {
+                candidate.candidate_kind == LANE_GRANT_MEMORY_CANDIDATE_KIND
+                    && candidate.candidate_id == "unsampled"
+            })
             .expect("complete candidate set includes unsampled memory");
         let after_unsampled = after_unsampled_mutation
             .candidate_set
             .iter()
-            .find(|candidate| candidate.memory_id == "unsampled")
+            .find(|candidate| {
+                candidate.candidate_kind == LANE_GRANT_MEMORY_CANDIDATE_KIND
+                    && candidate.candidate_id == "unsampled"
+            })
             .expect("complete candidate set still includes unsampled memory");
         assert_ne!(before_unsampled.revision_id, after_unsampled.revision_id);
         assert!(before_unsampled.revision_id.starts_with("revwg1_"));
@@ -993,6 +1405,90 @@ mod tests {
                 .canonical_approval_snapshot_bytes()
                 .unwrap(),
             "an unsampled source mutation must stale the authenticated snapshot",
+        );
+    }
+
+    #[test]
+    fn immutable_ledger_event_pins_are_generic_deterministic_and_snapshot_bound() {
+        let no_tags = empty_strings();
+        let no_redacted = empty_strings();
+        let memories = [build_memory(
+            "memory-candidate",
+            TrustClass::AgentAssertion,
+            &no_tags,
+            1,
+            false,
+            false,
+            &no_redacted,
+        )];
+        let redaction_rules = empty_strings();
+        let input = LaneGrantPreviewInput {
+            peer_node_key: "nodekey:test",
+            peer_in_group: true,
+            lane: Lane::GraphLink,
+            workspace_id: "ws-1",
+            current_policy: IntendedLanePolicy::conservative_default(),
+            proposed_policy: IntendedLanePolicy {
+                graph_link: LaneDecision::Allow,
+                ..IntendedLanePolicy::conservative_default()
+            },
+            memories: &memories,
+            sample_strategy: SampleStrategy::MostRecent,
+            limit: 1,
+            redaction_rules: &redaction_rules,
+            sample_random_seed: 0,
+        };
+        let context = LaneGrantApprovalContext {
+            target_peer_id: "peer-1",
+            grant_generation: 3,
+            candidate_revision_generation: 41,
+            current_policy_generation: "policy-current",
+            proposed_policy_generation: "policy-proposed",
+        };
+        let first_event = [MeshLedgerEventCandidateView {
+            event_id: "mesh_evt_immutable_1",
+        }];
+        let first = compute_lane_grant_preview_with_context_and_ledger_candidates(
+            &input,
+            &context,
+            &first_event,
+        );
+        let repeated = compute_lane_grant_preview_with_context_and_ledger_candidates(
+            &input,
+            &context,
+            &first_event,
+        );
+        let second_event = [
+            MeshLedgerEventCandidateView {
+                event_id: "mesh_evt_immutable_1",
+            },
+            MeshLedgerEventCandidateView {
+                event_id: "mesh_evt_immutable_2",
+            },
+        ];
+        let after_insert = compute_lane_grant_preview_with_context_and_ledger_candidates(
+            &input,
+            &context,
+            &second_event,
+        );
+
+        assert_eq!(first, repeated);
+        assert_eq!(first.affected_ledger_event_count, 1);
+        assert_eq!(after_insert.affected_ledger_event_count, 2);
+        let event_pin = first
+            .candidate_set
+            .iter()
+            .find(|candidate| {
+                candidate.candidate_kind == LANE_GRANT_MESH_LEDGER_EVENT_CANDIDATE_KIND
+            })
+            .expect("ledger event is in the complete candidate set");
+        assert_eq!(event_pin.candidate_id, "mesh_evt_immutable_1");
+        assert!(event_pin.revision_id.starts_with("revme1_"));
+        assert!(!event_pin.revision_id.contains("mesh_evt_immutable_1"));
+        assert_ne!(
+            first.canonical_approval_snapshot_bytes().unwrap(),
+            after_insert.canonical_approval_snapshot_bytes().unwrap(),
+            "a ledger insert must stale the snapshot without a workspace-generation change",
         );
     }
 
@@ -1089,15 +1585,24 @@ mod tests {
         assert_field_drift!("proposedPolicy.decision", |value: &mut LaneGrantPreview| {
             value.proposed_policy.decision.push('x')
         });
-        assert_field_drift!("candidateSet.memoryId", |value: &mut LaneGrantPreview| {
-            value.candidate_set[0].memory_id.push('x')
-        });
+        assert_field_drift!(
+            "candidateSet.candidateKind",
+            |value: &mut LaneGrantPreview| { value.candidate_set[0].candidate_kind.push('x') }
+        );
+        assert_field_drift!(
+            "candidateSet.candidateId",
+            |value: &mut LaneGrantPreview| { value.candidate_set[0].candidate_id.push('x') }
+        );
         assert_field_drift!("candidateSet.revisionId", |value: &mut LaneGrantPreview| {
             value.candidate_set[0].revision_id.push('x')
         });
         assert_field_drift!("affectedMemoryCount", |value: &mut LaneGrantPreview| {
             value.affected_memory_count += 1
         });
+        assert_field_drift!(
+            "affectedLedgerEventCount",
+            |value: &mut LaneGrantPreview| { value.affected_ledger_event_count += 1 }
+        );
         assert_field_drift!(
             "redactedFromExposureCount",
             |value: &mut LaneGrantPreview| value.redacted_from_exposure_count += 1
@@ -1156,6 +1661,10 @@ mod tests {
         assert_field_drift!("redactionRulesApplied", |value: &mut LaneGrantPreview| {
             value.redaction_rules_applied.push("jwt".to_owned())
         });
+        assert_field_drift!(
+            "redactionScannerGeneration",
+            |value: &mut LaneGrantPreview| value.redaction_scanner_generation.push('x')
+        );
         assert_field_drift!("cautionCodes", |value: &mut LaneGrantPreview| value
             .caution_codes
             .push("extra".to_owned()));
@@ -1175,10 +1684,9 @@ mod tests {
         let mut projected = base.clone();
         projected.approval_token = Some(ApprovalTokenProjection {
             schema: "ee.mesh.approval_token.v1".to_owned(),
-            sensitive: true,
-            bearer: "eeap1_redacted-test-bearer".to_owned(),
+            value: "eeap1_redacted-test-bearer".to_owned(),
             expires_at: "2026-08-04T08:15:00Z".to_owned(),
-            external_recorder_residual: "External logs may retain this token.".to_owned(),
+            handling: "secret".to_owned(),
         });
         assert_eq!(
             projected.canonical_approval_snapshot_bytes().unwrap(),

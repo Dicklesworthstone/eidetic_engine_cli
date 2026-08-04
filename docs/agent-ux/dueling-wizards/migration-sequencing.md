@@ -5,8 +5,8 @@ This registry is the human-facing companion to
 owned by `bd-1n0np.23.1` and enforced by
 `tests/contracts/dueling_wizards_migration_registry.rs`.
 
-The current compiled migration tail in `src/db/mod.rs` is `V088`. The next
-planned allocation starts at `V089`. Every dueling-wizards schema task must
+The current compiled migration tail in `src/db/mod.rs` is `V089`. The next
+planned allocation starts at `V090`. Every dueling-wizards schema task must
 allocate from the registry before adding a runtime migration, then keep the
 runtime `MIGRATIONS` array contiguous. The registry is a plan artifact, not a
 substitute for the real migration constants.
@@ -24,9 +24,12 @@ profile/check repair), `V085_EVIDENCE_SECURITY_POSTURE` (forward-only
 fail-closed evidence admission and provenance-integrity repair),
 `V086_RULE_INDEX_GENERATIONS` (forward-only procedural-rule generation
 tracking and source-row repair), `V087_EVIDENCE_STORAGE_REBUILD`
-(forward-only canonical evidence-table rebuild and generation repair), and
+(forward-only canonical evidence-table rebuild and generation repair),
 `V088_MESH_LANE_GRANT_STATES` (durable exact-peer lane consent with monotonic
-grant generations and target-rotation invalidation) landed
+grant generations and target-rotation invalidation), and
+`V089_MESH_LANE_GRANT_CONFIG_BINDINGS` (forward-only immutable-V088 repair
+that binds widened lanes to exact config bytes and invalidates legacy unbound
+allows) landed
 between the initiative's implemented allocations and the compiled tail.
 Implemented allocations therefore record historical fact (two
 allocations may share one compiled migration, as the sentinel pair does under
@@ -41,7 +44,7 @@ rollback must never be required for ordinary repair. A task that adds durable
 or derived storage must also name the backup/export/restore asset class and the
 boundary migration coverage path before source work starts.
 
-Do not reuse migration numbers. If the compiled tail moves past `V088`, update
+Do not reuse migration numbers. If the compiled tail moves past `V089`, update
 this registry in the same change that adds the runtime migration.
 
 ### V085 legacy-evidence remediation
@@ -99,6 +102,28 @@ denied until the explicit bounded rescreen above evaluates them. Because the
 table replacement is forward-only, the same protected offline-snapshot posture
 applies before migration when byte-for-byte recovery is required.
 
+### V089 immutable-V088 repair
+
+`V088_MESH_LANE_GRANT_STATES` remains byte-for-byte identical to its first
+committed definition. `V089_MESH_LANE_GRANT_CONFIG_BINDINGS` performs the
+approved-config binding as a new forward-only table rebuild. It accepts the
+official 13-column V088 table and the one briefly shipped 19-column physical
+shape, copies only the shared V088 columns, and produces one canonical table
+with six lane-specific approval-digest columns and cross-column constraints.
+The rebuilt target also aligns `peer_id` with the published opaque-ID grammar
+`^peer_[A-Za-z0-9._:-]{6,128}$`, including its minimum and maximum lengths;
+the runtime target adapter applies the same bound before emitting grant data.
+
+An old `allow` has no trustworthy binding to the current config bytes. V089
+therefore converts each such lane to explicit `deny`, clears every approval
+digest, advances that row's consent generation once (saturating at SQLite's
+integer maximum), and refreshes its update timestamp. Existing `deny`,
+`quarantine`, and inherited `NULL` values remain restrictive or inherited as
+before. Migration-history validation recognizes only the exact computed
+checksum and exact audit label from the accidental rewritten V088; any other
+V088 checksum remains migration drift. Rerunning migration is idempotent and
+does not rewrite either the V088 history record or already canonical rows.
+
 ## Allocations
 
 | Version | Allocation | Status | Bead | Durable scope |
@@ -111,9 +136,9 @@ applies before migration when byte-for-byte recovery is required.
 | `V070` | `typed_memory_kind_sidecar` | implemented | `bd-1n0np.12.1` | Optional validated per-kind memory JSON sidecar fields (landed as `V070_MEMORY_TYPED_FIELDS` on `memories`). |
 | `V071` | `workspace_generations` | implemented | `bd-1n0np.8.2` | Monotonic workspace and derived-asset generation state. |
 | `V072` | `error_fingerprints` | implemented | `bd-1n0np.4.3` | Error fingerprints plus repair, proof, and outcome links (`error_repair_links` landed separately as `V073_ERROR_REPAIR_LINKS`). |
-| `V089` | `attestation_bundles` | planned | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
-| `V090` | `query_miss_ledger` | planned | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
-| `V091` | `source_write_stats` | planned | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
+| `V090` | `attestation_bundles` | planned | `bd-1n0np.22.1` | Canonical attestation bundle rows and bundle item hashes. |
+| `V091` | `query_miss_ledger` | planned | `bd-1n0np.6.3` | Redacted low-utility query miss ledger with TTL posture. |
+| `V092` | `source_write_stats` | planned | `bd-1n0np.8.5` | Per-source write-stream statistics for write-immune quarantine decisions. |
 
 `V084_PACK_RECORD_PROFILE_DOMAIN` is covered by the FrankenSQLite regression
 `db::tests::v084_pack_profile_rebuild_preserves_parent_children_indexes_and_order`.
@@ -125,7 +150,7 @@ proves all six canonical profiles plus `contradiction_suppressed` persist.
 
 The manifest's `transitionMatrix` mirrors the allocation table one-for-one.
 This is the implementation gate: `implemented` rows must name the compiled
-migration constant and stay at or behind the current compiled tail (`V088` at
+migration constant and stay at or behind the current compiled tail (`V089` at
 the time of this registry). `planned` rows must stay ahead of the compiled tail
 and keep `migrationConstant`, `boundaryMigrationEvidence`, and
 `backupCoverageEvidence` set to `required_before_implemented`.
@@ -144,7 +169,7 @@ same change.
 `scripts/e2e_cross_cutting.sh` statically pins the registry's conservative
 posture before runtime proof is available. The shell gate pins the exact
 implemented version layout (`V066` through `V072`, with the sentinel pair
-sharing `V069`) plus the planned reservations (`V089` through `V091`),
+sharing `V069`) plus the planned reservations (`V090` through `V092`),
 transition rows mirror allocation rows by ID, version, and status, implemented
 rows stay at or behind the compiled tail, planned rows stay at or beyond the
 next allocation, and backup assets mirror each allocation's asset kind,

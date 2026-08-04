@@ -100,7 +100,7 @@
     "posture": "disabled_local_only",
     "repairCommands": [
       "ee init --workspace \"[WORKSPACE]\" --json",
-      "ee mesh export --workspace \"[WORKSPACE]\" --out mesh-export.json --json",
+      "ee mesh export --workspace \"[WORKSPACE]\" --peer <peer-id> --out mesh-export.json --json",
       "ee mesh import --workspace \"[WORKSPACE]\" --file mesh-export.json --json"
     ],
     "schema": "ee.mesh.cli.status.v1",

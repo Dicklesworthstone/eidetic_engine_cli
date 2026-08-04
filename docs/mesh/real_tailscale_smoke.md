@@ -24,9 +24,11 @@ The script validates:
 
 - `tailscale status --json` is available and includes the requested peer.
 - `ee mesh status --json` runs with `EE_MESH_ENABLED=1`.
+- The selected real peer is explicitly enrolled and its returned opaque
+  `peerId` is used as the transfer target.
 - `ee mesh sync --once --json` completes one foreground supervisor cycle.
-- `ee mesh export` produces a JSON artifact and `ee mesh import --dry-run`
-  accepts it.
+- `ee mesh export --peer <enrolled-peer-id>` produces a peer-policy-filtered
+  JSON artifact and `ee mesh import --dry-run` accepts it.
 - The event log includes redaction-safe peer, route, latency, policy, and
   revision fields for closeout evidence.
 

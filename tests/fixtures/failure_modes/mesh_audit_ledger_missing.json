@@ -15,7 +15,8 @@
     "description": "A mesh command or support-bundle projection cannot find any mesh audit ledger rows for a workspace that has mesh export/import state.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee mesh export --workspace . --json"
+      "enroll and enable a mesh peer; record its returned opaque peerId as <peer-id>",
+      "ee mesh export --workspace . --peer <peer-id> --json"
     ],
     "invocation": "ee audit timeline --workspace . --surface mesh --json"
   },

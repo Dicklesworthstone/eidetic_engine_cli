@@ -14,8 +14,9 @@ use std::path::PathBuf;
 
 use ee::mesh::lane_grant::{APPROVAL_TOKEN_BEARER_LEN, APPROVAL_TOKEN_SCHEMA_V1};
 use ee::mesh::lane_grant_preview::{
+    LANE_GRANT_MEMORY_CANDIDATE_KIND, LANE_GRANT_MESH_LEDGER_EVENT_CANDIDATE_KIND,
     LANE_GRANT_PREVIEW_COPY_VERSION, LANE_GRANT_PREVIEW_SCHEMA_V2,
-    LANE_GRANT_TARGET_ADAPTER_VERSION,
+    LANE_GRANT_TARGET_ADAPTER_VERSION, lane_grant_redaction_scanner_generation,
 };
 use ee::output::{public_schemas, render_schema_export_json};
 use serde_json::Value;
@@ -48,11 +49,13 @@ const REQUIRED_TOP_LEVEL: &[&str] = &[
     "proposedPolicy",
     "candidateSet",
     "affectedMemoryCount",
+    "affectedLedgerEventCount",
     "redactedFromExposureCount",
     "previewSampleStrategy",
     "previewSampleLimit",
     "previewSample",
     "redactionRulesApplied",
+    "redactionScannerGeneration",
     "cautionCodes",
     "cautions",
 ];
@@ -96,7 +99,12 @@ const REQUIRED_POLICY_SNAPSHOT_FIELDS: &[&str] = &["generation", "lane", "decisi
 
 const REQUIRED_GRANT_TARGET_FIELDS: &[&str] = &["adapterVersion", "peerId"];
 
-const REQUIRED_REVISION_PIN_FIELDS: &[&str] = &["memoryId", "revisionId"];
+const REQUIRED_CANDIDATE_PIN_FIELDS: &[&str] = &["candidateKind", "candidateId", "revisionId"];
+
+const REQUIRED_CANDIDATE_KINDS: &[&str] = &[
+    LANE_GRANT_MEMORY_CANDIDATE_KIND,
+    LANE_GRANT_MESH_LEDGER_EVENT_CANDIDATE_KIND,
+];
 
 const REQUIRED_PREVIEW_ROW_FIELDS: &[&str] = &[
     "memoryId",
@@ -111,13 +119,7 @@ const REQUIRED_PREVIEW_ROW_FIELDS: &[&str] = &[
     "wouldExposeUnderProposedPolicy",
 ];
 
-const REQUIRED_TOKEN_FIELDS: &[&str] = &[
-    "schema",
-    "sensitive",
-    "bearer",
-    "expiresAt",
-    "externalRecorderResidual",
-];
+const REQUIRED_TOKEN_FIELDS: &[&str] = &["schema", "value", "expiresAt", "handling"];
 
 const REQUIRED_MUTATION_FIELDS: &[&str] = &[
     "schema",
@@ -402,17 +404,17 @@ fn lane_grant_preview_target_and_candidate_pins_are_exact() -> TestResult {
     )?;
     require_required_fields(
         &schema,
-        "/$defs/revisionPin/required",
-        REQUIRED_REVISION_PIN_FIELDS,
-        "revisionPin.required",
+        "/$defs/candidatePin/required",
+        REQUIRED_CANDIDATE_PIN_FIELDS,
+        "candidatePin.required",
     )?;
     ensure(
         schema["properties"]["target"]["$ref"] == "#/$defs/grantTarget",
         "preview target must use the versioned grant-target adapter",
     )?;
     ensure(
-        schema["properties"]["candidateSet"]["items"]["$ref"] == "#/$defs/revisionPin",
-        "the complete candidate set must consist of revision pins",
+        schema["properties"]["candidateSet"]["items"]["$ref"] == "#/$defs/candidatePin",
+        "the complete candidate set must consist of generic candidate pins",
     )?;
     ensure(
         schema["$defs"]["grantTarget"]["properties"]["adapterVersion"]["const"]
@@ -424,6 +426,59 @@ fn lane_grant_preview_target_and_candidate_pins_are_exact() -> TestResult {
             .get("originNodeId")
             .is_none(),
         "public grant target must not expose its internal origin-node adapter binding",
+    )?;
+    require_closed_set(
+        &schema,
+        "/$defs/candidateKind/enum",
+        REQUIRED_CANDIDATE_KINDS,
+        "candidateKind enum",
+    )?;
+    require_property_fields(
+        &schema,
+        "/$defs/candidatePin/properties",
+        REQUIRED_CANDIDATE_PIN_FIELDS,
+        "candidatePin.properties",
+    )?;
+    for forbidden in [
+        "memoryId",
+        "eventJson",
+        "contentHash",
+        "eventHash",
+        "bodyCacheKey",
+        "uri",
+        "policyDecisionJson",
+        "policyFailureSurfaceJson",
+    ] {
+        ensure(
+            schema["$defs"]["candidatePin"]["properties"]
+                .get(forbidden)
+                .is_none(),
+            format!("candidate pins must not expose raw ledger field {forbidden}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn lane_grant_preview_scanner_generation_is_required_opaque_and_source_derived() -> TestResult {
+    let schema = load_schema(PREVIEW_PATH)?;
+    ensure(
+        schema["properties"]["redactionScannerGeneration"]["pattern"] == "^redscan1_[0-9a-f]{64}$",
+        "redaction scanner generation must use the closed opaque v1 shape",
+    )?;
+    let generation = lane_grant_redaction_scanner_generation();
+    ensure(
+        generation.starts_with("redscan1_") && generation.len() == "redscan1_".len() + 64,
+        format!("runtime scanner generation has invalid shape: {generation}"),
+    )?;
+    ensure(
+        schema["properties"]["redactionScannerGeneration"]["description"]
+            .as_str()
+            .is_some_and(|description| {
+                description.contains("source-derived")
+                    && description.contains("without exposing any memory-content hash")
+            }),
+        "scanner generation description must state its source binding and non-content contract",
     )
 }
 
@@ -486,16 +541,16 @@ fn approval_token_is_optional_sensitive_opaque_and_identifier_free() -> TestResu
         "approval token projection must reject identifier/debug field drift",
     )?;
     ensure(
-        token["properties"]["sensitive"]["const"] == Value::Bool(true),
-        "approval token must be explicitly marked sensitive",
+        token["properties"]["handling"]["const"] == "secret",
+        "approval token handling must be explicitly marked secret",
     )?;
     ensure(
-        token["properties"]["bearer"]["pattern"] == "^eeap1_[A-Za-z0-9_-]+$",
+        token["properties"]["value"]["pattern"] == "^eeap1_[A-Za-z0-9_-]+$",
         "approval bearer must retain its redaction-recognizable eeap1_ prefix",
     )?;
     ensure(
-        token["properties"]["bearer"]["minLength"] == serde_json::json!(APPROVAL_TOKEN_BEARER_LEN)
-            && token["properties"]["bearer"]["maxLength"]
+        token["properties"]["value"]["minLength"] == serde_json::json!(APPROVAL_TOKEN_BEARER_LEN)
+            && token["properties"]["value"]["maxLength"]
                 == serde_json::json!(APPROVAL_TOKEN_BEARER_LEN),
         "v1 approval bearer must remain the fixed 157-character envelope projection",
     )?;
@@ -519,10 +574,10 @@ fn approval_token_is_optional_sensitive_opaque_and_identifier_free() -> TestResu
         )?;
     }
     ensure(
-        token["properties"]["externalRecorderResidual"]["const"]
+        token["description"]
             .as_str()
-            .is_some_and(|copy| copy.contains("third-party") && copy.contains("expires")),
-        "approval token must name the third-party recorder residual until expiry",
+            .is_some_and(|copy| copy.contains("third-party") && copy.contains("expiry")),
+        "approval token schema must name the third-party recorder residual until expiry",
     )
 }
 

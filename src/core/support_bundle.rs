@@ -72,6 +72,7 @@ const MANIFEST_FILE: &str = "manifest.json";
 const STATUS_FILE: &str = "status.json";
 const DOCTOR_FILE: &str = "doctor.json";
 const AUDIT_FILE: &str = "audit.jsonl";
+const MESH_APPROVAL_TOKEN_REDACTION_REASON: &str = "mesh_approval_token";
 const VERIFICATION_EVIDENCE_SUMMARY_FILE: &str = "verification_evidence_summary.json";
 const PROOF_BROKER_SUMMARY_FILE: &str = "proof_broker_summary.json";
 const MEMORY_DRIFT_SUMMARY_FILE: &str = "memory_drift_summary.json";
@@ -1354,7 +1355,7 @@ pub fn plan_bundle(options: &BundleOptions) -> Result<BundleReport, DomainError>
         bundle_id,
         files_collected,
         total_size_bytes: 0,
-        redaction_applied: redaction_level.redacts_secrets(),
+        redaction_applied: redaction_level.redacts_secrets() || workspace_redaction.redacted,
         redaction_level,
         redaction_summary: RedactionSummary {
             total_redactions: if workspace_redaction.redacted { 1 } else { 0 },
@@ -1376,6 +1377,7 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
             message: "--out is required".to_string(),
             repair: Some("ee support bundle --help".to_string()),
         })?;
+    reject_support_bundle_mesh_approval_bearer("output path", &output_dir.display().to_string())?;
 
     let workspace_path = options
         .workspace
@@ -1498,22 +1500,17 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
     ];
 
     for (filename, content) in files_to_write {
-        let (final_content, redacted) = if redaction_level.redacts_secrets() {
-            let report = redact_support_bundle_content(content, redaction_level);
-            let redacted = report.redacted;
-            let reasons = report.redacted_reasons;
-            if redacted {
-                total_redactions += 1;
-                for reason in &reasons {
-                    if !all_redaction_reasons.contains(reason) {
-                        all_redaction_reasons.push(reason.clone());
-                    }
+        let report = redact_support_bundle_content(content, redaction_level);
+        let redacted = report.redacted;
+        if redacted {
+            total_redactions += 1;
+            for reason in &report.redacted_reasons {
+                if !all_redaction_reasons.contains(reason) {
+                    all_redaction_reasons.push(reason.clone());
                 }
             }
-            (report.content, redacted)
-        } else {
-            (content.clone(), false)
-        };
+        }
+        let final_content = report.content;
 
         let file_path = bundle_dir.join(filename);
         let size = write_file_with_hash(&file_path, &final_content)?;
@@ -1529,6 +1526,7 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         total_size += size;
     }
 
+    let redaction_applied = redaction_level.redacts_secrets() || total_redactions > 0;
     let manifest = BundleManifest {
         schema: SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1.to_owned(),
         bundle_id: bundle_id.clone(),
@@ -1537,7 +1535,7 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         ee_version: env!("CARGO_PKG_VERSION").to_owned(),
         files: manifest_entries,
         total_size_bytes: total_size,
-        redaction_applied: redaction_level.redacts_secrets(),
+        redaction_applied,
         redaction_reasons: all_redaction_reasons.clone(),
     };
 
@@ -1563,7 +1561,7 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         bundle_id,
         files_collected,
         total_size_bytes: total_size,
-        redaction_applied: redaction_level.redacts_secrets(),
+        redaction_applied,
         redaction_level,
         redaction_summary: RedactionSummary {
             total_redactions,
@@ -1578,6 +1576,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
 
 /// Inspect an existing bundle and verify its integrity.
 pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainError> {
+    reject_support_bundle_mesh_approval_bearer(
+        "bundle path",
+        &options.bundle_path.display().to_string(),
+    )?;
     if !options.bundle_path.exists() {
         return Err(DomainError::NotFound {
             resource: "bundle".to_string(),
@@ -1622,13 +1624,27 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
     let mut manifest_invalid = false;
     let manifest: Option<BundleManifest> = if manifest_present {
         match read_regular_file_no_symlinks(&manifest_path) {
-            Ok(content) => match serde_json::from_str(&content) {
-                Ok(manifest) => Some(manifest),
-                Err(_) => {
-                    manifest_invalid = true;
-                    None
+            Ok(content) => {
+                reject_support_bundle_mesh_approval_bearer("manifest bytes", &content)?;
+                match serde_json::from_str(&content) {
+                    Ok(manifest) => {
+                        let decoded = serde_json::to_string(&manifest).map_err(|error| {
+                        DomainError::Storage {
+                            message: format!(
+                                "Failed to validate the decoded support bundle manifest: {error}"
+                            ),
+                            repair: Some("Regenerate the support bundle.".to_owned()),
+                        }
+                    })?;
+                        reject_support_bundle_mesh_approval_bearer("decoded manifest", &decoded)?;
+                        Some(manifest)
+                    }
+                    Err(_) => {
+                        manifest_invalid = true;
+                        None
+                    }
                 }
-            },
+            }
             Err(_) => {
                 manifest_invalid = true;
                 None
@@ -1693,6 +1709,7 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
         if let Ok(entries) = fs::read_dir(bundle_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().replace('\\', "/");
+                reject_support_bundle_mesh_approval_bearer("bundle member name", &name)?;
                 if !expected_entries.contains(&name) && !hash_mismatches.contains(&name) {
                     files_found.push(name.clone());
                     hash_mismatches.push(name);
@@ -1708,6 +1725,7 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
         if let Ok(entries) = fs::read_dir(bundle_dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str() {
+                    reject_support_bundle_mesh_approval_bearer("bundle member name", name)?;
                     files_found.push(name.to_owned());
                     if let Ok(meta) = fs::symlink_metadata(entry.path()) {
                         if meta.file_type().is_symlink() {
@@ -5848,7 +5866,7 @@ fn redact_support_bundle_path(path: &Path, level: RedactionLevel) -> SupportDiag
 }
 
 fn redact_support_bundle_content(text: &str, level: RedactionLevel) -> SupportDiagnosticRedaction {
-    match level {
+    let mut report = match level {
         RedactionLevel::None => SupportDiagnosticRedaction {
             content: text.to_owned(),
             redacted: false,
@@ -5870,7 +5888,111 @@ fn redact_support_bundle_content(text: &str, level: RedactionLevel) -> SupportDi
         | RedactionLevel::Strict
         | RedactionLevel::Paranoid
         | RedactionLevel::Full => redact_support_diagnostic_content(text),
+    };
+
+    // Mesh approval tokens are short-lived authentication bearers, not
+    // diagnostic payload. `include_raw` deliberately disables ordinary
+    // support-bundle redaction, but it must never turn the bundle into an
+    // approval-token export surface. Run this targeted pass for every level;
+    // the normal redactors have already removed the token at non-None levels,
+    // so this is normally a no-op outside the raw path.
+    let mesh_redaction = redact_support_bundle_mesh_approval_bearers(&report.content);
+    if mesh_redaction.redacted {
+        report.content = mesh_redaction.content;
+        report.redacted = true;
+        report
+            .redacted_reasons
+            .extend(mesh_redaction.redacted_reasons);
+        report.redacted_reasons.sort();
+        report.redacted_reasons.dedup();
     }
+
+    report
+}
+
+fn redact_support_bundle_mesh_approval_bearers(text: &str) -> SupportDiagnosticRedaction {
+    let scan = redact_secret_like_content(text);
+    let mesh_was_redacted = scan
+        .redacted_reasons
+        .contains(&MESH_APPROVAL_TOKEN_REDACTION_REASON);
+    let mut spans = scan
+        .matches
+        .iter()
+        .filter(|matched| matched.pattern_id == MESH_APPROVAL_TOKEN_REDACTION_REASON)
+        .map(|matched| (matched.start, matched.end))
+        .collect::<Vec<_>>();
+    spans.sort_unstable();
+    spans.dedup();
+
+    if spans.is_empty() {
+        return if mesh_was_redacted {
+            // The canonical scanner normally reports reasons and spans
+            // together. If those views ever drift, fail closed instead of
+            // returning content the scanner says held an approval bearer.
+            SupportDiagnosticRedaction {
+                content: redaction_placeholder(MESH_APPROVAL_TOKEN_REDACTION_REASON),
+                redacted: true,
+                redacted_reasons: vec![MESH_APPROVAL_TOKEN_REDACTION_REASON.to_owned()],
+            }
+        } else {
+            SupportDiagnosticRedaction {
+                content: text.to_owned(),
+                redacted: false,
+                redacted_reasons: Vec::new(),
+            }
+        };
+    }
+
+    let spans_are_safe = spans.iter().all(|&(start, end)| {
+        start < end
+            && end <= text.len()
+            && text.is_char_boundary(start)
+            && text.is_char_boundary(end)
+    }) && spans.windows(2).all(|window| window[0].1 <= window[1].0);
+    if !spans_are_safe {
+        // Match spans come from the canonical policy scanner and should always
+        // be valid. If that invariant ever drifts, fail closed instead of
+        // writing even part of a bearer into a support bundle.
+        return SupportDiagnosticRedaction {
+            content: redaction_placeholder(MESH_APPROVAL_TOKEN_REDACTION_REASON),
+            redacted: true,
+            redacted_reasons: vec![MESH_APPROVAL_TOKEN_REDACTION_REASON.to_owned()],
+        };
+    }
+
+    let placeholder = redaction_placeholder(MESH_APPROVAL_TOKEN_REDACTION_REASON);
+    let mut content = text.to_owned();
+    for &(start, end) in spans.iter().rev() {
+        content.replace_range(start..end, &placeholder);
+    }
+
+    SupportDiagnosticRedaction {
+        content,
+        redacted: true,
+        redacted_reasons: vec![MESH_APPROVAL_TOKEN_REDACTION_REASON.to_owned()],
+    }
+}
+
+fn reject_support_bundle_mesh_approval_bearer(
+    surface: &'static str,
+    text: &str,
+) -> Result<(), DomainError> {
+    let scan = redact_secret_like_content(text);
+    if scan
+        .redacted_reasons
+        .contains(&MESH_APPROVAL_TOKEN_REDACTION_REASON)
+    {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "Support bundle operation denied because the {surface} contains credential material"
+            ),
+            repair: Some(
+                "Move or regenerate the bundle without credential material in paths or manifest fields."
+                    .to_owned(),
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn redact_support_diagnostic_content(text: &str) -> SupportDiagnosticRedaction {
@@ -7035,6 +7157,10 @@ fn generate_bundle_id() -> String {
     )
 }
 
+fn support_bundle_error_path(path: &Path) -> String {
+    redact_support_bundle_mesh_approval_bearers(&path.display().to_string()).content
+}
+
 fn write_file_with_hash(path: &Path, content: &str) -> Result<u64, DomainError> {
     reject_existing_symlink_component(path, "support bundle file")?;
     ensure_support_bundle_file_final_path_absent(path)?;
@@ -7048,7 +7174,7 @@ fn write_file_with_hash(path: &Path, content: &str) -> Result<u64, DomainError> 
         .map_err(|e| DomainError::Storage {
             message: format!(
                 "Failed to create temporary support bundle file {}: {e}",
-                temp_path.display()
+                support_bundle_error_path(&temp_path)
             ),
             repair: None,
         })?;
@@ -7056,14 +7182,14 @@ fn write_file_with_hash(path: &Path, content: &str) -> Result<u64, DomainError> 
         .map_err(|e| DomainError::Storage {
             message: format!(
                 "Failed to write temporary support bundle file {}: {e}",
-                temp_path.display()
+                support_bundle_error_path(&temp_path)
             ),
             repair: None,
         })?;
     file.sync_data().map_err(|e| DomainError::Storage {
         message: format!(
             "Failed to sync temporary support bundle file {}: {e}",
-            temp_path.display()
+            support_bundle_error_path(&temp_path)
         ),
         repair: None,
     })?;
@@ -7082,8 +7208,8 @@ fn publish_support_bundle_temp_file(temp_path: &Path, path: &Path) -> Result<(),
     fs::rename(temp_path, path).map_err(|e| DomainError::Storage {
         message: format!(
             "Failed to publish temporary support bundle file {} to {}: {e}",
-            temp_path.display(),
-            path.display()
+            support_bundle_error_path(temp_path),
+            support_bundle_error_path(path)
         ),
         repair: None,
     })
@@ -7097,7 +7223,7 @@ fn create_support_bundle_directory(
     fs::create_dir_all(output_dir).map_err(|e| DomainError::Storage {
         message: format!(
             "Failed to create support bundle output directory {}: {e}",
-            output_dir.display()
+            support_bundle_error_path(output_dir)
         ),
         repair: Some("Check write permissions on output directory".to_string()),
     })?;
@@ -7108,7 +7234,7 @@ fn create_support_bundle_directory(
             (
                 format!(
                     "Support bundle directory {} already exists; refusing to overwrite it.",
-                    bundle_dir.display()
+                    support_bundle_error_path(bundle_dir)
                 ),
                 "Retry support bundle creation with a fresh output directory.".to_owned(),
             )
@@ -7116,7 +7242,7 @@ fn create_support_bundle_directory(
             (
                 format!(
                     "Failed to create support bundle directory {}: {e}",
-                    bundle_dir.display()
+                    support_bundle_error_path(bundle_dir)
                 ),
                 "Check write permissions on output directory.".to_owned(),
             )
@@ -7135,7 +7261,7 @@ fn support_bundle_temp_path(path: &Path) -> Result<PathBuf, DomainError> {
         return Err(DomainError::Storage {
             message: format!(
                 "Failed to derive temporary support bundle file for {}: missing file name.",
-                path.display()
+                support_bundle_error_path(path)
             ),
             repair: None,
         });
@@ -7151,7 +7277,7 @@ fn ensure_support_bundle_file_temp_path_absent(path: &Path) -> Result<(), Domain
         Ok(_) => Err(DomainError::Storage {
             message: format!(
                 "Refusing to create support bundle temp file {} because it already exists.",
-                path.display()
+                support_bundle_error_path(path)
             ),
             repair: Some(
                 "Remove the stale support bundle temp file or choose a fresh output directory."
@@ -7162,7 +7288,7 @@ fn ensure_support_bundle_file_temp_path_absent(path: &Path) -> Result<(), Domain
         Err(error) => Err(DomainError::Storage {
             message: format!(
                 "Failed to inspect support bundle temp file {} before create: {error}",
-                path.display()
+                support_bundle_error_path(path)
             ),
             repair: Some("Check support bundle temp path permissions.".to_owned()),
         }),
@@ -7175,14 +7301,14 @@ fn ensure_support_bundle_created_temp_path_regular(path: &Path) -> Result<(), Do
         Ok(_) => Err(DomainError::Storage {
             message: format!(
                 "Refusing to publish support bundle temp file {} because it is not a regular file.",
-                path.display()
+                support_bundle_error_path(path)
             ),
             repair: Some("Remove the stale support bundle temp path and retry.".to_owned()),
         }),
         Err(error) => Err(DomainError::Storage {
             message: format!(
                 "Failed to inspect support bundle temp file {} before publish: {error}",
-                path.display()
+                support_bundle_error_path(path)
             ),
             repair: Some("Check support bundle temp path permissions.".to_owned()),
         }),
@@ -7194,7 +7320,7 @@ fn ensure_support_bundle_file_final_path_absent(path: &Path) -> Result<(), Domai
         Ok(metadata) if metadata.file_type().is_file() => Err(DomainError::Storage {
             message: format!(
                 "Refusing to create support bundle file {} because it already exists.",
-                path.display()
+                support_bundle_error_path(path)
             ),
             repair: Some(
                 "Choose a fresh support bundle output directory or remove the stale file."
@@ -7204,7 +7330,7 @@ fn ensure_support_bundle_file_final_path_absent(path: &Path) -> Result<(), Domai
         Ok(_) => Err(DomainError::Storage {
             message: format!(
                 "Refusing to create support bundle file {} because the final path is not a regular file.",
-                path.display()
+                support_bundle_error_path(path)
             ),
             repair: Some(
                 "Remove the non-regular support bundle path or choose a fresh output directory."
@@ -7215,7 +7341,7 @@ fn ensure_support_bundle_file_final_path_absent(path: &Path) -> Result<(), Domai
         Err(error) => Err(DomainError::Storage {
             message: format!(
                 "Failed to inspect support bundle file {} before create: {error}",
-                path.display()
+                support_bundle_error_path(path)
             ),
             repair: Some("Check support bundle path permissions.".to_owned()),
         }),
@@ -7231,7 +7357,7 @@ fn reject_existing_symlink_component(path: &Path, label: &str) -> Result<(), Dom
                 return Err(DomainError::Storage {
                     message: format!(
                         "Refusing to access {label} through symlinked path component {}.",
-                        current.display()
+                        support_bundle_error_path(&current)
                     ),
                     repair: Some("Choose a real, non-symlink support bundle path.".to_owned()),
                 });
@@ -7242,7 +7368,7 @@ fn reject_existing_symlink_component(path: &Path, label: &str) -> Result<(), Dom
                 return Err(DomainError::Storage {
                     message: format!(
                         "Failed to inspect {label} path component {}: {error}",
-                        current.display()
+                        support_bundle_error_path(&current)
                     ),
                     repair: Some("Check support bundle path permissions.".to_owned()),
                 });
@@ -9583,6 +9709,216 @@ mod tests {
     }
 
     #[test]
+    fn create_bundle_scrubs_mesh_approval_bearers_from_redacted_audit_projection() -> TestResult {
+        assert_create_bundle_scrubs_mesh_approval_bearers("mesh-approval-redacted", false)
+    }
+
+    #[test]
+    fn create_bundle_include_raw_cannot_bypass_mesh_approval_bearer_scrubbing() -> TestResult {
+        assert_create_bundle_scrubs_mesh_approval_bearers("mesh-approval-include-raw", true)
+    }
+
+    fn mesh_approval_bearer_canary() -> String {
+        // Assemble the recognizable prefix in pieces so this source fixture
+        // cannot itself be mistaken for a checked-in approval credential.
+        format!(
+            "{}{}",
+            ["e", "e", "a", "p", "1", "_"].concat(),
+            "A".repeat(151)
+        )
+    }
+
+    fn assert_create_bundle_scrubs_mesh_approval_bearers(
+        test_name: &str,
+        include_raw: bool,
+    ) -> TestResult {
+        let root = unique_test_path(test_name);
+        let workspace = root.join("workspace");
+        fs::create_dir_all(workspace.join(".ee"))
+            .map_err(|error| format!("failed to create workspace metadata dir: {error}"))?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize workspace: {error}"))?;
+
+        let database_path = workspace.join(".ee").join("ee.db");
+        let connection = DbConnection::open_file(&database_path)
+            .map_err(|error| format!("failed to open test db: {error}"))?;
+        connection
+            .migrate()
+            .map_err(|error| format!("failed to migrate test db: {error}"))?;
+
+        let workspace_id = "wsp_01234567890123456789012345";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some(test_name.to_owned()),
+                },
+            )
+            .map_err(|error| format!("failed to insert workspace: {error}"))?;
+
+        let approval_bearer = mesh_approval_bearer_canary();
+        connection
+            .insert_audit(
+                "audit_01234567890123456789012345",
+                &crate::db::CreateAuditInput {
+                    workspace_id: Some(workspace_id.to_owned()),
+                    actor: Some(format!("diagnostic-canary:{approval_bearer}")),
+                    action: "mesh.approval.canary".to_owned(),
+                    target_type: Some("mesh_lane".to_owned()),
+                    target_id: Some("lane-canary".to_owned()),
+                    details: None,
+                },
+            )
+            .map_err(|error| format!("failed to insert audit canary: {error}"))?;
+        connection
+            .close()
+            .map_err(|error| format!("failed to close test db: {error}"))?;
+
+        let output_dir = root.join("out-safe");
+        fs::create_dir_all(&output_dir)
+            .map_err(|error| format!("failed to create output dir: {error}"))?;
+        let report = create_bundle(&BundleOptions {
+            workspace,
+            output_dir: Some(output_dir.clone()),
+            dry_run: false,
+            redacted: true,
+            redaction_level: RedactionLevel::Paranoid,
+            include_raw,
+            audit_limit: 5,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(
+            report.redaction_level,
+            if include_raw {
+                RedactionLevel::None
+            } else {
+                RedactionLevel::Paranoid
+            }
+        );
+        assert!(
+            report.redaction_applied,
+            "mandatory bearer scrubbing must be reported even when include_raw is active"
+        );
+        assert!(
+            report
+                .redaction_summary
+                .reasons
+                .iter()
+                .any(|reason| reason == MESH_APPROVAL_TOKEN_REDACTION_REASON),
+            "bundle report must identify the mandatory bearer redaction class"
+        );
+        assert!(
+            report.redaction_summary.total_redactions >= 1,
+            "the audit content must count as redacted"
+        );
+
+        let bundle_dir = output_dir.join(format!("ee_support_{}", report.bundle_id));
+        let reported_output_path = report
+            .output_path
+            .as_ref()
+            .ok_or_else(|| "created bundle must report output path".to_owned())?;
+        let reported_output_path_text = reported_output_path.display().to_string();
+        assert_eq!(
+            reported_output_path, &bundle_dir,
+            "the report must identify the directory that was actually created"
+        );
+        assert!(
+            !reported_output_path_text.contains(&approval_bearer),
+            "the safe output path must not contain the approval bearer"
+        );
+        let report_json = report.data_json().to_string();
+        assert!(
+            !report_json.contains(&approval_bearer),
+            "machine-facing bundle report must not contain the approval bearer"
+        );
+        assert_eq!(
+            report
+                .data_json()
+                .pointer("/outputPath")
+                .and_then(Value::as_str),
+            Some(reported_output_path_text.as_str()),
+            "data_json and human output must consume the same real path"
+        );
+
+        for filename in &report.files_collected {
+            let member = fs::read_to_string(bundle_dir.join(filename))
+                .map_err(|error| format!("failed to read bundle member {filename}: {error}"))?;
+            assert!(
+                !member.contains(&approval_bearer),
+                "support bundle member {filename} must not contain the approval bearer"
+            );
+        }
+
+        let audit_text = fs::read_to_string(bundle_dir.join(AUDIT_FILE))
+            .map_err(|error| format!("failed to read audit projection: {error}"))?;
+        assert!(
+            audit_text.contains(&redaction_placeholder(MESH_APPROVAL_TOKEN_REDACTION_REASON)),
+            "audit projection must retain an explicit bearer-redaction marker"
+        );
+        assert!(
+            audit_text.contains("mesh.approval.canary"),
+            "targeted bearer scrubbing must preserve non-secret audit diagnostics"
+        );
+
+        let manifest_text = fs::read_to_string(bundle_dir.join(MANIFEST_FILE))
+            .map_err(|error| format!("failed to read bundle manifest: {error}"))?;
+        let manifest: BundleManifest = serde_json::from_str(&manifest_text)
+            .map_err(|error| format!("failed to parse bundle manifest: {error}"))?;
+        assert!(manifest.redaction_applied);
+        assert!(
+            manifest
+                .redaction_reasons
+                .iter()
+                .any(|reason| reason == MESH_APPROVAL_TOKEN_REDACTION_REASON),
+            "bundle manifest must identify the mandatory bearer redaction class"
+        );
+        assert!(
+            manifest
+                .files
+                .iter()
+                .any(|entry| entry.path == AUDIT_FILE && entry.redacted),
+            "bundle manifest must mark the audit projection as redacted"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn create_bundle_rejects_mesh_approval_bearer_path_before_filesystem_mutation() -> TestResult {
+        let root = unique_test_path("mesh-approval-output-path-denied");
+        let approval_bearer = mesh_approval_bearer_canary();
+        let output_dir = root.join(format!("out-{approval_bearer}"));
+        assert!(
+            !output_dir.exists(),
+            "the credential-bearing output path must start absent"
+        );
+
+        let error = create_bundle(&BundleOptions {
+            workspace: root.join("workspace"),
+            output_dir: Some(output_dir.clone()),
+            dry_run: false,
+            redacted: true,
+            redaction_level: RedactionLevel::Paranoid,
+            include_raw: false,
+            audit_limit: 5,
+        })
+        .expect_err("credential-bearing output paths must fail closed");
+
+        assert_eq!(error.code(), "policy_denied");
+        assert!(
+            !error.message().contains(&approval_bearer),
+            "the rejection must not echo the approval bearer"
+        );
+        assert!(
+            !output_dir.exists(),
+            "rejection must happen before creating the output directory"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn support_bundle_standard_redacts_data_and_workspace_absolute_paths() {
         let raw = "repo=/data/projects/eidetic_engine_cli scratch=/workspace/agent/output.json";
 
@@ -9820,6 +10156,56 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn inspect_bundle_rejects_bearer_bearing_path_and_decoded_manifest() -> TestResult {
+        let bearer = mesh_approval_bearer_canary();
+        let root = unique_test_path("inspect-mesh-approval-bearer");
+
+        let path_error = inspect_bundle(&InspectOptions {
+            bundle_path: root.join(&bearer),
+            verify_hashes: true,
+        })
+        .expect_err("inspection must reject a bearer-bearing path before filesystem access");
+        ensure(
+            !path_error.message().contains(&bearer),
+            "bearer-bearing inspect path error must not echo the credential",
+        )?;
+
+        let bundle_dir = root.join("bundle");
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|error| format!("failed to create inspect fixture: {error}"))?;
+        let manifest = BundleManifest {
+            schema: SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1.to_owned(),
+            bundle_id: "inspect-bearer-fixture".to_owned(),
+            created_at: "2026-08-04T00:00:00Z".to_owned(),
+            workspace_path: bearer.clone(),
+            ee_version: "test".to_owned(),
+            files: Vec::new(),
+            total_size_bytes: 0,
+            redaction_applied: false,
+            redaction_reasons: Vec::new(),
+        };
+        let serialized = serde_json::to_string(&manifest)
+            .map_err(|error| format!("failed to serialize inspect fixture: {error}"))?;
+        let escaped = serialized.replacen(&bearer, &format!("\\u0065{}", &bearer[1..]), 1);
+        ensure(
+            !escaped.contains(&bearer),
+            "fixture must conceal the bearer until JSON decoding",
+        )?;
+        fs::write(bundle_dir.join(MANIFEST_FILE), escaped)
+            .map_err(|error| format!("failed to write inspect fixture: {error}"))?;
+
+        let manifest_error = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir,
+            verify_hashes: true,
+        })
+        .expect_err("inspection must reject a decoded bearer in the manifest");
+        ensure(
+            !manifest_error.message().contains(&bearer),
+            "decoded manifest error must not echo the credential",
+        )
+    }
+
     #[cfg(unix)]
     #[test]
     fn create_bundle_rejects_symlinked_output_parent() -> TestResult {
@@ -9954,7 +10340,8 @@ mod tests {
     #[test]
     fn create_support_bundle_directory_rejects_existing_bundle_dir() -> TestResult {
         let root = unique_test_path("existing-bundle-dir");
-        let output_dir = root.join("support-out");
+        let approval_bearer = mesh_approval_bearer_canary();
+        let output_dir = root.join(format!("support-out-{approval_bearer}"));
         let bundle_dir = output_dir.join("ee_support_existing");
         fs::create_dir_all(&bundle_dir)
             .map_err(|error| format!("failed to create stale bundle dir: {error}"))?;
@@ -9969,6 +10356,16 @@ mod tests {
             error.message().contains("already exists"),
             "unexpected error: {}",
             error.message()
+        );
+        assert!(
+            !error.message().contains(&approval_bearer),
+            "support-bundle directory errors must not expose approval bearers"
+        );
+        assert!(
+            error
+                .message()
+                .contains(&redaction_placeholder(MESH_APPROVAL_TOKEN_REDACTION_REASON)),
+            "support-bundle directory errors must retain an explicit bearer-redaction marker"
         );
         assert_eq!(
             fs::read_to_string(&sentinel_path)

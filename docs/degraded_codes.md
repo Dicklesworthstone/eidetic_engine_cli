@@ -8875,7 +8875,8 @@ ee audit verify --workspace . --json
 
 ```bash
 ee init --workspace .
-ee mesh export --workspace . --json
+enroll and enable a mesh peer; record its returned opaque peerId as <peer-id>
+ee mesh export --workspace . --peer <peer-id> --json
 ```
 
 **Invocation.**
@@ -9409,13 +9410,14 @@ ee context 'peer body evidence' --workspace . --memory-scope swarm --json
 
 ```bash
 ee init --workspace . --json
+enroll and enable a mesh peer; record its returned opaque peerId as <peer-id>
 insert a mesh import-ledger event whose eventJson contains API_KEY=<sentinel>, tags, evidenceRefs[].artifactPath=keys/id_ed25519, and embeddingSurrogate=<sentinel>
 ```
 
 **Invocation.**
 
 ```bash
-ee mesh export --workspace . --json
+ee mesh export --workspace . --peer <peer-id> --json
 ```
 
 **Expected emission.** Message contains: `mesh export denied ... pre-export secret scanning ... policy-denied material`
@@ -9482,7 +9484,7 @@ ee mesh sync --once --workspace . --json
 
 **Expected emission.** Message contains: `did not contact peers ... no usable foreground peer transport`
 
-**Repair hint.** `ee mesh export`
+**Repair hint.** `ee mesh export --peer <peer-id>`
 
 **Fixture.** [`tests/fixtures/failure_modes/mesh_sync_once_network_deferred.json`](../tests/fixtures/failure_modes/mesh_sync_once_network_deferred.json)
 

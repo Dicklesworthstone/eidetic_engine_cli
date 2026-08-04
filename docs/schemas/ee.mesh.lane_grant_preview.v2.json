@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.mesh.lane_grant_preview.v2.json",
   "title": "ee.mesh.lane_grant_preview.v2",
-  "description": "Canonical read-only approval snapshot emitted by `ee mesh preview-grant <peer-id> --lane <lane>`. Human and JSON renderers consume this same snapshot. It binds copy/schema version, workspace, the opaque enrolled-peer target adapter and grant generation, current/proposed policy generations, the complete revision-pinned candidate set, sample strategy/limit, exact ordered redacted samples, redaction rules, and caution codes. Ordinary output is deterministic and token-free. Only explicit robot issuance adds the optional sensitive approvalToken object.",
+  "description": "Canonical read-only approval snapshot emitted by `ee mesh preview-grant <peer-id> --lane <lane>`. Human and JSON renderers consume this same snapshot. It binds copy/schema version, workspace, the opaque enrolled-peer target adapter and grant generation, current/proposed policy generations, the complete generic revision-pinned memory and mesh-ledger candidate set, sample strategy/limit, exact ordered redacted samples, redaction rules and scanner generation, and caution codes. Ordinary output is deterministic and token-free. Only explicit robot issuance adds the optional sensitive approvalToken object.",
   "type": "object",
   "required": [
     "schema",
@@ -15,11 +15,13 @@
     "proposedPolicy",
     "candidateSet",
     "affectedMemoryCount",
+    "affectedLedgerEventCount",
     "redactedFromExposureCount",
     "previewSampleStrategy",
     "previewSampleLimit",
     "previewSample",
     "redactionRulesApplied",
+    "redactionScannerGeneration",
     "cautionCodes",
     "cautions"
   ],
@@ -31,7 +33,7 @@
     },
     "copyVersion": {
       "type": "string",
-      "const": "ee.mesh.lane_grant_preview.copy.v1",
+      "const": "ee.mesh.lane_grant_preview.copy.v2",
       "description": "Operator-copy and renderer contract version. A copy change requires a new value and invalidates outstanding approvals."
     },
     "workspaceId": {
@@ -58,14 +60,19 @@
     "candidateSet": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/revisionPin"
+        "$ref": "#/$defs/candidatePin"
       },
-      "description": "Complete canonical candidate set considered by the preview, not only sampled rows. Every entry pins an immutable entity revision; ordering is deterministic and approval-bound."
+      "description": "Complete canonical candidate set considered by the preview, not only sampled rows. Memory pins bind the workspace mutation generation. Mesh-ledger pins bind every immutable event or retained body reference authorized by the proposed lane. Ordering is deterministic and approval-bound; no event JSON, content/event digest, body-cache key, URI, or policy JSON is exposed."
     },
     "affectedMemoryCount": {
       "type": "integer",
       "minimum": 0,
       "description": "Total memories that would become visible under the proposed effective policy, computed across the complete candidate set."
+    },
+    "affectedLedgerEventCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Exact number of immutable mesh-ledger events whose lane material, or whose retained body reference for a body grant, is authorized by the proposed lane through the production outbound policy engine."
     },
     "redactedFromExposureCount": {
       "type": "integer",
@@ -97,6 +104,11 @@
         "minLength": 1,
         "maxLength": 128
       }
+    },
+    "redactionScannerGeneration": {
+      "type": "string",
+      "pattern": "^redscan1_[0-9a-f]{64}$",
+      "description": "Opaque source-derived generation of the ee-controlled redaction scanner implementation. It changes across scanner-logic upgrades without exposing any memory-content hash."
     },
     "cautionCodes": {
       "type": "array",
@@ -191,15 +203,26 @@
         }
       }
     },
-    "revisionPin": {
+    "candidateKind": {
+      "type": "string",
+      "enum": [
+        "memory",
+        "mesh_ledger_event"
+      ]
+    },
+    "candidatePin": {
       "type": "object",
       "required": [
-        "memoryId",
+        "candidateKind",
+        "candidateId",
         "revisionId"
       ],
       "additionalProperties": false,
       "properties": {
-        "memoryId": {
+        "candidateKind": {
+          "$ref": "#/$defs/candidateKind"
+        },
+        "candidateId": {
           "type": "string",
           "minLength": 1,
           "maxLength": 256
@@ -208,7 +231,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 256,
-          "description": "Opaque exposure-revision pin formed from the memory ID and the workspace's monotonic source-mutation generation. It changes when candidate-affecting memory or tag state changes, including in-place updates, without exposing a body-content hash."
+          "description": "Opaque, kind-domain-separated exposure-revision pin. Memory revisions include the workspace's monotonic source-mutation generation. Immutable mesh-ledger revisions use only event identity, never event JSON, content/event digests, body-cache keys, URIs, or policy JSON."
         }
       }
     },

@@ -331,12 +331,12 @@ every step):
 | `mesh_revoke_unknown_peer` | warning | Named peer not in current peer-group | Re-list eligible peers |
 | `discovery_policy_no_ee_mesh_tag` | info | Responder is in `service_tag` mode but not advertising the tag | `tailscale up --advertise-tags=tag:ee-mesh` |
 | `discovery_policy_empty_allowlist` | info | Discovery mode is `allowlist` but no node keys are configured | Add allowed node keys or switch discovery mode |
-| `lane_grant_preview_peer_not_in_group` | info | Enrolled peer is omitted from this workspace's `[[mesh.peer_group_bindings]]` | Add the peer id to the matching binding; preview still runs |
+| `lane_grant_preview_peer_not_in_group` | info | Enrolled peer is omitted from this workspace's `[[mesh.peer_group_bindings]]` | If intended, add the peer id, then re-run/review a fresh preview and apply a fresh approval; membership alone does not grant a denied lane |
 | `steward_auto_enroll_disabled` | info | `EE_MESH_AUTO_ENROLL_ON_DEMAND=0` (default) | Set the env var if you want auto-reconciliation |
 | `mesh_peer_policy_denied` | medium | SRR6.5 peer policy denied the requested mesh lane | Review trust and lane policy before retrying |
 | `mesh_peer_human_explicit_filtered` | medium | Human-explicit memories were filtered from peer exposure | Use preview-grant and explicit policy before widening access |
 | `mesh_approval_token_invalid` | high | Bearer is malformed, tampered with, from another workspace/store/surface, or signed by a non-current key | Discard it and explicitly issue a fresh token after reviewing a new preview |
-| `mesh_approval_token_stale` | warning | Authenticated bearer expired or its canonical preview no longer matches current target/policy/revisions/sample/generation | Re-run the ordinary preview, review the drift, then explicitly issue a new token |
+| `mesh_approval_token_stale` | warning | Authenticated bearer expired or its canonical preview no longer matches current target/policy/memory-or-ledger revisions/scanner generation/sample/grant generation | Re-run the ordinary preview, review the drift, then explicitly issue a new token |
 | `mesh_store_authentication_unavailable` | high | The workspace store-auth root is missing or unreadable | Run `ee doctor --json`; do not grant until local authentication is repaired |
 
 ## Safety Patterns
@@ -357,10 +357,20 @@ token-free `ee.mesh.lane_grant_preview.v2` snapshot with:
   compare-and-swap generation.
 - `currentPolicy.generation` / `proposedPolicy.generation` — the exact policy
   inputs bound into consent.
-- `candidateSet[]` — the complete revision-pinned candidate set, not only the
-  sample.
+- `candidateSet[]` — the complete generic revision-pinned set: every memory and
+  each immutable mesh-ledger event or retained body reference authorized by
+  the proposed lane, not only the sample. Ledger pins contain only
+  `candidateKind`, `candidateId`, and opaque `revisionId`; they never expose raw
+  event JSON, content/event digests, body-cache keys, URIs, or policy JSON.
 - `affectedMemoryCount` — total memories that become visible.
-- `redactedFromExposureCount` — how many of those still have redacted fields.
+- `affectedLedgerEventCount` — exact mesh-ledger events whose lane material, or
+  whose retained body reference for a body grant, is authorized through the
+  production outbound policy engine.
+- `redactedFromExposureCount` — candidates blocked from exposure by active
+  redaction-class policy.
+- `redactionScannerGeneration` — source-derived ee scanner generation; a
+  scanner-logic upgrade stales outstanding approval even if sampled output is
+  unchanged.
 - `previewSampleStrategy`, `previewSampleLimit`, and `previewSample[]` — the
   exact ordered, redacted sample shown to the operator.
 - `cautionCodes[]` and `cautions[]` — canonical hazards bound into approval,
@@ -368,8 +378,8 @@ token-free `ee.mesh.lane_grant_preview.v2` snapshot with:
   - `high_trust_class_exposure` — `trust_class=human_explicit` memories exposed.
   - `large_volume_exposure` — >1000 memories exposed.
   - `sensitive_tags_in_exposure` — memories tagged `secret` / `private` / `personal` / `internal` exposed.
-  - `tombstoned_in_exposure` or `redaction_active` — a sampled revision is
-    tombstoned or still constrained by redaction.
+  - `tombstoned_in_exposure` or `redaction_active` — the complete candidate set
+    includes tombstoned or redaction-constrained revisions.
   - `peer_not_in_group` or `lane_already_granted` — the target/group or current
     decision needs operator attention.
 
@@ -382,10 +392,14 @@ request issuance explicitly and pass only the bearer through bounded stdin:
 ```bash
 ee mesh preview-grant "$PEER_ID" --lane body --workspace . \
   --issue-approval-token --json \
-  | jq -r '.data.preview.approvalToken.bearer' \
+  | jq -r '.data.preview.approvalToken.value' \
   | ee mesh grant "$PEER_ID" --lane body --workspace . \
       --preview-token-stdin --json
 ```
+
+Opted-in issuance writes the bearer to stdout by design. ee-controlled sinks
+scrub it, but external or third-party stdout/session recorders outside ee's
+control may retain it until the 15-minute expiry.
 
 The bearer is a marked-sensitive secret with a 15-minute lifetime. Do not put
 it in command arguments, a shell variable, logs, audit notes, support bundles,

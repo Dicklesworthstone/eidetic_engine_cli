@@ -4,8 +4,8 @@
   "gateBead": "bd-1n0np.23.1",
   "manifestOwner": "tests/contracts/dueling_wizards_migration_registry.rs",
   "sourceOfTruth": "src/db/mod.rs::MIGRATIONS",
-  "currentLastCompiledMigration": 88,
-  "nextPlannedMigration": 89,
+  "currentLastCompiledMigration": 89,
+  "nextPlannedMigration": 90,
   "boundaryMigrationE2e": "scripts/e2e_boundary_migration.sh",
   "backupCoverageBead": "bd-1n0np.23.2",
   "policy": {
@@ -31,7 +31,8 @@
         "V085": "V085_EVIDENCE_SECURITY_POSTURE (forward-only fail-closed evidence admission and provenance-integrity repair)",
         "V086": "V086_RULE_INDEX_GENERATIONS (forward-only procedural-rule generation tracking and source-row repair)",
         "V087": "V087_EVIDENCE_STORAGE_REBUILD (forward-only canonical evidence-table rebuild and generation repair)",
-        "V088": "V088_MESH_LANE_GRANT_STATES (authenticated per-peer mesh lane grant and revocation state with exact approved-config bindings)"
+        "V088": "V088_MESH_LANE_GRANT_STATES (authenticated per-peer mesh lane grant and revocation state with target-identity bindings)",
+        "V089": "V089_MESH_LANE_GRANT_CONFIG_BINDINGS (forward-only immutable-V088 repair that adds exact approved-config bindings and invalidates unbound allows)"
       }
     }
   },
@@ -118,16 +119,6 @@
     },
     {
       "id": "attestation_bundles",
-      "version": 89,
-      "status": "planned",
-      "runtimeRule": "planned_allocation_only",
-      "migrationConstant": "required_before_implemented",
-      "boundaryMigrationEvidence": "required_before_implemented",
-      "backupCoverageEvidence": "required_before_implemented",
-      "proofPosture": "rch_only_no_local_fallback"
-    },
-    {
-      "id": "query_miss_ledger",
       "version": 90,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
@@ -137,8 +128,18 @@
       "proofPosture": "rch_only_no_local_fallback"
     },
     {
-      "id": "source_write_stats",
+      "id": "query_miss_ledger",
       "version": 91,
+      "status": "planned",
+      "runtimeRule": "planned_allocation_only",
+      "migrationConstant": "required_before_implemented",
+      "boundaryMigrationEvidence": "required_before_implemented",
+      "backupCoverageEvidence": "required_before_implemented",
+      "proofPosture": "rch_only_no_local_fallback"
+    },
+    {
+      "id": "source_write_stats",
+      "version": 92,
       "status": "planned",
       "runtimeRule": "planned_allocation_only",
       "migrationConstant": "required_before_implemented",
@@ -289,8 +290,8 @@
     },
     {
       "id": "attestation_bundles",
-      "version": 89,
-      "migrationName": "V089_ATTESTATION_BUNDLES",
+      "version": 90,
+      "migrationName": "V090_ATTESTATION_BUNDLES",
       "ownerBead": "bd-1n0np.22.1",
       "ownerSurface": "attestation_bundles",
       "status": "planned",
@@ -304,8 +305,8 @@
     },
     {
       "id": "query_miss_ledger",
-      "version": 90,
-      "migrationName": "V090_QUERY_MISS_LEDGER",
+      "version": 91,
+      "migrationName": "V091_QUERY_MISS_LEDGER",
       "ownerBead": "bd-1n0np.6.3",
       "ownerSurface": "gap_honesty",
       "status": "planned",
@@ -318,8 +319,8 @@
     },
     {
       "id": "source_write_stats",
-      "version": 91,
-      "migrationName": "V091_SOURCE_WRITE_STATS",
+      "version": 92,
+      "migrationName": "V092_SOURCE_WRITE_STATS",
       "ownerBead": "bd-1n0np.8.5",
       "ownerSurface": "read_fence",
       "status": "planned",

@@ -944,7 +944,7 @@ mod tests {
     #[test]
     fn classify_repair_detects_template_for_angle_bracket_metavariables() -> TestResult {
         ensure(
-            classify_repair_command("ee mesh export --out <file>"),
+            classify_repair_command("ee mesh export --peer <peer-id> --out <file>"),
             RepairCommandKind::Template,
             "<file> metavariable -> Template",
         )?;
@@ -989,7 +989,7 @@ mod tests {
     #[test]
     fn is_repair_command_template_matches_classify() -> TestResult {
         ensure(
-            is_repair_command_template("ee mesh export --out <file>"),
+            is_repair_command_template("ee mesh export --peer <peer-id> --out <file>"),
             true,
             "<file> is template",
         )?;

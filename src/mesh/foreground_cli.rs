@@ -4,6 +4,7 @@
 //! safe to use with mesh disabled, with no Tailscale installation, and against a
 //! workspace that has no mesh rows yet.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use asupersync::runtime::yield_now::yield_now;
@@ -102,7 +103,7 @@ impl MeshCliDegradation {
             severity: "info",
             message: "Foreground sync --once did not contact peers because no usable foreground peer transport path was available."
                 .to_owned(),
-            repair: "Use `ee mesh export --out mesh-export.json` and `ee mesh import --file mesh-export.json` for local file exchange, or configure an enrolled peer transport before retrying sync."
+            repair: "Use `ee mesh export --peer <peer-id> --out mesh-export.json` and `ee mesh import --file mesh-export.json` for an enrolled peer transfer, or configure a peer transport before retrying sync. Use `ee export` or `ee backup` for local backups."
                 .to_owned(),
         }
     }
@@ -251,6 +252,430 @@ pub struct MeshEventRow {
     pub imported_at: String,
 }
 
+/// Stable failure classes for the checked-in `ee.mesh.event.v1` contract.
+///
+/// The variants deliberately carry no peer-controlled strings. Callers may
+/// safely surface the class in policy/audit output without reflecting hostile
+/// event bytes or identifiers back to an operator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MeshEventContractError {
+    InvalidJson,
+    InvalidSchema,
+    UnsupportedRequiredFeature,
+    EventHashMismatch,
+    EventIdMismatch,
+    OuterProjectionMismatch,
+}
+
+impl MeshEventContractError {
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::InvalidJson => "invalid_event_json",
+            Self::InvalidSchema => "invalid_event_schema",
+            Self::UnsupportedRequiredFeature => "unsupported_required_feature",
+            Self::EventHashMismatch => "event_hash_mismatch",
+            Self::EventIdMismatch => "event_id_mismatch",
+            Self::OuterProjectionMismatch => "outer_event_projection_mismatch",
+        }
+    }
+}
+
+impl std::fmt::Display for MeshEventContractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.reason())
+    }
+}
+
+impl std::error::Error for MeshEventContractError {}
+
+/// A schema-checked event projection whose `event_json` is canonical JSON.
+///
+/// `requires_unredacted_body_lane` marks schema-permitted, caller-controlled
+/// fields that can carry arbitrary bytes (`trustClaim` values and
+/// `bodyRef.uri`). A metadata-lane policy alone is insufficient for those
+/// fields. Transfer callers must additionally require an unredacted body-lane
+/// grant; the production outbound filter below does so fail-closed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CanonicalMeshEventProjection {
+    pub event: MeshEventRow,
+    pub requires_unredacted_body_lane: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CanonicalMeshEventV1 {
+    schema: String,
+    event_id: String,
+    origin_node_id: String,
+    origin_workspace_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    producer_peer_id: Option<String>,
+    seq: u64,
+    prev_event_hash: Option<String>,
+    event_hash: String,
+    event_kind: String,
+    logical_memory_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supersedes: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tombstones: Option<Vec<String>>,
+    content_hash: String,
+    body_ref: Option<CanonicalMeshBodyRefV1>,
+    material_lane: String,
+    redaction_class: String,
+    trust_lane: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trust_claim: Option<serde_json::Map<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_until: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_audit_hash: Option<String>,
+    required_features: Vec<String>,
+    produced_at: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CanonicalMeshBodyRefV1 {
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_bytes: Option<u64>,
+}
+
+const MESH_EVENT_REQUIRED_FIELDS: [&str; 16] = [
+    "schema",
+    "eventId",
+    "originNodeId",
+    "originWorkspaceId",
+    "seq",
+    "prevEventHash",
+    "eventHash",
+    "eventKind",
+    "logicalMemoryId",
+    "contentHash",
+    "bodyRef",
+    "materialLane",
+    "redactionClass",
+    "trustLane",
+    "requiredFeatures",
+    "producedAt",
+];
+
+const MESH_EVENT_OPTIONAL_NON_NULL_FIELDS: [&str; 7] = [
+    "producerPeerId",
+    "supersedes",
+    "tombstones",
+    "trustClaim",
+    "validFrom",
+    "validUntil",
+    "sourceAuditHash",
+];
+
+/// Parse, validate, hash-check, and canonicalize a file-replay mesh event.
+///
+/// The outer row is a database/export projection, not a second source of
+/// truth. Every field duplicated by `ee.mesh.event.v1` must exactly match the
+/// canonical inner event or the row is rejected. The returned row contains a
+/// freshly serialized, recursively key-sorted `event_json`; unchecked input
+/// bytes are never relayed by callers that use this projection.
+///
+/// Destination-local outer state is deliberately cleared. In particular, an
+/// importing peer cannot choose a local memory/cache reference, replay a prior
+/// policy verdict or attestation, or backdate the local import ledger. The
+/// empty `imported_at` is an explicit "local assignment required" sentinel:
+/// persistence callers must replace it with a locally generated timestamp (or
+/// pass `None` to the database API so the writer generates one).
+pub fn project_canonical_mesh_event(
+    event: &MeshEventRow,
+) -> Result<CanonicalMeshEventProjection, MeshEventContractError> {
+    let raw: serde_json::Value =
+        serde_json::from_str(&event.event_json).map_err(|_| MeshEventContractError::InvalidJson)?;
+    let object = raw
+        .as_object()
+        .ok_or(MeshEventContractError::InvalidSchema)?;
+    if MESH_EVENT_REQUIRED_FIELDS
+        .iter()
+        .any(|field| !object.contains_key(*field))
+        || MESH_EVENT_OPTIONAL_NON_NULL_FIELDS
+            .iter()
+            .any(|field| object.get(*field).is_some_and(serde_json::Value::is_null))
+        || object
+            .get("bodyRef")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|body_ref| {
+                ["previewHash", "uri", "sizeBytes"]
+                    .iter()
+                    .any(|field| body_ref.get(*field).is_some_and(serde_json::Value::is_null))
+            })
+    {
+        return Err(MeshEventContractError::InvalidSchema);
+    }
+
+    let parsed = serde_json::from_value::<CanonicalMeshEventV1>(raw)
+        .map_err(|_| MeshEventContractError::InvalidSchema)?;
+    validate_canonical_mesh_event_schema(&parsed)?;
+
+    let parsed_value =
+        serde_json::to_value(&parsed).map_err(|_| MeshEventContractError::InvalidSchema)?;
+    let expected_event_hash = canonical_mesh_event_hash(&parsed_value)?;
+    if parsed.event_hash != expected_event_hash {
+        return Err(MeshEventContractError::EventHashMismatch);
+    }
+    let expected_event_id = mesh_event_id_from_hash(&expected_event_hash)
+        .ok_or(MeshEventContractError::InvalidSchema)?;
+    if parsed.event_id != expected_event_id {
+        return Err(MeshEventContractError::EventIdMismatch);
+    }
+
+    if parsed.event_id != event.event_id
+        || parsed.origin_node_id != event.origin_node_id
+        || parsed.origin_workspace_id != event.origin_workspace_id
+        || parsed.producer_peer_id != event.producer_peer_id
+        || parsed.seq != event.seq
+        || parsed.prev_event_hash != event.prev_event_hash
+        || parsed.event_hash != event.event_hash
+        || parsed.event_kind != event.event_kind
+        || parsed.logical_memory_id != event.logical_memory_id
+        || parsed.content_hash != event.content_hash
+        || parsed.material_lane != event.material_lane
+        || parsed.redaction_class != event.redaction_class
+        || parsed.trust_lane != event.trust_lane
+    {
+        return Err(MeshEventContractError::OuterProjectionMismatch);
+    }
+
+    let requires_unredacted_body_lane = parsed.trust_claim.is_some()
+        || parsed
+            .body_ref
+            .as_ref()
+            .and_then(|body_ref| body_ref.uri.as_ref())
+            .is_some();
+    let canonical_value = canonicalize_mesh_event_json(&parsed_value);
+    let canonical_event_json = serde_json::to_string(&canonical_value)
+        .map_err(|_| MeshEventContractError::InvalidSchema)?;
+    let mut projected = event.clone();
+    projected.event_json = canonical_event_json;
+    projected.import_decision.clear();
+    projected.local_memory_id = None;
+    projected.body_cache_key = None;
+    projected.policy_failure_surface_json = None;
+    projected.policy_decision_json = None;
+    projected.policy_attestation = None;
+    projected.imported_at.clear();
+
+    Ok(CanonicalMeshEventProjection {
+        event: projected,
+        requires_unredacted_body_lane,
+    })
+}
+
+fn validate_canonical_mesh_event_schema(
+    event: &CanonicalMeshEventV1,
+) -> Result<(), MeshEventContractError> {
+    let valid = event.schema == crate::models::MESH_EVENT_SCHEMA_V1
+        && mesh_event_identifier_is_valid(&event.event_id, "mesh_evt_", 64, 64, true)
+        && mesh_event_identifier_is_valid(&event.origin_node_id, "node_", 6, 128, false)
+        && mesh_event_identifier_is_valid(&event.origin_workspace_id, "wsp_", 6, 128, false)
+        && event
+            .producer_peer_id
+            .as_ref()
+            .is_none_or(|peer_id| mesh_event_identifier_is_valid(peer_id, "peer_", 6, 128, false))
+        && event.seq >= 1
+        && event
+            .prev_event_hash
+            .as_ref()
+            .is_none_or(|hash| mesh_event_hash_is_valid(hash))
+        && mesh_event_hash_is_valid(&event.event_hash)
+        && matches!(
+            event.event_kind.as_str(),
+            "create"
+                | "revise"
+                | "tombstone"
+                | "shareWithdraw"
+                | "trust"
+                | "validity"
+                | "bodyAvailable"
+        )
+        && mesh_event_identifier_is_valid(&event.logical_memory_id, "mem_", 6, 128, false)
+        && event
+            .supersedes
+            .as_ref()
+            .is_none_or(|ids| mesh_event_memory_id_set_is_valid(ids))
+        && event
+            .tombstones
+            .as_ref()
+            .is_none_or(|ids| mesh_event_memory_id_set_is_valid(ids))
+        && mesh_event_hash_is_valid(&event.content_hash)
+        && event
+            .body_ref
+            .as_ref()
+            .is_none_or(mesh_event_body_ref_is_valid)
+        && matches!(
+            event.material_lane.as_str(),
+            "metadata" | "body" | "embedding" | "graphLink" | "revisionNotice" | "curationSignal"
+        )
+        && matches!(
+            event.redaction_class.as_str(),
+            "metadataOnly" | "preview" | "body" | "embedding" | "secretDenied"
+        )
+        && matches!(
+            event.trust_lane.as_str(),
+            "localHuman" | "peerHumanViaPeer" | "peerAgent" | "peerDerived" | "untrusted"
+        )
+        && event.trust_claim.as_ref().is_none_or(|claim| {
+            claim.values().all(|value| {
+                matches!(
+                    value,
+                    serde_json::Value::Null
+                        | serde_json::Value::Bool(_)
+                        | serde_json::Value::Number(_)
+                        | serde_json::Value::String(_)
+                )
+            })
+        })
+        && event
+            .valid_from
+            .as_deref()
+            .is_none_or(mesh_event_rfc3339_is_valid)
+        && event
+            .valid_until
+            .as_deref()
+            .is_none_or(mesh_event_rfc3339_is_valid)
+        && event
+            .source_audit_hash
+            .as_deref()
+            .is_none_or(mesh_event_hash_is_valid)
+        && mesh_event_required_features_are_well_formed(&event.required_features)
+        && mesh_event_rfc3339_is_valid(&event.produced_at);
+    if !valid {
+        return Err(MeshEventContractError::InvalidSchema);
+    }
+    if event
+        .required_features
+        .iter()
+        .any(|feature| feature != "mesh.event.v1")
+    {
+        return Err(MeshEventContractError::UnsupportedRequiredFeature);
+    }
+    Ok(())
+}
+
+fn mesh_event_identifier_is_valid(
+    value: &str,
+    prefix: &str,
+    minimum_suffix_length: usize,
+    maximum_suffix_length: usize,
+    lowercase_hex_only: bool,
+) -> bool {
+    let Some(suffix) = value.strip_prefix(prefix) else {
+        return false;
+    };
+    (minimum_suffix_length..=maximum_suffix_length).contains(&suffix.len())
+        && suffix.bytes().all(|byte| {
+            if lowercase_hex_only {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            } else {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+            }
+        })
+}
+
+fn mesh_event_hash_is_valid(value: &str) -> bool {
+    mesh_event_identifier_is_valid(value, "blake3:", 64, 64, true)
+}
+
+fn mesh_event_memory_id_set_is_valid(values: &[String]) -> bool {
+    let mut unique = BTreeSet::new();
+    values.iter().all(|value| {
+        mesh_event_identifier_is_valid(value, "mem_", 6, 128, false)
+            && unique.insert(value.as_str())
+    })
+}
+
+fn mesh_event_body_ref_is_valid(body_ref: &CanonicalMeshBodyRefV1) -> bool {
+    // Deserializing into `u64` already enforces the schema's integer and
+    // non-negative constraints for `sizeBytes`; no additional upper bound is
+    // published by v1.
+    let _ = body_ref.size_bytes;
+    matches!(
+        body_ref.kind.as_str(),
+        "none" | "inlinePreview" | "contentAddressed" | "remoteAvailable"
+    ) && body_ref
+        .preview_hash
+        .as_deref()
+        .is_none_or(mesh_event_hash_is_valid)
+        && body_ref.uri.as_ref().is_none_or(|uri| {
+            let character_count = uri.chars().count();
+            (1..=512).contains(&character_count)
+        })
+}
+
+fn mesh_event_required_features_are_well_formed(features: &[String]) -> bool {
+    let mut unique = BTreeSet::new();
+    features.len() <= 32
+        && features.iter().all(|feature| {
+            let Some(suffix) = feature.strip_prefix("mesh.") else {
+                return false;
+            };
+            !suffix.is_empty()
+                && feature.len() <= 64
+                && suffix.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'.' | b'-')
+                })
+                && unique.insert(feature.as_str())
+        })
+}
+
+fn mesh_event_rfc3339_is_valid(value: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(value).is_ok()
+}
+
+fn canonical_mesh_event_hash(event: &serde_json::Value) -> Result<String, MeshEventContractError> {
+    let mut hashable = event.clone();
+    let object = hashable
+        .as_object_mut()
+        .ok_or(MeshEventContractError::InvalidSchema)?;
+    object.remove("eventHash");
+    object.remove("eventId");
+    let canonical = canonicalize_mesh_event_json(&hashable);
+    let bytes =
+        serde_json::to_vec(&canonical).map_err(|_| MeshEventContractError::InvalidSchema)?;
+    Ok(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+}
+
+fn mesh_event_id_from_hash(event_hash: &str) -> Option<String> {
+    event_hash
+        .strip_prefix("blake3:")
+        .map(|digest| format!("mesh_evt_{digest}"))
+}
+
+fn canonicalize_mesh_event_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(canonicalize_mesh_event_json).collect())
+        }
+        serde_json::Value::Object(values) => {
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            let mut canonical = serde_json::Map::with_capacity(values.len());
+            for key in keys {
+                canonical.insert(key.clone(), canonicalize_mesh_event_json(&values[key]));
+            }
+            serde_json::Value::Object(canonical)
+        }
+        _ => value.clone(),
+    }
+}
+
 /// Per-event verdict from applying a target peer's outbound policy to an
 /// export artifact. Included in the artifact so an operator can audit exactly
 /// which records were dropped or body-stripped and why.
@@ -274,11 +699,44 @@ pub struct MeshOutboundExportFilter {
     pub decisions: Vec<MeshOutboundExportEventDecision>,
 }
 
+/// Apply the target peer's metadata policy to the non-event portions of a
+/// mesh artifact. Peer rows contain display/policy metadata and cursor rows
+/// contain topology state; neither projection has passed a redaction
+/// transform, so a `redact` requirement fails closed just like `deny`.
+pub fn apply_outbound_artifact_metadata_policy(
+    artifact: &mut MeshExportArtifact,
+    registry: &MeshPeerPolicyRegistry,
+    local_workspace_id: &str,
+    target_peer_id: &str,
+) {
+    let peer_metadata_allowed = registry
+        .decide_outbound(&MeshOutboundPolicyDecisionInput {
+            local_workspace_id,
+            target_peer_id,
+            origin_workspace_id: local_workspace_id,
+            material_lane: MeshLane::Metadata,
+            payload_is_redacted: false,
+        })
+        .permits_payload_export();
+    if !peer_metadata_allowed {
+        artifact.peers.clear();
+    }
+
+    artifact.cursors.retain(|cursor| {
+        registry
+            .decide_outbound(&MeshOutboundPolicyDecisionInput {
+                local_workspace_id,
+                target_peer_id,
+                origin_workspace_id: &cursor.origin_workspace_id,
+                material_lane: MeshLane::Metadata,
+                payload_is_redacted: false,
+            })
+            .permits_payload_export()
+    });
+}
+
 fn mesh_export_redaction_is_redacted(redaction_class: &str) -> bool {
-    matches!(
-        redaction_class,
-        "redacted" | "body_redacted" | "strict" | "paranoid"
-    )
+    matches!(redaction_class, "metadataOnly" | "preview" | "secretDenied")
 }
 
 /// Apply `target_peer_id`'s outbound policy to export events, per record and
@@ -287,9 +745,9 @@ fn mesh_export_redaction_is_redacted(redaction_class: &str) -> bool {
 ///
 /// - An event whose own material lane is not permitted for export to that peer
 ///   is dropped (its material never leaves).
-/// - A permitted non-body event that references a body is stripped of its body
-///   reference when the body lane is not permitted (a configured `body: deny`
-///   policy observably strips bodies from the artifact).
+/// - Destination-local outer references and verdicts are stripped by the
+///   canonical projector regardless of lane policy. They are never transport
+///   material; a stripped local body-cache key is reflected in the decision.
 /// - An event whose lane string is unparseable is dropped fail-closed.
 ///
 /// Missing or ambiguous policy for an event denies it (the registry's outbound
@@ -305,7 +763,27 @@ pub fn apply_outbound_export_policy(
     let mut kept = Vec::new();
     let mut decisions = Vec::new();
 
-    for mut event in events {
+    for candidate in events {
+        let had_destination_local_body_reference = candidate.body_cache_key.is_some();
+        let projection = match project_canonical_mesh_event(&candidate) {
+            Ok(projection) => projection,
+            Err(error) => {
+                decisions.push(MeshOutboundExportEventDecision {
+                    event_id: safe_rejected_mesh_event_id(&candidate.event_id),
+                    material_lane: safe_rejected_mesh_material_lane(&candidate.material_lane),
+                    origin_workspace_id: safe_rejected_mesh_workspace_id(
+                        &candidate.origin_workspace_id,
+                    ),
+                    action: "reject".to_owned(),
+                    reason: error.reason().to_owned(),
+                    event_dropped: true,
+                    body_stripped: false,
+                });
+                continue;
+            }
+        };
+        let requires_unredacted_body_lane = projection.requires_unredacted_body_lane;
+        let event = projection.event;
         let Some(lane) = parse_mesh_lane(&event.material_lane) else {
             decisions.push(MeshOutboundExportEventDecision {
                 event_id: event.event_id.clone(),
@@ -341,24 +819,38 @@ pub fn apply_outbound_export_policy(
             continue;
         }
 
-        // The event's own lane is exportable. If it references a body under a
-        // non-body lane, gate the body lane separately and strip on denial.
-        let mut body_stripped = false;
-        if event.body_cache_key.is_some() && lane != MeshLane::Body {
-            let body_permitted = registry
-                .decide_outbound(&MeshOutboundPolicyDecisionInput {
+        // `trustClaim` and `bodyRef.uri` are schema-valid but can carry
+        // arbitrary bytes. They may not tunnel through a metadata-only or
+        // redact-only grant. Because these fields are hash-bound, stripping
+        // them would create a different event; drop the whole event unless an
+        // explicit unredacted body-lane grant permits the material.
+        if requires_unredacted_body_lane {
+            let body_material_decision =
+                registry.decide_outbound(&MeshOutboundPolicyDecisionInput {
                     local_workspace_id,
                     target_peer_id,
                     origin_workspace_id: &event.origin_workspace_id,
                     material_lane: MeshLane::Body,
-                    payload_is_redacted,
-                })
-                .permits_payload_export();
-            if !body_permitted {
-                event.body_cache_key = None;
-                body_stripped = true;
+                    payload_is_redacted: false,
+                });
+            if !body_material_decision.permits_payload_export() {
+                decisions.push(MeshOutboundExportEventDecision {
+                    event_id: event.event_id.clone(),
+                    material_lane: event.material_lane.clone(),
+                    origin_workspace_id: event.origin_workspace_id.clone(),
+                    action: body_material_decision.action.as_str().to_owned(),
+                    reason: "event_metadata_requires_unredacted_body_lane".to_owned(),
+                    event_dropped: true,
+                    body_stripped: false,
+                });
+                continue;
             }
         }
+
+        // `body_cache_key` is a destination-local lookup key, not transport
+        // material. The canonical projector has already removed it under every
+        // policy; retain only the safe boolean explaining that sanitization.
+        let body_stripped = had_destination_local_body_reference;
 
         decisions.push(MeshOutboundExportEventDecision {
             event_id: event.event_id.clone(),
@@ -375,6 +867,33 @@ pub fn apply_outbound_export_policy(
     MeshOutboundExportFilter {
         events: kept,
         decisions,
+    }
+}
+
+fn safe_rejected_mesh_event_id(value: &str) -> String {
+    if mesh_event_identifier_is_valid(value, "mesh_evt_", 64, 64, true) {
+        value.to_owned()
+    } else {
+        "mesh_evt_invalid_contract".to_owned()
+    }
+}
+
+fn safe_rejected_mesh_material_lane(value: &str) -> String {
+    if matches!(
+        value,
+        "metadata" | "body" | "embedding" | "graphLink" | "revisionNotice" | "curationSignal"
+    ) {
+        value.to_owned()
+    } else {
+        "invalid".to_owned()
+    }
+}
+
+fn safe_rejected_mesh_workspace_id(value: &str) -> String {
+    if mesh_event_identifier_is_valid(value, "wsp_", 6, 128, false) {
+        value.to_owned()
+    } else {
+        "wsp_invalid_contract".to_owned()
     }
 }
 
@@ -1166,7 +1685,7 @@ impl MeshForegroundSnapshot {
                     mesh_shell_quote_arg(&self.workspace_path)
                 ),
                 format!(
-                    "ee mesh export --workspace {} --out mesh-export.json --json",
+                    "ee mesh export --workspace {} --peer <peer-id> --out mesh-export.json --json",
                     mesh_shell_quote_arg(&self.workspace_path)
                 ),
                 format!(
@@ -2121,10 +2640,12 @@ mod tests {
         MESH_AUTO_STATUS_SCHEMA_V1, MESH_EXPORT_ARTIFACT_SCHEMA_V1,
         MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE, MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE,
         MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE, MESH_WORKSPACE_UNINITIALIZED_CODE,
-        MeshAutoStatusSignals, MeshCliDegradation, MeshEventRow, MeshForegroundSnapshot,
-        MeshForegroundSyncPeerOutcome, MeshForegroundSyncRequest, MeshForegroundSyncTransport,
-        MeshPeerRow, MeshStorageCounts, MeshSyncSupervisorOptions, REPAIR_ACTION_GRAPH_SCHEMA_V1,
-        apply_outbound_export_policy, auto_enrollment_status_for_snapshot,
+        MeshAutoStatusSignals, MeshCliDegradation, MeshEventContractError, MeshEventRow,
+        MeshExportPolicyAttestation, MeshForegroundSnapshot, MeshForegroundSyncPeerOutcome,
+        MeshForegroundSyncRequest, MeshForegroundSyncTransport, MeshPeerRow, MeshStorageCounts,
+        MeshSyncSupervisorOptions, REPAIR_ACTION_GRAPH_SCHEMA_V1, apply_outbound_export_policy,
+        auto_enrollment_status_for_snapshot, canonical_mesh_event_hash,
+        canonicalize_mesh_event_json, mesh_event_id_from_hash, project_canonical_mesh_event,
         run_mesh_sync_supervisor_supervised, run_mesh_sync_supervisor_supervised_with_transport,
     };
     use crate::config::ConfigFile;
@@ -2172,39 +2693,179 @@ max_bytes = 0
         MeshPeerPolicyRegistry::from_config(&config)
     }
 
-    fn export_event(event_id: &str, lane: &str, body_key: Option<&str>) -> MeshEventRow {
+    /// A production outbound policy that permits the canonical material lanes
+    /// only after the event projection is already redacted.
+    fn redaction_required_registry() -> MeshPeerPolicyRegistry {
+        let config = ConfigFile::parse(
+            r#"
+[[mesh.peer_policies]]
+policy_id = "pol_export_redaction_required"
+workspace_id = "wsp_local"
+peer_id = "peer_target"
+origin_workspace_ids = ["wsp_origin"]
+trust_lane = "peerAgent"
+import_trust_class = "agent_validated"
+default_action = "deny"
+
+[mesh.peer_policies.allowed_lanes]
+metadata = "allow"
+body = "allow"
+embedding = "allow"
+graph_link = "allow"
+revision_notice = "allow"
+curation_signal = "allow"
+
+[mesh.peer_policies.redaction]
+metadata = "redact"
+preview = "redact"
+body = "redact"
+embedding = "redact"
+
+[mesh.peer_policies.body_fetch]
+allowed = true
+requires_consent = false
+max_bytes = 1048576
+"#,
+        )
+        .expect("redaction-required policy config should parse");
+        MeshPeerPolicyRegistry::from_config(&config)
+    }
+
+    fn body_allow_registry() -> MeshPeerPolicyRegistry {
+        let config = ConfigFile::parse(
+            r#"
+[[mesh.peer_policies]]
+policy_id = "pol_export_body_allow"
+workspace_id = "wsp_local"
+peer_id = "peer_target"
+origin_workspace_ids = ["wsp_origin"]
+trust_lane = "peerAgent"
+import_trust_class = "agent_validated"
+default_action = "deny"
+
+[mesh.peer_policies.allowed_lanes]
+metadata = "allow"
+body = "allow"
+embedding = "deny"
+graph_link = "allow"
+revision_notice = "allow"
+curation_signal = "allow"
+
+[mesh.peer_policies.redaction]
+metadata = "share"
+preview = "share"
+body = "share"
+embedding = "deny"
+
+[mesh.peer_policies.body_fetch]
+allowed = true
+requires_consent = false
+max_bytes = 1048576
+"#,
+        )
+        .expect("body-allow policy config should parse");
+        MeshPeerPolicyRegistry::from_config(&config)
+    }
+
+    fn export_event(label: &str, lane: &str, body_key: Option<&str>) -> MeshEventRow {
+        let redaction_class = match lane {
+            "body" => "body",
+            "embedding" => "embedding",
+            _ => "metadataOnly",
+        };
+        export_event_with_redaction(label, lane, redaction_class, body_key)
+    }
+
+    fn export_event_with_redaction(
+        label: &str,
+        lane: &str,
+        redaction_class: &str,
+        body_key: Option<&str>,
+    ) -> MeshEventRow {
+        let logical_memory_id = format!("mem_fixture_{label}");
+        let content_hash = format!("blake3:{}", blake3::hash(label.as_bytes()).to_hex());
+        let mut inner = serde_json::json!({
+            "schema": crate::models::MESH_EVENT_SCHEMA_V1,
+            "eventId": format!("mesh_evt_{}", "0".repeat(64)),
+            "originNodeId": "node_origin",
+            "originWorkspaceId": "wsp_origin",
+            "seq": 1,
+            "prevEventHash": null,
+            "eventHash": format!("blake3:{}", "0".repeat(64)),
+            "eventKind": "create",
+            "logicalMemoryId": logical_memory_id.clone(),
+            "contentHash": content_hash.clone(),
+            "bodyRef": null,
+            "materialLane": lane,
+            "redactionClass": redaction_class,
+            "trustLane": "peerAgent",
+            "requiredFeatures": ["mesh.event.v1"],
+            "producedAt": "2026-07-31T00:00:00Z",
+        });
+        let event_hash = canonical_mesh_event_hash(&inner).expect("hash fixture event");
+        let event_id = mesh_event_id_from_hash(&event_hash).expect("derive fixture event id");
+        let object = inner.as_object_mut().expect("fixture event object");
+        object.insert(
+            "eventHash".to_owned(),
+            serde_json::json!(event_hash.clone()),
+        );
+        object.insert("eventId".to_owned(), serde_json::json!(event_id.clone()));
+
         MeshEventRow {
-            event_id: event_id.to_owned(),
+            event_id,
             origin_node_id: "node_origin".to_owned(),
             origin_workspace_id: "wsp_origin".to_owned(),
             producer_peer_id: None,
             seq: 1,
             prev_event_hash: None,
-            event_hash: "blake3:evhash".to_owned(),
+            event_hash,
             event_kind: "create".to_owned(),
-            logical_memory_id: "mem_x".to_owned(),
-            content_hash: "blake3:content".to_owned(),
+            logical_memory_id,
+            content_hash,
             material_lane: lane.to_owned(),
-            redaction_class: "none".to_owned(),
+            redaction_class: redaction_class.to_owned(),
             trust_lane: "peerAgent".to_owned(),
             import_decision: "allow".to_owned(),
-            local_memory_id: None,
+            local_memory_id: Some(label.to_owned()),
             body_cache_key: body_key.map(str::to_owned),
             policy_failure_surface_json: None,
             policy_decision_json: None,
-            event_json: "{}".to_owned(),
+            event_json: serde_json::to_string(&inner).expect("serialize fixture event"),
             policy_attestation: None,
             imported_at: "2026-07-31T00:00:00Z".to_owned(),
         }
     }
 
+    fn reseal_event_json(
+        event: &mut MeshEventRow,
+        mutate: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
+    ) {
+        let mut inner: serde_json::Value =
+            serde_json::from_str(&event.event_json).expect("parse fixture event");
+        let object = inner.as_object_mut().expect("fixture event object");
+        mutate(object);
+        let event_hash = canonical_mesh_event_hash(&inner).expect("rehash fixture event");
+        let event_id = mesh_event_id_from_hash(&event_hash).expect("rederive fixture event id");
+        let object = inner.as_object_mut().expect("fixture event object");
+        object.insert(
+            "eventHash".to_owned(),
+            serde_json::json!(event_hash.clone()),
+        );
+        object.insert("eventId".to_owned(), serde_json::json!(event_id.clone()));
+        event.event_hash = event_hash;
+        event.event_id = event_id;
+        event.event_json = serde_json::to_string(&inner).expect("serialize resealed fixture event");
+    }
+
     #[test]
     fn body_deny_policy_drops_body_events_and_strips_body_refs() {
-        let events = vec![
-            export_event("meta_no_body", "metadata", None),
-            export_event("meta_with_body", "metadata", Some("bodykey-1")),
-            export_event("pure_body", "body", Some("bodykey-2")),
-        ];
+        let meta_no_body = export_event("meta_no_body", "metadata", None);
+        let meta_no_body_id = meta_no_body.event_id.clone();
+        let meta_with_body = export_event("meta_with_body", "metadata", Some("bodykey-1"));
+        let meta_with_body_id = meta_with_body.event_id.clone();
+        let pure_body = export_event("pure_body", "body", Some("bodykey-2"));
+        let pure_body_id = pure_body.event_id.clone();
+        let events = vec![meta_no_body, meta_with_body, pure_body];
         let registry = body_deny_registry();
         let filtered = apply_outbound_export_policy(events, &registry, "wsp_local", "peer_target");
 
@@ -2214,13 +2875,16 @@ max_bytes = 0
             .iter()
             .map(|event| event.event_id.as_str())
             .collect();
-        assert_eq!(kept_ids, vec!["meta_no_body", "meta_with_body"]);
+        assert_eq!(
+            kept_ids,
+            vec![meta_no_body_id.as_str(), meta_with_body_id.as_str()]
+        );
 
         // The metadata event that referenced a body has it stripped.
         let with_body = filtered
             .events
             .iter()
-            .find(|event| event.event_id == "meta_with_body")
+            .find(|event| event.event_id == meta_with_body_id)
             .expect("kept metadata event");
         assert!(
             with_body.body_cache_key.is_none(),
@@ -2231,13 +2895,13 @@ max_bytes = 0
         let dropped = filtered
             .decisions
             .iter()
-            .find(|decision| decision.event_id == "pure_body")
+            .find(|decision| decision.event_id == pure_body_id)
             .expect("pure_body decision");
         assert!(dropped.event_dropped);
         let stripped = filtered
             .decisions
             .iter()
-            .find(|decision| decision.event_id == "meta_with_body")
+            .find(|decision| decision.event_id == meta_with_body_id)
             .expect("meta_with_body decision");
         assert!(stripped.body_stripped && !stripped.event_dropped);
     }
@@ -2253,12 +2917,69 @@ max_bytes = 0
     }
 
     #[test]
-    fn unparseable_lane_is_dropped_fail_closed() {
+    fn non_event_artifact_metadata_is_policy_gated_and_unredacted() {
+        let build_artifact = || MeshExportArtifact {
+            schema: MESH_EXPORT_ARTIFACT_SCHEMA_V1.to_owned(),
+            workspace_id: "wsp_local".to_owned(),
+            source: "test".to_owned(),
+            policy_attestation: None,
+            storage: MeshStorageCounts::default(),
+            peers: vec![MeshPeerRow {
+                peer_id: "peer_other".to_owned(),
+                origin_node_id: "node_other".to_owned(),
+                display_name: Some("private display metadata".to_owned()),
+                enabled: true,
+                last_seen_at: "2026-08-04T00:00:00Z".to_owned(),
+                policy_summary_json: Some(r#"{"scope":"private"}"#.to_owned()),
+            }],
+            cursors: vec![MeshCursorRow {
+                peer_id: "peer_other".to_owned(),
+                origin_node_id: "node_other".to_owned(),
+                origin_workspace_id: "wsp_origin".to_owned(),
+                last_seq: 1,
+                tip_event_hash: None,
+                tip_audit_hash: None,
+                status: "ready".to_owned(),
+                updated_at: "2026-08-04T00:00:00Z".to_owned(),
+            }],
+            events: Vec::new(),
+        };
+
+        let mut denied = build_artifact();
+        apply_outbound_artifact_metadata_policy(
+            &mut denied,
+            &MeshPeerPolicyRegistry::default(),
+            "wsp_local",
+            "peer_target",
+        );
+        assert!(denied.peers.is_empty());
+        assert!(denied.cursors.is_empty());
+
+        let mut requires_redaction = build_artifact();
+        apply_outbound_artifact_metadata_policy(
+            &mut requires_redaction,
+            &redaction_required_registry(),
+            "wsp_local",
+            "peer_target",
+        );
+        assert!(
+            requires_redaction.peers.is_empty(),
+            "raw peer metadata must not satisfy a redact requirement"
+        );
+        assert!(
+            requires_redaction.cursors.is_empty(),
+            "raw cursor metadata must not satisfy a redact requirement"
+        );
+    }
+
+    #[test]
+    fn schema_invalid_lane_is_dropped_fail_closed() {
         let events = vec![export_event("weird", "bogus_lane", None)];
         let registry = body_deny_registry();
         let filtered = apply_outbound_export_policy(events, &registry, "wsp_local", "peer_target");
         assert!(filtered.events.is_empty());
-        assert_eq!(filtered.decisions[0].reason, "unparseable_material_lane");
+        assert_eq!(filtered.decisions[0].reason, "invalid_event_schema");
+        assert_eq!(filtered.decisions[0].material_lane, "invalid");
     }
 
     #[test]
@@ -2269,6 +2990,247 @@ max_bytes = 0
         assert_eq!(filtered.events.len(), 1);
         assert!(!filtered.decisions[0].event_dropped);
         assert!(!filtered.decisions[0].body_stripped);
+    }
+
+    #[test]
+    fn canonical_redaction_classes_drive_production_export_policy() {
+        let cases = [
+            ("metadata_only", "metadata", "metadataOnly", true, None),
+            ("preview", "metadata", "preview", true, None),
+            ("secret_denied", "metadata", "secretDenied", true, None),
+            (
+                "raw_body",
+                "body",
+                "body",
+                false,
+                Some("outbound_payload_requires_redaction"),
+            ),
+            (
+                "raw_embedding",
+                "embedding",
+                "embedding",
+                false,
+                Some("outbound_payload_requires_redaction"),
+            ),
+            // This was accepted by the buggy pre-schema mapping. It is not a
+            // published ee.mesh.event.v1 redactionClass and must fail closed.
+            (
+                "legacy_redacted",
+                "metadata",
+                "redacted",
+                false,
+                Some("invalid_event_schema"),
+            ),
+        ];
+        let candidates = cases
+            .iter()
+            .map(
+                |(label, lane, redaction_class, expected_kept, expected_reason)| {
+                    let event = export_event_with_redaction(label, lane, redaction_class, None);
+                    (
+                        event.event_id.clone(),
+                        event,
+                        *expected_kept,
+                        *expected_reason,
+                    )
+                },
+            )
+            .collect::<Vec<_>>();
+        let expectations = candidates
+            .iter()
+            .map(|(event_id, _, expected_kept, expected_reason)| {
+                (event_id.clone(), *expected_kept, *expected_reason)
+            })
+            .collect::<Vec<_>>();
+        let events = candidates
+            .into_iter()
+            .map(|(_, event, _, _)| event)
+            .collect();
+        let registry = redaction_required_registry();
+
+        let filtered = apply_outbound_export_policy(events, &registry, "wsp_local", "peer_target");
+
+        for (event_id, expected_kept, expected_reason) in expectations {
+            let kept = filtered
+                .events
+                .iter()
+                .any(|event| event.event_id == event_id);
+            assert_eq!(kept, expected_kept, "unexpected verdict for {event_id}");
+            let decision = filtered
+                .decisions
+                .iter()
+                .find(|decision| decision.event_id == event_id)
+                .expect("every candidate must have an outbound decision");
+            assert_eq!(decision.event_dropped, !expected_kept);
+            if let Some(expected_reason) = expected_reason {
+                assert_eq!(decision.reason, expected_reason);
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_projection_rejects_unknown_hash_mismatch_and_outer_mismatch() {
+        let canonical = export_event("canonical_projection", "metadata", None);
+        let projection = project_canonical_mesh_event(&canonical).expect("valid projection");
+        let projected_value: serde_json::Value =
+            serde_json::from_str(&projection.event.event_json).expect("parse canonical projection");
+        assert_eq!(
+            projection.event.event_json,
+            serde_json::to_string(&canonicalize_mesh_event_json(&projected_value))
+                .expect("serialize canonical value")
+        );
+
+        let mut unknown = canonical.clone();
+        reseal_event_json(&mut unknown, |object| {
+            object.insert(
+                "metadataPayload".to_owned(),
+                serde_json::json!("covert-content"),
+            );
+        });
+        assert_eq!(
+            project_canonical_mesh_event(&unknown),
+            Err(MeshEventContractError::InvalidSchema)
+        );
+
+        let mut hash_mismatch = canonical.clone();
+        let mut inner: serde_json::Value =
+            serde_json::from_str(&hash_mismatch.event_json).expect("parse fixture event");
+        inner.as_object_mut().expect("fixture event object").insert(
+            "contentHash".to_owned(),
+            serde_json::json!(format!("blake3:{}", "a".repeat(64))),
+        );
+        hash_mismatch.event_json = serde_json::to_string(&inner).expect("serialize hash mismatch");
+        assert_eq!(
+            project_canonical_mesh_event(&hash_mismatch),
+            Err(MeshEventContractError::EventHashMismatch)
+        );
+
+        let mut id_mismatch = canonical.clone();
+        let mismatched_id = format!("mesh_evt_{}", "f".repeat(64));
+        let mut inner: serde_json::Value =
+            serde_json::from_str(&id_mismatch.event_json).expect("parse fixture event");
+        inner.as_object_mut().expect("fixture event object").insert(
+            "eventId".to_owned(),
+            serde_json::json!(mismatched_id.clone()),
+        );
+        id_mismatch.event_id = mismatched_id;
+        id_mismatch.event_json = serde_json::to_string(&inner).expect("serialize id mismatch");
+        assert_eq!(
+            project_canonical_mesh_event(&id_mismatch),
+            Err(MeshEventContractError::EventIdMismatch)
+        );
+
+        let mut missing_required = canonical.clone();
+        let mut inner: serde_json::Value =
+            serde_json::from_str(&missing_required.event_json).expect("parse fixture event");
+        inner
+            .as_object_mut()
+            .expect("fixture event object")
+            .remove("producedAt");
+        missing_required.event_json =
+            serde_json::to_string(&inner).expect("serialize missing required field");
+        assert_eq!(
+            project_canonical_mesh_event(&missing_required),
+            Err(MeshEventContractError::InvalidSchema)
+        );
+
+        let mut outer_mismatch = canonical;
+        outer_mismatch.logical_memory_id = "mem_different_projection".to_owned();
+        assert_eq!(
+            project_canonical_mesh_event(&outer_mismatch),
+            Err(MeshEventContractError::OuterProjectionMismatch)
+        );
+    }
+
+    #[test]
+    fn canonical_projection_clears_destination_local_outer_state() {
+        let mut injected = export_event(
+            "destination_local_outer_injection",
+            "metadata",
+            Some("peer-chosen-body-cache-key"),
+        );
+        injected.import_decision = "quarantine".to_owned();
+        injected.local_memory_id = Some("mem_peer_chosen_local_reference".to_owned());
+        injected.policy_failure_surface_json =
+            Some(r#"{"reason":"peer-chosen-local-failure"}"#.to_owned());
+        injected.policy_decision_json =
+            Some(r#"{"decision":"peer-chosen-local-allow"}"#.to_owned());
+        injected.policy_attestation = Some(MeshExportPolicyAttestation::allowed(4_294));
+        injected.imported_at = "2099-12-31T23:59:59Z".to_owned();
+
+        let projection = project_canonical_mesh_event(&injected).expect("valid inner event");
+        let projected = &projection.event;
+        assert!(projected.import_decision.is_empty());
+        assert!(projected.local_memory_id.is_none());
+        assert!(projected.body_cache_key.is_none());
+        assert!(projected.policy_failure_surface_json.is_none());
+        assert!(projected.policy_decision_json.is_none());
+        assert!(projected.policy_attestation.is_none());
+        assert!(
+            projected.imported_at.is_empty(),
+            "the import writer must assign its own local timestamp"
+        );
+        assert_eq!(projected.event_id, injected.event_id);
+        assert_eq!(projected.event_hash, injected.event_hash);
+
+        let projected_again = project_canonical_mesh_event(projected)
+            .expect("sanitized projection remains canonical");
+        assert_eq!(projected_again, projection);
+    }
+
+    #[test]
+    fn arbitrary_inner_metadata_requires_an_unredacted_body_lane() {
+        let mut trust_claim = export_event("trust_claim", "metadata", None);
+        reseal_event_json(&mut trust_claim, |object| {
+            object.insert(
+                "trustClaim".to_owned(),
+                serde_json::json!({"note": "arbitrary non-secret content"}),
+            );
+        });
+        let trust_claim_id = trust_claim.event_id.clone();
+        let mut remote_uri = export_event("remote_uri", "metadata", None);
+        reseal_event_json(&mut remote_uri, |object| {
+            object.insert(
+                "bodyRef".to_owned(),
+                serde_json::json!({
+                    "kind": "remoteAvailable",
+                    "uri": "mesh-body://arbitrary-non-secret-content",
+                }),
+            );
+        });
+        let remote_uri_id = remote_uri.event_id.clone();
+
+        let denied = apply_outbound_export_policy(
+            vec![trust_claim.clone(), remote_uri.clone()],
+            &body_deny_registry(),
+            "wsp_local",
+            "peer_target",
+        );
+        assert!(denied.events.is_empty());
+        assert!(denied.decisions.iter().all(|decision| {
+            decision.event_dropped
+                && decision.reason == "event_metadata_requires_unredacted_body_lane"
+        }));
+
+        let allowed = apply_outbound_export_policy(
+            vec![trust_claim, remote_uri],
+            &body_allow_registry(),
+            "wsp_local",
+            "peer_target",
+        );
+        assert_eq!(allowed.events.len(), 2);
+        assert!(
+            allowed
+                .events
+                .iter()
+                .any(|event| event.event_id == trust_claim_id)
+        );
+        assert!(
+            allowed
+                .events
+                .iter()
+                .any(|event| event.event_id == remote_uri_id)
+        );
     }
     use crate::mesh::tailscale_autodiscovery::{
         TAILSCALE_AUTODISCOVERY_SCHEMA_V1, TailscaleAutodiscoveryReport,

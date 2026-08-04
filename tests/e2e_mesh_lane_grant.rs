@@ -18,7 +18,12 @@ use ee::db::{
     CreateAuditInput, DbConnection, MeshLaneGrantAtomicError, MeshLaneGrantMutationError,
     MeshLaneGrantMutationInput, MeshLaneGrantTargetAdapter,
 };
+use ee::mesh::foreground_cli::{
+    MESH_EXPORT_ARTIFACT_SCHEMA_V1, MeshCursorRow, MeshEventRow, MeshExportArtifact, MeshPeerRow,
+    MeshStorageCounts,
+};
 use ee::mesh::lane_grant::{APPROVAL_TOKEN_TTL_SECONDS, compare_snapshot, issue, verify_authentic};
+use ee::mesh::peer::build_peer_origin_node_id;
 use ee::policy::store_auth::{StoreAuthRoot, workspace_keys_dir};
 use serde_json::Value;
 
@@ -26,7 +31,10 @@ type TestResult = Result<(), String>;
 
 const TEST_LANE_ARG: &str = "graph-link";
 const TEST_LANE_WIRE: &str = "graph_link";
+const TEST_MATERIAL_LANE_WIRE: &str = "graphLink";
+const TEST_TAILSCALE_NODE_KEY: &str = "nodekey:lane-grant-e2e";
 const GRANT_SCHEMA: &str = "ee.mesh.grant.v1";
+const EXPORT_AUDIT_ACTION: &str = "mesh.audit.export";
 const GRANT_AUDIT_ACTION: &str = "mesh.audit.lane_grant";
 const REVOKE_AUDIT_ACTION: &str = "mesh.audit.lane_revoke";
 
@@ -35,6 +43,25 @@ struct LaneGrantFixture {
     workspace: String,
     workspace_id: String,
     peer_id: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct MeshImportDurableSnapshot {
+    peers: Vec<ee::db::StoredMeshPeer>,
+    cursors: Vec<ee::db::StoredMeshPeerCursor>,
+    ledger_events: Vec<ee::db::StoredMeshImportLedgerEvent>,
+    index_jobs: Vec<ee::db::StoredSearchIndexJob>,
+}
+
+impl MeshImportDurableSnapshot {
+    fn counts(&self) -> (usize, usize, usize, usize) {
+        (
+            self.peers.len(),
+            self.cursors.len(),
+            self.ledger_events.len(),
+            self.index_jobs.len(),
+        )
+    }
 }
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
@@ -297,7 +324,7 @@ fn set_up_fixture(label: &str) -> Result<LaneGrantFixture, String> {
             "--alias",
             "lane-grant-peer",
             "--tailscale-node-key",
-            "nodekey:lane-grant-e2e",
+            TEST_TAILSCALE_NODE_KEY,
             "--endpoint",
             "100.64.20.2:4747",
             "--tailnet-id",
@@ -339,6 +366,311 @@ fn set_up_fixture(label: &str) -> Result<LaneGrantFixture, String> {
         workspace_id,
         peer_id,
     })
+}
+
+fn fixture_hash(label: &str) -> String {
+    format!("blake3:{}", blake3::hash(label.as_bytes()).to_hex())
+}
+
+fn canonical_mesh_event_json(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => {
+            Value::Array(values.iter().map(canonical_mesh_event_json).collect())
+        }
+        Value::Object(values) => {
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            let mut canonical = serde_json::Map::with_capacity(values.len());
+            for key in keys {
+                canonical.insert(key.clone(), canonical_mesh_event_json(&values[key]));
+            }
+            Value::Object(canonical)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn seal_mesh_event_json(event: &mut Value) -> Result<(String, String), String> {
+    let mut hashable = event.clone();
+    let object = hashable
+        .as_object_mut()
+        .ok_or_else(|| "mesh event fixture must be an object".to_owned())?;
+    object.remove("eventHash");
+    object.remove("eventId");
+    let canonical = canonical_mesh_event_json(&hashable);
+    let bytes = serde_json::to_vec(&canonical)
+        .map_err(|error| format!("serialize canonical mesh event fixture: {error}"))?;
+    let digest = blake3::hash(&bytes).to_hex().to_string();
+    let event_hash = format!("blake3:{digest}");
+    let event_id = format!("mesh_evt_{digest}");
+    let object = event
+        .as_object_mut()
+        .ok_or_else(|| "mesh event fixture must be an object".to_owned())?;
+    object.insert("eventHash".to_owned(), Value::String(event_hash.clone()));
+    object.insert("eventId".to_owned(), Value::String(event_id.clone()));
+    Ok((event_id, event_hash))
+}
+
+fn write_graph_link_artifact(
+    fixture: &LaneGrantFixture,
+    label: &str,
+    seq: u64,
+    prev_event_hash: Option<&str>,
+) -> Result<(String, String, String), String> {
+    let logical_memory_id = format!("mem_lane_grant_{label}_{seq:02}");
+    let origin_node_id = build_peer_origin_node_id(TEST_TAILSCALE_NODE_KEY);
+    let content_hash = fixture_hash(&format!("content:{label}:{seq}"));
+    let produced_at = format!("2026-08-04T00:00:{:02}Z", seq.min(59));
+    let mut event_json = serde_json::json!({
+        "schema": "ee.mesh.event.v1",
+        "eventId": format!("mesh_evt_{}", "0".repeat(64)),
+        "originNodeId": origin_node_id.clone(),
+        "originWorkspaceId": fixture.workspace_id.clone(),
+        "producerPeerId": fixture.peer_id.clone(),
+        "seq": seq,
+        "prevEventHash": prev_event_hash,
+        "eventHash": format!("blake3:{}", "0".repeat(64)),
+        "eventKind": "create",
+        "logicalMemoryId": logical_memory_id.clone(),
+        "contentHash": content_hash.clone(),
+        "bodyRef": null,
+        "materialLane": TEST_MATERIAL_LANE_WIRE,
+        "redactionClass": "metadataOnly",
+        "trustLane": "peerAgent",
+        "requiredFeatures": ["mesh.event.v1"],
+        "producedAt": produced_at.clone(),
+    });
+    let (event_id, event_hash) = seal_mesh_event_json(&mut event_json)?;
+    let event = MeshEventRow {
+        event_id: event_id.clone(),
+        origin_node_id,
+        origin_workspace_id: fixture.workspace_id.clone(),
+        producer_peer_id: Some(fixture.peer_id.clone()),
+        seq,
+        prev_event_hash: prev_event_hash.map(str::to_owned),
+        event_hash: event_hash.clone(),
+        event_kind: "create".to_owned(),
+        logical_memory_id: logical_memory_id.clone(),
+        content_hash,
+        material_lane: TEST_MATERIAL_LANE_WIRE.to_owned(),
+        redaction_class: "metadataOnly".to_owned(),
+        trust_lane: "peerAgent".to_owned(),
+        // The importer must ignore this transported claim and recompute policy
+        // from the local enrollment, config snapshot, and durable grant state.
+        import_decision: "allow".to_owned(),
+        local_memory_id: None,
+        body_cache_key: None,
+        policy_failure_surface_json: None,
+        policy_decision_json: None,
+        event_json: serde_json::to_string(&canonical_mesh_event_json(&event_json))
+            .map_err(|error| format!("serialize canonical mesh event fixture: {error}"))?,
+        policy_attestation: None,
+        imported_at: produced_at,
+    };
+    let artifact = MeshExportArtifact {
+        schema: MESH_EXPORT_ARTIFACT_SCHEMA_V1.to_owned(),
+        workspace_id: fixture.workspace_id.clone(),
+        source: "ee mesh export".to_owned(),
+        policy_attestation: None,
+        storage: MeshStorageCounts {
+            imported_event_count: 1,
+            ..MeshStorageCounts::default()
+        },
+        peers: Vec::new(),
+        cursors: Vec::new(),
+        events: vec![event],
+    };
+    let path = Path::new(&fixture.workspace).join(format!("mesh-{label}-{seq}.json"));
+    let rendered = serde_json::to_string_pretty(&artifact)
+        .map_err(|error| format!("serialize {label} mesh artifact: {error}"))?;
+    fs::write(&path, format!("{rendered}\n"))
+        .map_err(|error| format!("write {}: {error}", path.display()))?;
+    Ok((path.to_string_lossy().into_owned(), event_id, event_hash))
+}
+
+fn write_hash_bound_metadata_body_artifact(
+    fixture: &LaneGrantFixture,
+    label: &str,
+    seq: u64,
+) -> Result<(String, String, String), String> {
+    let (path, _, _) = write_graph_link_artifact(fixture, label, seq, None)?;
+    let mut artifact: MeshExportArtifact =
+        serde_json::from_slice(&fs::read(&path).map_err(|error| format!("read {path}: {error}"))?)
+            .map_err(|error| format!("parse {path}: {error}"))?;
+    let event = artifact
+        .events
+        .first_mut()
+        .ok_or_else(|| format!("{path} omitted its metadata event"))?;
+    let mut event_json: Value = serde_json::from_str(&event.event_json)
+        .map_err(|error| format!("parse canonical eventJson from {path}: {error}"))?;
+    let body_uri = format!("ee-body://lane-grant-e2e/{label}/{seq}");
+    let object = event_json
+        .as_object_mut()
+        .ok_or_else(|| format!("canonical eventJson from {path} was not an object"))?;
+    object.insert(
+        "bodyRef".to_owned(),
+        serde_json::json!({
+            "kind": "remoteAvailable",
+            "uri": body_uri.clone(),
+            "sizeBytes": 64,
+        }),
+    );
+    object.insert(
+        "trustClaim".to_owned(),
+        serde_json::json!({
+            "assertedBy": "lane-grant-e2e-peer",
+        }),
+    );
+    object.insert(
+        "materialLane".to_owned(),
+        Value::String("metadata".to_owned()),
+    );
+    let (event_id, event_hash) = seal_mesh_event_json(&mut event_json)?;
+    event.event_id = event_id.clone();
+    event.event_hash = event_hash;
+    event.material_lane = "metadata".to_owned();
+    event.event_json = serde_json::to_string(&canonical_mesh_event_json(&event_json))
+        .map_err(|error| format!("serialize canonical metadata event fixture: {error}"))?;
+
+    let rendered = serde_json::to_string_pretty(&artifact)
+        .map_err(|error| format!("serialize {label} metadata mesh artifact: {error}"))?;
+    fs::write(&path, format!("{rendered}\n"))
+        .map_err(|error| format!("rewrite {path}: {error}"))?;
+    Ok((path, event_id, body_uri))
+}
+
+fn write_disabled_import_effect_artifact(
+    fixture: &LaneGrantFixture,
+    label: &str,
+    seq: u64,
+) -> Result<(String, String, String), String> {
+    let (path, _, _) = write_graph_link_artifact(fixture, label, seq, None)?;
+    let mut artifact: MeshExportArtifact =
+        serde_json::from_slice(&fs::read(&path).map_err(|error| format!("read {path}: {error}"))?)
+            .map_err(|error| format!("parse {path}: {error}"))?;
+    let event = artifact
+        .events
+        .first_mut()
+        .ok_or_else(|| format!("{path} omitted its import-effect event"))?;
+    let mut event_json: Value = serde_json::from_str(&event.event_json)
+        .map_err(|error| format!("parse canonical eventJson from {path}: {error}"))?;
+    event_json
+        .as_object_mut()
+        .ok_or_else(|| format!("canonical eventJson from {path} was not an object"))?
+        .insert(
+            "materialLane".to_owned(),
+            Value::String("metadata".to_owned()),
+        );
+    let (event_id, event_hash) = seal_mesh_event_json(&mut event_json)?;
+    event.event_id = event_id.clone();
+    event.event_hash = event_hash.clone();
+    event.material_lane = "metadata".to_owned();
+    event.event_json = serde_json::to_string(&canonical_mesh_event_json(&event_json))
+        .map_err(|error| format!("serialize canonical import-effect event fixture: {error}"))?;
+
+    let candidate_peer_id = "peer_disabled_import_candidate".to_owned();
+    artifact.peers = vec![MeshPeerRow {
+        peer_id: candidate_peer_id.clone(),
+        origin_node_id: "node_disabled_import_candidate".to_owned(),
+        display_name: Some("disabled import candidate".to_owned()),
+        enabled: true,
+        last_seen_at: "2026-08-04T00:01:00Z".to_owned(),
+        policy_summary_json: None,
+    }];
+    artifact.cursors = vec![MeshCursorRow {
+        peer_id: fixture.peer_id.clone(),
+        origin_node_id: build_peer_origin_node_id(TEST_TAILSCALE_NODE_KEY),
+        origin_workspace_id: fixture.workspace_id.clone(),
+        last_seq: seq,
+        tip_event_hash: Some(event_hash),
+        tip_audit_hash: None,
+        status: "active".to_owned(),
+        updated_at: "2026-08-04T00:01:00Z".to_owned(),
+    }];
+    artifact.storage.peer_count = 1;
+    artifact.storage.cursor_count = 1;
+
+    let rendered = serde_json::to_string_pretty(&artifact)
+        .map_err(|error| format!("serialize {label} import-effect artifact: {error}"))?;
+    fs::write(&path, format!("{rendered}\n"))
+        .map_err(|error| format!("rewrite {path}: {error}"))?;
+    Ok((path, event_id, candidate_peer_id))
+}
+
+fn stored_graph_link_event(
+    fixture: &LaneGrantFixture,
+    seq: u64,
+) -> Result<ee::db::StoredMeshImportLedgerEvent, String> {
+    let database_path = Path::new(&fixture.workspace).join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open {}: {error}", database_path.display()))?;
+    connection
+        .get_mesh_import_ledger_event(
+            &fixture.workspace_id,
+            &build_peer_origin_node_id(TEST_TAILSCALE_NODE_KEY),
+            &fixture.workspace_id,
+            seq,
+        )
+        .map_err(|error| format!("load imported graph-link event {seq}: {error}"))?
+        .ok_or_else(|| format!("imported graph-link event {seq} was not persisted"))
+}
+
+fn matching_import_job_count(fixture: &LaneGrantFixture, event_id: &str) -> Result<usize, String> {
+    let database_path = Path::new(&fixture.workspace).join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open {}: {error}", database_path.display()))?;
+    let jobs = connection
+        .list_search_index_jobs(&fixture.workspace_id, None)
+        .map_err(|error| format!("list search-index jobs for {event_id}: {error}"))?;
+    Ok(jobs
+        .iter()
+        .filter(|job| {
+            job.document_source.as_deref() == Some("import")
+                && job.document_id.as_deref() == Some(event_id)
+        })
+        .count())
+}
+
+fn mesh_import_durable_snapshot(
+    fixture: &LaneGrantFixture,
+) -> Result<MeshImportDurableSnapshot, String> {
+    let database_path = Path::new(&fixture.workspace).join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open {}: {error}", database_path.display()))?;
+    Ok(MeshImportDurableSnapshot {
+        peers: connection
+            .list_mesh_peers(&fixture.workspace_id)
+            .map_err(|error| format!("snapshot mesh peers: {error}"))?,
+        cursors: connection
+            .list_mesh_peer_cursors(&fixture.workspace_id)
+            .map_err(|error| format!("snapshot mesh cursors: {error}"))?,
+        ledger_events: connection
+            .list_mesh_import_ledger_events_for_workspace(&fixture.workspace_id)
+            .map_err(|error| format!("snapshot mesh import ledger: {error}"))?,
+        index_jobs: connection
+            .list_search_index_jobs(&fixture.workspace_id, None)
+            .map_err(|error| format!("snapshot search-index jobs: {error}"))?,
+    })
+}
+
+fn fixture_workspace_generation(fixture: &LaneGrantFixture) -> Result<u64, String> {
+    let database_path = Path::new(&fixture.workspace).join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open {}: {error}", database_path.display()))?;
+    connection
+        .get_workspace_generation(&fixture.workspace_id)
+        .map_err(|error| format!("load workspace generation: {error}"))
+        .map(|generation| generation.unwrap_or(0))
+}
+
+fn mesh_export_audit_count(fixture: &LaneGrantFixture) -> Result<usize, String> {
+    let database_path = Path::new(&fixture.workspace).join(".ee").join("ee.db");
+    let connection = DbConnection::open_file(&database_path)
+        .map_err(|error| format!("open {}: {error}", database_path.display()))?;
+    connection
+        .list_audit_by_action(EXPORT_AUDIT_ACTION, None)
+        .map(|entries| entries.len())
+        .map_err(|error| format!("list mesh export audit rows: {error}"))
 }
 
 fn preview(fixture: &LaneGrantFixture, issue_token: bool) -> Result<(Output, Value), String> {
@@ -515,6 +847,34 @@ fn ordinary_preview_is_token_free_deterministic_and_read_only() -> TestResult {
             .is_some_and(|candidates| candidates.len() == 1),
         format!("ordinary preview must bind the complete one-memory candidate set: {ordinary}"),
     )?;
+    ensure_equal(
+        &ordinary
+            .pointer("/candidateSet/0/candidateKind")
+            .and_then(Value::as_str),
+        &Some("memory"),
+        "ordinary preview memory candidate kind",
+    )?;
+    ensure_equal(
+        &ordinary
+            .pointer("/candidateSet/0/candidateId")
+            .and_then(Value::as_str),
+        &Some(fixture.memory_id.as_str()),
+        "ordinary preview memory candidate id",
+    )?;
+    ensure_equal(
+        &json_u64(&ordinary, "/affectedLedgerEventCount", "ordinary preview")?,
+        &0,
+        "ordinary preview has no mesh-ledger candidates",
+    )?;
+    ensure(
+        ordinary
+            .pointer("/redactionScannerGeneration")
+            .and_then(Value::as_str)
+            .is_some_and(|generation| {
+                generation.starts_with("redscan1_") && generation.len() == "redscan1_".len() + 64
+            }),
+        format!("ordinary preview omitted the source-derived scanner generation: {ordinary}"),
+    )?;
 
     let (_, repeated_json) = preview(&fixture, false)?;
     let repeated = preview_payload(&repeated_json, "repeated ordinary preview")?;
@@ -526,24 +886,31 @@ fn ordinary_preview_is_token_free_deterministic_and_read_only() -> TestResult {
 
     let (issued_output, issued_json) = preview(&fixture, true)?;
     let mut issued = preview_payload(&issued_json, "explicit token preview")?;
-    let bearer = sensitive_json_string(&issued, "/approvalToken/bearer", "explicit token preview")?;
+    let bearer = sensitive_json_string(&issued, "/approvalToken/value", "explicit token preview")?;
     ensure(
         bearer.starts_with("eeap1_") && bearer.len() < 512,
         "explicit preview bearer must use the bounded eeap1_ envelope",
     )?;
     ensure_equal(
         &issued
-            .pointer("/approvalToken/sensitive")
-            .and_then(Value::as_bool),
-        &Some(true),
-        "explicit preview token sensitivity marker",
+            .pointer("/approvalToken/handling")
+            .and_then(Value::as_str),
+        &Some("secret"),
+        "explicit preview token handling marker",
     )?;
-    ensure(
-        issued
-            .pointer("/approvalToken/externalRecorderResidual")
-            .and_then(Value::as_str)
-            .is_some_and(|copy| copy.contains("third-party") && copy.contains("expires")),
-        "explicit preview must state the external-recorder residual",
+    let mut token_fields = issued
+        .pointer("/approvalToken")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "explicit preview approvalToken must be an object".to_owned())?
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    token_fields.sort_unstable();
+    let expected_token_fields = vec!["expiresAt", "handling", "schema", "value"];
+    ensure_equal(
+        &token_fields,
+        &expected_token_fields,
+        "explicit preview token closed field set",
     )?;
     ensure_equal(
         &String::from_utf8_lossy(&issued_output.stdout)
@@ -571,6 +938,112 @@ fn ordinary_preview_is_token_free_deterministic_and_read_only() -> TestResult {
         &lane_audit_entries(&fixture, REVOKE_AUDIT_ACTION)?.len(),
         &0,
         "token-free and explicit previews must not append revoke audits",
+    )
+}
+
+#[test]
+fn approval_token_issuance_rejects_non_json_machine_renderers() -> TestResult {
+    let fixture = set_up_fixture("preview-token-renderers")?;
+
+    for renderer in ["hook", "jsonl", "compact"] {
+        let output = run_ee(
+            &fixture.workspace,
+            &[
+                "mesh",
+                "preview-grant",
+                fixture.peer_id.as_str(),
+                "--lane",
+                TEST_LANE_ARG,
+                "--issue-approval-token",
+                "--format",
+                renderer,
+            ],
+        )?;
+        ensure(
+            !output.status.success(),
+            format!("{renderer} token issuance unexpectedly succeeded"),
+        )?;
+        assert_no_bearer(&output.stdout, &format!("{renderer} token issuance stdout"))?;
+        assert_no_bearer(&output.stderr, &format!("{renderer} token issuance stderr"))?;
+        let json = stdout_json(&output, &format!("{renderer} token issuance"))?;
+        ensure_equal(
+            &json.pointer("/error/code").and_then(Value::as_str),
+            &Some("usage"),
+            &format!("{renderer} token issuance error code"),
+        )?;
+        ensure(
+            json.pointer("/error/message")
+                .and_then(Value::as_str)
+                .is_some_and(|message| message.contains("only with --json")),
+            format!("{renderer} token issuance error did not explain JSON-only output: {json}"),
+        )?;
+    }
+
+    ensure_equal(
+        &lane_audit_entries(&fixture, GRANT_AUDIT_ACTION)?.len(),
+        &0,
+        "rejected renderer token previews must not append grant audits",
+    )
+}
+
+#[test]
+fn lane_grant_rejects_non_json_machine_renderers_without_confirmation_or_effects() -> TestResult {
+    let fixture = set_up_fixture("grant-machine-renderers")?;
+
+    for renderer in ["hook", "jsonl", "compact"] {
+        for token_stdin in [false, true] {
+            let mut args = vec![
+                "mesh",
+                "grant",
+                fixture.peer_id.as_str(),
+                "--lane",
+                TEST_LANE_ARG,
+                "--format",
+                renderer,
+            ];
+            if token_stdin {
+                args.push("--preview-token-stdin");
+            }
+            let output = run_ee_with_stdin(&fixture.workspace, &args, b"yes\n")?;
+            ensure(
+                !output.status.success(),
+                format!(
+                    "{renderer} grant unexpectedly entered a mutation flow (token stdin: {token_stdin})"
+                ),
+            )?;
+            assert_no_bearer(&output.stdout, &format!("{renderer} grant stdout"))?;
+            assert_no_bearer(&output.stderr, &format!("{renderer} grant stderr"))?;
+            let json = stdout_json(&output, &format!("{renderer} grant rejection"))?;
+            ensure_equal(
+                &json.pointer("/error/code").and_then(Value::as_str),
+                &Some("usage"),
+                &format!("{renderer} grant error code"),
+            )?;
+            ensure(
+                json.pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| {
+                        message.contains("only human confirmation or --json bearer submission")
+                    }),
+                format!("{renderer} grant error did not explain the closed renderer set: {json}"),
+            )?;
+        }
+    }
+
+    ensure_equal(
+        &lane_audit_entries(&fixture, GRANT_AUDIT_ACTION)?.len(),
+        &0,
+        "rejected renderer grants must not append grant audits",
+    )?;
+    let (_, preview_json) = preview(&fixture, false)?;
+    ensure_equal(
+        &json_u64(
+            &preview_payload(&preview_json, "post-renderer-rejection preview")?,
+            "/grantGeneration",
+            "post-renderer-rejection preview",
+        )?,
+        &0,
+        "rejected renderer grants must not advance consent generation",
     )
 }
 
@@ -662,7 +1135,11 @@ fn preview_cautions_are_projected_as_actionable_top_level_degradations() -> Test
         omitted_group_degraded
             .pointer("/repair")
             .and_then(Value::as_str)
-            .is_some_and(|repair| repair.contains("[[mesh.peer_group_bindings]]")),
+            .is_some_and(|repair| {
+                repair.contains("[[mesh.peer_group_bindings]]")
+                    && repair.contains("fresh approval")
+                    && repair.contains("membership alone does not grant")
+            }),
         format!("peer-group degradation repair drifted: {omitted_group_degraded}"),
     )
 }
@@ -726,8 +1203,16 @@ fn human_confirmation_reuses_json_preview_and_commits_the_reviewed_effect() -> T
             json_u64(&snapshot, "/affectedMemoryCount", "JSON preview")?
         ),
         format!(
+            "  affected ledger events: {}",
+            json_u64(&snapshot, "/affectedLedgerEventCount", "JSON preview")?
+        ),
+        format!(
             "  redacted from exposure: {}",
             json_u64(&snapshot, "/redactedFromExposureCount", "JSON preview")?
+        ),
+        format!(
+            "  redaction scanner generation: {}",
+            json_string(&snapshot, "/redactionScannerGeneration", "JSON preview")?
         ),
     ];
     for line in expected_lines {
@@ -889,19 +1374,20 @@ fn invalid_and_expired_bearers_have_distinct_public_errors_and_zero_effect() -> 
 }
 
 #[test]
-fn config_byte_drift_after_preview_stales_bearer_with_zero_effect() -> TestResult {
+fn config_byte_or_parse_drift_after_preview_stales_bearer_with_zero_effect() -> TestResult {
     let fixture = set_up_fixture("config-drift-before-grant")?;
     let (_, issued_json) = preview(&fixture, true)?;
     let bearer = sensitive_json_string(
         &issued_json,
-        "/data/preview/approvalToken/bearer",
+        "/data/preview/approvalToken/value",
         "pre-config-drift approval preview",
     )?;
     let config_path = Path::new(&fixture.workspace)
         .join(".ee")
         .join("config.toml");
-    let mut drifted_config_bytes = fs::read(&config_path)
+    let original_config_bytes = fs::read(&config_path)
         .map_err(|error| format!("read pre-drift lane-grant config: {error}"))?;
+    let mut drifted_config_bytes = original_config_bytes.clone();
     drifted_config_bytes.extend_from_slice(b"\n# comment-only drift after approval preview\n");
     fs::write(&config_path, drifted_config_bytes)
         .map_err(|error| format!("write comment-drifted lane-grant config: {error}"))?;
@@ -926,6 +1412,58 @@ fn config_byte_drift_after_preview_stales_bearer_with_zero_effect() -> TestResul
         "warning",
         "authentic but its approved preview is stale",
     )?;
+
+    fs::write(&config_path, b"[mesh\n")
+        .map_err(|error| format!("write malformed lane-grant config: {error}"))?;
+    let malformed_rejected = run_ee_with_stdin(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            TEST_LANE_ARG,
+            "--preview-token-stdin",
+            "--json",
+        ],
+        format!("{bearer}\n").as_bytes(),
+    )?;
+    approval_error_json(
+        &malformed_rejected,
+        "malformed-config approval bearer",
+        "mesh_approval_token_stale",
+        "warning",
+        "authentic but its approved preview is stale",
+    )?;
+
+    fs::write(
+        &config_path,
+        b"[mesh]\nenabled = true\ncommand_mode = \"cache\"\n",
+    )
+    .map_err(|error| format!("write valid config without peer policy: {error}"))?;
+    let missing_policy_rejected = run_ee_with_stdin(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            TEST_LANE_ARG,
+            "--preview-token-stdin",
+            "--json",
+        ],
+        format!("{bearer}\n").as_bytes(),
+    )?;
+    approval_error_json(
+        &missing_policy_rejected,
+        "missing-policy approval bearer",
+        "mesh_approval_token_stale",
+        "warning",
+        "authentic but its approved preview is stale",
+    )?;
+
+    fs::write(&config_path, original_config_bytes)
+        .map_err(|error| format!("restore lane-grant config after drift checks: {error}"))?;
 
     let (_, after_json) = preview(&fixture, false)?;
     let after = preview_payload(&after_json, "post-config-drift rejection preview")?;
@@ -960,7 +1498,7 @@ fn store_key_rotation_invalidates_outstanding_bearer_with_zero_effect() -> TestR
     let (_, issued_json) = preview(&fixture, true)?;
     let bearer = sensitive_json_string(
         &issued_json,
-        "/data/preview/approvalToken/bearer",
+        "/data/preview/approvalToken/value",
         "pre-rotation approval preview",
     )?;
 
@@ -1055,7 +1593,7 @@ fn concurrent_double_apply_commits_once_and_stales_the_loser() -> TestResult {
             // an identical CAS input before either may enter the writer-fenced
             // transaction. Even setup errors rendezvous at the barrier so the
             // test cannot deadlock while reporting the real preparation fault.
-            let prepared = (|| {
+            let prepared: Result<_, String> = (|| {
                 let root = StoreAuthRoot::open(&keys_dir)
                     .map_err(|error| format!("{label}: open store-auth root: {error}"))?;
                 let authenticated =
@@ -1206,12 +1744,10 @@ fn bounded_stdin_grant_replay_and_revoke_are_generation_atomic() -> TestResult {
         .join("config.toml");
     let original_config_bytes = fs::read(&config_path)
         .map_err(|error| format!("read original lane-grant config: {error}"))?;
-    let expected_config_digest =
-        ee::mesh::lane_grant::approval_config_digest(&original_config_bytes);
     let (_, issued_json) = preview(&fixture, true)?;
     let bearer = sensitive_json_string(
         &issued_json,
-        "/data/preview/approvalToken/bearer",
+        "/data/preview/approvalToken/value",
         "grant approval preview",
     )?;
     let bounded_stdin = format!("{bearer}\n");
@@ -1293,27 +1829,17 @@ fn bounded_stdin_grant_replay_and_revoke_are_generation_atomic() -> TestResult {
         &Some(approval_audit_id.as_str()),
         "grant audit approval binding",
     )?;
-    ensure_equal(
-        &grant_audits[0]
-            .pointer("/details/details/entries/approval_config_digest/kind")
-            .and_then(Value::as_str),
-        &Some("digest"),
-        "grant audit config-binding kind",
-    )?;
-    ensure_equal(
-        &grant_audits[0]
-            .pointer("/details/details/entries/approval_config_digest/value")
-            .and_then(Value::as_str),
-        &Some(expected_config_digest.as_str()),
-        "grant audit exact approved config digest",
-    )?;
     let serialized_grant_audit = serde_json::to_string(&grant_audits[0])
         .map_err(|error| format!("serialize grant audit: {error}"))?;
     assert_no_bearer(serialized_grant_audit.as_bytes(), "grant audit row")?;
     ensure(
+        !serialized_grant_audit.contains("approval_config_digest"),
+        "grant audit must persist only the opaque approval ID, not a config fingerprint",
+    )?;
+    ensure(
         !serialized_grant_audit.contains("[mesh]")
             && !serialized_grant_audit.contains("command_mode"),
-        "grant audit must persist only the config digest, never raw config bytes",
+        "grant audit must never persist raw config bytes",
     )?;
 
     let (_, granted_preview_json) = preview(&fixture, false)?;
@@ -1546,7 +2072,7 @@ fn peer_revoke_and_same_node_reenrollment_cannot_resurrect_lane_consent() -> Tes
     let (_, first_token_json) = preview(&fixture, true)?;
     let first_bearer = sensitive_json_string(
         &first_token_json,
-        "/data/preview/approvalToken/bearer",
+        "/data/preview/approvalToken/value",
         "initial grant approval",
     )?;
     let first_grant = run_ee_with_stdin(
@@ -1570,7 +2096,7 @@ fn peer_revoke_and_same_node_reenrollment_cannot_resurrect_lane_consent() -> Tes
     let (_, outstanding_token_json) = preview(&fixture, true)?;
     let outstanding_bearer = sensitive_json_string(
         &outstanding_token_json,
-        "/data/preview/approvalToken/bearer",
+        "/data/preview/approvalToken/value",
         "outstanding post-grant approval",
     )?;
 
@@ -1621,7 +2147,7 @@ fn peer_revoke_and_same_node_reenrollment_cannot_resurrect_lane_consent() -> Tes
             "--alias",
             "lane-grant-peer",
             "--tailscale-node-key",
-            "nodekey:lane-grant-e2e",
+            TEST_TAILSCALE_NODE_KEY,
             "--endpoint",
             "100.64.20.2:4747",
             "--tailnet-id",
@@ -1701,7 +2227,7 @@ fn pregrant_bearer_is_stale_after_same_node_reenrollment() -> TestResult {
     let (_, token_json) = preview(&fixture, true)?;
     let bearer = sensitive_json_string(
         &token_json,
-        "/data/preview/approvalToken/bearer",
+        "/data/preview/approvalToken/value",
         "generation-zero approval",
     )?;
     ensure_equal(
@@ -1724,7 +2250,7 @@ fn pregrant_bearer_is_stale_after_same_node_reenrollment() -> TestResult {
             "--alias",
             "lane-grant-peer",
             "--tailscale-node-key",
-            "nodekey:lane-grant-e2e",
+            TEST_TAILSCALE_NODE_KEY,
             "--endpoint",
             "100.64.20.2:4747",
             "--tailnet-id",
@@ -1798,4 +2324,946 @@ fn pregrant_bearer_is_stale_after_same_node_reenrollment() -> TestResult {
         &0,
         "stale generation-zero replay must append no grant audit",
     )
+}
+
+#[test]
+fn disabled_mesh_import_is_policy_denied_with_zero_durable_effects() -> TestResult {
+    let fixture = set_up_fixture("disabled-import")?;
+    let (artifact_path, event_id, candidate_peer_id) =
+        write_disabled_import_effect_artifact(&fixture, "disabled-import", 1)?;
+    let config_path = Path::new(&fixture.workspace)
+        .join(".ee")
+        .join("config.toml");
+    let enabled_config = fs::read_to_string(&config_path)
+        .map_err(|error| format!("read enabled mesh config: {error}"))?;
+    let disabled_config = enabled_config.replacen("enabled = true", "enabled = false", 1);
+    ensure(
+        disabled_config != enabled_config,
+        "disabled-import fixture config did not contain the enabled mesh sentinel",
+    )?;
+    fs::write(&config_path, disabled_config)
+        .map_err(|error| format!("write disabled mesh config: {error}"))?;
+
+    let before = mesh_import_durable_snapshot(&fixture)?;
+    ensure(
+        before
+            .peers
+            .iter()
+            .all(|peer| peer.peer_id != candidate_peer_id),
+        "disabled-import candidate peer unexpectedly existed before replay",
+    )?;
+    ensure(
+        before
+            .ledger_events
+            .iter()
+            .all(|event| event.event_id != event_id),
+        "disabled-import event unexpectedly existed before replay",
+    )?;
+    ensure(
+        before
+            .index_jobs
+            .iter()
+            .all(|job| job.document_id.as_deref() != Some(event_id.as_str())),
+        "disabled-import event unexpectedly had an index job before replay",
+    )?;
+
+    // The common E2E command helper explicitly enables mesh so unrelated lane
+    // tests exercise production paths. Remove only that test override here so
+    // this process observes the disabled workspace config snapshot.
+    let mut command = ee_command(
+        &fixture.workspace,
+        &["mesh", "import", "--file", artifact_path.as_str(), "--json"],
+    );
+    command.env_remove("EE_MESH_ENABLED");
+    let denied = command
+        .output()
+        .map_err(|error| format!("run disabled ee mesh import: {error}"))?;
+    ensure(
+        !denied.status.success(),
+        "disabled ee mesh import unexpectedly succeeded",
+    )?;
+    ensure_json_stderr_empty(&denied, "disabled ee mesh import")?;
+    assert_no_bearer(&denied.stdout, "disabled ee mesh import stdout")?;
+    assert_no_bearer(&denied.stderr, "disabled ee mesh import stderr")?;
+    let denied_json = stdout_json(&denied, "disabled ee mesh import")?;
+    ensure_equal(
+        &denied_json.pointer("/schema").and_then(Value::as_str),
+        &Some("ee.error.v2"),
+        "disabled mesh import error schema",
+    )?;
+    ensure_equal(
+        &denied_json.pointer("/error/code").and_then(Value::as_str),
+        &Some("policy_denied"),
+        "disabled mesh import error code",
+    )?;
+    ensure(
+        denied_json
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| {
+                message.contains("Mesh is disabled") && message.contains("import is denied")
+            }),
+        format!("disabled mesh import error omitted the containment reason: {denied_json}"),
+    )?;
+
+    let after = mesh_import_durable_snapshot(&fixture)?;
+    ensure_equal(
+        &after.counts(),
+        &before.counts(),
+        "disabled import peer/cursor/ledger/index counts",
+    )?;
+    ensure_equal(
+        &after,
+        &before,
+        "disabled import durable peer/cursor/ledger/index sentinels",
+    )
+}
+
+#[test]
+fn mesh_export_rejects_unknown_and_disabled_targets_without_effects() -> TestResult {
+    let fixture = set_up_fixture("export-target-gate")?;
+    let output_path = Path::new(&fixture.workspace).join("guarded-mesh-export.json");
+    let sentinel = b"existing export target bytes\n";
+    fs::write(&output_path, sentinel)
+        .map_err(|error| format!("write guarded export sentinel: {error}"))?;
+    let output_arg = output_path.to_string_lossy().into_owned();
+
+    let missing_flag = run_ee(
+        &fixture.workspace,
+        &["mesh", "export", "--out", output_arg.as_str(), "--json"],
+    )?;
+    ensure(
+        !missing_flag.status.success(),
+        "mesh export without --peer must fail argument parsing",
+    )?;
+    ensure(
+        redacted_output(&missing_flag.stderr).contains("--peer <PEER_ID>"),
+        "missing-peer parse failure must identify the required flag",
+    )?;
+    ensure_equal(
+        &fs::read(&output_path)
+            .map_err(|error| format!("read guarded export sentinel: {error}"))?,
+        &sentinel.to_vec(),
+        "missing-peer export output bytes",
+    )?;
+    ensure_equal(
+        &mesh_export_audit_count(&fixture)?,
+        &0,
+        "missing-peer export audit count",
+    )?;
+
+    let unknown_peer = format!("{}-unknown", fixture.peer_id);
+    let unknown = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "export",
+            "--peer",
+            unknown_peer.as_str(),
+            "--out",
+            output_arg.as_str(),
+            "--json",
+        ],
+    )?;
+    ensure(!unknown.status.success(), "unknown export peer must fail")?;
+    ensure_json_stderr_empty(&unknown, "unknown mesh export target")?;
+    let unknown_json = stdout_json(&unknown, "unknown mesh export target")?;
+    ensure(
+        unknown_json
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("No enrolled mesh peer found")),
+        format!("unknown export peer error was not canonical: {unknown_json}"),
+    )?;
+    ensure_equal(
+        &fs::read(&output_path)
+            .map_err(|error| format!("read guarded export sentinel: {error}"))?,
+        &sentinel.to_vec(),
+        "unknown-peer export output bytes",
+    )?;
+    ensure_equal(
+        &mesh_export_audit_count(&fixture)?,
+        &0,
+        "unknown-peer export audit count",
+    )?;
+
+    let revoke = run_ee(
+        &fixture.workspace,
+        &["mesh", "peer", "revoke", fixture.peer_id.as_str(), "--json"],
+    )?;
+    success_json(&revoke, "disable mesh export target")?;
+    let disabled = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "export",
+            "--peer",
+            fixture.peer_id.as_str(),
+            "--out",
+            output_arg.as_str(),
+            "--json",
+        ],
+    )?;
+    ensure(!disabled.status.success(), "disabled export peer must fail")?;
+    ensure_json_stderr_empty(&disabled, "disabled mesh export target")?;
+    let disabled_json = stdout_json(&disabled, "disabled mesh export target")?;
+    ensure(
+        disabled_json
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("mesh export is denied")),
+        format!("disabled export peer error was not canonical: {disabled_json}"),
+    )?;
+    ensure_equal(
+        &fs::read(&output_path)
+            .map_err(|error| format!("read guarded export sentinel: {error}"))?,
+        &sentinel.to_vec(),
+        "disabled-peer export output bytes",
+    )?;
+    ensure_equal(
+        &mesh_export_audit_count(&fixture)?,
+        &0,
+        "disabled-peer export audit count",
+    )
+}
+
+#[test]
+fn body_grant_pins_and_releases_hash_bound_metadata_body_fields() -> TestResult {
+    let fixture = set_up_fixture("metadata-body-boundary")?;
+    let (artifact_path, event_id, body_uri) =
+        write_hash_bound_metadata_body_artifact(&fixture, "metadata-body", 1)?;
+
+    // The production importer validates and preserves this canonical event,
+    // but local policy denies its arbitrary body-bearing metadata until the
+    // body lane is explicitly approved.
+    let import = run_ee(
+        &fixture.workspace,
+        &["mesh", "import", "--file", artifact_path.as_str(), "--json"],
+    )?;
+    let import_json = success_json(&import, "metadata-body ee mesh import")?;
+    ensure_equal(
+        &json_u64(
+            &import_json,
+            "/data/importedEventCount",
+            "metadata-body import report",
+        )?,
+        &1,
+        "metadata-body import ledger count",
+    )?;
+    let stored = stored_graph_link_event(&fixture, 1)?;
+    ensure_equal(
+        &stored.event_id,
+        &event_id,
+        "metadata-body durable event identity",
+    )?;
+    ensure_equal(
+        &stored.import_decision.as_str(),
+        &"deny",
+        "metadata-body event requires explicit body authority",
+    )?;
+    ensure_equal(
+        &matching_import_job_count(&fixture, &event_id)?,
+        &0,
+        "denied metadata-body event index job count",
+    )?;
+
+    let before_grant = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "export",
+            "--peer",
+            fixture.peer_id.as_str(),
+            "--json",
+        ],
+    )?;
+    let before_grant_json = success_json(&before_grant, "pre-body-grant ee mesh export")?;
+    ensure_equal(
+        &json_u64(
+            &before_grant_json,
+            "/data/eventCount",
+            "pre-body-grant export report",
+        )?,
+        &0,
+        "metadata-only policy must not export hash-bound body fields",
+    )?;
+
+    // The explicit token authenticates the exact body-lane preview. Its
+    // complete ledger candidate projection pins the immutable event identity
+    // and an opaque revision without disclosing its URI or authority claim.
+    let issued = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "preview-grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            "body",
+            "--issue-approval-token",
+            "--json",
+        ],
+    )?;
+    let issued_json = success_json(&issued, "metadata-body approval preview")?;
+    let issued_preview = preview_payload(&issued_json, "metadata-body approval preview")?;
+    ensure_equal(
+        &issued_preview.pointer("/lane").and_then(Value::as_str),
+        &Some("body"),
+        "metadata-body approval lane",
+    )?;
+    ensure_equal(
+        &json_u64(
+            &issued_preview,
+            "/affectedLedgerEventCount",
+            "metadata-body approval preview",
+        )?,
+        &1,
+        "metadata-body preview ledger-event count",
+    )?;
+    let candidates = issued_preview
+        .pointer("/candidateSet")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("metadata-body preview omitted candidateSet: {issued_preview}"))?;
+    let ledger_pins = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.pointer("/candidateKind").and_then(Value::as_str) == Some("mesh_ledger_event")
+        })
+        .collect::<Vec<_>>();
+    ensure_equal(
+        &ledger_pins.len(),
+        &1,
+        "metadata-body complete ledger candidate pins",
+    )?;
+    let ledger_pin = ledger_pins[0];
+    ensure_equal(
+        &ledger_pin.pointer("/candidateId").and_then(Value::as_str),
+        &Some(event_id.as_str()),
+        "metadata-body ledger candidate identity",
+    )?;
+    ensure(
+        ledger_pin
+            .pointer("/revisionId")
+            .and_then(Value::as_str)
+            .is_some_and(|revision| revision.starts_with("revme1_")),
+        format!("metadata-body candidate omitted its opaque revision pin: {ledger_pin}"),
+    )?;
+    let mut pin_fields = ledger_pin
+        .as_object()
+        .ok_or_else(|| "metadata-body ledger pin was not an object".to_owned())?
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    pin_fields.sort_unstable();
+    ensure_equal(
+        &pin_fields,
+        &vec!["candidateId", "candidateKind", "revisionId"],
+        "metadata-body ledger pin closed field set",
+    )?;
+    let serialized_preview = serde_json::to_string(&issued_preview)
+        .map_err(|error| format!("serialize metadata-body approval preview: {error}"))?;
+    ensure(
+        !serialized_preview.contains(&body_uri)
+            && !serialized_preview.contains("trustClaim")
+            && !serialized_preview.contains("eventJson"),
+        "metadata-body preview must expose only opaque ledger pins",
+    )?;
+
+    let ordinary = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "preview-grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            "body",
+            "--json",
+        ],
+    )?;
+    let ordinary_json = success_json(&ordinary, "token-free metadata-body preview")?;
+    ensure_equal(
+        &canonical_preview_bytes(&issued_json, "issued metadata-body preview")?,
+        &canonical_preview_bytes(&ordinary_json, "token-free metadata-body preview")?,
+        "approval token exact preview binding",
+    )?;
+    let bearer = sensitive_json_string(
+        &issued_json,
+        "/data/preview/approvalToken/value",
+        "metadata-body approval preview",
+    )?;
+    let grant = run_ee_with_stdin(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            "body",
+            "--preview-token-stdin",
+            "--json",
+        ],
+        format!("{bearer}\n").as_bytes(),
+    )?;
+    let grant_json = success_json(&grant, "metadata-body ee mesh grant")?;
+    assert_no_bearer(&grant.stdout, "metadata-body grant stdout")?;
+    assert_no_bearer(&grant.stderr, "metadata-body grant stderr")?;
+    ensure_equal(
+        &grant_json.pointer("/data/decision").and_then(Value::as_str),
+        &Some("allow"),
+        "metadata-body grant decision",
+    )?;
+
+    let after_grant = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "export",
+            "--peer",
+            fixture.peer_id.as_str(),
+            "--json",
+        ],
+    )?;
+    let after_grant_json = success_json(&after_grant, "post-body-grant ee mesh export")?;
+    ensure_equal(
+        &json_u64(
+            &after_grant_json,
+            "/data/eventCount",
+            "post-body-grant export report",
+        )?,
+        &1,
+        "body grant must export the exact previously denied metadata event",
+    )?;
+    let exported = after_grant_json
+        .pointer("/data/artifact/events/0")
+        .ok_or_else(|| format!("post-body-grant export omitted its event: {after_grant_json}"))?;
+    ensure_equal(
+        &exported.pointer("/eventId").and_then(Value::as_str),
+        &Some(event_id.as_str()),
+        "post-body-grant exported event identity",
+    )?;
+    let exported_event_json = serde_json::from_str::<Value>(&json_string(
+        exported,
+        "/eventJson",
+        "post-body-grant exported event",
+    )?)
+    .map_err(|error| format!("parse post-body-grant canonical eventJson: {error}"))?;
+    ensure_equal(
+        &exported_event_json
+            .pointer("/bodyRef/uri")
+            .and_then(Value::as_str),
+        &Some(body_uri.as_str()),
+        "post-body-grant hash-bound body URI",
+    )?;
+    ensure_equal(
+        &exported_event_json
+            .pointer("/trustClaim/assertedBy")
+            .and_then(Value::as_str),
+        &Some("lane-grant-e2e-peer"),
+        "post-body-grant hash-bound trust claim",
+    )
+}
+
+#[test]
+fn committed_grant_controls_production_inbound_and_outbound_paths() -> TestResult {
+    let fixture = set_up_fixture("production-policy")?;
+    let config_path = Path::new(&fixture.workspace)
+        .join(".ee")
+        .join("config.toml");
+    let original_config_bytes = fs::read(&config_path)
+        .map_err(|error| format!("read production-path mesh config: {error}"))?;
+
+    // The artifact claims that graph-link material is allowed. Before a local
+    // grant, the production importer must override that untrusted claim with a
+    // deny, retain only the honest ledger record, and enqueue no index work.
+    let (pregrant_path, pregrant_event_id, pregrant_event_hash) =
+        write_graph_link_artifact(&fixture, "pregrant", 1, None)?;
+    let pregrant_import = run_ee(
+        &fixture.workspace,
+        &["mesh", "import", "--file", pregrant_path.as_str(), "--json"],
+    )?;
+    let pregrant_import_json = success_json(&pregrant_import, "pre-grant ee mesh import")?;
+    ensure_equal(
+        &pregrant_import_json
+            .pointer("/data/schema")
+            .and_then(Value::as_str),
+        &Some("ee.mesh.cli.import.v1"),
+        "pre-grant import report schema",
+    )?;
+    ensure_equal(
+        &json_u64(
+            &pregrant_import_json,
+            "/data/importedEventCount",
+            "pre-grant import report",
+        )?,
+        &1,
+        "pre-grant import ledger count",
+    )?;
+    let pregrant_row = stored_graph_link_event(&fixture, 1)?;
+    ensure_equal(
+        &pregrant_row.event_id,
+        &pregrant_event_id,
+        "pre-grant durable event id",
+    )?;
+    ensure_equal(
+        &pregrant_row.import_decision.as_str(),
+        &"deny",
+        "pre-grant locally recomputed import decision",
+    )?;
+    ensure(
+        pregrant_row.policy_failure_surface_json.is_some(),
+        "pre-grant denial must persist a structured policy failure surface",
+    )?;
+    ensure_equal(
+        &matching_import_job_count(&fixture, &pregrant_event_id)?,
+        &0,
+        "pre-grant denial must enqueue no import index job",
+    )?;
+
+    let pregrant_export = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "export",
+            "--peer",
+            fixture.peer_id.as_str(),
+            "--json",
+        ],
+    )?;
+    let pregrant_export_json = success_json(&pregrant_export, "pre-grant ee mesh export")?;
+    ensure_equal(
+        &pregrant_export_json
+            .pointer("/data/schema")
+            .and_then(Value::as_str),
+        &Some("ee.mesh.cli.export.v1"),
+        "pre-grant export report schema",
+    )?;
+    ensure_equal(
+        &json_u64(
+            &pregrant_export_json,
+            "/data/eventCount",
+            "pre-grant export report",
+        )?,
+        &0,
+        "pre-grant outbound graph-link exposure",
+    )?;
+
+    // Cross the real process boundary used by operators: issue an authenticated
+    // preview bearer. The complete candidate set must bind the denied import
+    // row because the proposed outbound policy would expose that exact event.
+    let (_, issued_json) = preview(&fixture, true)?;
+    let issued_preview = preview_payload(&issued_json, "production-path grant approval")?;
+    ensure_equal(
+        &json_u64(
+            &issued_preview,
+            "/affectedLedgerEventCount",
+            "production-path grant approval",
+        )?,
+        &1,
+        "pre-grant preview affected ledger-event count",
+    )?;
+    let issued_candidates = issued_preview
+        .pointer("/candidateSet")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("production preview omitted candidateSet: {issued_preview}"))?;
+    ensure(
+        issued_candidates.iter().any(|candidate| {
+            candidate.pointer("/candidateKind").and_then(Value::as_str) == Some("mesh_ledger_event")
+                && candidate.pointer("/candidateId").and_then(Value::as_str)
+                    == Some(pregrant_event_id.as_str())
+                && candidate
+                    .pointer("/revisionId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|revision| revision.starts_with("revme1_"))
+        }),
+        format!(
+            "production preview did not bind the denied ledger event by immutable identity: {issued_preview}"
+        ),
+    )?;
+    let serialized_issued_preview = serde_json::to_string(&issued_preview)
+        .map_err(|error| format!("serialize production preview: {error}"))?;
+    let pregrant_content_hash = fixture_hash("content:pregrant:1");
+    for forbidden in [
+        pregrant_event_hash.as_str(),
+        pregrant_content_hash.as_str(),
+        "mem_lane_grant_pregrant_01",
+        "ee.mesh.event.v1",
+        "eventJson",
+        "contentHash",
+        "eventHash",
+        "bodyCacheKey",
+        "policyDecisionJson",
+        "policyFailureSurfaceJson",
+        "https://",
+    ] {
+        ensure(
+            !serialized_issued_preview.contains(forbidden),
+            format!("production preview leaked raw ledger material {forbidden:?}"),
+        )?;
+    }
+    let bearer = sensitive_json_string(
+        &issued_json,
+        "/data/preview/approvalToken/value",
+        "production-path grant approval",
+    )?;
+
+    // Ledger inserts intentionally do not advance the workspace memory
+    // generation. Adding another matching event must still change the complete
+    // candidate set and stale the already-issued bearer with zero grant/audit
+    // effects.
+    let generation_before_ledger_insert = fixture_workspace_generation(&fixture)?;
+    let (post_issuance_path, post_issuance_event_id, post_issuance_event_hash) =
+        write_graph_link_artifact(&fixture, "post-issuance", 2, Some(&pregrant_event_hash))?;
+    let post_issuance_import = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "import",
+            "--file",
+            post_issuance_path.as_str(),
+            "--json",
+        ],
+    )?;
+    success_json(
+        &post_issuance_import,
+        "post-issuance pre-grant ee mesh import",
+    )?;
+    ensure_equal(
+        &fixture_workspace_generation(&fixture)?,
+        &generation_before_ledger_insert,
+        "mesh-ledger insert must not rely on workspace memory generation",
+    )?;
+    let post_issuance_row = stored_graph_link_event(&fixture, 2)?;
+    ensure_equal(
+        &post_issuance_row.import_decision.as_str(),
+        &"deny",
+        "post-issuance event remains denied before grant",
+    )?;
+    ensure_equal(
+        &matching_import_job_count(&fixture, &post_issuance_event_id)?,
+        &0,
+        "post-issuance denied event must enqueue no index job",
+    )?;
+    let stale_grant = run_ee_with_stdin(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            TEST_LANE_ARG,
+            "--preview-token-stdin",
+            "--json",
+        ],
+        format!("{bearer}\n").as_bytes(),
+    )?;
+    approval_error_json(
+        &stale_grant,
+        "ledger-drifted production grant",
+        "mesh_approval_token_stale",
+        "warning",
+        "authentic but its approved preview is stale",
+    )?;
+    ensure_equal(
+        &lane_audit_entries(&fixture, GRANT_AUDIT_ACTION)?.len(),
+        &0,
+        "ledger-drifted bearer must append no grant audit",
+    )?;
+
+    // Issue a fresh snapshot that binds both immutable events, pass only its
+    // bearer over bounded stdin, and commit generation 1.
+    let (_, refreshed_issued_json) = preview(&fixture, true)?;
+    let refreshed_preview =
+        preview_payload(&refreshed_issued_json, "refreshed production approval")?;
+    ensure_equal(
+        &json_u64(
+            &refreshed_preview,
+            "/affectedLedgerEventCount",
+            "refreshed production approval",
+        )?,
+        &2,
+        "refreshed preview affected ledger-event count",
+    )?;
+    let refreshed_bearer = sensitive_json_string(
+        &refreshed_issued_json,
+        "/data/preview/approvalToken/value",
+        "refreshed production-path grant approval",
+    )?;
+    let grant = run_ee_with_stdin(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "grant",
+            fixture.peer_id.as_str(),
+            "--lane",
+            TEST_LANE_ARG,
+            "--preview-token-stdin",
+            "--json",
+        ],
+        format!("{refreshed_bearer}\n").as_bytes(),
+    )?;
+    let grant_json = success_json(&grant, "production-path ee mesh grant")?;
+    assert_no_bearer(&grant.stdout, "production-path grant stdout")?;
+    assert_no_bearer(&grant.stderr, "production-path grant stderr")?;
+    ensure_equal(
+        &grant_json.pointer("/data/decision").and_then(Value::as_str),
+        &Some("allow"),
+        "production-path grant decision",
+    )?;
+    ensure_equal(
+        &json_u64(
+            &grant_json,
+            "/data/newGrantGeneration",
+            "production-path grant",
+        )?,
+        &1,
+        "production-path grant generation",
+    )?;
+
+    // Both durable events that the named export omitted before the grant must
+    // now cross the production outbound policy gate.
+    let granted_export = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "export",
+            "--peer",
+            fixture.peer_id.as_str(),
+            "--json",
+        ],
+    )?;
+    let granted_export_json = success_json(&granted_export, "granted ee mesh export")?;
+    ensure_equal(
+        &json_u64(
+            &granted_export_json,
+            "/data/eventCount",
+            "granted export report",
+        )?,
+        &2,
+        "granted outbound graph-link exposure",
+    )?;
+    let granted_events = granted_export_json
+        .pointer("/data/artifact/events")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("granted export omitted artifact events: {granted_export_json}"))?;
+    ensure(
+        granted_events.iter().any(|event| {
+            event.pointer("/eventId").and_then(Value::as_str) == Some(pregrant_event_id.as_str())
+        }),
+        "granted export must contain the exact previously denied graph-link event",
+    )?;
+    ensure(
+        granted_events.iter().any(|event| {
+            event.pointer("/eventId").and_then(Value::as_str)
+                == Some(post_issuance_event_id.as_str())
+        }),
+        "granted export must contain the event that staled the first approval",
+    )?;
+
+    // A new inbound event on the granted lane now admits to local truth and
+    // enqueues exactly one durable import-index job.
+    let (postgrant_path, postgrant_event_id, postgrant_event_hash) =
+        write_graph_link_artifact(&fixture, "postgrant", 3, Some(&post_issuance_event_hash))?;
+    let postgrant_import = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "import",
+            "--file",
+            postgrant_path.as_str(),
+            "--json",
+        ],
+    )?;
+    let postgrant_import_json = success_json(&postgrant_import, "granted ee mesh import")?;
+    ensure_equal(
+        &json_u64(
+            &postgrant_import_json,
+            "/data/importedEventCount",
+            "granted import report",
+        )?,
+        &1,
+        "granted import ledger count",
+    )?;
+    let postgrant_row = stored_graph_link_event(&fixture, 3)?;
+    ensure_equal(
+        &postgrant_row.event_id,
+        &postgrant_event_id,
+        "granted durable event id",
+    )?;
+    ensure_equal(
+        &postgrant_row.import_decision.as_str(),
+        &"allow",
+        "granted locally recomputed import decision",
+    )?;
+    ensure(
+        postgrant_row.policy_failure_surface_json.is_none(),
+        "granted import must not persist a policy failure surface",
+    )?;
+    let postgrant_policy_raw = postgrant_row
+        .policy_decision_json
+        .as_deref()
+        .ok_or_else(|| "granted import omitted its durable policy decision".to_owned())?;
+    let postgrant_policy: Value = serde_json::from_str(postgrant_policy_raw)
+        .map_err(|error| format!("parse granted import policy decision: {error}"))?;
+    ensure_equal(
+        &postgrant_policy
+            .pointer("/direction")
+            .and_then(Value::as_str),
+        &Some("inbound"),
+        "granted import policy direction",
+    )?;
+    ensure_equal(
+        &postgrant_policy.pointer("/action").and_then(Value::as_str),
+        &Some("allow"),
+        "granted import policy action",
+    )?;
+    ensure_equal(
+        &postgrant_policy
+            .pointer("/materialLane")
+            .and_then(Value::as_str),
+        &Some("graphLink"),
+        "granted import policy lane",
+    )?;
+    ensure_equal(
+        &matching_import_job_count(&fixture, &postgrant_event_id)?,
+        &1,
+        "granted import index job count",
+    )?;
+
+    // Approval is bound to the exact successfully parsed config bytes. A
+    // comment-only digest drift must make both production directions fail
+    // closed even though the underlying TOML policy still parses as `deny`.
+    let mut drifted_config_bytes = original_config_bytes.clone();
+    drifted_config_bytes.extend_from_slice(b"\n# production path digest drift\n");
+    fs::write(&config_path, drifted_config_bytes)
+        .map_err(|error| format!("write production-path config drift: {error}"))?;
+
+    let drifted_export = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "export",
+            "--peer",
+            fixture.peer_id.as_str(),
+            "--json",
+        ],
+    )?;
+    let drifted_export_json = success_json(&drifted_export, "drifted ee mesh export")?;
+    ensure_equal(
+        &json_u64(
+            &drifted_export_json,
+            "/data/eventCount",
+            "drifted export report",
+        )?,
+        &0,
+        "config-drifted outbound graph-link exposure",
+    )?;
+
+    let (drifted_path, drifted_event_id, drifted_event_hash) =
+        write_graph_link_artifact(&fixture, "drifted", 4, Some(&postgrant_event_hash))?;
+    let drifted_import = run_ee(
+        &fixture.workspace,
+        &["mesh", "import", "--file", drifted_path.as_str(), "--json"],
+    )?;
+    let drifted_import_json = success_json(&drifted_import, "drifted ee mesh import")?;
+    ensure_equal(
+        &json_u64(
+            &drifted_import_json,
+            "/data/importedEventCount",
+            "drifted import report",
+        )?,
+        &1,
+        "drifted import ledger count",
+    )?;
+    let drifted_row = stored_graph_link_event(&fixture, 4)?;
+    ensure_equal(
+        &drifted_row.event_id,
+        &drifted_event_id,
+        "drifted durable event id",
+    )?;
+    ensure_equal(
+        &drifted_row.import_decision.as_str(),
+        &"deny",
+        "config-drifted locally recomputed import decision",
+    )?;
+    ensure(
+        drifted_row.policy_failure_surface_json.is_some(),
+        "config-drifted denial must persist a structured policy failure surface",
+    )?;
+    ensure_equal(
+        &matching_import_job_count(&fixture, &drifted_event_id)?,
+        &0,
+        "config-drifted denial must enqueue no import index job",
+    )?;
+
+    fs::write(&config_path, original_config_bytes)
+        .map_err(|error| format!("restore production-path mesh config: {error}"))?;
+
+    // Revocation is the symmetric production fence: it advances the same
+    // generation and immediately closes both future serving and admission.
+    let revoke = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "revoke-lane",
+            fixture.peer_id.as_str(),
+            "--lane",
+            TEST_LANE_ARG,
+            "--json",
+        ],
+    )?;
+    let revoke_json = success_json(&revoke, "production-path ee mesh revoke-lane")?;
+    ensure_equal(
+        &json_u64(
+            &revoke_json,
+            "/data/newGrantGeneration",
+            "production-path revoke",
+        )?,
+        &2,
+        "production-path revoke generation",
+    )?;
+
+    let revoked_export = run_ee(
+        &fixture.workspace,
+        &[
+            "mesh",
+            "export",
+            "--peer",
+            fixture.peer_id.as_str(),
+            "--json",
+        ],
+    )?;
+    let revoked_export_json = success_json(&revoked_export, "revoked ee mesh export")?;
+    ensure_equal(
+        &json_u64(
+            &revoked_export_json,
+            "/data/eventCount",
+            "revoked export report",
+        )?,
+        &0,
+        "revoked outbound graph-link exposure",
+    )?;
+
+    let (revoked_path, revoked_event_id, _) =
+        write_graph_link_artifact(&fixture, "revoked", 5, Some(&drifted_event_hash))?;
+    let revoked_import = run_ee(
+        &fixture.workspace,
+        &["mesh", "import", "--file", revoked_path.as_str(), "--json"],
+    )?;
+    success_json(&revoked_import, "revoked ee mesh import")?;
+    let revoked_row = stored_graph_link_event(&fixture, 5)?;
+    ensure_equal(
+        &revoked_row.import_decision.as_str(),
+        &"deny",
+        "revoked locally recomputed import decision",
+    )?;
+    ensure_equal(
+        &matching_import_job_count(&fixture, &revoked_event_id)?,
+        &0,
+        "revoked denial must enqueue no import index job",
+    )?;
+    ensure_equal(
+        &lane_audit_entries(&fixture, REVOKE_AUDIT_ACTION)?.len(),
+        &1,
+        "production-path revoke audit count",
+    )?;
+    Ok(())
 }

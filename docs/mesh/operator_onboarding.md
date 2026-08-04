@@ -124,7 +124,7 @@ starter profile has this shape:
     "workspaceId": "wsp_local_release",
     "preview": {
       "schema": "ee.mesh.lane_grant_preview.v2",
-      "copyVersion": "ee.mesh.lane_grant_preview.copy.v1",
+      "copyVersion": "ee.mesh.lane_grant_preview.copy.v2",
       "workspaceId": "wsp_local_release",
       "target": {
         "adapterVersion": "ee.mesh.grant_target.v1",
@@ -143,9 +143,19 @@ starter profile has this shape:
         "decision": "allow"
       },
       "candidateSet": [
-        { "memoryId": "mem_example", "revisionId": "rev_example" }
+        {
+          "candidateKind": "memory",
+          "candidateId": "mem_example",
+          "revisionId": "revwg1_example"
+        },
+        {
+          "candidateKind": "mesh_ledger_event",
+          "candidateId": "mesh_evt_example",
+          "revisionId": "revme1_example"
+        }
       ],
       "affectedMemoryCount": 1,
+      "affectedLedgerEventCount": 1,
       "redactedFromExposureCount": 0,
       "previewSampleStrategy": "random",
       "previewSampleLimit": 25,
@@ -164,6 +174,7 @@ starter profile has this shape:
         }
       ],
       "redactionRulesApplied": ["secret_detector"],
+      "redactionScannerGeneration": "redscan1_0000000000000000000000000000000000000000000000000000000000000000",
       "cautionCodes": ["redaction_active"],
       "cautions": [
         {
@@ -178,9 +189,14 @@ starter profile has this shape:
 }
 ```
 
-`candidateSet[]` binds every revision considered, while `previewSample[]` is
-only the bounded, already-redacted operator view. Inspect the target, both
-policy generations, affected/redacted counts, exact sample, and cautions.
+`candidateSet[]` binds every memory revision and every immutable mesh-ledger
+event whose lane material, or whose retained body reference for a body grant,
+the proposed policy would authorize;
+`previewSample[]` remains only the bounded, already-redacted memory view. Event
+pins expose only `candidateKind`, immutable `candidateId`, and an opaque
+identity-derived `revisionId`—never raw event JSON, content/event digests,
+body-cache keys, URIs, or policy JSON. Inspect both affected counts, the
+source-derived `redactionScannerGeneration`, the exact sample, and cautions.
 
 Human grant mode renders that same canonical preview and asks `y/N`. For a
 non-interactive JSON grant, explicitly request the 15-minute sensitive bearer
@@ -189,7 +205,7 @@ and pipe only the bearer field into bounded stdin:
 ```bash
 ee mesh preview-grant "$PEER_ID" --lane body --workspace . \
   --issue-approval-token --json \
-  | jq -r '.data.preview.approvalToken.bearer' \
+  | jq -r '.data.preview.approvalToken.value' \
   | ee mesh grant "$PEER_ID" --lane body --workspace . \
       --preview-token-stdin --json
 ```
@@ -200,6 +216,9 @@ then snapshot comparison, generation compare-and-swap, allow, and audit commit
 atomically. An expired or drifted authenticated bearer returns
 `mesh_approval_token_stale`; malformed, tampered, wrong-context, or wrong-key
 input returns `mesh_approval_token_invalid` without an authentication oracle.
+Opted-in issuance necessarily writes the bearer to stdout: ee-controlled sinks
+scrub it, but external or third-party stdout/session recorders outside ee's
+control may retain it until the 15-minute expiry.
 
 ## Revisable Pack Flow
 
@@ -272,7 +291,7 @@ Before widening a lane, run a preview and inspect the exact decision surface:
 
 ```bash
 ee mesh preview-grant <peer-id> --lane body --workspace . --json \
-  | jq '.data.preview | {target, lane, grantGeneration, currentPolicy, proposedPolicy, affectedMemoryCount, redactedFromExposureCount, cautionCodes}'
+  | jq '.data.preview | {target, lane, grantGeneration, currentPolicy, proposedPolicy, affectedMemoryCount, affectedLedgerEventCount, redactedFromExposureCount, redactionScannerGeneration, cautionCodes}'
 ```
 
 Use `ee mesh peers --workspace . --json` to obtain the opaque `peerId`. Do not

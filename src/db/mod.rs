@@ -989,6 +989,31 @@ impl DbConnection {
         self.execute_read_snapshot_raw(DbOperation::RollbackTransaction, "ROLLBACK")
     }
 
+    /// Execute a closure while exclusively owning this database's writer fence,
+    /// without opening a SQL transaction.
+    ///
+    /// This is the bounded primitive for operations whose authorization read,
+    /// audit write, and external side effect must not interleave with another
+    /// ee-controlled writer. Transactions opened by the closure reuse the same
+    /// reentrant owner fence. The caller supplies an acquisition-error mapper so
+    /// domain-specific closures can preserve their own error type without a
+    /// blanket `From<DbError>` implementation.
+    pub(crate) fn with_write_owner_fence<T, E, F, M>(
+        &self,
+        map_error: M,
+        f: F,
+    ) -> std::result::Result<T, E>
+    where
+        F: FnOnce() -> std::result::Result<T, E>,
+        M: FnOnce(DbError) -> E,
+    {
+        let _write_owner = self
+            .reject_read_only_write(DbOperation::BeginTransaction)
+            .and_then(|()| lock_file_write_owner_gate(&self.location))
+            .map_err(map_error)?;
+        f()
+    }
+
     /// Execute a closure within a transaction.
     /// Commits on success, rolls back on error.
     pub fn with_transaction<T, F>(&self, f: F) -> Result<T>
@@ -2794,6 +2819,16 @@ pub struct Migration {
     checksum_label: &'static str,
 }
 
+// V088 was briefly rewritten in place to add config-bound lane consent. Some
+// databases may therefore contain either the computed checksum or the audit
+// label from that accidental definition. Keep this allowlist exact: V089
+// canonicalizes either physical table shape, while every other checksum drift
+// remains a hard error.
+const V088_ACCIDENTAL_CONFIG_BOUND_SQL_CHECKSUM: &str =
+    "blake3:6e40455774f08344c83fa1bd05862df57c8ab10b9caacbce0a308f34ca33bcbf";
+const V088_ACCIDENTAL_CONFIG_BOUND_CHECKSUM_LABEL: &str =
+    "blake3:v088_mesh_lane_grant_states_config_bound_2026_08_04";
+
 impl Migration {
     /// Construct a migration. The label is retained for human audit; applied
     /// records store the computed `blake3:<hex>` checksum of the SQL text.
@@ -2834,6 +2869,12 @@ impl Migration {
     fn checksum_matches_applied_record(&self, applied_checksum: &str) -> bool {
         text_matches(applied_checksum, &self.checksum())
             || text_matches(applied_checksum, self.checksum_label())
+            || (self.version == V088_MESH_LANE_GRANT_STATES.version()
+                && (text_matches(applied_checksum, V088_ACCIDENTAL_CONFIG_BOUND_SQL_CHECKSUM)
+                    || text_matches(
+                        applied_checksum,
+                        V088_ACCIDENTAL_CONFIG_BOUND_CHECKSUM_LABEL,
+                    )))
     }
 }
 
@@ -7662,11 +7703,9 @@ UPDATE workspace_generations
 /// value in this table is an exact `(workspace_id, peer_id, lane)` override;
 /// NULL deliberately means "inherit config" rather than deny.  The target
 /// adapter is canonical and versioned so approval snapshots bind both the
-/// stable local peer id and the peer's current origin-node identity. Each
-/// widened lane also stores the exact approved config-file digest; an allow
-/// without a current matching digest is denied at policy use. Every successful
-/// grant or revoke advances `grant_generation`; the write API below performs
-/// that compare-and-swap under `BEGIN IMMEDIATE`.
+/// stable local peer id and the peer's current origin-node identity.  Every
+/// successful grant or revoke advances `grant_generation`; the write API below
+/// performs that compare-and-swap under `BEGIN IMMEDIATE`.
 pub const V088_MESH_LANE_GRANT_STATES: Migration = Migration::new(
     88,
     "mesh_lane_grant_states",
@@ -7683,6 +7722,74 @@ CREATE TABLE mesh_lane_grant_states (
         target_origin_node_id GLOB 'node_*'
         AND length(trim(target_origin_node_id)) > 6
         AND target_origin_node_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    target_adapter_json TEXT NOT NULL CHECK (
+        json_valid(target_adapter_json)
+        AND target_adapter_json =
+            '{"schema":"ee.mesh.lane_grant_target_adapter.v1","peerId":"'
+            || peer_id
+            || '","originNodeId":"'
+            || target_origin_node_id
+            || '"}'
+    ),
+    grant_generation INTEGER NOT NULL DEFAULT 0 CHECK (grant_generation >= 0),
+    metadata_override TEXT CHECK (
+        metadata_override IS NULL OR metadata_override IN ('allow', 'quarantine', 'deny')
+    ),
+    body_override TEXT CHECK (
+        body_override IS NULL OR body_override IN ('allow', 'quarantine', 'deny')
+    ),
+    embedding_override TEXT CHECK (
+        embedding_override IS NULL OR embedding_override IN ('allow', 'quarantine', 'deny')
+    ),
+    graph_link_override TEXT CHECK (
+        graph_link_override IS NULL OR graph_link_override IN ('allow', 'quarantine', 'deny')
+    ),
+    revision_notice_override TEXT CHECK (
+        revision_notice_override IS NULL OR revision_notice_override IN ('allow', 'quarantine', 'deny')
+    ),
+    curation_signal_override TEXT CHECK (
+        curation_signal_override IS NULL OR curation_signal_override IN ('allow', 'quarantine', 'deny')
+    ),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    PRIMARY KEY (workspace_id, peer_id),
+    FOREIGN KEY (workspace_id, peer_id)
+        REFERENCES mesh_peers(workspace_id, peer_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX idx_mesh_lane_grant_states_generation
+    ON mesh_lane_grant_states(workspace_id, grant_generation, peer_id);
+"#,
+    "blake3:v088_mesh_lane_grant_states_2026_08_04",
+);
+
+/// V089: Bind widened mesh lanes to the exact approved config-file digest.
+///
+/// This forward-only repair preserves V088's immutable bytes and rebuilds both
+/// the official 13-column V088 table and the brief accidental 19-column shape
+/// into one canonical schema. Legacy `allow` rows cannot prove a config-byte
+/// binding, so they become explicit denies, lose any digest, and advance their
+/// generation once. Restrictive and inherited states remain unchanged.
+pub const V089_MESH_LANE_GRANT_CONFIG_BINDINGS: Migration = Migration::new(
+    89,
+    "mesh_lane_grant_config_bindings",
+    r#"
+DROP INDEX IF EXISTS idx_mesh_lane_grant_states_generation;
+ALTER TABLE mesh_lane_grant_states RENAME TO mesh_lane_grant_states_v088;
+
+CREATE TABLE mesh_lane_grant_states (
+    workspace_id TEXT NOT NULL,
+    peer_id TEXT NOT NULL CHECK (
+        peer_id GLOB 'peer_*'
+        AND length(trim(peer_id)) > 6
+        AND peer_id NOT GLOB '*[^A-Za-z0-9._:-]*'
+    ),
+    target_adapter_version INTEGER NOT NULL DEFAULT 1 CHECK (target_adapter_version = 1),
+    target_origin_node_id TEXT NOT NULL CHECK (
+        target_origin_node_id GLOB 'node_*'
+        AND length(trim(target_origin_node_id)) > 6
+        AND target_origin_node_id NOT GLOB '*[^A-Za-z0-9._:-]*'
     ),
     target_adapter_json TEXT NOT NULL CHECK (
         json_valid(target_adapter_json)
@@ -7785,10 +7892,65 @@ CREATE TABLE mesh_lane_grant_states (
         ON DELETE CASCADE
 );
 
+INSERT INTO mesh_lane_grant_states (
+    workspace_id, peer_id, target_adapter_version, target_origin_node_id,
+    target_adapter_json, grant_generation,
+    metadata_override, body_override, embedding_override,
+    graph_link_override, revision_notice_override, curation_signal_override,
+    metadata_approval_config_digest, body_approval_config_digest,
+    embedding_approval_config_digest, graph_link_approval_config_digest,
+    revision_notice_approval_config_digest, curation_signal_approval_config_digest,
+    updated_at
+)
+SELECT
+    workspace_id,
+    peer_id,
+    target_adapter_version,
+    target_origin_node_id,
+    target_adapter_json,
+    CASE
+        WHEN (
+            metadata_override = 'allow'
+            OR body_override = 'allow'
+            OR embedding_override = 'allow'
+            OR graph_link_override = 'allow'
+            OR revision_notice_override = 'allow'
+            OR curation_signal_override = 'allow'
+        ) AND grant_generation < 9223372036854775807
+        THEN grant_generation + 1
+        ELSE grant_generation
+    END,
+    CASE WHEN metadata_override = 'allow' THEN 'deny' ELSE metadata_override END,
+    CASE WHEN body_override = 'allow' THEN 'deny' ELSE body_override END,
+    CASE WHEN embedding_override = 'allow' THEN 'deny' ELSE embedding_override END,
+    CASE WHEN graph_link_override = 'allow' THEN 'deny' ELSE graph_link_override END,
+    CASE WHEN revision_notice_override = 'allow' THEN 'deny' ELSE revision_notice_override END,
+    CASE WHEN curation_signal_override = 'allow' THEN 'deny' ELSE curation_signal_override END,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    CASE
+        WHEN metadata_override = 'allow'
+          OR body_override = 'allow'
+          OR embedding_override = 'allow'
+          OR graph_link_override = 'allow'
+          OR revision_notice_override = 'allow'
+          OR curation_signal_override = 'allow'
+        THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        ELSE updated_at
+    END
+FROM mesh_lane_grant_states_v088
+ORDER BY workspace_id, peer_id;
+
+DROP TABLE mesh_lane_grant_states_v088;
+
 CREATE INDEX idx_mesh_lane_grant_states_generation
     ON mesh_lane_grant_states(workspace_id, grant_generation, peer_id);
 "#,
-    "blake3:v088_mesh_lane_grant_states_config_bound_2026_08_04",
+    "blake3:v089_mesh_lane_grant_config_bindings_2026_08_04",
 );
 
 /// All migrations in version order.
@@ -7881,6 +8043,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V086_RULE_INDEX_GENERATIONS,
     V087_EVIDENCE_STORAGE_REBUILD,
     V088_MESH_LANE_GRANT_STATES,
+    V089_MESH_LANE_GRANT_CONFIG_BINDINGS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -7970,13 +8133,15 @@ impl DbConnection {
             }
 
             let now = Utc::now().to_rfc3339();
-            let outcome = if migration.version == V087_EVIDENCE_STORAGE_REBUILD.version
-                && matches!(&self.location, DatabaseLocation::File(_))
-            {
-                self.apply_file_schema_rebuild_migration(migration, &now)?
-            } else {
-                self.apply_migration(migration, &now)?
-            };
+            let rebuilds_existing_table = migration.version
+                == V087_EVIDENCE_STORAGE_REBUILD.version
+                || migration.version == V089_MESH_LANE_GRANT_CONFIG_BINDINGS.version;
+            let outcome =
+                if rebuilds_existing_table && matches!(&self.location, DatabaseLocation::File(_)) {
+                    self.apply_file_schema_rebuild_migration(migration, &now)?
+                } else {
+                    self.apply_migration(migration, &now)?
+                };
             match outcome {
                 ApplyOutcome::Applied => applied.push(migration.version),
                 ApplyOutcome::AlreadyApplied => skipped.push(migration.version),
@@ -7988,10 +8153,10 @@ impl DbConnection {
 
     /// Apply a table-replacing migration through a fresh file connection.
     ///
-    /// The pinned FrankenSQLite generation correctly commits V087's
-    /// rename/create/copy/drop sequence, but a connection that compiled the
+    /// The pinned FrankenSQLite generation correctly commits table-rebuild
+    /// rename/create/copy/drop sequences, but a connection that compiled the
     /// pre-rebuild table can retain that retired root page for a later UPDATE.
-    /// Running the rebuild on a sibling connection turns the schema change into
+    /// Running a rebuild on a sibling connection turns the schema change into
     /// an external commit, which FrankenSQLite's normal schema-cookie refresh
     /// path handles before the original connection is reused.
     fn apply_file_schema_rebuild_migration(
@@ -11893,10 +12058,14 @@ impl MeshLaneGrantTargetAdapter {
     /// Return the exact JSON representation constrained by migration V088.
     pub fn canonical_json(&self) -> std::result::Result<String, MeshLaneGrantMutationError> {
         self.validate()?;
-        Ok(format!(
+        Ok(self.render_canonical_json())
+    }
+
+    fn render_canonical_json(&self) -> String {
+        format!(
             r#"{{"schema":"{MESH_LANE_GRANT_TARGET_ADAPTER_SCHEMA_V1}","peerId":"{}","originNodeId":"{}"}}"#,
             self.peer_id, self.origin_node_id
-        ))
+        )
     }
 
     fn validate(&self) -> std::result::Result<(), MeshLaneGrantMutationError> {
@@ -11909,7 +12078,8 @@ impl MeshLaneGrantTargetAdapter {
         }
         if !valid_mesh_lane_grant_identifier(&self.peer_id, "peer_") {
             return Err(MeshLaneGrantMutationError::InvalidTargetAdapter {
-                message: "target adapter peer_id must be a canonical peer_* identifier".to_owned(),
+                message: "target adapter peer_id must match ^peer_[A-Za-z0-9._:-]{6,128}$"
+                    .to_owned(),
             });
         }
         if !valid_mesh_lane_grant_identifier(&self.origin_node_id, "node_") {
@@ -12873,16 +13043,24 @@ impl DbConnection {
     /// so an artifact cannot win a race by overwriting a concurrently enrolled
     /// local identity. Returns `true` only when a row was inserted.
     pub fn insert_mesh_peer_if_absent(&self, input: &UpsertMeshPeerInput) -> Result<bool> {
-        self.with_transaction(|| {
-            if self
-                .get_mesh_peer(&input.workspace_id, &input.peer_id)?
-                .is_some()
-            {
-                return Ok(false);
-            }
-            self.upsert_mesh_peer_in_current_transaction(input)?;
-            Ok(true)
-        })
+        self.with_transaction(|| self.insert_mesh_peer_if_absent_in_current_transaction(input))
+    }
+
+    /// Transaction-internal replay enrollment primitive. Callers must already
+    /// hold the write transaction that couples the absence check to the rest of
+    /// their import-side effects.
+    pub(crate) fn insert_mesh_peer_if_absent_in_current_transaction(
+        &self,
+        input: &UpsertMeshPeerInput,
+    ) -> Result<bool> {
+        if self
+            .get_mesh_peer(&input.workspace_id, &input.peer_id)?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        self.upsert_mesh_peer_in_current_transaction(input)?;
+        Ok(true)
     }
 
     fn invalidate_mesh_lane_grants_in_transaction(
@@ -15462,21 +15640,19 @@ fn stored_mesh_lane_grant_state_from_row(row: &Row) -> Result<StoredMeshLaneGran
         operation: DbOperation::Query,
         message: format!("invalid mesh lane target adapter JSON: {error}"),
     })?;
-    target_adapter
-        .validate()
-        .map_err(|error| DbError::MalformedRow {
+    if target_adapter.schema != MESH_LANE_GRANT_TARGET_ADAPTER_SCHEMA_V1
+        || !valid_stored_mesh_lane_grant_identifier(&target_adapter.peer_id, "peer_")
+        || !valid_stored_mesh_lane_grant_identifier(&target_adapter.origin_node_id, "node_")
+    {
+        return Err(DbError::MalformedRow {
             operation: DbOperation::Query,
-            message: error.to_string(),
-        })?;
+            message: "mesh lane target adapter is not storage-canonical".to_owned(),
+        });
+    }
+    let target_is_publicly_valid = target_adapter.validate().is_ok();
     if target_adapter.peer_id != peer_id
         || target_adapter.origin_node_id != target_origin_node_id
-        || target_adapter
-            .canonical_json()
-            .map_err(|error| DbError::MalformedRow {
-                operation: DbOperation::Query,
-                message: error.to_string(),
-            })?
-            != target_adapter_json
+        || target_adapter.render_canonical_json() != target_adapter_json
     {
         return Err(DbError::MalformedRow {
             operation: DbOperation::Query,
@@ -15484,18 +15660,15 @@ fn stored_mesh_lane_grant_state_from_row(row: &Row) -> Result<StoredMeshLaneGran
                 .to_owned(),
         });
     }
+    let joined_target_matches =
+        required_sqlite_bool(row, 19, DbOperation::Query, "target_matches_current_peer")?;
 
     let state = StoredMeshLaneGrantState {
         workspace_id,
         peer_id,
         target_adapter,
         target_adapter_json,
-        target_matches_current_peer: required_sqlite_bool(
-            row,
-            19,
-            DbOperation::Query,
-            "target_matches_current_peer",
-        )?,
+        target_matches_current_peer: target_is_publicly_valid && joined_target_matches,
         grant_generation: required_u64(row, 5, DbOperation::Query, "grant_generation")?,
         metadata_override: optional_mesh_lane_decision(row, 6, "metadata_override")?,
         body_override: optional_mesh_lane_decision(row, 7, "body_override")?,
@@ -15627,11 +15800,29 @@ fn mesh_lane_grant_state_values(
 }
 
 fn valid_mesh_lane_grant_identifier(value: &str, prefix: &str) -> bool {
-    value.starts_with(prefix)
-        && value.len() > prefix.len()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    if matches!(prefix, "peer_" | "node_") {
+        let Some(suffix) = value.strip_prefix(prefix) else {
+            return false;
+        };
+        return (6..=128).contains(&suffix.len())
+            && suffix.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+            });
+    }
+    false
+}
+
+fn valid_stored_mesh_lane_grant_identifier(value: &str, prefix: &str) -> bool {
+    if matches!(prefix, "peer_" | "node_") {
+        let Some(suffix) = value.strip_prefix(prefix) else {
+            return false;
+        };
+        return suffix.len() >= 2
+            && suffix.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+            });
+    }
+    false
 }
 
 fn stored_mesh_peer_cursor_from_row(row: &Row) -> Result<StoredMeshPeerCursor> {
@@ -28692,7 +28883,7 @@ mod tests {
     use std::error::Error as StdError;
     use std::fmt;
     use std::path::PathBuf;
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, mpsc};
     use std::thread;
     use std::time::Duration;
 
@@ -29429,6 +29620,709 @@ mod tests {
         Ok(())
     }
 
+    fn seed_recorded_v088(
+        connection: &DbConnection,
+        checksum: &str,
+        accidental_config_bound_shape: bool,
+    ) -> TestResult {
+        seed_migrations_through(connection, 87)?;
+        connection.execute_raw(super::V088_MESH_LANE_GRANT_STATES.sql())?;
+        if accidental_config_bound_shape {
+            connection.execute_raw(
+                "ALTER TABLE mesh_lane_grant_states ADD COLUMN metadata_approval_config_digest TEXT;
+                 ALTER TABLE mesh_lane_grant_states ADD COLUMN body_approval_config_digest TEXT;
+                 ALTER TABLE mesh_lane_grant_states ADD COLUMN embedding_approval_config_digest TEXT;
+                 ALTER TABLE mesh_lane_grant_states ADD COLUMN graph_link_approval_config_digest TEXT;
+                 ALTER TABLE mesh_lane_grant_states ADD COLUMN revision_notice_approval_config_digest TEXT;
+                 ALTER TABLE mesh_lane_grant_states ADD COLUMN curation_signal_approval_config_digest TEXT;",
+            )?;
+        }
+        connection.record_migration(&MigrationRecord::new(
+            super::V088_MESH_LANE_GRANT_STATES.version(),
+            super::V088_MESH_LANE_GRANT_STATES.name(),
+            checksum,
+            "2026-08-04T00:00:00Z",
+        )?)?;
+        Ok(())
+    }
+
+    fn insert_v088_mesh_peer(
+        connection: &DbConnection,
+        peer_id: &str,
+        origin_node_id: &str,
+    ) -> TestResult {
+        connection.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO mesh_peers (
+                workspace_id, peer_id, origin_node_id, display_name,
+                policy_summary_json, enabled, last_seen_at
+             ) VALUES (?1, ?2, ?3, NULL, NULL, 1, ?4)",
+            &[
+                Value::Text("wsp_01234567890123456789012345".to_owned()),
+                Value::Text(peer_id.to_owned()),
+                Value::Text(origin_node_id.to_owned()),
+                Value::Text("2026-08-04T00:00:00Z".to_owned()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_v088_grant_state(
+        connection: &DbConnection,
+        peer_id: &str,
+        origin_node_id: &str,
+        grant_generation: i64,
+        metadata_override: Option<&str>,
+        body_override: Option<&str>,
+        embedding_override: Option<&str>,
+        graph_link_override: Option<&str>,
+        revision_notice_override: Option<&str>,
+        curation_signal_override: Option<&str>,
+        updated_at: &str,
+    ) -> TestResult {
+        let optional_text =
+            |value: Option<&str>| value.map_or(Value::Null, |value| Value::Text(value.to_owned()));
+        let adapter_json = format!(
+            r#"{{"schema":"ee.mesh.lane_grant_target_adapter.v1","peerId":"{peer_id}","originNodeId":"{origin_node_id}"}}"#
+        );
+        connection.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO mesh_lane_grant_states (
+                workspace_id, peer_id, target_adapter_version,
+                target_origin_node_id, target_adapter_json, grant_generation,
+                metadata_override, body_override, embedding_override,
+                graph_link_override, revision_notice_override,
+                curation_signal_override, updated_at
+             ) VALUES (?1, ?2, 1, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            &[
+                Value::Text("wsp_01234567890123456789012345".to_owned()),
+                Value::Text(peer_id.to_owned()),
+                Value::Text(origin_node_id.to_owned()),
+                Value::Text(adapter_json),
+                Value::BigInt(grant_generation),
+                optional_text(metadata_override),
+                optional_text(body_override),
+                optional_text(embedding_override),
+                optional_text(graph_link_override),
+                optional_text(revision_notice_override),
+                optional_text(curation_signal_override),
+                Value::Text(updated_at.to_owned()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn v088_mesh_lane_grant_migration_bytes_remain_immutable() -> TestResult {
+        ensure_equal(
+            &super::V088_MESH_LANE_GRANT_STATES.checksum(),
+            &"blake3:914c2f4bd659b83a9a4779cc707de92bda50f123f4bbcaa3837c4391750b206c".to_owned(),
+            "V088 immutable SQL checksum",
+        )?;
+        ensure_equal(
+            &super::V088_MESH_LANE_GRANT_STATES.checksum_label(),
+            &"blake3:v088_mesh_lane_grant_states_2026_08_04",
+            "V088 immutable audit label",
+        )?;
+        ensure(
+            !super::V088_MESH_LANE_GRANT_STATES
+                .sql()
+                .contains("approval_config_digest"),
+            "V088 must retain its original pre-config-binding schema",
+        )
+    }
+
+    #[test]
+    fn v089_preserves_legacy_ids_while_runtime_enforces_published_boundaries() -> TestResult {
+        let maximum = format!("peer_{}", "a".repeat(128));
+        let overlong = format!("peer_{}", "a".repeat(129));
+        for peer_id in ["peer_abc123", "peer_a.b:c-", maximum.as_str()] {
+            ensure(
+                super::valid_mesh_lane_grant_identifier(peer_id, "peer_"),
+                format!("published peer id must be accepted: {peer_id}"),
+            )?;
+            ensure(
+                super::MeshLaneGrantTargetAdapter::new(peer_id, "node_boundary_01")
+                    .canonical_json()
+                    .is_ok(),
+                format!("canonical adapter must emit published peer id: {peer_id}"),
+            )?;
+        }
+        for peer_id in ["peer_abc12", overlong.as_str(), "peer_abc/123"] {
+            ensure(
+                !super::valid_mesh_lane_grant_identifier(peer_id, "peer_"),
+                format!("out-of-contract peer id must be rejected: {peer_id}"),
+            )?;
+            ensure(
+                super::MeshLaneGrantTargetAdapter::new(peer_id, "node_boundary_01")
+                    .canonical_json()
+                    .is_err(),
+                format!("adapter must not emit out-of-contract peer id: {peer_id}"),
+            )?;
+        }
+
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        for (index, peer_id) in ["peer_abc123", "peer_a.b:c-", maximum.as_str()]
+            .into_iter()
+            .enumerate()
+        {
+            let origin_node_id = format!("node_boundary_valid_{index}");
+            insert_v088_mesh_peer(&connection, peer_id, &origin_node_id)?;
+            insert_v088_grant_state(
+                &connection,
+                peer_id,
+                &origin_node_id,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "2026-08-04T00:00:00Z",
+            )?;
+        }
+        for (index, (peer_id, legacy_storage_compatible)) in [
+            ("peer_abc12", true),
+            (overlong.as_str(), true),
+            ("peer_abc/123", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let origin_node_id = format!("node_boundary_invalid_{index}");
+            insert_v088_mesh_peer(&connection, peer_id, &origin_node_id)?;
+            let inserted = insert_v088_grant_state(
+                &connection,
+                peer_id,
+                &origin_node_id,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "2026-08-04T00:00:00Z",
+            )
+            .is_ok();
+            ensure_equal(
+                &inserted,
+                &legacy_storage_compatible,
+                &format!(
+                    "V089 must preserve V088-compatible legacy ids without admitting invalid characters: {peer_id}"
+                ),
+            )?;
+        }
+
+        ensure(
+            super::MeshLaneGrantTargetAdapter::new("peer_abc123", "node_a.b:c-")
+                .canonical_json()
+                .is_ok(),
+            "runtime adapter must accept the published node-id punctuation",
+        )?;
+        let overlong_node = format!("node_{}", "n".repeat(129));
+        for (index, origin_node_id) in ["node_ab", overlong_node.as_str()].into_iter().enumerate() {
+            ensure(
+                super::MeshLaneGrantTargetAdapter::new("peer_abc123", origin_node_id)
+                    .canonical_json()
+                    .is_err(),
+                format!("runtime adapter must reject out-of-contract node id: {origin_node_id}"),
+            )?;
+            let peer_id = format!("peer_legacy_node_{index}");
+            insert_v088_mesh_peer(&connection, &peer_id, origin_node_id)?;
+            insert_v088_grant_state(
+                &connection,
+                &peer_id,
+                origin_node_id,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "2026-08-04T00:00:00Z",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn v089_lists_legacy_target_ids_without_treating_them_as_current() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_recorded_v088(
+            &connection,
+            &super::V088_MESH_LANE_GRANT_STATES.checksum(),
+            false,
+        )?;
+        setup_workspace(&connection)?;
+
+        let overlong_peer_id = format!("peer_{}", "p".repeat(129));
+        let overlong_node_id = format!("node_{}", "n".repeat(129));
+        let legacy_targets = [
+            ("peer_abc12".to_owned(), "node_legacy_short_peer".to_owned()),
+            (
+                overlong_peer_id.clone(),
+                "node_legacy_overlong_peer".to_owned(),
+            ),
+            ("peer_legacy_short_node".to_owned(), "node_ab".to_owned()),
+            (
+                "peer_legacy_overlong_node".to_owned(),
+                overlong_node_id.clone(),
+            ),
+        ];
+        for (peer_id, origin_node_id) in &legacy_targets {
+            insert_v088_mesh_peer(&connection, peer_id, origin_node_id)?;
+            insert_v088_grant_state(
+                &connection,
+                peer_id,
+                origin_node_id,
+                4,
+                Some("allow"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                "2026-08-04T05:00:00Z",
+            )?;
+        }
+        insert_v088_mesh_peer(
+            &connection,
+            "peer_boundary_current",
+            "node_boundary_current",
+        )?;
+        insert_v088_grant_state(
+            &connection,
+            "peer_boundary_current",
+            "node_boundary_current",
+            4,
+            Some("allow"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            "2026-08-04T05:00:00Z",
+        )?;
+
+        let migration = connection.migrate()?;
+        ensure_equal(
+            &migration.applied().to_vec(),
+            &vec![89_u32],
+            "legacy target fixtures migrate through V089",
+        )?;
+        let states = connection.list_mesh_lane_grant_states("wsp_01234567890123456789012345")?;
+        ensure_equal(
+            &states.len(),
+            &5,
+            "all migrated target rows remain readable",
+        )?;
+        let current_config_digest = hash('a');
+
+        for (peer_id, _) in &legacy_targets {
+            let state = states
+                .iter()
+                .find(|state| state.peer_id == peer_id.as_str())
+                .ok_or_else(|| TestFailure::new(format!("missing legacy target row {peer_id}")))?;
+            ensure(
+                !state.target_matches_current_peer,
+                format!("legacy target {peer_id} must never be current"),
+            )?;
+            ensure_equal(
+                &state.metadata_override,
+                &Some(super::MeshLaneDecision::Deny),
+                &format!("legacy target {peer_id} migrated allow fails closed"),
+            )?;
+            ensure_equal(
+                &state.effective_override_for(
+                    super::MeshLane::Metadata,
+                    Some(current_config_digest.as_str()),
+                ),
+                &Some(super::MeshLaneDecision::Deny),
+                &format!("legacy target {peer_id} cannot retain an effective allow"),
+            )?;
+        }
+
+        let current = states
+            .iter()
+            .find(|state| state.peer_id == "peer_boundary_current")
+            .ok_or("missing current boundary target row")?;
+        ensure(
+            current.target_matches_current_peer,
+            "a publicly valid migrated target remains current",
+        )
+    }
+
+    #[test]
+    fn v089_rebuilds_populated_v088_fail_closed_and_is_idempotent() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_recorded_v088(
+            &connection,
+            &super::V088_MESH_LANE_GRANT_STATES.checksum(),
+            false,
+        )?;
+        setup_workspace(&connection)?;
+
+        for (peer_id, origin_node_id) in [
+            ("peer_v089_allow", "node_v089_allow"),
+            ("peer_v089_restrict", "node_v089_restrict"),
+            ("peer_v089_max", "node_v089_max"),
+        ] {
+            insert_v088_mesh_peer(&connection, peer_id, origin_node_id)?;
+        }
+        insert_v088_grant_state(
+            &connection,
+            "peer_v089_allow",
+            "node_v089_allow",
+            7,
+            Some("allow"),
+            Some("deny"),
+            Some("quarantine"),
+            None,
+            Some("allow"),
+            None,
+            "2026-08-04T01:00:00Z",
+        )?;
+        insert_v088_grant_state(
+            &connection,
+            "peer_v089_restrict",
+            "node_v089_restrict",
+            11,
+            Some("deny"),
+            Some("quarantine"),
+            None,
+            None,
+            None,
+            None,
+            "2026-08-04T02:00:00Z",
+        )?;
+        insert_v088_grant_state(
+            &connection,
+            "peer_v089_max",
+            "node_v089_max",
+            i64::MAX,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("allow"),
+            "2026-08-04T03:00:00Z",
+        )?;
+
+        let v088_checksum_before = connection
+            .applied_migrations()?
+            .into_iter()
+            .find(|record| record.version() == 88)
+            .ok_or("missing V088 record before V089")?
+            .checksum()
+            .to_owned();
+        let migration = connection.migrate()?;
+        ensure_equal(
+            &migration.applied().to_vec(),
+            &vec![89_u32],
+            "V089 is the only pending migration",
+        )?;
+
+        let allow = connection
+            .get_mesh_lane_grant_state("wsp_01234567890123456789012345", "peer_v089_allow")?
+            .ok_or("V089 allow-row fixture missing")?;
+        ensure_equal(&allow.grant_generation, &8, "legacy allow generation")?;
+        ensure_equal(
+            &allow.metadata_override,
+            &Some(super::MeshLaneDecision::Deny),
+            "legacy metadata allow becomes explicit deny",
+        )?;
+        ensure_equal(
+            &allow.body_override,
+            &Some(super::MeshLaneDecision::Deny),
+            "existing deny is preserved",
+        )?;
+        ensure_equal(
+            &allow.embedding_override,
+            &Some(super::MeshLaneDecision::Quarantine),
+            "existing quarantine is preserved",
+        )?;
+        ensure_equal(
+            &allow.revision_notice_override,
+            &Some(super::MeshLaneDecision::Deny),
+            "every legacy allow is invalidated",
+        )?;
+        ensure(
+            allow.updated_at != "2026-08-04T01:00:00Z",
+            "invalidated row timestamp advances",
+        )?;
+
+        let restrict = connection
+            .get_mesh_lane_grant_state("wsp_01234567890123456789012345", "peer_v089_restrict")?
+            .ok_or("V089 restrictive-row fixture missing")?;
+        ensure_equal(
+            &restrict.grant_generation,
+            &11,
+            "restrictive generation remains stable",
+        )?;
+        ensure_equal(
+            &restrict.updated_at,
+            &"2026-08-04T02:00:00Z".to_owned(),
+            "restrictive row timestamp remains stable",
+        )?;
+
+        let saturated = connection
+            .get_mesh_lane_grant_state("wsp_01234567890123456789012345", "peer_v089_max")?
+            .ok_or("V089 saturated-row fixture missing")?;
+        ensure_equal(
+            &saturated.grant_generation,
+            &u64::try_from(i64::MAX).unwrap(),
+            "legacy allow generation saturates at SQLite max",
+        )?;
+        ensure_equal(
+            &saturated.curation_signal_override,
+            &Some(super::MeshLaneDecision::Deny),
+            "saturated legacy allow still becomes deny",
+        )?;
+
+        for state in [&allow, &restrict, &saturated] {
+            ensure(
+                [
+                    &state.metadata_approval_config_digest,
+                    &state.body_approval_config_digest,
+                    &state.embedding_approval_config_digest,
+                    &state.graph_link_approval_config_digest,
+                    &state.revision_notice_approval_config_digest,
+                    &state.curation_signal_approval_config_digest,
+                ]
+                .into_iter()
+                .all(Option::is_none),
+                "V089 initializes every approval digest as NULL",
+            )?;
+        }
+
+        let columns = connection.query("PRAGMA table_info(mesh_lane_grant_states)", &[])?;
+        let column_names = columns
+            .iter()
+            .filter_map(|row| row.get(1).and_then(Value::as_str).map(str::to_owned))
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &column_names,
+            &[
+                "workspace_id",
+                "peer_id",
+                "target_adapter_version",
+                "target_origin_node_id",
+                "target_adapter_json",
+                "grant_generation",
+                "metadata_override",
+                "body_override",
+                "embedding_override",
+                "graph_link_override",
+                "revision_notice_override",
+                "curation_signal_override",
+                "metadata_approval_config_digest",
+                "body_approval_config_digest",
+                "embedding_approval_config_digest",
+                "graph_link_approval_config_digest",
+                "revision_notice_approval_config_digest",
+                "curation_signal_approval_config_digest",
+                "updated_at",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+            "V089 canonical column order",
+        )?;
+        let index = connection.query(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'index' AND name = 'idx_mesh_lane_grant_states_generation'",
+            &[],
+        )?;
+        ensure_equal(&index.len(), &1, "V089 generation index")?;
+        let foreign_keys =
+            connection.query("PRAGMA foreign_key_list(mesh_lane_grant_states)", &[])?;
+        ensure(
+            foreign_keys
+                .iter()
+                .any(|row| row.get(2).and_then(Value::as_str) == Some("mesh_peers")),
+            "V089 foreign key still targets mesh_peers",
+        )?;
+        ensure(
+            !table_exists(&connection, "mesh_lane_grant_states_v088")?,
+            "V089 leaves no retired table",
+        )?;
+        ensure(
+            connection.check_foreign_keys()?.passed,
+            "V089 foreign keys pass",
+        )?;
+        ensure(
+            connection.check_integrity()?.passed,
+            "V089 integrity passes",
+        )?;
+        ensure(
+            connection
+                .execute_raw(
+                    "UPDATE mesh_lane_grant_states
+                     SET metadata_override = 'allow'
+                     WHERE peer_id = 'peer_v089_allow'",
+                )
+                .is_err(),
+            "canonical schema rejects allow without a config digest",
+        )?;
+
+        let v088_checksum_after = connection
+            .applied_migrations()?
+            .into_iter()
+            .find(|record| record.version() == 88)
+            .ok_or("missing V088 record after V089")?
+            .checksum()
+            .to_owned();
+        ensure_equal(
+            &v088_checksum_after,
+            &v088_checksum_before,
+            "V089 never rewrites the V088 migration record",
+        )?;
+        let before_rerun =
+            connection.list_mesh_lane_grant_states("wsp_01234567890123456789012345")?;
+        let rerun = connection.migrate()?;
+        ensure(rerun.applied().is_empty(), "V089 rerun applies nothing")?;
+        ensure_equal(
+            &rerun.skipped().to_vec(),
+            &migration_versions(),
+            "V089 rerun skips the complete migration set",
+        )?;
+        ensure_equal(
+            &connection.list_mesh_lane_grant_states("wsp_01234567890123456789012345")?,
+            &before_rerun,
+            "V089 rerun preserves canonical rows",
+        )
+    }
+
+    #[test]
+    fn v089_accepts_only_known_accidental_v088_checksums_and_upgrades_shape() -> TestResult {
+        for (case, accidental_checksum) in [
+            ("computed", super::V088_ACCIDENTAL_CONFIG_BOUND_SQL_CHECKSUM),
+            ("label", super::V088_ACCIDENTAL_CONFIG_BOUND_CHECKSUM_LABEL),
+        ] {
+            let connection = DbConnection::open_memory()?;
+            seed_recorded_v088(&connection, accidental_checksum, true)?;
+            setup_workspace(&connection)?;
+            insert_v088_mesh_peer(&connection, "peer_v089_accidental", "node_v089_accidental")?;
+            insert_v088_grant_state(
+                &connection,
+                "peer_v089_accidental",
+                "node_v089_accidental",
+                17,
+                Some("allow"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                "2026-08-04T04:00:00Z",
+            )?;
+            connection.execute_for(
+                DbOperation::Execute,
+                "UPDATE mesh_lane_grant_states
+                 SET metadata_approval_config_digest = ?1
+                 WHERE workspace_id = ?2 AND peer_id = ?3",
+                &[
+                    Value::Text(hash('a')),
+                    Value::Text("wsp_01234567890123456789012345".to_owned()),
+                    Value::Text("peer_v089_accidental".to_owned()),
+                ],
+            )?;
+
+            connection.validate_applied_migrations()?;
+            let migration = connection.migrate()?;
+            ensure_equal(
+                &migration.applied().to_vec(),
+                &vec![89_u32],
+                &format!("known accidental {case} checksum applies V089"),
+            )?;
+            let state = connection
+                .get_mesh_lane_grant_state(
+                    "wsp_01234567890123456789012345",
+                    "peer_v089_accidental",
+                )?
+                .ok_or_else(|| {
+                    TestFailure::new(format!("{case}: upgraded accidental row missing"))
+                })?;
+            ensure_equal(
+                &state.metadata_override,
+                &Some(super::MeshLaneDecision::Deny),
+                &format!("{case}: accidental allow fails closed"),
+            )?;
+            ensure_equal(
+                &state.metadata_approval_config_digest,
+                &None,
+                &format!("{case}: accidental digest is cleared"),
+            )?;
+            ensure_equal(
+                &state.grant_generation,
+                &18,
+                &format!("{case}: accidental generation advances"),
+            )?;
+            let stored_checksum = connection
+                .applied_migrations()?
+                .into_iter()
+                .find(|record| record.version() == 88)
+                .ok_or_else(|| TestFailure::new(format!("{case}: V088 record missing")))?
+                .checksum()
+                .to_owned();
+            ensure_equal(
+                &stored_checksum,
+                &accidental_checksum.to_owned(),
+                &format!("{case}: V088 record remains immutable"),
+            )?;
+            connection.close()?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn migration_validation_rejects_unknown_v088_checksum() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        seed_recorded_v088(&connection, "blake3:unknown_v088_checksum", false)?;
+
+        match connection.validate_applied_migrations() {
+            Err(DbError::MigrationDrift {
+                version,
+                expected_name,
+                actual_name,
+                expected_checksum,
+                actual_checksum,
+            }) => {
+                ensure_equal(&version, &88, "unknown V088 drift version")?;
+                ensure_equal(
+                    &expected_name,
+                    &Some(super::V088_MESH_LANE_GRANT_STATES.name().to_owned()),
+                    "unknown V088 expected name",
+                )?;
+                ensure_equal(
+                    &actual_name,
+                    &super::V088_MESH_LANE_GRANT_STATES.name().to_owned(),
+                    "unknown V088 actual name",
+                )?;
+                ensure_equal(
+                    &expected_checksum,
+                    &Some(super::V088_MESH_LANE_GRANT_STATES.checksum()),
+                    "unknown V088 expected checksum",
+                )?;
+                ensure_equal(
+                    &actual_checksum,
+                    &"blake3:unknown_v088_checksum".to_owned(),
+                    "unknown V088 actual checksum",
+                )
+            }
+            other => Err(TestFailure::new(format!(
+                "unknown V088 checksum must remain a drift error, got {other:?}"
+            ))),
+        }
+    }
+
     #[test]
     fn v084_pack_profile_rebuild_preserves_parent_children_indexes_and_order() -> TestResult {
         let connection = DbConnection::open_memory()?;
@@ -29929,8 +30823,8 @@ mod tests {
         evidence_ids.push(mismatched_evidence_id);
         let migration = connection.migrate()?;
         ensure(
-            migration.applied() == [85, 86, 87, 88],
-            "legacy evidence upgrade must apply V085 through V088 in order",
+            migration.applied() == [85, 86, 87, 88, 89],
+            "legacy evidence upgrade must apply V085 through V089 in order",
         )?;
         ensure(
             matches!(
@@ -45298,6 +46192,118 @@ mod tests {
             &0usize,
             "dropping final direct owner clears dotted depth",
         )
+    }
+
+    #[test]
+    fn with_write_owner_fence_is_reentrant_without_implicit_transaction() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(TestFailure::from)?;
+        let location = connection.location().clone();
+
+        connection.with_write_owner_fence(TestFailure::from, || {
+            ensure_equal(
+                &file_write_owner_depth_for_test(&location),
+                &1usize,
+                "outer write-owner fence depth",
+            )?;
+
+            // The fence deliberately does not issue BEGIN. A caller remains free
+            // to open and close its own transaction while retaining ownership.
+            connection.begin().map_err(TestFailure::from)?;
+            connection.rollback().map_err(TestFailure::from)?;
+
+            connection.with_write_owner_fence(TestFailure::from, || {
+                ensure_equal(
+                    &file_write_owner_depth_for_test(&location),
+                    &2usize,
+                    "nested write-owner fence depth",
+                )
+            })?;
+            ensure_equal(
+                &file_write_owner_depth_for_test(&location),
+                &1usize,
+                "nested fence release restores outer depth",
+            )
+        })?;
+
+        ensure_equal(
+            &file_write_owner_depth_for_test(&location),
+            &0usize,
+            "outer fence release clears owner depth",
+        )
+    }
+
+    #[test]
+    fn with_write_owner_fence_serializes_process_threads() -> TestResult {
+        let (outer_entered_tx, outer_entered_rx) = mpsc::channel();
+        let (outer_release_tx, outer_release_rx) = mpsc::channel();
+        let outer = thread::spawn(move || -> std::result::Result<(), String> {
+            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            connection.with_write_owner_fence(
+                |error| error.to_string(),
+                || {
+                    outer_entered_tx
+                        .send(())
+                        .map_err(|error| format!("announce outer fence: {error}"))?;
+                    outer_release_rx
+                        .recv()
+                        .map_err(|error| format!("await outer fence release: {error}"))
+                },
+            )
+        });
+
+        outer_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|error| TestFailure::new(format!("outer fence did not start: {error}")))?;
+
+        let (contender_state_tx, contender_state_rx) = mpsc::channel();
+        let contender = thread::spawn(move || -> std::result::Result<(), String> {
+            let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+            contender_state_tx
+                .send("attempting")
+                .map_err(|error| format!("announce fence attempt: {error}"))?;
+            connection.with_write_owner_fence(
+                |error| error.to_string(),
+                || {
+                    contender_state_tx
+                        .send("entered")
+                        .map_err(|error| format!("announce fence entry: {error}"))
+                },
+            )
+        });
+
+        ensure_equal(
+            &contender_state_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|error| TestFailure::new(format!("contender did not start: {error}")))?,
+            &"attempting",
+            "contender state before owner release",
+        )?;
+        ensure(
+            matches!(
+                contender_state_rx.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ),
+            "contender must not enter while the outer thread owns the fence",
+        )?;
+
+        outer_release_tx
+            .send(())
+            .map_err(|error| TestFailure::new(format!("release outer fence: {error}")))?;
+        outer
+            .join()
+            .map_err(|_| TestFailure::new("outer fence thread panicked"))?
+            .map_err(TestFailure::new)?;
+        ensure_equal(
+            &contender_state_rx
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|error| TestFailure::new(format!("contender never entered: {error}")))?,
+            &"entered",
+            "contender state after owner release",
+        )?;
+        contender
+            .join()
+            .map_err(|_| TestFailure::new("contender fence thread panicked"))?
+            .map_err(TestFailure::new)
     }
 
     #[test]

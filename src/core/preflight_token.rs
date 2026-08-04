@@ -556,30 +556,29 @@ pub fn record_preflight_halt_audit(
         .map(|memory| memory.memory_id.clone())
         .collect::<Vec<_>>();
     let audit_id = generate_audit_id();
+    let actor = options.actor.as_deref().map(preflight_audit_text);
+    let details = preflight_audit_details_json(json!({
+        "schema": PREFLIGHT_HALT_AUDIT_SCHEMA_V1,
+        "command": command,
+        "commandHash": command_hash,
+        "exitCode": options.exit_code,
+        "checkedAt": options.checked_at,
+        "ruleIds": rule_ids,
+        "enforcedHaltRuleIds": enforced_halt_rule_ids,
+        "matchedMemoryIds": matched_memory_ids,
+        "matches": options.matches,
+        "matchedMemories": options.matched_memories,
+    }));
     connection
         .insert_audit(
             &audit_id,
             &CreateAuditInput {
                 workspace_id: Some(options.workspace_id.clone()),
-                actor: options.actor.clone(),
+                actor,
                 action: audit_actions::PREFLIGHT_HALT.to_owned(),
                 target_type: Some("preflight_guard".to_owned()),
                 target_id: Some(command_hash.clone()),
-                details: Some(
-                    json!({
-                        "schema": PREFLIGHT_HALT_AUDIT_SCHEMA_V1,
-                        "command": command,
-                        "commandHash": command_hash,
-                        "exitCode": options.exit_code,
-                        "checkedAt": options.checked_at,
-                        "ruleIds": rule_ids,
-                        "enforcedHaltRuleIds": enforced_halt_rule_ids,
-                        "matchedMemoryIds": matched_memory_ids,
-                        "matches": options.matches,
-                        "matchedMemories": options.matched_memories,
-                    })
-                    .to_string(),
-                ),
+                details: Some(details),
             },
         )
         .map_err(storage_error)?;
@@ -924,20 +923,30 @@ fn insert_token_audit(
     details: serde_json::Value,
 ) -> Result<String> {
     let audit_id = generate_audit_id();
+    let actor = actor.map(preflight_audit_text);
+    let details = preflight_audit_details_json(details);
     connection
         .insert_audit(
             &audit_id,
             &CreateAuditInput {
                 workspace_id: Some(workspace_id.to_owned()),
-                actor: actor.map(str::to_owned),
+                actor,
                 action: action.to_owned(),
                 target_type: Some("preflight_bypass_token".to_owned()),
                 target_id: Some(token_hash_prefix.to_owned()),
-                details: Some(details.to_string()),
+                details: Some(details),
             },
         )
         .map_err(storage_error)?;
     Ok(audit_id)
+}
+
+fn preflight_audit_details_json(details: serde_json::Value) -> String {
+    preflight_audit_text(&details.to_string())
+}
+
+fn preflight_audit_text(text: &str) -> String {
+    crate::output::redact_mesh_approval_bearers(text)
 }
 
 fn bypass_token_list_entry(token: StoredPreflightBypassToken) -> Result<BypassTokenListEntry> {
@@ -958,4 +967,185 @@ fn bypass_token_list_entry(token: StoredPreflightBypassToken) -> Result<BypassTo
         command_hash: token.command_hash,
         rule_ids,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::preflight_guard::{
+        GuardAction, GuardMatch, MatchResolution, PreflightMemoryMatch, RuleSource,
+    };
+    use crate::db::{CreateWorkspaceInput, DbConnection};
+
+    use super::{
+        PREFLIGHT_BYPASS_AUDIT_SCHEMA_V1, PREFLIGHT_HALT_AUDIT_SCHEMA_V1,
+        RecordPreflightBypassAuditOptions, RecordPreflightHaltAuditOptions,
+        bypass_command_scope_hash, record_preflight_bypass_audit, record_preflight_halt_audit,
+    };
+
+    const WORKSPACE_ID: &str = "wsp_preflightbeareraudit00000";
+    const RULE_ID: &str = "builtin:approval_bearer_audit_test";
+
+    fn mesh_approval_bearer_canary() -> String {
+        format!(
+            "{}{}",
+            ["e", "e", "a", "p", "1", "_"].concat(),
+            "A".repeat(151)
+        )
+    }
+
+    fn test_connection() -> std::result::Result<DbConnection, String> {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: "/tmp/preflight-bearer-audit".to_owned(),
+                    name: Some("preflight-bearer-audit".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(connection)
+    }
+
+    fn guard_match(bearer: &str, resolution: MatchResolution) -> GuardMatch {
+        GuardMatch {
+            rule_id: RULE_ID.to_owned(),
+            pattern: format!("safe pattern before {bearer} and after"),
+            action: GuardAction::Halt,
+            message: format!("safe guard message before {bearer} and after"),
+            source: RuleSource::Builtin {
+                name: "approval_bearer_audit_test".to_owned(),
+            },
+            resolution,
+        }
+    }
+
+    fn memory_match(bearer: &str) -> PreflightMemoryMatch {
+        PreflightMemoryMatch {
+            memory_id: "mem_preflight_bearer_audit".to_owned(),
+            kind: "risk".to_owned(),
+            content: format!("safe memory context before {bearer} and after"),
+            provenance_uri: Some("memory://mem_preflight_bearer_audit".to_owned()),
+            severity: "high",
+            severity_source: "risk_memory",
+            score: 1.0,
+            matched_terms: vec!["safe-term".to_owned()],
+        }
+    }
+
+    fn audit_projection(
+        connection: &DbConnection,
+        audit_id: &str,
+    ) -> std::result::Result<(Option<String>, String), String> {
+        let entry = connection
+            .get_audit(audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("audit row {audit_id} must exist"))?;
+        let details = entry
+            .details
+            .ok_or_else(|| format!("audit row {audit_id} must have details"))?;
+        Ok((entry.actor, details))
+    }
+
+    fn assert_safe_audit_actor(
+        actor: Option<&str>,
+        bearer: &str,
+    ) -> std::result::Result<(), String> {
+        let actor = actor.ok_or_else(|| "preflight audit actor must be present".to_owned())?;
+        if actor.contains(bearer) {
+            return Err(format!(
+                "preflight audit actor exposed an approval bearer: {actor}"
+            ));
+        }
+        if !actor.contains("safe actor before [REDACTED:mesh_approval_token] and after") {
+            return Err(format!(
+                "preflight audit actor lost its safe redacted projection: {actor}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn assert_safe_audit_details(
+        details: &str,
+        bearer: &str,
+        expected_schema: &str,
+    ) -> std::result::Result<(), String> {
+        if details.contains(bearer) {
+            return Err(format!(
+                "preflight audit details exposed an approval bearer: {details}"
+            ));
+        }
+        if !details.contains("[REDACTED:mesh_approval_token]") {
+            return Err(format!(
+                "preflight audit details omitted the approval-bearer marker: {details}"
+            ));
+        }
+        if !details.contains("safe") || !details.contains("and after") {
+            return Err(format!(
+                "preflight audit redaction discarded useful safe context: {details}"
+            ));
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(details).map_err(|error| error.to_string())?;
+        if value.get("schema").and_then(serde_json::Value::as_str) != Some(expected_schema) {
+            return Err(format!(
+                "preflight audit retained the wrong schema after redaction: {details}"
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn preflight_halt_and_bypass_audits_scrub_mesh_approval_bearers() -> Result<(), String> {
+        let connection = test_connection()?;
+        let bearer = mesh_approval_bearer_canary();
+        if bearer.len() != crate::mesh::lane_grant::APPROVAL_TOKEN_BEARER_LEN {
+            return Err("approval bearer canary has the wrong length".to_owned());
+        }
+        let command = format!("safe command before {bearer} and after");
+        let expected_command_hash = bypass_command_scope_hash(&command, &[RULE_ID.to_owned()]);
+        let actor = format!("safe actor before {bearer} and after");
+
+        let halt = record_preflight_halt_audit(
+            &connection,
+            &RecordPreflightHaltAuditOptions {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                actor: Some(actor.clone()),
+                command: command.clone(),
+                matches: vec![guard_match(&bearer, MatchResolution::Enforced)],
+                matched_memories: vec![memory_match(&bearer)],
+                exit_code: 7,
+                checked_at: "2026-08-04T00:00:00Z".to_owned(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        if halt.command_hash != expected_command_hash {
+            return Err("halt audit command hash was not bound to the original command".to_owned());
+        }
+        let (halt_actor, halt_details) = audit_projection(&connection, &halt.audit_id)?;
+        assert_safe_audit_actor(halt_actor.as_deref(), &bearer)?;
+        assert_safe_audit_details(&halt_details, &bearer, PREFLIGHT_HALT_AUDIT_SCHEMA_V1)?;
+
+        let bypass = record_preflight_bypass_audit(
+            &connection,
+            &RecordPreflightBypassAuditOptions {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                token: "safe-preflight-bypass-token".to_owned(),
+                actor: Some(actor),
+                command,
+                matches: vec![guard_match(&bearer, MatchResolution::BypassedWithToken)],
+                matched_memories: vec![memory_match(&bearer)],
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        if bypass.command_hash != expected_command_hash {
+            return Err(
+                "bypass audit command hash was not bound to the original command".to_owned(),
+            );
+        }
+        let (bypass_actor, bypass_details) = audit_projection(&connection, &bypass.audit_id)?;
+        assert_safe_audit_actor(bypass_actor.as_deref(), &bearer)?;
+        assert_safe_audit_details(&bypass_details, &bearer, PREFLIGHT_BYPASS_AUDIT_SCHEMA_V1)
+    }
 }

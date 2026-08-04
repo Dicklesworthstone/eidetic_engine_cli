@@ -291,6 +291,9 @@ pub enum FlightRecorderError {
     InvalidDegradedCode {
         code: String,
     },
+    SensitiveInput {
+        field: &'static str,
+    },
     Io {
         path: PathBuf,
         message: String,
@@ -329,6 +332,10 @@ impl std::fmt::Display for FlightRecorderError {
             Self::InvalidDegradedCode { code } => {
                 write!(formatter, "invalid flight-recorder degraded code: {code}")
             }
+            Self::SensitiveInput { field } => write!(
+                formatter,
+                "flight-recorder {field} contained sensitive credential material"
+            ),
             Self::Io { path, message } => {
                 write!(
                     formatter,
@@ -482,17 +489,19 @@ pub fn append_workload_trace(
     trace: &AgentWorkloadTrace,
 ) -> Result<FlightRecorderAppendReport, FlightRecorderError> {
     let trace_path = options.trace_path();
-    ensure_trace_append_path_safe(&trace_path)?;
-    fs::create_dir_all(&options.directory).map_err(|error| FlightRecorderError::Io {
-        path: options.directory.clone(),
-        message: error.to_string(),
-    })?;
+    reject_mesh_approval_bearer("trace path", &trace_path.display().to_string())?;
     ensure_trace_append_path_safe(&trace_path)?;
     let mut line = serde_json::to_string(trace).map_err(|error| FlightRecorderError::Io {
         path: trace_path.clone(),
         message: error.to_string(),
     })?;
+    reject_mesh_approval_bearer("trace row", &line)?;
     line.push('\n');
+    fs::create_dir_all(&options.directory).map_err(|error| FlightRecorderError::Io {
+        path: options.directory.clone(),
+        message: error.to_string(),
+    })?;
+    ensure_trace_append_path_safe(&trace_path)?;
     let existing_bytes = match fs::symlink_metadata(&trace_path) {
         Ok(metadata) => metadata.len(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
@@ -632,6 +641,7 @@ fn replay_workload_trace_with_max_bytes(
     trace_path: &Path,
     max_bytes: u64,
 ) -> Result<FlightRecorderReplayReport, FlightRecorderError> {
+    reject_mesh_approval_bearer("trace path", &trace_path.display().to_string())?;
     let body = read_trace_body(trace_path, max_bytes)?;
     let trace_hash = format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex());
     let mut command_counts = BTreeMap::<String, usize>::new();
@@ -647,8 +657,23 @@ fn replay_workload_trace_with_max_bytes(
         if trimmed.is_empty() {
             continue;
         }
+        reject_mesh_approval_bearer("trace replay row", trimmed)?;
         match serde_json::from_str::<AgentWorkloadTrace>(trimmed) {
-            Ok(row) if row.schema == AGENT_WORKLOAD_TRACE_SCHEMA_V1 => {
+            Ok(row) => {
+                // Scan the decoded representation as well as the raw JSONL
+                // bytes above. JSON escapes can otherwise conceal a bearer
+                // prefix until serde materializes the string fields.
+                let decoded = serde_json::to_string(&row).map_err(|error| {
+                    FlightRecorderError::MalformedTrace {
+                        line: index + 1,
+                        message: error.to_string(),
+                    }
+                })?;
+                reject_mesh_approval_bearer("trace replay row", &decoded)?;
+                if row.schema != AGENT_WORKLOAD_TRACE_SCHEMA_V1 {
+                    malformed_lines = malformed_lines.saturating_add(1);
+                    continue;
+                }
                 row_count = row_count.saturating_add(1);
                 let command_key = command_key(&row.command.verbs);
                 *command_counts.entry(command_key).or_default() += 1;
@@ -664,7 +689,6 @@ fn replay_workload_trace_with_max_bytes(
                 memory_reference_count =
                     memory_reference_count.saturating_add(row.memory_references.len());
             }
-            Ok(_) => malformed_lines = malformed_lines.saturating_add(1),
             Err(error) => {
                 if row_count == 0 && malformed_lines == 0 {
                     return Err(FlightRecorderError::MalformedTrace {
@@ -822,6 +846,26 @@ fn ensure_trace_replay_path_safe(path: &Path, max_bytes: u64) -> Result<(), Flig
 }
 
 fn validate_inputs(inputs: &FlightRecorderInputs<'_>) -> Result<(), FlightRecorderError> {
+    reject_mesh_approval_bearer("recorded_at", inputs.recorded_at_rfc3339)?;
+    for verb in inputs.command.verbs {
+        reject_mesh_approval_bearer("command.verbs", verb)?;
+    }
+    for flag in inputs.command.flag_names {
+        reject_mesh_approval_bearer("command.flag_names", flag)?;
+    }
+    if let Some(output_format) = inputs.command.output_format {
+        reject_mesh_approval_bearer("command.output_format", output_format)?;
+    }
+    for hash in inputs.memory_hashes {
+        reject_mesh_approval_bearer("memory_hashes", hash)?;
+    }
+    if let Some(model_family) = inputs.harness_model_family {
+        reject_mesh_approval_bearer("harness_model_family", model_family)?;
+    }
+    for code in inputs.degraded_codes {
+        reject_mesh_approval_bearer("degraded_codes", code)?;
+    }
+
     if inputs.command.verbs.is_empty()
         || !inputs.command.verbs.iter().all(|verb| is_verb_token(verb))
     {
@@ -873,6 +917,21 @@ fn validate_inputs(inputs: &FlightRecorderInputs<'_>) -> Result<(), FlightRecord
                 code: (*code).to_string(),
             });
         }
+    }
+    Ok(())
+}
+
+fn reject_mesh_approval_bearer(
+    field: &'static str,
+    value: &str,
+) -> Result<(), FlightRecorderError> {
+    let redaction = crate::policy::redact_secret_like_content(value);
+    if redaction
+        .redacted_reasons
+        .iter()
+        .any(|reason| *reason == "mesh_approval_token")
+    {
+        return Err(FlightRecorderError::SensitiveInput { field });
     }
     Ok(())
 }
@@ -1219,6 +1278,19 @@ mod tests {
         }
     }
 
+    fn exact_length_mesh_approval_bearer() -> String {
+        let mut bearer = ["e", "e", "a", "p", "1", "_"].concat();
+        bearer.push_str(
+            &"A".repeat(crate::mesh::lane_grant::APPROVAL_TOKEN_BEARER_LEN - bearer.len()),
+        );
+        assert_eq!(
+            bearer.len(),
+            crate::mesh::lane_grant::APPROVAL_TOKEN_BEARER_LEN,
+            "fixture must exercise the complete production bearer boundary"
+        );
+        bearer
+    }
+
     #[test]
     fn baseline_record_produces_strict_redaction_trace_with_stable_id() {
         let inputs = baseline_inputs();
@@ -1482,6 +1554,127 @@ mod tests {
         let err = append_workload_trace(&options, &trace).expect_err("quota exceeded");
         assert!(matches!(err, FlightRecorderError::QuotaExceeded { .. }));
         assert!(!options.trace_path().exists());
+    }
+
+    #[test]
+    fn append_and_replay_reject_exact_length_mesh_approval_bearer() {
+        let bearer = exact_length_mesh_approval_bearer();
+        let degraded_codes = [bearer.as_str()];
+        let mut poisoned_inputs = baseline_inputs();
+        poisoned_inputs.degraded_codes = &degraded_codes;
+        let record_error = record_workload(&poisoned_inputs)
+            .expect_err("record boundary must reject an approval bearer");
+        assert!(!record_error.to_string().contains(&bearer));
+        assert!(matches!(
+            record_error,
+            FlightRecorderError::SensitiveInput {
+                field: "degraded_codes"
+            }
+        ));
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let options = FlightRecorderStorageOptions {
+            directory: temp.path().join("recorder"),
+            retention_days: 7,
+            max_bytes: 64 * 1024,
+        };
+        let mut trace = record_workload(&baseline_inputs()).expect("trace");
+        trace.harness_identity.model_family = Some(bearer.clone());
+
+        let append_error = append_workload_trace(&options, &trace)
+            .expect_err("append boundary must reject an approval bearer");
+        assert!(!append_error.to_string().contains(&bearer));
+        assert!(matches!(
+            append_error,
+            FlightRecorderError::SensitiveInput { field: "trace row" }
+        ));
+        assert!(
+            !options.trace_path().exists(),
+            "rejected append must not persist credential material"
+        );
+        assert!(
+            !options.directory.exists(),
+            "rejected append must not create the recorder directory"
+        );
+
+        std::fs::create_dir_all(&options.directory).expect("create replay fixture directory");
+        let serialized = serde_json::to_string(&trace).expect("serialize poisoned trace");
+        std::fs::write(options.trace_path(), format!("{serialized}\n"))
+            .expect("write replay boundary fixture");
+        let replay_error = replay_workload_trace(&options.trace_path())
+            .expect_err("replay boundary must reject an approval bearer");
+        assert!(!replay_error.to_string().contains(&bearer));
+        assert!(matches!(
+            replay_error,
+            FlightRecorderError::SensitiveInput {
+                field: "trace replay row"
+            }
+        ));
+    }
+
+    #[test]
+    fn replay_rejects_json_escaped_mesh_approval_bearer_after_decode() {
+        let bearer = exact_length_mesh_approval_bearer();
+        let mut trace = record_workload(&baseline_inputs()).expect("trace");
+        trace.degraded_codes = vec![bearer.clone()];
+        let serialized = serde_json::to_string(&trace).expect("serialize poisoned trace");
+        let escaped_prefix = format!("\\u0065{}", &bearer[1..]);
+        let escaped = serialized.replacen(&bearer, &escaped_prefix, 1);
+        assert_ne!(escaped, serialized, "fixture must replace the bearer");
+        assert!(
+            !escaped.contains(&bearer),
+            "raw replay fixture must conceal the prefix until JSON decoding"
+        );
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let trace_path = temp.path().join("agent-workload-trace.jsonl");
+        std::fs::write(&trace_path, format!("{escaped}\n")).expect("write escaped replay fixture");
+
+        let error = replay_workload_trace(&trace_path)
+            .expect_err("decoded replay boundary must reject an approval bearer");
+        assert!(!error.to_string().contains(&bearer));
+        assert!(matches!(
+            error,
+            FlightRecorderError::SensitiveInput {
+                field: "trace replay row"
+            }
+        ));
+    }
+
+    #[test]
+    fn append_and_replay_reject_mesh_approval_bearers_in_trace_paths() {
+        let bearer = exact_length_mesh_approval_bearer();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let options = FlightRecorderStorageOptions {
+            directory: temp.path().join(&bearer),
+            retention_days: 7,
+            max_bytes: 64 * 1024,
+        };
+        let trace = record_workload(&baseline_inputs()).expect("trace");
+
+        let append_error = append_workload_trace(&options, &trace)
+            .expect_err("append must reject a bearer-bearing output path");
+        assert!(!append_error.to_string().contains(&bearer));
+        assert!(matches!(
+            append_error,
+            FlightRecorderError::SensitiveInput {
+                field: "trace path"
+            }
+        ));
+        assert!(
+            !options.directory.exists(),
+            "rejected bearer-bearing trace path must not create directories"
+        );
+
+        let replay_error = replay_workload_trace(&options.trace_path())
+            .expect_err("replay must reject a bearer-bearing input path");
+        assert!(!replay_error.to_string().contains(&bearer));
+        assert!(matches!(
+            replay_error,
+            FlightRecorderError::SensitiveInput {
+                field: "trace path"
+            }
+        ));
     }
 
     #[cfg(unix)]

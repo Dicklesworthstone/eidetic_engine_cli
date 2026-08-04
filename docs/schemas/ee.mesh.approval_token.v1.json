@@ -2,14 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.mesh.approval_token.v1.json",
   "title": "ee.mesh.approval_token.v1",
-  "description": "Public projection of an explicitly issued, short-lived mesh lane-approval bearer. The opaque bearer contains the fresh nonce, nonce-salted keyed snapshot tag, bounded timestamps, and context-bound envelope MAC. Those internals are not separate public fields. This projection deliberately contains no stable store, workspace, or key identifier. Ordinary previews omit the entire object.",
+  "description": "Public projection of an explicitly issued, short-lived mesh lane-approval bearer. The opaque value contains the fresh nonce, nonce-salted keyed snapshot tag, bounded timestamps, and context-bound envelope MAC. Those internals are not separate public fields. This projection deliberately contains no stable store, workspace, or key identifier. Ordinary previews omit the entire object. An opted-in value may remain in a third-party stdout or session recorder until expiry; ee-controlled sinks must redact it.",
   "type": "object",
   "required": [
     "schema",
-    "sensitive",
-    "bearer",
+    "value",
     "expiresAt",
-    "externalRecorderResidual"
+    "handling"
   ],
   "additionalProperties": false,
   "properties": {
@@ -17,12 +16,7 @@
       "type": "string",
       "const": "ee.mesh.approval_token.v1"
     },
-    "sensitive": {
-      "type": "boolean",
-      "const": true,
-      "description": "Load-bearing marker: the bearer is a secret and must be redacted from ee-controlled tracing, errors, audit, support artifacts, and imported session material."
-    },
-    "bearer": {
+    "value": {
       "type": "string",
       "minLength": 157,
       "maxLength": 157,
@@ -33,10 +27,10 @@
       "$ref": "#/$defs/rfc3339",
       "description": "Expiry of this bearer. V1 issuance uses a 900-second TTL."
     },
-    "externalRecorderResidual": {
+    "handling": {
       "type": "string",
-      "const": "An opted-in approval bearer may be captured by a third-party stdout or session recorder until it expires.",
-      "description": "Named residual outside ee-controlled sinks; bounded by context binding, 15-minute expiry, and generation-CAS single use."
+      "const": "secret",
+      "description": "Load-bearing marker: redact the value from ee-controlled tracing, errors, audit, support artifacts, and imported session material."
     }
   },
   "$defs": {

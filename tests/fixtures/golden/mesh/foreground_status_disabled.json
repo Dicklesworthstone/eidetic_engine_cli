@@ -117,7 +117,7 @@
   },
   "repairCommands": [
     "ee init --workspace \"/tmp/ee-mesh\" --json",
-    "ee mesh export --workspace \"/tmp/ee-mesh\" --out mesh-export.json --json",
+    "ee mesh export --workspace \"/tmp/ee-mesh\" --peer <peer-id> --out mesh-export.json --json",
     "ee mesh import --workspace \"/tmp/ee-mesh\" --file mesh-export.json --json"
   ],
   "degraded": [

@@ -1086,7 +1086,7 @@ tailnet or local file-exchange path is part of the agent workflow.
 | `ee mesh preview-grant <peer-id> --lane <lane> --issue-approval-token --json` | Explicitly issue a sensitive, short-lived approval bearer bound to the canonical preview |
 | `ee mesh grant <peer-id> --lane <lane> --preview-token-stdin --json` | Verify a bearer from bounded stdin, advance the target generation, grant the lane, and audit atomically |
 | `ee mesh revoke-lane <peer-id> --lane <lane> --json` | Deny one lane, always advance its generation, invalidate prior previews, and audit atomically |
-| `ee mesh export --out <file> --json` | Write a redaction-safe foreground mesh artifact |
+| `ee mesh export --peer <peer-id> --out <file> --json` | Write a redaction-safe artifact for an enrolled, enabled peer; use `ee export` or `ee backup` for local backups |
 | `ee mesh import --file <file> --json` | Import a foreground mesh artifact from a local file |
 | `ee mesh sync --once --json` | Run one foreground sync cycle |
 
@@ -1109,7 +1109,7 @@ PEER_ID=peer_example123
 ee mesh preview-grant "$PEER_ID" --lane body --workspace . --json
 ee mesh preview-grant "$PEER_ID" --lane body --workspace . \
   --issue-approval-token --json \
-  | jq -r '.data.preview.approvalToken.bearer' \
+  | jq -r '.data.preview.approvalToken.value' \
   | ee mesh grant "$PEER_ID" --lane body --workspace . \
       --preview-token-stdin --json
 ee mesh revoke-lane "$PEER_ID" --lane body --workspace . --json
@@ -1118,7 +1118,11 @@ ee mesh revoke-lane "$PEER_ID" --lane body --workspace . --json
 Ordinary previews remain deterministic and contain no bearer. Explicitly
 issued approval tokens are secrets: do not log, persist, echo, or place them in
 arguments. They expire after 15 minutes and become stale when the target,
-policy, candidate revisions, redacted sample, or grant generation changes.
+policy, generic memory/mesh-ledger candidate revisions, source-derived
+redaction-scanner generation, redacted sample, or grant generation changes.
+Opted-in issuance necessarily writes the bearer to stdout. ee-controlled sinks
+scrub it, but external or third-party stdout/session recorders outside ee's
+control may retain it until the 15-minute expiry.
 Revocation stops future serving but cannot erase bytes a peer already cached or
 copied.
 
@@ -1949,7 +1953,7 @@ a raw Tailscale node key.
 | Surface | What to use |
 |---|---|
 | Deterministic preview | `ee mesh preview-grant <peer-id> --lane metadata --json` |
-| Explicit JSON grant | Pipe `.data.preview.approvalToken.bearer` from `preview-grant --issue-approval-token --json` into `ee mesh grant <peer-id> --lane metadata --preview-token-stdin --json` |
+| Explicit JSON grant | Pipe `.data.preview.approvalToken.value` from `preview-grant --issue-approval-token --json` into `ee mesh grant <peer-id> --lane metadata --preview-token-stdin --json` |
 | Narrow one lane | `ee mesh revoke-lane <peer-id> --lane metadata --json` |
 | Discovery consent | `ee mesh discovery-policy --explain --json` |
 | Share preview | `ee share preview --peer <peer> --json` |

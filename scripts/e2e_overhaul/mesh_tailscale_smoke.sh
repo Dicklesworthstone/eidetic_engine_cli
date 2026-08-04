@@ -199,11 +199,32 @@ run_ee_json() {
 STATUS_JSON="$(run_ee_json mesh_status mesh status)"
 assert_jq "$STATUS_JSON" '.success == true or .schema == "ee.mesh.status.v1"' "mesh_status_success"
 
+PEER_NODE_KEY="$(jq -r '.key // empty' "$PEER_JSON")"
+PEER_ENDPOINT="$(jq -r '.value.TailscaleIPs[0] // .value.DNSName // empty' "$PEER_JSON")"
+PEER_ALIAS="$(jq -r '.value.HostName // .value.DNSName // "real-tailnet-peer"' "$PEER_JSON")"
+if [ -z "$PEER_NODE_KEY" ] || [ -z "$PEER_ENDPOINT" ]; then
+    skip "requested peer did not expose the node key and endpoint required for enrollment"
+fi
+PEER_ADD_JSON="$(run_ee_json mesh_peer_add mesh peer add \
+    --alias "$PEER_ALIAS" \
+    --tailscale-node-key "$PEER_NODE_KEY" \
+    --endpoint "$PEER_ENDPOINT" \
+    --tailnet-id "real-tailnet-$PEER_HASH" \
+    --profile metadata-only \
+    --public-key-fingerprint "tailscale-smoke:$PEER_HASH" \
+    --responder-capability mesh:metadata \
+    --yes)"
+assert_jq "$PEER_ADD_JSON" '.success == true and .data.success == true' "mesh_peer_add_success"
+MESH_PEER_ID="$(jq -r '.data.peerId // empty' "$PEER_ADD_JSON")"
+if [ -z "$MESH_PEER_ID" ]; then
+    fail "mesh_peer_add" "peer enrollment did not return an opaque peerId"
+fi
+
 SYNC_JSON="$(run_ee_json mesh_sync mesh sync --once --peer-concurrency 1 --body-fetch-budget-bytes 65536 --time-budget-ms "${EE_REAL_TAILSCALE_SYNC_BUDGET_MS:-5000}")"
 assert_jq "$SYNC_JSON" '.success == true or .schema == "ee.mesh.sync.v1"' "mesh_sync_success"
 
 EXPORT_PATH="$ARTIFACT_DIR/mesh-export.json"
-EXPORT_JSON="$(run_ee_json mesh_export mesh export --out "$EXPORT_PATH")"
+EXPORT_JSON="$(run_ee_json mesh_export mesh export --peer "$MESH_PEER_ID" --out "$EXPORT_PATH")"
 assert_jq "$EXPORT_JSON" '.success == true or .schema == "ee.mesh.export.v1"' "mesh_export_success"
 assert_json_file "$EXPORT_PATH" "mesh_export_artifact"
 

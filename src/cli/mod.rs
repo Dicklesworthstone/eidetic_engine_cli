@@ -19376,10 +19376,12 @@ where
                     let _ = stdout.write_all(json.as_bytes());
                     let _ = stdout.write_all(b"\n");
                 } else {
-                    let _ = writeln!(stderr, "error: {}", domain_error.message());
+                    let mut rendered = format!("error: {}\n", domain_error.message());
                     if let Some(repair) = domain_error.repair() {
-                        let _ = writeln!(stderr, "\nNext:\n  {repair}");
+                        rendered.push_str(&format!("\nNext:\n  {repair}\n"));
                     }
+                    let rendered = output::redact_mesh_approval_bearers(&rendered);
+                    let _ = stderr.write_all(rendered.as_bytes());
                 }
                 return domain_error.exit_code();
             }
@@ -19411,9 +19413,10 @@ where
                 let _ = stdout.write_all(json.as_bytes());
                 let _ = stdout.write_all(b"\n");
             } else {
-                let error_str = error.to_string();
+                let error_str = output::redact_mesh_approval_bearers(&error.to_string());
                 let _ = stderr.write_all(error_str.as_bytes());
                 if let Some(hint) = suggestion {
+                    let hint = output::redact_mesh_approval_bearers(&hint);
                     let _ = stderr.write_all(b"\n\n");
                     let _ = stderr.write_all(hint.as_bytes());
                     let _ = stderr.write_all(b"\n");
@@ -25591,10 +25594,13 @@ where
                 "details": details,
             }
         });
-        let _ = stdout.write_all((json.to_string() + "\n").as_bytes());
+        let rendered = output::redact_mesh_approval_bearers(&(json.to_string() + "\n"));
+        let _ = stdout.write_all(rendered.as_bytes());
     } else {
-        let _ = writeln!(stderr, "error: {message}");
-        let _ = writeln!(stderr, "\nNext:\n  {repair}");
+        let rendered = output::redact_mesh_approval_bearers(&format!(
+            "error: {message}\n\nNext:\n  {repair}\n"
+        ));
+        let _ = stderr.write_all(rendered.as_bytes());
     }
     ProcessExitCode::Usage
 }
@@ -25614,10 +25620,14 @@ where
             "schema": crate::models::ERROR_SCHEMA_V2,
             "error": error.data_json(),
         });
-        let _ = stdout.write_all((json.to_string() + "\n").as_bytes());
+        let rendered = output::redact_mesh_approval_bearers(&(json.to_string() + "\n"));
+        let _ = stdout.write_all(rendered.as_bytes());
     } else {
-        let _ = writeln!(stderr, "error: {}", error.message);
-        let _ = writeln!(stderr, "\nNext:\n  {}", error.repair);
+        let rendered = output::redact_mesh_approval_bearers(&format!(
+            "error: {}\n\nNext:\n  {}\n",
+            error.message, error.repair
+        ));
+        let _ = stderr.write_all(rendered.as_bytes());
     }
     ProcessExitCode::Usage
 }
@@ -26036,6 +26046,7 @@ fn flight_recorder_error_to_domain(
         | crate::obs::flight_recorder::FlightRecorderError::InvalidModelFamily { .. }
         | crate::obs::flight_recorder::FlightRecorderError::InvalidRecordedAt { .. }
         | crate::obs::flight_recorder::FlightRecorderError::InvalidDegradedCode { .. }
+        | crate::obs::flight_recorder::FlightRecorderError::SensitiveInput { .. }
         | crate::obs::flight_recorder::FlightRecorderError::MalformedTrace { .. } => {
             DomainError::Usage {
                 message: error.to_string(),
@@ -26323,10 +26334,14 @@ where
             "schema": crate::models::ERROR_SCHEMA_V2,
             "error": error.data_json(),
         });
-        let _ = stdout.write_all((json.to_string() + "\n").as_bytes());
+        let rendered = output::redact_mesh_approval_bearers(&(json.to_string() + "\n"));
+        let _ = stdout.write_all(rendered.as_bytes());
     } else {
-        let _ = writeln!(stderr, "error: {}", error.message);
-        let _ = writeln!(stderr, "\nNext:\n  {}", error.repair);
+        let rendered = output::redact_mesh_approval_bearers(&format!(
+            "error: {}\n\nNext:\n  {}\n",
+            error.message, error.repair
+        ));
+        let _ = stderr.write_all(rendered.as_bytes());
     }
     ProcessExitCode::Usage
 }
@@ -42118,12 +42133,15 @@ where
             "schema": crate::models::ERROR_SCHEMA_V2,
             "error": error_json,
         });
-        let _ = stdout.write_all((json.to_string() + "\n").as_bytes());
+        let rendered = output::redact_mesh_approval_bearers(&(json.to_string() + "\n"));
+        let _ = stdout.write_all(rendered.as_bytes());
     } else {
-        let _ = writeln!(stderr, "error: {}: {}", error.code.as_str(), error.message);
+        let mut rendered = format!("error: {}: {}\n", error.code.as_str(), error.message);
         if let Some(repair) = &error.repair {
-            let _ = writeln!(stderr, "\nNext:\n  {repair}");
+            rendered.push_str(&format!("\nNext:\n  {repair}\n"));
         }
+        let rendered = output::redact_mesh_approval_bearers(&rendered);
+        let _ = stderr.write_all(rendered.as_bytes());
     }
     ProcessExitCode::Usage
 }
@@ -48550,10 +48568,12 @@ where
         let _ = stdout.write_all(output::error_response_json(error).as_bytes());
         let _ = stdout.write_all(b"\n");
     } else {
-        let _ = writeln!(stderr, "error: {}", error.message());
+        let mut rendered = format!("error: {}\n", error.message());
         if let Some(repair) = error.repair() {
-            let _ = writeln!(stderr, "\nNext:\n  {repair}");
+            rendered.push_str(&format!("\nNext:\n  {repair}\n"));
         }
+        let rendered = output::redact_mesh_approval_bearers(&rendered);
+        let _ = stderr.write_all(rendered.as_bytes());
     }
     error.exit_code()
 }
@@ -61811,7 +61831,7 @@ mod tests {
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json,
         read_environment_attestation_fixture_json, render_bootstrap_degradations, run,
-        write_context_stream_terminal_error, write_index_rebuild_error,
+        write_context_stream_terminal_error, write_domain_error, write_index_rebuild_error,
     };
     use crate::cass::CassImportError;
     use crate::config::MeshCommandMode;
@@ -61842,6 +61862,16 @@ mod tests {
     use crate::search::plan_cache::{DEFAULT_PLAN_CACHE_ENTRIES, EnvVarValueSource, PlanCache};
 
     type TestResult = Result<(), String>;
+
+    fn mesh_approval_bearer_canary() -> String {
+        // Assemble the fixed-width bearer without checking its recognizable
+        // credential prefix into this test source as one literal.
+        format!(
+            "{}{}",
+            ["e", "e", "a", "p", "1", "_"].concat(),
+            "A".repeat(151)
+        )
+    }
 
     #[test]
     fn cass_import_domain_error_envelope_and_details_are_public_safe() -> TestResult {
@@ -71330,6 +71360,266 @@ mod tests {
     }
 
     #[test]
+    fn domain_error_human_message_and_next_block_scrub_mesh_approval_bearers() -> TestResult {
+        let bearer = mesh_approval_bearer_canary();
+        ensure_equal(
+            &bearer.len(),
+            &crate::mesh::lane_grant::APPROVAL_TOKEN_BEARER_LEN,
+            "approval bearer canary length",
+        )?;
+        let error = DomainError::Usage {
+            message: format!("failed while handling {bearer}"),
+            repair: Some(format!("retry without {bearer}")),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = write_domain_error(&error, false, &mut stdout, &mut stderr);
+        let stderr = String::from_utf8(stderr)
+            .map_err(|error| format!("human error output must be UTF-8: {error}"))?;
+
+        ensure_equal(&exit, &ProcessExitCode::Usage, "human error exit")?;
+        ensure(stdout.is_empty(), "human error stdout must remain empty")?;
+        ensure(
+            !stderr.contains(&bearer),
+            "human error egress must not expose the approval bearer",
+        )?;
+        ensure_contains(
+            &stderr,
+            "error: failed while handling [REDACTED:mesh_approval_token]",
+            "redacted human error message",
+        )?;
+        ensure_contains(
+            &stderr,
+            "Next:\n  retry without [REDACTED:mesh_approval_token]",
+            "redacted human repair block",
+        )
+    }
+
+    #[test]
+    fn human_clap_parse_errors_scrub_mesh_approval_bearers() -> TestResult {
+        let bearer = mesh_approval_bearer_canary();
+        let (exit, stdout, stderr) = invoke(&["ee", bearer.as_str()]);
+
+        ensure_equal(&exit, &ProcessExitCode::Usage, "parse error exit")?;
+        ensure(
+            stdout.is_empty(),
+            "human parse error stdout must remain empty",
+        )?;
+        ensure(
+            !stderr.contains(&bearer),
+            "human Clap parse error must not echo the approval bearer",
+        )?;
+        ensure_contains(
+            &stderr,
+            "[REDACTED:mesh_approval_token]",
+            "human Clap parse-error redaction marker",
+        )
+    }
+
+    #[test]
+    fn recorder_usage_error_scrubs_mesh_approval_bearers_in_human_json_and_toon_modes() -> TestResult
+    {
+        let bearer = mesh_approval_bearer_canary();
+        let message = format!("safe recorder context before {bearer} and after");
+        let repair = format!("retry the safe recorder operation without {bearer}");
+        let details = serde_json::json!({
+            "safeField": "safe detail survives",
+            "nested": {"eventType": bearer.clone()},
+        });
+
+        let mut human_stdout = Vec::new();
+        let mut human_stderr = Vec::new();
+        let human_exit = super::write_recorder_event_usage_error(
+            false,
+            &mut human_stdout,
+            &mut human_stderr,
+            "safe_recorder_error",
+            message.clone(),
+            &repair,
+            details.clone(),
+        );
+        let human_stderr = String::from_utf8(human_stderr)
+            .map_err(|error| format!("recorder human error must be UTF-8: {error}"))?;
+        ensure_equal(
+            &human_exit,
+            &ProcessExitCode::Usage,
+            "recorder human error exit",
+        )?;
+        ensure(
+            human_stdout.is_empty(),
+            "recorder human error stdout must remain empty",
+        )?;
+        ensure(
+            !human_stderr.contains(&bearer),
+            "recorder human error must not expose the approval bearer",
+        )?;
+        ensure_contains(
+            &human_stderr,
+            "safe recorder context before [REDACTED:mesh_approval_token] and after",
+            "recorder human error keeps safe context",
+        )?;
+        ensure_contains(
+            &human_stderr,
+            "retry the safe recorder operation without [REDACTED:mesh_approval_token]",
+            "recorder human repair keeps safe context",
+        )?;
+
+        let mut json_stdout = Vec::new();
+        let mut json_stderr = Vec::new();
+        let json_exit = super::write_recorder_event_usage_error(
+            true,
+            &mut json_stdout,
+            &mut json_stderr,
+            "safe_recorder_error",
+            message,
+            &repair,
+            details,
+        );
+        let json_stdout = String::from_utf8(json_stdout)
+            .map_err(|error| format!("recorder JSON error must be UTF-8: {error}"))?;
+        ensure_equal(
+            &json_exit,
+            &ProcessExitCode::Usage,
+            "recorder JSON error exit",
+        )?;
+        ensure(
+            json_stderr.is_empty(),
+            "recorder JSON error stderr must remain empty",
+        )?;
+        ensure(
+            !json_stdout.contains(&bearer),
+            "recorder JSON error must not expose the approval bearer",
+        )?;
+        let json: serde_json::Value = serde_json::from_str(&json_stdout)
+            .map_err(|error| format!("recorder JSON error parses: {error}"))?;
+        ensure_equal(
+            &json
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str),
+            &Some("safe_recorder_error"),
+            "recorder JSON error keeps code",
+        )?;
+        ensure_equal(
+            &json
+                .pointer("/error/details/safeField")
+                .and_then(serde_json::Value::as_str),
+            &Some("safe detail survives"),
+            "recorder JSON error keeps safe detail",
+        )?;
+
+        let (toon_exit, toon_stdout, toon_stderr) = invoke(&[
+            "ee",
+            "--format",
+            "toon",
+            "recorder",
+            "event",
+            "run_safe",
+            "--event-type",
+            bearer.as_str(),
+            "--dry-run",
+        ]);
+        ensure_equal(
+            &toon_exit,
+            &ProcessExitCode::Usage,
+            "recorder TOON error exit",
+        )?;
+        ensure(
+            toon_stdout.is_empty(),
+            "recorder TOON error stdout must remain empty",
+        )?;
+        ensure(
+            !toon_stderr.contains(&bearer),
+            "recorder TOON error must not expose the approval bearer",
+        )?;
+        ensure_contains(
+            &toon_stderr,
+            "[REDACTED:mesh_approval_token]",
+            "recorder TOON error redaction marker",
+        )
+    }
+
+    #[test]
+    fn adjacent_recorder_error_sinks_scrub_mesh_approval_bearers() -> TestResult {
+        let bearer = mesh_approval_bearer_canary();
+        let validation_error = crate::core::recorder::RecorderEventError {
+            code: crate::core::recorder::RecorderEventRejectionCode::PayloadTooLarge,
+            message: format!("safe validation context before {bearer} and after"),
+            repair: format!("retry safe validation without {bearer}"),
+            payload_bytes: 2,
+            max_payload_bytes: 1,
+        };
+
+        for wants_json in [false, true] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = super::write_recorder_event_validation_error(
+                wants_json,
+                &mut stdout,
+                &mut stderr,
+                &validation_error,
+            );
+            let rendered = String::from_utf8([stdout, stderr].concat())
+                .map_err(|error| format!("validation error output must be UTF-8: {error}"))?;
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Usage,
+                "recorder validation error exit",
+            )?;
+            ensure(
+                !rendered.contains(&bearer),
+                "recorder validation error must not expose the approval bearer",
+            )?;
+            ensure_contains(
+                &rendered,
+                "safe validation context before [REDACTED:mesh_approval_token] and after",
+                "recorder validation error keeps safe context",
+            )?;
+        }
+
+        let import_error = crate::core::recorder::RecorderImportError {
+            code: crate::core::recorder::RecorderImportErrorCode::InvalidSourceShape,
+            message: format!("safe import context before {bearer} and after"),
+            repair: format!("retry safe import without {bearer}"),
+            details: Box::new(serde_json::json!({
+                "safeField": "safe import detail survives",
+                "nested": {"source": bearer.clone()},
+            })),
+        };
+
+        for wants_json in [false, true] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let exit = super::write_recorder_import_error(
+                wants_json,
+                &mut stdout,
+                &mut stderr,
+                &import_error,
+            );
+            let rendered = String::from_utf8([stdout, stderr].concat())
+                .map_err(|error| format!("recorder import error output must be UTF-8: {error}"))?;
+            ensure_equal(&exit, &ProcessExitCode::Usage, "recorder import error exit")?;
+            ensure(
+                !rendered.contains(&bearer),
+                "recorder import error must not expose the approval bearer",
+            )?;
+            ensure_contains(
+                &rendered,
+                "safe import context before [REDACTED:mesh_approval_token] and after",
+                "recorder import error keeps safe context",
+            )?;
+            if wants_json {
+                ensure_contains(
+                    &rendered,
+                    "safe import detail survives",
+                    "recorder import JSON error keeps safe nested detail",
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn stream_isolation_json_error_writes_to_stdout_only() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "--json", "not-a-command"]);
         ensure_equal(&exit, &ProcessExitCode::Usage, "json error exit")?;
@@ -75693,6 +75983,108 @@ mod tests {
             "query-file error details",
         )?;
         ensure(stderr.is_empty(), "pack json error stderr must be empty")
+    }
+
+    #[test]
+    fn query_file_error_scrubs_mesh_approval_bearers_in_human_json_and_toon_modes() -> TestResult {
+        let bearer = mesh_approval_bearer_canary();
+        let error = super::QueryFileError::new(
+            super::QueryFileErrorCode::InvalidFile,
+            format!("safe query context before {bearer} and after"),
+            Some(format!("retry safe query loading without {bearer}")),
+        );
+
+        let mut human_stdout = Vec::new();
+        let mut human_stderr = Vec::new();
+        let human_exit =
+            super::write_query_file_error(&error, false, &mut human_stdout, &mut human_stderr);
+        let human_stderr = String::from_utf8(human_stderr)
+            .map_err(|error| format!("query human error must be UTF-8: {error}"))?;
+        ensure_equal(
+            &human_exit,
+            &ProcessExitCode::Usage,
+            "query human error exit",
+        )?;
+        ensure(
+            human_stdout.is_empty(),
+            "query human error stdout must remain empty",
+        )?;
+        ensure(
+            !human_stderr.contains(&bearer),
+            "query human error must not expose the approval bearer",
+        )?;
+        ensure_contains(
+            &human_stderr,
+            "safe query context before [REDACTED:mesh_approval_token] and after",
+            "query human error keeps safe context",
+        )?;
+        ensure_contains(
+            &human_stderr,
+            "retry safe query loading without [REDACTED:mesh_approval_token]",
+            "query human repair keeps safe context",
+        )?;
+
+        let mut json_stdout = Vec::new();
+        let mut json_stderr = Vec::new();
+        let json_exit =
+            super::write_query_file_error(&error, true, &mut json_stdout, &mut json_stderr);
+        let json_stdout = String::from_utf8(json_stdout)
+            .map_err(|error| format!("query JSON error must be UTF-8: {error}"))?;
+        ensure_equal(&json_exit, &ProcessExitCode::Usage, "query JSON error exit")?;
+        ensure(
+            json_stderr.is_empty(),
+            "query JSON error stderr must remain empty",
+        )?;
+        ensure(
+            !json_stdout.contains(&bearer),
+            "query JSON error must not expose the approval bearer",
+        )?;
+        let json: serde_json::Value = serde_json::from_str(&json_stdout)
+            .map_err(|error| format!("query JSON error parses: {error}"))?;
+        ensure_equal(
+            &json
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str),
+            &Some("ERR_INVALID_QUERY_FILE"),
+            "query JSON error keeps code",
+        )?;
+        let json_message = json
+            .pointer("/error/message")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "query JSON error message must be a string".to_owned())?;
+        ensure_contains(
+            json_message,
+            "safe query context before",
+            "query JSON error keeps safe message",
+        )?;
+
+        let (toon_exit, toon_stdout, toon_stderr) = invoke(&[
+            "ee",
+            "--format",
+            "toon",
+            "pack",
+            "--query-file",
+            bearer.as_str(),
+        ]);
+        ensure_equal(&toon_exit, &ProcessExitCode::Usage, "query TOON error exit")?;
+        ensure(
+            toon_stdout.is_empty(),
+            "query TOON error stdout must remain empty",
+        )?;
+        ensure(
+            !toon_stderr.contains(&bearer),
+            "query TOON error must not expose the approval bearer",
+        )?;
+        ensure_contains(
+            &toon_stderr,
+            "ERR_QUERY_FILE_NOT_FOUND",
+            "query TOON error keeps stable code",
+        )?;
+        ensure_contains(
+            &toon_stderr,
+            "[REDACTED:mesh_approval_token]",
+            "query TOON error redaction marker",
+        )
     }
 
     #[test]
