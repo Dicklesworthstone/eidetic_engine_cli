@@ -302,4 +302,31 @@ fn remember_typed_field_errors_are_stable_and_structured() {
         serde_json::from_str(&stdout).expect("malformed-field JSON response");
     assert_eq!(malformed["error"]["code"], "typed_field_invalid");
     assert_eq!(malformed["error"]["details"]["field"], "cause");
+
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--workspace",
+        &workspace,
+        "remember",
+        "A failure with no assignment separator.",
+        "--kind",
+        "failure",
+        "--field",
+        secret_like_value,
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(
+        exit,
+        ProcessExitCode::Usage,
+        "bare malformed field stderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains(secret_like_value) && !stderr.contains(secret_like_value),
+        "bare malformed values must not be reflected: stdout={stdout:?} stderr={stderr:?}"
+    );
+    let bare: serde_json::Value =
+        serde_json::from_str(&stdout).expect("bare malformed-field JSON response");
+    assert_eq!(bare["error"]["code"], "typed_field_invalid");
+    assert_eq!(bare["error"]["details"]["field"], "fields");
 }

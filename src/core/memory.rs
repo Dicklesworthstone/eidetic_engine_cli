@@ -2323,7 +2323,7 @@ fn prepare_remember_memory_with_store(
         .map_err(|error| remember_usage_error(error.to_string()))?;
     let kind = MemoryKind::from_str(options.kind)
         .map_err(|error| remember_usage_error(error.to_string()))?;
-    let explicit_field_hint = typed_assignment_field_hint(typed_field_assignments);
+    let explicit_field_hint = typed_assignment_field_hint(&kind, typed_field_assignments);
     let explicit_unredacted =
         crate::models::memory::canonicalize_typed_memory_field_assignments_json_with_redactor(
             &kind,
@@ -5718,7 +5718,7 @@ fn remember_usage_error(message: String) -> DomainError {
     }
 }
 
-fn typed_assignment_field_hint(assignments: &[String]) -> Option<String> {
+fn typed_assignment_field_hint(kind: &MemoryKind, assignments: &[String]) -> Option<String> {
     let assignment = assignments.first()?.trim();
     let separator = assignment
         .char_indices()
@@ -5728,10 +5728,10 @@ fn typed_assignment_field_hint(assignments: &[String]) -> Option<String> {
     if raw_field.is_empty() {
         return None;
     }
-    Some(
-        crate::models::memory::normalize_typed_memory_field_name(raw_field)
-            .unwrap_or_else(|_| raw_field.to_owned()),
-    )
+    let field = crate::models::memory::normalize_typed_memory_field_name(raw_field).ok()?;
+    crate::models::memory::typed_memory_field_names(kind)
+        .contains(&field)
+        .then_some(field)
 }
 
 fn typed_field_validation_error(
@@ -6073,7 +6073,7 @@ fn remember_request_hash(
     }
     let kind = MemoryKind::from_str(options.kind)
         .map_err(|error| remember_usage_error(error.to_string()))?;
-    let field_hint = typed_assignment_field_hint(typed_field_assignments);
+    let field_hint = typed_assignment_field_hint(&kind, typed_field_assignments);
     let typed_fields =
         crate::models::memory::canonicalize_typed_memory_field_assignments_json_with_redactor(
             &kind,

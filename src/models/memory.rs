@@ -403,7 +403,9 @@ where
                 .unwrap_or(assignment.len());
             let raw_field = assignment[..separator].trim();
             let field = normalize_typed_memory_field_name(raw_field)
-                .unwrap_or_else(|_| raw_field.to_owned());
+                .ok()
+                .filter(|field| typed_memory_field_spec(specs, field).is_some())
+                .unwrap_or_else(|| "fields".to_owned());
             return Err(MemoryValidationError::TypedFieldInvalid {
                 field,
                 reason: "assignment must use NAME=VALUE; `~` and `^` are search-only separators"
