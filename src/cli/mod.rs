@@ -2087,6 +2087,10 @@ pub enum ClaimCommand {
     /// Show details for a specific claim.
     Show(ClaimShowArgs),
     /// Verify a claim's evidence artifacts.
+    ///
+    /// Exit codes: 0 when every selected claim passes; 9 (eval failure) when
+    /// any claim fails verification; 1 for usage errors (bad claims file or
+    /// unknown claim id).
     Verify(ClaimVerifyArgs),
 }
 
@@ -53612,8 +53616,26 @@ where
     };
 
     match crate::core::claims::build_claim_verify_report(&options) {
-        Ok(report) => write_claim_verify_report(cli, &report, stdout),
+        Ok(report) => {
+            let write_exit = write_claim_verify_report(cli, &report, stdout);
+            claim_verify_exit_code(&report, write_exit)
+        }
         Err(error) => write_claim_error(&error, cli, stdout, stderr),
+    }
+}
+
+/// Exit-code contract for `ee claim verify`: any claim that fails verification
+/// must surface as a non-zero exit so `ee claim verify all && …` cannot report
+/// a healthy workspace over red claims (GH#24). Verification failure maps to
+/// `EvalFailure` (9), matching the eval-gate convention; write errors keep
+/// their own code.
+const fn claim_verify_exit_code(
+    report: &crate::core::claims::ClaimVerifyReport,
+    write_exit: ProcessExitCode,
+) -> ProcessExitCode {
+    match write_exit {
+        ProcessExitCode::Success if report.failed_count > 0 => ProcessExitCode::EvalFailure,
+        other => other,
     }
 }
 
@@ -79476,6 +79498,43 @@ demos:
     fn did_you_mean_subcommand_claim_verify() -> TestResult {
         let suggestion = super::did_you_mean("verfy", Some("claim"));
         ensure_equal(&suggestion, &Some("verify".to_string()), "verfy -> verify")
+    }
+
+    /// GH#24 regression: `ee claim verify` must exit non-zero (EvalFailure)
+    /// when any claim fails verification, and stay zero when all pass.
+    #[test]
+    fn claim_verify_exit_code_maps_failed_claims_to_eval_failure() -> TestResult {
+        fn report(failed_count: usize) -> crate::core::claims::ClaimVerifyReport {
+            crate::core::claims::ClaimVerifyReport {
+                schema: crate::core::claims::CLAIM_VERIFY_SCHEMA_V1,
+                claim_id: "all".to_string(),
+                verify_all: true,
+                claims_file: ".ee/claims.yaml".to_string(),
+                artifacts_dir: "artifacts".to_string(),
+                total_claims: 2,
+                verified_count: 2 - failed_count,
+                failed_count,
+                skipped_count: 0,
+                results: Vec::new(),
+                fail_fast: false,
+            }
+        }
+
+        ensure_equal(
+            &super::claim_verify_exit_code(&report(0), ProcessExitCode::Success),
+            &ProcessExitCode::Success,
+            "all claims pass -> exit 0",
+        )?;
+        ensure_equal(
+            &super::claim_verify_exit_code(&report(1), ProcessExitCode::Success),
+            &ProcessExitCode::EvalFailure,
+            "failing claim -> exit 9 (EvalFailure)",
+        )?;
+        ensure_equal(
+            &super::claim_verify_exit_code(&report(1), ProcessExitCode::Storage),
+            &ProcessExitCode::Storage,
+            "write error keeps its own exit code",
+        )
     }
 
     #[test]
