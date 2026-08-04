@@ -1952,6 +1952,8 @@ fn detect_pem_block_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>
 
 fn detect_raw_api_token_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
     const RAW_TOKEN_PATTERNS: &[(&str, &str, usize, bool)] = &[
+        // Authenticated mesh lane/body approval bearers: eeap1_...
+        ("eeap1_", "mesh_approval_token", 16, false),
         ("sk-ant-api03-", "anthropic_api_key", 40, false),
         ("sk-proj-", "openai_api_key", 40, false),
         ("sk-", "openai_api_key", 48, false),
@@ -1995,7 +1997,11 @@ fn detect_raw_api_token_matches(input: &str, matches: &mut Vec<SecretRedactionMa
             };
             let token_start = search_start + relative;
             let after_prefix = token_start + prefix.len();
-            if token_start > 0
+            // The eeap1_ marker is deliberately recognizable so every
+            // ee-controlled text path can scrub a leaked approval bearer even
+            // when a recorder/tag has fused it to an identifier prefix.
+            if code != "mesh_approval_token"
+                && token_start > 0
                 && input.as_bytes().get(token_start - 1).is_some_and(|byte| {
                     byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-'
                 })
@@ -2599,6 +2605,8 @@ fn redact_raw_api_tokens_with_boundary(
     let mut changed = false;
 
     const RAW_TOKEN_PATTERNS: &[(&str, &str, usize, bool)] = &[
+        // Authenticated mesh lane/body approval bearers: eeap1_...
+        ("eeap1_", "mesh_approval_token", 16, false),
         // Anthropic API keys: sk-ant-api03-...
         ("sk-ant-api03-", "anthropic_api_key", 40, false),
         // OpenAI project keys: sk-proj-...
@@ -2668,7 +2676,11 @@ fn redact_raw_api_tokens_with_boundary(
             let token_start = search_start + relative;
             let after_prefix = token_start + prefix.len();
 
-            if require_left_boundary && token_start > 0 {
+            // Approval bearers intentionally match at any byte position. Their
+            // eeap1_ prefix plus bounded long suffix is specific enough to
+            // prioritize leak prevention over the boundary policy used for
+            // common provider-token prefixes.
+            if require_left_boundary && code != "mesh_approval_token" && token_start > 0 {
                 if let Some(byte) = output.as_bytes().get(token_start - 1) {
                     if byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-' {
                         search_start = after_prefix;
@@ -4507,6 +4519,75 @@ mod tests {
         assert!(!report.content.contains(&gho));
         assert!(!report.content.contains(&ghs));
         assert!(!report.content.contains(&github_pat));
+    }
+
+    #[test]
+    fn central_redaction_masks_mesh_approval_bearers_on_all_text_paths() {
+        // A v1 lane/body approval envelope encodes to 151 base64url bytes after
+        // the recognizable prefix. Construct it in pieces so the test source
+        // itself never resembles a usable bearer.
+        let bearer = synthetic_raw_value(&["e", "e", "a", "p", "1", "_"], 151);
+        let content = format!("approval bearer: {bearer}");
+
+        let stored = redact_secret_like_content(&content);
+        assert!(stored.redacted);
+        assert!(stored.redacted_reasons.contains(&"mesh_approval_token"));
+        assert!(!stored.content.contains(&bearer));
+        assert!(
+            stored
+                .content
+                .contains(&redaction_placeholder("mesh_approval_token"))
+        );
+        let partial_bearer = synthetic_raw_value(&["e", "e", "a", "p", "1", "_"], 16);
+        let partial = redact_secret_like_content(&format!("truncated={partial_bearer}"));
+        assert!(partial.redacted);
+        assert!(partial.redacted_reasons.contains(&"mesh_approval_token"));
+        assert!(!partial.content.contains(&partial_bearer));
+
+        let ingested = screen_external_text_for_ingestion(&content);
+        assert!(ingested.redacted);
+        assert!(
+            ingested
+                .redacted_reasons
+                .iter()
+                .any(|reason| reason == "mesh_approval_token")
+        );
+        assert!(!ingested.content.contains(&bearer));
+
+        // Tags, tracing labels, replay, and support material can fuse the
+        // bearer to an identifier. The recognizable eeap1_ prefix is the one
+        // raw-token family that intentionally ignores the usual left boundary.
+        let fused = format!("diagnostic-{bearer}");
+        let fused_stored = redact_secret_like_content(&fused);
+        assert!(fused_stored.redacted);
+        assert!(
+            fused_stored
+                .redacted_reasons
+                .contains(&"mesh_approval_token")
+        );
+        assert!(!fused_stored.content.contains(&bearer));
+        let replay = redact_public_replay_text(&fused);
+        assert!(replay.redacted);
+        assert!(replay.redacted_reasons.contains(&"mesh_approval_token"));
+        assert!(!replay.content.contains(&bearer));
+
+        let scan = scan_mesh_export_subjects(&[MeshExportSecretScanSubject::new(
+            "approval",
+            "lane-grant",
+            "bearer",
+            &content,
+        )]);
+        assert!(scan.denied());
+        assert!(
+            scan.denied_secret_classes
+                .iter()
+                .any(|class| class == "mesh_approval_token")
+        );
+        assert!(
+            !serde_json::to_string(&scan)
+                .expect("render scan")
+                .contains(&bearer)
+        );
     }
 
     #[test]

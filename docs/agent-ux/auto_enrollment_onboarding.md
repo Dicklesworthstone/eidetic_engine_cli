@@ -30,13 +30,15 @@ The safe agent order is:
 ee status --workspace . --json
 ee mesh status --workspace . --json
 ee mesh auto-enroll --workspace . --dry-run --json
-ee mesh preview-grant <node-key> --lane metadata --workspace . --json
+ee mesh peers --workspace . --json                 # choose an opaque peerId
+ee mesh preview-grant <peer-id> --lane metadata --workspace . --json
 ee pack "audit release readiness" --workspace . --mesh revisable --json
 ```
 
 Stop before the mutating `ee mesh auto-enroll --json`, `ee mesh disable`,
-`ee mesh revoke`, `ee mesh discovery-policy set|allow|deny`, or any body /
-embedding grant unless the operator has asked for that exact state change.
+`ee mesh peer revoke`, `ee mesh grant`, `ee mesh revoke-lane`,
+`ee mesh discovery-policy set|allow|deny`, or any body / embedding grant unless
+the operator has asked for that exact state change.
 Never describe a mesh denial as a broken local memory system; it is usually the
 policy layer doing its job.
 
@@ -149,15 +151,18 @@ tailscale shields-up).
 | `ee mesh auto-enroll --replace-manual-with-auto --json` | same as auto-enroll | YES (migration audit row) |
 | `ee mesh disable --workspace . --json` | `ee.mesh.disable_result.v1` | YES (rollback audit row) |
 | `ee mesh disable --dry-run --json` | same | no |
-| `ee mesh revoke <node-key> --json` | `ee.mesh.revoke_result.v1` | YES (per-peer + denylist) |
+| `ee mesh peer revoke <peer-id> --json` | peer command result | YES (all lanes for one enrolled peer) |
 | `ee mesh hello-responder status --json` | `ee.mesh.hello_responder.status.v1` | no |
 | `ee mesh steward status --json` | `ee.mesh.steward.status.v1` | no |
 | `ee mesh steward run-now --json` | same | YES (when steward enabled) |
 | `ee mesh discovery-policy --json` | `ee.mesh.discovery_policy.v1` | no |
-| `ee mesh discovery-policy set --mode <m>` | same | YES (writes `.ee/config.toml`) |
+| `ee mesh discovery-policy set --discovery-mode <m> --respond-mode <m>` | same | YES (writes workspace discovery policy) |
 | `ee mesh discovery-policy allow <node-key>` | same | YES (writes allowlist) |
 | `ee mesh discovery-policy deny <node-key>` | same | YES (writes denylist) |
-| `ee mesh preview-grant <node-key> --lane <lane> --json` | `ee.mesh.lane_grant_preview.v1` | no |
+| `ee mesh preview-grant <peer-id> --lane <lane> --json` | `ee.mesh.lane_grant_preview.v2` (token-free) | no |
+| `ee mesh preview-grant <peer-id> --lane <lane> --issue-approval-token --json` | `ee.mesh.lane_grant_preview.v2` + `approvalToken` (`ee.mesh.approval_token.v1`) | no policy/audit mutation; emits a secret bearer |
+| `ee mesh grant <peer-id> --lane <lane> --preview-token-stdin --json` | `ee.mesh.grant.v1` | YES (authenticated grant + generation CAS + audit in one transaction) |
+| `ee mesh revoke-lane <peer-id> --lane <lane> --json` | `ee.mesh.revoke_lane.v1` | YES (deny + generation advance + audit in one transaction) |
 | `ee doctor --json` | `ee.doctor.v1` (with `categorized.mesh_auto_enroll` block) | no |
 
 ## The Status Surface
@@ -330,27 +335,74 @@ every step):
 | `steward_auto_enroll_disabled` | info | `EE_MESH_AUTO_ENROLL_ON_DEMAND=0` (default) | Set the env var if you want auto-reconciliation |
 | `mesh_peer_policy_denied` | medium | SRR6.5 peer policy denied the requested mesh lane | Review trust and lane policy before retrying |
 | `mesh_peer_human_explicit_filtered` | medium | Human-explicit memories were filtered from peer exposure | Use preview-grant and explicit policy before widening access |
+| `mesh_approval_token_invalid` | high | Bearer is malformed, tampered with, from another workspace/store/surface, or signed by a non-current key | Discard it and explicitly issue a fresh token after reviewing a new preview |
+| `mesh_approval_token_stale` | warning | Authenticated bearer expired or its canonical preview no longer matches current target/policy/revisions/sample/generation | Re-run the ordinary preview, review the drift, then explicitly issue a new token |
+| `mesh_store_authentication_unavailable` | high | The workspace store-auth root is missing or unreadable | Run `ee doctor --json`; do not grant until local authentication is repaired |
 
 ## Safety Patterns
 
 ### Always preview before granting body/embedding lanes
 
 ```bash
-ee mesh preview-grant <node-key> --lane body --workspace . --json
+PEER_ID=peer_example123
+ee mesh preview-grant "$PEER_ID" --lane body --workspace . --json
 ```
 
-Returns `ee.mesh.lane_grant_preview.v1` with:
+Select `PEER_ID` from `ee mesh peers --workspace . --json`. It is an opaque
+enrolled-peer lookup handle, not a raw Tailscale node key and not a
+cryptographic identity. The ordinary command returns the deterministic,
+token-free `ee.mesh.lane_grant_preview.v2` snapshot with:
 
+- `target.peerId` and `grantGeneration` — the exact opaque target and its
+  compare-and-swap generation.
+- `currentPolicy.generation` / `proposedPolicy.generation` — the exact policy
+  inputs bound into consent.
+- `candidateSet[]` — the complete revision-pinned candidate set, not only the
+  sample.
 - `affectedMemoryCount` — total memories that become visible.
 - `redactedFromExposureCount` — how many of those still have redacted fields.
-- `previewSample[]` — sampled memory rows so you can spot-check.
-- `cautions[]` — explicit hazards:
+- `previewSampleStrategy`, `previewSampleLimit`, and `previewSample[]` — the
+  exact ordered, redacted sample shown to the operator.
+- `cautionCodes[]` and `cautions[]` — canonical hazards bound into approval,
+  including:
   - `high_trust_class_exposure` — `trust_class=human_explicit` memories exposed.
   - `large_volume_exposure` — >1000 memories exposed.
   - `sensitive_tags_in_exposure` — memories tagged `secret` / `private` / `personal` / `internal` exposed.
-  - `cross_workspace_overlap` — memories also bound to other workspaces.
+  - `tombstoned_in_exposure` or `redaction_active` — a sampled revision is
+    tombstoned or still constrained by redaction.
+  - `peer_not_in_group` or `lane_already_granted` — the target/group or current
+    decision needs operator attention.
 
 Treat any non-empty `cautions[]` as a stop-and-think signal.
+
+Human mode (`ee mesh grant ...` without `--json`) renders that same canonical
+preview and asks `y/N`; its internal bearer is never printed. Robot mode must
+request issuance explicitly and pass only the bearer through bounded stdin:
+
+```bash
+ee mesh preview-grant "$PEER_ID" --lane body --workspace . \
+  --issue-approval-token --json \
+  | jq -r '.data.preview.approvalToken.bearer' \
+  | ee mesh grant "$PEER_ID" --lane body --workspace . \
+      --preview-token-stdin --json
+```
+
+The bearer is a marked-sensitive secret with a 15-minute lifetime. Do not put
+it in command arguments, a shell variable, logs, audit notes, support bundles,
+or session transcripts. Ordinary previews never contain it. Grant verification
+authenticates the token before comparing the canonical snapshot, then commits
+the generation compare-and-swap, allow decision, and audit row atomically.
+
+Narrowing a lane does not require an approval token:
+
+```bash
+ee mesh revoke-lane "$PEER_ID" --lane body --workspace . --json
+```
+
+Revocation always advances the target generation, even when the lane was
+already denied, so every earlier preview remains stale. It stops future
+serving; `remoteErasureGuaranteed` is always `false` because `ee` cannot erase
+bytes the peer already cached or copied.
 
 ### Forensic correlation via summaryHash
 
@@ -368,11 +420,13 @@ they reversed, so a "what was undone, and when" query is two index lookups.
 
 ### Pure-read invariant
 
-`ee mesh status`, `ee mesh hello-responder status`, `ee mesh steward status`,
+`ee mesh status`, `ee mesh hello-responder status`, an ordinary token-free
 `ee mesh preview-grant`, and `ee mesh discovery-policy --explain` are all
-read-only. They never write peer-group rows, never write audit rows. The
-only mutating mesh commands are `auto-enroll`, `disable`, `revoke`,
-`discovery-policy set|allow|deny`, and `steward run-now` (when enabled).
+read-only. They never write peer-group rows or audit rows. Explicit token
+issuance also does not change lane policy, but it produces a non-deterministic
+secret and must not be used for polling. Mutating mesh commands include
+`auto-enroll`, `disable`, `peer revoke`, `grant`, `revoke-lane`, and
+`discovery-policy set|allow|deny`.
 
 If your agent harness needs to poll mesh state between operations, prefer
 `ee mesh status --json` (which hits the 30s discovery cache by default).
@@ -421,7 +475,9 @@ ee audit timeline \
 - It does **not** decide which memories peers can read. SRR6.5 trust + lane
   policy owns that. Conservative defaults (deny body/embedding/graph_link)
   ship out of the box; widening is explicit via `ee mesh grant` after
-  reviewing `ee mesh preview-grant`.
+  reviewing the token-free `ee.mesh.lane_grant_preview.v2` snapshot. Robot
+  grants additionally require an explicitly issued approval bearer on bounded
+  stdin.
 - It does **not** sync memories on its own schedule. SRR6.46.14 steward is
   opt-in via `EE_MESH_AUTO_ENROLL_ON_DEMAND=1`. Without that, drift is
   surfaced but not automatically reconciled.
@@ -448,8 +504,13 @@ ee audit timeline \
 - `docs/schemas/ee.mesh.hello.response.v1.json` — successful hello response
 - `docs/schemas/ee.mesh.hello.error.v1.json` — privacy-preserving decline
   response
-- `docs/schemas/ee.mesh.lane_grant_preview.v1.json` — pre-grant visibility
-  audit
+- `docs/schemas/ee.mesh.lane_grant_preview.v2.json` — canonical, revision-pinned
+  pre-grant visibility and consent snapshot
+- `docs/schemas/ee.mesh.approval_token.v1.json` — sensitive short-lived bearer
+  projection emitted only on explicit issuance
+- `docs/schemas/ee.mesh.grant.v1.json` — atomic authenticated grant result
+- `docs/schemas/ee.mesh.revoke_lane.v1.json` — atomic lane-narrowing result and
+  remote-erasure residual
 - `docs/schemas/ee.repair_action_graph.v1.json` — shared status/doctor
   remediation graph
 - `docs/migration-guide.md` — v0.3.0 migration notes (added when

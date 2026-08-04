@@ -66,7 +66,7 @@ use crate::search::{
 #[cfg(test)]
 use crate::search::HashEmbedder;
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
-use frankensearch::LexicalSearch;
+use frankensearch::LexicalRead;
 
 pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 pub const DIAG_SEARCH_SCHEMA_V1: &str = "ee.diag.search.v1";
@@ -7933,7 +7933,7 @@ fn diag_search_sync(
 #[cfg(feature = "lexical-bm25")]
 fn open_lexical_searcher_for_diag(
     index_dir: &Path,
-) -> Result<Option<Arc<dyn LexicalSearch>>, String> {
+) -> Result<Option<Arc<dyn LexicalRead>>, String> {
     open_lexical_searcher(index_dir)
 }
 
@@ -7944,7 +7944,7 @@ fn open_lexical_searcher_for_diag(
 )]
 fn open_lexical_searcher_for_diag(
     _index_dir: &Path,
-) -> Result<Option<Arc<dyn LexicalSearch>>, String> {
+) -> Result<Option<Arc<dyn LexicalRead>>, String> {
     Ok(None)
 }
 
@@ -10121,14 +10121,14 @@ fn attach_lexical_searcher(
 }
 
 #[cfg(feature = "lexical-bm25")]
-fn open_lexical_searcher(index_dir: &Path) -> Result<Option<Arc<dyn LexicalSearch>>, String> {
+fn open_lexical_searcher(index_dir: &Path) -> Result<Option<Arc<dyn LexicalRead>>, String> {
     let lexical_dir = index_dir.join("lexical");
     if !lexical_dir.exists() {
         return Ok(None);
     }
 
     TantivyIndex::open(&lexical_dir)
-        .map(|lexical| Some(Arc::new(lexical) as Arc<dyn LexicalSearch>))
+        .map(|lexical| Some(Arc::new(lexical) as Arc<dyn LexicalRead>))
         .map_err(|error| {
             format!(
                 "Failed to open lexical index at {}: {error}",
@@ -10142,7 +10142,7 @@ fn open_lexical_searcher(index_dir: &Path) -> Result<Option<Arc<dyn LexicalSearc
     clippy::unnecessary_wraps,
     reason = "signature mirrors the lexical-bm25 implementation"
 )]
-fn open_lexical_searcher(_index_dir: &Path) -> Result<Option<Arc<dyn LexicalSearch>>, String> {
+fn open_lexical_searcher(_index_dir: &Path) -> Result<Option<Arc<dyn LexicalRead>>, String> {
     Ok(None)
 }
 

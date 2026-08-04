@@ -1,35 +1,10 @@
-//! bd-36bbk.1.17 — structural contract for the SRR6.46.17 pre-grant
-//! lane visibility audit schema (`ee.mesh.lane_grant_preview.v1`).
+//! bd-tc-epic-qzk7o.2.2 — authenticated mesh lane approval contracts.
 //!
-//! The pure-decision module at `src/mesh/lane_grant_preview.rs`
-//! computes the preview rows + cautions; this contract pins the
-//! wire shape so a future renderer or trust-policy refactor can't
-//! drift the schema without an explicit update here.
-//!
-//! Asserts:
-//!
-//! 1. The schema file exists at the canonical path and parses.
-//! 2. `$id`, `title`, and `properties.schema.const` agree on
-//!    `ee.mesh.lane_grant_preview.v1`.
-//! 3. The required top-level fields match what the pure module emits.
-//! 4. `additionalProperties: false` at the top level — read-only
-//!    surface, no drift fields.
-//! 5. `lane` enum is the closed set of six SRR6 trust lanes
-//!    (`metadata`, `body`, `embedding`, `graph_link`,
-//!    `curation_signal`, `revision_notice`) matching
-//!    `IntendedLanePolicy` field names.
-//! 6. `laneDecision` enum is `allow | quarantine | deny`.
-//! 7. `trustClass` enum is the closed five-class set.
-//! 8. `caution.kind` enum is the closed seven-kind set the bead
-//!    acceptance names.
-//! 9. `caution.severity` is restricted to `info | warning` only —
-//!    the read-only computation cannot take an `error` path.
-//! 10. `previewSampleStrategy` enum is the closed three-strategy set.
-//! 11. `previewRow` required fields match the bead's documented row
-//!    shape.
-//! 12. `caution` and `policySnapshot` nested required fields stay
-//!    exact, so renderers and pure-decision callers cannot drift the
-//!    supporting object shapes quietly.
+//! ADR 0086 supersedes the historical raw-node-key v1 preview at runtime.
+//! This contract pins the canonical v2 snapshot, its optional sensitive
+//! approval-token projection, and the generation-advancing grant/revoke
+//! mutation results. The historical v1 JSON file remains documentation, but
+//! it must no longer be published through `ee schema list/export`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -37,26 +12,48 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
+use ee::mesh::lane_grant::{APPROVAL_TOKEN_BEARER_LEN, APPROVAL_TOKEN_SCHEMA_V1};
+use ee::mesh::lane_grant_preview::{
+    LANE_GRANT_PREVIEW_COPY_VERSION, LANE_GRANT_PREVIEW_SCHEMA_V2,
+    LANE_GRANT_TARGET_ADAPTER_VERSION,
+};
+use ee::output::{public_schemas, render_schema_export_json};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
-const SCHEMA_PATH: &str = "docs/schemas/ee.mesh.lane_grant_preview.v1.json";
-const SCHEMA_ID: &str = "https://eidetic-engine/schemas/ee.mesh.lane_grant_preview.v1.json";
-const SCHEMA_NAME: &str = "ee.mesh.lane_grant_preview.v1";
+const PREVIEW_PATH: &str = "docs/schemas/ee.mesh.lane_grant_preview.v2.json";
+const PREVIEW_ID: &str = "https://eidetic-engine/schemas/ee.mesh.lane_grant_preview.v2.json";
+const PREVIEW_SCHEMA: &str = LANE_GRANT_PREVIEW_SCHEMA_V2;
+const TOKEN_PATH: &str = "docs/schemas/ee.mesh.approval_token.v1.json";
+const TOKEN_ID: &str = "https://eidetic-engine/schemas/ee.mesh.approval_token.v1.json";
+const TOKEN_SCHEMA: &str = APPROVAL_TOKEN_SCHEMA_V1;
+const GRANT_PATH: &str = "docs/schemas/ee.mesh.grant.v1.json";
+const GRANT_ID: &str = "https://eidetic-engine/schemas/ee.mesh.grant.v1.json";
+const GRANT_SCHEMA: &str = "ee.mesh.grant.v1";
+const REVOKE_PATH: &str = "docs/schemas/ee.mesh.revoke_lane.v1.json";
+const REVOKE_ID: &str = "https://eidetic-engine/schemas/ee.mesh.revoke_lane.v1.json";
+const REVOKE_SCHEMA: &str = "ee.mesh.revoke_lane.v1";
+const HISTORICAL_PREVIEW_PATH: &str = "docs/schemas/ee.mesh.lane_grant_preview.v1.json";
+const HISTORICAL_PREVIEW_SCHEMA: &str = "ee.mesh.lane_grant_preview.v1";
 
 const REQUIRED_TOP_LEVEL: &[&str] = &[
     "schema",
-    "peerNodeKey",
-    "lane",
+    "copyVersion",
     "workspaceId",
+    "target",
+    "lane",
+    "grantGeneration",
     "currentPolicy",
     "proposedPolicy",
+    "candidateSet",
     "affectedMemoryCount",
     "redactedFromExposureCount",
     "previewSampleStrategy",
+    "previewSampleLimit",
     "previewSample",
     "redactionRulesApplied",
+    "cautionCodes",
     "cautions",
 ];
 
@@ -73,10 +70,10 @@ const REQUIRED_LANE_DECISIONS: &[&str] = &["allow", "quarantine", "deny"];
 
 const REQUIRED_TRUST_CLASSES: &[&str] = &[
     "human_explicit",
-    "human_revised",
     "agent_validated",
-    "agent_proposed",
-    "external",
+    "agent_assertion",
+    "cass_evidence",
+    "legacy_import",
 ];
 
 const REQUIRED_CAUTION_KINDS: &[&str] = &[
@@ -95,10 +92,15 @@ const REQUIRED_SAMPLE_STRATEGIES: &[&str] = &["random", "highest-trust", "most-r
 
 const REQUIRED_CAUTION_FIELDS: &[&str] = &["kind", "message", "severity"];
 
-const REQUIRED_POLICY_SNAPSHOT_FIELDS: &[&str] = &["lane", "decision"];
+const REQUIRED_POLICY_SNAPSHOT_FIELDS: &[&str] = &["generation", "lane", "decision"];
+
+const REQUIRED_GRANT_TARGET_FIELDS: &[&str] = &["adapterVersion", "peerId"];
+
+const REQUIRED_REVISION_PIN_FIELDS: &[&str] = &["memoryId", "revisionId"];
 
 const REQUIRED_PREVIEW_ROW_FIELDS: &[&str] = &[
     "memoryId",
+    "revisionId",
     "level",
     "kind",
     "contentPreview",
@@ -107,6 +109,28 @@ const REQUIRED_PREVIEW_ROW_FIELDS: &[&str] = &[
     "hasSensitiveTags",
     "redactedFields",
     "wouldExposeUnderProposedPolicy",
+];
+
+const REQUIRED_TOKEN_FIELDS: &[&str] = &[
+    "schema",
+    "sensitive",
+    "bearer",
+    "expiresAt",
+    "externalRecorderResidual",
+];
+
+const REQUIRED_MUTATION_FIELDS: &[&str] = &[
+    "schema",
+    "command",
+    "workspaceId",
+    "target",
+    "lane",
+    "previousGrantGeneration",
+    "newGrantGeneration",
+    "decision",
+    "auditId",
+    "remoteErasureGuaranteed",
+    "residual",
 ];
 
 fn repo_root() -> PathBuf {
@@ -121,8 +145,8 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
-fn load_schema() -> Result<Value, String> {
-    let path = repo_root().join(SCHEMA_PATH);
+fn load_schema(relative_path: &str) -> Result<Value, String> {
+    let path = repo_root().join(relative_path);
     let text =
         fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
     serde_json::from_str(&text).map_err(|error| format!("parse {}: {error}", path.display()))
@@ -145,6 +169,13 @@ fn collect_strings(node: &Value, ctx: &str) -> Result<BTreeSet<String>, String> 
 
 fn expected_string_set(expected: &[&str]) -> BTreeSet<String> {
     expected.iter().map(|value| (*value).to_owned()).collect()
+}
+
+fn collect_object_keys(node: &Value, ctx: &str) -> Result<BTreeSet<String>, String> {
+    let object = node
+        .as_object()
+        .ok_or_else(|| format!("{ctx}: expected object, got: {node}"))?;
+    Ok(object.keys().cloned().collect())
 }
 
 fn require_closed_set(schema: &Value, pointer: &str, expected: &[&str], label: &str) -> TestResult {
@@ -170,61 +201,123 @@ fn require_required_fields(
     )
 }
 
-#[test]
-fn lane_grant_preview_schema_file_exists_and_parses() -> TestResult {
-    let _ = load_schema()?;
-    Ok(())
-}
-
-#[test]
-fn lane_grant_preview_schema_identity_is_consistent() -> TestResult {
-    let schema = load_schema()?;
-    ensure(
-        schema["$id"] == SCHEMA_ID,
-        format!("expected $id={SCHEMA_ID}; got: {}", schema["$id"]),
-    )?;
-    ensure(
-        schema["title"] == SCHEMA_NAME,
-        format!("expected title={SCHEMA_NAME}; got: {}", schema["title"]),
-    )?;
-    ensure(
-        schema["properties"]["schema"]["const"] == SCHEMA_NAME,
-        "properties.schema.const must equal ee.mesh.lane_grant_preview.v1",
-    )?;
-    Ok(())
-}
-
-#[test]
-fn lane_grant_preview_required_top_level_fields_match_spec() -> TestResult {
-    let schema = load_schema()?;
-    let actual = collect_strings(&schema["required"], "top-level required")?;
-    let expected = expected_string_set(REQUIRED_TOP_LEVEL);
+fn require_property_fields(
+    schema: &Value,
+    pointer: &str,
+    expected: &[&str],
+    label: &str,
+) -> TestResult {
+    let actual = collect_object_keys(schema.pointer(pointer).unwrap_or(&Value::Null), label)?;
+    let expected = expected_string_set(expected);
     ensure(
         actual == expected,
-        format!(
-            "REQUIRED_TOP_LEVEL drifted from schema required array\nexpected={expected:?}\nactual={actual:?}"
-        ),
+        format!("{label} drifted from property field set; expected {expected:?}, got {actual:?}"),
+    )
+}
+
+fn require_identity(schema: &Value, schema_id: &str, schema_name: &str) -> TestResult {
+    ensure(
+        schema["$id"] == schema_id,
+        format!("expected $id={schema_id}; got: {}", schema["$id"]),
+    )?;
+    ensure(
+        schema["title"] == schema_name,
+        format!("expected title={schema_name}; got: {}", schema["title"]),
+    )?;
+    ensure(
+        schema["properties"]["schema"]["const"] == schema_name,
+        format!("properties.schema.const must equal {schema_name}"),
     )
 }
 
 #[test]
-fn lane_grant_preview_top_level_is_closed() -> TestResult {
-    let schema = load_schema()?;
+fn authenticated_lane_contract_schema_files_exist_and_parse() -> TestResult {
+    for path in [PREVIEW_PATH, TOKEN_PATH, GRANT_PATH, REVOKE_PATH] {
+        let _ = load_schema(path)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn authenticated_lane_contract_schema_identities_are_consistent() -> TestResult {
+    for (path, schema_id, schema_name) in [
+        (PREVIEW_PATH, PREVIEW_ID, PREVIEW_SCHEMA),
+        (TOKEN_PATH, TOKEN_ID, TOKEN_SCHEMA),
+        (GRANT_PATH, GRANT_ID, GRANT_SCHEMA),
+        (REVOKE_PATH, REVOKE_ID, REVOKE_SCHEMA),
+    ] {
+        require_identity(&load_schema(path)?, schema_id, schema_name)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn schema_registry_publishes_v2_token_and_mutations_but_not_historical_v1() -> TestResult {
+    let historical = load_schema(HISTORICAL_PREVIEW_PATH)?;
+    require_identity(
+        &historical,
+        "https://eidetic-engine/schemas/ee.mesh.lane_grant_preview.v1.json",
+        HISTORICAL_PREVIEW_SCHEMA,
+    )?;
+    let published = public_schemas()
+        .iter()
+        .map(|entry| entry.id)
+        .collect::<BTreeSet<_>>();
+    for required in [PREVIEW_SCHEMA, TOKEN_SCHEMA, GRANT_SCHEMA, REVOKE_SCHEMA] {
+        ensure(
+            published.contains(required),
+            format!("public schema registry is missing {required}"),
+        )?;
+    }
+    ensure(
+        !published.contains(HISTORICAL_PREVIEW_SCHEMA),
+        "historical ee.mesh.lane_grant_preview.v1 must not remain runtime-published",
+    )
+}
+
+#[test]
+fn public_schema_exports_are_byte_semantically_equal_to_docs() -> TestResult {
+    for (path, schema_name) in [
+        (PREVIEW_PATH, PREVIEW_SCHEMA),
+        (TOKEN_PATH, TOKEN_SCHEMA),
+        (GRANT_PATH, GRANT_SCHEMA),
+        (REVOKE_PATH, REVOKE_SCHEMA),
+    ] {
+        let exported: Value =
+            serde_json::from_str(&render_schema_export_json(Some(schema_name)))
+                .map_err(|error| format!("parse schema export {schema_name}: {error}"))?;
+        let documented = load_schema(path)?;
+        ensure(
+            exported == documented,
+            format!("schema export {schema_name} drifted from {path}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn lane_grant_preview_required_top_level_fields_are_exact_and_closed() -> TestResult {
+    let schema = load_schema(PREVIEW_PATH)?;
+    require_required_fields(&schema, "/required", REQUIRED_TOP_LEVEL, "preview.required")?;
     ensure(
         schema["additionalProperties"] == Value::Bool(false),
-        "top-level additionalProperties must be false (closed schema; read-only surface)",
+        "preview top level must reject unversioned drift fields",
+    )?;
+    ensure(
+        schema["properties"]["copyVersion"]["const"] == LANE_GRANT_PREVIEW_COPY_VERSION,
+        "preview copyVersion must pin the human/JSON renderer copy",
     )
 }
 
 #[test]
 fn lane_grant_preview_lane_enum_is_six_trust_lanes() -> TestResult {
-    let schema = load_schema()?;
+    let schema = load_schema(PREVIEW_PATH)?;
     require_closed_set(&schema, "/$defs/lane/enum", REQUIRED_LANES, "lane enum")
 }
 
 #[test]
 fn lane_grant_preview_lane_decision_enum_is_three_states() -> TestResult {
-    let schema = load_schema()?;
+    let schema = load_schema(PREVIEW_PATH)?;
     require_closed_set(
         &schema,
         "/$defs/laneDecision/enum",
@@ -235,7 +328,7 @@ fn lane_grant_preview_lane_decision_enum_is_three_states() -> TestResult {
 
 #[test]
 fn lane_grant_preview_trust_class_enum_is_five_authority_classes() -> TestResult {
-    let schema = load_schema()?;
+    let schema = load_schema(PREVIEW_PATH)?;
     require_closed_set(
         &schema,
         "/$defs/trustClass/enum",
@@ -246,18 +339,18 @@ fn lane_grant_preview_trust_class_enum_is_five_authority_classes() -> TestResult
 
 #[test]
 fn lane_grant_preview_caution_kind_enum_matches_bead_acceptance() -> TestResult {
-    let schema = load_schema()?;
+    let schema = load_schema(PREVIEW_PATH)?;
     require_closed_set(
         &schema,
-        "/$defs/caution/properties/kind/enum",
+        "/$defs/cautionCode/enum",
         REQUIRED_CAUTION_KINDS,
-        "caution.kind enum",
+        "caution code enum",
     )
 }
 
 #[test]
 fn lane_grant_preview_caution_severity_excludes_error_per_read_only_invariant() -> TestResult {
-    let schema = load_schema()?;
+    let schema = load_schema(PREVIEW_PATH)?;
     require_closed_set(
         &schema,
         "/$defs/caution/properties/severity/enum",
@@ -278,7 +371,7 @@ fn lane_grant_preview_caution_severity_excludes_error_per_read_only_invariant() 
 
 #[test]
 fn lane_grant_preview_caution_required_fields_match_schema_contract() -> TestResult {
-    let schema = load_schema()?;
+    let schema = load_schema(PREVIEW_PATH)?;
     require_required_fields(
         &schema,
         "/$defs/caution/required",
@@ -289,7 +382,7 @@ fn lane_grant_preview_caution_required_fields_match_schema_contract() -> TestRes
 
 #[test]
 fn lane_grant_preview_policy_snapshot_required_fields_match_schema_contract() -> TestResult {
-    let schema = load_schema()?;
+    let schema = load_schema(PREVIEW_PATH)?;
     require_required_fields(
         &schema,
         "/$defs/policySnapshot/required",
@@ -299,23 +392,185 @@ fn lane_grant_preview_policy_snapshot_required_fields_match_schema_contract() ->
 }
 
 #[test]
-fn lane_grant_preview_sample_strategy_enum_is_three_strategies() -> TestResult {
-    let schema = load_schema()?;
-    require_closed_set(
+fn lane_grant_preview_target_and_candidate_pins_are_exact() -> TestResult {
+    let schema = load_schema(PREVIEW_PATH)?;
+    require_required_fields(
         &schema,
-        "/properties/previewSampleStrategy/enum",
-        REQUIRED_SAMPLE_STRATEGIES,
-        "previewSampleStrategy enum",
+        "/$defs/grantTarget/required",
+        REQUIRED_GRANT_TARGET_FIELDS,
+        "grantTarget.required",
+    )?;
+    require_required_fields(
+        &schema,
+        "/$defs/revisionPin/required",
+        REQUIRED_REVISION_PIN_FIELDS,
+        "revisionPin.required",
+    )?;
+    ensure(
+        schema["properties"]["target"]["$ref"] == "#/$defs/grantTarget",
+        "preview target must use the versioned grant-target adapter",
+    )?;
+    ensure(
+        schema["properties"]["candidateSet"]["items"]["$ref"] == "#/$defs/revisionPin",
+        "the complete candidate set must consist of revision pins",
+    )?;
+    ensure(
+        schema["$defs"]["grantTarget"]["properties"]["adapterVersion"]["const"]
+            == LANE_GRANT_TARGET_ADAPTER_VERSION,
+        "grant target adapter version must remain explicit",
+    )?;
+    ensure(
+        schema["$defs"]["grantTarget"]["properties"]
+            .get("originNodeId")
+            .is_none(),
+        "public grant target must not expose its internal origin-node adapter binding",
     )
 }
 
 #[test]
-fn lane_grant_preview_row_required_fields_match_bead_spec() -> TestResult {
-    let schema = load_schema()?;
+fn lane_grant_preview_sample_contract_is_revision_pinned_and_bounded() -> TestResult {
+    let schema = load_schema(PREVIEW_PATH)?;
+    require_closed_set(
+        &schema,
+        "/$defs/sampleStrategy/enum",
+        REQUIRED_SAMPLE_STRATEGIES,
+        "previewSampleStrategy enum",
+    )?;
     require_required_fields(
         &schema,
         "/$defs/previewRow/required",
         REQUIRED_PREVIEW_ROW_FIELDS,
         "previewRow.required",
+    )?;
+    ensure(
+        schema["properties"]["previewSampleLimit"]["maximum"] == 500,
+        "previewSampleLimit must remain capped at 500",
+    )?;
+    ensure(
+        schema["properties"]["previewSample"]["maxItems"] == 500,
+        "previewSample must remain capped at 500 rows",
+    )?;
+    ensure(
+        schema["properties"]["previewSample"]["items"]["$ref"] == "#/$defs/previewRow",
+        "preview samples must use the revision-pinned row contract",
+    )?;
+    ensure(
+        schema["properties"]["cautionCodes"]["items"]["$ref"] == "#/$defs/cautionCode",
+        "approval-bound caution codes must use the canonical caution vocabulary",
     )
+}
+
+#[test]
+fn approval_token_is_optional_sensitive_opaque_and_identifier_free() -> TestResult {
+    let preview = load_schema(PREVIEW_PATH)?;
+    let preview_required = collect_strings(&preview["required"], "preview.required")?;
+    ensure(
+        !preview_required.contains("approvalToken"),
+        "ordinary deterministic previews must not require or emit approvalToken",
+    )?;
+    ensure(
+        preview["properties"]["approvalToken"]["$ref"] == TOKEN_ID,
+        "explicit issuance must use the registered approval-token schema",
+    )?;
+
+    let token = load_schema(TOKEN_PATH)?;
+    require_required_fields(&token, "/required", REQUIRED_TOKEN_FIELDS, "token.required")?;
+    require_property_fields(
+        &token,
+        "/properties",
+        REQUIRED_TOKEN_FIELDS,
+        "token.properties",
+    )?;
+    ensure(
+        token["additionalProperties"] == Value::Bool(false),
+        "approval token projection must reject identifier/debug field drift",
+    )?;
+    ensure(
+        token["properties"]["sensitive"]["const"] == Value::Bool(true),
+        "approval token must be explicitly marked sensitive",
+    )?;
+    ensure(
+        token["properties"]["bearer"]["pattern"] == "^eeap1_[A-Za-z0-9_-]+$",
+        "approval bearer must retain its redaction-recognizable eeap1_ prefix",
+    )?;
+    ensure(
+        token["properties"]["bearer"]["minLength"] == serde_json::json!(APPROVAL_TOKEN_BEARER_LEN)
+            && token["properties"]["bearer"]["maxLength"]
+                == serde_json::json!(APPROVAL_TOKEN_BEARER_LEN),
+        "v1 approval bearer must remain the fixed 157-character envelope projection",
+    )?;
+
+    let properties = token["properties"]
+        .as_object()
+        .ok_or_else(|| "token.properties must be an object".to_string())?;
+    for forbidden in [
+        "storeId",
+        "storeKeyNamespace",
+        "workspaceId",
+        "keyId",
+        "nonce",
+        "snapshotTag",
+        "envelopeMac",
+        "issuedAt",
+    ] {
+        ensure(
+            !properties.contains_key(forbidden),
+            format!("approval token must not expose internal/context field {forbidden}"),
+        )?;
+    }
+    ensure(
+        token["properties"]["externalRecorderResidual"]["const"]
+            .as_str()
+            .is_some_and(|copy| copy.contains("third-party") && copy.contains("expires")),
+        "approval token must name the third-party recorder residual until expiry",
+    )
+}
+
+#[test]
+fn grant_and_revoke_results_pin_generation_audit_and_non_erasure() -> TestResult {
+    for (path, command, decision) in [
+        (GRANT_PATH, "ee mesh grant", "allow"),
+        (REVOKE_PATH, "ee mesh revoke-lane", "deny"),
+    ] {
+        let schema = load_schema(path)?;
+        require_required_fields(
+            &schema,
+            "/required",
+            REQUIRED_MUTATION_FIELDS,
+            "mutation.required",
+        )?;
+        ensure(
+            schema["additionalProperties"] == Value::Bool(false),
+            format!("{path} must be closed"),
+        )?;
+        ensure(
+            schema["properties"]["command"]["const"] == command,
+            format!("{path} command drifted"),
+        )?;
+        ensure(
+            schema["properties"]["decision"]["const"] == decision,
+            format!("{path} decision drifted"),
+        )?;
+        ensure(
+            schema["properties"]["remoteErasureGuaranteed"]["const"] == Value::Bool(false),
+            format!("{path} must never claim remote erasure"),
+        )?;
+        ensure(
+            schema["properties"]["residual"]["const"]
+                .as_str()
+                .is_some_and(|copy| copy.contains("cannot erase bytes")),
+            format!("{path} must state the cached/copied-byte residual"),
+        )?;
+        require_required_fields(
+            &schema,
+            "/$defs/grantTarget/required",
+            REQUIRED_GRANT_TARGET_FIELDS,
+            "mutation grantTarget.required",
+        )?;
+        ensure(
+            schema["properties"]["target"]["$ref"] == "#/$defs/grantTarget",
+            format!("{path} target must use the versioned adapter"),
+        )?;
+    }
+    Ok(())
 }

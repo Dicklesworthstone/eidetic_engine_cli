@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.approval_token.v1.json",
+  "title": "ee.mesh.approval_token.v1",
+  "description": "Public projection of an explicitly issued, short-lived mesh lane-approval bearer. The opaque bearer contains the fresh nonce, nonce-salted keyed snapshot tag, bounded timestamps, and context-bound envelope MAC. Those internals are not separate public fields. This projection deliberately contains no stable store, workspace, or key identifier. Ordinary previews omit the entire object.",
+  "type": "object",
+  "required": [
+    "schema",
+    "sensitive",
+    "bearer",
+    "expiresAt",
+    "externalRecorderResidual"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.approval_token.v1"
+    },
+    "sensitive": {
+      "type": "boolean",
+      "const": true,
+      "description": "Load-bearing marker: the bearer is a secret and must be redacted from ee-controlled tracing, errors, audit, support artifacts, and imported session material."
+    },
+    "bearer": {
+      "type": "string",
+      "minLength": 157,
+      "maxLength": 157,
+      "pattern": "^eeap1_[A-Za-z0-9_-]+$",
+      "description": "Opaque, current-key-only fixed-width v1 approval bearer. Consumers must pass it through bounded stdin using --preview-token-stdin; never argv or an environment variable."
+    },
+    "expiresAt": {
+      "$ref": "#/$defs/rfc3339",
+      "description": "Expiry of this bearer. V1 issuance uses a 900-second TTL."
+    },
+    "externalRecorderResidual": {
+      "type": "string",
+      "const": "An opted-in approval bearer may be captured by a third-party stdout or session recorder until it expires.",
+      "description": "Named residual outside ee-controlled sinks; bounded by context binding, 15-minute expiry, and generation-CAS single use."
+    }
+  },
+  "$defs": {
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

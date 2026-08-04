@@ -17,8 +17,8 @@ use crate::core::tailscale_probe::{
 };
 use crate::db::{
     CreateAuditInput, CreateSearchIndexJobInput, DbConnection, InsertMeshImportLedgerEventInput,
-    SearchIndexJobType, StoredMeshPeer, StoredMeshPeerCursor, UpsertMeshPeerCursorInput,
-    UpsertMeshPeerInput, audit_actions, generate_audit_id,
+    SearchIndexJobType, StoredMeshPeerCursor, UpsertMeshPeerCursorInput, UpsertMeshPeerInput,
+    audit_actions, generate_audit_id,
 };
 use crate::mesh::audit::{
     MeshAuditDetails, MeshAuditEventInput, MeshAuditEventKind, MeshAuditLedgerError,
@@ -72,6 +72,14 @@ use crate::policy::{
 use super::{Cli, write_domain_error, write_stdout};
 
 const MESH_CLI_INIT_SCHEMA_V1: &str = "ee.mesh.cli.init.v1";
+const MESH_GRANT_SCHEMA_V1: &str = "ee.mesh.grant.v1";
+const MESH_REVOKE_LANE_SCHEMA_V1: &str = "ee.mesh.revoke_lane.v1";
+const MESH_GRANT_COMMAND: &str = "ee mesh grant";
+const MESH_REVOKE_LANE_COMMAND: &str = "ee mesh revoke-lane";
+const MESH_GRANT_RESIDUAL: &str = "A later lane revocation stops future serving but cannot erase bytes the peer already cached or copied.";
+const MESH_REVOKE_LANE_RESIDUAL: &str =
+    "Revocation stops future serving but cannot erase bytes the peer already cached or copied.";
+const APPROVAL_TOKEN_EXTERNAL_RECORDER_RESIDUAL: &str = "An opted-in approval bearer may be captured by a third-party stdout or session recorder until it expires.";
 const DISCOVERY_POLICY_CONFIG_FILE: &str = "discovery_policy.toml";
 const AUTO_ENROLL_OVERRIDES_FILE: &str = "auto_enroll_overrides.toml";
 
@@ -97,6 +105,9 @@ const MESH_CONFIG_MAX_BYTES: usize = 1024 * 1024;
 /// operators with larger payloads can chunk imports. bd-3l1cy /
 /// bd-1icct multi-pass-bug-hunting follow-up.
 const MESH_IMPORT_ARTIFACT_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Human lane-grant confirmation accepts only `y` or `yes`; cap the entire
+/// line so a piped stream without a newline cannot grow memory until EOF.
+const LANE_GRANT_CONFIRMATION_MAX_BYTES: usize = 16;
 
 /// Read `path` into a string while refusing payloads above `max_bytes`.
 ///
@@ -164,6 +175,10 @@ pub enum MeshCommand {
     Sync(MeshSyncArgs),
     /// Preview the effect of granting one lane to a peer without mutating policy.
     PreviewGrant(MeshPreviewGrantArgs),
+    /// Grant one lane after an authenticated, revision-pinned preview.
+    Grant(MeshGrantArgs),
+    /// Revoke one lane and invalidate every preview from the prior generation.
+    RevokeLane(MeshRevokeLaneArgs),
 }
 
 /// Arguments for `ee mesh discovery-policy`.
@@ -255,9 +270,9 @@ pub struct MeshHelloResponderStatusArgs {
 /// Arguments for `ee mesh preview-grant`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct MeshPreviewGrantArgs {
-    /// Peer node key the preview targets.
-    #[arg(value_name = "PEER_NODE_KEY")]
-    pub peer_node_key: String,
+    /// Opaque enrolled peer ID the preview targets.
+    #[arg(value_name = "PEER_ID")]
+    pub peer_id: String,
 
     /// Lane to preview granting on this peer.
     #[arg(long, value_name = "LANE")]
@@ -268,7 +283,7 @@ pub struct MeshPreviewGrantArgs {
     pub database: Option<PathBuf>,
 
     /// Maximum preview rows. Internally clamped to LANE_GRANT_PREVIEW_MAX_LIMIT.
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 25)]
     pub limit: usize,
 
     /// How the preview samples memories from the candidate set.
@@ -282,7 +297,95 @@ pub struct MeshPreviewGrantArgs {
     /// Seed for the random sample strategy. Pinned for deterministic replay.
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
+
+    /// Issue a marked-sensitive 15-minute approval bearer in JSON mode.
+    #[arg(long = "issue-approval-token", action = ArgAction::SetTrue)]
+    pub issue_approval_token: bool,
 }
+
+/// Arguments for `ee mesh grant`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshGrantArgs {
+    /// Opaque enrolled peer ID whose effective policy will be widened.
+    #[arg(value_name = "PEER_ID")]
+    pub peer_id: String,
+
+    /// Lane to allow for this exact peer.
+    #[arg(long, value_name = "LANE")]
+    pub lane: MeshPreviewGrantLane,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Read the approval bearer from bounded standard input (JSON mode only).
+    #[arg(long = "preview-token-stdin", action = ArgAction::SetTrue)]
+    pub preview_token_stdin: bool,
+}
+
+/// Arguments for `ee mesh revoke-lane`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshRevokeLaneArgs {
+    /// Opaque enrolled peer ID whose effective policy will be narrowed.
+    #[arg(value_name = "PEER_ID")]
+    pub peer_id: String,
+
+    /// Lane to deny for this exact peer.
+    #[arg(long, value_name = "LANE")]
+    pub lane: MeshPreviewGrantLane,
+
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeshLaneGrantPreviewReport {
+    command: &'static str,
+    workspace_id: String,
+    preview: crate::mesh::lane_grant_preview::LaneGrantPreview,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MeshLaneMutationReport {
+    schema: &'static str,
+    command: &'static str,
+    workspace_id: String,
+    target: crate::mesh::lane_grant_preview::GrantTargetSnapshot,
+    lane: String,
+    previous_grant_generation: u64,
+    new_grant_generation: u64,
+    decision: &'static str,
+    audit_id: String,
+    remote_erasure_guaranteed: bool,
+    residual: &'static str,
+}
+
+#[derive(Debug)]
+struct PreparedLaneGrantPreview {
+    preview: crate::mesh::lane_grant_preview::LaneGrantPreview,
+    target_adapter: crate::db::MeshLaneGrantTargetAdapter,
+    current_state: Option<crate::db::StoredMeshLaneGrantState>,
+}
+
+#[derive(Debug)]
+enum LaneGrantEffectError {
+    Approval(crate::mesh::lane_grant::ApprovalTokenError),
+    Domain(DomainError),
+}
+
+impl std::fmt::Display for LaneGrantEffectError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Approval(error) => write!(formatter, "{error}"),
+            Self::Domain(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for LaneGrantEffectError {}
 
 /// Arguments for `ee mesh disable`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
@@ -751,6 +854,8 @@ where
         MeshCommand::Import(args) => handle_mesh_import(cli, args, stdout, stderr),
         MeshCommand::Sync(args) => handle_mesh_sync(cli, args, stdout, stderr),
         MeshCommand::PreviewGrant(args) => handle_mesh_preview_grant(cli, args, stdout, stderr),
+        MeshCommand::Grant(args) => handle_mesh_grant(cli, args, stdout, stderr),
+        MeshCommand::RevokeLane(args) => handle_mesh_revoke_lane(cli, args, stdout, stderr),
     }
 }
 
@@ -764,10 +869,9 @@ where
     W: Write,
     E: Write,
 {
-    use crate::mesh::auto_enrollment_safety::IntendedLanePolicy;
     use crate::mesh::lane_grant_preview::{
-        LANE_GRANT_PREVIEW_MAX_LIMIT, Lane, LaneGrantPreviewInput, SampleStrategy,
-        compute_lane_grant_preview,
+        ApprovalTokenProjection, LANE_GRANT_PREVIEW_DEFAULT_LIMIT, LANE_GRANT_PREVIEW_MAX_LIMIT,
+        SampleStrategy,
     };
 
     if args.limit > LANE_GRANT_PREVIEW_MAX_LIMIT {
@@ -782,71 +886,513 @@ where
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
+    if args.issue_approval_token && !cli.wants_json() {
+        let domain_error = DomainError::Usage {
+            message: "--issue-approval-token is available only with --json".to_owned(),
+            repair: Some(
+                "Use ordinary human preview output without a bearer, or add --json for an explicit robot bearer projection."
+                    .to_owned(),
+            ),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
 
-    let snapshot = match build_snapshot(cli, args.database.as_deref()) {
-        Ok(snapshot) => snapshot,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    };
-
-    let lane = match args.lane {
-        MeshPreviewGrantLane::Metadata => Lane::Metadata,
-        MeshPreviewGrantLane::Body => Lane::Body,
-        MeshPreviewGrantLane::Embedding => Lane::Embedding,
-        MeshPreviewGrantLane::GraphLink => Lane::GraphLink,
-        MeshPreviewGrantLane::CurationSignal => Lane::CurationSignal,
-        MeshPreviewGrantLane::RevisionNotice => Lane::RevisionNotice,
-    };
     let sample_strategy = match args.sample_strategy {
         MeshPreviewGrantSampleStrategy::Random => SampleStrategy::Random,
         MeshPreviewGrantSampleStrategy::HighestTrust => SampleStrategy::HighestTrust,
         MeshPreviewGrantSampleStrategy::MostRecent => SampleStrategy::MostRecent,
     };
+    if args.issue_approval_token
+        && (args.limit != LANE_GRANT_PREVIEW_DEFAULT_LIMIT
+            || sample_strategy != SampleStrategy::Random
+            || args.seed != 0)
+    {
+        let domain_error = DomainError::Usage {
+            message: "Approval-token issuance requires the canonical preview sample parameters"
+                .to_owned(),
+            repair: Some(format!(
+                "Re-run with --limit {LANE_GRANT_PREVIEW_DEFAULT_LIMIT} --sample-strategy random --seed 0 --issue-approval-token --json."
+            )),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
 
-    let redaction_rules: Vec<String> = Vec::new();
-    // DB-backed resolver is owned by a follow-up slice; for now the
-    // preview runs against an empty candidate set and surfaces the
-    // structural envelope including peer_not_in_group and
-    // lane_already_granted cautions that derive from peer policy state.
-    let memories: Vec<crate::mesh::lane_grant_preview::MemoryView<'_>> = Vec::new();
-    let preview = compute_lane_grant_preview(&LaneGrantPreviewInput {
-        peer_node_key: args.peer_node_key.as_str(),
-        peer_in_group: false,
+    let snapshot = match build_snapshot(cli, args.database.as_deref()) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    if !snapshot.initialized {
+        let error = lane_grant_uninitialized_error(&snapshot);
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let database_path = Path::new(&snapshot.database_path);
+    let connection = match open_mesh_connection(database_path) {
+        Ok(connection) => connection,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let (config, config_bytes) = match load_mesh_config_for_approval(cli, args.database.as_deref())
+    {
+        Ok(config) => config,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let lane = preview_lane(args.lane);
+    let mut prepared = match prepare_lane_grant_preview(
+        &connection,
+        &snapshot.workspace_id,
+        &args.peer_id,
         lane,
-        workspace_id: snapshot.workspace_id.as_str(),
-        current_policy: IntendedLanePolicy::conservative_default(),
-        proposed_policy: lane_grant_preview_proposed_policy(lane),
-        memories: &memories,
         sample_strategy,
-        limit: args.limit,
-        redaction_rules: redaction_rules.as_slice(),
-        sample_random_seed: args.seed,
-    });
+        args.limit,
+        args.seed,
+        &config,
+        &config_bytes,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
 
-    let preview_value = serde_json::to_value(&preview).unwrap_or_else(|_| serde_json::json!({}));
-    let response = serde_json::json!({
-        "schema": "ee.response.v2",
-        "success": true,
-        "data": {
-            "command": "mesh preview-grant",
-            "workspaceId": snapshot.workspace_id,
-            "preview": preview_value,
+    if args.issue_approval_token {
+        let canonical_snapshot = match prepared.preview.canonical_approval_snapshot_bytes() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let domain_error = lane_grant_serialization_error(error);
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        let root = match open_lane_grant_auth_root(&snapshot.workspace_path) {
+            Ok(root) => root,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        let issued = match crate::mesh::lane_grant::issue(
+            &root,
+            &snapshot.workspace_id,
+            MESH_GRANT_SCHEMA_V1,
+            &canonical_snapshot,
+            chrono::Utc::now().timestamp(),
+        ) {
+            Ok(issued) => issued,
+            Err(error) => {
+                let domain_error = approval_token_domain_error(&error, &args.peer_id, lane);
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        let Some(expires_at) =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(issued.expires_at_unix_seconds(), 0)
+        else {
+            let domain_error = DomainError::Storage {
+                message: "Issued mesh approval token had an invalid expiry timestamp".to_owned(),
+                repair: Some("Run `ee doctor --json` and retry the preview.".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        };
+        prepared.preview.approval_token = Some(ApprovalTokenProjection {
+            schema: crate::mesh::lane_grant::APPROVAL_TOKEN_SCHEMA_V1.to_owned(),
+            sensitive: true,
+            bearer: issued.token().expose_bearer(),
+            expires_at: expires_at.to_rfc3339(),
+            external_recorder_residual: APPROVAL_TOKEN_EXTERNAL_RECORDER_RESIDUAL.to_owned(),
+        });
+    }
+
+    let report = MeshLaneGrantPreviewReport {
+        command: "mesh preview-grant",
+        workspace_id: snapshot.workspace_id,
+        preview: prepared.preview,
+    };
+    let human = render_lane_grant_preview_human(&report.preview);
+    write_mesh_report(cli, &report, &human, stdout)
+}
+
+fn handle_mesh_grant<W, E>(
+    cli: &Cli,
+    args: &MeshGrantArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    use crate::mesh::lane_grant::{issue, read_bounded_token, verify_authentic_token};
+    use crate::mesh::lane_grant_preview::{LANE_GRANT_PREVIEW_DEFAULT_LIMIT, SampleStrategy};
+
+    if cli.wants_json() != args.preview_token_stdin {
+        let error = DomainError::Usage {
+            message: if cli.wants_json() {
+                "JSON grant requires --preview-token-stdin".to_owned()
+            } else {
+                "--preview-token-stdin is available only with --json".to_owned()
+            },
+            repair: Some(if cli.wants_json() {
+                "Pipe only the bearer from an explicit preview into `ee mesh grant <peer> --lane <lane> --preview-token-stdin --json`."
+                    .to_owned()
+            } else {
+                "Run the human command without --preview-token-stdin and confirm its inline canonical preview."
+                    .to_owned()
+            }),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let snapshot = match build_snapshot(cli, args.database.as_deref()) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    if !snapshot.initialized {
+        let error = lane_grant_uninitialized_error(&snapshot);
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let connection = match open_mesh_connection(Path::new(&snapshot.database_path)) {
+        Ok(connection) => connection,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let root = match open_lane_grant_auth_root(&snapshot.workspace_path) {
+        Ok(root) => root,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let lane = preview_lane(args.lane);
+    let now = chrono::Utc::now().timestamp();
+
+    let (authenticated, target_adapter, current_state) = if cli.wants_json() {
+        let token = match read_bounded_token(&mut std::io::stdin().lock()) {
+            Ok(token) => token,
+            Err(error) => {
+                let domain_error = approval_token_domain_error(&error, &args.peer_id, lane);
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        let authenticated = match verify_authentic_token(
+            &root,
+            &snapshot.workspace_id,
+            MESH_GRANT_SCHEMA_V1,
+            &token,
+            now,
+        ) {
+            Ok(authenticated) => authenticated,
+            Err(error) => {
+                let domain_error = approval_token_domain_error(&error, &args.peer_id, lane);
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        let (target, state) = match load_lane_grant_target_state(
+            &connection,
+            &snapshot.workspace_id,
+            &args.peer_id,
+        ) {
+            Ok(target) => target,
+            Err(LaneGrantTargetStateError::Missing | LaneGrantTargetStateError::Disabled) => {
+                let error = approval_token_domain_error(
+                    &crate::mesh::lane_grant::ApprovalTokenError::Stale,
+                    &args.peer_id,
+                    lane,
+                );
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+            Err(LaneGrantTargetStateError::Domain(error)) => {
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        (authenticated, target, state)
+    } else {
+        let (config, config_bytes) =
+            match load_mesh_config_for_approval(cli, args.database.as_deref()) {
+                Ok(config) => config,
+                Err(error) => {
+                    return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                }
+            };
+        let prepared = match prepare_lane_grant_preview(
+            &connection,
+            &snapshot.workspace_id,
+            &args.peer_id,
+            lane,
+            SampleStrategy::Random,
+            LANE_GRANT_PREVIEW_DEFAULT_LIMIT,
+            0,
+            &config,
+            &config_bytes,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        let human = render_lane_grant_preview_human(&prepared.preview);
+        let write_exit = write_stdout(stdout, &human);
+        if write_exit != ProcessExitCode::Success {
+            return write_exit;
+        }
+        let _ = write!(
+            stderr,
+            "Grant lane '{}' to peer {}? [y/N] ",
+            lane.as_str(),
+            args.peer_id
+        );
+        let _ = stderr.flush();
+        let confirmed = match read_lane_grant_confirmation(std::io::stdin().lock()) {
+            Ok(confirmed) => confirmed,
+            Err(error) => {
+                let error = DomainError::Usage {
+                    message: format!(
+                        "Failed to read bounded lane-grant confirmation from stdin: {error}"
+                    ),
+                    repair: Some("Retry interactively and enter only `y` or `yes`.".to_owned()),
+                };
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        if !confirmed {
+            return write_stdout(
+                stdout,
+                "Lane grant cancelled; no state or audit row was written.\n",
+            );
+        }
+        let canonical_snapshot = match prepared.preview.canonical_approval_snapshot_bytes() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let domain_error = lane_grant_serialization_error(error);
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        let issued = match issue(
+            &root,
+            &snapshot.workspace_id,
+            MESH_GRANT_SCHEMA_V1,
+            &canonical_snapshot,
+            now,
+        ) {
+            Ok(issued) => issued,
+            Err(error) => {
+                let domain_error = approval_token_domain_error(&error, &args.peer_id, lane);
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        let authenticated = match verify_authentic_token(
+            &root,
+            &snapshot.workspace_id,
+            MESH_GRANT_SCHEMA_V1,
+            issued.token(),
+            now,
+        ) {
+            Ok(authenticated) => authenticated,
+            Err(error) => {
+                let domain_error = approval_token_domain_error(&error, &args.peer_id, lane);
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        (
+            authenticated,
+            prepared.target_adapter,
+            prepared.current_state,
+        )
+    };
+
+    let previous_generation = current_state
+        .as_ref()
+        .map_or(0, |state| state.grant_generation);
+    let mutation = crate::db::MeshLaneGrantMutationInput {
+        workspace_id: snapshot.workspace_id.clone(),
+        peer_id: args.peer_id.clone(),
+        target_adapter: target_adapter.clone(),
+        material_lane: config_mesh_lane(lane),
+        expected_generation: previous_generation,
+        updated_at: Some(chrono::Utc::now().to_rfc3339()),
+    };
+    // Hold the store-auth root's shared lock from the final snapshot check
+    // through the grant, audit, and database commit. A concurrent rotation
+    // therefore occurs wholly before this phase (and makes the authenticated
+    // bearer invalid) or wholly after the atomic mutation.
+    let locked_root = match open_lane_grant_auth_guard(&snapshot.workspace_path) {
+        Ok(root) => root,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let transaction = connection.apply_mesh_lane_grant_transaction(
+        &mutation,
+        || {
+            let (config, config_bytes) =
+                load_mesh_config_for_approval(cli, args.database.as_deref())
+                    .map_err(LaneGrantEffectError::Domain)?;
+            let (transaction_target, transaction_state) =
+                load_lane_grant_target_state(&connection, &snapshot.workspace_id, &args.peer_id)
+                    .map_err(|error| match error {
+                        LaneGrantTargetStateError::Missing
+                        | LaneGrantTargetStateError::Disabled => LaneGrantEffectError::Approval(
+                            crate::mesh::lane_grant::ApprovalTokenError::Stale,
+                        ),
+                        LaneGrantTargetStateError::Domain(error) => {
+                            LaneGrantEffectError::Domain(error)
+                        }
+                    })?;
+            let prepared = prepare_lane_grant_preview_for_state(
+                &connection,
+                &snapshot.workspace_id,
+                &args.peer_id,
+                lane,
+                SampleStrategy::Random,
+                LANE_GRANT_PREVIEW_DEFAULT_LIMIT,
+                0,
+                &config,
+                &config_bytes,
+                transaction_target,
+                transaction_state,
+            )
+            .map_err(LaneGrantEffectError::Domain)?;
+            let canonical_snapshot = prepared
+                .preview
+                .canonical_approval_snapshot_bytes()
+                .map_err(lane_grant_serialization_error)
+                .map_err(LaneGrantEffectError::Domain)?;
+            crate::mesh::lane_grant::compare_snapshot(
+                &locked_root,
+                &authenticated,
+                &canonical_snapshot,
+                chrono::Utc::now().timestamp(),
+            )
+            .map_err(LaneGrantEffectError::Approval)
         },
-        "degraded": [],
-    });
+        |next_state, verified| {
+            let approval_audit_id = verified.audit_id().to_opaque_string();
+            append_lane_mutation_audit(
+                &connection,
+                &snapshot.workspace_id,
+                &args.peer_id,
+                lane,
+                previous_generation,
+                next_state.grant_generation,
+                "allow",
+                MeshAuditEventKind::LaneGrant,
+                Some(&approval_audit_id),
+            )?;
+            Ok(approval_audit_id)
+        },
+    );
 
-    // `response` is an in-memory `serde_json::Value`; its Display impl is
-    // the same infallible encoder, so the envelope can never silently
-    // collapse to an empty stdout line.
-    let _ = write_stdout(stdout, &(response.to_string() + "\n"));
-    ProcessExitCode::Success
+    let (next_state, _, audit_id) = match transaction {
+        Ok(result) => result,
+        Err(crate::db::MeshLaneGrantAtomicError::Mutation(error)) => {
+            let domain_error = grant_mutation_domain_error(error, &args.peer_id, lane);
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+        Err(crate::db::MeshLaneGrantAtomicError::Verification(LaneGrantEffectError::Approval(
+            error,
+        ))) => {
+            let domain_error = approval_token_domain_error(&error, &args.peer_id, lane);
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+        Err(crate::db::MeshLaneGrantAtomicError::Verification(LaneGrantEffectError::Domain(
+            error,
+        ))) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(crate::db::MeshLaneGrantAtomicError::Effect(error)) => {
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let report = MeshLaneMutationReport {
+        schema: MESH_GRANT_SCHEMA_V1,
+        command: MESH_GRANT_COMMAND,
+        workspace_id: snapshot.workspace_id,
+        target: public_lane_grant_target(&args.peer_id),
+        lane: lane.as_str().to_owned(),
+        previous_grant_generation: previous_generation,
+        new_grant_generation: next_state.grant_generation,
+        decision: "allow",
+        audit_id,
+        remote_erasure_guaranteed: false,
+        residual: MESH_GRANT_RESIDUAL,
+    };
+    let human = render_lane_mutation_human(&report);
+    write_mesh_report(cli, &report, &human, stdout)
+}
+
+fn handle_mesh_revoke_lane<W, E>(
+    cli: &Cli,
+    args: &MeshRevokeLaneArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let snapshot = match build_snapshot(cli, args.database.as_deref()) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    if !snapshot.initialized {
+        let error = lane_grant_uninitialized_error(&snapshot);
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+    let connection = match open_mesh_connection(Path::new(&snapshot.database_path)) {
+        Ok(connection) => connection,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let lane = preview_lane(args.lane);
+    let (target_adapter, state) =
+        match load_lane_grant_target_state(&connection, &snapshot.workspace_id, &args.peer_id) {
+            Ok(target) => target,
+            Err(error) => {
+                let error = error.into_domain(&args.peer_id);
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
+        };
+    let previous_generation = state.as_ref().map_or(0, |state| state.grant_generation);
+    let mutation = crate::db::MeshLaneGrantMutationInput {
+        workspace_id: snapshot.workspace_id.clone(),
+        peer_id: args.peer_id.clone(),
+        target_adapter,
+        material_lane: config_mesh_lane(lane),
+        expected_generation: previous_generation,
+        updated_at: Some(chrono::Utc::now().to_rfc3339()),
+    };
+    let transaction = connection.revoke_mesh_lane_transaction(
+        &mutation,
+        || Ok::<(), std::convert::Infallible>(()),
+        |next_state, _| {
+            append_lane_mutation_audit(
+                &connection,
+                &snapshot.workspace_id,
+                &args.peer_id,
+                lane,
+                previous_generation,
+                next_state.grant_generation,
+                "deny",
+                MeshAuditEventKind::LaneRevoke,
+                None,
+            )
+        },
+    );
+    let (next_state, (), audit_id) = match transaction {
+        Ok(result) => result,
+        Err(crate::db::MeshLaneGrantAtomicError::Mutation(error)) => {
+            let domain_error = revoke_mutation_domain_error(error, &args.peer_id, lane);
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+        Err(crate::db::MeshLaneGrantAtomicError::Verification(never)) => match never {},
+        Err(crate::db::MeshLaneGrantAtomicError::Effect(error)) => {
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let report = MeshLaneMutationReport {
+        schema: MESH_REVOKE_LANE_SCHEMA_V1,
+        command: MESH_REVOKE_LANE_COMMAND,
+        workspace_id: snapshot.workspace_id,
+        target: public_lane_grant_target(&args.peer_id),
+        lane: lane.as_str().to_owned(),
+        previous_grant_generation: previous_generation,
+        new_grant_generation: next_state.grant_generation,
+        decision: "deny",
+        audit_id,
+        remote_erasure_guaranteed: false,
+        residual: MESH_REVOKE_LANE_RESIDUAL,
+    };
+    let human = render_lane_mutation_human(&report);
+    write_mesh_report(cli, &report, &human, stdout)
 }
 
 fn lane_grant_preview_proposed_policy(
+    mut policy: crate::mesh::auto_enrollment_safety::IntendedLanePolicy,
     lane: crate::mesh::lane_grant_preview::Lane,
 ) -> crate::mesh::auto_enrollment_safety::IntendedLanePolicy {
-    use crate::mesh::auto_enrollment_safety::{IntendedLanePolicy, LaneDecision};
+    use crate::mesh::auto_enrollment_safety::LaneDecision;
     use crate::mesh::lane_grant_preview::Lane;
-    let mut policy = IntendedLanePolicy::conservative_default();
     match lane {
         Lane::Metadata => policy.metadata = LaneDecision::Allow,
         Lane::Body => policy.body = LaneDecision::Allow,
@@ -856,6 +1402,772 @@ fn lane_grant_preview_proposed_policy(
         Lane::RevisionNotice => policy.revision_notice = LaneDecision::Allow,
     }
     policy
+}
+
+fn lane_grant_uninitialized_error(snapshot: &MeshForegroundSnapshot) -> DomainError {
+    DomainError::Storage {
+        message: format!(
+            "Cannot manage mesh lane grants because {} does not exist",
+            snapshot.database_path
+        ),
+        repair: Some(format!(
+            "Run `ee init --workspace \"{}\" --json` first.",
+            snapshot.workspace_path
+        )),
+    }
+}
+
+fn open_lane_grant_auth_root(
+    workspace_path: &str,
+) -> Result<crate::policy::store_auth::StoreAuthRoot, DomainError> {
+    let keys_dir = crate::policy::store_auth::workspace_keys_dir(Path::new(workspace_path));
+    crate::policy::store_auth::StoreAuthRoot::open(keys_dir).map_err(|error| {
+        approval_token_domain_error(
+            &crate::mesh::lane_grant::ApprovalTokenError::StoreAuth(error),
+            "peer_unavailable",
+            crate::mesh::lane_grant_preview::Lane::Metadata,
+        )
+    })
+}
+
+fn open_lane_grant_auth_guard(
+    workspace_path: &str,
+) -> Result<crate::policy::store_auth::StoreAuthReadGuard, DomainError> {
+    let keys_dir = crate::policy::store_auth::workspace_keys_dir(Path::new(workspace_path));
+    crate::policy::store_auth::StoreAuthRoot::open_read_locked(keys_dir).map_err(|error| {
+        approval_token_domain_error(
+            &crate::mesh::lane_grant::ApprovalTokenError::StoreAuth(error),
+            "peer_unavailable",
+            crate::mesh::lane_grant_preview::Lane::Metadata,
+        )
+    })
+}
+
+enum LaneGrantTargetStateError {
+    Missing,
+    Disabled,
+    Domain(DomainError),
+}
+
+impl LaneGrantTargetStateError {
+    fn into_domain(self, peer_id: &str) -> DomainError {
+        match self {
+            Self::Missing => unknown_mesh_peer_error(peer_id),
+            Self::Disabled => DomainError::PolicyDenied {
+                message: format!("Mesh peer {peer_id} is disabled; lane policy cannot be widened"),
+                repair: Some(
+                    "Re-enroll or explicitly re-enable the peer, then obtain a fresh preview."
+                        .to_owned(),
+                ),
+            },
+            Self::Domain(error) => error,
+        }
+    }
+}
+
+fn load_lane_grant_target_state(
+    connection: &DbConnection,
+    workspace_id: &str,
+    peer_id: &str,
+) -> Result<
+    (
+        crate::db::MeshLaneGrantTargetAdapter,
+        Option<crate::db::StoredMeshLaneGrantState>,
+    ),
+    LaneGrantTargetStateError,
+> {
+    let peer = connection
+        .get_mesh_peer(workspace_id, peer_id)
+        .map_err(|error| {
+            LaneGrantTargetStateError::Domain(storage_error(
+                "Failed to load lane-grant peer",
+                error,
+            ))
+        })?
+        .ok_or(LaneGrantTargetStateError::Missing)?;
+    if !peer.enabled {
+        return Err(LaneGrantTargetStateError::Disabled);
+    }
+    let target_adapter =
+        crate::db::MeshLaneGrantTargetAdapter::new(peer.peer_id, peer.origin_node_id);
+    target_adapter.canonical_json().map_err(|error| {
+        LaneGrantTargetStateError::Domain(DomainError::Storage {
+            message: format!("Stored mesh peer cannot form a lane-grant target: {error}"),
+            repair: Some("Run `ee doctor --json` and repair the peer record.".to_owned()),
+        })
+    })?;
+    let state = connection
+        .get_mesh_lane_grant_state(workspace_id, peer_id)
+        .map_err(|error| {
+            LaneGrantTargetStateError::Domain(storage_error(
+                "Failed to load lane-grant state",
+                error,
+            ))
+        })?;
+    Ok((target_adapter, state))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_lane_grant_preview(
+    connection: &DbConnection,
+    workspace_id: &str,
+    peer_id: &str,
+    lane: crate::mesh::lane_grant_preview::Lane,
+    sample_strategy: crate::mesh::lane_grant_preview::SampleStrategy,
+    limit: usize,
+    seed: u64,
+    config: &crate::config::ConfigFile,
+    config_bytes: &[u8],
+) -> Result<PreparedLaneGrantPreview, DomainError> {
+    let (target_adapter, current_state) =
+        load_lane_grant_target_state(connection, workspace_id, peer_id)
+            .map_err(|error| error.into_domain(peer_id))?;
+    prepare_lane_grant_preview_for_state(
+        connection,
+        workspace_id,
+        peer_id,
+        lane,
+        sample_strategy,
+        limit,
+        seed,
+        config,
+        config_bytes,
+        target_adapter,
+        current_state,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_lane_grant_preview_for_state(
+    connection: &DbConnection,
+    workspace_id: &str,
+    peer_id: &str,
+    lane: crate::mesh::lane_grant_preview::Lane,
+    sample_strategy: crate::mesh::lane_grant_preview::SampleStrategy,
+    limit: usize,
+    seed: u64,
+    config: &crate::config::ConfigFile,
+    config_bytes: &[u8],
+    target_adapter: crate::db::MeshLaneGrantTargetAdapter,
+    current_state: Option<crate::db::StoredMeshLaneGrantState>,
+) -> Result<PreparedLaneGrantPreview, DomainError> {
+    use crate::mesh::lane_grant_preview::{
+        LaneGrantApprovalContext, LaneGrantPreviewInput, MemoryView,
+        compute_lane_grant_preview_with_context,
+    };
+
+    let target_adapter_json =
+        target_adapter
+            .canonical_json()
+            .map_err(|error| DomainError::Storage {
+                message: format!("Stored mesh peer cannot form a lane-grant target: {error}"),
+                repair: Some("Run `ee doctor --json` and repair the peer record.".to_owned()),
+            })?;
+    let grant_generation = current_state
+        .as_ref()
+        .map_or(0, |state| state.grant_generation);
+    let current_peer_policy =
+        effective_lane_grant_policy(config, workspace_id, peer_id, current_state.as_ref())?;
+    let current_policy = intended_lane_policy_from_peer_policy(&current_peer_policy);
+    let proposed_policy = lane_grant_preview_proposed_policy(current_policy, lane);
+    let proposed_generation =
+        grant_generation
+            .checked_add(1)
+            .ok_or_else(|| DomainError::Storage {
+                message: format!(
+                    "Mesh lane grant generation {grant_generation} cannot be advanced"
+                ),
+                repair: Some(
+                    "Run `ee doctor --json`; do not bypass the generation guard.".to_owned(),
+                ),
+            })?;
+    let current_policy_generation = lane_grant_policy_generation(
+        config_bytes,
+        &target_adapter_json,
+        grant_generation,
+        &current_policy,
+    );
+    let proposed_policy_generation = lane_grant_policy_generation(
+        config_bytes,
+        &target_adapter_json,
+        proposed_generation,
+        &proposed_policy,
+    );
+    let (memories, redaction_rules) =
+        lane_grant_preview_memories(connection, workspace_id, &current_peer_policy, lane)?;
+    let memory_views = memories
+        .iter()
+        .map(LaneGrantPreviewMemory::as_view)
+        .collect::<Vec<MemoryView<'_>>>();
+    let bindings = config
+        .mesh
+        .peer_group_bindings
+        .as_deref()
+        .unwrap_or_default();
+    let preview = compute_lane_grant_preview_with_context(
+        &LaneGrantPreviewInput {
+            peer_node_key: peer_id,
+            peer_in_group: peer_is_in_lane_group(workspace_id, peer_id, bindings),
+            lane,
+            workspace_id,
+            current_policy,
+            proposed_policy,
+            memories: &memory_views,
+            sample_strategy,
+            limit,
+            redaction_rules: &redaction_rules,
+            sample_random_seed: seed,
+        },
+        &LaneGrantApprovalContext {
+            target_peer_id: peer_id,
+            grant_generation,
+            current_policy_generation: &current_policy_generation,
+            proposed_policy_generation: &proposed_policy_generation,
+        },
+    );
+    Ok(PreparedLaneGrantPreview {
+        preview,
+        target_adapter,
+        current_state,
+    })
+}
+
+fn public_lane_grant_target(peer_id: &str) -> crate::mesh::lane_grant_preview::GrantTargetSnapshot {
+    crate::mesh::lane_grant_preview::GrantTargetSnapshot {
+        adapter_version: crate::mesh::lane_grant_preview::LANE_GRANT_TARGET_ADAPTER_VERSION
+            .to_owned(),
+        peer_id: peer_id.to_owned(),
+    }
+}
+
+fn render_lane_grant_preview_human(
+    preview: &crate::mesh::lane_grant_preview::LaneGrantPreview,
+) -> String {
+    let mut output = format!(
+        "Mesh lane grant preview\n  peer: {}\n  lane: {}\n  generation: {}\n  current: {}\n  proposed: {}\n  affected memories: {}\n  redacted from exposure: {}\n",
+        preview.target.peer_id,
+        preview.lane,
+        preview.grant_generation,
+        preview.current_policy.decision,
+        preview.proposed_policy.decision,
+        preview.affected_memory_count,
+        preview.redacted_from_exposure_count,
+    );
+    if !preview.preview_sample.is_empty() {
+        output.push_str("  sample:\n");
+        for row in &preview.preview_sample {
+            output.push_str(&format!(
+                "    - {} [{} / {}]: {}\n",
+                row.memory_id, row.trust_class, row.kind, row.content_preview
+            ));
+        }
+    }
+    if !preview.cautions.is_empty() {
+        output.push_str("  cautions:\n");
+        for caution in &preview.cautions {
+            output.push_str(&format!(
+                "    - {} ({}): {}\n",
+                caution.kind, caution.severity, caution.message
+            ));
+        }
+    }
+    output
+}
+
+fn render_lane_mutation_human(report: &MeshLaneMutationReport) -> String {
+    format!(
+        "{}: peer={} lane={} decision={} generation {} -> {}\n  audit: {}\n  remote erasure guaranteed: no\n  {}\n",
+        report.command,
+        report.target.peer_id,
+        report.lane,
+        report.decision,
+        report.previous_grant_generation,
+        report.new_grant_generation,
+        report.audit_id,
+        report.residual,
+    )
+}
+
+fn lane_grant_serialization_error(error: serde_json::Error) -> DomainError {
+    DomainError::Storage {
+        message: format!("Failed to serialize the canonical lane-grant preview: {error}"),
+        repair: Some("Retry the preview and report the serialization failure.".to_owned()),
+    }
+}
+
+fn lane_cli_value(lane: crate::mesh::lane_grant_preview::Lane) -> &'static str {
+    use crate::mesh::lane_grant_preview::Lane;
+    match lane {
+        Lane::Metadata => "metadata",
+        Lane::Body => "body",
+        Lane::Embedding => "embedding",
+        Lane::GraphLink => "graph-link",
+        Lane::CurationSignal => "curation-signal",
+        Lane::RevisionNotice => "revision-notice",
+    }
+}
+
+fn read_lane_grant_confirmation<R: std::io::BufRead>(reader: R) -> std::io::Result<bool> {
+    let mut limited = reader.take((LANE_GRANT_CONFIRMATION_MAX_BYTES + 1) as u64);
+    let mut answer = Vec::with_capacity(LANE_GRANT_CONFIRMATION_MAX_BYTES + 1);
+    std::io::BufRead::read_until(&mut limited, b'\n', &mut answer)?;
+    if answer.len() > LANE_GRANT_CONFIRMATION_MAX_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("confirmation exceeds {LANE_GRANT_CONFIRMATION_MAX_BYTES}-byte limit"),
+        ));
+    }
+    let answer = std::str::from_utf8(&answer).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("confirmation is not UTF-8: {error}"),
+        )
+    })?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+fn approval_token_domain_error(
+    error: &crate::mesh::lane_grant::ApprovalTokenError,
+    peer_id: &str,
+    lane: crate::mesh::lane_grant_preview::Lane,
+) -> DomainError {
+    use crate::mesh::lane_grant::ApprovalTokenError;
+    if let ApprovalTokenError::StoreAuth(store_error) = error {
+        return DomainError::UsageCodeWithDetails {
+            code: crate::policy::store_auth::MESH_STORE_AUTHENTICATION_UNAVAILABLE_CODE,
+            message: store_error.message(),
+            repair: Some(store_error.repair()),
+            details_json: "{}".to_owned(),
+        };
+    }
+    let peer_id = super::shell_quote_cli_arg(peer_id);
+    let command = format!(
+        "ee mesh preview-grant {peer_id} --lane {} --issue-approval-token --json",
+        lane_cli_value(lane)
+    );
+    DomainError::UsageCodeWithDetails {
+        code: error.code(),
+        message: error.message(),
+        repair: Some(error.repair()),
+        details_json: json!({
+            "recovery": [{
+                "priority": 0,
+                "kind": "command",
+                "command": command,
+                "rationale": "Rebuild the read-only approval snapshot and explicitly issue a fresh short-lived bearer.",
+                "riskClass": "read_only_probe",
+                "requiresHumanApproval": false,
+                "mutatesExternalState": false,
+                "mutatesTrackerState": false,
+                "privacyClass": "sensitive_bearer_issuance",
+            }],
+        })
+        .to_string(),
+    }
+}
+
+fn grant_mutation_domain_error(
+    error: crate::db::MeshLaneGrantMutationError,
+    peer_id: &str,
+    lane: crate::mesh::lane_grant_preview::Lane,
+) -> DomainError {
+    use crate::db::MeshLaneGrantMutationError;
+    match error {
+        MeshLaneGrantMutationError::GenerationConflict { .. }
+        | MeshLaneGrantMutationError::TargetMismatch { .. }
+        | MeshLaneGrantMutationError::PeerNotFound { .. }
+        | MeshLaneGrantMutationError::PeerDisabled { .. } => approval_token_domain_error(
+            &crate::mesh::lane_grant::ApprovalTokenError::Stale,
+            peer_id,
+            lane,
+        ),
+        MeshLaneGrantMutationError::Database(error) => {
+            storage_error("Failed to commit mesh lane grant", error)
+        }
+        MeshLaneGrantMutationError::InvalidTargetAdapter { message } => DomainError::Storage {
+            message: format!("Invalid persisted lane-grant target: {message}"),
+            repair: Some("Run `ee doctor --json` and repair the peer record.".to_owned()),
+        },
+        MeshLaneGrantMutationError::GenerationExhausted { current } => DomainError::Storage {
+            message: format!("Mesh lane grant generation {current} cannot be advanced"),
+            repair: Some("Run `ee doctor --json`; do not bypass the generation guard.".to_owned()),
+        },
+    }
+}
+
+fn revoke_mutation_domain_error(
+    error: crate::db::MeshLaneGrantMutationError,
+    peer_id: &str,
+    lane: crate::mesh::lane_grant_preview::Lane,
+) -> DomainError {
+    use crate::db::MeshLaneGrantMutationError;
+    match error {
+        MeshLaneGrantMutationError::Database(error) => {
+            storage_error("Failed to revoke mesh lane", error)
+        }
+        MeshLaneGrantMutationError::GenerationConflict { expected, actual } => DomainError::Usage {
+            message: format!(
+                "Mesh lane generation changed while revoking {} for {peer_id}: expected {expected}, actual {actual}",
+                lane.as_str()
+            ),
+            repair: Some(
+                "Retry `ee mesh revoke-lane`; it will bind the new generation.".to_owned(),
+            ),
+        },
+        other => DomainError::PolicyDenied {
+            message: format!(
+                "Cannot revoke mesh lane {} for {peer_id}: {other}",
+                lane.as_str()
+            ),
+            repair: Some("Inspect `ee mesh peer show <peer> --json` and retry.".to_owned()),
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_lane_mutation_audit(
+    connection: &DbConnection,
+    workspace_id: &str,
+    peer_id: &str,
+    lane: crate::mesh::lane_grant_preview::Lane,
+    previous_generation: u64,
+    new_generation: u64,
+    decision: &str,
+    event_kind: MeshAuditEventKind,
+    approval_audit_id: Option<&str>,
+) -> Result<String, DomainError> {
+    let mut details = MeshAuditDetails::default();
+    details
+        .insert_reference("lane", lane.as_str())
+        .map_err(lane_mutation_audit_error)?;
+    details
+        .insert_reference("decision", decision)
+        .map_err(lane_mutation_audit_error)?;
+    details
+        .insert_count("previous_grant_generation", previous_generation)
+        .map_err(lane_mutation_audit_error)?;
+    details
+        .insert_count("new_grant_generation", new_generation)
+        .map_err(lane_mutation_audit_error)?;
+    details
+        .insert_bool("remote_erasure_guaranteed", false)
+        .map_err(lane_mutation_audit_error)?;
+    if let Some(approval_audit_id) = approval_audit_id {
+        details
+            .insert_reference("approval_audit_id", approval_audit_id)
+            .map_err(lane_mutation_audit_error)?;
+    }
+    let event = compute_mesh_audit_event(&MeshAuditEventInput {
+        workspace_id: workspace_id.to_owned(),
+        event_kind,
+        peer_id: Some(peer_id.to_owned()),
+        origin_workspace_id: None,
+        target_workspace_id: None,
+        workspace_scope: Some("exact_peer_lane".to_owned()),
+        policy_decision_id: approval_audit_id.map(str::to_owned),
+        local_row_refs: Vec::new(),
+        cached_body_refs: Vec::new(),
+        details,
+        previous_event_hash: None,
+    })
+    .map_err(lane_mutation_audit_error)?;
+    append_mesh_audit_event(connection, &event, Some(event_kind.audit_action()))
+        .map_err(lane_mutation_audit_error)
+}
+
+fn lane_mutation_audit_error(error: MeshAuditLedgerError) -> DomainError {
+    DomainError::Storage {
+        message: format!("Mesh lane mutation audit failed: {error}"),
+        repair: Some(
+            "Run `ee audit verify --json`; the lane mutation was rolled back with its audit."
+                .to_owned(),
+        ),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LaneGrantPreviewMemory {
+    memory_id: String,
+    level: String,
+    kind: String,
+    content: String,
+    tags: Vec<String>,
+    trust_class: crate::models::TrustClass,
+    redacted_fields: Vec<String>,
+    created_at_secs: i64,
+    is_tombstoned: bool,
+    blocked_by_redaction_class: bool,
+}
+
+impl LaneGrantPreviewMemory {
+    fn as_view(&self) -> crate::mesh::lane_grant_preview::MemoryView<'_> {
+        crate::mesh::lane_grant_preview::MemoryView {
+            memory_id: &self.memory_id,
+            level: &self.level,
+            kind: &self.kind,
+            content: &self.content,
+            tags: &self.tags,
+            trust_class: self.trust_class,
+            redacted_fields: &self.redacted_fields,
+            created_at_secs: self.created_at_secs,
+            is_tombstoned: self.is_tombstoned,
+            blocked_by_redaction_class: self.blocked_by_redaction_class,
+        }
+    }
+}
+
+fn lane_grant_preview_memories(
+    connection: &DbConnection,
+    workspace_id: &str,
+    policy: &crate::mesh::policy::MeshPeerPolicy,
+    lane: crate::mesh::lane_grant_preview::Lane,
+) -> Result<(Vec<LaneGrantPreviewMemory>, Vec<String>), DomainError> {
+    let memories = connection
+        .list_current_memories_including_tombstoned(workspace_id)
+        .map_err(|error| storage_error("Failed to list lane-preview memories", error))?;
+    let ids = memories
+        .iter()
+        .map(|memory| memory.id.as_str())
+        .collect::<Vec<_>>();
+    let tags_by_memory = connection
+        .get_memory_tags_batch(&ids)
+        .map_err(|error| storage_error("Failed to list lane-preview memory tags", error))?;
+    let blocked_by_redaction_class = lane_grant_redaction_denied(policy, lane);
+    let mut rules = BTreeSet::new();
+    let mut prepared = Vec::with_capacity(memories.len());
+    for memory in memories {
+        let trust_class = memory
+            .trust_class
+            .parse()
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Memory {} has an invalid trust class during lane preview: {error}",
+                    memory.id
+                ),
+                repair: Some("Run `ee doctor --json` before granting a mesh lane.".to_owned()),
+            })?;
+        let redaction = crate::policy::redact_secret_like_content(&memory.content);
+        let mut redacted_fields = redaction
+            .redacted_reasons
+            .iter()
+            .map(|reason| {
+                rules.insert((*reason).to_owned());
+                format!("content:{reason}")
+            })
+            .collect::<Vec<_>>();
+        let mut tags = tags_by_memory
+            .get(&memory.id)
+            .into_iter()
+            .flatten()
+            .map(|tag| {
+                let report = crate::policy::redact_secret_like_content(tag);
+                for reason in &report.redacted_reasons {
+                    rules.insert((*reason).to_owned());
+                    redacted_fields.push(format!("tag:{reason}"));
+                }
+                report.content
+            })
+            .collect::<Vec<_>>();
+        tags.sort();
+        tags.dedup();
+        redacted_fields.sort();
+        redacted_fields.dedup();
+        let created_at_secs = chrono::DateTime::parse_from_rfc3339(&memory.created_at)
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Memory {} has an invalid created_at timestamp during lane preview: {error}",
+                    memory.id
+                ),
+                repair: Some("Run `ee doctor --json` before granting a mesh lane.".to_owned()),
+            })?
+            .timestamp();
+        prepared.push(LaneGrantPreviewMemory {
+            memory_id: memory.id,
+            level: memory.level,
+            kind: memory.kind,
+            content: redaction.content,
+            tags,
+            trust_class,
+            redacted_fields,
+            created_at_secs,
+            is_tombstoned: memory.tombstoned_at.is_some(),
+            blocked_by_redaction_class,
+        });
+    }
+    Ok((prepared, rules.into_iter().collect()))
+}
+
+fn lane_grant_redaction_denied(
+    policy: &crate::mesh::policy::MeshPeerPolicy,
+    lane: crate::mesh::lane_grant_preview::Lane,
+) -> bool {
+    use crate::mesh::lane_grant_preview::Lane;
+    use crate::mesh::policy::MeshRedactionDecision;
+    match lane {
+        Lane::Metadata => policy.redaction.metadata == MeshRedactionDecision::Deny,
+        Lane::Body => policy.redaction.body == MeshRedactionDecision::Deny,
+        Lane::Embedding => policy.redaction.embedding == MeshRedactionDecision::Deny,
+        Lane::GraphLink | Lane::CurationSignal | Lane::RevisionNotice => false,
+    }
+}
+
+fn intended_lane_policy_from_peer_policy(
+    policy: &crate::mesh::policy::MeshPeerPolicy,
+) -> crate::mesh::auto_enrollment_safety::IntendedLanePolicy {
+    use crate::config::MeshLane;
+    use crate::mesh::auto_enrollment_safety::IntendedLanePolicy;
+    IntendedLanePolicy {
+        metadata: preview_lane_decision(policy.allowed_lanes.decision(MeshLane::Metadata)),
+        body: preview_lane_decision(policy.allowed_lanes.decision(MeshLane::Body)),
+        embedding: preview_lane_decision(policy.allowed_lanes.decision(MeshLane::Embedding)),
+        graph_link: preview_lane_decision(policy.allowed_lanes.decision(MeshLane::GraphLink)),
+        revision_notice: preview_lane_decision(
+            policy.allowed_lanes.decision(MeshLane::RevisionNotice),
+        ),
+        curation_signal: preview_lane_decision(
+            policy.allowed_lanes.decision(MeshLane::CurationSignal),
+        ),
+    }
+}
+
+fn preview_lane_decision(
+    decision: crate::config::MeshLaneDecision,
+) -> crate::mesh::auto_enrollment_safety::LaneDecision {
+    use crate::config::MeshLaneDecision;
+    use crate::mesh::auto_enrollment_safety::LaneDecision;
+    match decision {
+        MeshLaneDecision::Allow => LaneDecision::Allow,
+        MeshLaneDecision::Quarantine => LaneDecision::Quarantine,
+        MeshLaneDecision::Deny => LaneDecision::Deny,
+    }
+}
+
+fn config_mesh_lane(lane: crate::mesh::lane_grant_preview::Lane) -> crate::config::MeshLane {
+    use crate::config::MeshLane;
+    use crate::mesh::lane_grant_preview::Lane;
+    match lane {
+        Lane::Metadata => MeshLane::Metadata,
+        Lane::Body => MeshLane::Body,
+        Lane::Embedding => MeshLane::Embedding,
+        Lane::GraphLink => MeshLane::GraphLink,
+        Lane::CurationSignal => MeshLane::CurationSignal,
+        Lane::RevisionNotice => MeshLane::RevisionNotice,
+    }
+}
+
+fn preview_lane(args: MeshPreviewGrantLane) -> crate::mesh::lane_grant_preview::Lane {
+    use crate::mesh::lane_grant_preview::Lane;
+    match args {
+        MeshPreviewGrantLane::Metadata => Lane::Metadata,
+        MeshPreviewGrantLane::Body => Lane::Body,
+        MeshPreviewGrantLane::Embedding => Lane::Embedding,
+        MeshPreviewGrantLane::GraphLink => Lane::GraphLink,
+        MeshPreviewGrantLane::CurationSignal => Lane::CurationSignal,
+        MeshPreviewGrantLane::RevisionNotice => Lane::RevisionNotice,
+    }
+}
+
+fn effective_lane_grant_policy(
+    config: &crate::config::ConfigFile,
+    workspace_id: &str,
+    peer_id: &str,
+    state: Option<&crate::db::StoredMeshLaneGrantState>,
+) -> Result<crate::mesh::policy::MeshPeerPolicy, DomainError> {
+    use crate::core::memory_scope::MeshOutboundPolicyDecisionInput;
+    use crate::mesh::policy::MeshPeerPolicyRegistry;
+    let registry = MeshPeerPolicyRegistry::from_config(config);
+    let input = MeshOutboundPolicyDecisionInput {
+        local_workspace_id: workspace_id,
+        origin_workspace_id: workspace_id,
+        target_peer_id: peer_id,
+        material_lane: crate::config::MeshLane::Metadata,
+        payload_is_redacted: true,
+    };
+    let mut policy = registry
+        .select_outbound_policy(&input)
+        .map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Cannot build lane approval for peer {peer_id}: {error}"
+            ),
+            repair: Some(
+                "Configure exactly one mesh.peer_policies entry for this workspace, peer, and local origin, then re-run the preview."
+                    .to_owned(),
+            ),
+        })?
+        .clone();
+    if let Some(state) = state.filter(|state| state.target_matches_current_peer) {
+        apply_lane_grant_state_to_policy(&mut policy, state);
+    }
+    Ok(policy)
+}
+
+fn apply_lane_grant_state_to_policy(
+    policy: &mut crate::mesh::policy::MeshPeerPolicy,
+    state: &crate::db::StoredMeshLaneGrantState,
+) {
+    if let Some(decision) = state.metadata_override {
+        policy.allowed_lanes.metadata = Some(decision);
+    }
+    if let Some(decision) = state.body_override {
+        policy.allowed_lanes.body = Some(decision);
+    }
+    if let Some(decision) = state.embedding_override {
+        policy.allowed_lanes.embedding = Some(decision);
+    }
+    if let Some(decision) = state.graph_link_override {
+        policy.allowed_lanes.graph_link = Some(decision);
+    }
+    if let Some(decision) = state.revision_notice_override {
+        policy.allowed_lanes.revision_notice = Some(decision);
+    }
+    if let Some(decision) = state.curation_signal_override {
+        policy.allowed_lanes.curation_signal = Some(decision);
+    }
+}
+
+fn lane_grant_policy_generation(
+    config_bytes: &[u8],
+    target_adapter_json: &str,
+    generation: u64,
+    policy: &crate::mesh::auto_enrollment_safety::IntendedLanePolicy,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.mesh.lane_policy_generation.v1\0");
+    hasher.update(&(config_bytes.len() as u64).to_be_bytes());
+    hasher.update(config_bytes);
+    hasher.update(&(target_adapter_json.len() as u64).to_be_bytes());
+    hasher.update(target_adapter_json.as_bytes());
+    hasher.update(&generation.to_be_bytes());
+    for decision in [
+        policy.metadata,
+        policy.body,
+        policy.embedding,
+        policy.graph_link,
+        policy.revision_notice,
+        policy.curation_signal,
+    ] {
+        hasher.update(decision.as_str().as_bytes());
+        hasher.update(&[0]);
+    }
+    let digest = hasher.finalize().to_hex();
+    format!("mesh_policy_{}", &digest[..24])
+}
+
+fn peer_is_in_lane_group(
+    workspace_id: &str,
+    peer_id: &str,
+    bindings: &[crate::config::MeshPeerGroupBinding],
+) -> bool {
+    bindings.iter().any(|binding| {
+        binding.workspace_id.as_deref() == Some(workspace_id)
+            && binding
+                .peer_ids
+                .as_ref()
+                .is_some_and(|peers| peers.iter().any(|peer| peer == peer_id))
+    })
 }
 
 fn handle_mesh_init<W, E>(
@@ -1268,10 +2580,12 @@ where
         };
         if let Err(error) = connection.with_transaction(|| {
             for upsert in &upserts {
-                connection.upsert_mesh_peer(upsert)?;
+                connection
+                    .upsert_mesh_peer_with_grant_invalidation_in_current_transaction(upsert)?;
             }
             for revocation in &revocations {
-                connection.upsert_mesh_peer(revocation)?;
+                connection
+                    .upsert_mesh_peer_with_grant_invalidation_in_current_transaction(revocation)?;
             }
             Ok(())
         }) {
@@ -1844,7 +3158,10 @@ where
     // drop records the peer may not receive and strip denied bodies. This is
     // the production entry point that makes [[mesh.peer_policies]] load-bearing.
     if let Some(peer_id) = args.peer.as_deref() {
-        let registry = load_mesh_peer_policy_registry(cli, args.database.as_deref());
+        let registry = match load_mesh_peer_policy_registry(cli, args.database.as_deref()) {
+            Ok(registry) => registry,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
         let filtered = apply_outbound_export_policy(
             std::mem::take(&mut artifact.events),
             &registry,
@@ -1937,8 +3254,11 @@ fn mesh_secret_export_denied_error(
 pub(crate) fn load_mesh_peer_policy_registry(
     cli: &Cli,
     database_override: Option<&Path>,
-) -> crate::mesh::policy::MeshPeerPolicyRegistry {
+) -> Result<crate::mesh::policy::MeshPeerPolicyRegistry, DomainError> {
     let workspace_path = cli.resolve_workspace();
+    let database_path = database_override
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
     let config_path = database_override
         .and_then(|path| path.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| workspace_path.join(".ee"))
@@ -1947,7 +3267,72 @@ pub(crate) fn load_mesh_peer_policy_registry(
         .ok()
         .and_then(|contents| crate::config::ConfigFile::parse(&contents).ok())
         .unwrap_or_default();
-    crate::mesh::policy::MeshPeerPolicyRegistry::from_config(&config)
+    let registry = crate::mesh::policy::MeshPeerPolicyRegistry::from_config(&config);
+    if !database_path.is_file() {
+        return Ok(registry);
+    }
+    let connection = open_mesh_connection(&database_path)?;
+    let workspace_id = resolve_mesh_workspace_id(&connection, &workspace_path)?;
+    let states = connection
+        .list_mesh_lane_grant_states(&workspace_id)
+        .map_err(|error| storage_error("Failed to load mesh lane-grant policy state", error))?;
+    Ok(registry.with_lane_grant_states(states))
+}
+
+fn mesh_workspace_config_path(cli: &Cli, database_override: Option<&Path>) -> PathBuf {
+    database_override
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| cli.resolve_workspace().join(".ee"))
+        .join("config.toml")
+}
+
+/// Load the exact policy bytes authenticated by an approval snapshot. Unlike
+/// ordinary fail-closed export/import lookup, a consent preview may not turn a
+/// malformed or unreadable config into an apparently valid empty policy: that
+/// would let a later parse repair silently change what the operator approved.
+fn load_mesh_config_for_approval(
+    cli: &Cli,
+    database_override: Option<&Path>,
+) -> Result<(crate::config::ConfigFile, Vec<u8>), DomainError> {
+    let config_path = mesh_workspace_config_path(cli, database_override);
+    if !config_path.exists() {
+        return Ok((crate::config::ConfigFile::default(), Vec::new()));
+    }
+    if !config_path.is_file() {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Mesh approval config path {} is not a regular file",
+                config_path.display()
+            ),
+            repair: Some(
+                "Restore .ee/config.toml as a readable regular file, then re-run the preview."
+                    .to_owned(),
+            ),
+        });
+    }
+    let contents = read_mesh_text_bounded(&config_path, MESH_CONFIG_MAX_BYTES, "approval config")
+        .map_err(|error| DomainError::Configuration {
+        message: format!(
+            "Failed to read mesh approval config {}: {error}",
+            config_path.display()
+        ),
+        repair: Some(
+            "Fix .ee/config.toml ownership, permissions, or size, then re-run the preview."
+                .to_owned(),
+        ),
+    })?;
+    let config = crate::config::ConfigFile::parse(&contents).map_err(|error| {
+        DomainError::Configuration {
+            message: format!(
+                "Failed to parse mesh approval config {}: {error}",
+                config_path.display()
+            ),
+            repair: Some(
+                "Fix the reported .ee/config.toml field and obtain a fresh preview.".to_owned(),
+            ),
+        }
+    })?;
+    Ok((config, contents.into_bytes()))
 }
 
 /// Load the workspace peer-group bindings from the effective config. A missing
@@ -3199,7 +4584,7 @@ fn import_mesh_artifact(
     let connection = open_mesh_connection(&database_path)?;
     let workspace_id = resolve_mesh_workspace_id(&connection, &workspace_path)?;
     let bindings = load_mesh_peer_group_bindings(cli, database_override);
-    let registry = load_mesh_peer_policy_registry(cli, database_override);
+    let registry = load_mesh_peer_policy_registry(cli, database_override)?;
     import_mesh_artifact_into_connection(&connection, &workspace_id, artifact, &bindings, &registry)
 }
 
@@ -3212,14 +4597,11 @@ fn import_mesh_artifact_into_connection(
 ) -> Result<(usize, usize, usize), DomainError> {
     let mut imported_peer_count = 0;
     for peer in &artifact.peers {
-        let existing = connection
-            .get_mesh_peer(workspace_id, &peer.peer_id)
-            .map_err(|error| storage_error("Failed to inspect existing mesh peer", error))?;
-        let changed = existing
-            .as_ref()
-            .is_none_or(|stored| !mesh_peer_matches_row(stored, workspace_id, peer));
-        connection
-            .upsert_mesh_peer(&UpsertMeshPeerInput {
+        // Enrollment identity and enabled state are local authority. A replay
+        // artifact may introduce a missing peer, but it must never rotate,
+        // re-enable, or roll back a peer already enrolled in this store.
+        let inserted = connection
+            .insert_mesh_peer_if_absent(&UpsertMeshPeerInput {
                 workspace_id: workspace_id.to_owned(),
                 peer_id: peer.peer_id.clone(),
                 origin_node_id: peer.origin_node_id.clone(),
@@ -3229,13 +4611,24 @@ fn import_mesh_artifact_into_connection(
                 last_seen_at: Some(peer.last_seen_at.clone()),
             })
             .map_err(|error| storage_error("Failed to import mesh peer", error))?;
-        if changed {
+        if inserted {
             imported_peer_count += 1;
         }
     }
 
     let mut imported_cursor_count = 0;
     for cursor in &artifact.cursors {
+        let enrolled_peer = connection
+            .get_mesh_peer(workspace_id, &cursor.peer_id)
+            .map_err(|error| {
+                storage_error("Failed to verify mesh cursor producer identity", error)
+            })?;
+        if !enrolled_peer
+            .as_ref()
+            .is_some_and(|peer| peer.enabled && peer.origin_node_id == cursor.origin_node_id)
+        {
+            continue;
+        }
         let existing = connection
             .get_mesh_peer_cursor(workspace_id, &cursor.peer_id, &cursor.origin_workspace_id)
             .map_err(|error| storage_error("Failed to inspect existing mesh peer cursor", error))?;
@@ -3260,6 +4653,13 @@ fn import_mesh_artifact_into_connection(
         }
     }
 
+    // Refresh after admitting any previously unknown peer so the import
+    // decision sees the current locally authoritative enrollment and grant.
+    let refreshed_states = connection
+        .list_mesh_lane_grant_states(workspace_id)
+        .map_err(|error| storage_error("Failed to refresh mesh lane-grant policy state", error))?;
+    let refreshed_registry = registry.clone().with_lane_grant_states(refreshed_states);
+
     let mut imported_event_count = 0;
     for event in &artifact.events {
         let existing = connection
@@ -3271,7 +4671,21 @@ fn import_mesh_artifact_into_connection(
             )
             .map_err(|error| storage_error("Failed to inspect existing mesh event", error))?;
         let changed = existing.is_none();
-        let decision = decide_import_event(workspace_id, event, bindings, registry);
+        let decision = if let Some(producer_peer_id) = event.producer_peer_id.as_deref() {
+            let enrolled_peer = connection
+                .get_mesh_peer(workspace_id, producer_peer_id)
+                .map_err(|error| {
+                    storage_error("Failed to verify mesh event producer identity", error)
+                })?;
+            match enrolled_peer {
+                Some(peer) if peer.enabled && peer.origin_node_id == event.origin_node_id => {
+                    decide_import_event(workspace_id, event, bindings, &refreshed_registry)
+                }
+                _ => denied_import_event(event, "peer_identity_mismatch"),
+            }
+        } else {
+            decide_import_event(workspace_id, event, bindings, &refreshed_registry)
+        };
         connection
             .insert_mesh_import_ledger_event(&InsertMeshImportLedgerEventInput {
                 workspace_id: workspace_id.to_owned(),
@@ -3324,6 +4738,34 @@ struct ImportEventDecision {
     admits: bool,
 }
 
+fn denied_import_event(
+    event: &crate::mesh::foreground_cli::MeshEventRow,
+    reason: &str,
+) -> ImportEventDecision {
+    ImportEventDecision {
+        import_decision: "deny".to_owned(),
+        policy_decision_json: Some(
+            json!({
+                "schema": "ee.mesh.policy_decision.v1",
+                "direction": "inbound",
+                "action": "deny",
+                "reason": reason,
+                "materialLane": event.material_lane,
+            })
+            .to_string(),
+        ),
+        policy_failure_surface_json: Some(
+            json!({
+                "schema": "ee.mesh.policy_failure_surface.v1",
+                "code": "mesh_peer_policy_denied",
+                "reason": reason,
+            })
+            .to_string(),
+        ),
+        admits: false,
+    }
+}
+
 /// Peer-supplied events may not claim trust classes above the `agent_validated`
 /// ceiling; a claim of operator, CASS, or legacy authority is rejected so a
 /// peer cannot launder elevated trust into the local store (ADR 0086 TC-D3).
@@ -3347,30 +4789,7 @@ fn decide_import_event(
 ) -> ImportEventDecision {
     use crate::core::memory_scope::{
         MeshEventValidity, MeshImportDecisionInput, MeshPeerPolicyDecisionInput,
-        decide_mesh_import, parse_mesh_lane,
-    };
-
-    let denied = |reason: &str| ImportEventDecision {
-        import_decision: "deny".to_owned(),
-        policy_decision_json: Some(
-            json!({
-                "schema": "ee.mesh.policy_decision.v1",
-                "direction": "inbound",
-                "action": "deny",
-                "reason": reason,
-                "materialLane": event.material_lane,
-            })
-            .to_string(),
-        ),
-        policy_failure_surface_json: Some(
-            json!({
-                "schema": "ee.mesh.policy_failure_surface.v1",
-                "code": "mesh_peer_policy_denied",
-                "reason": reason,
-            })
-            .to_string(),
-        ),
-        admits: false,
+        decide_mesh_import_with_lane_override, parse_mesh_lane,
     };
 
     // Outer ceiling: reject an over-claimed trust lane before any policy work.
@@ -3401,22 +4820,25 @@ fn decide_import_event(
 
     // Fail closed on an unparseable lane (mirrors the outbound export filter).
     let Some(lane) = parse_mesh_lane(&event.material_lane) else {
-        return denied("unparseable_material_lane");
+        return denied_import_event(event, "unparseable_material_lane");
     };
 
     let origin = event.origin_workspace_id.as_str();
     let producer = event.producer_peer_id.as_deref().unwrap_or("");
 
     // Layer 1 — peer-group membership gate.
-    let membership = decide_mesh_import(
-        &MeshImportDecisionInput {
-            local_workspace_id: workspace_id,
-            origin_workspace_id: origin,
-            producer_peer_id: producer,
-            material_lane: lane,
-            event_validity: MeshEventValidity::Valid,
-        },
+    let membership_input = MeshImportDecisionInput {
+        local_workspace_id: workspace_id,
+        origin_workspace_id: origin,
+        producer_peer_id: producer,
+        material_lane: lane,
+        event_validity: MeshEventValidity::Valid,
+    };
+    let membership_override = registry.inbound_membership_override(&membership_input);
+    let membership = decide_mesh_import_with_lane_override(
+        &membership_input,
         bindings,
+        membership_override.as_ref(),
     );
     if !membership.permits_local_truth_side_effects() {
         return ImportEventDecision {
@@ -3505,20 +4927,6 @@ fn stable_mesh_import_index_job_id(
     )
     .to_hex();
     format!("sidx_{}", &hash[..26])
-}
-
-fn mesh_peer_matches_row(
-    stored: &StoredMeshPeer,
-    workspace_id: &str,
-    row: &crate::mesh::foreground_cli::MeshPeerRow,
-) -> bool {
-    stored.workspace_id == workspace_id
-        && stored.peer_id == row.peer_id
-        && stored.origin_node_id == row.origin_node_id
-        && stored.display_name == row.display_name
-        && stored.policy_summary_json == row.policy_summary_json
-        && stored.enabled == row.enabled
-        && stored.last_seen_at == row.last_seen_at
 }
 
 fn mesh_cursor_matches_row(
@@ -4065,6 +5473,45 @@ mod tests {
         TailscalePeerEeCapability, TailscalePeerReport, TailscaleProbeMethod,
     };
     use crate::mesh::tailscale_autodiscovery::TailscaleAutodiscoveryPeer;
+
+    #[test]
+    fn approval_token_recovery_shell_quotes_untrusted_peer_id() {
+        let peer_id = "peer'; touch /tmp/should-not-run; echo '";
+        let error = approval_token_domain_error(
+            &crate::mesh::lane_grant::ApprovalTokenError::Invalid,
+            peer_id,
+            crate::mesh::lane_grant_preview::Lane::GraphLink,
+        );
+        let details_json = match error {
+            DomainError::UsageCodeWithDetails { details_json, .. } => details_json,
+            other => panic!("expected structured usage error, got {other:?}"),
+        };
+        let details: serde_json::Value =
+            serde_json::from_str(&details_json).expect("structured recovery JSON");
+        let command = details
+            .pointer("/recovery/0/command")
+            .and_then(serde_json::Value::as_str)
+            .expect("recovery command");
+        let quoted_peer = super::super::shell_quote_cli_arg(peer_id);
+        assert_eq!(
+            command,
+            format!(
+                "ee mesh preview-grant {quoted_peer} --lane graph-link --issue-approval-token --json"
+            )
+        );
+    }
+
+    #[test]
+    fn lane_grant_human_confirmation_is_bounded() {
+        assert!(read_lane_grant_confirmation(std::io::Cursor::new(b"yes\nignored")).unwrap());
+        assert!(!read_lane_grant_confirmation(std::io::Cursor::new(b"no\n")).unwrap());
+
+        let oversized = vec![b'y'; LANE_GRANT_CONFIRMATION_MAX_BYTES + 1];
+        let error = read_lane_grant_confirmation(std::io::Cursor::new(oversized))
+            .expect_err("oversized confirmation must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("byte limit"));
+    }
 
     #[test]
     fn read_mesh_text_bounded_refuses_oversized_payload() {
@@ -4877,6 +6324,154 @@ max_bytes = 0
         assert_eq!(
             index_jobs[0].document_id.as_deref(),
             Some(artifact.events[0].event_id.as_str())
+        );
+    }
+
+    #[test]
+    fn mesh_import_peer_rotation_cannot_reuse_a_stale_lane_grant() {
+        let connection = DbConnection::open_memory().expect("open memory db");
+        connection.migrate().expect("migrate db");
+        let workspace_id = REPLAY_WORKSPACE_ID;
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-mesh-replay-rotated-grant".to_string(),
+                    name: Some("mesh replay rotated grant".to_string()),
+                },
+            )
+            .expect("insert workspace");
+
+        let peer_id = "peer_mesh_replay_counts";
+        let original_node_id = "node_mesh_replay_original";
+        connection
+            .upsert_mesh_peer(&UpsertMeshPeerInput {
+                workspace_id: workspace_id.to_owned(),
+                peer_id: peer_id.to_owned(),
+                origin_node_id: original_node_id.to_owned(),
+                display_name: Some("replay-counts".to_owned()),
+                policy_summary_json: None,
+                enabled: true,
+                last_seen_at: Some("2026-05-21T19:49:00Z".to_owned()),
+            })
+            .expect("insert original peer target");
+        connection
+            .apply_mesh_lane_grant_with_effect(
+                &crate::db::MeshLaneGrantMutationInput {
+                    workspace_id: workspace_id.to_owned(),
+                    peer_id: peer_id.to_owned(),
+                    target_adapter: crate::db::MeshLaneGrantTargetAdapter::new(
+                        peer_id,
+                        original_node_id,
+                    ),
+                    material_lane: crate::config::MeshLane::GraphLink,
+                    expected_generation: 0,
+                    updated_at: Some("2026-05-21T19:49:01Z".to_owned()),
+                },
+                |_| Ok::<(), std::convert::Infallible>(()),
+            )
+            .expect("grant graph lane to original target");
+
+        let rotated_node_id = "node_mesh_replay_rotated";
+        connection
+            .upsert_mesh_peer(&UpsertMeshPeerInput {
+                workspace_id: workspace_id.to_owned(),
+                peer_id: peer_id.to_owned(),
+                origin_node_id: rotated_node_id.to_owned(),
+                display_name: Some("replay-counts-rotated".to_owned()),
+                policy_summary_json: None,
+                enabled: true,
+                last_seen_at: Some("2026-05-21T19:49:02Z".to_owned()),
+            })
+            .expect("rotate the locally authoritative peer target");
+
+        let mut config = admitting_replay_config();
+        config
+            .mesh
+            .peer_group_bindings
+            .as_mut()
+            .expect("peer-group binding")
+            .first_mut()
+            .expect("peer-group binding row")
+            .lanes
+            .graph_link = Some(crate::config::MeshLaneDecision::Deny);
+        config
+            .mesh
+            .peer_policies
+            .as_mut()
+            .expect("peer policy")
+            .first_mut()
+            .expect("peer policy row")
+            .allowed_lanes
+            .graph_link = Some(crate::config::MeshLaneDecision::Deny);
+        let bindings = config.mesh.peer_group_bindings.clone().unwrap_or_default();
+        let grant_states = connection
+            .list_mesh_lane_grant_states(workspace_id)
+            .expect("load post-rotation grant state");
+        assert!(
+            grant_states[0].target_matches_current_peer,
+            "local rotation must rebind the cleared generation fence to the new target"
+        );
+        assert_eq!(grant_states[0].grant_generation, 2);
+        assert_eq!(grant_states[0].graph_link_override, None);
+        let registry = crate::mesh::policy::MeshPeerPolicyRegistry::from_config(&config)
+            .with_lane_grant_states(grant_states);
+
+        let mut artifact = mesh_export_artifact_for_import_counts();
+        artifact.peers[0].origin_node_id = original_node_id.to_owned();
+        artifact.cursors[0].origin_node_id = original_node_id.to_owned();
+        artifact.events[0].origin_node_id = original_node_id.to_owned();
+        artifact.events[0].material_lane = "graph_link".to_owned();
+
+        let imported = import_mesh_artifact_into_connection(
+            &connection,
+            workspace_id,
+            &artifact,
+            &bindings,
+            &registry,
+        )
+        .expect("import rotating peer and event");
+        assert_eq!(
+            imported,
+            (0, 0, 1),
+            "the artifact may record its denied event but cannot roll back peer or cursor identity"
+        );
+
+        let peer = connection
+            .get_mesh_peer(workspace_id, peer_id)
+            .expect("reload enrolled peer")
+            .expect("peer remains enrolled");
+        assert_eq!(peer.origin_node_id, rotated_node_id);
+        assert!(peer.enabled);
+
+        let refreshed = connection
+            .get_mesh_lane_grant_state(workspace_id, peer_id)
+            .expect("reload grant state")
+            .expect("grant state remains durable");
+        assert!(
+            refreshed.target_matches_current_peer,
+            "artifact replay must not replace the locally rebound target"
+        );
+        assert_eq!(refreshed.grant_generation, 2);
+        assert_eq!(refreshed.graph_link_override, None);
+        let events = connection
+            .list_mesh_import_ledger_events_for_workspace(workspace_id)
+            .expect("list imported events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].import_decision, "deny");
+        assert!(
+            events[0]
+                .policy_decision_json
+                .as_deref()
+                .is_some_and(|decision| decision.contains("peer_identity_mismatch")),
+            "the ledger must explain the local enrollment identity mismatch"
+        );
+        assert!(
+            connection
+                .list_search_index_jobs(workspace_id, None)
+                .expect("list index jobs")
+                .is_empty(),
+            "a rotated target's stale grant must admit no local-truth side effects"
         );
     }
 

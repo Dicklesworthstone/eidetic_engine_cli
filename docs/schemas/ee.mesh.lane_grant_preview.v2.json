@@ -1,0 +1,348 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.lane_grant_preview.v2.json",
+  "title": "ee.mesh.lane_grant_preview.v2",
+  "description": "Canonical read-only approval snapshot emitted by `ee mesh preview-grant <peer-id> --lane <lane>`. Human and JSON renderers consume this same snapshot. It binds copy/schema version, workspace, the opaque enrolled-peer target adapter and grant generation, current/proposed policy generations, the complete revision-pinned candidate set, sample strategy/limit, exact ordered redacted samples, redaction rules, and caution codes. Ordinary output is deterministic and token-free. Only explicit robot issuance adds the optional sensitive approvalToken object.",
+  "type": "object",
+  "required": [
+    "schema",
+    "copyVersion",
+    "workspaceId",
+    "target",
+    "lane",
+    "grantGeneration",
+    "currentPolicy",
+    "proposedPolicy",
+    "candidateSet",
+    "affectedMemoryCount",
+    "redactedFromExposureCount",
+    "previewSampleStrategy",
+    "previewSampleLimit",
+    "previewSample",
+    "redactionRulesApplied",
+    "cautionCodes",
+    "cautions"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.lane_grant_preview.v2"
+    },
+    "copyVersion": {
+      "type": "string",
+      "const": "ee.mesh.lane_grant_preview.copy.v1",
+      "description": "Operator-copy and renderer contract version. A copy change requires a new value and invalidates outstanding approvals."
+    },
+    "workspaceId": {
+      "$ref": "#/$defs/workspaceId",
+      "description": "Exact workspace context against which the preview was computed and to which approval verification is bound."
+    },
+    "target": {
+      "$ref": "#/$defs/grantTarget"
+    },
+    "lane": {
+      "$ref": "#/$defs/lane"
+    },
+    "grantGeneration": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Exact target generation observed by this preview. Grant applies by compare-and-swap and advances it; revoke also advances it, making this preview stale."
+    },
+    "currentPolicy": {
+      "$ref": "#/$defs/policySnapshot"
+    },
+    "proposedPolicy": {
+      "$ref": "#/$defs/policySnapshot"
+    },
+    "candidateSet": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/revisionPin"
+      },
+      "description": "Complete canonical candidate set considered by the preview, not only sampled rows. Every entry pins an immutable entity revision; ordering is deterministic and approval-bound."
+    },
+    "affectedMemoryCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total memories that would become visible under the proposed effective policy, computed across the complete candidate set."
+    },
+    "redactedFromExposureCount": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Candidate memories that remain hidden by redaction-class policy even if the proposed lane decision is allow."
+    },
+    "previewSampleStrategy": {
+      "$ref": "#/$defs/sampleStrategy"
+    },
+    "previewSampleLimit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 500,
+      "description": "Effective bounded sample limit after applying the default and the 500-row hard ceiling."
+    },
+    "previewSample": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "$ref": "#/$defs/previewRow"
+      },
+      "description": "Exact ordered, already-redacted sample rendered to humans and JSON consumers. No unkeyed sample or content hash is emitted."
+    },
+    "redactionRulesApplied": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    },
+    "cautionCodes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/cautionCode"
+      },
+      "description": "Canonical ordered caution vocabulary bound into approval verification. It matches the kinds represented by cautions."
+    },
+    "cautions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/caution"
+      }
+    },
+    "approvalToken": {
+      "$ref": "https://eidetic-engine/schemas/ee.mesh.approval_token.v1.json",
+      "description": "Present only when a robot explicitly requests --issue-approval-token. Ordinary human and JSON previews omit this field and remain deterministic."
+    }
+  },
+  "$defs": {
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "peerId": {
+      "type": "string",
+      "pattern": "^peer_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "grantTarget": {
+      "type": "object",
+      "required": [
+        "adapterVersion",
+        "peerId"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "adapterVersion": {
+          "type": "string",
+          "const": "ee.mesh.grant_target.v1",
+          "description": "Versioned M0 adapter boundary consumed by later exact-node identity migrations."
+        },
+        "peerId": {
+          "$ref": "#/$defs/peerId",
+          "description": "Opaque enrolled-peer lookup handle. It is not a cryptographic identity and does not expose the adapter's internal origin-node binding."
+        }
+      }
+    },
+    "lane": {
+      "type": "string",
+      "enum": [
+        "metadata",
+        "body",
+        "embedding",
+        "graph_link",
+        "curation_signal",
+        "revision_notice"
+      ]
+    },
+    "laneDecision": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "quarantine",
+        "deny"
+      ]
+    },
+    "policyGeneration": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Deterministic generation derived from the exact policy inputs that affect this decision. Approval goes stale when it changes."
+    },
+    "policySnapshot": {
+      "type": "object",
+      "required": [
+        "generation",
+        "lane",
+        "decision"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "generation": {
+          "$ref": "#/$defs/policyGeneration"
+        },
+        "lane": {
+          "$ref": "#/$defs/lane"
+        },
+        "decision": {
+          "$ref": "#/$defs/laneDecision"
+        }
+      }
+    },
+    "revisionPin": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "revisionId"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "revisionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Immutable entity revision selected at preview time. In the current store, a revised memory receives a new memory ID, so memoryId and revisionId may be identical."
+        }
+      }
+    },
+    "sampleStrategy": {
+      "type": "string",
+      "enum": [
+        "random",
+        "highest-trust",
+        "most-recent"
+      ],
+      "description": "The random strategy is deterministic for the snapshot's fixed sampling input; issuance randomness affects only the optional bearer, never sample selection."
+    },
+    "trustClass": {
+      "type": "string",
+      "enum": [
+        "human_explicit",
+        "agent_validated",
+        "agent_assertion",
+        "cass_evidence",
+        "legacy_import"
+      ],
+      "description": "Canonical five-class vocabulary from src/models/trust.rs."
+    },
+    "previewRow": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "revisionId",
+        "level",
+        "kind",
+        "contentPreview",
+        "tags",
+        "trustClass",
+        "hasSensitiveTags",
+        "redactedFields",
+        "wouldExposeUnderProposedPolicy"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "revisionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "level": {
+          "type": "string",
+          "enum": [
+            "working",
+            "episodic",
+            "semantic",
+            "procedural"
+          ]
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "contentPreview": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "At most 100 Unicode scalar values from the already-redacted memory body."
+        },
+        "tags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "trustClass": {
+          "$ref": "#/$defs/trustClass"
+        },
+        "hasSensitiveTags": {
+          "type": "boolean"
+        },
+        "redactedFields": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "wouldExposeUnderProposedPolicy": {
+          "type": "boolean"
+        }
+      }
+    },
+    "cautionCode": {
+      "type": "string",
+      "enum": [
+        "high_trust_class_exposure",
+        "large_volume_exposure",
+        "sensitive_tags_in_exposure",
+        "tombstoned_in_exposure",
+        "redaction_active",
+        "peer_not_in_group",
+        "lane_already_granted"
+      ]
+    },
+    "caution": {
+      "type": "object",
+      "required": [
+        "kind",
+        "message",
+        "severity"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/cautionCode"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "severity": {
+          "type": "string",
+          "enum": [
+            "info",
+            "warning"
+          ]
+        }
+      }
+    }
+  }
+}

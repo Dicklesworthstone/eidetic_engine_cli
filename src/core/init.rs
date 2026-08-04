@@ -19,6 +19,7 @@ use super::{
     workspace::stable_workspace_id,
 };
 use crate::db::{CreateWorkspaceInput, DbConnection};
+use crate::policy::store_auth::{StoreAuthRoot, workspace_keys_dir};
 
 /// Status of the init operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -898,6 +899,14 @@ fn initialize_database(
 
     super::model::ensure_bundled_embedding_model_registered(&connection, &workspace_id)
         .map_err(|error| format!("failed to register bundled embedding model: {error}"))?;
+
+    // Approval-token issuance is a read-only preview operation and therefore
+    // must never create authentication material as a side effect. Establish
+    // the hardened store-local root during explicit workspace initialization
+    // instead; idempotent init also repairs older initialized workspaces that
+    // predate this key.
+    StoreAuthRoot::open_or_create(workspace_keys_dir(workspace_path))
+        .map_err(|error| format!("failed to initialize store authentication root: {error}"))?;
 
     Ok(())
 }

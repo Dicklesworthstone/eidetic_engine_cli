@@ -1077,12 +1077,15 @@ tailnet or local file-exchange path is part of the agent workflow.
 |---|---|
 | `ee mesh init --json` | Inspect foreground mesh readiness without starting a daemon |
 | `ee mesh status --json` | Report local mesh posture, cache counts, and repair commands |
-| `ee mesh peers --json` | List configured peers and anti-entropy cursors |
+| `ee mesh peers --json` | List configured peers, including the opaque `peerId` used by lane-consent commands, and anti-entropy cursors |
 | `ee mesh peer add\|list\|show\|rotate\|revoke\|unknown-attempt` | Manage app-level mesh peer records after explicit consent |
 | `ee mesh auto-enroll --json` | Materialize Tailscale-discovered peers from fresh autodiscovery |
 | `ee mesh discovery-policy [set\|allow\|deny] --json` | Inspect or update caller/responder discovery policy |
 | `ee mesh hello-responder status --json` | Inspect the local hello responder lifecycle job |
-| `ee mesh preview-grant <nodekey> --lane <lane> --json` | Preview lane grants without mutating policy |
+| `ee mesh preview-grant <peer-id> --lane <lane> --json` | Emit the deterministic, token-free `ee.mesh.lane_grant_preview.v2` snapshot without mutating policy |
+| `ee mesh preview-grant <peer-id> --lane <lane> --issue-approval-token --json` | Explicitly issue a sensitive, short-lived approval bearer bound to the canonical preview |
+| `ee mesh grant <peer-id> --lane <lane> --preview-token-stdin --json` | Verify a bearer from bounded stdin, advance the target generation, grant the lane, and audit atomically |
+| `ee mesh revoke-lane <peer-id> --lane <lane> --json` | Deny one lane, always advance its generation, invalidate prior previews, and audit atomically |
 | `ee mesh export --out <file> --json` | Write a redaction-safe foreground mesh artifact |
 | `ee mesh import --file <file> --json` | Import a foreground mesh artifact from a local file |
 | `ee mesh sync --once --json` | Run one foreground sync cycle |
@@ -1095,6 +1098,29 @@ ee pack "handoff this bead" --workspace . --mesh cache --json
 ee status --workspace . --mesh revisable --json
 ee mesh discovery-policy --explain --json
 ```
+
+Lane consent targets the opaque enrolled `peerId`, not a raw Tailscale node
+key. Inspect an ordinary preview first. For a non-interactive JSON grant, issue
+the approval bearer explicitly and pipe only that field into the bounded stdin
+surface so it is not stored in a shell variable:
+
+```bash
+PEER_ID=peer_example123
+ee mesh preview-grant "$PEER_ID" --lane body --workspace . --json
+ee mesh preview-grant "$PEER_ID" --lane body --workspace . \
+  --issue-approval-token --json \
+  | jq -r '.data.preview.approvalToken.bearer' \
+  | ee mesh grant "$PEER_ID" --lane body --workspace . \
+      --preview-token-stdin --json
+ee mesh revoke-lane "$PEER_ID" --lane body --workspace . --json
+```
+
+Ordinary previews remain deterministic and contain no bearer. Explicitly
+issued approval tokens are secrets: do not log, persist, echo, or place them in
+arguments. They expire after 15 minutes and become stale when the target,
+policy, candidate revisions, redacted sample, or grant generation changes.
+Revocation stops future serving but cannot erase bytes a peer already cached or
+copied.
 
 Related docs:
 
@@ -1495,7 +1521,7 @@ Additional runtime-adjacent modules:
 
 | Module | Role |
 |---|---|
-| `mesh` | Optional peer exchange, Tailscale autodiscovery, hello responder, anti-entropy, policy, and lane preview |
+| `mesh` | Optional peer exchange, Tailscale autodiscovery, hello responder, anti-entropy, policy, authenticated lane consent, and revocation |
 | `obs` | Flight recorder, structured tracing, posture helpers, and diagnostic evidence |
 | `hooks` | Agent harness hook helpers, including preflight shell snippets |
 | `steward` | Bounded maintenance jobs, spec packs, and optional daemon work |
@@ -1916,11 +1942,15 @@ go into `curate candidates` and do not silently enter the procedural layer.
 
 ### Mesh sharing posture
 
-Outbound sharing goes through policy and preview paths before lane grants.
+Outbound sharing goes through policy and an authenticated canonical preview
+before lane grants. Lane-consent commands use the opaque enrolled `peerId`, not
+a raw Tailscale node key.
 
 | Surface | What to use |
 |---|---|
-| Preview lane access | `ee mesh preview-grant <nodekey> --lane metadata --json` |
+| Deterministic preview | `ee mesh preview-grant <peer-id> --lane metadata --json` |
+| Explicit JSON grant | Pipe `.data.preview.approvalToken.bearer` from `preview-grant --issue-approval-token --json` into `ee mesh grant <peer-id> --lane metadata --preview-token-stdin --json` |
+| Narrow one lane | `ee mesh revoke-lane <peer-id> --lane metadata --json` |
 | Discovery consent | `ee mesh discovery-policy --explain --json` |
 | Share preview | `ee share preview --peer <peer> --json` |
 | Operator docs | [`docs/mesh/share_preview.md`](docs/mesh/share_preview.md), [`docs/mesh/peer_policy.md`](docs/mesh/peer_policy.md) |

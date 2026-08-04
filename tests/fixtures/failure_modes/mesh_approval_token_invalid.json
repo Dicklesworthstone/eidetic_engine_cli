@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_approval_token_invalid",
+  "introduced_by": {
+    "bead": "bd-tc-epic-qzk7o.2.2",
+    "epic_letter": "TC"
+  },
+  "surfaces": [
+    "mesh grant"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The bounded stdin supplied to `ee mesh grant` is malformed, tampered, signed by a non-current key, or authenticated for a different store, workspace, or command surface. All unauthenticated causes collapse to one high-severity error so the response cannot become a target, key, MAC, or snapshot authentication oracle. No lane state or audit row is written.",
+    "setup_commands": [
+      "ee init --workspace . --json"
+    ],
+    "invocation": "printf '%s\\n' 'eeap1_invalid-bearer' | ee mesh grant peer_example123 --lane body --preview-token-stdin --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_approval_token_invalid",
+    "severity": "high",
+    "message_contains": [
+      "mesh approval token",
+      "invalid for this store, workspace, and command"
+    ],
+    "repair_contains": "read-only lane preview again",
+    "repair_string": "Run the read-only lane preview again and submit its new approval token through bounded stdin."
+  }
+}

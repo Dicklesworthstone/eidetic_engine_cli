@@ -15,7 +15,7 @@
 //! being granted, and a small set of caller-side facts (peer-in-group,
 //! sample strategy). The output is a fully populated
 //! [`LaneGrantPreview`] envelope shaped to the documented
-//! `ee.mesh.lane_grant_preview.v1` schema, ready for any renderer.
+//! `ee.mesh.lane_grant_preview.v2` schema, ready for any renderer.
 //!
 //! Why a separate module rather than folding this into the auto-enroll
 //! flow: (1) the preview is a pure read with a strict "no DB writes,
@@ -36,11 +36,22 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::mesh::auto_enrollment_safety::{IntendedLanePolicy, LaneDecision};
+use crate::models::TrustClass;
 
 /// JSON schema identifier for the lane-grant preview output. Held as the
 /// source-of-truth constant so the renderer and the schema-lifecycle
 /// drift gate agree.
-pub const LANE_GRANT_PREVIEW_SCHEMA_V1: &str = "ee.mesh.lane_grant_preview.v1";
+pub const LANE_GRANT_PREVIEW_SCHEMA_V2: &str = "ee.mesh.lane_grant_preview.v2";
+
+/// Copy contract bound into every authenticated approval snapshot. Copy
+/// changes are consent changes: a token issued for older operator wording may
+/// not authorize a mutation rendered with newer wording.
+pub const LANE_GRANT_PREVIEW_COPY_VERSION: &str = "ee.mesh.lane_grant_preview.copy.v1";
+
+/// Versioned opaque-handle adapter persisted with the grant. T2.2/T3.1 can
+/// migrate its private representation when stable node identities land; the
+/// public preview intentionally exposes only this version and the peer ID.
+pub const LANE_GRANT_TARGET_ADAPTER_VERSION: &str = "ee.mesh.grant_target.v1";
 
 /// Degraded code emitted (informational) when the lane-grant preview
 /// runs against a peer that is not in the workspace's auto-enrolled
@@ -96,7 +107,7 @@ pub enum Lane {
 }
 
 impl Lane {
-    /// Canonical wire string used in `ee.mesh.lane_grant_preview.v1`.
+    /// Canonical wire string used in `ee.mesh.lane_grant_preview.v2`.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -153,61 +164,18 @@ impl SampleStrategy {
     }
 }
 
-// ============================================================================
-// TrustClass — SRR6.5 trust authority class
-// ============================================================================
-
-/// SRR6.5 trust authority class. Higher classes are more trustworthy
-/// (and therefore more sensitive to leak). Order matters: the
-/// `Ord`/`PartialOrd` derive uses declaration order, so
-/// `HumanExplicit < HumanRevised < AgentValidated < AgentProposed <
-/// External` — but the documented semantic is that **earlier variants
-/// have higher trust** for the purposes of the
-/// `high_trust_class_exposure` caution. Callers consult [`TrustClass::is_high_trust`]
-/// rather than relying on derived ordering to avoid the inversion.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TrustClass {
-    HumanExplicit,
-    HumanRevised,
-    AgentValidated,
-    AgentProposed,
-    External,
+fn trust_score(trust_class: TrustClass) -> u8 {
+    match trust_class {
+        TrustClass::HumanExplicit => 5,
+        TrustClass::AgentValidated => 4,
+        TrustClass::AgentAssertion => 3,
+        TrustClass::CassEvidence => 2,
+        TrustClass::LegacyImport => 1,
+    }
 }
 
-impl TrustClass {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::HumanExplicit => "human_explicit",
-            Self::HumanRevised => "human_revised",
-            Self::AgentValidated => "agent_validated",
-            Self::AgentProposed => "agent_proposed",
-            Self::External => "external",
-        }
-    }
-
-    /// Score for sort ordering under [`SampleStrategy::HighestTrust`].
-    /// Higher score = more trusted (and therefore picked first).
-    #[must_use]
-    pub fn trust_score(self) -> u8 {
-        match self {
-            Self::HumanExplicit => 5,
-            Self::HumanRevised => 4,
-            Self::AgentValidated => 3,
-            Self::AgentProposed => 2,
-            Self::External => 1,
-        }
-    }
-
-    /// Whether this trust class triggers the `high_trust_class_exposure`
-    /// caution when the memory would be exposed by the proposed grant.
-    /// Only `HumanExplicit` qualifies: those are the user's directly
-    /// authored rules, the most surprising thing to leak.
-    #[must_use]
-    pub fn is_high_trust(self) -> bool {
-        matches!(self, Self::HumanExplicit)
-    }
+fn is_high_trust(trust_class: TrustClass) -> bool {
+    matches!(trust_class, TrustClass::HumanExplicit)
 }
 
 // ============================================================================
@@ -271,21 +239,75 @@ pub struct LaneGrantPreviewInput<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PolicySnapshot {
+    pub generation: String,
     pub lane: String,
     pub decision: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantTargetSnapshot {
+    pub adapter_version: String,
+    pub peer_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateRevision {
+    pub memory_id: String,
+    pub revision_id: String,
+}
+
+/// Additional state that turns the pure visibility calculation into the
+/// canonical approval snapshot. The legacy wrapper uses deterministic
+/// placeholder generations; DB-backed callers must provide real values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LaneGrantApprovalContext<'a> {
+    pub target_peer_id: &'a str,
+    pub grant_generation: u64,
+    pub current_policy_generation: &'a str,
+    pub proposed_policy_generation: &'a str,
+}
+
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalTokenProjection {
+    pub schema: String,
+    pub sensitive: bool,
+    pub bearer: String,
+    pub expires_at: String,
+    pub external_recorder_residual: String,
+}
+
+impl std::fmt::Debug for ApprovalTokenProjection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ApprovalTokenProjection")
+            .field("schema", &self.schema)
+            .field("sensitive", &self.sensitive)
+            .field("bearer", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .field(
+                "external_recorder_residual",
+                &self.external_recorder_residual,
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PreviewRow {
     #[serde(rename = "memoryId")]
     pub memory_id: String,
+    #[serde(rename = "revisionId")]
+    pub revision_id: String,
     pub level: String,
     pub kind: String,
     #[serde(rename = "contentPreview")]
     pub content_preview: String,
     pub tags: Vec<String>,
     #[serde(rename = "trustClass")]
-    pub trust_class: TrustClass,
+    pub trust_class: String,
     #[serde(rename = "hasSensitiveTags")]
     pub has_sensitive_tags: bool,
     #[serde(rename = "redactedFields")]
@@ -320,26 +342,48 @@ pub struct Caution {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LaneGrantPreview {
     pub schema: &'static str,
-    #[serde(rename = "peerNodeKey")]
-    pub peer_node_key: String,
-    pub lane: String,
+    #[serde(rename = "copyVersion")]
+    pub copy_version: &'static str,
     #[serde(rename = "workspaceId")]
     pub workspace_id: String,
+    pub target: GrantTargetSnapshot,
+    pub lane: String,
+    #[serde(rename = "grantGeneration")]
+    pub grant_generation: u64,
     #[serde(rename = "currentPolicy")]
     pub current_policy: PolicySnapshot,
     #[serde(rename = "proposedPolicy")]
     pub proposed_policy: PolicySnapshot,
+    #[serde(rename = "candidateSet")]
+    pub candidate_set: Vec<CandidateRevision>,
     #[serde(rename = "affectedMemoryCount")]
     pub affected_memory_count: u64,
     #[serde(rename = "redactedFromExposureCount")]
     pub redacted_from_exposure_count: u64,
     #[serde(rename = "previewSampleStrategy")]
     pub preview_sample_strategy: String,
+    #[serde(rename = "previewSampleLimit")]
+    pub preview_sample_limit: usize,
     #[serde(rename = "previewSample")]
     pub preview_sample: Vec<PreviewRow>,
     #[serde(rename = "redactionRulesApplied")]
     pub redaction_rules_applied: Vec<String>,
+    #[serde(rename = "cautionCodes")]
+    pub caution_codes: Vec<String>,
     pub cautions: Vec<Caution>,
+    #[serde(rename = "approvalToken", skip_serializing_if = "Option::is_none")]
+    pub approval_token: Option<ApprovalTokenProjection>,
+}
+
+impl LaneGrantPreview {
+    /// Stable bytes authenticated by the approval token. The bearer projection
+    /// is deliberately excluded so equal snapshots can receive unlinkable
+    /// nonces without recursively authenticating their own token text.
+    pub fn canonical_approval_snapshot_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        let mut snapshot = self.clone();
+        snapshot.approval_token = None;
+        serde_json::to_vec(&snapshot)
+    }
 }
 
 // ============================================================================
@@ -365,6 +409,23 @@ pub struct LaneGrantPreview {
 ///    depend on sampling.
 #[must_use]
 pub fn compute_lane_grant_preview(input: &LaneGrantPreviewInput<'_>) -> LaneGrantPreview {
+    compute_lane_grant_preview_with_context(
+        input,
+        &LaneGrantApprovalContext {
+            target_peer_id: input.peer_node_key,
+            grant_generation: 0,
+            current_policy_generation: "policy:unspecified",
+            proposed_policy_generation: "policy:unspecified",
+        },
+    )
+}
+
+/// Compute the canonical v2 preview using DB/config-derived generation state.
+#[must_use]
+pub fn compute_lane_grant_preview_with_context(
+    input: &LaneGrantPreviewInput<'_>,
+    context: &LaneGrantApprovalContext<'_>,
+) -> LaneGrantPreview {
     let effective_limit = effective_limit(input.limit);
     let current_decision = input.lane.decision_in(&input.current_policy);
     let proposed_decision = input.lane.decision_in(&input.proposed_policy);
@@ -411,25 +472,47 @@ pub fn compute_lane_grant_preview(input: &LaneGrantPreviewInput<'_>) -> LaneGran
         redacted_blocked,
     );
 
+    let mut candidate_set = input
+        .memories
+        .iter()
+        .map(|memory| CandidateRevision {
+            memory_id: memory.memory_id.to_owned(),
+            revision_id: memory.memory_id.to_owned(),
+        })
+        .collect::<Vec<_>>();
+    candidate_set.sort();
+    let caution_codes = cautions.iter().map(|item| item.kind.clone()).collect();
+
     LaneGrantPreview {
-        schema: LANE_GRANT_PREVIEW_SCHEMA_V1,
-        peer_node_key: input.peer_node_key.to_owned(),
-        lane: input.lane.as_str().to_owned(),
+        schema: LANE_GRANT_PREVIEW_SCHEMA_V2,
+        copy_version: LANE_GRANT_PREVIEW_COPY_VERSION,
         workspace_id: input.workspace_id.to_owned(),
+        target: GrantTargetSnapshot {
+            adapter_version: LANE_GRANT_TARGET_ADAPTER_VERSION.to_owned(),
+            peer_id: context.target_peer_id.to_owned(),
+        },
+        lane: input.lane.as_str().to_owned(),
+        grant_generation: context.grant_generation,
         current_policy: PolicySnapshot {
+            generation: context.current_policy_generation.to_owned(),
             lane: input.lane.as_str().to_owned(),
             decision: current_decision.as_str().to_owned(),
         },
         proposed_policy: PolicySnapshot {
+            generation: context.proposed_policy_generation.to_owned(),
             lane: input.lane.as_str().to_owned(),
             decision: proposed_decision.as_str().to_owned(),
         },
+        candidate_set,
         affected_memory_count,
         redacted_from_exposure_count: redacted_blocked,
         preview_sample_strategy: input.sample_strategy.as_str().to_owned(),
+        preview_sample_limit: effective_limit,
         preview_sample: sample_rows,
         redaction_rules_applied: input.redaction_rules.to_vec(),
+        caution_codes,
         cautions,
+        approval_token: None,
     }
 }
 
@@ -449,11 +532,12 @@ fn effective_limit(requested: usize) -> usize {
 fn build_preview_row(memory: &MemoryView<'_>, would_expose: bool) -> PreviewRow {
     PreviewRow {
         memory_id: memory.memory_id.to_owned(),
+        revision_id: memory.memory_id.to_owned(),
         level: memory.level.to_owned(),
         kind: memory.kind.to_owned(),
         content_preview: truncate_chars(memory.content, LANE_GRANT_PREVIEW_CONTENT_PREVIEW_CHARS),
         tags: memory.tags.to_vec(),
-        trust_class: memory.trust_class,
+        trust_class: memory.trust_class.as_str().to_owned(),
         has_sensitive_tags: memory_has_sensitive_tag(memory),
         redacted_fields: memory.redacted_fields.to_vec(),
         would_expose_under_proposed_policy: would_expose,
@@ -484,9 +568,8 @@ fn tag_has_sensitive_token(tag: &str) -> bool {
 fn sort_sample(items: &mut [&MemoryView<'_>], strategy: SampleStrategy, seed: u64) {
     match strategy {
         SampleStrategy::HighestTrust => {
-            items.sort_by_key(|memory| {
-                (Reverse(memory.trust_class.trust_score()), memory.memory_id)
-            });
+            items
+                .sort_by_key(|memory| (Reverse(trust_score(memory.trust_class)), memory.memory_id));
         }
         SampleStrategy::MostRecent => {
             items.sort_by_key(|memory| (Reverse(memory.created_at_secs), memory.memory_id));
@@ -551,7 +634,7 @@ fn collect_cautions(
         if !would_expose {
             continue;
         }
-        if memory.trust_class.is_high_trust() {
+        if is_high_trust(memory.trust_class) {
             high_trust_exposure_count += 1;
         }
         if memory_has_sensitive_tag(memory) {
@@ -662,6 +745,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn approval_token_debug_redacts_bearer() {
+        let token = ApprovalTokenProjection {
+            schema: "ee.mesh.approval_token.v1".to_owned(),
+            sensitive: true,
+            bearer: "eeap1_secret-bearer-material".to_owned(),
+            expires_at: "2026-08-04T08:15:00Z".to_owned(),
+            external_recorder_residual: "External logs may retain this token.".to_owned(),
+        };
+
+        let rendered = format!("{token:?}");
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("secret-bearer-material"));
+    }
+
     // ---- Lane <-> IntendedLanePolicy decision lookup -----------------------
 
     #[test]
@@ -728,7 +826,7 @@ mod tests {
         let memories = [
             build_memory(
                 "m1",
-                TrustClass::AgentProposed,
+                TrustClass::AgentAssertion,
                 &no_tags,
                 1_000_000,
                 false,
@@ -737,7 +835,7 @@ mod tests {
             ),
             build_memory(
                 "m2",
-                TrustClass::AgentProposed,
+                TrustClass::AgentAssertion,
                 &no_tags,
                 2_000_000,
                 false,
@@ -783,7 +881,7 @@ mod tests {
         let memories = [
             build_memory(
                 "live",
-                TrustClass::AgentProposed,
+                TrustClass::AgentAssertion,
                 &no_tags,
                 1,
                 false,
@@ -792,7 +890,7 @@ mod tests {
             ),
             build_memory(
                 "tomb",
-                TrustClass::AgentProposed,
+                TrustClass::AgentAssertion,
                 &no_tags,
                 1,
                 true,
@@ -801,7 +899,7 @@ mod tests {
             ),
             build_memory(
                 "blocked",
-                TrustClass::AgentProposed,
+                TrustClass::AgentAssertion,
                 &no_tags,
                 1,
                 false,
@@ -892,7 +990,7 @@ mod tests {
             let no_redacted = empty_strings();
             let memories = [build_memory(
                 "m1",
-                TrustClass::AgentProposed,
+                TrustClass::AgentAssertion,
                 &tag_storage,
                 1,
                 false,
@@ -938,7 +1036,7 @@ mod tests {
             let no_redacted = empty_strings();
             let memories = [build_memory(
                 "m1",
-                TrustClass::AgentProposed,
+                TrustClass::AgentAssertion,
                 &tag_storage,
                 1,
                 false,
@@ -978,7 +1076,7 @@ mod tests {
         let no_redacted = empty_strings();
         let memories = [build_memory(
             "m1",
-            TrustClass::AgentProposed,
+            TrustClass::AgentAssertion,
             &tag_storage,
             1,
             false,
@@ -1013,7 +1111,7 @@ mod tests {
         let no_redacted = empty_strings();
         let memories = [build_memory(
             "m1",
-            TrustClass::AgentProposed,
+            TrustClass::AgentAssertion,
             &no_tags,
             1,
             false,
@@ -1050,7 +1148,7 @@ mod tests {
         let no_redacted = empty_strings();
         let memories = [build_memory(
             "m1",
-            TrustClass::AgentProposed,
+            TrustClass::AgentAssertion,
             &no_tags,
             1,
             false,
@@ -1091,7 +1189,7 @@ mod tests {
         let memories = [
             build_memory(
                 "agent",
-                TrustClass::AgentProposed,
+                TrustClass::AgentAssertion,
                 &no_tags,
                 1,
                 false,
@@ -1109,7 +1207,7 @@ mod tests {
             ),
             build_memory(
                 "external",
-                TrustClass::External,
+                TrustClass::CassEvidence,
                 &no_tags,
                 1,
                 false,
@@ -1149,7 +1247,7 @@ mod tests {
         let memories = [
             build_memory(
                 "old",
-                TrustClass::AgentProposed,
+                TrustClass::AgentAssertion,
                 &no_tags,
                 100,
                 false,
@@ -1158,7 +1256,7 @@ mod tests {
             ),
             build_memory(
                 "new",
-                TrustClass::AgentProposed,
+                TrustClass::AgentAssertion,
                 &no_tags,
                 999_999,
                 false,
@@ -1167,7 +1265,7 @@ mod tests {
             ),
             build_memory(
                 "middle",
-                TrustClass::AgentProposed,
+                TrustClass::AgentAssertion,
                 &no_tags,
                 5_000,
                 false,
@@ -1230,7 +1328,7 @@ mod tests {
                 };
                 build_memory(
                     id,
-                    TrustClass::AgentProposed,
+                    TrustClass::AgentAssertion,
                     &no_tags,
                     i,
                     false,
@@ -1311,7 +1409,7 @@ mod tests {
                 };
                 build_memory(
                     id,
-                    TrustClass::AgentProposed,
+                    TrustClass::AgentAssertion,
                     &no_tags,
                     i,
                     false,
@@ -1376,7 +1474,7 @@ mod tests {
                 let id_ref: &'static str = Box::leak(format!("m{i:04}").into_boxed_str());
                 build_memory(
                     id_ref,
-                    TrustClass::AgentProposed,
+                    TrustClass::AgentAssertion,
                     &no_tags,
                     i,
                     false,
@@ -1451,8 +1549,8 @@ mod tests {
     #[test]
     fn schema_constant_is_documented_version() {
         assert_eq!(
-            LANE_GRANT_PREVIEW_SCHEMA_V1,
-            "ee.mesh.lane_grant_preview.v1"
+            LANE_GRANT_PREVIEW_SCHEMA_V2,
+            "ee.mesh.lane_grant_preview.v2"
         );
     }
 }

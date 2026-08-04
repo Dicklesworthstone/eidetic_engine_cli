@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.grant.v1.json",
+  "title": "ee.mesh.grant.v1",
+  "description": "Successful result of `ee mesh grant <peer-id> --lane <lane>`. Approval verification, canonical-snapshot comparison, generation compare-and-swap, the allow decision, and consent audit commit in one transaction. The response never contains the approval bearer, nonce, keyed snapshot tag, sample bytes, or sample/content hashes.",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "workspaceId",
+    "target",
+    "lane",
+    "previousGrantGeneration",
+    "newGrantGeneration",
+    "decision",
+    "auditId",
+    "remoteErasureGuaranteed",
+    "residual"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.grant.v1"
+    },
+    "command": {
+      "type": "string",
+      "const": "ee mesh grant"
+    },
+    "workspaceId": {
+      "$ref": "#/$defs/workspaceId"
+    },
+    "target": {
+      "$ref": "#/$defs/grantTarget"
+    },
+    "lane": {
+      "$ref": "#/$defs/lane"
+    },
+    "previousGrantGeneration": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "newGrantGeneration": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Generation committed by this mutation. It is strictly greater than previousGrantGeneration; replay cannot commit the same generation twice."
+    },
+    "decision": {
+      "type": "string",
+      "const": "allow"
+    },
+    "auditId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Opaque, domain-keyed identifier derived from the approval token's high-entropy nonce. It is not the bearer, snapshot tag, content/sample hash, or sample bytes."
+    },
+    "remoteErasureGuaranteed": {
+      "type": "boolean",
+      "const": false
+    },
+    "residual": {
+      "type": "string",
+      "const": "A later lane revocation stops future serving but cannot erase bytes the peer already cached or copied."
+    }
+  },
+  "$defs": {
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "grantTarget": {
+      "type": "object",
+      "required": ["adapterVersion", "peerId"],
+      "additionalProperties": false,
+      "properties": {
+        "adapterVersion": {
+          "type": "string",
+          "const": "ee.mesh.grant_target.v1"
+        },
+        "peerId": {
+          "$ref": "#/$defs/peerId",
+          "description": "Opaque enrolled-peer lookup handle. It is not itself a cryptographic identity."
+        }
+      }
+    },
+    "peerId": {
+      "type": "string",
+      "pattern": "^peer_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "lane": {
+      "type": "string",
+      "enum": [
+        "metadata",
+        "body",
+        "embedding",
+        "graph_link",
+        "curation_signal",
+        "revision_notice"
+      ]
+    }
+  }
+}

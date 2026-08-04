@@ -1,13 +1,11 @@
 # ee.franken-stack.lock.v1
 #
-# Full commit IDs are mandatory. This set is the dependency checkout observed
-# in GitHub Actions run 29846907389, verify job 88689705551, where the entire
-# FrankenSQLite + Frankensearch + SQLModel stack compiled before Cargo reached
-# ee's own cancellation contract errors.
-asupersync	e464a484cb65c1a55be0d9c925e6e9c20318edcb
-franken_agent_detection	6d24c532667aebdf31ecac8a9ddb457bef32b3f7
-franken_networkx	8b7dff824838baf0c1cd4277254ef43be6284501
-frankensearch	4fb891b2838cd3880324e25bafbc0c9e3851be7c
-frankensqlite	6a86c07176830dcab0fd845a71a3dd070694ea28
-sqlmodel_rust	173592d5e5ab0c7adfc8d8b2f83b4aec4e9b6fa4
-toon_rust	48f185768cdfb30b865a3e19a3c040e92519baeb
+# Full commit IDs are mandatory. This set pins the synchronized 0.3.10 runtime,
+# 0.3.2 search/SQLModel, and 0.2.0 FrankenSQLite dependency closure used by ee.
+asupersync	e19be513985f678fd2e9812f7b5d973d2a3e4631
+franken_agent_detection	f839b370a91e0d403fc4e2e16c1dc9d19b5a5ceb
+franken_networkx	bec1d4b9edfd832bc31c3a56713c918a0bf682b9
+frankensearch	07cdf90c909ff0ee3d39b2299f75cee76e19ce38
+frankensqlite	f686f99a091409e59f4cb6d32150b963d2304eba
+sqlmodel_rust	84e4f0a9d2f1098afeeae19142442d8208c0f265
+toon_rust	e46b71957fad5397d4bae9eef9d428c8ac8b52aa

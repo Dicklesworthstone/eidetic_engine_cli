@@ -78,7 +78,7 @@ json = []
 embed-fast = ["frankensearch/model2vec", "frankensearch/download"]
 # Blocked: frankensearch/fastembed currently pulls reqwest/tokio/hyper/tower.
 # Do not expose an embed-quality feature until that tree is forbidden-dep clean.
-lexical-bm25 = ["frankensearch/lexical"]
+lexical-bm25 = ["frankensearch/lexical-tantivy"]
 # Active. Gates ~42 cfg-gated functions under src/graph/mod.rs. Default-on.
 graph = []
 # Active test-only gate for the heavyweight Python NetworkX differential suite.
@@ -98,8 +98,8 @@ serve = []
 science-analytics = []
 
 [dependencies]
-asupersync = { version = "=0.3.9", default-features = false, features = ["tracing-integration"] }
-arc-swap = { version = "1.7" }
+asupersync = { version = "=0.3.10", default-features = false, features = ["tracing-integration"] }
+arc-swap = { version = "=1.9.2" }
 base64 = { version = "0.22.1" }
 blake3 = { version = "1.5" }
 crossbeam-queue = { version = "0.3" }
@@ -160,7 +160,7 @@ tar = { version = "0.4", default-features = false }
 # rely on those constructors, so we opt in here: as a dev-dependency the feature
 # is unified into test/bench/`--all-targets` builds only and stays OUT of the
 # release binary (which uses the detached, capability-less production Cx path).
-asupersync = { version = "=0.3.9", default-features = false, features = ["tracing-integration", "test-internals"] }
+asupersync = { version = "=0.3.10", default-features = false, features = ["tracing-integration", "test-internals"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 insta = { version = "1.48.0", features = ["json"] }
 proptest = { version = "1.9.0", default-features = false, features = ["std"] }

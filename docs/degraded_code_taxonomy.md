@@ -705,18 +705,28 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `mesh_event_quarantined` | high | (TBD) |
 | `subscribe_cursor_stale` | warning | (TBD) |
 
-#### Store-local artifact authentication (1)
+#### Mesh lane approval and store-local authentication (3)
 | Code | Severity | Bead |
 |------|----------|------|
+| `mesh_approval_token_invalid` | high | bd-tc-epic-qzk7o.2.2 |
+| `mesh_approval_token_stale` | warning | bd-tc-epic-qzk7o.2.2 |
 | `mesh_store_authentication_unavailable` | high | bd-tc-epic-qzk7o.2.4 (TC-D14) |
 
-The store-local authentication root (ADR 0086 TC-D14) could not be
-established or verified: the key store is missing, malformed, symlinked,
-readable beyond the owner, or failed its known-answer/integrity self-check.
-Fail closed: `ee backup create` / `ee export` ship the artifact
-*unauthenticated* (no footer authentication block), and import refuses
-native `human_explicit` trust for unauthenticated artifacts rather than
-trusting a spoofable header. `response_time`.
+`mesh_approval_token_invalid` collapses malformed, forged, wrong-context, and
+non-current-key inputs so grant errors do not become an authentication oracle.
+`mesh_approval_token_stale` is emitted only after authentication when the
+bearer expired or the canonical approval snapshot/generation drifted. Both are
+response-time `ee.error.v2` failures: no success envelope, replacement bearer,
+lane mutation, or audit row is emitted.
+
+The store-local authentication root (ADR 0086 TC-D14) can fail because the key
+store is missing, malformed, symlinked, readable beyond the owner, or failed
+its known-answer/integrity self-check. Artifact-producing callers retain their
+documented unauthenticated-artifact posture, and import refuses native
+`human_explicit` trust rather than trusting a spoofable header. In contrast,
+`ee mesh preview-grant --issue-approval-token` and `ee mesh grant` fail closed
+through `ee.error.v2`; they never turn authentication loss into a degraded
+success artifact or lane grant. All three codes are `response_time`.
 
 #### Causal lab (13)
 | Code | Severity | Bead |

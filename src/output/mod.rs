@@ -10908,6 +10908,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: mesh_anti_entropy_schema_definition,
         },
         SchemaEntry {
+            id: "ee.mesh.approval_token.v1",
+            version: "1",
+            description: "Sensitive short-lived bearer projection for an explicitly issued mesh lane-approval token.",
+            category: "mesh",
+            definition: mesh_approval_token_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.mesh.auto_enrollment_result.v1",
             version: "1",
             description: "Auto-enrollment apply / dry-run result envelope.",
@@ -10950,6 +10957,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: mesh_event_schema_definition,
         },
         SchemaEntry {
+            id: "ee.mesh.grant.v1",
+            version: "1",
+            description: "Audited generation-advancing result for `ee mesh grant <peer-id> --lane <lane>`.",
+            category: "mesh",
+            definition: mesh_grant_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.mesh.hello_responder.status.v1",
             version: "1",
             description: "Hello-handshake responder status report.",
@@ -10978,9 +10992,9 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: mesh_hello_schema_definition,
         },
         SchemaEntry {
-            id: "ee.mesh.lane_grant_preview.v1",
-            version: "1",
-            description: "Pre-grant lane visibility audit emitted by `ee mesh preview-grant <peer> --lane <lane>`.",
+            id: "ee.mesh.lane_grant_preview.v2",
+            version: "2",
+            description: "Canonical authenticated lane-grant snapshot emitted by `ee mesh preview-grant <peer-id> --lane <lane>`.",
             category: "mesh",
             definition: mesh_lane_grant_preview_schema_definition,
         },
@@ -10990,6 +11004,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             description: "Workspace-scoped peer-group binding for optional mesh memory authorization.",
             category: "mesh",
             definition: mesh_peer_group_binding_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.mesh.revoke_lane.v1",
+            version: "1",
+            description: "Audited generation-advancing result for `ee mesh revoke-lane <peer-id> --lane <lane>`.",
+            category: "mesh",
+            definition: mesh_revoke_lane_schema_definition,
         },
         SchemaEntry {
             id: "ee.mesh.revoke_result.v1",
@@ -12306,6 +12327,10 @@ fn mesh_anti_entropy_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.mesh.anti_entropy.v1.json").to_string()
 }
 
+fn mesh_approval_token_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.approval_token.v1.json").to_string()
+}
+
 fn mesh_auto_enrollment_result_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.mesh.auto_enrollment_result.v1.json").to_string()
 }
@@ -12330,6 +12355,10 @@ fn mesh_event_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.mesh.event.v1.json").to_string()
 }
 
+fn mesh_grant_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.grant.v1.json").to_string()
+}
+
 fn mesh_hello_responder_status_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.mesh.hello_responder.status.v1.json").to_string()
 }
@@ -12347,11 +12376,15 @@ fn mesh_hello_schema_definition() -> String {
 }
 
 fn mesh_lane_grant_preview_schema_definition() -> String {
-    include_str!("../../docs/schemas/ee.mesh.lane_grant_preview.v1.json").to_string()
+    include_str!("../../docs/schemas/ee.mesh.lane_grant_preview.v2.json").to_string()
 }
 
 fn mesh_peer_group_binding_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.mesh.peer_group_binding.v1.json").to_string()
+}
+
+fn mesh_revoke_lane_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.revoke_lane.v1.json").to_string()
 }
 
 fn mesh_revoke_result_schema_definition() -> String {
@@ -14724,6 +14757,18 @@ pub fn error_response_toon(error: &DomainError) -> String {
 fn domain_error_severity(error: &DomainError) -> &'static str {
     if error.code().starts_with("level_transition_") {
         return "medium";
+    }
+    if let DomainError::UsageCodeWithDetails { code, .. } = error {
+        match *code {
+            // Keep forged/malformed/wrong-context approval failures above the
+            // ordinary usage tier without disclosing which authentication
+            // check failed. Authentic expiry or snapshot drift is separately
+            // actionable, but remains a warning requiring a fresh preview.
+            "mesh_approval_token_invalid" => return "high",
+            "mesh_approval_token_stale" => return "warning",
+            "mesh_store_authentication_unavailable" => return "high",
+            _ => {}
+        }
     }
     if matches!(
         error.code(),
@@ -20321,6 +20366,91 @@ mod tests {
         )?;
         ensure_contains(&json, "\"severity\":\"low\"", "error severity")?;
         ensure_contains(&json, "\"repair\":\"ee --help\"", "error repair")
+    }
+
+    #[test]
+    fn mesh_approval_token_invalid_is_high_without_authentication_oracle_details() -> TestResult {
+        let error = DomainError::UsageCodeWithDetails {
+            code: "mesh_approval_token_invalid",
+            message: "mesh approval token is invalid".to_string(),
+            repair: Some(
+                "ee mesh preview-grant peer_example --lane body --issue-approval-token --json"
+                    .to_string(),
+            ),
+            details_json: serde_json::json!({
+                "recovery": [{
+                    "priority": 0,
+                    "kind": "command",
+                    "command": "ee mesh preview-grant peer_example --lane body --issue-approval-token --json",
+                    "rationale": "Issue a fresh approval in the current store and workspace.",
+                    "riskClass": "read_only_probe",
+                    "requiresHumanApproval": false,
+                    "mutatesExternalState": false,
+                    "mutatesTrackerState": false,
+                    "privacyClass": "sensitive_bearer_issuance",
+                }],
+            })
+            .to_string(),
+        };
+        let json = error_response_json(&error);
+
+        ensure_contains(
+            &json,
+            "\"code\":\"mesh_approval_token_invalid\"",
+            "invalid token code",
+        )?;
+        ensure_contains(&json, "\"severity\":\"high\"", "invalid token severity")?;
+        for forbidden in [
+            "approvalToken",
+            "eeap1_",
+            "snapshotTag",
+            "envelopeMac",
+            "keyId",
+        ] {
+            ensure(
+                !json.contains(forbidden),
+                format!("invalid-token error must not expose {forbidden}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_approval_token_stale_is_warning_and_contains_no_replacement_bearer() -> TestResult {
+        let error = DomainError::UsageCodeWithDetails {
+            code: "mesh_approval_token_stale",
+            message: "mesh approval token is stale; preview again".to_string(),
+            repair: Some(
+                "ee mesh preview-grant peer_example --lane body --issue-approval-token --json"
+                    .to_string(),
+            ),
+            details_json: serde_json::json!({
+                "recovery": [{
+                    "priority": 0,
+                    "kind": "command",
+                    "command": "ee mesh preview-grant peer_example --lane body --issue-approval-token --json",
+                    "rationale": "Rebuild the approval snapshot against current state.",
+                    "riskClass": "read_only_probe",
+                    "requiresHumanApproval": false,
+                    "mutatesExternalState": false,
+                    "mutatesTrackerState": false,
+                    "privacyClass": "sensitive_bearer_issuance",
+                }],
+            })
+            .to_string(),
+        };
+        let json = error_response_json(&error);
+
+        ensure_contains(
+            &json,
+            "\"code\":\"mesh_approval_token_stale\"",
+            "stale token code",
+        )?;
+        ensure_contains(&json, "\"severity\":\"warning\"", "stale token severity")?;
+        ensure(
+            !json.contains("approvalToken") && !json.contains("eeap1_"),
+            "stale-token error must require a separate preview without returning a bearer",
+        )
     }
 
     #[test]

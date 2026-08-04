@@ -207,6 +207,29 @@ pub struct MeshImportDecisionInput<'a> {
     pub event_validity: MeshEventValidity,
 }
 
+/// One durable exact-peer lane override projected into the membership gate.
+///
+/// The identity tuple is carried with the decision so a caller cannot
+/// accidentally apply another peer's grant. Origin-workspace membership is
+/// still established from the configured binding before this override is ever
+/// consulted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshPeerLaneOverride {
+    pub local_workspace_id: String,
+    pub peer_id: String,
+    pub material_lane: MeshLane,
+    pub decision: MeshLaneDecision,
+}
+
+impl MeshPeerLaneOverride {
+    #[must_use]
+    pub fn matches(&self, input: &MeshImportDecisionInput<'_>) -> bool {
+        self.local_workspace_id == input.local_workspace_id
+            && self.peer_id == input.producer_peer_id
+            && self.material_lane == input.material_lane
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MeshPeerPolicy {
     pub policy_id: String,
@@ -659,6 +682,21 @@ pub fn decide_mesh_import(
     input: &MeshImportDecisionInput<'_>,
     bindings: &[MeshPeerGroupBinding],
 ) -> MeshImportDecision {
+    decide_mesh_import_with_lane_override(input, bindings, None)
+}
+
+/// Decide inbound membership with an optional exact peer/lane override.
+///
+/// Security ordering is deliberate: malformed/unsafe event checks and exact
+/// workspace, peer, origin-workspace, and peer-group membership all complete
+/// before the override is examined. A mismatched override is ignored and the
+/// configured group lane remains authoritative.
+#[must_use]
+pub fn decide_mesh_import_with_lane_override(
+    input: &MeshImportDecisionInput<'_>,
+    bindings: &[MeshPeerGroupBinding],
+    lane_override: Option<&MeshPeerLaneOverride>,
+) -> MeshImportDecision {
     if input.event_validity == MeshEventValidity::Malformed {
         return mesh_decision(
             input,
@@ -714,13 +752,22 @@ pub fn decide_mesh_import(
         );
     }
 
-    match lane_grant(binding, input.material_lane) {
+    let exact_override = lane_override.filter(|lane_override| lane_override.matches(input));
+    let lane_decision = exact_override
+        .map(|lane_override| lane_override.decision)
+        .or_else(|| lane_grant(binding, input.material_lane));
+
+    match lane_decision {
         Some(MeshLaneDecision::Allow) if input.event_validity == MeshEventValidity::Valid => {
             mesh_decision(
                 input,
                 peer_group_id,
                 MeshImportDecisionKind::Allow,
-                "lane_allowed",
+                if exact_override.is_some() {
+                    "lane_override_allowed"
+                } else {
+                    "lane_allowed"
+                },
             )
         }
         Some(MeshLaneDecision::Allow) => mesh_decision(
@@ -733,13 +780,21 @@ pub fn decide_mesh_import(
             input,
             peer_group_id,
             MeshImportDecisionKind::Quarantine,
-            "lane_quarantined",
+            if exact_override.is_some() {
+                "lane_override_quarantined"
+            } else {
+                "lane_quarantined"
+            },
         ),
         Some(MeshLaneDecision::Deny) => mesh_decision(
             input,
             peer_group_id,
             MeshImportDecisionKind::Deny,
-            "lane_denied",
+            if exact_override.is_some() {
+                "lane_override_denied"
+            } else {
+                "lane_denied"
+            },
         ),
         None => mesh_decision(
             input,
@@ -2125,6 +2180,75 @@ team_members = ["OutsideAgent"]
         assert!(!decision.permits_redacted_quarantine_state());
         assert_eq!(decision.reason, "lane_allowed");
         assert_eq!(decision.peer_group_id.as_deref(), Some("pg_alpha_mesh"));
+    }
+
+    #[test]
+    fn mesh_import_applies_only_an_exact_override_after_membership_checks() {
+        let exact = MeshPeerLaneOverride {
+            local_workspace_id: "wsp_local_alpha".to_owned(),
+            peer_id: "peer_builder_one".to_owned(),
+            material_lane: MeshLane::Body,
+            decision: MeshLaneDecision::Allow,
+        };
+        let granted = decide_mesh_import_with_lane_override(
+            &mesh_input(MeshLane::Body),
+            &[mesh_binding()],
+            Some(&exact),
+        );
+        assert_eq!(
+            granted.workspace_scope_decision,
+            MeshImportDecisionKind::Allow
+        );
+        assert_eq!(granted.reason, "lane_override_allowed");
+
+        let wrong_peer = MeshPeerLaneOverride {
+            peer_id: "peer_other".to_owned(),
+            material_lane: MeshLane::Metadata,
+            decision: MeshLaneDecision::Deny,
+            ..exact.clone()
+        };
+        let ignored = decide_mesh_import_with_lane_override(
+            &mesh_input(MeshLane::Metadata),
+            &[mesh_binding()],
+            Some(&wrong_peer),
+        );
+        assert_eq!(
+            ignored.workspace_scope_decision,
+            MeshImportDecisionKind::Allow
+        );
+        assert_eq!(ignored.reason, "lane_allowed");
+
+        let unknown_origin = MeshImportDecisionInput {
+            origin_workspace_id: "wsp_remote_unknown",
+            ..mesh_input(MeshLane::Body)
+        };
+        let blocked =
+            decide_mesh_import_with_lane_override(&unknown_origin, &[mesh_binding()], Some(&exact));
+        assert_eq!(
+            blocked.workspace_scope_decision,
+            MeshImportDecisionKind::Deny
+        );
+        assert_eq!(blocked.reason, "unknown_origin_workspace");
+    }
+
+    #[test]
+    fn mesh_import_explicit_deny_override_wins_over_config_allow() {
+        let denied = MeshPeerLaneOverride {
+            local_workspace_id: "wsp_local_alpha".to_owned(),
+            peer_id: "peer_builder_one".to_owned(),
+            material_lane: MeshLane::Metadata,
+            decision: MeshLaneDecision::Deny,
+        };
+        let decision = decide_mesh_import_with_lane_override(
+            &mesh_input(MeshLane::Metadata),
+            &[mesh_binding()],
+            Some(&denied),
+        );
+        assert_eq!(
+            decision.workspace_scope_decision,
+            MeshImportDecisionKind::Deny
+        );
+        assert_eq!(decision.reason, "lane_override_denied");
     }
 
     #[test]

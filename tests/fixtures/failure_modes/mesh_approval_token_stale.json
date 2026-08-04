@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_approval_token_stale",
+  "introduced_by": {
+    "bead": "bd-tc-epic-qzk7o.2.2",
+    "epic_letter": "TC"
+  },
+  "surfaces": [
+    "mesh grant"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A mesh approval bearer authenticates successfully, but its 15-minute lifetime elapsed or its canonical preview no longer matches the current target, grant generation, policy generations, complete revision-pinned candidate set, sample parameters, exact redacted sample, or caution set. The grant fails closed before mutation and returns no replacement bearer.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "issue an approval bearer with ee mesh preview-grant peer_example123 --lane body --issue-approval-token --workspace . --json in a bounded fixture harness",
+      "advance the target generation with ee mesh revoke-lane peer_example123 --lane body --workspace . --json"
+    ],
+    "invocation": "printf '%s\\n' '<previous-authentic-bearer>' | ee mesh grant peer_example123 --lane body --preview-token-stdin --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "mesh_approval_token_stale",
+    "severity": "warning",
+    "message_contains": [
+      "mesh approval token is authentic",
+      "approved preview is stale"
+    ],
+    "repair_contains": "read-only lane preview again",
+    "repair_string": "Run the read-only lane preview again and submit its new approval token through bounded stdin."
+  }
+}

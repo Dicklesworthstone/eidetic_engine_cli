@@ -2414,6 +2414,16 @@ impl EffectManifest {
                 "Rotate mesh peer credentials with audited policy metadata",
             ),
             CommandEffect::durable_write(
+                "mesh grant",
+                vec!["mesh_lane_grant_states", "audit_log"],
+                "Apply an authenticated mesh lane consent grant with generation fencing and audit provenance",
+            ),
+            CommandEffect::durable_write(
+                "mesh revoke-lane",
+                vec!["mesh_lane_grant_states", "audit_log"],
+                "Narrow mesh lane consent with generation fencing and audit provenance",
+            ),
+            CommandEffect::durable_write(
                 "note",
                 vec!["memories", "memory_tags", "audit_log"],
                 "Store a note as a memory with optional tags",
@@ -3647,6 +3657,32 @@ mod tests {
             &format!("{command} has no unavailable degraded code"),
         )?;
 
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_classifies_mesh_lane_mutations_as_audited_durable_writes() -> TestResult {
+        let manifest = EffectManifest::build();
+        for command in ["mesh grant", "mesh revoke-lane"] {
+            let effect = manifest
+                .get(command)
+                .ok_or_else(|| format!("{command} not found"))?;
+            ensure(
+                effect.default_effect,
+                EffectClass::DurableMemoryWrite,
+                &format!("{command} is a durable write"),
+            )?;
+            ensure(
+                effect.requires_audit,
+                true,
+                &format!("{command} requires audit"),
+            )?;
+            ensure(
+                effect.write_surfaces.db_tables.clone(),
+                vec!["mesh_lane_grant_states", "audit_log"],
+                &format!("{command} declares exact write surfaces"),
+            )?;
+        }
         Ok(())
     }
 

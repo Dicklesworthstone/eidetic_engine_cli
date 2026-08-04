@@ -87,23 +87,21 @@ or mesh-enabled config, treat it as a regression against ADR 0037.
 
 ## Two-Machine Metadata-Only Setup
 
-Use a metadata-only profile before granting body or embedding lanes. The exact
-command names may vary while SRR6 surfaces are still landing, but the operator
-sequence should stay the same:
+Use a metadata-only profile before granting body or embedding lanes. Materialize
+the conservative peer group first, then select the opaque enrolled `peerId`
+from the peer list. Raw Tailscale node keys remain transport/discovery inputs;
+they are not the public lane-consent target.
 
 ```bash
 ee mesh status --workspace . --json
 ee mesh discovery-policy --workspace . --json
-ee mesh preview-grant <node-key> --lane metadata --workspace . --json
-ee mesh preview-grant <node-key> --lane revisionNotice --workspace . --json
-```
-
-Only after the preview shows the expected workspace, peer identity, redaction
-posture, and audit destination should the operator materialize the grant:
-
-```bash
 ee mesh auto-enroll --workspace . --dry-run --json
 ee mesh auto-enroll --workspace . --json
+ee mesh peers --workspace . --json
+
+PEER_ID=peer_example123
+ee mesh preview-grant "$PEER_ID" --lane metadata --workspace . --json
+ee mesh preview-grant "$PEER_ID" --lane revision_notice --workspace . --json
 ```
 
 The policy should deny bodies and embeddings until a later explicit review.
@@ -112,76 +110,96 @@ See `docs/mesh/peer_policy.md` for the `[[mesh.peer_policies]]` fields and the
 
 ## Machine-Readable Examples
 
-These examples show the fields an operator should inspect before widening a
-lane. They are safe to paste into runbooks because they use redaction-safe peer,
-workspace, and policy aliases instead of raw host paths or memory bodies.
-
-Metadata-only grant preview should look like this shape:
-
-```jsonc
-{
-  "schema": "ee.response.v2",
-  "success": true,
-  "data": {
-    "schema": "ee.mesh.grant_preview.v1",
-    "preview": {
-      "action": "allow",
-      "reason": "metadata lane allowed for this peer group",
-      "policyRef": "mesh_pol_metadata_only_001",
-      "workspaceAlias": "local-release",
-      "peerAlias": "builder-host",
-      "materialLane": "metadata",
-      "redaction": "share",
-      "trustLane": "peerHumanViaPeer",
-      "importTrustClass": "agent_assertion",
-      "bodyFetchAllowed": false,
-      "localTruthSideEffectsAllowed": false,
-      "searchOrGraphSideEffectsAllowed": false,
-      "failure": null
-    }
-  },
-  "degraded": []
-}
-```
-
-A body preview under the same starter profile should fail closed:
+These examples show the live fields an operator should inspect before widening
+a lane. The ordinary preview is deterministic, token-free, and does not mutate
+policy or append an audit row. A body-lane preview under the metadata-only
+starter profile has this shape:
 
 ```jsonc
 {
   "schema": "ee.response.v2",
   "success": true,
   "data": {
-    "schema": "ee.mesh.grant_preview.v1",
+    "command": "mesh preview-grant",
+    "workspaceId": "wsp_local_release",
     "preview": {
-      "action": "deny",
-      "reason": "body lane is denied by the metadata-only profile",
-      "policyRef": "mesh_pol_metadata_only_001",
-      "workspaceAlias": "local-release",
-      "peerAlias": "builder-host",
-      "materialLane": "body",
-      "redaction": "deny",
-      "trustLane": "peerHumanViaPeer",
-      "importTrustClass": "agent_assertion",
-      "bodyFetchAllowed": false,
-      "localTruthSideEffectsAllowed": false,
-      "searchOrGraphSideEffectsAllowed": false,
-      "failure": {
-        "schema": "ee.mesh.policy_failure_surface.v1",
-        "code": "mesh_peer_policy_denied",
-        "severity": "medium",
-        "action": "deny",
-        "repair": "Preview and approve a narrower redacted-body grant before requesting bodies."
-      }
+      "schema": "ee.mesh.lane_grant_preview.v2",
+      "copyVersion": "ee.mesh.lane_grant_preview.copy.v1",
+      "workspaceId": "wsp_local_release",
+      "target": {
+        "adapterVersion": "ee.mesh.grant_target.v1",
+        "peerId": "peer_example123"
+      },
+      "lane": "body",
+      "grantGeneration": 2,
+      "currentPolicy": {
+        "generation": "policy_current_2",
+        "lane": "body",
+        "decision": "deny"
+      },
+      "proposedPolicy": {
+        "generation": "policy_proposed_3",
+        "lane": "body",
+        "decision": "allow"
+      },
+      "candidateSet": [
+        { "memoryId": "mem_example", "revisionId": "rev_example" }
+      ],
+      "affectedMemoryCount": 1,
+      "redactedFromExposureCount": 0,
+      "previewSampleStrategy": "random",
+      "previewSampleLimit": 25,
+      "previewSample": [
+        {
+          "memoryId": "mem_example",
+          "revisionId": "rev_example",
+          "level": "procedural",
+          "kind": "rule",
+          "contentPreview": "[redacted preview]",
+          "tags": ["release"],
+          "trustClass": "agent_validated",
+          "hasSensitiveTags": false,
+          "redactedFields": ["content"],
+          "wouldExposeUnderProposedPolicy": true
+        }
+      ],
+      "redactionRulesApplied": ["secret_detector"],
+      "cautionCodes": ["redaction_active"],
+      "cautions": [
+        {
+          "kind": "redaction_active",
+          "message": "One or more preview rows have fields removed by redaction.",
+          "severity": "info"
+        }
+      ]
     }
   },
   "degraded": []
 }
 ```
 
-Do not treat a policy denial as a broken mesh. A denial is usually the expected
-result of a safe starter profile. The important properties are that the body
-was not fetched, the peer and policy references are aliases, and local truth was
-not mutated.
+`candidateSet[]` binds every revision considered, while `previewSample[]` is
+only the bounded, already-redacted operator view. Inspect the target, both
+policy generations, affected/redacted counts, exact sample, and cautions.
+
+Human grant mode renders that same canonical preview and asks `y/N`. For a
+non-interactive JSON grant, explicitly request the 15-minute sensitive bearer
+and pipe only the bearer field into bounded stdin:
+
+```bash
+ee mesh preview-grant "$PEER_ID" --lane body --workspace . \
+  --issue-approval-token --json \
+  | jq -r '.data.preview.approvalToken.bearer' \
+  | ee mesh grant "$PEER_ID" --lane body --workspace . \
+      --preview-token-stdin --json
+```
+
+Never put the bearer in arguments, a shell variable, logs, support bundles, or
+audit notes. Verification authenticates it before revealing comparison detail;
+then snapshot comparison, generation compare-and-swap, allow, and audit commit
+atomically. An expired or drifted authenticated bearer returns
+`mesh_approval_token_stale`; malformed, tampered, wrong-context, or wrong-key
+input returns `mesh_approval_token_invalid` without an authentication oracle.
 
 ## Revisable Pack Flow
 
@@ -253,9 +271,12 @@ memory unless policy and outcome evidence prove otherwise.
 Before widening a lane, run a preview and inspect the exact decision surface:
 
 ```bash
-ee mesh preview-grant <node-key> --lane body --workspace . --json \
-  | jq '.data.preview | {action, materialLane, redaction, bodyFetchAllowed, failure}'
+ee mesh preview-grant <peer-id> --lane body --workspace . --json \
+  | jq '.data.preview | {target, lane, grantGeneration, currentPolicy, proposedPolicy, affectedMemoryCount, redactedFromExposureCount, cautionCodes}'
 ```
+
+Use `ee mesh peers --workspace . --json` to obtain the opaque `peerId`. Do not
+substitute a discovery node key into the lane-consent command.
 
 ## Safe Profile Promotion
 
@@ -308,10 +329,11 @@ Then choose the narrowest mutating action that matches the incident:
 | Situation | First action | Why |
 | --- | --- | --- |
 | Unknown or wrong workspace peer | `ee mesh disable --workspace . --dry-run --json` | Shows rollback impact before changing peer-group rows. |
-| One peer should stop receiving material | `ee mesh revoke <node-key> --workspace . --json` | Preserves the rest of the peer group when only one peer is wrong. |
+| One peer should stop receiving all material | `ee mesh peer revoke <peer-id> --workspace . --json` | Preserves the rest of the peer group when only one peer is wrong. |
+| One lane was too broad | `ee mesh revoke-lane <peer-id> --lane <lane> --workspace . --json` | Narrows only that lane and invalidates every preview from the prior generation. |
 | Tailnet or node-key changed | `ee mesh disable --reason "tailnet or node-key changed" --workspace . --json` | Backup-restored or tailnet-changed identity must fail closed. |
 | Audit row write fails | Stop before enrollment or grant changes | Mesh state must not change without its forensic precursor row. |
-| Body or embedding lane was too broad | Revoke the lane, then review audit and cache rows | Withdrawal is local and best-effort; do not claim remote deletion. |
+| Body or embedding lane was too broad | Run `ee mesh revoke-lane`, then review audit and cache rows | Withdrawal stops future serving but cannot erase remote cached or copied bytes. |
 
 Do not destroy caches or rewrite Git state during containment. Preserve evidence
 first; later cleanup belongs to the owning recovery bead or an explicit human
@@ -419,6 +441,9 @@ Mesh has two related but different code surfaces:
 | --- | --- | --- | --- |
 | `degraded[]` | `discovery_policy_no_ee_mesh_tag` | Status or discovery could not fully satisfy an optional mesh condition. | Follow the repair action or keep the command in local-only mode. |
 | `degraded[]` | `tailscale_shields_up` | Transport is reachable enough to diagnose, but inbound mesh traffic is blocked. | Decide whether this node should accept mesh traffic before changing Tailscale settings. |
+| Error | `mesh_approval_token_invalid` (high) | Bearer authentication failed, including malformed, tampered, wrong-context, or non-current-key input. | Discard it; review a new preview and explicitly issue a fresh bearer. |
+| Error | `mesh_approval_token_stale` (warning) | The bearer authenticated, but expired or no longer matches the current canonical snapshot/generation. | Review the new preview before issuing another bearer. |
+| Error | `mesh_store_authentication_unavailable` (high) | The store-auth root cannot authenticate approvals. | Run `ee doctor --json`; do not widen a lane until repaired. |
 | Policy failure surface | `mesh_peer_policy_denied` | Inbound peer material was denied by local policy. | Keep the denial unless a human approves a narrower grant. |
 | Policy failure surface | `mesh_peer_policy_quarantined` | Inbound material was retained only as quarantined evidence. | Inspect the audit and quarantine reason before using it in packs. |
 | Policy failure surface | `mesh_outbound_policy_denied` | Local policy refused to export a requested payload. | Do not bypass redaction; preview a safer lane or leave sharing disabled. |

@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use sqlmodel_core::{IsolationLevel, Row, Value};
 use sqlmodel_frankensqlite::FrankenConnection;
 
+use crate::config::{MeshLane, MeshLaneDecision};
 use crate::models::memory_anchor::MemoryAnchorFreshnessTransition;
 use crate::models::{
     AGENT_PROFILE_BIAS_CAP, AgentContextProfileCounts, EMBEDDING_METADATA_SCHEMA_V1,
@@ -60,6 +61,7 @@ pub const PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1: &str = "zstd_frame_v
 pub const PACK_REPLAY_LEDGER_MISSING: &str = "pack_replay_ledger_missing";
 pub const PACK_REPLAY_LEDGER_MALFORMED: &str = "pack_replay_ledger_malformed";
 pub const PACK_REPLAY_LEDGER_HASH_MISMATCH: &str = "pack_replay_ledger_hash_mismatch";
+pub const MESH_LANE_GRANT_TARGET_ADAPTER_SCHEMA_V1: &str = "ee.mesh.lane_grant_target_adapter.v1";
 
 /// Standard audit action types for memory operations (EE-070).
 pub mod audit_actions {
@@ -7654,6 +7656,73 @@ UPDATE workspace_generations
     "blake3:v087_evidence_storage_rebuild_2026_07_30",
 );
 
+/// V088: Persist exact per-peer mesh lane overrides and their consent generation.
+///
+/// Configured peer/group lanes remain the inherited baseline.  A non-NULL lane
+/// value in this table is an exact `(workspace_id, peer_id, lane)` override;
+/// NULL deliberately means "inherit config" rather than deny.  The target
+/// adapter is canonical and versioned so approval snapshots bind both the
+/// stable local peer id and the peer's current origin-node identity.  Every
+/// successful grant or revoke advances `grant_generation`; the write API below
+/// performs that compare-and-swap under `BEGIN IMMEDIATE`.
+pub const V088_MESH_LANE_GRANT_STATES: Migration = Migration::new(
+    88,
+    "mesh_lane_grant_states",
+    r#"
+CREATE TABLE mesh_lane_grant_states (
+    workspace_id TEXT NOT NULL,
+    peer_id TEXT NOT NULL CHECK (
+        peer_id GLOB 'peer_*'
+        AND length(trim(peer_id)) > 6
+        AND peer_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    target_adapter_version INTEGER NOT NULL DEFAULT 1 CHECK (target_adapter_version = 1),
+    target_origin_node_id TEXT NOT NULL CHECK (
+        target_origin_node_id GLOB 'node_*'
+        AND length(trim(target_origin_node_id)) > 6
+        AND target_origin_node_id NOT GLOB '*[^A-Za-z0-9_-]*'
+    ),
+    target_adapter_json TEXT NOT NULL CHECK (
+        json_valid(target_adapter_json)
+        AND target_adapter_json =
+            '{"schema":"ee.mesh.lane_grant_target_adapter.v1","peerId":"'
+            || peer_id
+            || '","originNodeId":"'
+            || target_origin_node_id
+            || '"}'
+    ),
+    grant_generation INTEGER NOT NULL DEFAULT 0 CHECK (grant_generation >= 0),
+    metadata_override TEXT CHECK (
+        metadata_override IS NULL OR metadata_override IN ('allow', 'quarantine', 'deny')
+    ),
+    body_override TEXT CHECK (
+        body_override IS NULL OR body_override IN ('allow', 'quarantine', 'deny')
+    ),
+    embedding_override TEXT CHECK (
+        embedding_override IS NULL OR embedding_override IN ('allow', 'quarantine', 'deny')
+    ),
+    graph_link_override TEXT CHECK (
+        graph_link_override IS NULL OR graph_link_override IN ('allow', 'quarantine', 'deny')
+    ),
+    revision_notice_override TEXT CHECK (
+        revision_notice_override IS NULL OR revision_notice_override IN ('allow', 'quarantine', 'deny')
+    ),
+    curation_signal_override TEXT CHECK (
+        curation_signal_override IS NULL OR curation_signal_override IN ('allow', 'quarantine', 'deny')
+    ),
+    updated_at TEXT NOT NULL CHECK (length(trim(updated_at)) > 0),
+    PRIMARY KEY (workspace_id, peer_id),
+    FOREIGN KEY (workspace_id, peer_id)
+        REFERENCES mesh_peers(workspace_id, peer_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX idx_mesh_lane_grant_states_generation
+    ON mesh_lane_grant_states(workspace_id, grant_generation, peer_id);
+"#,
+    "blake3:v088_mesh_lane_grant_states_2026_08_04",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -7743,6 +7812,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V085_EVIDENCE_SECURITY_POSTURE,
     V086_RULE_INDEX_GENERATIONS,
     V087_EVIDENCE_STORAGE_REBUILD,
+    V088_MESH_LANE_GRANT_STATES,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -11729,6 +11799,291 @@ pub struct StoredMeshPeer {
     pub last_seen_at: String,
 }
 
+/// Canonical versioned binding used by lane-grant snapshots and durable state.
+///
+/// The adapter intentionally contains no store, workspace, or key identifier.
+/// Its peer and origin-node fields are the minimum stable target identity that
+/// must survive config rendering while still invalidating on peer-key drift.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MeshLaneGrantTargetAdapter {
+    pub schema: String,
+    pub peer_id: String,
+    pub origin_node_id: String,
+}
+
+impl MeshLaneGrantTargetAdapter {
+    #[must_use]
+    pub fn new(peer_id: impl Into<String>, origin_node_id: impl Into<String>) -> Self {
+        Self {
+            schema: MESH_LANE_GRANT_TARGET_ADAPTER_SCHEMA_V1.to_owned(),
+            peer_id: peer_id.into(),
+            origin_node_id: origin_node_id.into(),
+        }
+    }
+
+    /// Return the exact JSON representation constrained by migration V088.
+    pub fn canonical_json(&self) -> std::result::Result<String, MeshLaneGrantMutationError> {
+        self.validate()?;
+        Ok(format!(
+            r#"{{"schema":"{MESH_LANE_GRANT_TARGET_ADAPTER_SCHEMA_V1}","peerId":"{}","originNodeId":"{}"}}"#,
+            self.peer_id, self.origin_node_id
+        ))
+    }
+
+    fn validate(&self) -> std::result::Result<(), MeshLaneGrantMutationError> {
+        if self.schema != MESH_LANE_GRANT_TARGET_ADAPTER_SCHEMA_V1 {
+            return Err(MeshLaneGrantMutationError::InvalidTargetAdapter {
+                message: format!(
+                    "target adapter schema must be {MESH_LANE_GRANT_TARGET_ADAPTER_SCHEMA_V1}"
+                ),
+            });
+        }
+        if !valid_mesh_lane_grant_identifier(&self.peer_id, "peer_") {
+            return Err(MeshLaneGrantMutationError::InvalidTargetAdapter {
+                message: "target adapter peer_id must be a canonical peer_* identifier".to_owned(),
+            });
+        }
+        if !valid_mesh_lane_grant_identifier(&self.origin_node_id, "node_") {
+            return Err(MeshLaneGrantMutationError::InvalidTargetAdapter {
+                message: "target adapter origin_node_id must be a canonical node_* identifier"
+                    .to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Durable per-peer lane overrides. `None` means inherit the configured peer
+/// policy; it is observably different from an explicit `Deny` override.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredMeshLaneGrantState {
+    pub workspace_id: String,
+    pub peer_id: String,
+    pub target_adapter: MeshLaneGrantTargetAdapter,
+    pub target_adapter_json: String,
+    pub target_matches_current_peer: bool,
+    pub grant_generation: u64,
+    pub metadata_override: Option<MeshLaneDecision>,
+    pub body_override: Option<MeshLaneDecision>,
+    pub embedding_override: Option<MeshLaneDecision>,
+    pub graph_link_override: Option<MeshLaneDecision>,
+    pub revision_notice_override: Option<MeshLaneDecision>,
+    pub curation_signal_override: Option<MeshLaneDecision>,
+    pub updated_at: String,
+}
+
+impl StoredMeshLaneGrantState {
+    #[must_use]
+    pub const fn override_for(&self, lane: MeshLane) -> Option<MeshLaneDecision> {
+        match lane {
+            MeshLane::Metadata => self.metadata_override,
+            MeshLane::Body => self.body_override,
+            MeshLane::Embedding => self.embedding_override,
+            MeshLane::GraphLink => self.graph_link_override,
+            MeshLane::RevisionNotice => self.revision_notice_override,
+            MeshLane::CurationSignal => self.curation_signal_override,
+        }
+    }
+
+    fn set_override(&mut self, lane: MeshLane, decision: MeshLaneDecision) {
+        match lane {
+            MeshLane::Metadata => self.metadata_override = Some(decision),
+            MeshLane::Body => self.body_override = Some(decision),
+            MeshLane::Embedding => self.embedding_override = Some(decision),
+            MeshLane::GraphLink => self.graph_link_override = Some(decision),
+            MeshLane::RevisionNotice => self.revision_notice_override = Some(decision),
+            MeshLane::CurationSignal => self.curation_signal_override = Some(decision),
+        }
+    }
+
+    fn clear_overrides(&mut self) {
+        self.metadata_override = None;
+        self.body_override = None;
+        self.embedding_override = None;
+        self.graph_link_override = None;
+        self.revision_notice_override = None;
+        self.curation_signal_override = None;
+    }
+}
+
+/// Input shared by grant and revoke compare-and-swap mutations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshLaneGrantMutationInput {
+    pub workspace_id: String,
+    pub peer_id: String,
+    pub target_adapter: MeshLaneGrantTargetAdapter,
+    pub material_lane: MeshLane,
+    pub expected_generation: u64,
+    pub updated_at: Option<String>,
+}
+
+/// A lane mutation rejected before commit. Every variant leaves the grant row
+/// and any caller-provided transactional effect unchanged.
+#[derive(Debug)]
+pub enum MeshLaneGrantMutationError {
+    Database(DbError),
+    InvalidTargetAdapter {
+        message: String,
+    },
+    PeerNotFound {
+        workspace_id: String,
+        peer_id: String,
+    },
+    PeerDisabled {
+        workspace_id: String,
+        peer_id: String,
+    },
+    TargetMismatch {
+        peer_id: String,
+        expected_origin_node_id: String,
+        actual_origin_node_id: String,
+    },
+    GenerationConflict {
+        expected: u64,
+        actual: u64,
+    },
+    GenerationExhausted {
+        current: u64,
+    },
+}
+
+impl From<DbError> for MeshLaneGrantMutationError {
+    fn from(error: DbError) -> Self {
+        Self::Database(error)
+    }
+}
+
+impl fmt::Display for MeshLaneGrantMutationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Database(error) => write!(formatter, "{error}"),
+            Self::InvalidTargetAdapter { message } => formatter.write_str(message),
+            Self::PeerNotFound {
+                workspace_id,
+                peer_id,
+            } => write!(
+                formatter,
+                "mesh peer {peer_id} is not enrolled in workspace {workspace_id}"
+            ),
+            Self::PeerDisabled {
+                workspace_id,
+                peer_id,
+            } => write!(
+                formatter,
+                "mesh peer {peer_id} is disabled in workspace {workspace_id}"
+            ),
+            Self::TargetMismatch {
+                peer_id,
+                expected_origin_node_id,
+                actual_origin_node_id,
+            } => write!(
+                formatter,
+                "mesh peer {peer_id} target changed from {expected_origin_node_id} to {actual_origin_node_id}"
+            ),
+            Self::GenerationConflict { expected, actual } => write!(
+                formatter,
+                "mesh lane grant generation changed: expected {expected}, actual {actual}"
+            ),
+            Self::GenerationExhausted { current } => write!(
+                formatter,
+                "mesh lane grant generation {current} cannot be advanced"
+            ),
+        }
+    }
+}
+
+impl Error for MeshLaneGrantMutationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Database(error) => Some(error),
+            Self::InvalidTargetAdapter { .. }
+            | Self::PeerNotFound { .. }
+            | Self::PeerDisabled { .. }
+            | Self::TargetMismatch { .. }
+            | Self::GenerationConflict { .. }
+            | Self::GenerationExhausted { .. } => None,
+        }
+    }
+}
+
+/// Error from a CAS transaction that also runs a caller-owned effect (normally
+/// the consent audit insert) before commit.
+#[derive(Debug)]
+pub enum MeshLaneGrantTransactionError<E> {
+    Mutation(MeshLaneGrantMutationError),
+    Effect(E),
+}
+
+impl<E> From<DbError> for MeshLaneGrantTransactionError<E> {
+    fn from(error: DbError) -> Self {
+        Self::Mutation(MeshLaneGrantMutationError::Database(error))
+    }
+}
+
+impl<E: fmt::Display> fmt::Display for MeshLaneGrantTransactionError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Mutation(error) => write!(formatter, "{error}"),
+            Self::Effect(error) => {
+                write!(formatter, "lane-grant transactional effect failed: {error}")
+            }
+        }
+    }
+}
+
+impl<E: Error + 'static> Error for MeshLaneGrantTransactionError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Mutation(error) => Some(error),
+            Self::Effect(error) => Some(error),
+        }
+    }
+}
+
+/// Typed failure from the full approval/CAS/audit transaction. Verification
+/// and audit errors intentionally remain separate so callers can preserve the
+/// public invalid-vs-stale token contract without flattening audit failures.
+#[derive(Debug)]
+pub enum MeshLaneGrantAtomicError<V, E> {
+    Mutation(MeshLaneGrantMutationError),
+    Verification(V),
+    Effect(E),
+}
+
+impl<V, E> From<DbError> for MeshLaneGrantAtomicError<V, E> {
+    fn from(error: DbError) -> Self {
+        Self::Mutation(MeshLaneGrantMutationError::Database(error))
+    }
+}
+
+impl<V: fmt::Display, E: fmt::Display> fmt::Display for MeshLaneGrantAtomicError<V, E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Mutation(error) => write!(formatter, "{error}"),
+            Self::Verification(error) => {
+                write!(
+                    formatter,
+                    "lane-grant approval verification failed: {error}"
+                )
+            }
+            Self::Effect(error) => {
+                write!(formatter, "lane-grant transactional effect failed: {error}")
+            }
+        }
+    }
+}
+
+impl<V: Error + 'static, E: Error + 'static> Error for MeshLaneGrantAtomicError<V, E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Mutation(error) => Some(error),
+            Self::Verification(error) => Some(error),
+            Self::Effect(error) => Some(error),
+        }
+    }
+}
+
 /// Input for upserting a per-peer anti-entropy cursor.
 #[derive(Debug, Clone)]
 pub struct UpsertMeshPeerCursorInput {
@@ -12283,8 +12638,13 @@ impl DbConnection {
         Ok(())
     }
 
-    /// Insert or update an optional mesh peer without enabling mesh behavior.
-    pub fn upsert_mesh_peer(&self, input: &UpsertMeshPeerInput) -> Result<StoredMeshPeer> {
+    /// Transaction-internal primitive for writing a mesh peer row. Production
+    /// enrollment callers use [`Self::upsert_mesh_peer`] so authority changes
+    /// cannot bypass lane-grant invalidation.
+    pub(crate) fn upsert_mesh_peer_in_current_transaction(
+        &self,
+        input: &UpsertMeshPeerInput,
+    ) -> Result<StoredMeshPeer> {
         let last_seen_at = input
             .last_seen_at
             .clone()
@@ -12324,6 +12684,168 @@ impl DbConnection {
             })
     }
 
+    /// Insert or update a locally authoritative peer enrollment and invalidate
+    /// every durable lane grant when its security identity changes.
+    ///
+    /// Origin-node rotation, disable/re-enable, and serialized enrollment/key
+    /// changes all clear overrides and advance the consent generation in the
+    /// same writer-fenced transaction as the peer upsert. This prevents a
+    /// revoked peer that is later re-enrolled under the same deterministic
+    /// peer/node identifiers from resurrecting old consent or replaying an
+    /// approval token issued before revocation.
+    pub fn upsert_mesh_peer(&self, input: &UpsertMeshPeerInput) -> Result<StoredMeshPeer> {
+        self.with_transaction(|| {
+            self.upsert_mesh_peer_with_grant_invalidation_in_current_transaction(input)
+        })
+    }
+
+    /// Transaction-internal form used when a caller must update several peer
+    /// enrollments atomically (for example auto-enrollment materialization).
+    pub(crate) fn upsert_mesh_peer_with_grant_invalidation_in_current_transaction(
+        &self,
+        input: &UpsertMeshPeerInput,
+    ) -> Result<StoredMeshPeer> {
+        let existing = self.get_mesh_peer(&input.workspace_id, &input.peer_id)?;
+        let security_identity_changed = existing.as_ref().is_some_and(|stored| {
+            stored.origin_node_id != input.origin_node_id
+                || stored.enabled != input.enabled
+                || stored.policy_summary_json != input.policy_summary_json
+        });
+        let peer = self.upsert_mesh_peer_in_current_transaction(input)?;
+        if security_identity_changed {
+            self.invalidate_mesh_lane_grants_in_transaction(
+                &input.workspace_id,
+                &input.peer_id,
+                input.last_seen_at.as_deref(),
+            )?;
+        }
+        Ok(peer)
+    }
+
+    /// Introduce a peer from a replay artifact only when no local enrollment
+    /// already owns its peer id. The check and insert share one writer fence,
+    /// so an artifact cannot win a race by overwriting a concurrently enrolled
+    /// local identity. Returns `true` only when a row was inserted.
+    pub fn insert_mesh_peer_if_absent(&self, input: &UpsertMeshPeerInput) -> Result<bool> {
+        self.with_transaction(|| {
+            if self
+                .get_mesh_peer(&input.workspace_id, &input.peer_id)?
+                .is_some()
+            {
+                return Ok(false);
+            }
+            self.upsert_mesh_peer_in_current_transaction(input)?;
+            Ok(true)
+        })
+    }
+
+    fn invalidate_mesh_lane_grants_in_transaction(
+        &self,
+        workspace_id: &str,
+        peer_id: &str,
+        updated_at: Option<&str>,
+    ) -> Result<()> {
+        let peer =
+            self.get_mesh_peer(workspace_id, peer_id)?
+                .ok_or_else(|| DbError::MalformedRow {
+                    operation: DbOperation::Query,
+                    message: "mesh peer disappeared during grant invalidation".to_owned(),
+                })?;
+        let target_adapter = MeshLaneGrantTargetAdapter::new(peer_id, peer.origin_node_id);
+        let target_adapter_json =
+            target_adapter
+                .canonical_json()
+                .map_err(|error| DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: format!("cannot bind invalidated grant state to peer: {error}"),
+                })?;
+        let updated_at = updated_at
+            .map(str::to_owned)
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        let Some(state) = self.get_mesh_lane_grant_state(workspace_id, peer_id)? else {
+            let affected = self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO mesh_lane_grant_states (
+                    workspace_id, peer_id, target_adapter_version,
+                    target_origin_node_id, target_adapter_json, grant_generation,
+                    metadata_override, body_override, embedding_override,
+                    graph_link_override, revision_notice_override,
+                    curation_signal_override, updated_at
+                 ) VALUES (?1, ?2, 1, ?3, ?4, 1,
+                           NULL, NULL, NULL, NULL, NULL, NULL, ?5)",
+                &[
+                    Value::Text(workspace_id.to_owned()),
+                    Value::Text(peer_id.to_owned()),
+                    Value::Text(target_adapter.origin_node_id),
+                    Value::Text(target_adapter_json),
+                    Value::Text(updated_at),
+                ],
+            )?;
+            if affected != 1 {
+                return Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: "failed to create mesh lane grant invalidation fence".to_owned(),
+                });
+            }
+            return Ok(());
+        };
+        let next_generation =
+            state
+                .grant_generation
+                .checked_add(1)
+                .ok_or_else(|| DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message: format!(
+                        "mesh lane grant generation {} cannot advance during peer invalidation",
+                        state.grant_generation
+                    ),
+                })?;
+        let expected_generation =
+            i64::try_from(state.grant_generation).map_err(|_| DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "mesh lane grant generation does not fit i64".to_owned(),
+            })?;
+        let next_generation =
+            i64::try_from(next_generation).map_err(|_| DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "next mesh lane grant generation does not fit i64".to_owned(),
+            })?;
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE mesh_lane_grant_states
+                SET target_adapter_version = 1,
+                    target_origin_node_id = ?3,
+                    target_adapter_json = ?4,
+                    grant_generation = ?5,
+                    metadata_override = NULL,
+                    body_override = NULL,
+                    embedding_override = NULL,
+                    graph_link_override = NULL,
+                    revision_notice_override = NULL,
+                    curation_signal_override = NULL,
+                    updated_at = ?6
+              WHERE workspace_id = ?1
+                AND peer_id = ?2
+                AND grant_generation = ?7",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(peer_id.to_owned()),
+                Value::Text(target_adapter.origin_node_id),
+                Value::Text(target_adapter_json),
+                Value::BigInt(next_generation),
+                Value::Text(updated_at),
+                Value::BigInt(expected_generation),
+            ],
+        )?;
+        if affected != 1 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "mesh lane grant changed during peer invalidation".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Get one optional mesh peer by local workspace and peer id.
     pub fn get_mesh_peer(
         &self,
@@ -12356,6 +12878,384 @@ impl DbConnection {
             &[Value::Text(workspace_id.to_owned())],
         )?;
         rows.iter().map(stored_mesh_peer_from_row).collect()
+    }
+
+    /// Read one durable per-peer lane-grant state.
+    ///
+    /// `target_matches_current_peer` is computed against the current enabled
+    /// `mesh_peers` row on every read. Callers must not apply overrides when it
+    /// is false: a disabled or rotated peer requires fresh enrollment and a
+    /// fresh approval snapshot/mutation.
+    pub fn get_mesh_lane_grant_state(
+        &self,
+        workspace_id: &str,
+        peer_id: &str,
+    ) -> Result<Option<StoredMeshLaneGrantState>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT s.workspace_id, s.peer_id, s.target_adapter_version,
+                    s.target_origin_node_id, s.target_adapter_json,
+                    s.grant_generation, s.metadata_override, s.body_override,
+                    s.embedding_override, s.graph_link_override,
+                    s.revision_notice_override, s.curation_signal_override,
+                    s.updated_at,
+                    CASE
+                        WHEN s.target_origin_node_id = p.origin_node_id AND p.enabled = 1
+                        THEN 1 ELSE 0
+                    END
+             FROM mesh_lane_grant_states s
+             LEFT JOIN mesh_peers p
+               ON p.workspace_id = s.workspace_id AND p.peer_id = s.peer_id
+             WHERE s.workspace_id = ?1 AND s.peer_id = ?2",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(peer_id.to_owned()),
+            ],
+        )?;
+        rows.first()
+            .map(stored_mesh_lane_grant_state_from_row)
+            .transpose()
+    }
+
+    /// List durable per-peer lane-grant states in deterministic peer order.
+    pub fn list_mesh_lane_grant_states(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredMeshLaneGrantState>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT s.workspace_id, s.peer_id, s.target_adapter_version,
+                    s.target_origin_node_id, s.target_adapter_json,
+                    s.grant_generation, s.metadata_override, s.body_override,
+                    s.embedding_override, s.graph_link_override,
+                    s.revision_notice_override, s.curation_signal_override,
+                    s.updated_at,
+                    CASE
+                        WHEN s.target_origin_node_id = p.origin_node_id AND p.enabled = 1
+                        THEN 1 ELSE 0
+                    END
+             FROM mesh_lane_grant_states s
+             LEFT JOIN mesh_peers p
+               ON p.workspace_id = s.workspace_id AND p.peer_id = s.peer_id
+             WHERE s.workspace_id = ?1
+             ORDER BY s.peer_id ASC",
+            &[Value::Text(workspace_id.to_owned())],
+        )?;
+        rows.iter()
+            .map(stored_mesh_lane_grant_state_from_row)
+            .collect()
+    }
+
+    /// Return the current consent generation, treating a missing state row as
+    /// generation zero (the all-inherit baseline).
+    pub fn mesh_lane_grant_generation(&self, workspace_id: &str, peer_id: &str) -> Result<u64> {
+        Ok(self
+            .get_mesh_lane_grant_state(workspace_id, peer_id)?
+            .map_or(0, |state| state.grant_generation))
+    }
+
+    /// Test-only no-audit wrapper around the production effect-required API.
+    #[cfg(test)]
+    fn apply_mesh_lane_grant(
+        &self,
+        input: &MeshLaneGrantMutationInput,
+    ) -> std::result::Result<StoredMeshLaneGrantState, MeshLaneGrantMutationError> {
+        match self
+            .apply_mesh_lane_grant_with_effect(input, |_| Ok::<(), std::convert::Infallible>(()))
+        {
+            Ok((state, ())) => Ok(state),
+            Err(MeshLaneGrantTransactionError::Mutation(error)) => Err(error),
+            Err(MeshLaneGrantTransactionError::Effect(never)) => match never {},
+        }
+    }
+
+    /// Test-only no-audit wrapper around the production effect-required API.
+    ///
+    /// A revoke always advances `grant_generation`, including when the lane was
+    /// already explicitly denied. That makes every previously issued preview
+    /// token stale without pretending already disclosed bytes were erased.
+    #[cfg(test)]
+    fn revoke_mesh_lane(
+        &self,
+        input: &MeshLaneGrantMutationInput,
+    ) -> std::result::Result<StoredMeshLaneGrantState, MeshLaneGrantMutationError> {
+        match self.revoke_mesh_lane_with_effect(input, |_| Ok::<(), std::convert::Infallible>(())) {
+            Ok((state, ())) => Ok(state),
+            Err(MeshLaneGrantTransactionError::Mutation(error)) => Err(error),
+            Err(MeshLaneGrantTransactionError::Effect(never)) => match never {},
+        }
+    }
+
+    /// Apply a grant and a caller-owned durable effect in one writer-fenced
+    /// transaction. The callback normally inserts the consent audit row. If it
+    /// fails, both the lane mutation and its generation advance roll back.
+    pub fn apply_mesh_lane_grant_with_effect<T, E, F>(
+        &self,
+        input: &MeshLaneGrantMutationInput,
+        effect: F,
+    ) -> std::result::Result<(StoredMeshLaneGrantState, T), MeshLaneGrantTransactionError<E>>
+    where
+        F: FnOnce(&StoredMeshLaneGrantState) -> std::result::Result<T, E>,
+    {
+        self.mutate_mesh_lane_grant_with_effect(input, MeshLaneDecision::Allow, effect)
+    }
+
+    /// Run approval verification, the grant CAS, and its durable audit effect
+    /// under one `BEGIN IMMEDIATE` writer fence.
+    ///
+    /// `verify` runs before the grant row changes, so it can rebuild and
+    /// compare the canonical preview from the transaction's pre-mutation DB
+    /// snapshot. `effect` runs only after the CAS succeeds and normally appends
+    /// the audit row using the verified approval's opaque audit id. Failure in
+    /// either callback rolls back every database write.
+    pub fn apply_mesh_lane_grant_transaction<P, T, VE, EE, V, F>(
+        &self,
+        input: &MeshLaneGrantMutationInput,
+        verify: V,
+        effect: F,
+    ) -> std::result::Result<(StoredMeshLaneGrantState, P, T), MeshLaneGrantAtomicError<VE, EE>>
+    where
+        V: FnOnce() -> std::result::Result<P, VE>,
+        F: FnOnce(&StoredMeshLaneGrantState, &P) -> std::result::Result<T, EE>,
+    {
+        self.mutate_mesh_lane_grant_transaction(input, MeshLaneDecision::Allow, verify, effect)
+    }
+
+    /// Apply a revoke and a caller-owned durable effect in one writer-fenced
+    /// transaction. See [`apply_mesh_lane_grant_with_effect`].
+    pub fn revoke_mesh_lane_with_effect<T, E, F>(
+        &self,
+        input: &MeshLaneGrantMutationInput,
+        effect: F,
+    ) -> std::result::Result<(StoredMeshLaneGrantState, T), MeshLaneGrantTransactionError<E>>
+    where
+        F: FnOnce(&StoredMeshLaneGrantState) -> std::result::Result<T, E>,
+    {
+        self.mutate_mesh_lane_grant_with_effect(input, MeshLaneDecision::Deny, effect)
+    }
+
+    /// Run a caller-owned precondition, the revoke CAS, and its durable audit
+    /// effect under one `BEGIN IMMEDIATE` writer fence.
+    pub fn revoke_mesh_lane_transaction<P, T, VE, EE, V, F>(
+        &self,
+        input: &MeshLaneGrantMutationInput,
+        verify: V,
+        effect: F,
+    ) -> std::result::Result<(StoredMeshLaneGrantState, P, T), MeshLaneGrantAtomicError<VE, EE>>
+    where
+        V: FnOnce() -> std::result::Result<P, VE>,
+        F: FnOnce(&StoredMeshLaneGrantState, &P) -> std::result::Result<T, EE>,
+    {
+        self.mutate_mesh_lane_grant_transaction(input, MeshLaneDecision::Deny, verify, effect)
+    }
+
+    fn mutate_mesh_lane_grant_with_effect<T, E, F>(
+        &self,
+        input: &MeshLaneGrantMutationInput,
+        decision: MeshLaneDecision,
+        effect: F,
+    ) -> std::result::Result<(StoredMeshLaneGrantState, T), MeshLaneGrantTransactionError<E>>
+    where
+        F: FnOnce(&StoredMeshLaneGrantState) -> std::result::Result<T, E>,
+    {
+        self.with_transaction_error(|| {
+            let state = self
+                .mutate_mesh_lane_grant_in_transaction(input, decision)
+                .map_err(MeshLaneGrantTransactionError::Mutation)?;
+            let effect_result = effect(&state).map_err(MeshLaneGrantTransactionError::Effect)?;
+            Ok((state, effect_result))
+        })
+    }
+
+    fn mutate_mesh_lane_grant_transaction<P, T, VE, EE, V, F>(
+        &self,
+        input: &MeshLaneGrantMutationInput,
+        decision: MeshLaneDecision,
+        verify: V,
+        effect: F,
+    ) -> std::result::Result<(StoredMeshLaneGrantState, P, T), MeshLaneGrantAtomicError<VE, EE>>
+    where
+        V: FnOnce() -> std::result::Result<P, VE>,
+        F: FnOnce(&StoredMeshLaneGrantState, &P) -> std::result::Result<T, EE>,
+    {
+        self.with_transaction_error(|| {
+            let verified = verify().map_err(MeshLaneGrantAtomicError::Verification)?;
+            let state = self
+                .mutate_mesh_lane_grant_in_transaction(input, decision)
+                .map_err(MeshLaneGrantAtomicError::Mutation)?;
+            let effect_result =
+                effect(&state, &verified).map_err(MeshLaneGrantAtomicError::Effect)?;
+            Ok((state, verified, effect_result))
+        })
+    }
+
+    fn mutate_mesh_lane_grant_in_transaction(
+        &self,
+        input: &MeshLaneGrantMutationInput,
+        decision: MeshLaneDecision,
+    ) -> std::result::Result<StoredMeshLaneGrantState, MeshLaneGrantMutationError> {
+        input.target_adapter.validate()?;
+        if input.target_adapter.peer_id != input.peer_id {
+            return Err(MeshLaneGrantMutationError::InvalidTargetAdapter {
+                message: "target adapter peer_id does not match the mutation peer_id".to_owned(),
+            });
+        }
+
+        let peer = self
+            .get_mesh_peer(&input.workspace_id, &input.peer_id)?
+            .ok_or_else(|| MeshLaneGrantMutationError::PeerNotFound {
+                workspace_id: input.workspace_id.clone(),
+                peer_id: input.peer_id.clone(),
+            })?;
+        if !peer.enabled {
+            return Err(MeshLaneGrantMutationError::PeerDisabled {
+                workspace_id: input.workspace_id.clone(),
+                peer_id: input.peer_id.clone(),
+            });
+        }
+        if input.target_adapter.origin_node_id != peer.origin_node_id {
+            return Err(MeshLaneGrantMutationError::TargetMismatch {
+                peer_id: input.peer_id.clone(),
+                expected_origin_node_id: input.target_adapter.origin_node_id.clone(),
+                actual_origin_node_id: peer.origin_node_id,
+            });
+        }
+
+        let existing = self.get_mesh_lane_grant_state(&input.workspace_id, &input.peer_id)?;
+        let actual_generation = existing.as_ref().map_or(0, |state| state.grant_generation);
+        if actual_generation != input.expected_generation {
+            return Err(MeshLaneGrantMutationError::GenerationConflict {
+                expected: input.expected_generation,
+                actual: actual_generation,
+            });
+        }
+        let next_generation = actual_generation.checked_add(1).ok_or(
+            MeshLaneGrantMutationError::GenerationExhausted {
+                current: actual_generation,
+            },
+        )?;
+        let next_generation_sql = i64::try_from(next_generation).map_err(|_| {
+            MeshLaneGrantMutationError::GenerationExhausted {
+                current: actual_generation,
+            }
+        })?;
+        let expected_generation_sql = i64::try_from(actual_generation).map_err(|_| {
+            MeshLaneGrantMutationError::GenerationExhausted {
+                current: actual_generation,
+            }
+        })?;
+        let updated_at = input
+            .updated_at
+            .clone()
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        if updated_at.trim().is_empty() {
+            return Err(MeshLaneGrantMutationError::InvalidTargetAdapter {
+                message: "lane-grant updated_at must not be empty".to_owned(),
+            });
+        }
+        let target_adapter_json = input.target_adapter.canonical_json()?;
+
+        let mut next = existing
+            .clone()
+            .unwrap_or_else(|| StoredMeshLaneGrantState {
+                workspace_id: input.workspace_id.clone(),
+                peer_id: input.peer_id.clone(),
+                target_adapter: input.target_adapter.clone(),
+                target_adapter_json: target_adapter_json.clone(),
+                target_matches_current_peer: true,
+                grant_generation: 0,
+                metadata_override: None,
+                body_override: None,
+                embedding_override: None,
+                graph_link_override: None,
+                revision_notice_override: None,
+                curation_signal_override: None,
+                updated_at: updated_at.clone(),
+            });
+        if !next.target_matches_current_peer {
+            // A fresh approval for a rotated origin-node identity must never
+            // transfer grants that were consented for the prior node. Preserve
+            // only the monotonic generation, then apply the one newly reviewed
+            // lane below.
+            next.clear_overrides();
+        }
+        next.target_adapter = input.target_adapter.clone();
+        next.target_adapter_json = target_adapter_json.clone();
+        next.target_matches_current_peer = true;
+        next.grant_generation = next_generation;
+        next.updated_at = updated_at.clone();
+        next.set_override(input.material_lane, decision);
+
+        let values = mesh_lane_grant_state_values(&next, next_generation_sql);
+        if existing.is_some() {
+            let mut update_values = values;
+            update_values.push(Value::BigInt(expected_generation_sql));
+            let affected = self.execute_for(
+                DbOperation::Execute,
+                "UPDATE mesh_lane_grant_states
+                    SET target_adapter_version = ?3,
+                        target_origin_node_id = ?4,
+                        target_adapter_json = ?5,
+                        grant_generation = ?6,
+                        metadata_override = ?7,
+                        body_override = ?8,
+                        embedding_override = ?9,
+                        graph_link_override = ?10,
+                        revision_notice_override = ?11,
+                        curation_signal_override = ?12,
+                        updated_at = ?13
+                  WHERE workspace_id = ?1
+                    AND peer_id = ?2
+                    AND grant_generation = ?14",
+                &update_values,
+            )?;
+            if affected != 1 {
+                let actual = self
+                    .get_mesh_lane_grant_state(&input.workspace_id, &input.peer_id)?
+                    .map_or(0, |state| state.grant_generation);
+                return Err(MeshLaneGrantMutationError::GenerationConflict {
+                    expected: input.expected_generation,
+                    actual,
+                });
+            }
+        } else {
+            let affected = self.execute_for(
+                DbOperation::Execute,
+                "INSERT INTO mesh_lane_grant_states (
+                    workspace_id, peer_id, target_adapter_version,
+                    target_origin_node_id, target_adapter_json, grant_generation,
+                    metadata_override, body_override, embedding_override,
+                    graph_link_override, revision_notice_override,
+                    curation_signal_override, updated_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+                 )",
+                &values,
+            )?;
+            if affected != 1 {
+                return Err(MeshLaneGrantMutationError::GenerationConflict {
+                    expected: input.expected_generation,
+                    actual: 0,
+                });
+            }
+        }
+
+        let stored = self
+            .get_mesh_lane_grant_state(&input.workspace_id, &input.peer_id)?
+            .ok_or_else(|| MeshLaneGrantMutationError::GenerationConflict {
+                expected: input.expected_generation,
+                actual: actual_generation,
+            })?;
+        if stored.grant_generation != next_generation
+            || stored.override_for(input.material_lane) != Some(decision)
+            || !stored.target_matches_current_peer
+        {
+            return Err(MeshLaneGrantMutationError::GenerationConflict {
+                expected: input.expected_generation,
+                actual: stored.grant_generation,
+            });
+        }
+        Ok(stored)
     }
 
     /// Insert or update a per-peer anti-entropy cursor.
@@ -14339,6 +15239,120 @@ fn stored_mesh_peer_from_row(row: &Row) -> Result<StoredMeshPeer> {
     })
 }
 
+fn stored_mesh_lane_grant_state_from_row(row: &Row) -> Result<StoredMeshLaneGrantState> {
+    let workspace_id = required_text(row, 0, DbOperation::Query, "workspace_id")?.to_owned();
+    let peer_id = required_text(row, 1, DbOperation::Query, "peer_id")?.to_owned();
+    let adapter_version = required_u64(row, 2, DbOperation::Query, "target_adapter_version")?;
+    if adapter_version != 1 {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: format!("unsupported mesh lane target adapter version {adapter_version}"),
+        });
+    }
+    let target_origin_node_id =
+        required_text(row, 3, DbOperation::Query, "target_origin_node_id")?.to_owned();
+    let target_adapter_json =
+        required_text(row, 4, DbOperation::Query, "target_adapter_json")?.to_owned();
+    let target_adapter = serde_json::from_str::<MeshLaneGrantTargetAdapter>(&target_adapter_json)
+        .map_err(|error| DbError::MalformedRow {
+        operation: DbOperation::Query,
+        message: format!("invalid mesh lane target adapter JSON: {error}"),
+    })?;
+    target_adapter
+        .validate()
+        .map_err(|error| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: error.to_string(),
+        })?;
+    if target_adapter.peer_id != peer_id
+        || target_adapter.origin_node_id != target_origin_node_id
+        || target_adapter
+            .canonical_json()
+            .map_err(|error| DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: error.to_string(),
+            })?
+            != target_adapter_json
+    {
+        return Err(DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "mesh lane target adapter does not match its durable target columns"
+                .to_owned(),
+        });
+    }
+
+    Ok(StoredMeshLaneGrantState {
+        workspace_id,
+        peer_id,
+        target_adapter,
+        target_adapter_json,
+        target_matches_current_peer: required_sqlite_bool(
+            row,
+            13,
+            DbOperation::Query,
+            "target_matches_current_peer",
+        )?,
+        grant_generation: required_u64(row, 5, DbOperation::Query, "grant_generation")?,
+        metadata_override: optional_mesh_lane_decision(row, 6, "metadata_override")?,
+        body_override: optional_mesh_lane_decision(row, 7, "body_override")?,
+        embedding_override: optional_mesh_lane_decision(row, 8, "embedding_override")?,
+        graph_link_override: optional_mesh_lane_decision(row, 9, "graph_link_override")?,
+        revision_notice_override: optional_mesh_lane_decision(row, 10, "revision_notice_override")?,
+        curation_signal_override: optional_mesh_lane_decision(row, 11, "curation_signal_override")?,
+        updated_at: required_text(row, 12, DbOperation::Query, "updated_at")?.to_owned(),
+    })
+}
+
+fn optional_mesh_lane_decision(
+    row: &Row,
+    index: usize,
+    field: &str,
+) -> Result<Option<MeshLaneDecision>> {
+    optional_text(row, index)?
+        .map(|decision| match decision {
+            "allow" => Ok(MeshLaneDecision::Allow),
+            "quarantine" => Ok(MeshLaneDecision::Quarantine),
+            "deny" => Ok(MeshLaneDecision::Deny),
+            other => Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: format!("{field} has unsupported lane decision {other:?}"),
+            }),
+        })
+        .transpose()
+}
+
+fn mesh_lane_grant_state_values(
+    state: &StoredMeshLaneGrantState,
+    generation_sql: i64,
+) -> Vec<Value> {
+    let decision_value = |decision: Option<MeshLaneDecision>| {
+        decision.map_or(Value::Null, |value| Value::Text(value.as_str().to_owned()))
+    };
+    vec![
+        Value::Text(state.workspace_id.clone()),
+        Value::Text(state.peer_id.clone()),
+        Value::BigInt(1),
+        Value::Text(state.target_adapter.origin_node_id.clone()),
+        Value::Text(state.target_adapter_json.clone()),
+        Value::BigInt(generation_sql),
+        decision_value(state.metadata_override),
+        decision_value(state.body_override),
+        decision_value(state.embedding_override),
+        decision_value(state.graph_link_override),
+        decision_value(state.revision_notice_override),
+        decision_value(state.curation_signal_override),
+        Value::Text(state.updated_at.clone()),
+    ]
+}
+
+fn valid_mesh_lane_grant_identifier(value: &str, prefix: &str) -> bool {
+    value.starts_with(prefix)
+        && value.len() > prefix.len()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 fn stored_mesh_peer_cursor_from_row(row: &Row) -> Result<StoredMeshPeerCursor> {
     Ok(StoredMeshPeerCursor {
         workspace_id: required_text(row, 0, DbOperation::Query, "workspace_id")?.to_string(),
@@ -16192,6 +17206,23 @@ impl DbConnection {
         sql.push_str(" ORDER BY id ASC");
 
         let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter().map(stored_memory_from_row).collect()
+    }
+
+    /// List current revision heads, including rows that have been tombstoned.
+    ///
+    /// This is intentionally narrower than `list_memories(..., true)`: callers
+    /// that need to explain tombstone filtering must not accidentally include
+    /// superseded revision history in the candidate set.
+    pub fn list_current_memories_including_tombstoned(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredMemory>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, level, kind, content, workflow_id, confidence, utility, importance, provenance_uri, trust_class, trust_subclass, provenance_chain_hash, provenance_chain_hash_version, provenance_verification_status, provenance_verified_at, provenance_verification_note, created_at, updated_at, tombstoned_at, valid_from, valid_to FROM memories WHERE workspace_id = ?1 AND valid_to IS NULL ORDER BY id ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
         rows.iter().map(stored_memory_from_row).collect()
     }
 
@@ -28617,8 +29648,8 @@ mod tests {
         evidence_ids.push(mismatched_evidence_id);
         let migration = connection.migrate()?;
         ensure(
-            migration.applied() == [85, 86, 87],
-            "legacy evidence upgrade must apply V085, V086, and V087 in order",
+            migration.applied() == [85, 86, 87, 88],
+            "legacy evidence upgrade must apply V085 through V088 in order",
         )?;
         ensure(
             matches!(
@@ -30551,6 +31582,10 @@ mod tests {
         ensure(
             table_names.contains(&"mesh_peer_cursors"),
             "mesh_peer_cursors table must exist",
+        )?;
+        ensure(
+            table_names.contains(&"mesh_lane_grant_states"),
+            "mesh_lane_grant_states table must exist",
         )?;
         ensure(
             table_names.contains(&"mesh_import_ledger"),
@@ -34832,6 +35867,340 @@ mod tests {
     }
 
     #[test]
+    fn mesh_peer_lifecycle_creates_a_fence_before_the_first_lane_grant() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let active = super::UpsertMeshPeerInput {
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            peer_id: "peer_pregrant_000001".to_owned(),
+            origin_node_id: "node_pregrant_000001".to_owned(),
+            display_name: Some("pregrant".to_owned()),
+            policy_summary_json: Some(r#"{"state":"active"}"#.to_owned()),
+            enabled: true,
+            last_seen_at: Some("2026-08-04T00:00:00Z".to_owned()),
+        };
+        connection.upsert_mesh_peer(&active)?;
+        ensure(
+            connection
+                .get_mesh_lane_grant_state(&active.workspace_id, &active.peer_id)?
+                .is_none(),
+            "initial enrollment has no grant row before any lifecycle transition",
+        )?;
+
+        connection.upsert_mesh_peer(&super::UpsertMeshPeerInput {
+            policy_summary_json: Some(r#"{"state":"revoked"}"#.to_owned()),
+            enabled: false,
+            last_seen_at: Some("2026-08-04T00:01:00Z".to_owned()),
+            ..active.clone()
+        })?;
+        let disabled = connection
+            .get_mesh_lane_grant_state(&active.workspace_id, &active.peer_id)?
+            .ok_or("peer revoke must create a generation fence even before the first grant")?;
+        ensure_equal(
+            &disabled.grant_generation,
+            &1,
+            "first lifecycle transition generation",
+        )?;
+        ensure(
+            !disabled.target_matches_current_peer,
+            "disabled peer cannot match its generation fence",
+        )?;
+        ensure_equal(
+            &disabled.metadata_override,
+            &None,
+            "new lifecycle fence starts with no grants",
+        )?;
+
+        connection.upsert_mesh_peer(&super::UpsertMeshPeerInput {
+            last_seen_at: Some("2026-08-04T00:02:00Z".to_owned()),
+            ..active.clone()
+        })?;
+        let reenrolled = connection
+            .get_mesh_lane_grant_state(&active.workspace_id, &active.peer_id)?
+            .ok_or("same-node re-enrollment must retain the generation fence")?;
+        ensure_equal(
+            &reenrolled.grant_generation,
+            &2,
+            "same-node re-enrollment generation",
+        )?;
+        ensure(
+            reenrolled.target_matches_current_peer,
+            "active same-node peer matches the cleared fence",
+        )?;
+        ensure_equal(
+            &reenrolled.metadata_override,
+            &None,
+            "same-node re-enrollment cannot create consent",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn mesh_lane_grants_cas_revoke_and_target_rotation_are_fail_closed() -> TestResult {
+        use crate::config::{MeshLane, MeshLaneDecision};
+
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.upsert_mesh_peer_in_current_transaction(&super::UpsertMeshPeerInput {
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            peer_id: "peer_alpha_000001".to_owned(),
+            origin_node_id: "node_alpha_000001".to_owned(),
+            display_name: Some("alpha".to_owned()),
+            policy_summary_json: None,
+            enabled: true,
+            last_seen_at: Some("2026-08-04T00:00:00Z".to_owned()),
+        })?;
+
+        let mutation = super::MeshLaneGrantMutationInput {
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            peer_id: "peer_alpha_000001".to_owned(),
+            target_adapter: super::MeshLaneGrantTargetAdapter::new(
+                "peer_alpha_000001",
+                "node_alpha_000001",
+            ),
+            material_lane: MeshLane::Metadata,
+            expected_generation: 0,
+            updated_at: Some("2026-08-04T00:01:00Z".to_owned()),
+        };
+        ensure_equal(
+            &connection.mesh_lane_grant_generation(
+                "wsp_01234567890123456789012345",
+                "peer_alpha_000001",
+            )?,
+            &0,
+            "missing lane state starts at generation zero",
+        )?;
+        let granted = connection
+            .apply_mesh_lane_grant(&mutation)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        ensure_equal(&granted.grant_generation, &1, "first grant generation")?;
+        ensure_equal(
+            &granted.metadata_override,
+            &Some(MeshLaneDecision::Allow),
+            "grant writes exact allow override",
+        )?;
+        ensure_equal(
+            &granted.body_override,
+            &None,
+            "unmentioned lane continues inheriting config",
+        )?;
+
+        let replay = connection.apply_mesh_lane_grant(&mutation);
+        ensure(
+            matches!(
+                replay,
+                Err(super::MeshLaneGrantMutationError::GenerationConflict {
+                    expected: 0,
+                    actual: 1
+                })
+            ),
+            "replayed grant must fail generation CAS",
+        )?;
+        ensure_equal(
+            &connection.mesh_lane_grant_generation(
+                "wsp_01234567890123456789012345",
+                "peer_alpha_000001",
+            )?,
+            &1,
+            "failed replay commits zero generation changes",
+        )?;
+
+        let revoked = connection
+            .revoke_mesh_lane(&super::MeshLaneGrantMutationInput {
+                expected_generation: 1,
+                updated_at: Some("2026-08-04T00:02:00Z".to_owned()),
+                ..mutation.clone()
+            })
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        ensure_equal(&revoked.grant_generation, &2, "first revoke generation")?;
+        ensure_equal(
+            &revoked.metadata_override,
+            &Some(MeshLaneDecision::Deny),
+            "revoke writes exact deny override",
+        )?;
+        let revoked_again = connection
+            .revoke_mesh_lane(&super::MeshLaneGrantMutationInput {
+                expected_generation: 2,
+                updated_at: Some("2026-08-04T00:03:00Z".to_owned()),
+                ..mutation.clone()
+            })
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        ensure_equal(
+            &revoked_again.grant_generation,
+            &3,
+            "already-denied revoke still advances generation",
+        )?;
+
+        let failed_verification = connection.revoke_mesh_lane_transaction(
+            &super::MeshLaneGrantMutationInput {
+                expected_generation: 3,
+                updated_at: Some("2026-08-04T00:04:00Z".to_owned()),
+                ..mutation.clone()
+            },
+            || Err::<(), _>("approval stale"),
+            |_, _| Ok::<(), &str>(()),
+        );
+        ensure(
+            matches!(
+                failed_verification,
+                Err(super::MeshLaneGrantAtomicError::Verification(
+                    "approval stale"
+                ))
+            ),
+            "failed approval verification must abort before the revoke",
+        )?;
+
+        let failed_effect = connection.revoke_mesh_lane_transaction(
+            &super::MeshLaneGrantMutationInput {
+                expected_generation: 3,
+                updated_at: Some("2026-08-04T00:04:30Z".to_owned()),
+                ..mutation.clone()
+            },
+            || Ok::<_, &str>("verified"),
+            |_, _| Err::<(), _>("audit failed"),
+        );
+        ensure(
+            matches!(
+                failed_effect,
+                Err(super::MeshLaneGrantAtomicError::Effect("audit failed"))
+            ),
+            "failed transactional audit effect must abort the revoke",
+        )?;
+        ensure_equal(
+            &connection.mesh_lane_grant_generation(
+                "wsp_01234567890123456789012345",
+                "peer_alpha_000001",
+            )?,
+            &3,
+            "failed transactional effect rolls generation back",
+        )?;
+
+        let body_granted = connection
+            .apply_mesh_lane_grant(&super::MeshLaneGrantMutationInput {
+                material_lane: MeshLane::Body,
+                expected_generation: 3,
+                updated_at: Some("2026-08-04T00:05:00Z".to_owned()),
+                ..mutation.clone()
+            })
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        ensure_equal(&body_granted.grant_generation, &4, "body grant generation")?;
+        ensure_equal(
+            &body_granted.body_override,
+            &Some(MeshLaneDecision::Allow),
+            "body override is stored before rotation",
+        )?;
+
+        connection.upsert_mesh_peer_in_current_transaction(&super::UpsertMeshPeerInput {
+            origin_node_id: "node_alpha_000002".to_owned(),
+            last_seen_at: Some("2026-08-04T00:06:00Z".to_owned()),
+            ..super::UpsertMeshPeerInput {
+                workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                peer_id: "peer_alpha_000001".to_owned(),
+                origin_node_id: "node_alpha_000001".to_owned(),
+                display_name: Some("alpha".to_owned()),
+                policy_summary_json: None,
+                enabled: true,
+                last_seen_at: Some("2026-08-04T00:00:00Z".to_owned()),
+            }
+        })?;
+        let stale = connection
+            .get_mesh_lane_grant_state("wsp_01234567890123456789012345", "peer_alpha_000001")?
+            .ok_or("rotated peer should retain stale state for generation fencing")?;
+        ensure(
+            !stale.target_matches_current_peer,
+            "registry must be able to ignore pre-rotation overrides",
+        )?;
+
+        let fresh_target = super::MeshLaneGrantMutationInput {
+            target_adapter: super::MeshLaneGrantTargetAdapter::new(
+                "peer_alpha_000001",
+                "node_alpha_000002",
+            ),
+            material_lane: MeshLane::Metadata,
+            expected_generation: 4,
+            updated_at: Some("2026-08-04T00:07:00Z".to_owned()),
+            ..mutation
+        };
+        let fresh = connection
+            .apply_mesh_lane_grant(&fresh_target)
+            .map_err(|error| TestFailure::new(error.to_string()))?;
+        ensure_equal(
+            &fresh.grant_generation,
+            &5,
+            "post-rotation grant generation",
+        )?;
+        ensure_equal(
+            &fresh.metadata_override,
+            &Some(MeshLaneDecision::Allow),
+            "newly reviewed lane applies to the rotated target",
+        )?;
+        ensure_equal(
+            &fresh.body_override,
+            &None,
+            "old-target lane grants must not transfer to the rotated target",
+        )?;
+
+        let disabled = super::UpsertMeshPeerInput {
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            peer_id: "peer_alpha_000001".to_owned(),
+            origin_node_id: "node_alpha_000002".to_owned(),
+            display_name: Some("alpha".to_owned()),
+            policy_summary_json: Some(r#"{"keyGeneration":1,"state":"revoked"}"#.to_owned()),
+            enabled: false,
+            last_seen_at: Some("2026-08-04T00:08:00Z".to_owned()),
+        };
+        connection.upsert_mesh_peer(&disabled)?;
+        let after_disable = connection
+            .get_mesh_lane_grant_state("wsp_01234567890123456789012345", "peer_alpha_000001")?
+            .ok_or("peer disable must preserve a generation fence")?;
+        ensure_equal(
+            &after_disable.grant_generation,
+            &6,
+            "peer disable advances the consent generation",
+        )?;
+        ensure_equal(
+            &after_disable.metadata_override,
+            &None,
+            "peer disable clears every prior allow",
+        )?;
+        ensure(
+            !after_disable.target_matches_current_peer,
+            "disabled peer cannot match a lane-grant target",
+        )?;
+
+        connection.upsert_mesh_peer(&super::UpsertMeshPeerInput {
+            policy_summary_json: Some(r#"{"keyGeneration":1,"state":"active"}"#.to_owned()),
+            enabled: true,
+            last_seen_at: Some("2026-08-04T00:09:00Z".to_owned()),
+            ..disabled
+        })?;
+        let after_reenroll = connection
+            .get_mesh_lane_grant_state("wsp_01234567890123456789012345", "peer_alpha_000001")?
+            .ok_or("same-node re-enrollment must retain a generation fence")?;
+        ensure_equal(
+            &after_reenroll.grant_generation,
+            &7,
+            "same-node re-enrollment advances the generation again",
+        )?;
+        ensure_equal(
+            &after_reenroll.metadata_override,
+            &None,
+            "same-node re-enrollment cannot resurrect old consent",
+        )?;
+        ensure(
+            after_reenroll.target_matches_current_peer,
+            "the active peer may match its target without inheriting cleared overrides",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn mesh_import_ledger_is_idempotent_and_rejects_seq_hash_conflicts() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
@@ -36567,6 +37936,30 @@ mod tests {
                 .iter()
                 .any(|memory| memory.id == "mem_00000000000000000000000030"),
             "retrieval list includes validity-window rows for query-time filtering",
+        )?;
+
+        ensure(
+            connection.tombstone_memory("mem_00000000000000000000000002")?,
+            "tombstone current memory for current-head listing",
+        )?;
+        let current_with_tombstones = connection
+            .list_current_memories_including_tombstoned("wsp_01234567890123456789012345")?;
+        ensure_equal(
+            &current_with_tombstones.len(),
+            &2,
+            "current-head listing excludes bounded revision history",
+        )?;
+        ensure(
+            current_with_tombstones
+                .iter()
+                .all(|memory| memory.valid_to.is_none()),
+            "current-head listing excludes every superseded revision",
+        )?;
+        ensure(
+            current_with_tombstones.iter().any(|memory| {
+                memory.id == "mem_00000000000000000000000002" && memory.tombstoned_at.is_some()
+            }),
+            "current-head listing includes tombstoned memory",
         )?;
 
         connection.close()?;

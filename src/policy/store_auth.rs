@@ -30,9 +30,11 @@
 //! closure (slice 3) consume this module without re-implementing any of it.
 
 use std::fmt;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{Ordering, compiler_fence};
 
+use fs4::fs_std::FileExt as Fs4FileExt;
 use serde::{Deserialize, Serialize};
 
 use super::hex_lower;
@@ -47,6 +49,8 @@ const KEY_ID_LEN: usize = 16;
 const KEY_FILE_NAME: &str = "store_auth_root.json";
 /// Temp sibling used for atomic replace during rotation.
 const KEY_FILE_TMP_NAME: &str = "store_auth_root.json.tmp";
+/// Persistent advisory-lock sibling coordinating readers with key rotation.
+const KEY_LOCK_FILE_NAME: &str = "store_auth_root.lock";
 /// On-disk key-file schema tag.
 const KEY_FILE_SCHEMA: &str = "ee.store_auth.keyfile.v1";
 /// Maximum retired keys retained for the same-store verification window.
@@ -243,6 +247,17 @@ impl fmt::Display for KeyId {
 pub struct Mac([u8; MAC_LEN]);
 
 impl Mac {
+    /// Construct a MAC from its fixed-width wire representation.
+    ///
+    /// This does not authenticate the bytes. Callers must pass the result to
+    /// [`StoreAuthRoot::verify`] before treating it as valid. The constructor
+    /// exists for bounded binary envelopes (such as mesh approval tokens),
+    /// where a hex round-trip would add an unnecessary second encoding.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; MAC_LEN]) -> Self {
+        Self(bytes)
+    }
+
     /// Lowercase hex rendering (64 characters).
     #[must_use]
     pub fn to_hex(&self) -> String {
@@ -407,6 +422,48 @@ pub struct StoreAuthRoot {
     retired: Vec<KeyEntry>,
 }
 
+/// A current store-auth root held under the key store's shared advisory lock.
+///
+/// Approval callers keep this guard alive across their database transaction,
+/// so [`StoreAuthRoot::rotate`] cannot replace the current key after snapshot
+/// verification but before the grant and audit commit.
+pub struct StoreAuthReadGuard {
+    root: StoreAuthRoot,
+    lock_file: std::fs::File,
+}
+
+impl Deref for StoreAuthReadGuard {
+    type Target = StoreAuthRoot;
+
+    fn deref(&self) -> &Self::Target {
+        &self.root
+    }
+}
+
+impl fmt::Debug for StoreAuthReadGuard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("StoreAuthReadGuard")
+            .field(&self.root)
+            .finish()
+    }
+}
+
+impl Drop for StoreAuthReadGuard {
+    fn drop(&mut self) {
+        let _ = Fs4FileExt::unlock(&self.lock_file);
+    }
+}
+
+struct StoreAuthWriteGuard {
+    lock_file: std::fs::File,
+}
+
+impl Drop for StoreAuthWriteGuard {
+    fn drop(&mut self) {
+        let _ = Fs4FileExt::unlock(&self.lock_file);
+    }
+}
+
 impl fmt::Debug for StoreAuthRoot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StoreAuthRoot")
@@ -511,10 +568,44 @@ impl StoreAuthRoot {
         Ok(root)
     }
 
+    /// Load the current root while holding the key store's shared advisory
+    /// lock. Rotation waits until the returned guard is dropped.
+    pub fn open_read_locked(
+        keys_dir: impl AsRef<Path>,
+    ) -> Result<StoreAuthReadGuard, StoreAuthError> {
+        let keys_dir = keys_dir.as_ref();
+        let lock_file = open_key_lock_file(keys_dir)?;
+        Fs4FileExt::lock_shared(&lock_file).map_err(|error| StoreAuthError::Io {
+            path: keys_dir.join(KEY_LOCK_FILE_NAME).display().to_string(),
+            message: format!("acquire shared key-store lock: {error}"),
+        })?;
+        match Self::open(keys_dir) {
+            Ok(root) => Ok(StoreAuthReadGuard { root, lock_file }),
+            Err(error) => {
+                let _ = Fs4FileExt::unlock(&lock_file);
+                Err(error)
+            }
+        }
+    }
+
     /// Rotate to a fresh root. The prior current key moves into the bounded
     /// retired window (oldest evicted past `MAX_RETIRED_KEYS`); the key file
     /// is atomically replaced. Returns the new current key id.
     pub fn rotate(&mut self) -> Result<KeyId, StoreAuthError> {
+        let lock_file = open_key_lock_file(&self.keys_dir)?;
+        Fs4FileExt::lock_exclusive(&lock_file).map_err(|error| StoreAuthError::Io {
+            path: self.keys_dir.join(KEY_LOCK_FILE_NAME).display().to_string(),
+            message: format!("acquire exclusive key-store lock: {error}"),
+        })?;
+        let _write_guard = StoreAuthWriteGuard { lock_file };
+
+        // Adopt the latest on-disk window only after acquiring the exclusive
+        // lock. This prevents two stale in-memory handles from losing each
+        // other's retired-key history during consecutive rotations.
+        let disk = Self::open(&self.keys_dir)?;
+        self.current = disk.current;
+        self.retired = disk.retired;
+
         let new_entry = KeyEntry {
             key_id: KeyId(random_bytes::<KEY_ID_LEN>()?),
             root: Secret(random_bytes::<KEY_LEN>()?),
@@ -798,6 +889,28 @@ fn enforce_owner_only_file(_path: &Path) -> Result<(), StoreAuthError> {
     Ok(())
 }
 
+/// Open the persistent owner-only advisory lock file used to serialize key
+/// rotation against approval transactions. The file contains no key material
+/// and is never removed; descriptor close is the crash-safe unlock path.
+fn open_key_lock_file(keys_dir: &Path) -> Result<std::fs::File, StoreAuthError> {
+    ensure_hardened_dir(keys_dir)?;
+    let path = keys_dir.join(KEY_LOCK_FILE_NAME);
+    reject_symlink_components(keys_dir, &path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(&path).map_err(|error| StoreAuthError::Io {
+        path: path.display().to_string(),
+        message: format!("open key-store lock: {error}"),
+    })?;
+    enforce_owner_only_file(&path)?;
+    Ok(file)
+}
+
 /// Exclusively create the key file (`O_EXCL`), owner-only on Unix.
 fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<(), StoreAuthError> {
     use std::io::Write as _;
@@ -903,6 +1016,26 @@ mod tests {
         drop(first);
         let second = StoreAuthRoot::open_or_create(dir.path()).expect("second");
         assert_eq!(id, second.current_key_id(), "must adopt the existing root");
+    }
+
+    #[test]
+    fn read_guard_blocks_rotation_lock_until_the_transaction_finishes() {
+        let dir = keys_dir();
+        StoreAuthRoot::create(dir.path()).expect("create");
+        let guard = StoreAuthRoot::open_read_locked(dir.path()).expect("shared read lock");
+        let contender = open_key_lock_file(dir.path()).expect("rotation contender");
+
+        assert!(
+            !Fs4FileExt::try_lock_exclusive(&contender).expect("try exclusive while shared"),
+            "rotation must not enter while an approval transaction holds the read guard"
+        );
+
+        drop(guard);
+        assert!(
+            Fs4FileExt::try_lock_exclusive(&contender).expect("try exclusive after shared"),
+            "rotation may enter after the approval transaction releases its guard"
+        );
+        Fs4FileExt::unlock(&contender).expect("unlock contender");
     }
 
     #[test]
@@ -1131,6 +1264,7 @@ mod tests {
         assert_eq!(format!("{secret:?}"), "Secret(<redacted>)");
         let mac = Mac([0xab_u8; MAC_LEN]);
         assert!(format!("{mac:?}").contains(&"ab".repeat(MAC_LEN)));
+        assert_eq!(Mac::from_bytes(*mac.as_bytes()), mac);
     }
 
     #[test]

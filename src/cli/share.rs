@@ -110,7 +110,11 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
-    let registry = super::mesh::load_mesh_peer_policy_registry(cli, args.database.as_deref());
+    let registry = match super::mesh::load_mesh_peer_policy_registry(cli, args.database.as_deref())
+    {
+        Ok(registry) => registry,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
     let candidate_set = share_preview_candidates(
         &memories,
         args.include_body,

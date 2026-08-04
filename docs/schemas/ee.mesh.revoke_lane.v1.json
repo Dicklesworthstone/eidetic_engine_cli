@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.revoke_lane.v1.json",
+  "title": "ee.mesh.revoke_lane.v1",
+  "description": "Successful result of `ee mesh revoke-lane <peer-id> --lane <lane>`. The idempotent narrowing mutation records deny, always advances the exact target's grant generation, and audits in the same transaction. Advancing the generation invalidates every outstanding preview and prevents a stale approval from re-enabling the lane.",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "workspaceId",
+    "target",
+    "lane",
+    "previousGrantGeneration",
+    "newGrantGeneration",
+    "decision",
+    "auditId",
+    "remoteErasureGuaranteed",
+    "residual"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.revoke_lane.v1"
+    },
+    "command": {
+      "type": "string",
+      "const": "ee mesh revoke-lane"
+    },
+    "workspaceId": {
+      "$ref": "#/$defs/workspaceId"
+    },
+    "target": {
+      "$ref": "#/$defs/grantTarget"
+    },
+    "lane": {
+      "$ref": "#/$defs/lane"
+    },
+    "previousGrantGeneration": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "newGrantGeneration": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Generation committed by this mutation. It advances even when the effective lane decision was already deny, so every earlier preview stays stale."
+    },
+    "decision": {
+      "type": "string",
+      "const": "deny"
+    },
+    "auditId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Opaque identifier of the durable lane-revocation audit row."
+    },
+    "remoteErasureGuaranteed": {
+      "type": "boolean",
+      "const": false,
+      "description": "Always false: a local-first lane revocation can stop future serving but cannot prove deletion of bytes already disclosed."
+    },
+    "residual": {
+      "type": "string",
+      "const": "Revocation stops future serving but cannot erase bytes the peer already cached or copied."
+    }
+  },
+  "$defs": {
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "grantTarget": {
+      "type": "object",
+      "required": ["adapterVersion", "peerId"],
+      "additionalProperties": false,
+      "properties": {
+        "adapterVersion": {
+          "type": "string",
+          "const": "ee.mesh.grant_target.v1"
+        },
+        "peerId": {
+          "$ref": "#/$defs/peerId",
+          "description": "Opaque enrolled-peer lookup handle. It is not itself a cryptographic identity."
+        }
+      }
+    },
+    "peerId": {
+      "type": "string",
+      "pattern": "^peer_[A-Za-z0-9._:-]{6,128}$"
+    },
+    "lane": {
+      "type": "string",
+      "enum": [
+        "metadata",
+        "body",
+        "embedding",
+        "graph_link",
+        "curation_signal",
+        "revision_notice"
+      ]
+    }
+  }
+}
