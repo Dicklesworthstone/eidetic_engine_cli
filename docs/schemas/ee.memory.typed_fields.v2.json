@@ -52,8 +52,10 @@
   "$defs": {
     "text": {
       "type": "string",
+      "description": "Non-empty text capped by the runtime at 4096 UTF-8 bytes. JSON Schema maxLength counts Unicode code points; x-ee-maxUtf8Bytes is the authoritative byte bound for preflight clients.",
       "minLength": 1,
-      "maxLength": 4096
+      "maxLength": 4096,
+      "x-ee-maxUtf8Bytes": 4096
     },
     "rfc3339": {
       "allOf": [

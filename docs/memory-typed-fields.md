@@ -86,8 +86,9 @@ ee remember "Remote verification won the storage decision." \
 
 Field names use the same normalization as search: `revisit-by` and
 `revisit_by` both persist as `revisit_by`. The first `=` separates the name
-from the value, so additional `=` characters remain part of the value. `~` and
-`^` are search-only operators and are rejected on writes.
+from the value, so additional `=`, `~`, and `^` characters remain literal parts
+of the value. Using `~` or `^` instead of `=` as the assignment separator is
+rejected because those operators are search-only.
 
 Repeat a list-valued field (`options`, `exceptions`) to append items in command
 order. Assigning a scalar field more than once is an error. Explicit values
@@ -134,9 +135,9 @@ different field contract. The common cases are:
 
 | Case | Outcome |
 |---|---|
-| Field name is not valid for the kind | error includes the offending field and valid names |
-| Assignment omits `=` or uses `~` / `^` | error explains that writes require `NAME=VALUE` |
-| Scalar field is assigned more than once | error identifies the duplicate field |
+| Field name is not valid for the kind | `typed_field_unknown` includes the offending field and valid names |
+| Assignment omits `=` or uses `~` / `^` | `typed_field_invalid` explains that writes require `NAME=VALUE` |
+| Scalar field is assigned more than once | `typed_field_invalid` identifies the duplicate field |
 | Field has the wrong JSON type | error names the expected shape |
 | RFC3339 field cannot parse | error names the timestamp field and parse reason |
 | Text/list/JSON exceeds a bound | error includes actual size and limit |

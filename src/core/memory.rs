@@ -2323,6 +2323,7 @@ fn prepare_remember_memory_with_store(
         .map_err(|error| remember_usage_error(error.to_string()))?;
     let kind = MemoryKind::from_str(options.kind)
         .map_err(|error| remember_usage_error(error.to_string()))?;
+    let explicit_field_hint = typed_assignment_field_hint(typed_field_assignments);
     let explicit_unredacted =
         crate::models::memory::canonicalize_typed_memory_field_assignments_json_with_redactor(
             &kind,
@@ -2330,7 +2331,7 @@ fn prepare_remember_memory_with_store(
             str::to_owned,
         )
         .map_err(|error| {
-            remember_usage_error(format!("invalid typed field assignment: {error}"))
+            typed_field_validation_error(&kind, explicit_field_hint.as_deref(), error)
         })?;
     let policy_input = explicit_unredacted
         .as_ref()
@@ -2354,7 +2355,7 @@ fn prepare_remember_memory_with_store(
             |value| crate::policy::redact_secret_like_content(value).content,
         )
         .map_err(|error| {
-            remember_usage_error(format!("invalid typed field assignment: {error}"))
+            typed_field_validation_error(&kind, explicit_field_hint.as_deref(), error)
         })?;
     let typed_fields_json = crate::models::memory::merge_typed_memory_fields_json(
         &kind,
@@ -5717,6 +5718,120 @@ fn remember_usage_error(message: String) -> DomainError {
     }
 }
 
+fn typed_assignment_field_hint(assignments: &[String]) -> Option<String> {
+    let assignment = assignments.first()?.trim();
+    let separator = assignment
+        .char_indices()
+        .find_map(|(index, character)| matches!(character, '=' | '~' | '^').then_some(index))
+        .unwrap_or(assignment.len());
+    let raw_field = assignment[..separator].trim();
+    if raw_field.is_empty() {
+        return None;
+    }
+    Some(
+        crate::models::memory::normalize_typed_memory_field_name(raw_field)
+            .unwrap_or_else(|_| raw_field.to_owned()),
+    )
+}
+
+fn typed_field_validation_error(
+    kind: &MemoryKind,
+    field_hint: Option<&str>,
+    error: MemoryValidationError,
+) -> DomainError {
+    let message = error.to_string();
+    let mut valid_fields = crate::models::memory::typed_memory_field_names(kind);
+    let (code, field, reason) = match &error {
+        MemoryValidationError::TypedFieldsUnsupportedKind { .. } => (
+            TYPED_FIELD_UNKNOWN_CODE,
+            field_hint.unwrap_or("fields").to_owned(),
+            message.clone(),
+        ),
+        MemoryValidationError::TypedFieldNotAllowed {
+            field,
+            valid_fields: error_valid_fields,
+            ..
+        } => {
+            valid_fields.clone_from(error_valid_fields);
+            (
+                TYPED_FIELD_UNKNOWN_CODE,
+                field.clone(),
+                "field is not declared for the selected memory kind".to_owned(),
+            )
+        }
+        MemoryValidationError::TypedFieldWrongType { field, expected } => (
+            TYPED_FIELD_INVALID_CODE,
+            field.clone(),
+            format!("expected {expected}"),
+        ),
+        MemoryValidationError::TypedFieldInvalid { field, reason } => {
+            (TYPED_FIELD_INVALID_CODE, field.clone(), reason.clone())
+        }
+        MemoryValidationError::TypedFieldTooLong {
+            field,
+            bytes,
+            limit,
+        } => (
+            TYPED_FIELD_INVALID_CODE,
+            field.clone(),
+            format!("value is {bytes} UTF-8 bytes; limit is {limit}"),
+        ),
+        MemoryValidationError::TypedFieldListTooLong {
+            field,
+            count,
+            limit,
+        } => (
+            TYPED_FIELD_INVALID_CODE,
+            field.clone(),
+            format!("list has {count} items; limit is {limit}"),
+        ),
+        MemoryValidationError::TypedFieldsJsonTooLarge { bytes, limit } => (
+            TYPED_FIELD_INVALID_CODE,
+            "fields".to_owned(),
+            format!("sidecar JSON is {bytes} UTF-8 bytes; limit is {limit}"),
+        ),
+        MemoryValidationError::InvalidTypedFieldsJson { message } => (
+            TYPED_FIELD_INVALID_CODE,
+            field_hint.unwrap_or("fields").to_owned(),
+            message.clone(),
+        ),
+        MemoryValidationError::TypedFieldsTooMany { count, limit } => (
+            TYPED_FIELD_INVALID_CODE,
+            "fields".to_owned(),
+            format!("sidecar has {count} populated fields; limit is {limit}"),
+        ),
+        MemoryValidationError::TypedFieldsKindMismatch { expected, actual } => (
+            TYPED_FIELD_INVALID_CODE,
+            "kind".to_owned(),
+            format!("expected kind `{expected}`, got `{actual}`"),
+        ),
+        _ => (
+            TYPED_FIELD_INVALID_CODE,
+            field_hint.unwrap_or("fields").to_owned(),
+            message.clone(),
+        ),
+    };
+    let repair = if code == TYPED_FIELD_UNKNOWN_CODE {
+        "Choose a field from error.details.validFields for this kind. Inspect the registry with `ee schema export ee.memory.typed_fields.v2 --json`."
+    } else {
+        "Correct the named field using error.details.reason and validFields. Inspect the registry with `ee schema export ee.memory.typed_fields.v2 --json`."
+    };
+    DomainError::UsageCodeWithDetails {
+        code,
+        message,
+        repair: Some(repair.to_owned()),
+        details_json: serde_json::json!({
+            "failureModeCode": code,
+            "schema": crate::models::memory::TYPED_MEMORY_FIELDS_SCHEMA_V2,
+            "kind": kind.as_str(),
+            "field": field,
+            "reason": reason,
+            "validFields": valid_fields,
+        })
+        .to_string(),
+    }
+}
+
 // =============================================================================
 // Remember ergonomic upgrades (bd-1pi9m.4)
 //
@@ -5749,6 +5864,12 @@ pub const REMEMBER_REINFORCE_AUDIT_SCHEMA_V1: &str = "ee.audit.memory_reinforce.
 
 /// Per-line error code for an idempotency key replayed with a different request.
 pub const REMEMBER_IDEMPOTENCY_CONFLICT_CODE: &str = "remember_idempotency_conflict";
+
+/// A typed-field name is not declared for the selected memory kind.
+pub const TYPED_FIELD_UNKNOWN_CODE: &str = "typed_field_unknown";
+
+/// A declared typed-field assignment has an invalid name, value, or shape.
+pub const TYPED_FIELD_INVALID_CODE: &str = "typed_field_invalid";
 
 /// Metadata schema for evidence spans attached by `ee remember --reinforce`.
 const REMEMBER_REINFORCE_EVIDENCE_SCHEMA_V1: &str = "ee.remember.reinforce_evidence.v1";
@@ -5952,13 +6073,14 @@ fn remember_request_hash(
     }
     let kind = MemoryKind::from_str(options.kind)
         .map_err(|error| remember_usage_error(error.to_string()))?;
+    let field_hint = typed_assignment_field_hint(typed_field_assignments);
     let typed_fields =
         crate::models::memory::canonicalize_typed_memory_field_assignments_json_with_redactor(
             &kind,
             typed_field_assignments,
             str::to_owned,
         )
-        .map_err(|error| remember_usage_error(format!("invalid typed field assignment: {error}")))?
+        .map_err(|error| typed_field_validation_error(&kind, field_hint.as_deref(), error))?
         .ok_or_else(|| remember_usage_error("typed field assignments were empty".to_owned()))?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"ee.remember.request.v1\0");
@@ -6829,6 +6951,11 @@ impl RememberBatchLineError {
             message: message.into(),
         }
     }
+
+    fn typed(kind: &MemoryKind, field_hint: Option<&str>, error: MemoryValidationError) -> Self {
+        let error = typed_field_validation_error(kind, field_hint, error);
+        Self::new(error.code(), error.message())
+    }
 }
 
 fn remember_batch_string_field(
@@ -6887,18 +7014,57 @@ fn remember_batch_typed_field_assignments(
             "`fields` must be an object whose values are strings or arrays of strings",
         )
     })?;
-    if fields.is_empty() || fields.values().all(serde_json::Value::is_null) {
+    if fields.is_empty() {
         return Ok(Vec::new());
     }
 
+    let kind = MemoryKind::from_str(kind).map_err(|error| {
+        RememberBatchLineError::new("remember_validation_failed", error.to_string())
+    })?;
+    let valid_fields = crate::models::memory::typed_memory_field_names(&kind);
     let mut normalized_fields = serde_json::Map::new();
     for (raw_name, value) in fields {
-        let name = crate::models::memory::normalize_typed_memory_field_name(raw_name)
-            .map_err(|error| RememberBatchLineError::new("remember_validation_failed", error))?;
+        let name = crate::models::memory::normalize_typed_memory_field_name(raw_name).map_err(
+            |reason| {
+                RememberBatchLineError::typed(
+                    &kind,
+                    None,
+                    MemoryValidationError::TypedFieldInvalid {
+                        field: raw_name.clone(),
+                        reason,
+                    },
+                )
+            },
+        )?;
+        if !valid_fields.contains(&name) {
+            return Err(RememberBatchLineError::typed(
+                &kind,
+                None,
+                MemoryValidationError::TypedFieldNotAllowed {
+                    kind: kind.as_str().to_owned(),
+                    field: name,
+                    valid_fields: valid_fields.clone(),
+                },
+            ));
+        }
+        if value.is_null() {
+            return Err(RememberBatchLineError::typed(
+                &kind,
+                None,
+                MemoryValidationError::TypedFieldInvalid {
+                    field: name,
+                    reason: "null is not a write value; omit the field instead".to_owned(),
+                },
+            ));
+        }
         if value.as_str().is_some_and(|text| text.trim().is_empty()) {
-            return Err(RememberBatchLineError::new(
-                "remember_validation_failed",
-                format!("`fields.{name}` must not be empty"),
+            return Err(RememberBatchLineError::typed(
+                &kind,
+                None,
+                MemoryValidationError::TypedFieldInvalid {
+                    field: name,
+                    reason: "value must not be empty".to_owned(),
+                },
             ));
         }
         if let Some(items) = value.as_array()
@@ -6907,25 +7073,30 @@ fn remember_batch_typed_field_assignments(
                     .iter()
                     .any(|item| item.as_str().is_some_and(|text| text.trim().is_empty())))
         {
-            return Err(RememberBatchLineError::new(
-                "remember_validation_failed",
-                format!("`fields.{name}` must contain at least one non-empty string"),
+            return Err(RememberBatchLineError::typed(
+                &kind,
+                None,
+                MemoryValidationError::TypedFieldInvalid {
+                    field: name,
+                    reason: "list must contain at least one non-empty string".to_owned(),
+                },
             ));
         }
         if normalized_fields
             .insert(name.clone(), value.clone())
             .is_some()
         {
-            return Err(RememberBatchLineError::new(
-                "remember_validation_failed",
-                format!("`fields` contains more than one spelling of `{name}`"),
+            return Err(RememberBatchLineError::typed(
+                &kind,
+                None,
+                MemoryValidationError::TypedFieldInvalid {
+                    field: name,
+                    reason: "field appears more than once after name normalization".to_owned(),
+                },
             ));
         }
     }
 
-    let kind = MemoryKind::from_str(kind).map_err(|error| {
-        RememberBatchLineError::new("remember_validation_failed", error.to_string())
-    })?;
     let raw_json = serde_json::to_string(&normalized_fields).map_err(|error| {
         RememberBatchLineError::new(
             "remember_invalid_json",
@@ -6933,20 +7104,9 @@ fn remember_batch_typed_field_assignments(
         )
     })?;
     let canonical = crate::models::memory::canonicalize_typed_memory_fields_json(&kind, &raw_json)
-        .map_err(|error| {
-            RememberBatchLineError::new(
-                "remember_validation_failed",
-                format!("invalid `fields` object: {error}"),
-            )
-        })?;
-    let fields = crate::models::memory::typed_memory_fields_from_json(&kind, &canonical).map_err(
-        |error| {
-            RememberBatchLineError::new(
-                "remember_validation_failed",
-                format!("invalid canonical `fields` object: {error}"),
-            )
-        },
-    )?;
+        .map_err(|error| RememberBatchLineError::typed(&kind, None, error))?;
+    let fields = crate::models::memory::typed_memory_fields_from_json(&kind, &canonical)
+        .map_err(|error| RememberBatchLineError::typed(&kind, None, error))?;
     let mut assignments = Vec::new();
     for (name, value) in fields {
         match value {
@@ -6956,18 +7116,26 @@ fn remember_batch_typed_field_assignments(
             serde_json::Value::Array(values) => {
                 for value in values {
                     let Some(value) = value.as_str() else {
-                        return Err(RememberBatchLineError::new(
-                            "remember_validation_failed",
-                            format!("canonical `fields.{name}` contained a non-string item"),
+                        return Err(RememberBatchLineError::typed(
+                            &kind,
+                            None,
+                            MemoryValidationError::TypedFieldInvalid {
+                                field: name,
+                                reason: "canonical list contained a non-string item".to_owned(),
+                            },
                         ));
                     };
                     assignments.push(format!("{name}={value}"));
                 }
             }
             _ => {
-                return Err(RememberBatchLineError::new(
-                    "remember_validation_failed",
-                    format!("canonical `fields.{name}` was not a string or string array"),
+                return Err(RememberBatchLineError::typed(
+                    &kind,
+                    None,
+                    MemoryValidationError::TypedFieldInvalid {
+                        field: name,
+                        reason: "canonical value was not a string or string array".to_owned(),
+                    },
                 ));
             }
         }
@@ -15614,7 +15782,7 @@ mod tests {
         .expect_err("scalar fields reject arrays even when they contain one item");
         ensure(
             scalar_array.code,
-            "remember_validation_failed",
+            TYPED_FIELD_INVALID_CODE,
             "scalar array error code",
         )?;
 
@@ -15624,7 +15792,7 @@ mod tests {
         .expect_err("list fields reject scalar strings");
         ensure(
             list_scalar.code,
-            "remember_validation_failed",
+            TYPED_FIELD_INVALID_CODE,
             "list scalar error code",
         )?;
 
@@ -15634,8 +15802,38 @@ mod tests {
         .expect_err("list fields reject empty arrays");
         ensure(
             empty_list.code,
-            "remember_validation_failed",
+            TYPED_FIELD_INVALID_CODE,
             "empty list error code",
+        )?;
+
+        let all_null = parse_remember_batch_line(
+            r#"{"content":"Failure evidence.","kind":"failure","fields":{"family":null}}"#,
+        )
+        .expect_err("null is not a typed-field write value");
+        ensure(
+            all_null.code,
+            TYPED_FIELD_INVALID_CODE,
+            "all-null field error code",
+        )?;
+
+        let mixed_null = parse_remember_batch_line(
+            r#"{"content":"Failure evidence.","kind":"failure","fields":{"family":"prefetch","cause":null}}"#,
+        )
+        .expect_err("mixed valid and null fields reject the complete line");
+        ensure(
+            mixed_null.code,
+            TYPED_FIELD_INVALID_CODE,
+            "mixed-null field error code",
+        )?;
+
+        let unknown_null = parse_remember_batch_line(
+            r#"{"content":"Failure evidence.","kind":"failure","fields":{"disposition":null}}"#,
+        )
+        .expect_err("unknown null fields cannot disappear before registry validation");
+        ensure(
+            unknown_null.code,
+            TYPED_FIELD_UNKNOWN_CODE,
+            "unknown-null field error code",
         )?;
 
         let smuggled_name = parse_remember_batch_line(
@@ -15644,7 +15842,7 @@ mod tests {
         .expect_err("an equals sign in an object key cannot alter assignment parsing");
         ensure(
             smuggled_name.code,
-            "remember_validation_failed",
+            TYPED_FIELD_INVALID_CODE,
             "smuggled name error code",
         )?;
 

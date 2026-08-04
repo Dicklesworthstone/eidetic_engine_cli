@@ -207,3 +207,68 @@ fn remember_and_note_explicit_fields_round_trip_through_public_cli() {
     assert_eq!(note["data"]["dry_run"], true);
     assert_eq!(note["data"]["persisted"], false);
 }
+
+#[test]
+fn remember_typed_field_errors_are_stable_and_structured() {
+    let temp = tempfile::tempdir().expect("temporary typed-field error workspace");
+    let workspace = temp.path().to_string_lossy().into_owned();
+
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--workspace",
+        &workspace,
+        "remember",
+        "A failure with an undeclared field.",
+        "--kind",
+        "failure",
+        "--field",
+        "disposition=candidate",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(
+        exit,
+        ProcessExitCode::Usage,
+        "unknown field stderr: {stderr}"
+    );
+    let unknown: serde_json::Value =
+        serde_json::from_str(&stdout).expect("unknown-field JSON response");
+    assert_eq!(unknown["error"]["code"], "typed_field_unknown");
+    assert_eq!(unknown["error"]["details"]["field"], "disposition");
+    assert_eq!(unknown["error"]["details"]["kind"], "failure");
+    assert!(
+        unknown["error"]["details"]["validFields"]
+            .as_array()
+            .is_some_and(|fields| fields.iter().any(|field| field.as_str() == Some("family"))),
+        "unknown-field response omitted the registry vocabulary: {unknown}"
+    );
+
+    let (exit, stdout, stderr) = invoke(&[
+        "ee",
+        "--workspace",
+        &workspace,
+        "remember",
+        "A decision with an invalid revisit timestamp.",
+        "--kind",
+        "decision",
+        "--field",
+        "revisit-by=next Tuesday",
+        "--dry-run",
+        "--json",
+    ]);
+    assert_eq!(
+        exit,
+        ProcessExitCode::Usage,
+        "invalid field stderr: {stderr}"
+    );
+    let invalid: serde_json::Value =
+        serde_json::from_str(&stdout).expect("invalid-field JSON response");
+    assert_eq!(invalid["error"]["code"], "typed_field_invalid");
+    assert_eq!(invalid["error"]["details"]["field"], "revisit_by");
+    assert!(
+        invalid["error"]["details"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("RFC 3339")),
+        "invalid-field response omitted the actionable reason: {invalid}"
+    );
+}

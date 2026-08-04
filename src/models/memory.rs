@@ -338,6 +338,18 @@ fn typed_memory_valid_field_names(specs: &[TypedMemoryFieldSpec]) -> Vec<String>
     specs.iter().map(|spec| spec.name.to_owned()).collect()
 }
 
+/// Return the canonical registry field names accepted for a memory kind.
+///
+/// Kinds without a v2 typed sidecar return an empty list. This is the same
+/// vocabulary published by `ee.memory.typed_fields.v2` and used in structured
+/// validation errors.
+#[must_use]
+pub fn typed_memory_field_names(kind: &MemoryKind) -> Vec<String> {
+    typed_memory_field_specs(kind)
+        .map(typed_memory_valid_field_names)
+        .unwrap_or_default()
+}
+
 /// Normalize a typed-memory field name exactly as `ee search --field` does.
 ///
 /// CLI callers may use kebab-case for convenience; persisted sidecars always
