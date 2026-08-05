@@ -6516,6 +6516,26 @@ fn truncate_hits_to_limit(hits: &mut Vec<SearchHit>, limit: u32) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RelevanceFloorCounts {
+    considered: usize,
+    passed: usize,
+}
+
+impl RelevanceFloorCounts {
+    fn new(considered: usize, passed: usize) -> Self {
+        Self { considered, passed }
+    }
+
+    fn has_no_relevant_results(self) -> bool {
+        self.considered > 0 && self.passed == 0
+    }
+
+    fn is_low_recall(self) -> bool {
+        self.considered >= 3 && (self.passed * 10) < (self.considered * 3)
+    }
+}
+
 fn run_search_inner(
     options: &SearchOptions,
     read_connection: Option<&DbConnection>,
@@ -6715,6 +6735,7 @@ fn run_search_inner_with_performance(
             let (above_floor, below_floor): (Vec<_>, Vec<_>) = raw_hits
                 .into_iter()
                 .partition(|hit| search_hit_meets_relevance_floor(hit, user_floor_override));
+            let floor_counts = RelevanceFloorCounts::new(pre_floor_count, above_floor.len());
             let dropped = below_floor.len();
             let query_assist_visibility_start = Instant::now();
             let query_assist_candidates = query_assist_visible_candidates(options, &below_floor);
@@ -6813,27 +6834,28 @@ fn run_search_inner_with_performance(
                 }
             }
 
-            // Emit no_relevant_results when everything got filtered out
-            // (and there were candidates to begin with). Empty workspace
+            // Emit no_relevant_results when no candidate passed the relevance
+            // floor (and there were candidates to begin with). Empty workspace
             // is a different scenario — pre_floor_count == 0 — and we
             // leave it as plain SearchStatus::NoResults without an extra
             // degradation since "no memories" is honest by itself.
-            if kept == 0 && pre_floor_count > 0 {
+            if floor_counts.has_no_relevant_results() {
                 degraded.push(SearchDegradation::no_relevant_results(
                     &options.query,
                     floor,
-                    pre_floor_count,
+                    floor_counts.considered,
                     pre_floor_top_score,
                 ));
             }
             // Low-recall informational signal when significant drop.
-            // Threshold: kept < 30% of considered AND ≥ 3 candidates total
-            // (avoid spurious signal for tiny corpora).
-            if pre_floor_count >= 3 && (kept * 10) < (pre_floor_count * 3) {
+            // Threshold: passed < 30% of considered AND ≥ 3 candidates total
+            // (avoid spurious signal for tiny corpora). Later visibility and
+            // result-limit drops have their own diagnostics.
+            if floor_counts.is_low_recall() {
                 degraded.push(SearchDegradation::low_recall_after_floor(
                     floor,
-                    kept,
-                    pre_floor_count,
+                    floor_counts.passed,
+                    floor_counts.considered,
                 ));
             }
 
@@ -7113,6 +7135,7 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
     let (above_floor, below_floor): (Vec<_>, Vec<_>) = raw_hits
         .into_iter()
         .partition(|hit| search_hit_meets_relevance_floor(hit, user_floor_override));
+    let floor_counts = RelevanceFloorCounts::new(pre_floor_count, above_floor.len());
     let (mut above_floor, scope_stats) =
         apply_memory_scope_visibility(options, above_floor, &mut degraded, None);
     annotate_hits_with_score_calibration(
@@ -7154,19 +7177,19 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
             degraded.push(SearchDegradation::weak_query_recall(floor, top));
         }
     }
-    if kept == 0 && pre_floor_count > 0 {
+    if floor_counts.has_no_relevant_results() {
         degraded.push(SearchDegradation::no_relevant_results(
             &options.query,
             floor,
-            pre_floor_count,
+            floor_counts.considered,
             pre_floor_top_score,
         ));
     }
-    if pre_floor_count >= 3 && (kept * 10) < (pre_floor_count * 3) {
+    if floor_counts.is_low_recall() {
         degraded.push(SearchDegradation::low_recall_after_floor(
             floor,
-            kept,
-            pre_floor_count,
+            floor_counts.passed,
+            floor_counts.considered,
         ));
     }
 
@@ -16289,6 +16312,37 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].doc_id, "mem_a");
         assert_eq!(hits[1].doc_id, "mem_b");
+    }
+
+    #[test]
+    fn relevance_floor_counts_ignore_later_visibility_and_limit_drops() {
+        let all_passed = RelevanceFloorCounts::new(50, 50);
+
+        assert!(!all_passed.has_no_relevant_results());
+        assert!(!all_passed.is_low_recall());
+    }
+
+    #[test]
+    fn relevance_floor_counts_classify_actual_floor_drops() {
+        let empty = RelevanceFloorCounts::new(0, 0);
+        assert!(!empty.has_no_relevant_results());
+        assert!(!empty.is_low_recall());
+
+        let all_dropped = RelevanceFloorCounts::new(5, 0);
+        assert!(all_dropped.has_no_relevant_results());
+        assert!(all_dropped.is_low_recall());
+
+        let tiny_miss = RelevanceFloorCounts::new(2, 0);
+        assert!(tiny_miss.has_no_relevant_results());
+        assert!(!tiny_miss.is_low_recall());
+
+        let partial_recall = RelevanceFloorCounts::new(10, 2);
+        assert!(!partial_recall.has_no_relevant_results());
+        assert!(partial_recall.is_low_recall());
+
+        let threshold = RelevanceFloorCounts::new(10, 3);
+        assert!(!threshold.has_no_relevant_results());
+        assert!(!threshold.is_low_recall());
     }
 
     #[test]
