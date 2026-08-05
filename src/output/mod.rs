@@ -13172,6 +13172,12 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
                 default: Some("fact"),
             },
             CommandArg {
+                name: "--field",
+                description: "Set a typed sidecar field declared by ee.memory.typed_fields.v2 (`NAME=VALUE`). Repeat `--field NAME=VALUE` for list-valued fields.",
+                required: false,
+                default: None,
+            },
+            CommandArg {
                 name: "--tags",
                 description: "Tags (comma-separated)",
                 required: false,
@@ -13186,6 +13192,12 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
             CommandArg {
                 name: "--source",
                 description: "Source provenance URI",
+                required: false,
+                default: None,
+            },
+            CommandArg {
+                name: "--sentinel",
+                description: "Attach a deterministic sentinel predicate (`KIND:TARGET`). Supported kinds: path_exists, file_hash_or_marker, json_schema_contains_field, config_key_exists, env_var_registered, degraded_code_fixture_exists, dependency_capability_present, command_help_contains_flag. Unknown kinds are rejected; run `ee sentinel explain` for target syntax.",
                 required: false,
                 default: None,
             },
@@ -13265,6 +13277,12 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
                 name: "QUERY",
                 description: "Query string to search for",
                 required: true,
+                default: None,
+            },
+            CommandArg {
+                name: "--field",
+                description: "Filter a typed memory sidecar field with `NAME=VALUE` (exact), `NAME~VALUE` (contains), or `NAME^VALUE` (prefix); repeat `--field` to combine filters. Produce fields with repeatable `ee remember --field NAME=VALUE`; inspect ee.memory.typed_fields.v2 with `ee schema export ee.memory.typed_fields.v2 --json`.",
+                required: false,
                 default: None,
             },
             CommandArg {

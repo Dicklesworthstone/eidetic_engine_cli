@@ -35,6 +35,28 @@ step "init workspace"
 init_out="$(ee_json init --workspace "$WS" --json)"
 assert_jq "$init_out" '.success == true' "ee init succeeds"
 
+step "reject unknown sentinel kinds before memory mutation"
+before_unknown="$(ee_json memory list --workspace "$WS" --json)"
+assert_jq "$before_unknown" '.success == true and ((.data.memories // []) | type == "array")' \
+    "baseline memory list succeeds"
+before_unknown_count="$(printf '%s' "$before_unknown" | jq -r '(.data.memories // []) | length')"
+unknown_kind="$(ee_json remember "unknown sentinel kind must not persist" \
+    --workspace "$WS" --level procedural --kind fact \
+    --sentinel "definitely_unknown:target" --json)"
+assert_jq "$unknown_kind" \
+    '.schema == "ee.error.v2"
+     and .error.code == "usage"
+     and (.error.message | contains("unknown memory sentinel kind"))
+     and (.error.message | contains("path_exists"))
+     and (.error.repair | contains("ee sentinel explain"))' \
+    "unknown sentinel kind returns a repairable usage error"
+after_unknown="$(ee_json memory list --workspace "$WS" --json)"
+assert_jq "$after_unknown" '.success == true and ((.data.memories // []) | type == "array")' \
+    "post-rejection memory list succeeds"
+after_unknown_count="$(printf '%s' "$after_unknown" | jq -r '(.data.memories // []) | length')"
+assert_eq "$after_unknown_count" "$before_unknown_count" \
+    "unknown sentinel kind is rejected before memory mutation"
+
 step "remember a sentinel-backed contract-shaped fact"
 mem="$(ee_json remember \
     "The demo.v1 schema defines the memoryId field." \

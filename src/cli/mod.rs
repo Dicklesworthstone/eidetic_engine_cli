@@ -8709,7 +8709,10 @@ pub struct SearchArgs {
     #[arg(long, value_name = "KIND")]
     pub kind: Option<String>,
 
-    /// Restrict results to a typed memory sidecar field value (`name=value`).
+    /// Filter by a typed memory field; repeat for multiple filters.
+    /// Operators: `name=value` (exact), `name~value` (contains), or
+    /// `name^value` (prefix). Produce fields with
+    /// `ee remember --field NAME=VALUE`.
     //
     // NOTE: the Rust field name MUST NOT be `fields` — clap derives the arg id
     // from the field identifier (not `long`), and a `fields` id collides with
@@ -9276,7 +9279,8 @@ pub struct RememberArgs {
     pub kind: String,
 
     /// Set a typed sidecar field declared by ee.memory.typed_fields.v2.
-    /// See `ee schema list`; repeat list-valued fields.
+    /// Inspect it with `ee schema export ee.memory.typed_fields.v2 --json`;
+    /// repeat list-valued fields.
     #[arg(long = "field", value_name = "NAME=VALUE", action = ArgAction::Append)]
     pub typed_field_assignments: Vec<String>,
 
@@ -9320,7 +9324,12 @@ pub struct RememberArgs {
     #[arg(long, value_name = "RFC3339")]
     pub valid_to: Option<String>,
 
-    /// Attach a deterministic sentinel predicate to this memory (`kind:target`).
+    /// Attach a deterministic sentinel predicate (`kind:target`); repeatable.
+    /// Kinds: `path_exists`, `file_hash_or_marker`,
+    /// `json_schema_contains_field`, `config_key_exists`, `env_var_registered`,
+    /// `degraded_code_fixture_exists`, `dependency_capability_present`, and
+    /// `command_help_contains_flag`. Unknown kinds are rejected. Run
+    /// `ee sentinel explain` for target syntax.
     #[arg(long = "sentinel", value_name = "KIND:TARGET", action = ArgAction::Append)]
     pub sentinels: Vec<String>,
 
