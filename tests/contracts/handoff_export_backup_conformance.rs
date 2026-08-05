@@ -377,7 +377,10 @@ fn redaction_and_content_hash_contracts_are_explicit() -> TestResult {
         "/redaction_summary/ids_redacted",
     ] {
         ensure(
-            handoff_json.pointer(field).and_then(Value::as_u64).is_some(),
+            handoff_json
+                .pointer(field)
+                .and_then(Value::as_u64)
+                .is_some(),
             format!("handoff redaction summary missing numeric field `{field}`"),
         )?;
     }

@@ -66,7 +66,9 @@ fn assert_required_fields(payload: &Value) -> TestResult {
         "captureTemplate",
     ] {
         if payload.get(field).is_none() {
-            return Err(format!("query assist payload missing required field `{field}`"));
+            return Err(format!(
+                "query assist payload missing required field `{field}`"
+            ));
         }
     }
     Ok(())
@@ -104,7 +106,10 @@ fn representative_query_assist_payload_matches_contract_shape() -> TestResult {
     assert_required_fields(&payload)?;
     assert_eq!(payload["schema"], "ee.query_assist.v1");
     assert_eq!(payload["mode"], "explain");
-    assert_eq!(payload["didYouMean"][0]["candidateStatus"], "below_relevance_floor");
+    assert_eq!(
+        payload["didYouMean"][0]["candidateStatus"],
+        "below_relevance_floor"
+    );
     assert!(
         payload["captureTemplate"]["command"]
             .as_str()
