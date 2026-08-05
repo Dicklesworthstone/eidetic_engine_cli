@@ -6532,6 +6532,30 @@ impl RelevanceFloorCounts {
     fn is_low_recall(self) -> bool {
         self.considered >= 3 && (self.passed * 10) < (self.considered * 3)
     }
+
+    fn append_degradations(
+        self,
+        degraded: &mut Vec<SearchDegradation>,
+        query: &str,
+        floor: f32,
+        top_score_before_floor: Option<f32>,
+    ) {
+        if self.has_no_relevant_results() {
+            degraded.push(SearchDegradation::no_relevant_results(
+                query,
+                floor,
+                self.considered,
+                top_score_before_floor,
+            ));
+        }
+        if self.is_low_recall() {
+            degraded.push(SearchDegradation::low_recall_after_floor(
+                floor,
+                self.passed,
+                self.considered,
+            ));
+        }
+    }
 }
 
 fn run_search_inner(
@@ -6832,30 +6856,16 @@ fn run_search_inner_with_performance(
                 }
             }
 
-            // Emit no_relevant_results when no candidate passed the relevance
-            // floor (and there were candidates to begin with). Empty workspace
-            // is a different scenario — pre_floor_count == 0 — and we
-            // leave it as plain SearchStatus::NoResults without an extra
-            // degradation since "no memories" is honest by itself.
-            if floor_counts.has_no_relevant_results() {
-                degraded.push(SearchDegradation::no_relevant_results(
-                    &options.query,
-                    floor,
-                    floor_counts.considered,
-                    pre_floor_top_score,
-                ));
-            }
-            // Low-recall informational signal when significant drop.
-            // Threshold: passed < 30% of considered AND ≥ 3 candidates total
-            // (avoid spurious signal for tiny corpora). Later visibility and
-            // result-limit drops have their own diagnostics.
-            if floor_counts.is_low_recall() {
-                degraded.push(SearchDegradation::low_recall_after_floor(
-                    floor,
-                    floor_counts.passed,
-                    floor_counts.considered,
-                ));
-            }
+            // Emit floor degradations from the immutable partition snapshot.
+            // Empty workspaces stay plain `NoResults`; significant floor loss
+            // is <30% passed with at least three candidates. Later visibility
+            // and result-limit drops have their own diagnostics.
+            floor_counts.append_degradations(
+                &mut degraded,
+                &options.query,
+                floor,
+                pre_floor_top_score,
+            );
 
             let status = if above_floor.is_empty() {
                 SearchStatus::NoResults
@@ -7174,21 +7184,9 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
             degraded.push(SearchDegradation::weak_query_recall(floor, top));
         }
     }
-    if floor_counts.has_no_relevant_results() {
-        degraded.push(SearchDegradation::no_relevant_results(
-            &options.query,
-            floor,
-            floor_counts.considered,
-            pre_floor_top_score,
-        ));
-    }
-    if floor_counts.is_low_recall() {
-        degraded.push(SearchDegradation::low_recall_after_floor(
-            floor,
-            floor_counts.passed,
-            floor_counts.considered,
-        ));
-    }
+    // Keep diagnostic search aligned with the live path by deriving floor
+    // degradations from the same pre-visibility partition snapshot.
+    floor_counts.append_degradations(&mut degraded, &options.query, floor, pre_floor_top_score);
 
     let status = if above_floor.is_empty() {
         SearchStatus::NoResults
@@ -15073,7 +15071,7 @@ mod tests {
 
         let (scoped, stats) = apply_memory_scope_visibility_with_metadata_mode(
             &options,
-            hits,
+            hits.clone(),
             &mut degraded,
             Some(&connection),
             true,
@@ -15093,6 +15091,35 @@ mod tests {
                 .iter()
                 .any(|entry| entry.code == "scope_excluded_evidence")
         );
+
+        options.strict_scope = true;
+        let floor_counts = RelevanceFloorCounts::new(hits.len(), hits.len());
+        let mut strict_degraded = Vec::new();
+        let (strict_scoped, strict_stats) = apply_memory_scope_visibility_with_metadata_mode(
+            &options,
+            hits,
+            &mut strict_degraded,
+            Some(&connection),
+            true,
+        );
+        assert!(strict_scoped.is_empty());
+        assert_eq!(strict_stats.strict_violations, 1);
+        assert!(
+            strict_degraded
+                .iter()
+                .any(|entry| entry.code == "scope_strict_excluded_evidence")
+        );
+
+        floor_counts.append_degradations(
+            &mut strict_degraded,
+            "strict scope query",
+            0.05,
+            Some(0.9),
+        );
+        assert!(strict_degraded.iter().all(|entry| !matches!(
+            entry.code.as_str(),
+            "no_relevant_results" | "low_recall_after_floor"
+        )));
 
         connection.close().map_err(|error| error.to_string())
     }
@@ -16340,6 +16367,47 @@ mod tests {
         let threshold = RelevanceFloorCounts::new(10, 3);
         assert!(!threshold.has_no_relevant_results());
         assert!(!threshold.is_low_recall());
+    }
+
+    #[test]
+    fn relevance_floor_degradations_ignore_later_visibility_and_limit_drops() {
+        let mut hits = (0..50)
+            .map(|index| synthetic_reranked_hit(&format!("mem_{index:02}"), 0.90))
+            .collect::<Vec<_>>();
+        let floor_counts = RelevanceFloorCounts::new(hits.len(), hits.len());
+
+        truncate_hits_to_limit(&mut hits, 10);
+        assert_eq!(hits.len(), 10);
+
+        let mut after_limit = Vec::new();
+        floor_counts.append_degradations(&mut after_limit, "reranked query", 0.05, Some(0.90));
+        assert!(
+            after_limit.is_empty(),
+            "truncating 50 floor-passing candidates later must not report floor loss"
+        );
+
+        let mut after_scope_visibility = Vec::new();
+        RelevanceFloorCounts::new(5, 5).append_degradations(
+            &mut after_scope_visibility,
+            "strict scope query",
+            0.05,
+            Some(0.80),
+        );
+        assert!(
+            after_scope_visibility.is_empty(),
+            "hiding floor-passing candidates later must not report no relevant results"
+        );
+
+        let mut actual_floor_loss = Vec::new();
+        RelevanceFloorCounts::new(10, 2).append_degradations(
+            &mut actual_floor_loss,
+            "weak recall query",
+            0.05,
+            Some(0.20),
+        );
+        assert_eq!(actual_floor_loss.len(), 1);
+        assert_eq!(actual_floor_loss[0].code, "low_recall_after_floor");
+        assert!(actual_floor_loss[0].message.contains("2 of 10"));
     }
 
     #[test]
