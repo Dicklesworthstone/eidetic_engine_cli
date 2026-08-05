@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.claim_manifest.v1.json",
+  "title": "ee.claim_manifest.v1",
+  "description": "Canonical manifest.json data model for one executable claim. The manifest binds portable artifact paths to BLAKE3 digests and records the latest verification posture consumed by ee claim show and verify. Parser-only snake_case aliases are intentionally omitted.",
+  "type": "object",
+  "required": ["schema", "claimId", "artifacts"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.claim_manifest.v1"
+    },
+    "claimId": {
+      "type": "string",
+      "pattern": "^claim_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/manifestArtifact"}
+    },
+    "lastVerifiedAt": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "lastTraceId": {
+      "type": ["string", "null"],
+      "pattern": "^trace_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "verificationStatus": {
+      "type": "string",
+      "enum": [
+        "unverified",
+        "passing",
+        "failing",
+        "stale",
+        "expired",
+        "incomplete"
+      ],
+      "default": "unverified"
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "claimId", "artifacts"],
+    "summary": [
+      "schema",
+      "claimId",
+      "verificationStatus",
+      "lastVerifiedAt",
+      "artifacts"
+    ],
+    "standard": [
+      "schema",
+      "claimId",
+      "artifacts",
+      "lastVerifiedAt",
+      "lastTraceId",
+      "verificationStatus"
+    ],
+    "full": ["*"]
+  },
+  "$defs": {
+    "manifestArtifact": {
+      "type": "object",
+      "required": ["path", "artifactType", "blake3Hash", "sizeBytes", "createdAt"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!.*[\\\\:])(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$"
+        },
+        "artifactType": {
+          "type": "string",
+          "enum": [
+            "golden_fixture",
+            "schema_contract",
+            "screenshot",
+            "log",
+            "benchmark",
+            "replay",
+            "report"
+          ]
+        },
+        "blake3Hash": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]{64}$"
+        },
+        "sizeBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.claim_manifest.v1",
+      "claimId": "claim_00000000000000000000000000",
+      "artifacts": [
+        {
+          "path": "reports/release.json",
+          "artifactType": "report",
+          "blake3Hash": "0000000000000000000000000000000000000000000000000000000000000000",
+          "sizeBytes": 128,
+          "createdAt": "2026-08-01T12:00:00Z"
+        }
+      ],
+      "lastVerifiedAt": "2026-08-01T12:05:00Z",
+      "lastTraceId": "trace_00000000000000000000000000",
+      "verificationStatus": "failing"
+    }
+  ]
+}

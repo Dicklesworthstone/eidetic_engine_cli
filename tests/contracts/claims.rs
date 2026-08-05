@@ -13,7 +13,7 @@ use ee::core::claims::{
     build_claim_list_report, build_claim_show_report, build_claim_verify_report,
 };
 use ee::models::{ClaimId, DemoId, EvidenceId, ManifestVerificationStatus, PolicyId};
-use ee::output::render_claim_verify_json;
+use ee::output::{render_claim_verify_json, render_schema_export_json};
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -288,6 +288,85 @@ fn gate14_regressed_claim_reports_missing_stale_and_hash_mismatch_errors() -> Te
     ensure_contains(&json, "stale_payload_hash", "stale hash error")?;
     ensure_contains(&json, "hash_mismatch", "hash mismatch error")?;
     assert_golden("regressed_claim", &(json + "\n"))
+}
+
+#[test]
+fn public_claim_schema_examples_parse_through_runtime() -> TestResult {
+    let fixture = unique_claim_workspace("public_schema_examples")?;
+    let claims_schema: Value = serde_json::from_str(&render_schema_export_json(Some(
+        ee::models::CLAIMS_FILE_SCHEMA_V1,
+    )))
+    .map_err(|error| format!("failed to parse exported claims-file schema: {error}"))?;
+    let claims_example = claims_schema
+        .pointer("/examples/0")
+        .ok_or_else(|| "claims-file schema missing examples[0]".to_string())?;
+    fs::write(
+        fixture.join("claims.yaml"),
+        serde_yaml::to_string(claims_example)
+            .map_err(|error| format!("failed to encode claims example as YAML: {error}"))?,
+    )
+    .map_err(|error| format!("failed to write claims example: {error}"))?;
+
+    let claim_id = claims_example
+        .pointer("/claims/0/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "claims example missing claims[0].id".to_string())?;
+    let list = build_claim_list_report(&ClaimListOptions {
+        workspace_path: fixture.clone(),
+        status: Some("regressed".to_string()),
+        frequency: Some("weekly".to_string()),
+        ..Default::default()
+    })
+    .map_err(|error| error.to_string())?;
+    ensure(list.total_count == 1, "public claims example should parse")?;
+    ensure(
+        list.filtered_count == 1,
+        "public claims example should expose regressed and weekly",
+    )?;
+    ensure(
+        list.claims.first().map(|claim| claim.id.as_str()) == Some(claim_id),
+        "runtime claim id should match the public example",
+    )?;
+
+    let manifest_schema: Value = serde_json::from_str(&render_schema_export_json(Some(
+        ee::models::CLAIM_MANIFEST_SCHEMA_V1,
+    )))
+    .map_err(|error| format!("failed to parse exported claim-manifest schema: {error}"))?;
+    let manifest_example = manifest_schema
+        .pointer("/examples/0")
+        .ok_or_else(|| "claim-manifest schema missing examples[0]".to_string())?;
+    ensure(
+        manifest_example["claimId"].as_str() == Some(claim_id),
+        "public claim and manifest examples should share a claim id",
+    )?;
+    let artifact_dir = fixture.join("artifacts").join(claim_id);
+    fs::create_dir_all(&artifact_dir)
+        .map_err(|error| format!("failed to create example artifact directory: {error}"))?;
+    fs::write(
+        artifact_dir.join("manifest.json"),
+        serde_json::to_string_pretty(manifest_example)
+            .map_err(|error| format!("failed to encode manifest example: {error}"))?,
+    )
+    .map_err(|error| format!("failed to write manifest example: {error}"))?;
+
+    let show = build_claim_show_report(&ClaimShowOptions {
+        workspace_path: fixture,
+        claim_id: claim_id.to_string(),
+        include_manifest: true,
+        ..Default::default()
+    })
+    .map_err(|error| error.to_string())?;
+    let manifest = show
+        .manifest
+        .ok_or_else(|| "runtime should parse the public manifest example".to_string())?;
+    ensure(
+        manifest.artifact_count == 1,
+        "public manifest artifact count",
+    )?;
+    ensure(
+        manifest.verification_status == ManifestVerificationStatus::Failing,
+        "public manifest verification status",
+    )
 }
 
 #[test]

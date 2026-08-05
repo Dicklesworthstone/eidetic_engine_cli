@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.claims_file.v1.json",
+  "title": "ee.claims_file.v1",
+  "description": "Canonical JSON data model for the claims.yaml file consumed by ee claim list, show, and verify. YAML is the on-disk encoding; the fields and examples below are directly serializable as YAML. Parser-only legacy aliases are intentionally omitted.",
+  "type": "object",
+  "required": ["schema", "version", "claims"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.claims_file.v1"
+    },
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "claims": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/claimEntry"}
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "version", "claims"],
+    "summary": ["schema", "version", "claims"],
+    "standard": ["schema", "version", "claims"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "claimEntry": {
+      "type": "object",
+      "required": ["id", "title"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^claim_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "description": {
+          "type": "string",
+          "default": ""
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "unverified",
+            "valid",
+            "invalid",
+            "expired",
+            "draft",
+            "active",
+            "verified",
+            "stale",
+            "regressed",
+            "retired"
+          ],
+          "default": "draft"
+        },
+        "frequency": {
+          "type": "string",
+          "enum": ["on_change", "daily", "weekly", "manual"],
+          "default": "on_change"
+        },
+        "policyId": {
+          "type": ["string", "null"],
+          "pattern": "^pol_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+        },
+        "evidenceIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^ev_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+          },
+          "uniqueItems": true,
+          "default": []
+        },
+        "demoIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^demo_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+          },
+          "uniqueItems": true,
+          "default": []
+        },
+        "tags": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true,
+          "default": []
+        },
+        "owner": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "ttl": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "evidence": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/claimEvidence"},
+            {
+              "type": "array",
+              "items": {"$ref": "#/$defs/claimEvidence"}
+            }
+          ]
+        }
+      }
+    },
+    "claimEvidence": {
+      "type": "object",
+      "required": ["kind", "target"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {"kind": {"const": "file-hash"}},
+            "required": ["kind"]
+          },
+          "then": {"required": ["expectedHash"]}
+        }
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "file-hash",
+            "command-exit",
+            "memory-presence",
+            "rule-status"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "expectedHash": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]{64}$"
+        },
+        "expectedExit": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647
+        },
+        "expectedStatus": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.claims_file.v1",
+      "version": 1,
+      "claims": [
+        {
+          "id": "claim_00000000000000000000000000",
+          "title": "Release verification regressed",
+          "description": "The recorded release report no longer matches its verified artifact hash.",
+          "status": "regressed",
+          "frequency": "weekly",
+          "owner": "release",
+          "ttl": "2099-12-31T23:59:59Z",
+          "tags": ["regression", "release"],
+          "evidence": [
+            {
+              "kind": "file-hash",
+              "target": "artifacts/claim_00000000000000000000000000/reports/release.json",
+              "expectedHash": "0000000000000000000000000000000000000000000000000000000000000000"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

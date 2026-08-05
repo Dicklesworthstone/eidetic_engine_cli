@@ -210,6 +210,19 @@ fn root_help_emits_walking_skeleton_prelude() -> Result<(), String> {
 }
 
 #[test]
+fn claim_verify_help_links_public_claim_schemas() -> Result<(), String> {
+    let help = command_help(&["claim", "verify", "--help"])?;
+    assert_contains_tokens(
+        "ee claim verify --help public schemas",
+        &help,
+        &[
+            "ee schema export ee.claims_file.v1 --json",
+            "ee schema export ee.claim_manifest.v1 --json",
+        ],
+    )
+}
+
+#[test]
 fn remember_and_search_help_document_sentinel_and_typed_field_grammars() -> Result<(), String> {
     let remember_help = command_help(&["remember", "--help"])?;
     assert_contains_tokens(

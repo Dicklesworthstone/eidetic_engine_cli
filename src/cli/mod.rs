@@ -2093,6 +2093,10 @@ pub enum ClaimCommand {
     /// Exit codes: 0 when every selected claim passes; 9 (eval failure) when
     /// any claim fails verification; 1 for usage errors (bad claims file or
     /// unknown claim id).
+    ///
+    /// Export the canonical input formats with
+    /// `ee schema export ee.claims_file.v1 --json` and
+    /// `ee schema export ee.claim_manifest.v1 --json`.
     Verify(ClaimVerifyArgs),
 }
 

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.manifest_artifact.v1.json",
+  "title": "ee.manifest_artifact.v1",
+  "description": "Canonical artifact record embedded in ee.claim_manifest.v1. Paths are portable workspace-relative paths, and blake3Hash is the raw 64-character digest verified against the artifact bytes by ee claim verify.",
+  "type": "object",
+  "required": ["path", "artifactType", "blake3Hash", "sizeBytes", "createdAt"],
+  "additionalProperties": false,
+  "properties": {
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!.*[\\\\:])(?!.*(?:^|/)\\.{1,2}(?:/|$))[^/]+(?:/[^/]+)*$",
+      "description": "Portable relative path with normalized slash-separated components; absolute, dot, parent, backslash, colon, and empty components are rejected."
+    },
+    "artifactType": {
+      "type": "string",
+      "enum": [
+        "golden_fixture",
+        "schema_contract",
+        "screenshot",
+        "log",
+        "benchmark",
+        "replay",
+        "report"
+      ]
+    },
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^[0-9A-Fa-f]{64}$",
+      "description": "Raw BLAKE3 hex digest without a blake3: prefix."
+    },
+    "sizeBytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "field_presets": {
+    "minimal": ["path", "artifactType", "blake3Hash", "sizeBytes", "createdAt"],
+    "summary": ["path", "artifactType", "blake3Hash", "sizeBytes", "createdAt"],
+    "standard": ["path", "artifactType", "blake3Hash", "sizeBytes", "createdAt"],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "path": "reports/release.json",
+      "artifactType": "report",
+      "blake3Hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sizeBytes": 128,
+      "createdAt": "2026-08-01T12:00:00Z"
+    }
+  ]
+}

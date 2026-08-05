@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.claim_entry.v1.json",
+  "title": "ee.claim_entry.v1",
+  "description": "Canonical executable-claim entry accepted in an ee.claims_file.v1 claims.yaml document. The schema publishes the lifecycle and verification-frequency vocabularies, typed cross-references, and the inline evidence forms consumed by ee claim list, show, and verify. Parser-only legacy aliases are intentionally omitted.",
+  "type": "object",
+  "required": ["id", "title"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^claim_[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "description": "Stable ClaimId in canonical Crockford Base32 form."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "description": {
+      "type": "string",
+      "default": ""
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "unverified",
+        "valid",
+        "invalid",
+        "expired",
+        "draft",
+        "active",
+        "verified",
+        "stale",
+        "regressed",
+        "retired"
+      ],
+      "default": "draft",
+      "description": "Claim lifecycle state. regressed means evidence passed previously and later stopped passing."
+    },
+    "frequency": {
+      "type": "string",
+      "enum": ["on_change", "daily", "weekly", "manual"],
+      "default": "on_change"
+    },
+    "policyId": {
+      "type": ["string", "null"],
+      "pattern": "^pol_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "evidenceIds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^ev_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "demoIds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^demo_[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "tags": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true,
+      "default": []
+    },
+    "owner": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "ttl": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "RFC 3339 expiry timestamp. An expired claim fails verification before evidence runs."
+    },
+    "evidence": {
+      "description": "One inline evidence predicate, an array of predicates, or null. command-exit defaults expectedExit to 0; rule-status defaults expectedStatus to active.",
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/claimEvidence"},
+        {
+          "type": "array",
+          "items": {"$ref": "#/$defs/claimEvidence"}
+        }
+      ]
+    }
+  },
+  "field_presets": {
+    "minimal": ["id", "title"],
+    "summary": ["id", "title", "status", "frequency", "owner", "tags"],
+    "standard": [
+      "id",
+      "title",
+      "description",
+      "status",
+      "frequency",
+      "policyId",
+      "evidenceIds",
+      "demoIds",
+      "tags",
+      "owner",
+      "ttl",
+      "evidence"
+    ],
+    "full": ["*"]
+  },
+  "$defs": {
+    "claimEvidence": {
+      "type": "object",
+      "required": ["kind", "target"],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {"kind": {"const": "file-hash"}},
+            "required": ["kind"]
+          },
+          "then": {"required": ["expectedHash"]}
+        }
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "file-hash",
+            "command-exit",
+            "memory-presence",
+            "rule-status"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "Workspace-relative file, bounded command, memory id, or rule id selected by kind."
+        },
+        "expectedHash": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]{64}$",
+          "description": "Required by file-hash evidence; raw 64-character BLAKE3 hex without a prefix."
+        },
+        "expectedExit": {
+          "type": "integer",
+          "minimum": -2147483648,
+          "maximum": 2147483647,
+          "description": "Expected process exit code for command-exit evidence; defaults to 0."
+        },
+        "expectedStatus": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Expected status text for rule-status evidence; defaults to active."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "id": "claim_00000000000000000000000000",
+      "title": "Release verification regressed",
+      "description": "The recorded release report no longer matches its verified artifact hash.",
+      "status": "regressed",
+      "frequency": "weekly",
+      "owner": "release",
+      "ttl": "2099-12-31T23:59:59Z",
+      "tags": ["regression", "release"],
+      "evidence": [
+        {
+          "kind": "file-hash",
+          "target": "artifacts/claim_00000000000000000000000000/reports/release.json",
+          "expectedHash": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ]
+    }
+  ]
+}

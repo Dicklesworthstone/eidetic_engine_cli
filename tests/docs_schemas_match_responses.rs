@@ -196,6 +196,16 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
         "ee.harness_conformance.v1",
         "ee.harness_conformance.v1.json",
     ),
+    (ee::models::CLAIMS_FILE_SCHEMA_V1, "ee.claims_file.v1.json"),
+    (ee::models::CLAIM_ENTRY_SCHEMA_V1, "ee.claim_entry.v1.json"),
+    (
+        ee::models::CLAIM_MANIFEST_SCHEMA_V1,
+        "ee.claim_manifest.v1.json",
+    ),
+    (
+        ee::models::MANIFEST_ARTIFACT_SCHEMA_V1,
+        "ee.manifest_artifact.v1.json",
+    ),
 ];
 
 fn repo_root() -> PathBuf {
@@ -703,6 +713,124 @@ fn public_schema_exports_match_docs_schema_files() -> TestResult {
             ));
         }
     }
+    Ok(())
+}
+
+#[test]
+fn claim_schema_docs_publish_canonical_enums_patterns_and_examples() -> TestResult {
+    let claims_file = schema_doc(ee::models::CLAIMS_FILE_SCHEMA_V1)?;
+    let claim_entry = schema_doc(ee::models::CLAIM_ENTRY_SCHEMA_V1)?;
+    let claim_manifest = schema_doc(ee::models::CLAIM_MANIFEST_SCHEMA_V1)?;
+    let manifest_artifact = schema_doc(ee::models::MANIFEST_ARTIFACT_SCHEMA_V1)?;
+
+    ensure_equal(
+        &claim_entry["properties"]["id"]["pattern"],
+        &json!("^claim_[0-7][0-9A-HJKMNP-TV-Z]{25}$"),
+        "claim id pattern",
+    )?;
+    ensure_equal(
+        &claim_entry["properties"]["status"]["enum"],
+        &json!([
+            "unverified",
+            "valid",
+            "invalid",
+            "expired",
+            "draft",
+            "active",
+            "verified",
+            "stale",
+            "regressed",
+            "retired"
+        ]),
+        "claim status vocabulary",
+    )?;
+    ensure_equal(
+        &claim_entry["properties"]["frequency"]["enum"],
+        &json!(["on_change", "daily", "weekly", "manual"]),
+        "claim frequency vocabulary",
+    )?;
+    ensure_equal(
+        &claim_entry["$defs"]["claimEvidence"]["properties"]["kind"]["enum"],
+        &json!([
+            "file-hash",
+            "command-exit",
+            "memory-presence",
+            "rule-status"
+        ]),
+        "claim evidence vocabulary",
+    )?;
+    ensure_equal(
+        &claim_entry["$defs"]["claimEvidence"]["properties"]["expectedExit"]["minimum"],
+        &json!(-2147483648_i64),
+        "claim evidence exit-code minimum",
+    )?;
+    ensure_equal(
+        &claim_entry["$defs"]["claimEvidence"]["properties"]["expectedExit"]["maximum"],
+        &json!(2147483647_i64),
+        "claim evidence exit-code maximum",
+    )?;
+    ensure_equal(
+        &claim_manifest["properties"]["verificationStatus"]["enum"],
+        &json!([
+            "unverified",
+            "passing",
+            "failing",
+            "stale",
+            "expired",
+            "incomplete"
+        ]),
+        "manifest verification vocabulary",
+    )?;
+    ensure_equal(
+        &manifest_artifact["properties"]["blake3Hash"]["pattern"],
+        &json!("^[0-9A-Fa-f]{64}$"),
+        "manifest BLAKE3 pattern",
+    )?;
+    ensure_equal(
+        &manifest_artifact["properties"]["sizeBytes"]["maximum"],
+        &json!(u64::MAX),
+        "manifest sizeBytes maximum",
+    )?;
+
+    let claims_example = claims_file
+        .pointer("/examples/0")
+        .ok_or_else(|| "claims-file schema missing examples[0]".to_owned())?;
+    let claim_example = claim_entry
+        .pointer("/examples/0")
+        .ok_or_else(|| "claim-entry schema missing examples[0]".to_owned())?;
+    let manifest_example = claim_manifest
+        .pointer("/examples/0")
+        .ok_or_else(|| "claim-manifest schema missing examples[0]".to_owned())?;
+    let artifact_example = manifest_artifact
+        .pointer("/examples/0")
+        .ok_or_else(|| "manifest-artifact schema missing examples[0]".to_owned())?;
+
+    ensure_equal(
+        &claims_example["claims"][0],
+        claim_example,
+        "claims-file example reuses canonical claim entry",
+    )?;
+    ensure_equal(
+        &manifest_example["artifacts"][0],
+        artifact_example,
+        "claim-manifest example reuses canonical artifact entry",
+    )?;
+    ensure_equal(
+        &claims_example["claims"][0]["status"],
+        &json!("regressed"),
+        "example exposes regressed lifecycle state",
+    )?;
+
+    for (label, example, schema) in [
+        ("claims file", claims_example, &claims_file),
+        ("claim entry", claim_example, &claim_entry),
+        ("claim manifest", manifest_example, &claim_manifest),
+        ("manifest artifact", artifact_example, &manifest_artifact),
+    ] {
+        validate_json_schema(example, schema, schema, "$")
+            .map_err(|error| format!("{label} schema example invalid: {error}"))?;
+    }
+
     Ok(())
 }
 

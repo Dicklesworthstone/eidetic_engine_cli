@@ -11321,6 +11321,34 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             category: "memory",
             definition: agentsmd_drift_schema_definition,
         },
+        SchemaEntry {
+            id: crate::models::CLAIMS_FILE_SCHEMA_V1,
+            version: "1",
+            description: "Canonical claims.yaml collection consumed by ee claim list, show, and verify.",
+            category: "claims",
+            definition: claims_file_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::models::CLAIM_ENTRY_SCHEMA_V1,
+            version: "1",
+            description: "Canonical executable-claim entry, including lifecycle, frequency, and evidence fields.",
+            category: "claims",
+            definition: claim_entry_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::models::CLAIM_MANIFEST_SCHEMA_V1,
+            version: "1",
+            description: "Per-claim artifact manifest consumed by ee claim show and verify.",
+            category: "claims",
+            definition: claim_manifest_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::models::MANIFEST_ARTIFACT_SCHEMA_V1,
+            version: "1",
+            description: "Portable BLAKE3-bound artifact record embedded in an executable-claim manifest.",
+            category: "claims",
+            definition: manifest_artifact_schema_definition,
+        },
     ]
 }
 
@@ -11334,6 +11362,22 @@ fn agentsmd_import_schema_definition() -> String {
 
 fn agentsmd_drift_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.agentsmd.drift.v1.json").to_string()
+}
+
+fn claims_file_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.claims_file.v1.json").to_string()
+}
+
+fn claim_entry_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.claim_entry.v1.json").to_string()
+}
+
+fn claim_manifest_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.claim_manifest.v1.json").to_string()
+}
+
+fn manifest_artifact_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.manifest_artifact.v1.json").to_string()
 }
 
 fn journal_entry_schema_definition() -> String {
