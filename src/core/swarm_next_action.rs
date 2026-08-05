@@ -13760,7 +13760,7 @@ mod tests {
                 action.kind == "retry_claim_gate"
                     && action.command_action.as_ref().is_some_and(|command| {
                         command.argv
-                            == argv(&[
+                            == [
                                 "br",
                                 "show",
                                 "bd-requested",
@@ -13768,7 +13768,10 @@ mod tests {
                                 "--no-auto-import",
                                 "--no-auto-flush",
                                 "--allow-stale",
-                            ])
+                            ]
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
                     })
             }));
         }
@@ -13914,12 +13917,15 @@ mod tests {
                 && action.command_action.as_ref().is_some_and(|command| {
                     command.command_id == ACTIONABLE_QUEUE_COMMAND_ID
                         && command.argv
-                            == argv(&[
+                            == [
                                 "bash",
                                 ACTIONABLE_QUEUE_SCRIPT_RELATIVE_PATH,
                                 "actionable",
                                 "--json",
-                            ])
+                            ]
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
                 })
         }));
         assert!(gate.recovery_actions.iter().all(|action| {
