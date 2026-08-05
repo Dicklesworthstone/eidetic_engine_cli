@@ -12668,7 +12668,7 @@ mod tests {
     #[test]
     fn work_packet_normalizes_verifier_topology_refusal_into_rch_posture() {
         let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
-        brief.beads.ready = vec![bead("bd-proof", "Needs RCH verifier evidence", 2)];
+        brief.beads.ready = vec![bead("bd-proof", "Test RCH verifier evidence", 2)];
         let evidence = verifier_evidence_from_json(&serde_json::json!({
             "schema": "ee.rch.verify.v1",
             "status": "rch_environment_failure",
@@ -12815,7 +12815,7 @@ mod tests {
     #[test]
     fn work_packet_blocks_selector_admission_contradiction() {
         let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
-        brief.beads.ready = vec![bead("bd-selector", "Needs selector admission proof", 2)];
+        brief.beads.ready = vec![bead("bd-selector", "Test selector admission proof", 2)];
         let evidence = verifier_evidence_from_json(&serde_json::json!({
             "schema": "ee.rch.verify.v1",
             "status": "remote_ready",
@@ -14437,7 +14437,7 @@ mod tests {
             RequestedCandidateLookup::Present {
                 bead: requested_candidate_bead(
                     "bd-stale-direct",
-                    "Stale tracker direct candidate",
+                    "Document stale tracker direct candidate",
                     "open",
                     None,
                 ),
@@ -15307,7 +15307,7 @@ mod tests {
             BeadsTrackerAuthorityState::DirtyIssues
         );
         assert!(!packet.tracker_integrity.br_reads_authoritative);
-        assert_eq!(packet.recommended_action.action, "coordinate_before_claim");
+        assert_eq!(packet.recommended_action.action, "blocked_no_action");
         assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
         assert_eq!(packet.candidates[0].decision, "external_state_required");
         assert!(
@@ -15931,7 +15931,8 @@ mod tests {
 
     #[test]
     fn work_packet_uses_stale_thresholds_before_owned_claims() {
-        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        set_fresh_agent_identity(&mut brief, "NavyLotus");
         let proposal = |bead_id: &str,
                         decision: &'static str,
                         evidence: &[&str]|
@@ -15969,6 +15970,7 @@ mod tests {
 
         let active_packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &active_snapshot);
         let active = &active_packet.candidates[0];
+        assert_eq!(active.ownership, "peer");
         assert_eq!(active.decision, "already_owned");
         assert_eq!(
             active_packet.recommended_action.action,
@@ -16301,7 +16303,7 @@ mod tests {
         }];
         let mut snapshot = snapshot_with_candidates(vec![candidate(
             "bd-contested",
-            "Touch shared swarm collector",
+            "Touch shared swarm next-action collector",
             "beads_ready",
             Some(2),
         )]);
@@ -16312,8 +16314,9 @@ mod tests {
 
         assert_eq!(packet.candidates.len(), 1);
         let candidate = &packet.candidates[0];
+        assert_eq!(candidate.edit_scope.state, "known");
         assert_eq!(candidate.decision, "unsafe_due_to_conflict");
-        assert_eq!(candidate.collision_risk, "medium");
+        assert_eq!(candidate.collision_risk, "high");
         for reason in [
             "dirty_checkout_path_count:1",
             "high_risk_dirty_surface:src/core/swarm_*.rs",
