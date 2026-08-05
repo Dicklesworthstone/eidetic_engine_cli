@@ -153,13 +153,7 @@
     "recommendedSafeToClaim": false,
     "selectedCandidate": {
       "id": "bd-md-lock",
-      "ownership": "unassigned",
-      "editScope": {
-        "state": "unknown",
-        "paths": [],
-        "sourceRefs": ["candidate_edit_scope.no_matching_bounded_surface"]
-      },
-      "decision": "safe_to_claim",
+      "decision": "coordinate_first",
       "collisionRisk": "unknown"
     },
     "sourceAuthority": {
@@ -168,9 +162,11 @@
       "remoteVerificationAdmitted": false
     },
     "unsafeReasons": [
+      "candidate_decision:coordinate_first",
+      "candidate_edit_scope_unknown",
       "gate_verdict:coordinate_first",
-      "memory_drift_lock_contention",
-      "packet_recommendation_not_claim_safe:coordinate_before_claim"
+      "inspect_candidate_before_edit_scope_resolution",
+      "memory_drift_lock_contention"
     ],
     "degradedCodes": ["memory_drift_lock_contention"],
     "claimCommandAction": null,
@@ -180,6 +176,8 @@
       "reasons": [
         "blocked_by_compile_health",
         "blocked_by_count",
+        "candidate_edit_scope_unknown",
+        "inspect_candidate_before_edit_scope_resolution",
         "memory_drift_lock_contention",
         "priority",
         "rank_milli",
@@ -190,7 +188,7 @@
         "record_overlap_decision_in_closeout",
         "repair_degraded_sources_before_claim",
         "reserve_files_before_editing",
-        "run_claim_gate_before_claim",
+        "resolve_candidate_edit_scope_before_claim",
         "use_rch_for_cargo_verification"
       ]
     },

@@ -33,7 +33,7 @@
     "candidateState": "candidate_present_actionable",
     "trackerAuthorityDegraded": true,
     "trackerHealth": "dirty_issues",
-    "verdict": "unsafe_due_to_conflict",
+    "verdict": "external_state_required",
     "trackerUnsafeReason": "beads_tracker_not_authoritative:dirty_issues",
     "degradedCode": "tracker_authority_degraded"
   }
