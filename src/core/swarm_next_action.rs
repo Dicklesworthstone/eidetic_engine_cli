@@ -6174,6 +6174,7 @@ fn rch_worker_root_canary_command_action() -> SwarmWorkPacketCommandAction {
     )
 }
 
+#[cfg(test)]
 fn work_packet_claim_gate_attestation_summary(
     packet: &SwarmWorkPacket,
 ) -> EnvironmentAttestationSummary {
