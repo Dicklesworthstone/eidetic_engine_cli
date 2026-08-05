@@ -1030,7 +1030,13 @@ impl DbConnection {
         impl Drop for TransactionGuard<'_> {
             fn drop(&mut self) {
                 if !self.completed {
-                    let _ = self.conn.rollback();
+                    if let Err(rollback_error) = self.conn.rollback() {
+                        tracing::error!(
+                            phase = "db_transaction_guard_drop",
+                            rollback_error = %rollback_error,
+                            "failed to rollback incomplete transaction from drop guard"
+                        );
+                    }
                 }
             }
         }
@@ -1041,20 +1047,34 @@ impl DbConnection {
         };
 
         match f() {
-            Ok(result) => {
-                // Commit while the guard is still armed: if `commit()` fails the
-                // `?` returns early and `TransactionGuard::drop` rolls the
-                // transaction back, honoring the "rolls back on error" contract.
-                // Disarming before the commit would strand an open transaction on
-                // commit failure (matches `apply_migration`/cass import, which
-                // also roll back when commit fails).
-                self.commit()?;
-                guard.completed = true;
-                Ok(result)
-            }
+            Ok(result) => match self.commit() {
+                Ok(()) => {
+                    guard.completed = true;
+                    Ok(result)
+                }
+                Err(error) => {
+                    match self.rollback() {
+                        Ok(()) => guard.completed = true,
+                        Err(rollback_error) => tracing::error!(
+                            phase = "db_transaction_commit",
+                            error = %error,
+                            rollback_error = %rollback_error,
+                            "failed to rollback transaction after commit failure"
+                        ),
+                    }
+                    Err(error)
+                }
+            },
             Err(err) => {
-                guard.completed = true;
-                let _ = self.rollback();
+                match self.rollback() {
+                    Ok(()) => guard.completed = true,
+                    Err(rollback_error) => tracing::error!(
+                        phase = "db_transaction_operation",
+                        error = %err,
+                        rollback_error = %rollback_error,
+                        "failed to rollback transaction after operation failure"
+                    ),
+                }
                 Err(err)
             }
         }
@@ -1082,7 +1102,13 @@ impl DbConnection {
         impl Drop for TransactionGuard<'_> {
             fn drop(&mut self) {
                 if !self.completed {
-                    let _ = self.conn.rollback();
+                    if let Err(rollback_error) = self.conn.rollback() {
+                        tracing::error!(
+                            phase = "db_transaction_error_guard_drop",
+                            rollback_error = %rollback_error,
+                            "failed to rollback incomplete domain transaction from drop guard"
+                        );
+                    }
                 }
             }
         }
@@ -1092,14 +1118,33 @@ impl DbConnection {
             completed: false,
         };
         match f() {
-            Ok(result) => {
-                self.commit().map_err(E::from)?;
-                guard.completed = true;
-                Ok(result)
-            }
+            Ok(result) => match self.commit() {
+                Ok(()) => {
+                    guard.completed = true;
+                    Ok(result)
+                }
+                Err(error) => {
+                    match self.rollback() {
+                        Ok(()) => guard.completed = true,
+                        Err(rollback_error) => tracing::error!(
+                            phase = "db_domain_transaction_commit",
+                            error = %error,
+                            rollback_error = %rollback_error,
+                            "failed to rollback domain transaction after commit failure"
+                        ),
+                    }
+                    Err(E::from(error))
+                }
+            },
             Err(error) => {
-                guard.completed = true;
-                let _ = self.rollback();
+                match self.rollback() {
+                    Ok(()) => guard.completed = true,
+                    Err(rollback_error) => tracing::error!(
+                        phase = "db_domain_transaction_operation",
+                        rollback_error = %rollback_error,
+                        "failed to rollback domain transaction after operation failure"
+                    ),
+                }
                 Err(error)
             }
         }
@@ -8803,9 +8848,7 @@ impl DbConnection {
         let checksum = migration.checksum();
         let record = MigrationRecord::new(migration.version, migration.name, checksum, applied_at)?;
 
-        self.begin_transaction(IsolationLevel::RepeatableRead)?;
-
-        let result = (|| {
+        self.with_transaction(|| {
             let outcome = if self.has_migration(migration.version)? {
                 ApplyOutcome::AlreadyApplied
             } else {
@@ -8829,35 +8872,7 @@ impl DbConnection {
                 self.record_migration(&record)?;
             }
             Ok(outcome)
-        })();
-
-        match result {
-            Ok(outcome) => match self.commit() {
-                Ok(()) => Ok(outcome),
-                Err(error) => {
-                    if let Err(rollback_error) = self.rollback() {
-                        tracing::error!(
-                            phase = "db_foreign_key_relaxed_migration_commit",
-                            error = %error,
-                            rollback_error = %rollback_error,
-                            "failed to rollback foreign-key-relaxed migration after commit failure"
-                        );
-                    }
-                    Err(error)
-                }
-            },
-            Err(error) => {
-                if let Err(rollback_error) = self.rollback() {
-                    tracing::error!(
-                        phase = "db_foreign_key_relaxed_migration_validation",
-                        error = %error,
-                        rollback_error = %rollback_error,
-                        "failed to rollback invalid foreign-key-relaxed migration"
-                    );
-                }
-                Err(error)
-            }
-        }
+        })
     }
 
     fn foreign_key_enforcement_state(&self) -> Result<i64> {
@@ -8872,51 +8887,35 @@ impl DbConnection {
     }
 
     fn apply_migration(&self, migration: &Migration, applied_at: &str) -> Result<ApplyOutcome> {
+        self.apply_migration_with_body(migration, applied_at, |connection, migration| {
+            connection.execute_raw_for(DbOperation::Execute, migration.sql)
+        })
+    }
+
+    fn apply_migration_with_body<F>(
+        &self,
+        migration: &Migration,
+        applied_at: &str,
+        apply_body: F,
+    ) -> Result<ApplyOutcome>
+    where
+        F: FnOnce(&Self, &Migration) -> Result<()>,
+    {
         let checksum = migration.checksum();
         let record = MigrationRecord::new(migration.version, migration.name, checksum, applied_at)?;
 
-        self.begin_transaction(IsolationLevel::RepeatableRead)?;
-
-        // Re-check under the transaction to handle concurrent migration attempts.
-        // Another process may have applied this version between the outer check and
-        // acquiring the write lock.
-        match self.has_migration(migration.version) {
-            Ok(true) => {
-                let _ = self.commit();
+        self.with_transaction(|| {
+            // Re-check while holding both the write-owner flock and the SQLite
+            // write transaction. Another process may have applied this version
+            // between the outer fast path and acquiring the writer fence.
+            if self.has_migration(migration.version)? {
                 return Ok(ApplyOutcome::AlreadyApplied);
             }
-            Ok(false) => {}
-            Err(e) => {
-                let _ = self.rollback();
-                return Err(e);
-            }
-        }
 
-        let result = (|| {
-            self.execute_raw_for(DbOperation::Execute, migration.sql)?;
-            self.record_migration(&record)
-        })();
-
-        match result {
-            Ok(()) => match self.commit() {
-                Ok(()) => Ok(ApplyOutcome::Applied),
-                Err(error) => {
-                    if let Err(rollback_error) = self.rollback() {
-                        tracing::error!(
-                            phase = "db_migration_apply_commit",
-                            error = %error,
-                            rollback_error = %rollback_error,
-                            "failed to rollback transaction after commit failure"
-                        );
-                    }
-                    Err(error)
-                }
-            },
-            Err(error) => {
-                let _ = self.rollback();
-                Err(error)
-            }
-        }
+            apply_body(self, migration)?;
+            self.record_migration(&record)?;
+            Ok(ApplyOutcome::Applied)
+        })
     }
 
     /// Check if the database schema is up to date.
@@ -35065,6 +35064,85 @@ mod tests {
     }
 
     #[test]
+    fn apply_migration_propagates_commit_failure_and_remains_retryable() -> TestResult {
+        use super::ApplyOutcome;
+
+        let temp_dir =
+            tempfile::tempdir().map_err(|error| TestFailure::new(format!("tempdir: {error}")))?;
+        let db_path = temp_dir.path().join("migration-commit-failure.ee.db");
+        let location = DatabaseLocation::File(db_path.clone());
+        let connection = DbConnection::open_file(&db_path)?;
+        connection.ensure_migration_table()?;
+
+        let deferred_foreign_key_failure = Migration::new(
+            1,
+            "deferred_foreign_key_failure",
+            "CREATE TABLE migration_commit_parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE migration_commit_child (
+                 id INTEGER PRIMARY KEY,
+                 parent_id INTEGER NOT NULL,
+                 FOREIGN KEY (parent_id) REFERENCES migration_commit_parent(id)
+                     DEFERRABLE INITIALLY DEFERRED
+             );
+             INSERT INTO migration_commit_child (id, parent_id) VALUES (1, 404)",
+            "blake3:deferred-foreign-key-failure",
+        );
+
+        let failed =
+            connection.apply_migration(&deferred_foreign_key_failure, "2026-08-05T18:00:00Z");
+        ensure(
+            matches!(
+                failed,
+                Err(DbError::SqlModel {
+                    operation: DbOperation::CommitTransaction,
+                    ..
+                })
+            ),
+            "deferred foreign-key failure must surface from transaction commit",
+        )?;
+        ensure_equal(
+            &file_write_owner_depth_for_test(&location),
+            &0,
+            "commit failure must release the write-owner fence",
+        )?;
+        ensure(
+            !table_exists(&connection, "migration_commit_parent")?,
+            "failed commit must roll back the parent table",
+        )?;
+        ensure(
+            !table_exists(&connection, "migration_commit_child")?,
+            "failed commit must roll back the child table",
+        )?;
+        ensure(
+            !connection.has_migration(1)?,
+            "failed commit must roll back the migration record",
+        )?;
+
+        let recovery = Migration::new(
+            1,
+            "commit_failure_recovery",
+            "CREATE TABLE migration_commit_recovery (id INTEGER PRIMARY KEY)",
+            "blake3:commit-failure-recovery",
+        );
+        ensure_equal(
+            &connection.apply_migration(&recovery, "2026-08-05T18:01:00Z")?,
+            &ApplyOutcome::Applied,
+            "a valid migration must remain applicable after commit rollback",
+        )?;
+        ensure(
+            table_exists(&connection, "migration_commit_recovery")?,
+            "recovery migration must commit its schema change",
+        )?;
+        ensure(
+            connection.has_migration(1)?,
+            "recovery migration must record the version",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn apply_migration_is_idempotent_under_recheck() -> TestResult {
         use super::ApplyOutcome;
 
@@ -35121,6 +35199,100 @@ mod tests {
             "original applied_at timestamp should be preserved",
         )?;
 
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn apply_migration_holds_owner_and_serializes_same_version_file_callers() -> TestResult {
+        use super::ApplyOutcome;
+
+        const CALLER_COUNT: usize = 4;
+
+        let temp_dir =
+            tempfile::tempdir().map_err(|error| TestFailure::new(format!("tempdir: {error}")))?;
+        let db_path = temp_dir.path().join("same-version-migration.ee.db");
+        let setup = DbConnection::open_file(&db_path)?;
+        setup.ensure_migration_table()?;
+        setup.close()?;
+
+        let barrier = Arc::new(Barrier::new(CALLER_COUNT));
+        let mut handles = Vec::new();
+        for caller_index in 0..CALLER_COUNT {
+            let db_path = db_path.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(
+                move || -> std::result::Result<ApplyOutcome, String> {
+                    barrier.wait();
+                    let location = DatabaseLocation::File(db_path.clone());
+                    let connection = DbConnection::open_file(&db_path)
+                        .map_err(|error| format!("caller {caller_index} open: {error}"))?;
+                    let migration = Migration::new(
+                        1,
+                        "same_version_concurrent_migration",
+                        "CREATE TABLE same_version_migration_marker (id INTEGER PRIMARY KEY)",
+                        "blake3:same-version-concurrent-migration",
+                    );
+                    let outcome = connection
+                        .apply_migration_with_body(
+                            &migration,
+                            "2026-08-05T18:02:00Z",
+                            |connection, migration| {
+                                let owner_depth = file_write_owner_depth_for_test(&location);
+                                if owner_depth != 1 {
+                                    return Err(DbError::MalformedRow {
+                                        operation: DbOperation::BeginTransaction,
+                                        message: format!(
+                                            "migration body expected write-owner depth 1, observed {owner_depth}"
+                                        ),
+                                    });
+                                }
+                                connection
+                                    .execute_raw_for(DbOperation::Execute, migration.sql())
+                            },
+                        )
+                        .map_err(|error| format!("caller {caller_index} apply: {error}"))?;
+                    connection
+                        .close()
+                        .map_err(|error| format!("caller {caller_index} close: {error}"))?;
+                    Ok(outcome)
+                },
+            ));
+        }
+
+        let mut applied_count = 0;
+        let mut already_applied_count = 0;
+        for handle in handles {
+            match handle
+                .join()
+                .map_err(|_| TestFailure::new("same-version migration caller panicked"))?
+                .map_err(TestFailure::new)?
+            {
+                ApplyOutcome::Applied => applied_count += 1,
+                ApplyOutcome::AlreadyApplied => already_applied_count += 1,
+            }
+        }
+        ensure_equal(
+            &applied_count,
+            &1,
+            "exactly one concurrent caller must apply the migration",
+        )?;
+        ensure_equal(
+            &already_applied_count,
+            &(CALLER_COUNT - 1),
+            "all later callers must observe the migration under the writer fence",
+        )?;
+
+        let connection = DbConnection::open_file(&db_path)?;
+        ensure(
+            table_exists(&connection, "same_version_migration_marker")?,
+            "concurrent migration must create the marker table",
+        )?;
+        ensure_equal(
+            &connection.applied_migrations()?.len(),
+            &1,
+            "concurrent migration must record one ledger row",
+        )?;
         connection.close()?;
         Ok(())
     }
