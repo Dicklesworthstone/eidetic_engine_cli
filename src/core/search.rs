@@ -6224,6 +6224,34 @@ struct SearchRerankRuntime {
     top_k: usize,
 }
 
+const SEARCH_RERANK_MIN_CANDIDATES: usize = 5;
+
+async fn apply_search_rerank(
+    cx: &asupersync::Cx,
+    query: &str,
+    candidates: &mut [crate::search::ScoredResult],
+    reranker: &dyn Reranker,
+    text_fn: impl Fn(&str) -> Option<String> + Send + Sync,
+    top_k: usize,
+) -> frankensearch::SearchResult<()> {
+    // Frankensearch currently nests TwoTierSearcher's Phase 3 inside a
+    // successful quality-embedding Phase 2. EE deliberately ships Model2Vec
+    // without the forbidden-dependency FastEmbed quality tier, so invoke the
+    // library's public rerank pipeline over Phase 1 candidates directly. This
+    // preserves Frankensearch's score/explanation semantics without inventing
+    // a fake quality embedder or changing hash-fallback retrieval behavior.
+    frankensearch::rerank_step(
+        cx,
+        reranker,
+        query,
+        candidates,
+        text_fn,
+        top_k,
+        SEARCH_RERANK_MIN_CANDIDATES,
+    )
+    .await
+}
+
 impl SearchRerankRuntime {
     fn disabled() -> Self {
         Self {
@@ -9035,9 +9063,7 @@ fn search_sync_with_performance(
             };
 
             let embedder_start = Instant::now();
-            let embedder_stack = crate::core::index::default_search_embedder_stack();
-            let fast_embedder = embedder_stack.fast_arc();
-            let quality_embedder = embedder_stack.quality_arc();
+            let fast_embedder = crate::core::index::default_search_embedder_stack().fast_arc();
             push_search_performance_timing(
                 &async_timings,
                 "searchSync::embedderInit",
@@ -9045,14 +9071,6 @@ fn search_sync_with_performance(
             );
             let searcher_build_start = Instant::now();
             let mut searcher = TwoTierSearcher::new(index, fast_embedder, config);
-            // bd-1nl13.13: Phase 3 reranking follows Frankensearch's Phase 2
-            // refinement. Dropping the stack's quality embedder here made a
-            // successfully loaded reranker unreachable: the search completed
-            // after fusion with reranked_count=0. Preserve the complete stack
-            // so the real cross-encoder path can execute.
-            if let Some(quality_embedder) = quality_embedder {
-                searcher = searcher.with_quality_embedder(quality_embedder);
-            }
             push_search_performance_timing(
                 &async_timings,
                 "searchSync::searcherBuild",
@@ -9085,16 +9103,6 @@ fn search_sync_with_performance(
                 searcher
             };
 
-            if let Some(reranker) = rerank_runtime_owned.reranker.clone() {
-                let attach_start = Instant::now();
-                searcher = searcher.with_reranker(reranker);
-                push_search_performance_timing(
-                    &async_timings,
-                    "searchSync::attachReranker",
-                    attach_start.elapsed(),
-                );
-            }
-
             let collect_start = Instant::now();
             let collect_limit = rerank_runtime_owned.collect_limit(limit);
             let search_result =
@@ -9109,6 +9117,37 @@ fn search_sync_with_performance(
                         .search_collect(&cx, &query_owned, collect_limit)
                         .await
                 };
+            let search_result = match search_result {
+                Ok((mut results, metrics)) => {
+                    if let (Some(reranker), Some(text_provider)) = (
+                        rerank_runtime_owned.reranker.clone(),
+                        rerank_runtime_owned.text_provider.clone(),
+                    ) {
+                        let rerank_start = Instant::now();
+                        let rerank_result = apply_search_rerank(
+                            &cx,
+                            &query_owned,
+                            &mut results,
+                            reranker.as_ref(),
+                            |doc_id| text_provider.text_for_doc(doc_id),
+                            rerank_runtime_owned.top_k,
+                        )
+                        .await;
+                        push_search_performance_timing(
+                            &async_timings,
+                            "searchSync::rerank",
+                            rerank_start.elapsed(),
+                        );
+                        match rerank_result {
+                            Ok(()) => Ok((results, metrics)),
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        Ok((results, metrics))
+                    }
+                }
+                Err(error) => Err(error),
+            };
             push_search_performance_timing(
                 &async_timings,
                 "searchSync::searchCollect",
@@ -16163,11 +16202,10 @@ mod tests {
     #[test]
     #[allow(clippy::cast_precision_loss)]
     fn rerank_step_reorders_top_k_when_reranker_available() -> TestResult {
-        // bd-2vq2z.29: positive-path proof that the rerank-apply helper ee wires
-        // via `searcher.with_reranker(...)` — frankensearch::rerank::rerank_step —
-        // actually REORDERS the top-K when a reranker is available, not just that
-        // search degrades when the model is absent. A deterministic stub reranker
-        // scores candidates so the LAST one ranks highest (full reversal).
+        // bd-2vq2z.29 / bd-1nl13.13: positive-path proof that EE's production
+        // rerank helper actually REORDERS the top-K when a reranker is available,
+        // not just that search degrades when the model is absent. A deterministic
+        // stub reranker scores candidates so the LAST one ranks highest.
         //
         // bd-1zltr extends the proof across EE's adapter and relevance floor:
         // realistic RRF-magnitude candidate scores are all below the reranked
@@ -16230,14 +16268,13 @@ mod tests {
 
         let (reranked_order, top_candidate) = crate::core::run_cli_future(async move {
             let cx = asupersync::Cx::for_testing();
-            frankensearch::rerank::rerank_step(
+            apply_search_rerank(
                 &cx,
-                reranker.as_ref(),
                 "release format checklist",
                 &mut candidates,
+                reranker.as_ref(),
                 |doc_id: &str| Some(format!("text body for {doc_id}")),
                 candidate_count,
-                5,
             )
             .await
             .map_err(|error| error.to_string())?;

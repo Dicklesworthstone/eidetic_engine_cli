@@ -243,10 +243,11 @@ assert_dueling_wizards_determinism_manifest
 run_3x_assert_identical() {
     local name="$1"
     shift
-    local run output command_status canonical_hash
+    local run output command_status canonical_hash stderr_path
     local -a hashes=()
     for run in 1 2 3; do
-        output=$("$EE_BINARY" "$@" --workspace "$EPIC_WORKSPACE" 2>/dev/null)
+        stderr_path="${EPIC_WORKSPACE}/determinism_${name}_run_${run}.stderr"
+        output=$("$EE_BINARY" "$@" --workspace "$EPIC_WORKSPACE" 2>"$stderr_path")
         command_status=$?
         if [ "$command_status" -ne 0 ] \
             || ! printf '%s' "$output" | jq -e \
@@ -464,8 +465,9 @@ fi
 run_rerank_json() {
     local label="${1:?label required}"
     shift
-    local command_status
-    RERANK_JSON_OUTPUT=$("$EE_BINARY" "$@" --workspace "$EPIC_WORKSPACE" 2>/dev/null)
+    local command_status stderr_path
+    stderr_path="${EPIC_WORKSPACE}/rerank_${label}.stderr"
+    RERANK_JSON_OUTPUT=$("$EE_BINARY" "$@" --workspace "$EPIC_WORKSPACE" 2>"$stderr_path")
     command_status=$?
     if [ "$command_status" -ne 0 ] \
         || ! printf '%s' "$RERANK_JSON_OUTPUT" | jq -e \
@@ -505,7 +507,7 @@ run_native_rerank_determinism_lane() {
     local embed_candidate="${EE_EMBED_MODEL_FIXTURE_DIR:-${EE_EMBED_MODEL_DIR:-${RERANK_ORIGINAL_HOME}/.local/share/ee/models}}"
     local embed_model_dir=""
     local rerank_home="${EPIC_WORKSPACE}/rerank-home"
-    local model_fetch_json index_json config_json fusion_json reranked_json
+    local model_fetch_json index_json index_status_json config_json fusion_json reranked_json
     local fusion_order reranked_order fusion_ids reranked_ids target_is_top
     local comparison_status
 
@@ -522,11 +524,23 @@ run_native_rerank_determinism_lane() {
         return $?
     fi
 
-    if [ -f "$embed_candidate/model.safetensors" ]; then
+    if [ "$RERANK_REQUIRE_MODEL" = "1" ] && [ -z "$RERANK_REFERENCE_VECTOR" ]; then
+        e2e_log_assert_eq "missing EE_E2E_RERANK_REFERENCE_VECTOR" \
+            "reference vector file" "rerank_reference_vector_required"
+        return 1
+    fi
+
+    if [ -f "$embed_candidate/model.safetensors" ] \
+        && [ -f "$embed_candidate/tokenizer.json" ] \
+        && [ -f "$embed_candidate/config.json" ]; then
         embed_model_dir="$embed_candidate"
-    elif [ -f "$embed_candidate/potion-multilingual-128M/model.safetensors" ]; then
+    elif [ -f "$embed_candidate/potion-multilingual-128M/model.safetensors" ] \
+        && [ -f "$embed_candidate/potion-multilingual-128M/tokenizer.json" ] \
+        && [ -f "$embed_candidate/potion-multilingual-128M/config.json" ]; then
         embed_model_dir="$embed_candidate/potion-multilingual-128M"
-    elif [ -f "$embed_candidate/model2vec/potion-multilingual-128M/model.safetensors" ]; then
+    elif [ -f "$embed_candidate/model2vec/potion-multilingual-128M/model.safetensors" ] \
+        && [ -f "$embed_candidate/model2vec/potion-multilingual-128M/tokenizer.json" ] \
+        && [ -f "$embed_candidate/model2vec/potion-multilingual-128M/config.json" ]; then
         embed_model_dir="$embed_candidate/model2vec/potion-multilingual-128M"
     fi
     if [ -z "$embed_model_dir" ]; then
@@ -584,6 +598,24 @@ run_native_rerank_determinism_lane() {
     fi
     e2e_log_assert_eq "true" "true" "rerank_index_document_count"
 
+    run_rerank_json "index_status" index status --json || return 1
+    index_status_json="$RERANK_JSON_OUTPUT"
+    if ! printf '%s' "$index_status_json" | jq -e '
+        .data.embedding.schema == "ee.embedding_posture.v1"
+        and .data.embedding.semantic == true
+        and .data.embedding.fast_model_id == "potion-multilingual-128M"
+        and .data.embedding.vector_coverage.embedded >= 5
+        and .data.embedding.vector_coverage.total >= 5
+        and all(.data.degraded[]; .code != "embed_model_unavailable")
+    ' >/dev/null 2>&1; then
+        e2e_log_assert_eq \
+            "semantic=$(printf '%s' "$index_status_json" | jq -r '.data.embedding.semantic // false') model=$(printf '%s' "$index_status_json" | jq -r '.data.embedding.fast_model_id // "<missing>"')" \
+            "semantic=true model=potion-multilingual-128M" \
+            "rerank_semantic_embedding_contract"
+        return 1
+    fi
+    e2e_log_assert_eq "true" "true" "rerank_semantic_embedding_contract"
+
     run_rerank_json "config_top_k" config set search.rerank_top_k 5 --json || return 1
     config_json="$RERANK_JSON_OUTPUT"
     e2e_log_note "rerank_top_k_config=$(printf '%s' "$config_json" | jq -c '.data // {}')"
@@ -625,7 +657,9 @@ run_native_rerank_determinism_lane() {
             and .rerankScore >= 0 and .rerankScore <= 1
             and .score == .rerankScore)
         and .data.results[0].explanation.factors[0].name == "rerank"
-        and (all((.degraded // [])[]; .code != "rerank_model_unavailable"))
+        and all(.data.degraded[];
+            .code != "rerank_model_unavailable"
+            and .code != "embed_model_unavailable")
     ' >/dev/null 2>&1; then
         e2e_log_assert_eq \
             "mode=$(printf '%s' "$reranked_json" | jq -r '.data.rerank.mode // "<missing>"') count=$(printf '%s' "$reranked_json" | jq -r '.data.rerank.rerankScoreCount // 0')" \
