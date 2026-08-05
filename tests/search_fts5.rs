@@ -4,8 +4,8 @@ use std::future::Future;
 
 use ee::search::{CanonicalSearchDocument, DocumentSource};
 use frankensearch::{
-    Fts5Config, Fts5ContentMode, Fts5LexicalSearch, Fts5Tokenizer, IndexableDocument,
-    LexicalSearch, ScoreSource, ScoredResult, TantivyIndex,
+    Fts5Config, Fts5ContentMode, Fts5LexicalSearch, Fts5Tokenizer, IndexableDocument, LexicalRead,
+    LexicalWrite, ScoreSource, ScoredResult, TantivyIndex,
 };
 
 type TestResult<T = ()> = Result<T, String>;

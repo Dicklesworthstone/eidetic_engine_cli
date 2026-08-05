@@ -25,7 +25,7 @@ pub use frankensearch::{
     ScoredResult, TwoTierConfig, TwoTierIndex, TwoTierSearcher,
 };
 #[cfg(feature = "lexical-bm25")]
-pub use frankensearch::{LexicalRead, LexicalSearch, TantivyIndex};
+pub use frankensearch::{LexicalRead, LexicalWrite, TantivyIndex};
 pub use query::{ParsedSearchQuery, SearchQueryClause, parse_search_query};
 pub use scoring::{
     AnchorMatchCandidateSignals, AnchorMatchContext, AnchorMatchScore,
