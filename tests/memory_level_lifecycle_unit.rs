@@ -270,7 +270,7 @@ fn manual_level_transition_demotes_peer_human_attested_authority_atomically() {
         kind: "fact",
         tags: Some("lifecycle"),
         confidence: 0.8,
-        source: Some("mesh://active-member/attestation"),
+        source: Some("agent-mail://active-member/attestation"),
         allow_secret_mention: false,
         valid_from: None,
         valid_to: None,
