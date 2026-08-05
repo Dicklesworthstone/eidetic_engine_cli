@@ -5,8 +5,8 @@
 //! semantics that those call sites will use.
 
 use std::convert::Infallible;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 use asupersync::channel::mpsc::{self, RecvError, SendError};
 
@@ -192,6 +192,7 @@ pub struct AuditLaneDrainReport {
 pub struct AuditLaneDrainError<E> {
     pub report: AuditLaneDrainReport,
     pub source: E,
+    pub undelivered: Vec<AuditEvent>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -283,6 +284,9 @@ pub fn insert_audit_event_batch(
 struct AuditLaneCounters {
     accepted: AtomicU64,
     drained: AtomicU64,
+    failed: AtomicU64,
+    // Linearizes queue publication/dequeue with counter retirement and snapshots.
+    linearization_gate: Mutex<()>,
 }
 
 impl AuditLaneCounters {
@@ -294,8 +298,28 @@ impl AuditLaneCounters {
         self.drained.load(Ordering::Acquire)
     }
 
+    fn failed(&self) -> u64 {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    // A poisoned gate may mean publication completed without accepted accounting; fail closed.
+    #[allow(clippy::expect_used)]
+    fn lock_linearization_gate(&self) -> MutexGuard<'_, ()> {
+        self.linearization_gate
+            .lock()
+            .expect("audit lane linearization gate poisoned; event accounting is uncertain")
+    }
+
+    fn pending_under_gate(&self) -> u64 {
+        // Callers must hold `linearization_gate` so publication cannot outrun accounting.
+        self.accepted()
+            .saturating_sub(self.drained())
+            .saturating_sub(self.failed())
+    }
+
     fn pending(&self) -> u64 {
-        self.accepted().saturating_sub(self.drained())
+        let _linearization_guard = self.lock_linearization_gate();
+        self.pending_under_gate()
     }
 }
 
@@ -309,20 +333,33 @@ pub struct AuditLaneHandle {
 impl AuditLaneHandle {
     #[must_use]
     pub fn enqueue(&self, event: AuditEvent) -> AuditEnqueueResult {
+        self.enqueue_with_publish_hook(event, || {})
+    }
+
+    fn enqueue_with_publish_hook<F>(
+        &self,
+        event: AuditEvent,
+        after_publish: F,
+    ) -> AuditEnqueueResult
+    where
+        F: FnOnce(),
+    {
+        let _linearization_guard = self.counters.lock_linearization_gate();
         let audit_seq = event.audit_seq;
         match self.sender.try_send(event) {
             Ok(()) => {
+                after_publish();
                 self.counters.accepted.fetch_add(1, Ordering::AcqRel);
                 AuditEnqueueResult::Enqueued {
                     audit_seq,
-                    pending_events: self.counters.pending(),
+                    pending_events: self.counters.pending_under_gate(),
                 }
             }
             Err(SendError::Full(event)) => AuditEnqueueResult::Backpressure {
                 code: AUDIT_BACKPRESSURE_CODE,
                 event,
                 capacity: self.capacity,
-                pending_events: self.counters.pending(),
+                pending_events: self.counters.pending_under_gate(),
             },
             Err(SendError::Disconnected(event) | SendError::Cancelled(event)) => {
                 AuditEnqueueResult::Closed { event }
@@ -422,10 +459,24 @@ impl AuditLane {
         &mut self,
         phase: AuditLanePhase,
         max_events: Option<u64>,
-        mut sink: F,
+        sink: F,
     ) -> Result<AuditLaneDrainReport, AuditLaneDrainError<E>>
     where
         F: FnMut(&[AuditEvent]) -> Result<(), E>,
+    {
+        self.drain_with_limit_and_dequeue_hook(phase, max_events, sink, || {})
+    }
+
+    fn drain_with_limit_and_dequeue_hook<E, F, H>(
+        &mut self,
+        phase: AuditLanePhase,
+        max_events: Option<u64>,
+        mut sink: F,
+        mut on_dequeue_gate_contention: H,
+    ) -> Result<AuditLaneDrainReport, AuditLaneDrainError<E>>
+    where
+        F: FnMut(&[AuditEvent]) -> Result<(), E>,
+        H: FnMut(),
     {
         let mut batch = Vec::with_capacity(self.config.batch_size);
         let mut received_events = 0_u64;
@@ -433,22 +484,25 @@ impl AuditLane {
         let mut batches = 0_u64;
 
         while max_events.is_none_or(|limit| received_events < limit) {
-            match self.receiver.try_recv() {
+            let receive_result = self.try_recv_with_gate_hook(&mut on_dequeue_gate_contention);
+            match receive_result {
                 Ok(event) => {
                     received_events = received_events.saturating_add(1);
                     batch.push(event);
                     if batch.len() == self.config.batch_size {
                         let batch_len = batch.len() as u64;
                         if let Err(source) = sink(&batch) {
+                            let report = self.finish_drain_report(
+                                phase,
+                                drained_events,
+                                batches,
+                                batch_len,
+                                1,
+                            );
                             return Err(AuditLaneDrainError {
-                                report: self.finish_drain_report(
-                                    phase,
-                                    drained_events,
-                                    batches,
-                                    batch_len,
-                                    1,
-                                ),
+                                report,
                                 source,
+                                undelivered: batch,
                             });
                         }
                         batch.clear();
@@ -463,9 +517,11 @@ impl AuditLane {
         if !batch.is_empty() {
             let batch_len = batch.len() as u64;
             if let Err(source) = sink(&batch) {
+                let report = self.finish_drain_report(phase, drained_events, batches, batch_len, 1);
                 return Err(AuditLaneDrainError {
-                    report: self.finish_drain_report(phase, drained_events, batches, batch_len, 1),
+                    report,
                     source,
+                    undelivered: batch,
                 });
             }
             batches = batches.saturating_add(1);
@@ -473,6 +529,27 @@ impl AuditLane {
         }
 
         Ok(self.finish_drain_report(phase, drained_events, batches, 0, 0))
+    }
+
+    fn try_recv_with_gate_hook<H>(
+        &mut self,
+        on_gate_contention: &mut H,
+    ) -> Result<AuditEvent, RecvError>
+    where
+        H: FnMut(),
+    {
+        let _linearization_guard = match self.counters.linearization_gate.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::WouldBlock) => {
+                on_gate_contention();
+                self.counters.lock_linearization_gate()
+            }
+            Err(TryLockError::Poisoned(poisoned)) => {
+                drop(poisoned.into_inner());
+                self.counters.lock_linearization_gate()
+            }
+        };
+        self.receiver.try_recv()
     }
 
     fn finish_drain_report(
@@ -483,12 +560,20 @@ impl AuditLane {
         failed_events: u64,
         failed_batches: u64,
     ) -> AuditLaneDrainReport {
-        if drained_events > 0 {
-            self.counters
-                .drained
-                .fetch_add(drained_events, Ordering::AcqRel);
-        }
-        let pending_events = self.counters.pending();
+        let pending_events = {
+            let _linearization_guard = self.counters.lock_linearization_gate();
+            if drained_events > 0 {
+                self.counters
+                    .drained
+                    .fetch_add(drained_events, Ordering::AcqRel);
+            }
+            if failed_events > 0 {
+                self.counters
+                    .failed
+                    .fetch_add(failed_events, Ordering::AcqRel);
+            }
+            self.counters.pending_under_gate()
+        };
         let mut degraded_codes = Vec::new();
         if failed_batches > 0 {
             degraded_codes.push(AUDIT_LANE_BATCH_COMMIT_FAILED_CODE);
@@ -515,7 +600,7 @@ mod tests {
     use crate::core::audit::{AuditVerifyOptions, verify_audit};
     use proptest::prelude::*;
     use std::convert::Infallible;
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, mpsc as std_mpsc};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -609,6 +694,90 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["workspace-a", "workspace-b", "workspace-a"]
         );
+    }
+
+    #[test]
+    fn concurrent_dequeue_waits_for_enqueue_accounting() {
+        const DEADLOCK_WATCHDOG: Duration = Duration::from_secs(5);
+
+        let config = AuditLaneConfig {
+            capacity: 1,
+            batch_size: 1,
+            shutdown_event_limit: 1,
+        };
+        let (handle, mut lane) = AuditLane::new(config);
+        let producer_handle = handle.clone();
+        let (published_tx, published_rx) = std_mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std_mpsc::sync_channel(0);
+        let producer = thread::spawn(move || {
+            producer_handle.enqueue_with_publish_hook(
+                AuditEvent::new("workspace-a", 1, "memory.create"),
+                || {
+                    published_tx
+                        .send(())
+                        .expect("test must observe channel publication");
+                    release_rx
+                        .recv()
+                        .expect("test must release enqueue accounting");
+                },
+            )
+        });
+
+        published_rx
+            .recv()
+            .expect("producer must publish before the consumer starts");
+        let (gate_contention_tx, gate_contention_rx) = std_mpsc::sync_channel(0);
+        let (drained_tx, drained_rx) = std_mpsc::channel();
+        let consumer = thread::spawn(move || {
+            let mut first_gate_contention = Some(gate_contention_tx);
+            lane.drain_with_limit_and_dequeue_hook(
+                AuditLanePhase::Drain,
+                None,
+                |batch| {
+                    drained_tx
+                        .send(
+                            batch
+                                .iter()
+                                .map(|event| event.audit_seq)
+                                .collect::<Vec<_>>(),
+                        )
+                        .expect("test must receive the drained batch");
+                    Ok::<(), Infallible>(())
+                },
+                || {
+                    if let Some(gate_contention_tx) = first_gate_contention.take() {
+                        gate_contention_tx
+                            .send(())
+                            .expect("test must observe dequeue gate contention");
+                    }
+                },
+            )
+            .expect("drain should succeed after enqueue accounting")
+        });
+
+        let contention_observed = gate_contention_rx.recv_timeout(DEADLOCK_WATCHDOG).is_ok();
+        release_tx
+            .send(())
+            .expect("producer must still be waiting for accounting release");
+
+        let drained = drained_rx
+            .recv_timeout(DEADLOCK_WATCHDOG)
+            .expect("consumer must drain after accounting completes");
+        let enqueue_result = producer.join().expect("producer must not panic");
+        let report = consumer.join().expect("consumer must not panic");
+
+        assert!(
+            contention_observed,
+            "consumer must observe dequeue-gate contention while publication is paused"
+        );
+        assert!(matches!(
+            enqueue_result,
+            AuditEnqueueResult::Enqueued { audit_seq: 1, .. }
+        ));
+        assert_eq!(drained, vec![1]);
+        assert_eq!(report.drained_events, 1);
+        assert_eq!(report.pending_events, 0);
+        assert_eq!(handle.pending_events(), 0);
     }
 
     #[test]
@@ -1093,6 +1262,68 @@ mod tests {
                 prop_assert_eq!(&pair[1].prev_row_hash, &pair[0].this_row_hash);
             }
         }
+
+        #[test]
+        fn randomized_sink_failure_conserves_event_ownership(
+            event_count in 1_usize..=64,
+            batch_size in 1_usize..=16,
+            failure_selector in any::<usize>(),
+        ) {
+            let config = AuditLaneConfig {
+                capacity: event_count,
+                batch_size,
+                shutdown_event_limit: event_count,
+            };
+            let (handle, mut lane) = AuditLane::new(config);
+            for seq in 1..=event_count as u64 {
+                prop_assert!(matches!(
+                    handle.enqueue(AuditEvent::new("workspace-a", seq, "memory.create")),
+                    AuditEnqueueResult::Enqueued { .. }
+                ));
+            }
+
+            let failing_batch = failure_selector % event_count.div_ceil(batch_size);
+            let mut sink_call = 0_usize;
+            let mut delivered = Vec::new();
+            let error = lane
+                .try_drain_available(|batch| {
+                    let current_call = sink_call;
+                    sink_call = sink_call.saturating_add(1);
+                    if current_call == failing_batch {
+                        Err::<(), ()>(())
+                    } else {
+                        delivered.extend(batch.iter().map(|event| event.audit_seq));
+                        Ok::<(), ()>(())
+                    }
+                })
+                .expect_err("selected sink batch must fail");
+            let AuditLaneDrainError {
+                report,
+                source: (),
+                undelivered,
+            } = error;
+
+            prop_assert_eq!(
+                report.drained_events + report.failed_events + report.pending_events,
+                event_count as u64
+            );
+            prop_assert_eq!(report.failed_events, undelivered.len() as u64);
+            prop_assert_eq!(report.failed_batches, 1);
+            delivered.extend(undelivered.into_iter().map(|event| event.audit_seq));
+
+            let final_report = lane
+                .try_drain_available(|batch| {
+                    delivered.extend(batch.iter().map(|event| event.audit_seq));
+                    Ok::<(), Infallible>(())
+                })
+                .expect("remaining queued events should drain");
+            prop_assert_eq!(
+                delivered,
+                (1..=event_count as u64).collect::<Vec<_>>()
+            );
+            prop_assert_eq!(final_report.pending_events, 0);
+            prop_assert_eq!(handle.pending_events(), 0);
+        }
     }
 
     fn run_randomized_producer_rate_case(
@@ -1282,7 +1513,7 @@ mod tests {
     }
 
     #[test]
-    fn drain_reports_sink_failure_without_marking_batch_drained() {
+    fn drain_returns_failed_batch_and_clears_pending_after_recovery() {
         let config = AuditLaneConfig {
             capacity: 4,
             batch_size: 2,
@@ -1304,31 +1535,94 @@ mod tests {
             })
             .expect_err("sink failure must be reported");
 
-        assert_eq!(error.source, "db unavailable");
+        let AuditLaneDrainError {
+            report: failure_report,
+            source,
+            undelivered,
+        } = error;
+        assert_eq!(source, "db unavailable");
         assert_eq!(attempted, vec![1, 2]);
+        let mut recovered = undelivered
+            .into_iter()
+            .map(|event| event.audit_seq)
+            .collect::<Vec<_>>();
+        assert_eq!(recovered, vec![1, 2]);
         assert_eq!(
-            error.report,
+            failure_report,
             AuditLaneDrainReport {
                 phase: AuditLanePhase::Drain,
                 drained_events: 0,
                 batches: 0,
                 failed_events: 2,
                 failed_batches: 1,
-                pending_events: 3,
+                pending_events: 1,
                 degraded_codes: vec![AUDIT_LANE_BATCH_COMMIT_FAILED_CODE],
             }
         );
-        assert_eq!(handle.pending_events(), 3);
+        assert_eq!(handle.pending_events(), 1);
 
-        let mut recovered = Vec::new();
         let report = lane
             .try_drain_available(|batch| {
                 recovered.extend(batch.iter().map(|event| event.audit_seq));
                 Ok::<(), Infallible>(())
             })
             .expect("remaining queued events should drain");
-        assert_eq!(recovered, vec![3]);
+        assert_eq!(recovered, vec![1, 2, 3]);
         assert_eq!(report.drained_events, 1);
-        assert_eq!(report.pending_events, 2);
+        assert_eq!(report.pending_events, 0);
+        assert_eq!(handle.pending_events(), 0);
+    }
+
+    #[test]
+    fn drain_returns_failed_tail_after_prior_success() {
+        let config = AuditLaneConfig {
+            capacity: 4,
+            batch_size: 2,
+            shutdown_event_limit: 4,
+        };
+        let (handle, mut lane) = AuditLane::new(config);
+        for seq in 1..=3 {
+            assert!(matches!(
+                handle.enqueue(AuditEvent::new("workspace-a", seq, "memory.create")),
+                AuditEnqueueResult::Enqueued { .. }
+            ));
+        }
+
+        let mut sink_call = 0_u64;
+        let mut delivered = Vec::new();
+        let error = lane
+            .try_drain_available(|batch| {
+                sink_call = sink_call.saturating_add(1);
+                if sink_call == 1 {
+                    delivered.extend(batch.iter().map(|event| event.audit_seq));
+                    Ok::<(), &'static str>(())
+                } else {
+                    Err::<(), &'static str>("db unavailable")
+                }
+            })
+            .expect_err("tail sink failure must be reported");
+        let AuditLaneDrainError {
+            report,
+            source,
+            undelivered,
+        } = error;
+
+        assert_eq!(source, "db unavailable");
+        assert_eq!(delivered, vec![1, 2]);
+        delivered.extend(undelivered.into_iter().map(|event| event.audit_seq));
+        assert_eq!(delivered, vec![1, 2, 3]);
+        assert_eq!(
+            report,
+            AuditLaneDrainReport {
+                phase: AuditLanePhase::Drain,
+                drained_events: 2,
+                batches: 1,
+                failed_events: 1,
+                failed_batches: 1,
+                pending_events: 0,
+                degraded_codes: vec![AUDIT_LANE_BATCH_COMMIT_FAILED_CODE],
+            }
+        );
+        assert_eq!(handle.pending_events(), 0);
     }
 }

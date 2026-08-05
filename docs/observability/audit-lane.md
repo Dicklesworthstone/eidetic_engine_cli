@@ -25,11 +25,12 @@ Every audit-lane telemetry event has:
 
 ## Ordering
 
-The lane preserves total ordering per workspace. Producers assign or receive a
-per-workspace `auditSeq` before enqueue; the single writer drains by that order
-and commits batches without reordering. Later slices must keep same inputs in
-the same order byte-stable: the same sequence of committed durable mutations
-must produce the same `auditSeq` order.
+The lane preserves successful enqueue order and commits batches without
+reordering; it does not sort events by `auditSeq`. Writer integration must
+therefore serialize each workspace's enqueues in assigned `auditSeq` order when
+numeric sequence order is required. Later slices must keep the same inputs in
+the same enqueue order byte-stable: the same sequence of committed durable
+mutations must produce the same `auditSeq` order.
 
 ## Chain Hash Continuity
 
@@ -75,8 +76,21 @@ for `ee audit verify --json` to prove whether the durable chain is complete.
 
 If a batch sink returns an error, the fallible drain path returns that source
 error with `audit_lane_batch_commit_failed`, `failedEvents`, and
-`failedBatches` in the report. Callers must not count that batch as drained or
-claim audit durability for the affected mutations.
+`failedBatches` in the report. The error also owns the failed batch as
+`undelivered`, preserving its original FIFO order. `failedEvents` is always the
+length of that vector, while `pendingEvents` counts only events that remain
+owned by the lane and queued for a later drain. It excludes events transferred
+to the caller through `undelivered`.
+
+Callers must recover or retry `undelivered` before permitting any later audit
+commit, including another lane drain or a backpressure/closed-lane direct
+fallback; otherwise durable audit order can diverge from acceptance order. The
+lane does not coordinate a returned drain error with producer-side direct
+fallbacks, so writer integration must serialize that recovery. A fallible batch
+sink must therefore be all-or-nothing on error, or support an idempotent retry
+of the returned batch. The current database batch sink is transactional.
+Callers must not count a failed batch as drained or claim audit durability for
+the affected mutations until that recovery succeeds.
 
 ## Crash Safety
 
