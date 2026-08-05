@@ -23,7 +23,8 @@ use ee::core::swarm_next_action::{
     SwarmNextActionInputSummary, SwarmNextActionSnapshot, SwarmNextActionVerificationSummary,
     SwarmWorkPacket, SwarmWorkPacketActionableQueueEvidence,
     SwarmWorkPacketActionableQueueExclusionAccounting, SwarmWorkPacketClaimGate,
-    actionable_queue_evidence_from_script_stdout, collect_work_packet_actionable_queue_evidence,
+    actionable_queue_evidence_from_script_stdout, collect_swarm_work_packet_with_verifier_evidence,
+    collect_work_packet_actionable_queue_evidence,
 };
 
 type TestResult = Result<(), String>;
@@ -1554,8 +1555,17 @@ fn claim_gate_actionable_queue_exclusion_accounting_matches_golden() -> TestResu
 }
 
 struct RecordingRunner {
-    stdout: String,
+    responses: Vec<(String, Vec<String>, String)>,
     calls: RefCell<Vec<(String, Vec<String>)>>,
+}
+
+impl RecordingRunner {
+    fn scripted_commands(&self) -> Vec<(String, Vec<String>)> {
+        self.responses
+            .iter()
+            .map(|(program, args, _)| (program.clone(), args.clone()))
+            .collect()
+    }
 }
 
 impl SwarmBriefCommandRunner for RecordingRunner {
@@ -1566,15 +1576,57 @@ impl SwarmBriefCommandRunner for RecordingRunner {
         _cwd: &Path,
         _timeout_ms: u64,
     ) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
-        self.calls.borrow_mut().push((
+        let call = (
             program.to_owned(),
             args.iter().map(|arg| (*arg).to_owned()).collect(),
-        ));
+        );
+        self.calls.borrow_mut().push(call.clone());
+        let stdout = self
+            .responses
+            .iter()
+            .find(|(expected_program, expected_args, _)| {
+                expected_program == program && expected_args == &call.1
+            })
+            .map(|(_, _, stdout)| stdout.clone())
+            .ok_or_else(|| {
+                SwarmBriefCommandError::Unavailable(format!(
+                    "no scripted response for {} {}",
+                    call.0,
+                    call.1.join(" ")
+                ))
+            })?;
         Ok(SwarmBriefCommandOutput {
-            stdout: self.stdout.clone(),
+            stdout,
             stderr: String::new(),
         })
     }
+}
+
+fn recording_runner_from_fixture(
+    fixture: &Value,
+    context: &str,
+) -> Result<RecordingRunner, String> {
+    let scripted_calls = fixture
+        .pointer("/scriptedCalls")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context}: missing scriptedCalls[]"))?;
+    let mut responses = Vec::with_capacity(scripted_calls.len());
+    for (index, call) in scripted_calls.iter().enumerate() {
+        let call_context = format!("{context} scriptedCalls[{index}]");
+        let program = string_at(call, "/program", &call_context)?.to_owned();
+        let args = string_array_at(call, "/args", &call_context)?;
+        let output_pointer = string_at(call, "/outputPointer", &call_context)?;
+        let output = fixture.pointer(output_pointer).ok_or_else(|| {
+            format!("{call_context}: outputPointer {output_pointer} does not resolve")
+        })?;
+        let stdout = serde_json::to_string(output)
+            .map_err(|error| format!("{call_context}: serialize response: {error}"))?;
+        responses.push((program, args, stdout));
+    }
+    Ok(RecordingRunner {
+        responses,
+        calls: RefCell::new(Vec::new()),
+    })
 }
 
 #[test]
@@ -1588,7 +1640,15 @@ fn actionable_queue_collection_is_read_only_and_records_command_ids() -> TestRes
     // it ever issues is the read-only queue probe.
     let options = SwarmBriefCollectOptions::for_workspace(repo_root());
     let runner = RecordingRunner {
-        stdout: stdout.to_owned(),
+        responses: vec![(
+            "bash".to_owned(),
+            vec![
+                "scripts/br_retry.sh".to_owned(),
+                "actionable".to_owned(),
+                "--json".to_owned(),
+            ],
+            stdout.to_owned(),
+        )],
         calls: RefCell::new(Vec::new()),
     };
     let brief = SwarmBriefReport::empty(&repo_root());
@@ -1678,6 +1738,340 @@ fn actionable_queue_collection_is_read_only_and_records_command_ids() -> TestRes
         ));
     }
 
+    let rendered = serde_json::to_value(&gate)
+        .map_err(|error| format!("{context}: serialize gate: {error}"))?;
+    assert_no_forbidden_markers(&rendered, context)?;
+    assert_next_actions_are_read_only(&rendered, context)?;
+
+    Ok(())
+}
+
+#[test]
+fn requested_candidate_hydration_escapes_bounded_recommendation_and_queue_projections() -> TestResult
+{
+    let fixture = actionable_queue_fixture("requested_candidate_hydration.json")?;
+    let context = "requested candidate hydration fixture";
+    let requested_candidate_id = string_at(&fixture, "/requestedCandidateId", context)?;
+
+    let tempdir = tempfile::tempdir().map_err(|error| format!("{context}: tempdir: {error}"))?;
+    let scripts_dir = tempdir.path().join("scripts");
+    fs::create_dir_all(&scripts_dir)
+        .map_err(|error| format!("{context}: create scripts directory: {error}"))?;
+    fs::write(scripts_dir.join("br_retry.sh"), "#!/usr/bin/env bash\n")
+        .map_err(|error| format!("{context}: write queue-probe sentinel: {error}"))?;
+
+    let mut options = SwarmBriefCollectOptions::for_workspace(tempdir.path());
+    options.enabled_sources = [SwarmBriefSourceKind::Beads].into_iter().collect();
+    let runner = recording_runner_from_fixture(&fixture, context)?;
+    let mut expected_calls = runner.scripted_commands();
+
+    let packet = collect_swarm_work_packet_with_verifier_evidence(
+        &options,
+        &runner,
+        &[],
+        Some(requested_candidate_id),
+    );
+    let gate = packet.claim_gate(Some(requested_candidate_id));
+
+    let mut calls = runner.calls.into_inner();
+    calls.sort();
+    expected_calls.sort();
+    if calls != expected_calls {
+        return Err(format!(
+            "{context}: collector argv drifted\nactual: {calls:#?}\nexpected: {expected_calls:#?}"
+        ));
+    }
+    let forbidden_argv_markers =
+        string_array_at(&fixture, "/expected/forbiddenRecordedArgvMarkers", context)?;
+    for (program, args) in &calls {
+        for marker in &forbidden_argv_markers {
+            if program == marker || args.iter().any(|arg| arg == marker) {
+                return Err(format!(
+                    "{context}: read-only collection issued forbidden argv marker `{marker}` in {program} {args:?}"
+                ));
+            }
+        }
+    }
+
+    let packet_candidate_ids = packet
+        .candidates
+        .iter()
+        .map(|candidate| candidate.id.clone())
+        .collect::<Vec<_>>();
+    let expected_packet_candidate_ids =
+        string_array_at(&fixture, "/expected/packetCandidateIds", context)?;
+    if packet_candidate_ids != expected_packet_candidate_ids {
+        return Err(format!(
+            "{context}: bounded packet candidates drifted\nactual: {packet_candidate_ids:?}\nexpected: {expected_packet_candidate_ids:?}"
+        ));
+    }
+    if packet_candidate_ids
+        .iter()
+        .any(|candidate_id| candidate_id == requested_candidate_id)
+    {
+        return Err(format!(
+            "{context}: direct hydration must not expand the serialized packet candidate set"
+        ));
+    }
+    let expected_recommended = string_at(&fixture, "/expected/recommendedCandidateId", context)?;
+    if packet.recommended_action.candidate_id.as_deref() != Some(expected_recommended) {
+        return Err(format!(
+            "{context}: recommendation changed while hydrating a non-top candidate: {:?}",
+            packet.recommended_action.candidate_id
+        ));
+    }
+
+    let expected_row_count = u64_at(&fixture, "/expected/actionableRowCount", context)?;
+    if gate.actionable_queue.row_count != Some(expected_row_count) {
+        return Err(format!(
+            "{context}: actionable rowCount expected {expected_row_count}, got {:?}",
+            gate.actionable_queue.row_count
+        ));
+    }
+    let expected_serialized_ids = string_array_at(
+        &fixture,
+        "/expected/serializedActionableCandidateIds",
+        context,
+    )?;
+    if gate.actionable_queue.candidate_ids != expected_serialized_ids {
+        return Err(format!(
+            "{context}: bounded actionable candidateIds drifted\nactual: {:?}\nexpected: {expected_serialized_ids:?}",
+            gate.actionable_queue.candidate_ids
+        ));
+    }
+    if gate
+        .actionable_queue
+        .candidate_ids
+        .iter()
+        .any(|candidate_id| candidate_id == requested_candidate_id)
+    {
+        return Err(format!(
+            "{context}: target must remain beyond the serialized actionable id bound"
+        ));
+    }
+    let expected_truncated = u64_at(
+        &fixture,
+        "/expected/truncatedActionableCandidateCount",
+        context,
+    )?;
+    if gate.actionable_queue.truncated_candidate_count != expected_truncated {
+        return Err(format!(
+            "{context}: truncatedCandidateCount expected {expected_truncated}, got {}",
+            gate.actionable_queue.truncated_candidate_count
+        ));
+    }
+    let full_authority = packet.source_authority_snapshot(Some(requested_candidate_id));
+    let full_actionable = full_authority
+        .sources
+        .iter()
+        .find(|source| source.source_kind == "actionable_queue")
+        .and_then(|source| source.actionable_queue.as_ref())
+        .ok_or_else(|| format!("{context}: full source vector missing actionable extension"))?;
+    if full_actionable.candidate_ids != expected_serialized_ids
+        || full_actionable.truncated_candidate_count != expected_truncated
+    {
+        return Err(format!(
+            "{context}: full source vector lost bounded queue metadata: {full_actionable:?}"
+        ));
+    }
+    let expected_candidate_state = string_at(&fixture, "/expected/candidateState", context)?;
+    if gate.actionable_queue.candidate_state != expected_candidate_state {
+        return Err(format!(
+            "{context}: actionable candidateState expected {expected_candidate_state}, got {}",
+            gate.actionable_queue.candidate_state
+        ));
+    }
+
+    if gate.requested_candidate_id.as_deref() != Some(requested_candidate_id) {
+        return Err(format!(
+            "{context}: requestedCandidateId drifted: {:?}",
+            gate.requested_candidate_id
+        ));
+    }
+    let selected = gate
+        .selected_candidate
+        .as_ref()
+        .ok_or_else(|| format!("{context}: direct lookup must hydrate selectedCandidate"))?;
+    if selected.id != requested_candidate_id {
+        return Err(format!(
+            "{context}: selectedCandidate id expected {requested_candidate_id}, got {}",
+            selected.id
+        ));
+    }
+    let expected_decision = string_at(&fixture, "/expected/selectedCandidateDecision", context)?;
+    if selected.decision != expected_decision {
+        return Err(format!(
+            "{context}: selectedCandidate decision expected {expected_decision}, got {}",
+            selected.decision
+        ));
+    }
+    let expected_recommended_safe = bool_at(&fixture, "/expected/recommendedSafeToClaim", context)?;
+    if gate.recommended_safe_to_claim != Some(expected_recommended_safe) {
+        return Err(format!(
+            "{context}: requested candidate safety expected {expected_recommended_safe}, got {:?}",
+            gate.recommended_safe_to_claim
+        ));
+    }
+
+    let candidate_evidence = gate
+        .source_authority_snapshot
+        .candidate_evidence
+        .as_ref()
+        .ok_or_else(|| format!("{context}: sourceAuthoritySnapshot missing candidateEvidence"))?;
+    let expected_lookup = string_at(&fixture, "/expected/lookupOutcome", context)?;
+    if candidate_evidence.candidate_id != requested_candidate_id
+        || candidate_evidence.lookup_outcome != expected_lookup
+    {
+        return Err(format!(
+            "{context}: source-authority candidate lookup drifted: {candidate_evidence:?}"
+        ));
+    }
+    let expected_stale_fallback =
+        bool_at(&fixture, "/expected/candidateStaleFallbackPresent", context)?;
+    if candidate_evidence.stale_fallback_present != Some(expected_stale_fallback) {
+        return Err(format!(
+            "{context}: candidate staleFallbackPresent expected {expected_stale_fallback}, got {:?}",
+            candidate_evidence.stale_fallback_present
+        ));
+    }
+
+    let actual_overall = serde_json::to_value(gate.source_authority_snapshot.overall)
+        .map_err(|error| format!("{context}: serialize source-authority overall: {error}"))?;
+    let expected_overall = fixture
+        .pointer("/expected/sourceAuthorityOverall")
+        .ok_or_else(|| format!("{context}: missing expected sourceAuthorityOverall"))?;
+    if &actual_overall != expected_overall {
+        return Err(format!(
+            "{context}: source-authority overall drifted\nactual: {actual_overall:#}\nexpected: {expected_overall:#}"
+        ));
+    }
+
+    let actual_source_states = serde_json::to_value(&gate.source_authority_snapshot.source_states)
+        .map_err(|error| format!("{context}: serialize source states: {error}"))?;
+    let expected_source_states = fixture
+        .pointer("/expected/sourceAuthoritySourceStates")
+        .ok_or_else(|| format!("{context}: missing expected sourceAuthoritySourceStates"))?;
+    if &actual_source_states != expected_source_states {
+        return Err(format!(
+            "{context}: ordered source-authority states drifted\nactual: {actual_source_states:#}\nexpected: {expected_source_states:#}"
+        ));
+    }
+
+    let install_verdict = gate.source_authority.install_freshness_verdict;
+    let permitted_install_verdicts = string_array_at(
+        &fixture,
+        "/expected/installFreshnessAuthority/permittedVerdicts",
+        context,
+    )?;
+    if !permitted_install_verdicts
+        .iter()
+        .any(|verdict| verdict == install_verdict)
+    {
+        return Err(format!(
+            "{context}: integration-test install verdict {install_verdict} is outside the explicit host-dependent contract {permitted_install_verdicts:?}"
+        ));
+    }
+    let expected_install_authoritative = bool_at(
+        &fixture,
+        "/expected/installFreshnessAuthority/authoritative",
+        context,
+    )?;
+    if gate.source_authority.install_freshness_authoritative != Some(expected_install_authoritative)
+    {
+        return Err(format!(
+            "{context}: install freshness authority expected {expected_install_authoritative}, got {:?}",
+            gate.source_authority.install_freshness_authoritative
+        ));
+    }
+    let expected_install_repair = string_at(
+        &fixture,
+        "/expected/installFreshnessAuthority/repair",
+        context,
+    )?;
+    if gate.source_authority.install_freshness_repair != Some(expected_install_repair) {
+        return Err(format!(
+            "{context}: install freshness repair drifted: {:?}",
+            gate.source_authority.install_freshness_repair
+        ));
+    }
+
+    let expected_degraded_codes = string_array_at(&fixture, "/expected/degradedCodes", context)?;
+    if gate.degraded_codes != expected_degraded_codes {
+        return Err(format!(
+            "{context}: degradedCodes drifted\nactual: {:?}\nexpected: {expected_degraded_codes:?}",
+            gate.degraded_codes
+        ));
+    }
+
+    let expected_unsafe_reason_pointer =
+        format!("/expected/unsafeReasonsByInstallFreshnessVerdict/{install_verdict}");
+    let expected_unsafe_reasons =
+        string_array_at(&fixture, &expected_unsafe_reason_pointer, context)?;
+    if gate.unsafe_reasons != expected_unsafe_reasons {
+        return Err(format!(
+            "{context}: unsafeReasons drifted for install verdict {install_verdict}\nactual: {:?}\nexpected: {expected_unsafe_reasons:?}",
+            gate.unsafe_reasons
+        ));
+    }
+
+    let expected_verdict = string_at(&fixture, "/expected/integrationTestVerdict", context)?;
+    if gate.verdict != expected_verdict {
+        return Err(format!(
+            "{context}: integration-test install posture expected verdict {expected_verdict}, got {}",
+            gate.verdict
+        ));
+    }
+    let expected_safe = bool_at(&fixture, "/expected/safeToClaim", context)?;
+    if gate.safe_to_claim != expected_safe {
+        return Err(format!(
+            "{context}: safeToClaim expected {expected_safe}, got {}",
+            gate.safe_to_claim
+        ));
+    }
+    let expected_claim_action = bool_at(&fixture, "/expected/claimCommandActionPresent", context)?;
+    if gate.claim_command_action.is_some() != expected_claim_action {
+        return Err(format!(
+            "{context}: claimCommandAction presence expected {expected_claim_action}, got {:?}",
+            gate.claim_command_action
+        ));
+    }
+    let actual_recovery_actions = serde_json::to_value(&gate.recovery_actions)
+        .map_err(|error| format!("{context}: serialize recoveryActions: {error}"))?;
+    let expected_recovery_actions = fixture
+        .pointer("/expected/recoveryActions")
+        .ok_or_else(|| format!("{context}: missing expected recoveryActions"))?;
+    if &actual_recovery_actions != expected_recovery_actions {
+        return Err(format!(
+            "{context}: ordered recoveryActions drifted\nactual: {actual_recovery_actions:#}\nexpected: {expected_recovery_actions:#}"
+        ));
+    }
+    let forbidden_reason_prefixes =
+        string_array_at(&fixture, "/expected/forbiddenUnsafeReasonPrefixes", context)?;
+    for prefix in forbidden_reason_prefixes {
+        if gate
+            .unsafe_reasons
+            .iter()
+            .any(|reason| reason.starts_with(&prefix))
+        {
+            return Err(format!(
+                "{context}: hydrated candidate retained contradictory unsafe reason prefix {prefix}: {:?}",
+                gate.unsafe_reasons
+            ));
+        }
+    }
+
+    if !packet.mutation_policy.side_effect_free
+        || packet.mutation_policy.claims_beads
+        || packet.mutation_policy.reserves_files
+        || packet.mutation_policy.sends_agent_mail
+        || packet.mutation_policy.runs_cargo
+        || packet.mutation_policy.stages_git
+        || packet.mutation_policy.deletes_files
+    {
+        return Err(format!(
+            "{context}: requested-candidate collection must keep the packet read-only"
+        ));
+    }
     let rendered = serde_json::to_value(&gate)
         .map_err(|error| format!("{context}: serialize gate: {error}"))?;
     assert_no_forbidden_markers(&rendered, context)?;

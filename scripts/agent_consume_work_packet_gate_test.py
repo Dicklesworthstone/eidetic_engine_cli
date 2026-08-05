@@ -688,6 +688,10 @@ class ClaimGateConsumer(unittest.TestCase):
                     f"claim_gate_source_authority_snapshot_candidate_outcome:{outcome}",
                     decision["whyNotSafe"],
                 )
+                self.assertNotIn(
+                    "malformed_claim_gate_source_authority_snapshot_lookup_outcome",
+                    decision["whyNotSafe"],
+                )
 
         gate = safe_gate()
         gate["sourceAuthoritySnapshot"]["candidateEvidence"][
@@ -698,6 +702,51 @@ class ClaimGateConsumer(unittest.TestCase):
         self.assertIn(
             "claim_gate_source_authority_snapshot_candidate_stale",
             decision["whyNotSafe"],
+        )
+
+    def test_known_non_actionable_candidate_is_valid_but_not_safe(self):
+        gate = safe_gate()
+        gate["safeToClaim"] = False
+        gate["verdict"] = "blocked_by_dependency"
+        gate["selectedCandidate"]["decision"] = "blocked_by_dependency"
+        gate["recommendedAction"] = "inspect_dependency_blocker"
+        gate["recommendedSafeToClaim"] = False
+        gate["sourceAuthoritySnapshot"]["overall"]["verdict"] = (
+            "fail_closed_insufficient_authority"
+        )
+        gate["sourceAuthoritySnapshot"]["overall"]["failClosed"] = True
+        gate["sourceAuthoritySnapshot"]["candidateEvidence"]["lookupOutcome"] = (
+            "candidate_known_non_actionable"
+        )
+        gate["actionableQueue"]["rowCount"] = 0
+        gate["actionableQueue"]["candidateIds"] = []
+        gate["actionableQueue"]["candidateState"] = (
+            "candidate_absent_from_actionable"
+        )
+        gate["actionableQueue"]["exclusionAccounting"]["excludedBlockedCount"] = 1
+        gate["unsafeReasons"] = [
+            "candidate_decision:blocked_by_dependency",
+            "actionable_queue_candidate_absent:bd-safe.1",
+        ]
+        gate["claimCommandAction"] = None
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_source_authority_snapshot_candidate_outcome:"
+            "candidate_known_non_actionable",
+            decision["whyNotSafe"],
+        )
+        self.assertNotIn(
+            "malformed_claim_gate_source_authority_snapshot_lookup_outcome",
+            decision["whyNotSafe"],
+        )
+        self.assertFalse(
+            any(action["actionKind"] == "claim" for action in decision["argvActions"])
+        )
+        self.assertFalse(
+            any("candidate_not_found" in reason for reason in decision["whyNotSafe"])
         )
 
     def test_source_authority_snapshot_source_vector_fails_closed_on_drift(self):
@@ -1721,6 +1770,22 @@ class ClaimGateConsumer(unittest.TestCase):
         gate["verdict"] = "candidate_not_found"
         gate["selectedCandidate"] = None
         gate["requestedCandidateId"] = "bd-missing"
+        gate["recommendedSafeToClaim"] = False
+        gate["sourceAuthoritySnapshot"]["overall"]["verdict"] = (
+            "fail_closed_insufficient_authority"
+        )
+        gate["sourceAuthoritySnapshot"]["overall"]["failClosed"] = True
+        gate["sourceAuthoritySnapshot"]["candidateEvidence"]["candidateId"] = (
+            "bd-missing"
+        )
+        gate["sourceAuthoritySnapshot"]["candidateEvidence"]["lookupOutcome"] = (
+            "candidate_absent_confirmed"
+        )
+        gate["actionableQueue"]["rowCount"] = 0
+        gate["actionableQueue"]["candidateIds"] = []
+        gate["actionableQueue"]["candidateState"] = (
+            "candidate_absent_from_actionable"
+        )
         gate["unsafeReasons"] = ["candidate_not_found:bd-missing"]
         gate["claimCommandAction"] = None
 
@@ -1728,7 +1793,50 @@ class ClaimGateConsumer(unittest.TestCase):
         self.assertFalse(decision["safeToClaim"])
         self.assertEqual(decision["candidateId"], "bd-missing")
         self.assertIn("candidate_not_found:bd-missing", decision["whyNotSafe"])
+        self.assertNotIn(
+            "claim_gate_candidate_not_found_without_confirmed_absence",
+            decision["whyNotSafe"],
+        )
         self.assertFalse(any(a["actionKind"] == "claim" for a in decision["argvActions"]))
+
+    def test_candidate_not_found_rejects_non_absence_lookup_outcomes(self):
+        outcomes = consumer.SOURCE_AUTHORITY_CANDIDATE_OUTCOMES - {
+            "candidate_absent_confirmed"
+        }
+        for outcome in sorted(outcomes):
+            with self.subTest(outcome=outcome):
+                gate = safe_gate()
+                gate["safeToClaim"] = False
+                gate["verdict"] = "candidate_not_found"
+                gate["selectedCandidate"] = None
+                gate["requestedCandidateId"] = "bd-unresolved"
+                gate["recommendedSafeToClaim"] = False
+                gate["sourceAuthoritySnapshot"]["candidateEvidence"][
+                    "candidateId"
+                ] = "bd-unresolved"
+                gate["sourceAuthoritySnapshot"]["candidateEvidence"][
+                    "lookupOutcome"
+                ] = outcome
+                gate["unsafeReasons"] = [f"candidate_lookup_inconclusive:{outcome}"]
+                gate["claimCommandAction"] = None
+
+                decision = consumer.consume(envelope(gate))
+
+                self.assertFalse(decision["safeToClaim"])
+                self.assertIn(
+                    "claim_gate_candidate_not_found_without_confirmed_absence",
+                    decision["whyNotSafe"],
+                )
+                self.assertNotIn(
+                    "malformed_claim_gate_source_authority_snapshot_lookup_outcome",
+                    decision["whyNotSafe"],
+                )
+                self.assertFalse(
+                    any(
+                        action["actionKind"] == "claim"
+                        for action in decision["argvActions"]
+                    )
+                )
 
 
 class WorkPacketConsumer(unittest.TestCase):

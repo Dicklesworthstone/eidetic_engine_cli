@@ -931,6 +931,48 @@ fn source_authority_snapshot_contract_covers_source_state_taxonomy() -> TestResu
         ));
     }
 
+    let lookup_description = string_field(
+        &schema,
+        "/definitions/candidateEvidence/properties/lookupOutcome/description",
+        schema_case.id,
+    )?;
+    let claim_gate_case = schema_case_by_id("ee.swarm.work_packet.claim_gate.v1")?;
+    let claim_gate_schema = schema_doc(claim_gate_case)?;
+    let compact_lookup_pointer = "/definitions/sourceAuthoritySnapshot/properties/candidateEvidence/oneOf/1/properties/lookupOutcome";
+    let compact_lookup_outcomes = string_array_at(
+        &claim_gate_schema,
+        &format!("{compact_lookup_pointer}/enum"),
+        claim_gate_case.id,
+    )?;
+    if compact_lookup_outcomes != lookup_outcomes {
+        return Err(format!(
+            "{} compact candidate lookup outcomes drifted from {}\ncompact: {compact_lookup_outcomes:?}\ncanonical: {lookup_outcomes:?}",
+            claim_gate_case.id, schema_case.id
+        ));
+    }
+    let compact_lookup_description = string_field(
+        &claim_gate_schema,
+        &format!("{compact_lookup_pointer}/description"),
+        claim_gate_case.id,
+    )?;
+    if compact_lookup_description != lookup_description {
+        return Err(format!(
+            "{} compact candidate lookup description drifted from {}",
+            claim_gate_case.id, schema_case.id
+        ));
+    }
+    let gate_verdicts = string_array_at(
+        &claim_gate_schema,
+        "/definitions/gateVerdict/enum",
+        claim_gate_case.id,
+    )?;
+    if gate_verdicts
+        .iter()
+        .any(|verdict| verdict == "candidate_known_non_actionable")
+    {
+        return Err("candidate_known_non_actionable is lookup evidence, not a gate verdict".into());
+    }
+
     if string_field(&schema, "/properties/redactionStatus/const", schema_case.id)?
         != "paths_counts_subjects_only_no_content"
     {

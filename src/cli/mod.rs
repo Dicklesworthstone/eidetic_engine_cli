@@ -58852,8 +58852,12 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let runner = SystemSwarmBriefCommandRunner;
-    let packet =
-        collect_swarm_work_packet_with_verifier_evidence(&options, &runner, &verifier_evidence);
+    let packet = collect_swarm_work_packet_with_verifier_evidence(
+        &options,
+        &runner,
+        &verifier_evidence,
+        args.candidate.as_deref(),
+    );
     let unavailable_sources = swarm_work_packet_unavailable_sources(&packet);
     if args.require_sources && !unavailable_sources.is_empty() {
         let error = DomainError::UnsatisfiedDegradedMode {
@@ -58978,8 +58982,12 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
     let runner = SystemSwarmBriefCommandRunner;
-    let packet =
-        collect_swarm_work_packet_with_verifier_evidence(&options, &runner, &verifier_evidence);
+    let packet = collect_swarm_work_packet_with_verifier_evidence(
+        &options,
+        &runner,
+        &verifier_evidence,
+        args.candidate.as_deref(),
+    );
     let unavailable_sources = swarm_work_packet_unavailable_sources(&packet);
     if args.require_sources && !unavailable_sources.is_empty() {
         let error = DomainError::UnsatisfiedDegradedMode {

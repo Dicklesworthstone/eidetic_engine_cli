@@ -34,7 +34,7 @@ use crate::core::swarm_brief::{
     SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefFileSurfaceRisk,
     SwarmBriefHostProfileSummary, SwarmBriefReport, SwarmBriefSourceKind, SwarmBriefSourceStatus,
     SwarmBriefThreadSummary, agent_mail_snapshot_brief_retry_command_template,
-    agent_mail_snapshot_producer_command_template, collect_swarm_brief,
+    agent_mail_snapshot_producer_command_template, collect_swarm_brief, parse_beads_json,
 };
 use crate::core::verify_ledger::{RchVerifyRunView, list_rch_verify_blockers};
 use crate::db::DbConnection;
@@ -89,6 +89,11 @@ const ACTIONABLE_QUEUE_STATE_STALE_FALLBACK: &str = "stale_fallback";
 const ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT: &str = "br_retry_script";
 const ACTIONABLE_QUEUE_MODE_BRIEF_READY_FILTER: &str = "brief_ready_filter";
 const ACTIONABLE_QUEUE_MODE_SKIPPED_BY_FLAG: &str = "skipped_by_flag";
+const REQUESTED_CANDIDATE_LOOKUP_NOT_EVALUATED: &str = "not_evaluated";
+const REQUESTED_CANDIDATE_LOOKUP_PRESENT: &str = "present";
+const REQUESTED_CANDIDATE_LOOKUP_ABSENT_CONFIRMED: &str = "absent_confirmed";
+const REQUESTED_CANDIDATE_LOOKUP_TIMED_OUT: &str = "timed_out";
+const REQUESTED_CANDIDATE_LOOKUP_UNAVAILABLE: &str = "unavailable";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SwarmNextActionSnapshot {
@@ -699,6 +704,8 @@ pub struct SwarmWorkPacket {
     claim_gate_install_freshness: SwarmWorkPacketClaimGateInstallFreshness,
     #[serde(skip)]
     claim_gate_actionable_queue: SwarmWorkPacketActionableQueueEvidence,
+    #[serde(skip)]
+    claim_gate_requested_candidate: SwarmWorkPacketRequestedCandidateEvidence,
     #[serde(skip)]
     source_authority_command_timeout_ms: u64,
     /// Bounded, redaction-safe host-profile evidence (recommended/effective
@@ -1411,6 +1418,50 @@ pub struct SwarmWorkPacketClaimGateActionableQueue {
     pub contradiction_evidence: Vec<String>,
 }
 
+/// Hidden direct-Beads evidence for an explicitly requested candidate.
+/// The row is redacted and evaluated into the same candidate contract as
+/// packet candidates, but it is deliberately excluded from packet
+/// serialization and packet-id material so a claim-gate lookup cannot
+/// rewrite recommendation ranking or the bounded candidate projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SwarmWorkPacketRequestedCandidateEvidence {
+    candidate_id: Option<String>,
+    lookup_state: &'static str,
+    exit_class: &'static str,
+    structurally_actionable: Option<bool>,
+    candidate: Option<SwarmWorkPacketCandidate>,
+}
+
+impl SwarmWorkPacketRequestedCandidateEvidence {
+    const fn not_evaluated() -> Self {
+        Self {
+            candidate_id: None,
+            lookup_state: REQUESTED_CANDIDATE_LOOKUP_NOT_EVALUATED,
+            exit_class: REQUESTED_CANDIDATE_LOOKUP_NOT_EVALUATED,
+            structurally_actionable: None,
+            candidate: None,
+        }
+    }
+
+    fn applies_to(&self, candidate_id: &str) -> bool {
+        self.candidate_id.as_deref() == Some(candidate_id)
+            && self.lookup_state != REQUESTED_CANDIDATE_LOOKUP_NOT_EVALUATED
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RequestedCandidateLookup {
+    Present {
+        bead: SwarmBriefBead,
+        blocked_by: Vec<String>,
+    },
+    AbsentConfirmed,
+    TimedOut,
+    Unavailable {
+        exit_class: &'static str,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SwarmWorkPacketClaimGateInstallFreshness {
     verdict: &'static str,
@@ -1698,6 +1749,7 @@ pub fn collect_swarm_work_packet_with_verifier_evidence(
     options: &SwarmBriefCollectOptions,
     runner: &impl SwarmBriefCommandRunner,
     verifier_evidence: &[SwarmNextActionRecentFirstError],
+    requested_candidate_id: Option<&str>,
 ) -> SwarmWorkPacket {
     let brief = collect_swarm_brief(options, runner);
     let tracker_integrity = collect_work_packet_tracker_integrity(options, runner, &brief);
@@ -1706,14 +1758,29 @@ pub fn collect_swarm_work_packet_with_verifier_evidence(
     verifier_evidence.extend(collect_work_packet_ledger_verifier_evidence(
         &options.workspace,
     ));
-    let mut packet = SwarmWorkPacket::from_swarm_brief_with_verifier_evidence_and_tracker_integrity(
+    let snapshot = SwarmNextActionSnapshot::from_swarm_brief_with_verifier_evidence(
         &brief,
         &verifier_evidence,
+    );
+    let mut packet = SwarmWorkPacket::from_brief_and_next_action_with_tracker_integrity(
+        &brief,
+        &snapshot,
         tracker_integrity,
     );
     packet.source_authority_command_timeout_ms = options.command_timeout_ms;
     packet.apply_claim_gate_install_freshness(collect_work_packet_claim_gate_install_freshness());
     packet.apply_claim_gate_actionable_queue(actionable_queue);
+    if let Some(candidate_id) = requested_candidate_id {
+        let lookup = collect_requested_candidate_lookup(options, runner, candidate_id);
+        let evidence = work_packet_requested_candidate_evidence_from_lookup(
+            candidate_id,
+            lookup,
+            &brief,
+            &snapshot,
+            &packet,
+        );
+        packet.apply_claim_gate_requested_candidate(evidence);
+    }
     packet
 }
 
@@ -1724,8 +1791,12 @@ pub fn collect_source_authority_snapshot_for_work_packet(
     verifier_evidence: &[SwarmNextActionRecentFirstError],
     requested_candidate_id: Option<&str>,
 ) -> SwarmSourceAuthoritySnapshot {
-    let packet =
-        collect_swarm_work_packet_with_verifier_evidence(options, runner, verifier_evidence);
+    let packet = collect_swarm_work_packet_with_verifier_evidence(
+        options,
+        runner,
+        verifier_evidence,
+        requested_candidate_id,
+    );
     packet.source_authority_snapshot(requested_candidate_id)
 }
 
@@ -2038,6 +2109,148 @@ fn brief_bead_is_actionable(bead: &SwarmBriefBead) -> bool {
         && bead.issue_type.as_deref() != Some("epic")
 }
 
+/// Resolve one explicitly requested id from Beads without relying on the
+/// bounded packet recommendation set. The argument vector is fixed and
+/// shell-free; auto import/flush are disabled so this remains a read-only
+/// authority probe. Only the structured ISSUE_NOT_FOUND error confirms
+/// absence. Every other failed, malformed, or mismatched response stays
+/// unavailable or timed out and must fail closed.
+fn collect_requested_candidate_lookup(
+    options: &SwarmBriefCollectOptions,
+    runner: &impl SwarmBriefCommandRunner,
+    candidate_id: &str,
+) -> RequestedCandidateLookup {
+    if !options
+        .enabled_sources
+        .contains(&SwarmBriefSourceKind::Beads)
+    {
+        return RequestedCandidateLookup::Unavailable {
+            exit_class: "skipped_by_flag",
+        };
+    }
+    let outcome = runner.run(
+        "br",
+        &[
+            "show",
+            candidate_id,
+            "--json",
+            "--no-auto-import",
+            "--no-auto-flush",
+            "--allow-stale",
+        ],
+        &options.workspace,
+        options.command_timeout_ms,
+    );
+    match outcome {
+        Ok(output) => requested_candidate_lookup_from_stdout(&output.stdout, candidate_id),
+        Err(SwarmBriefCommandError::TimedOut { .. })
+        | Err(SwarmBriefCommandError::Failed {
+            status: Some(124), ..
+        }) => RequestedCandidateLookup::TimedOut,
+        Err(SwarmBriefCommandError::Failed { stdout, stderr, .. })
+            if requested_candidate_absence_error(&stdout, candidate_id)
+                || requested_candidate_absence_error(&stderr, candidate_id) =>
+        {
+            RequestedCandidateLookup::AbsentConfirmed
+        }
+        Err(SwarmBriefCommandError::Failed {
+            status: Some(127), ..
+        })
+        | Err(SwarmBriefCommandError::Unavailable(_)) => RequestedCandidateLookup::Unavailable {
+            exit_class: "spawn_failed",
+        },
+        Err(SwarmBriefCommandError::InvalidUtf8(_)) => RequestedCandidateLookup::Unavailable {
+            exit_class: "parse_failed",
+        },
+        Err(SwarmBriefCommandError::Failed { .. }) => RequestedCandidateLookup::Unavailable {
+            exit_class: "nonzero_exit",
+        },
+    }
+}
+
+fn requested_candidate_lookup_from_stdout(
+    stdout: &str,
+    candidate_id: &str,
+) -> RequestedCandidateLookup {
+    let Ok(mut beads) = parse_beads_json(stdout, "direct_lookup") else {
+        return RequestedCandidateLookup::Unavailable {
+            exit_class: "parse_failed",
+        };
+    };
+    if beads.len() != 1 || beads[0].id != candidate_id {
+        return RequestedCandidateLookup::Unavailable {
+            exit_class: "parse_failed",
+        };
+    }
+    let Some(blocked_by) = requested_candidate_blockers(stdout, candidate_id) else {
+        return RequestedCandidateLookup::Unavailable {
+            exit_class: "parse_failed",
+        };
+    };
+    RequestedCandidateLookup::Present {
+        bead: beads.remove(0),
+        blocked_by,
+    }
+}
+
+fn requested_candidate_absence_error(payload: &str, candidate_id: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(payload.trim()) else {
+        return false;
+    };
+    if value.pointer("/error/code").and_then(Value::as_str) != Some("ISSUE_NOT_FOUND") {
+        return false;
+    }
+    value
+        .pointer("/error/context/searched_id")
+        .and_then(Value::as_str)
+        == Some(candidate_id)
+}
+
+fn requested_candidate_blockers(stdout: &str, candidate_id: &str) -> Option<Vec<String>> {
+    let value = serde_json::from_str::<Value>(stdout.trim()).ok()?;
+    let rows = value
+        .as_array()
+        .or_else(|| value.get("items").and_then(Value::as_array))
+        .or_else(|| value.get("issues").and_then(Value::as_array))
+        .or_else(|| value.get("result").and_then(Value::as_array))?;
+    if rows.len() != 1 || rows[0].get("id").and_then(Value::as_str) != Some(candidate_id) {
+        return None;
+    }
+    let row = &rows[0];
+    let mut blocked_by = BTreeSet::new();
+    for key in ["blocked_by", "blockedBy"] {
+        if let Some(values) = row.get(key).and_then(Value::as_array) {
+            for value in values {
+                if let Some(id) = value
+                    .as_str()
+                    .or_else(|| value.get("id").and_then(Value::as_str))
+                {
+                    blocked_by.insert(id.to_owned());
+                }
+            }
+        }
+    }
+    if let Some(dependencies) = row.get("dependencies").and_then(Value::as_array) {
+        for dependency in dependencies {
+            let dependency_type = dependency
+                .get("dependency_type")
+                .or_else(|| dependency.get("dependencyType"))
+                .and_then(Value::as_str);
+            let active = dependency
+                .get("status")
+                .and_then(Value::as_str)
+                .is_none_or(|status| status != "closed");
+            if matches!(dependency_type, Some("blocks" | "blocked_by"))
+                && active
+                && let Some(id) = dependency.get("id").and_then(Value::as_str)
+            {
+                blocked_by.insert(id.to_owned());
+            }
+        }
+    }
+    Some(blocked_by.into_iter().collect())
+}
+
 fn actionable_queue_exclusion_accounting(
     brief: &SwarmBriefReport,
     queue_ids: &[String],
@@ -2073,12 +2286,21 @@ fn work_packet_source_authority_snapshot(
     requested_candidate_id: Option<&str>,
 ) -> SwarmSourceAuthoritySnapshot {
     let candidate = work_packet_claim_gate_candidate(packet, requested_candidate_id);
+    let lookup_candidate_id = requested_candidate_id.or_else(|| {
+        candidate
+            .map(|candidate| candidate.id.as_str())
+            .filter(|candidate_id| {
+                packet
+                    .claim_gate_requested_candidate
+                    .applies_to(candidate_id)
+            })
+    });
     let actionable_queue =
         work_packet_claim_gate_actionable_queue(packet, candidate, requested_candidate_id);
     let install_freshness = work_packet_claim_gate_install_freshness(packet);
     work_packet_source_authority_snapshot_from_gate(
         packet,
-        requested_candidate_id,
+        lookup_candidate_id,
         candidate,
         &actionable_queue,
         install_freshness,
@@ -2098,15 +2320,30 @@ fn work_packet_source_authority_snapshot_from_gate(
 
     let mut sources = source_authority_source_kinds()
         .iter()
-        .map(|kind| source_authority_record(packet, kind, actionable_queue, install_freshness))
+        .map(|kind| {
+            source_authority_record(
+                packet,
+                kind,
+                actionable_queue,
+                install_freshness,
+                requested_candidate_id,
+            )
+        })
         .collect::<Vec<_>>();
     sources.sort_by(|left, right| left.source_kind.cmp(right.source_kind));
 
-    let candidate_evidence =
-        candidate_id.map(|id| source_authority_candidate_evidence(packet, &actionable_queue, id));
-    let mut contradictions = source_authority_contradictions(&actionable_queue);
+    let candidate_evidence = candidate_id.map(|id| {
+        source_authority_candidate_evidence(
+            packet,
+            &actionable_queue,
+            id,
+            requested_candidate_id.is_some(),
+        )
+    });
+    let mut contradictions =
+        source_authority_contradictions(&actionable_queue, candidate_evidence.as_ref());
     contradictions.sort_by(|left, right| left.contradiction_id.cmp(&right.contradiction_id));
-    let mut degraded = source_authority_degraded(packet, &sources);
+    let mut degraded = source_authority_degraded(packet, &sources, candidate_evidence.as_ref());
     degraded.sort();
     degraded.dedup();
     let overall = source_authority_overall(&sources, candidate_evidence.as_ref(), &contradictions);
@@ -2165,10 +2402,18 @@ fn source_authority_record(
     source_kind: &'static str,
     actionable_queue: &SwarmWorkPacketClaimGateActionableQueue,
     install_freshness: SwarmWorkPacketClaimGateInstallFreshness,
+    candidate_id: Option<&str>,
 ) -> SwarmSourceAuthorityRecord {
     match source_kind {
         "actionable_queue" => {
             return source_authority_actionable_queue_record(packet, actionable_queue);
+        }
+        "beads" => {
+            if let Some(record) =
+                source_authority_requested_candidate_beads_record(packet, candidate_id)
+            {
+                return record;
+            }
         }
         "installed_binary" => return source_authority_install_record(packet, install_freshness),
         "workspace_hygiene" => return source_authority_workspace_hygiene_record(packet),
@@ -2239,6 +2484,91 @@ fn source_authority_record(
     )
 }
 
+fn source_authority_requested_candidate_beads_record(
+    packet: &SwarmWorkPacket,
+    candidate_id: Option<&str>,
+) -> Option<SwarmSourceAuthorityRecord> {
+    let evidence = &packet.claim_gate_requested_candidate;
+    let candidate_id = candidate_id?;
+    if !evidence.applies_to(candidate_id) {
+        return None;
+    }
+    let state = match evidence.lookup_state {
+        REQUESTED_CANDIDATE_LOOKUP_TIMED_OUT => "timed_out",
+        REQUESTED_CANDIDATE_LOOKUP_UNAVAILABLE => "unavailable",
+        _ if !packet.tracker_integrity.br_reads_authoritative => "stale_fallback",
+        REQUESTED_CANDIDATE_LOOKUP_PRESENT | REQUESTED_CANDIDATE_LOOKUP_ABSENT_CONFIRMED => "ready",
+        _ => "unavailable",
+    };
+    let timed_out = state == "timed_out";
+    let exit_class = match (state, evidence.exit_class) {
+        ("timed_out", _) => "timeout",
+        ("unavailable", "spawn_failed") => "spawn_failed",
+        ("unavailable", "parse_failed") => "parse_failed",
+        ("unavailable", _) => "unknown",
+        _ => "ok",
+    };
+    let display_command =
+        format!("br show {candidate_id} --json --no-auto-import --no-auto-flush --allow-stale");
+    Some(source_authority_record_with(
+        packet,
+        "beads",
+        state,
+        state == "ready",
+        SwarmSourceAuthorityFreshness {
+            captured_at: None,
+            age_ms: (state == "ready").then_some(0),
+            stale_after_ms: Some(300_000),
+            freshness_state: if state == "ready" { "fresh" } else { "unknown" },
+        },
+        SwarmSourceAuthorityBudget {
+            command_budget_ms: Some(packet.source_authority_command_timeout_ms),
+            elapsed_ms: timed_out.then_some(packet.source_authority_command_timeout_ms),
+            timed_out,
+            retries_used: 0,
+            retry_budget: 0,
+        },
+        SwarmSourceAuthorityExit {
+            exit_class,
+            exit_code: timed_out.then_some(124),
+        },
+        SwarmSourceAuthorityPartialData {
+            available: matches!(state, "ready" | "stale_fallback"),
+            dropped_sections: (!matches!(state, "ready" | "stale_fallback"))
+                .then(|| vec!["candidate_row".to_owned()])
+                .unwrap_or_default(),
+            reason: (state != "ready").then(|| {
+                "direct candidate lookup did not provide fresh authoritative row evidence"
+                    .to_owned()
+            }),
+        },
+        SwarmSourceAuthorityFallback {
+            active: state == "stale_fallback",
+            fallback_kind: (state == "stale_fallback").then_some("stale_safe_snapshot"),
+            fallback_age_ms: None,
+        },
+        SwarmSourceAuthorityRepair {
+            guidance: (state != "ready").then(|| {
+                "Retry the bounded read-only candidate lookup; only a structured exact-id not-found answer confirms absence."
+                    .to_owned()
+            }),
+            command: (state != "ready").then_some(display_command),
+            safety: "read_only_probe",
+        },
+        match state {
+            "ready" => "direct Beads candidate lookup answered authoritatively".to_owned(),
+            "timed_out" => {
+                "direct Beads candidate lookup timed out; absence is not confirmed".to_owned()
+            }
+            "stale_fallback" => {
+                "direct Beads candidate lookup is stale-safe fallback only".to_owned()
+            }
+            _ => "direct Beads candidate lookup was unavailable or malformed".to_owned(),
+        },
+        None,
+    ))
+}
+
 fn source_authority_actionable_queue_record(
     packet: &SwarmWorkPacket,
     actionable_queue: &SwarmWorkPacketClaimGateActionableQueue,
@@ -2251,10 +2581,11 @@ fn source_authority_actionable_queue_record(
         _ => "unavailable",
     };
     let mut candidate_ids = actionable_queue.candidate_ids.clone();
-    let truncated_candidate_count = candidate_ids
-        .len()
-        .saturating_sub(ACTIONABLE_QUEUE_MAX_CANDIDATE_IDS)
-        as u64;
+    // `actionable_queue.candidate_ids` is already the bounded claim-gate
+    // projection. Preserve the truncation count computed from the raw queue;
+    // recomputing it from this vector would collapse every non-zero count to
+    // zero in the source-authority snapshot.
+    let truncated_candidate_count = actionable_queue.truncated_candidate_count;
     candidate_ids.truncate(ACTIONABLE_QUEUE_MAX_CANDIDATE_IDS);
     let timed_out = state == "timed_out";
     let partial_data = SwarmSourceAuthorityPartialData {
@@ -2673,51 +3004,178 @@ fn source_authority_candidate_evidence(
     packet: &SwarmWorkPacket,
     actionable_queue: &SwarmWorkPacketClaimGateActionableQueue,
     candidate_id: &str,
+    explicitly_requested: bool,
 ) -> SwarmSourceAuthorityCandidateEvidence {
-    let fallback_present = packet
+    let direct_evidence = &packet.claim_gate_requested_candidate;
+    let direct_applies = explicitly_requested && direct_evidence.applies_to(candidate_id);
+    let direct_present =
+        direct_applies && direct_evidence.lookup_state == REQUESTED_CANDIDATE_LOOKUP_PRESENT;
+    let packet_beads_fallback_present = packet
         .candidates
         .iter()
         .any(|candidate| candidate.id == candidate_id && candidate.source == "beads_ready");
-    let candidate_present_in_queue = actionable_queue
+    let candidate_present_in_queue =
+        actionable_queue.candidate_state == "candidate_present_actionable";
+    let candidate_listed_in_queue = packet
+        .claim_gate_actionable_queue
         .candidate_ids
         .iter()
         .any(|id| id == candidate_id);
     let mut present_in = Vec::new();
     let mut absent_from = Vec::new();
     let mut unavailable_in = Vec::new();
-    let lookup_outcome = match actionable_queue.candidate_state {
-        "candidate_present_actionable" if actionable_queue.authoritative => {
-            present_in.push("actionable_queue".to_owned());
-            "candidate_present"
-        }
-        "candidate_present_actionable" => "candidate_stale_fallback_only",
-        "candidate_absent_from_actionable" => {
-            absent_from.push("actionable_queue".to_owned());
-            "candidate_absent_confirmed"
-        }
-        "actionable_queue_timed_out" => {
-            unavailable_in.push("actionable_queue".to_owned());
-            "candidate_lookup_timed_out"
-        }
-        "actionable_queue_stale_fallback" => {
-            if candidate_present_in_queue || fallback_present {
-                "candidate_stale_fallback_only"
-            } else {
+    let packet_candidate_present = packet
+        .candidates
+        .iter()
+        .any(|candidate| candidate.id == candidate_id);
+    let direct_lookup_missing = explicitly_requested
+        && !direct_evidence.applies_to(candidate_id)
+        && !packet_candidate_present;
+    let lookup_outcome = if direct_lookup_missing {
+        unavailable_in.push("beads".to_owned());
+        "candidate_lookup_unavailable"
+    } else {
+        work_packet_requested_candidate_lookup_outcome(
+            packet,
+            candidate_id,
+            actionable_queue,
+            explicitly_requested,
+        )
+        .unwrap_or_else(|| match actionable_queue.candidate_state {
+            "candidate_present_actionable" if actionable_queue.authoritative => {
+                present_in.push("actionable_queue".to_owned());
+                "candidate_present"
+            }
+            "candidate_present_actionable" => "candidate_stale_fallback_only",
+            "candidate_absent_from_actionable" => {
+                absent_from.push("actionable_queue".to_owned());
+                "candidate_absent_confirmed"
+            }
+            "actionable_queue_timed_out" => {
+                unavailable_in.push("actionable_queue".to_owned());
+                "candidate_lookup_timed_out"
+            }
+            "actionable_queue_stale_fallback" => {
+                if candidate_listed_in_queue || packet_beads_fallback_present || direct_present {
+                    "candidate_stale_fallback_only"
+                } else {
+                    unavailable_in.push("actionable_queue".to_owned());
+                    "candidate_lookup_unavailable"
+                }
+            }
+            "actionable_queue_unavailable" => {
                 unavailable_in.push("actionable_queue".to_owned());
                 "candidate_lookup_unavailable"
             }
-        }
-        "actionable_queue_unavailable" => {
-            unavailable_in.push("actionable_queue".to_owned());
-            "candidate_lookup_unavailable"
-        }
-        _ if actionable_queue.bv_advisory_contradiction => "candidate_contradicted",
-        _ => "candidate_lookup_unavailable",
+            _ if actionable_queue.bv_advisory_contradiction => "candidate_contradicted",
+            _ => "candidate_lookup_unavailable",
+        })
     };
-    let stale_present = matches!(
-        lookup_outcome,
-        "candidate_lookup_timed_out" | "candidate_stale_fallback_only"
-    ) && fallback_present;
+    if direct_applies {
+        match lookup_outcome {
+            "candidate_present" => {
+                present_in.extend(["actionable_queue".to_owned(), "beads".to_owned()]);
+            }
+            "candidate_absent_confirmed" => {
+                absent_from.extend(["actionable_queue".to_owned(), "beads".to_owned()]);
+            }
+            "candidate_known_non_actionable" => {
+                present_in.push("beads".to_owned());
+                absent_from.push("actionable_queue".to_owned());
+            }
+            "candidate_lookup_timed_out"
+            | "candidate_lookup_unavailable"
+            | "candidate_stale_fallback_only" => {
+                match direct_evidence.lookup_state {
+                    REQUESTED_CANDIDATE_LOOKUP_PRESENT => {
+                        present_in.push("beads".to_owned());
+                    }
+                    REQUESTED_CANDIDATE_LOOKUP_ABSENT_CONFIRMED => {
+                        absent_from.push("beads".to_owned());
+                    }
+                    REQUESTED_CANDIDATE_LOOKUP_TIMED_OUT
+                    | REQUESTED_CANDIDATE_LOOKUP_UNAVAILABLE => {
+                        unavailable_in.push("beads".to_owned());
+                    }
+                    _ => {}
+                }
+                match actionable_queue.queue_state {
+                    ACTIONABLE_QUEUE_STATE_READY if candidate_present_in_queue => {
+                        present_in.push("actionable_queue".to_owned());
+                    }
+                    ACTIONABLE_QUEUE_STATE_READY => {
+                        absent_from.push("actionable_queue".to_owned());
+                    }
+                    ACTIONABLE_QUEUE_STATE_TIMED_OUT | ACTIONABLE_QUEUE_STATE_UNAVAILABLE => {
+                        unavailable_in.push("actionable_queue".to_owned());
+                    }
+                    _ => {}
+                }
+            }
+            "candidate_contradicted" => {
+                if direct_present {
+                    present_in.push("beads".to_owned());
+                } else if direct_evidence.lookup_state
+                    == REQUESTED_CANDIDATE_LOOKUP_ABSENT_CONFIRMED
+                {
+                    absent_from.push("beads".to_owned());
+                }
+                if candidate_present_in_queue {
+                    present_in.push("actionable_queue".to_owned());
+                } else if actionable_queue.queue_state == ACTIONABLE_QUEUE_STATE_READY {
+                    absent_from.push("actionable_queue".to_owned());
+                }
+            }
+            _ => {}
+        }
+    } else if packet_candidate_present {
+        match lookup_outcome {
+            "candidate_present" => present_in.push("actionable_queue".to_owned()),
+            "candidate_known_non_actionable" => {
+                present_in.push("beads".to_owned());
+                absent_from.push("actionable_queue".to_owned());
+            }
+            "candidate_lookup_timed_out" | "candidate_lookup_unavailable" => {
+                if packet_beads_fallback_present {
+                    present_in.push("beads".to_owned());
+                }
+                unavailable_in.push("actionable_queue".to_owned());
+            }
+            "candidate_stale_fallback_only" => {}
+            "candidate_contradicted" => {
+                present_in.push("beads".to_owned());
+                absent_from.push("actionable_queue".to_owned());
+            }
+            _ => {}
+        }
+    }
+    present_in.sort();
+    present_in.dedup();
+    absent_from.sort();
+    absent_from.dedup();
+    unavailable_in.sort();
+    unavailable_in.dedup();
+    let stale_source_kind = if actionable_queue.queue_state == ACTIONABLE_QUEUE_STATE_STALE_FALLBACK
+        && candidate_listed_in_queue
+    {
+        Some("actionable_queue")
+    } else if !packet.tracker_integrity.br_reads_authoritative
+        && (direct_present || packet_beads_fallback_present)
+    {
+        Some("beads")
+    } else if packet_beads_fallback_present
+        && !direct_present
+        && matches!(
+            lookup_outcome,
+            "candidate_lookup_timed_out"
+                | "candidate_lookup_unavailable"
+                | "candidate_stale_fallback_only"
+        )
+    {
+        Some("beads")
+    } else {
+        None
+    };
     SwarmSourceAuthorityCandidateEvidence {
         candidate_id: candidate_id.to_owned(),
         lookup_outcome,
@@ -2725,8 +3183,8 @@ fn source_authority_candidate_evidence(
         absent_from,
         unavailable_in,
         stale_fallback_presence: SwarmSourceAuthorityStaleFallbackPresence {
-            present: Some(stale_present),
-            source_kind: stale_present.then_some("beads"),
+            present: Some(stale_source_kind.is_some()),
+            source_kind: stale_source_kind,
             fallback_age_ms: None,
         },
         explanation: source_authority_candidate_explanation(lookup_outcome, candidate_id),
@@ -2736,16 +3194,19 @@ fn source_authority_candidate_evidence(
 fn source_authority_candidate_explanation(outcome: &str, candidate_id: &str) -> String {
     match outcome {
         "candidate_present" => {
-            format!("{candidate_id} is present in authoritative actionable-queue evidence.")
+            format!("{candidate_id} is present in authoritative candidate evidence.")
         }
         "candidate_absent_confirmed" => format!(
-            "{candidate_id} is absent from the authoritative actionable queue; absence is confirmed."
+            "{candidate_id} is absent from authoritative direct Beads and actionable-queue evidence; absence is confirmed."
+        ),
+        "candidate_known_non_actionable" => format!(
+            "{candidate_id} exists in Beads but is excluded by the authoritative actionable queue under the safe claimable-leaf contract."
         ),
         "candidate_lookup_timed_out" => format!(
             "{candidate_id} lookup timed out; absence is not confirmed and claims must fail closed."
         ),
         "candidate_stale_fallback_only" => format!(
-            "{candidate_id} appears only in stale-safe fallback evidence; claims must fail closed."
+            "{candidate_id} may have live identity evidence, but required claimability evidence is stale-safe fallback only; claims must fail closed."
         ),
         "candidate_contradicted" => format!(
             "{candidate_id} has contradictory source evidence; prefer fail-closed coordination."
@@ -2756,23 +3217,41 @@ fn source_authority_candidate_explanation(outcome: &str, candidate_id: &str) -> 
 
 fn source_authority_contradictions(
     actionable_queue: &SwarmWorkPacketClaimGateActionableQueue,
+    candidate_evidence: Option<&SwarmSourceAuthorityCandidateEvidence>,
 ) -> Vec<SwarmSourceAuthorityContradiction> {
-    if !actionable_queue.bv_advisory_contradiction
-        && actionable_queue.contradiction_evidence.is_empty()
+    let mut contradictions = Vec::new();
+    if candidate_evidence
+        .is_some_and(|evidence| evidence.lookup_outcome == "candidate_contradicted")
     {
-        return Vec::new();
+        let candidate_id = candidate_evidence
+            .map(|evidence| evidence.candidate_id.as_str())
+            .unwrap_or_default();
+        let digest = blake3::hash(candidate_id.as_bytes()).to_hex().to_string();
+        contradictions.push(SwarmSourceAuthorityContradiction {
+            contradiction_id: format!("ctr-{}", &digest[..8]),
+            source_a: "beads",
+            source_b: "actionable_queue",
+            field: "candidate_presence",
+            classification: "candidate_presence_conflict",
+            resolution: "prefer_fail_closed",
+        });
     }
-    let digest = blake3::hash(actionable_queue.contradiction_evidence.join("|").as_bytes())
-        .to_hex()
-        .to_string();
-    vec![SwarmSourceAuthorityContradiction {
-        contradiction_id: format!("ctr-{}", &digest[..8]),
-        source_a: "bv",
-        source_b: "actionable_queue",
-        field: "candidate_presence",
-        classification: "candidate_presence_conflict",
-        resolution: "prefer_fail_closed",
-    }]
+    if actionable_queue.bv_advisory_contradiction
+        || !actionable_queue.contradiction_evidence.is_empty()
+    {
+        let digest = blake3::hash(actionable_queue.contradiction_evidence.join("|").as_bytes())
+            .to_hex()
+            .to_string();
+        contradictions.push(SwarmSourceAuthorityContradiction {
+            contradiction_id: format!("ctr-{}", &digest[..8]),
+            source_a: "bv",
+            source_b: "actionable_queue",
+            field: "candidate_presence",
+            classification: "candidate_presence_conflict",
+            resolution: "prefer_fail_closed",
+        });
+    }
+    contradictions
 }
 
 fn source_authority_overall(
@@ -2812,7 +3291,8 @@ fn source_authority_overall(
     let candidate_blocks = candidate_evidence.is_some_and(|evidence| {
         matches!(
             evidence.lookup_outcome,
-            "candidate_lookup_unavailable"
+            "candidate_known_non_actionable"
+                | "candidate_lookup_unavailable"
                 | "candidate_lookup_timed_out"
                 | "candidate_stale_fallback_only"
                 | "candidate_contradicted"
@@ -2841,6 +3321,7 @@ fn source_authority_overall(
 fn source_authority_degraded(
     packet: &SwarmWorkPacket,
     sources: &[SwarmSourceAuthorityRecord],
+    candidate_evidence: Option<&SwarmSourceAuthorityCandidateEvidence>,
 ) -> Vec<SwarmSourceAuthorityDegradation> {
     let mut degraded = packet
         .degraded
@@ -2869,6 +3350,21 @@ fn source_authority_degraded(
             source_kind: Some(source.source_kind.to_owned()),
         })
     }));
+    if let Some(candidate) = candidate_evidence
+        .filter(|candidate| candidate.lookup_outcome == "candidate_known_non_actionable")
+    {
+        degraded.push(SwarmSourceAuthorityDegradation {
+            code: "source_authority_candidate_known_non_actionable".to_owned(),
+            severity: "warning",
+            message: "Candidate exists in Beads but is excluded by the safe actionable queue; do not report candidate_not_found."
+                .to_owned(),
+            repair: Some(
+                requested_candidate_lookup_command_action(&candidate.candidate_id)
+                    .display_command,
+            ),
+            source_kind: Some("actionable_queue".to_owned()),
+        });
+    }
     degraded
 }
 
@@ -3092,6 +3588,8 @@ impl SwarmWorkPacket {
             degraded,
             claim_gate_install_freshness: SwarmWorkPacketClaimGateInstallFreshness::not_evaluated(),
             claim_gate_actionable_queue: SwarmWorkPacketActionableQueueEvidence::not_evaluated(),
+            claim_gate_requested_candidate:
+                SwarmWorkPacketRequestedCandidateEvidence::not_evaluated(),
             source_authority_command_timeout_ms: DEFAULT_SWARM_SOURCE_COMMAND_TIMEOUT_MS,
             host_profile_admission,
         };
@@ -3109,6 +3607,13 @@ impl SwarmWorkPacket {
         evidence: SwarmWorkPacketActionableQueueEvidence,
     ) {
         self.claim_gate_actionable_queue = evidence;
+    }
+
+    fn apply_claim_gate_requested_candidate(
+        &mut self,
+        evidence: SwarmWorkPacketRequestedCandidateEvidence,
+    ) {
+        self.claim_gate_requested_candidate = evidence;
     }
 
     /// Build the read-only source-authority snapshot consumed by later
@@ -3141,15 +3646,32 @@ impl SwarmWorkPacket {
     #[must_use]
     pub fn claim_gate(&self, requested_candidate_id: Option<&str>) -> SwarmWorkPacketClaimGate {
         let candidate = work_packet_claim_gate_candidate(self, requested_candidate_id);
+        let lookup_candidate_id = requested_candidate_id.or_else(|| {
+            candidate
+                .map(|candidate| candidate.id.as_str())
+                .filter(|candidate_id| self.claim_gate_requested_candidate.applies_to(candidate_id))
+        });
         let actionable_queue =
             work_packet_claim_gate_actionable_queue(self, candidate, requested_candidate_id);
+        let requested_lookup_outcome = lookup_candidate_id.and_then(|candidate_id| {
+            work_packet_requested_candidate_lookup_outcome(
+                self,
+                candidate_id,
+                &actionable_queue,
+                true,
+            )
+        });
         let recommended_safe_to_claim = candidate.map(|candidate| {
-            work_packet_claim_gate_candidate_recommended_safe_to_claim(self, candidate)
+            work_packet_claim_gate_candidate_recommended_safe_to_claim(
+                self,
+                candidate,
+                requested_candidate_id.is_some(),
+            ) && requested_lookup_outcome.is_none_or(|outcome| outcome == "candidate_present")
         });
         let install_freshness = work_packet_claim_gate_install_freshness(self);
         let source_authority_snapshot = work_packet_source_authority_snapshot_from_gate(
             self,
-            requested_candidate_id,
+            lookup_candidate_id,
             candidate,
             &actionable_queue,
             install_freshness,
@@ -3171,6 +3693,7 @@ impl SwarmWorkPacket {
             requested_candidate_id,
             candidate,
             install_freshness,
+            requested_lookup_outcome,
         );
         let safe_to_claim = verdict == "safe_to_claim" && recommended_safe_to_claim == Some(true);
         let actions = work_packet_suggested_command_actions(
@@ -3200,6 +3723,7 @@ impl SwarmWorkPacket {
         let mut unsafe_reasons = work_packet_claim_gate_unsafe_reasons(
             self,
             requested_candidate_id,
+            lookup_candidate_id,
             candidate,
             verdict,
             &actionable_queue,
@@ -3227,15 +3751,32 @@ impl SwarmWorkPacket {
         source_refs.dedup();
         degraded_codes.sort();
         degraded_codes.dedup();
-        let selected_candidate = candidate.map(SwarmWorkPacketClaimGateCandidate::from);
+        let selected_candidate = (requested_lookup_outcome != Some("candidate_absent_confirmed"))
+            .then(|| candidate.map(SwarmWorkPacketClaimGateCandidate::from))
+            .flatten();
         let gate_id = work_packet_claim_gate_id(
             &self.packet_id,
             requested_candidate_id,
             verdict,
             safe_to_claim,
         );
-        let recovery_actions =
-            work_packet_claim_gate_recovery_actions(install_freshness, &self.rch_proof_posture);
+        let recovery_actions = work_packet_claim_gate_recovery_actions(
+            install_freshness,
+            &self.rch_proof_posture,
+            lookup_candidate_id,
+            requested_lookup_outcome,
+            lookup_candidate_id.and_then(|candidate_id| {
+                if self.claim_gate_requested_candidate.applies_to(candidate_id) {
+                    Some(self.claim_gate_requested_candidate.lookup_state)
+                } else {
+                    self.candidates
+                        .iter()
+                        .any(|candidate| candidate.id == candidate_id)
+                        .then_some(REQUESTED_CANDIDATE_LOOKUP_PRESENT)
+                }
+            }),
+            actionable_queue.queue_state,
+        );
 
         SwarmWorkPacketClaimGate {
             schema: SWARM_WORK_PACKET_CLAIM_GATE_SCHEMA_V1,
@@ -4169,12 +4710,29 @@ fn work_packet_claim_gate_candidate<'a>(
     requested_candidate_id: Option<&str>,
 ) -> Option<&'a SwarmWorkPacketCandidate> {
     if let Some(candidate_id) = requested_candidate_id {
+        if packet
+            .claim_gate_requested_candidate
+            .applies_to(candidate_id)
+        {
+            if let Some(candidate) = packet.claim_gate_requested_candidate.candidate.as_ref() {
+                return Some(candidate);
+            }
+            if packet.claim_gate_requested_candidate.lookup_state
+                == REQUESTED_CANDIDATE_LOOKUP_ABSENT_CONFIRMED
+            {
+                // An authoritative exact-id absence answer supersedes a stale
+                // candidate captured in the earlier bounded packet snapshot.
+                // Timeout/unavailable evidence may still fall back to that
+                // row for identity, but confirmed absence must select no row.
+                return None;
+            }
+        }
         return packet
             .candidates
             .iter()
             .find(|candidate| candidate.id == candidate_id);
     }
-    packet
+    let packet_candidate = packet
         .recommended_action
         .candidate_id
         .as_deref()
@@ -4184,16 +4742,28 @@ fn work_packet_claim_gate_candidate<'a>(
                 .iter()
                 .find(|candidate| candidate.id == candidate_id)
         })
-        .or_else(|| packet.candidates.first())
+        .or_else(|| packet.candidates.first());
+    if let Some(packet_candidate) = packet_candidate
+        && packet
+            .claim_gate_requested_candidate
+            .applies_to(&packet_candidate.id)
+        && let Some(hydrated_candidate) = packet.claim_gate_requested_candidate.candidate.as_ref()
+    {
+        return Some(hydrated_candidate);
+    }
+    packet_candidate
 }
 
 fn work_packet_claim_gate_candidate_recommended_safe_to_claim(
     packet: &SwarmWorkPacket,
     candidate: &SwarmWorkPacketCandidate,
+    explicitly_requested: bool,
 ) -> bool {
     candidate.decision == "safe_to_claim"
-        && packet.recommended_action.safe_to_claim == Some(true)
-        && packet.recommended_action.candidate_id.as_deref() == Some(candidate.id.as_str())
+        && (explicitly_requested
+            || (packet.recommended_action.safe_to_claim == Some(true)
+                && packet.recommended_action.candidate_id.as_deref()
+                    == Some(candidate.id.as_str())))
         && packet.tracker_integrity.br_reads_authoritative
         && !agent_mail_blocks_claim(&packet.coordination.agent_mail)
         && work_packet_rch_allows_claim(&packet.rch_proof_posture)
@@ -4248,10 +4818,11 @@ fn work_packet_claim_gate_verdict(
     requested_candidate_id: Option<&str>,
     candidate: Option<&SwarmWorkPacketCandidate>,
     install_freshness: SwarmWorkPacketClaimGateInstallFreshness,
+    requested_lookup_outcome: Option<&str>,
 ) -> &'static str {
     let Some(candidate) = candidate else {
         return if requested_candidate_id.is_some() {
-            if packet.tracker_integrity.br_reads_authoritative {
+            if requested_lookup_outcome == Some("candidate_absent_confirmed") {
                 "candidate_not_found"
             } else {
                 "external_state_required"
@@ -4269,6 +4840,9 @@ fn work_packet_claim_gate_verdict(
     if candidate.decision != "safe_to_claim" {
         return candidate.decision;
     }
+    if requested_lookup_outcome.is_some_and(|outcome| outcome != "candidate_present") {
+        return "external_state_required";
+    }
     if !packet.tracker_integrity.br_reads_authoritative {
         return "external_state_required";
     }
@@ -4284,7 +4858,11 @@ fn work_packet_claim_gate_verdict(
     if work_packet_has_coordination_degradation(packet) {
         return "coordinate_first";
     }
-    if !work_packet_claim_gate_candidate_recommended_safe_to_claim(packet, candidate) {
+    if !work_packet_claim_gate_candidate_recommended_safe_to_claim(
+        packet,
+        candidate,
+        requested_candidate_id.is_some(),
+    ) {
         return "coordinate_first";
     }
     "safe_to_claim"
@@ -4293,6 +4871,7 @@ fn work_packet_claim_gate_verdict(
 fn work_packet_claim_gate_unsafe_reasons(
     packet: &SwarmWorkPacket,
     requested_candidate_id: Option<&str>,
+    lookup_candidate_id: Option<&str>,
     candidate: Option<&SwarmWorkPacketCandidate>,
     verdict: &str,
     actionable_queue: &SwarmWorkPacketClaimGateActionableQueue,
@@ -4300,6 +4879,9 @@ fn work_packet_claim_gate_unsafe_reasons(
     let mut reasons = candidate
         .map(|candidate| candidate.unsafe_reasons.clone())
         .unwrap_or_default();
+    let requested_lookup_outcome = lookup_candidate_id.and_then(|candidate_id| {
+        work_packet_requested_candidate_lookup_outcome(packet, candidate_id, actionable_queue, true)
+    });
     let queue_candidate_id = candidate
         .map(|candidate| candidate.id.as_str())
         .or(requested_candidate_id)
@@ -4324,19 +4906,53 @@ fn work_packet_claim_gate_unsafe_reasons(
         }
         None => {
             if let Some(candidate_id) = requested_candidate_id {
-                if packet.tracker_integrity.br_reads_authoritative {
-                    reasons.push(format!("candidate_not_found:{candidate_id}"));
-                } else {
-                    reasons.push(format!(
-                        "candidate_unresolved_due_to_tracker_state:{}:{candidate_id}",
-                        packet.tracker_integrity.tracker_authority_state.label()
-                    ));
+                match requested_lookup_outcome {
+                    Some("candidate_absent_confirmed") => {
+                        reasons.push(format!("candidate_not_found:{candidate_id}"));
+                    }
+                    Some(outcome) => {
+                        reasons.push(format!("candidate_lookup_outcome:{outcome}:{candidate_id}"));
+                    }
+                    None => {
+                        reasons.push(format!("candidate_lookup_not_evaluated:{candidate_id}"));
+                        if !packet.tracker_integrity.br_reads_authoritative {
+                            reasons.push(format!(
+                                "candidate_unresolved_due_to_tracker_state:{}:{candidate_id}",
+                                packet.tracker_integrity.tracker_authority_state.label()
+                            ));
+                        }
+                    }
                 }
             } else {
                 reasons.push("no_candidate_available".to_owned());
             }
         }
         _ => {}
+    }
+    if candidate.is_some()
+        && let (Some(candidate_id), Some(outcome)) = (lookup_candidate_id, requested_lookup_outcome)
+        && outcome != "candidate_present"
+    {
+        reasons.push(format!("candidate_lookup_outcome:{outcome}:{candidate_id}"));
+    }
+    if let Some(candidate_id) = lookup_candidate_id
+        && packet
+            .claim_gate_requested_candidate
+            .applies_to(candidate_id)
+        && requested_lookup_outcome.is_some_and(|outcome| {
+            matches!(
+                outcome,
+                "candidate_lookup_unavailable"
+                    | "candidate_lookup_timed_out"
+                    | "candidate_stale_fallback_only"
+                    | "candidate_contradicted"
+            )
+        })
+    {
+        reasons.push(format!(
+            "candidate_lookup_exit_class:{}",
+            packet.claim_gate_requested_candidate.exit_class
+        ));
     }
     if !packet.tracker_integrity.br_reads_authoritative {
         reasons.push(format!(
@@ -4370,22 +4986,24 @@ fn work_packet_claim_gate_unsafe_reasons(
             .into_iter()
             .map(|code| format!("toolchain_authority:{code}")),
     );
-    if packet.recommended_action.safe_to_claim != Some(true) {
-        reasons.push(format!(
-            "packet_recommendation_not_claim_safe:{}",
-            packet.recommended_action.action
-        ));
-    }
-    if let Some(candidate) = candidate {
-        match packet.recommended_action.candidate_id.as_deref() {
-            Some(recommended) if recommended != candidate.id => {
-                reasons.push(format!(
-                    "packet_recommendation_candidate_mismatch:{recommended}:{}",
-                    candidate.id
-                ));
+    if requested_candidate_id.is_none() {
+        if packet.recommended_action.safe_to_claim != Some(true) {
+            reasons.push(format!(
+                "packet_recommendation_not_claim_safe:{}",
+                packet.recommended_action.action
+            ));
+        }
+        if let Some(candidate) = candidate {
+            match packet.recommended_action.candidate_id.as_deref() {
+                Some(recommended) if recommended != candidate.id => {
+                    reasons.push(format!(
+                        "packet_recommendation_candidate_mismatch:{recommended}:{}",
+                        candidate.id
+                    ));
+                }
+                None => reasons.push("packet_recommendation_candidate_missing".to_owned()),
+                _ => {}
             }
-            None => reasons.push("packet_recommendation_candidate_missing".to_owned()),
-            _ => {}
         }
     }
     if verdict != "safe_to_claim" && !reasons.iter().any(|reason| reason == verdict) {
@@ -4529,6 +5147,88 @@ fn actionable_queue_candidate_state(
         ACTIONABLE_QUEUE_STATE_TIMED_OUT => "actionable_queue_timed_out",
         ACTIONABLE_QUEUE_STATE_STALE_FALLBACK => "actionable_queue_stale_fallback",
         _ => ACTIONABLE_QUEUE_STATE_NOT_EVALUATED,
+    }
+}
+
+/// Reconcile direct Beads hydration with the authoritative actionable
+/// queue. This is the only path that may classify an explicit id as
+/// absent: both sources must answer authoritatively and exclude it.
+fn work_packet_requested_candidate_lookup_outcome(
+    packet: &SwarmWorkPacket,
+    requested_candidate_id: &str,
+    actionable_queue: &SwarmWorkPacketClaimGateActionableQueue,
+    use_direct_evidence: bool,
+) -> Option<&'static str> {
+    let evidence = &packet.claim_gate_requested_candidate;
+    if !use_direct_evidence || !evidence.applies_to(requested_candidate_id) {
+        let Some(candidate) = packet
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == requested_candidate_id)
+        else {
+            return (actionable_queue.queue_state != ACTIONABLE_QUEUE_STATE_NOT_EVALUATED)
+                .then_some("candidate_lookup_unavailable");
+        };
+        return match actionable_queue.queue_state {
+            ACTIONABLE_QUEUE_STATE_TIMED_OUT => Some("candidate_lookup_timed_out"),
+            ACTIONABLE_QUEUE_STATE_UNAVAILABLE => Some("candidate_lookup_unavailable"),
+            ACTIONABLE_QUEUE_STATE_STALE_FALLBACK => Some("candidate_stale_fallback_only"),
+            ACTIONABLE_QUEUE_STATE_READY if !packet.tracker_integrity.br_reads_authoritative => {
+                Some("candidate_stale_fallback_only")
+            }
+            ACTIONABLE_QUEUE_STATE_READY
+                if actionable_queue.candidate_state == "candidate_present_actionable" =>
+            {
+                Some("candidate_present")
+            }
+            ACTIONABLE_QUEUE_STATE_READY if candidate.decision == "safe_to_claim" => {
+                Some("candidate_contradicted")
+            }
+            ACTIONABLE_QUEUE_STATE_READY => Some("candidate_known_non_actionable"),
+            _ => None,
+        };
+    }
+    if evidence.lookup_state == REQUESTED_CANDIDATE_LOOKUP_TIMED_OUT
+        || actionable_queue.queue_state == ACTIONABLE_QUEUE_STATE_TIMED_OUT
+    {
+        return Some("candidate_lookup_timed_out");
+    }
+    if evidence.lookup_state == REQUESTED_CANDIDATE_LOOKUP_UNAVAILABLE
+        || matches!(
+            actionable_queue.queue_state,
+            ACTIONABLE_QUEUE_STATE_UNAVAILABLE | ACTIONABLE_QUEUE_STATE_NOT_EVALUATED
+        )
+    {
+        return Some("candidate_lookup_unavailable");
+    }
+    if !packet.tracker_integrity.br_reads_authoritative
+        || actionable_queue.queue_state == ACTIONABLE_QUEUE_STATE_STALE_FALLBACK
+    {
+        return Some("candidate_stale_fallback_only");
+    }
+    match evidence.lookup_state {
+        REQUESTED_CANDIDATE_LOOKUP_ABSENT_CONFIRMED => match actionable_queue.queue_state {
+            ACTIONABLE_QUEUE_STATE_READY
+                if actionable_queue.candidate_state == "candidate_absent_from_actionable" =>
+            {
+                Some("candidate_absent_confirmed")
+            }
+            ACTIONABLE_QUEUE_STATE_READY => Some("candidate_contradicted"),
+            _ => Some("candidate_lookup_unavailable"),
+        },
+        REQUESTED_CANDIDATE_LOOKUP_PRESENT => match actionable_queue.queue_state {
+            ACTIONABLE_QUEUE_STATE_READY => {
+                let queue_contains =
+                    actionable_queue.candidate_state == "candidate_present_actionable";
+                match (queue_contains, evidence.structurally_actionable) {
+                    (true, Some(true)) => Some("candidate_present"),
+                    (false, Some(false)) => Some("candidate_known_non_actionable"),
+                    _ => Some("candidate_contradicted"),
+                }
+            }
+            _ => Some("candidate_lookup_unavailable"),
+        },
+        _ => Some("candidate_lookup_unavailable"),
     }
 }
 
@@ -5190,6 +5890,10 @@ fn work_packet_claim_gate_install_freshness_degradation(
 fn work_packet_claim_gate_recovery_actions(
     install_freshness: SwarmWorkPacketClaimGateInstallFreshness,
     rch: &SwarmWorkPacketRchProofPosture,
+    requested_candidate_id: Option<&str>,
+    requested_lookup_outcome: Option<&str>,
+    requested_direct_lookup_state: Option<&str>,
+    actionable_queue_state: &str,
 ) -> Vec<SwarmWorkPacketClaimGateRecoveryAction> {
     let mut actions = Vec::new();
     if work_packet_rch_topology_recurrence_active(rch) {
@@ -5209,6 +5913,41 @@ fn work_packet_claim_gate_recovery_actions(
             required_substrate: "rch",
             rationale: "Check worker root topology with the read-only canary before launching another verifier.",
         });
+    }
+    if let Some(candidate_id) = requested_candidate_id {
+        let contradicted = requested_lookup_outcome == Some("candidate_contradicted");
+        if requested_direct_lookup_state.is_none_or(|state| {
+            matches!(
+                state,
+                REQUESTED_CANDIDATE_LOOKUP_TIMED_OUT | REQUESTED_CANDIDATE_LOOKUP_UNAVAILABLE
+            )
+        }) || contradicted
+        {
+            actions.push(SwarmWorkPacketClaimGateRecoveryAction {
+                priority: 5,
+                kind: "retry_claim_gate",
+                command_action: Some(requested_candidate_lookup_command_action(candidate_id)),
+                mutates_state: false,
+                required_substrate: "beads",
+                rationale: "Retry the bounded direct Beads lookup before recollecting the claim gate; a failed lookup never confirms absence.",
+            });
+        }
+        if matches!(
+            actionable_queue_state,
+            ACTIONABLE_QUEUE_STATE_UNAVAILABLE
+                | ACTIONABLE_QUEUE_STATE_TIMED_OUT
+                | ACTIONABLE_QUEUE_STATE_STALE_FALLBACK
+        ) || contradicted
+        {
+            actions.push(SwarmWorkPacketClaimGateRecoveryAction {
+                priority: 6,
+                kind: "retry_claim_gate",
+                command_action: Some(actionable_queue_retry_command_action()),
+                mutates_state: false,
+                required_substrate: "beads",
+                rationale: "Retry the authoritative actionable queue; timeout, unavailability, and stale fallback never confirm candidate absence.",
+            });
+        }
     }
     if install_freshness.blocks_claim {
         actions.extend([
@@ -5267,6 +6006,51 @@ fn work_packet_claim_gate_recovery_actions(
     actions.sort();
     actions.dedup();
     actions
+}
+
+fn requested_candidate_lookup_command_action(candidate_id: &str) -> SwarmWorkPacketCommandAction {
+    let argv = vec![
+        "br".to_owned(),
+        "show".to_owned(),
+        candidate_id.to_owned(),
+        "--json".to_owned(),
+        "--no-auto-import".to_owned(),
+        "--no-auto-flush".to_owned(),
+        "--allow-stale".to_owned(),
+    ];
+    SwarmWorkPacketCommandAction {
+        command_id: "beads_show_requested_candidate",
+        display_command: argv.join(" "),
+        argv,
+        shell_required: false,
+        copy_safety: "safe_structured_argv",
+        mutates_state: false,
+        required_substrate: "beads",
+        when: "before_claim_gate_retry",
+        rationale: "Refresh direct authoritative candidate evidence without importing, flushing, or mutating tracker state.",
+    }
+}
+
+fn actionable_queue_retry_command_action() -> SwarmWorkPacketCommandAction {
+    SwarmWorkPacketCommandAction {
+        command_id: ACTIONABLE_QUEUE_COMMAND_ID,
+        display_command: ACTIONABLE_QUEUE_COMMAND_TEMPLATE.to_owned(),
+        argv: [
+            "bash",
+            ACTIONABLE_QUEUE_SCRIPT_RELATIVE_PATH,
+            "actionable",
+            "--json",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        shell_required: false,
+        copy_safety: "safe_structured_argv",
+        mutates_state: false,
+        required_substrate: "beads",
+        when: "before_claim_gate_retry",
+        rationale: "Refresh the authoritative safe claimable-leaf queue through its bounded retry wrapper.",
+    }
 }
 
 fn work_packet_rch_topology_recurrence_active(rch: &SwarmWorkPacketRchProofPosture) -> bool {
@@ -5473,43 +6257,134 @@ fn work_packet_candidates(
         .map(|candidate| {
             let card = cards_by_candidate.get(&candidate.id);
             let stale = stale_by_bead.get(candidate.id.as_str());
-            let decision = work_packet_candidate_decision(
+            work_packet_candidate_from_next_action(
                 candidate,
                 card.map(|card| card.decision),
                 stale.map(|proposal| proposal.decision),
+                card.map_or_else(Vec::new, |card| card.do_not_take_because.clone()),
+                stale.map_or_else(Vec::new, |proposal| proposal.evidence.clone()),
+                brief,
+                snapshot,
+            )
+        })
+        .collect()
+}
+
+fn work_packet_candidate_from_next_action(
+    candidate: &SwarmNextActionCandidate,
+    card_decision: Option<&'static str>,
+    stale_decision: Option<&'static str>,
+    mut unsafe_reasons: Vec<String>,
+    stale_reasons: Vec<String>,
+    brief: &SwarmBriefReport,
+    snapshot: &SwarmNextActionSnapshot,
+) -> SwarmWorkPacketCandidate {
+    let decision =
+        work_packet_candidate_decision(candidate, card_decision, stale_decision, brief, snapshot);
+    if decision == "unsafe_due_to_conflict" {
+        unsafe_reasons.extend(work_packet_candidate_conflict_evidence(
+            candidate, brief, snapshot,
+        ));
+    }
+    if decision == "release_operator_required" {
+        unsafe_reasons.extend(candidate_release_operator_reasons(candidate));
+    }
+    unsafe_reasons.sort();
+    unsafe_reasons.dedup();
+    SwarmWorkPacketCandidate {
+        id: candidate.id.clone(),
+        title: candidate.title.clone(),
+        source: work_packet_candidate_source(candidate.source),
+        status: candidate.status.clone(),
+        priority: candidate.priority,
+        assignee: candidate.assignee.clone(),
+        decision,
+        collision_risk: work_packet_collision_risk(candidate, snapshot),
+        unsafe_reasons,
+        stale_reasons,
+        source_refs: work_packet_candidate_source_refs(candidate),
+    }
+}
+
+fn work_packet_requested_candidate_evidence_from_lookup(
+    candidate_id: &str,
+    lookup: RequestedCandidateLookup,
+    brief: &SwarmBriefReport,
+    snapshot: &SwarmNextActionSnapshot,
+    packet: &SwarmWorkPacket,
+) -> SwarmWorkPacketRequestedCandidateEvidence {
+    match lookup {
+        RequestedCandidateLookup::Present { bead, blocked_by } => {
+            let structurally_actionable = brief_bead_is_actionable(&bead) && blocked_by.is_empty();
+            let source_candidate = SwarmNextActionCandidate {
+                id: bead.id,
+                title: bead.title,
+                source: "beads_ready",
+                score_milli: None,
+                status: bead.status,
+                priority: bead.priority,
+                issue_type: bead.issue_type,
+                assignee: bead.assignee,
+                blocked_by,
+                blocked_by_compile_health: snapshot.compile_health.safe_to_launch_rch
+                    == Some(false),
+                action_hint: "reserve_files_and_start_smallest_useful_slice".to_owned(),
+            };
+            let mut candidate = work_packet_candidate_from_next_action(
+                &source_candidate,
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
                 brief,
                 snapshot,
             );
-            let mut unsafe_reasons =
-                card.map_or_else(Vec::new, |card| card.do_not_take_because.clone());
-            if decision == "unsafe_due_to_conflict" {
-                unsafe_reasons.extend(work_packet_candidate_conflict_evidence(
-                    candidate, brief, snapshot,
-                ));
-                unsafe_reasons.sort();
-                unsafe_reasons.dedup();
+            apply_candidate_coordination_collision_downgrade(
+                &mut candidate,
+                &source_candidate,
+                snapshot,
+                &packet.coordination,
+            );
+            apply_agent_mail_authority_candidate_downgrade(
+                std::slice::from_mut(&mut candidate),
+                &packet.coordination.agent_mail,
+            );
+            apply_tracker_integrity_candidate_downgrade(
+                std::slice::from_mut(&mut candidate),
+                &packet.tracker_integrity,
+            );
+            SwarmWorkPacketRequestedCandidateEvidence {
+                candidate_id: Some(candidate_id.to_owned()),
+                lookup_state: REQUESTED_CANDIDATE_LOOKUP_PRESENT,
+                exit_class: "ok",
+                structurally_actionable: Some(structurally_actionable),
+                candidate: Some(candidate),
             }
-            if decision == "release_operator_required" {
-                unsafe_reasons.extend(candidate_release_operator_reasons(candidate));
-                unsafe_reasons.sort();
-                unsafe_reasons.dedup();
+        }
+        RequestedCandidateLookup::AbsentConfirmed => SwarmWorkPacketRequestedCandidateEvidence {
+            candidate_id: Some(candidate_id.to_owned()),
+            lookup_state: REQUESTED_CANDIDATE_LOOKUP_ABSENT_CONFIRMED,
+            exit_class: "not_found",
+            structurally_actionable: None,
+            candidate: None,
+        },
+        RequestedCandidateLookup::TimedOut => SwarmWorkPacketRequestedCandidateEvidence {
+            candidate_id: Some(candidate_id.to_owned()),
+            lookup_state: REQUESTED_CANDIDATE_LOOKUP_TIMED_OUT,
+            exit_class: "timeout",
+            structurally_actionable: None,
+            candidate: None,
+        },
+        RequestedCandidateLookup::Unavailable { exit_class } => {
+            SwarmWorkPacketRequestedCandidateEvidence {
+                candidate_id: Some(candidate_id.to_owned()),
+                lookup_state: REQUESTED_CANDIDATE_LOOKUP_UNAVAILABLE,
+                exit_class,
+                structurally_actionable: None,
+                candidate: None,
             }
-            let stale_reasons = stale.map_or_else(Vec::new, |proposal| proposal.evidence.clone());
-            SwarmWorkPacketCandidate {
-                id: candidate.id.clone(),
-                title: candidate.title.clone(),
-                source: work_packet_candidate_source(candidate.source),
-                status: candidate.status.clone(),
-                priority: candidate.priority,
-                assignee: candidate.assignee.clone(),
-                decision,
-                collision_risk: work_packet_collision_risk(candidate, snapshot),
-                unsafe_reasons,
-                stale_reasons,
-                source_refs: work_packet_candidate_source_refs(candidate),
-            }
-        })
-        .collect()
+        }
+    }
 }
 
 fn apply_tracker_integrity_candidate_downgrade(
@@ -5597,21 +6472,35 @@ fn apply_coordination_collision_candidate_downgrade(
         let Some(source_candidate) = source_candidates.get(candidate.id.as_str()) else {
             continue;
         };
-        let (reasons, collision_risk) =
-            candidate_coordination_collision_reasons(source_candidate, snapshot, coordination);
-        if reasons.is_empty() {
-            continue;
-        }
-        if candidate.decision == "safe_to_claim" {
-            candidate.decision = "unsafe_due_to_conflict";
-        }
-        if collision_risk == "high" || candidate.collision_risk == "none" {
-            candidate.collision_risk = collision_risk;
-        }
-        candidate.unsafe_reasons.extend(reasons);
-        candidate.unsafe_reasons.sort();
-        candidate.unsafe_reasons.dedup();
+        apply_candidate_coordination_collision_downgrade(
+            candidate,
+            source_candidate,
+            snapshot,
+            coordination,
+        );
     }
+}
+
+fn apply_candidate_coordination_collision_downgrade(
+    candidate: &mut SwarmWorkPacketCandidate,
+    source_candidate: &SwarmNextActionCandidate,
+    snapshot: &SwarmNextActionSnapshot,
+    coordination: &SwarmWorkPacketCoordination,
+) {
+    let (reasons, collision_risk) =
+        candidate_coordination_collision_reasons(source_candidate, snapshot, coordination);
+    if reasons.is_empty() {
+        return;
+    }
+    if candidate.decision == "safe_to_claim" {
+        candidate.decision = "unsafe_due_to_conflict";
+    }
+    if collision_risk == "high" || candidate.collision_risk == "none" {
+        candidate.collision_risk = collision_risk;
+    }
+    candidate.unsafe_reasons.extend(reasons);
+    candidate.unsafe_reasons.sort();
+    candidate.unsafe_reasons.dedup();
 }
 
 fn candidate_coordination_collision_reasons(
@@ -12070,12 +12959,14 @@ mod tests {
         packet.source_authority_command_timeout_ms = 1_234;
         packet
             .apply_claim_gate_install_freshness(SwarmWorkPacketClaimGateInstallFreshness::fresh());
+        let mut actionable_ids = vec!["bd-safe".to_owned()];
+        actionable_ids.extend((0..33).map(|index| format!("bd-extra-{index:02}")));
         packet.apply_claim_gate_actionable_queue(SwarmWorkPacketActionableQueueEvidence {
             collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
             queue_state: ACTIONABLE_QUEUE_STATE_READY,
             exit_class: "ok",
-            row_count: Some(1),
-            candidate_ids: vec!["bd-safe".to_owned()],
+            row_count: Some(actionable_ids.len() as u64),
+            candidate_ids: actionable_ids,
             exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
         });
 
@@ -12102,14 +12993,16 @@ mod tests {
         assert!(actionable.authoritative);
         assert_eq!(actionable.budget.command_budget_ms, Some(1_234));
         assert_eq!(actionable.budget.retry_budget, 3);
+        let actionable_extension = actionable
+            .actionable_queue
+            .as_ref()
+            .expect("actionable extension");
         assert_eq!(
-            actionable
-                .actionable_queue
-                .as_ref()
-                .expect("actionable extension")
-                .command_template,
+            actionable_extension.command_template,
             ACTIONABLE_QUEUE_COMMAND_TEMPLATE
         );
+        assert_eq!(actionable_extension.candidate_ids.len(), 32);
+        assert_eq!(actionable_extension.truncated_candidate_count, 2);
 
         let bv = authority
             .sources
@@ -12133,6 +13026,8 @@ mod tests {
         assert_eq!(gate_snapshot.snapshot_id, authority.snapshot_id);
         assert_eq!(gate_snapshot.provenance_hash, authority.provenance_hash);
         assert_eq!(gate_snapshot.overall.verdict, authority.overall.verdict);
+        assert_eq!(gate.actionable_queue.candidate_ids.len(), 32);
+        assert_eq!(gate.actionable_queue.truncated_candidate_count, 2);
         assert_eq!(
             gate_snapshot
                 .candidate_evidence
@@ -12598,7 +13493,7 @@ mod tests {
     }
 
     #[test]
-    fn work_packet_claim_gate_requires_requested_candidate_to_match_packet_recommendation() {
+    fn work_packet_claim_gate_explicit_safe_candidate_is_independent_of_packet_recommendation() {
         let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
         let snapshot = snapshot_with_candidates(vec![
             candidate(
@@ -12618,14 +13513,754 @@ mod tests {
             Some("bd-one")
         );
         assert_eq!(packet.recommended_action.safe_to_claim, Some(true));
-        assert_eq!(gate.verdict, "coordinate_first");
-        assert!(!gate.safe_to_claim);
-        assert_eq!(gate.recommended_safe_to_claim, Some(false));
-        assert!(gate.claim_command_action.is_none());
+        assert_eq!(gate.verdict, "safe_to_claim");
+        assert!(gate.safe_to_claim);
+        assert_eq!(gate.recommended_safe_to_claim, Some(true));
         assert!(
             gate.unsafe_reasons
-                .contains(&"packet_recommendation_candidate_mismatch:bd-one:bd-two".to_owned())
+                .iter()
+                .all(|reason| { !reason.starts_with("packet_recommendation_candidate_mismatch") })
         );
+        assert_eq!(
+            gate.claim_command_action
+                .as_ref()
+                .and_then(|action| action.argv.get(2))
+                .map(String::as_str),
+            Some("bd-two")
+        );
+    }
+
+    #[test]
+    fn requested_candidate_hydration_resolves_safe_leaf_outside_packet_candidates() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-ranked",
+            "Bounded packet recommendation",
+            "beads_ready",
+            Some(1),
+        )]);
+        let mut packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        packet
+            .apply_claim_gate_install_freshness(SwarmWorkPacketClaimGateInstallFreshness::fresh());
+        packet.apply_claim_gate_actionable_queue(SwarmWorkPacketActionableQueueEvidence {
+            collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+            queue_state: ACTIONABLE_QUEUE_STATE_READY,
+            exit_class: "ok",
+            row_count: Some(2),
+            candidate_ids: vec!["bd-ranked".to_owned(), "bd-requested".to_owned()],
+            exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+        });
+        apply_requested_candidate_lookup(
+            &mut packet,
+            &brief,
+            &snapshot,
+            "bd-requested",
+            RequestedCandidateLookup::Present {
+                bead: requested_candidate_bead(
+                    "bd-requested",
+                    "Hydrate explicit claim-gate leaf",
+                    "open",
+                    None,
+                ),
+                blocked_by: Vec::new(),
+            },
+        );
+
+        let gate = packet.claim_gate(Some("bd-requested"));
+
+        assert!(
+            packet
+                .candidates
+                .iter()
+                .all(|candidate| candidate.id != "bd-requested")
+        );
+        assert_eq!(
+            packet.recommended_action.candidate_id.as_deref(),
+            Some("bd-ranked")
+        );
+        assert_eq!(gate.verdict, "safe_to_claim");
+        assert!(gate.safe_to_claim);
+        assert_eq!(gate.recommended_safe_to_claim, Some(true));
+        assert_eq!(
+            gate.selected_candidate
+                .as_ref()
+                .map(|candidate| (candidate.id.as_str(), candidate.decision)),
+            Some(("bd-requested", "safe_to_claim"))
+        );
+        assert_eq!(
+            gate.source_authority_snapshot
+                .candidate_evidence
+                .as_ref()
+                .map(|evidence| evidence.lookup_outcome),
+            Some("candidate_present")
+        );
+        assert_eq!(
+            gate.claim_command_action
+                .as_ref()
+                .and_then(|action| action.argv.get(2))
+                .map(String::as_str),
+            Some("bd-requested")
+        );
+        assert!(gate.unsafe_reasons.is_empty());
+    }
+
+    #[test]
+    fn requested_candidate_hydration_preserves_dependency_and_assignment_decisions() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(Vec::new());
+        let mut dependency_packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        dependency_packet
+            .apply_claim_gate_install_freshness(SwarmWorkPacketClaimGateInstallFreshness::fresh());
+        dependency_packet.apply_claim_gate_actionable_queue(
+            SwarmWorkPacketActionableQueueEvidence {
+                collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+                queue_state: ACTIONABLE_QUEUE_STATE_READY,
+                exit_class: "ok",
+                row_count: Some(1),
+                candidate_ids: vec!["bd-blocked".to_owned()],
+                exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+            },
+        );
+        apply_requested_candidate_lookup(
+            &mut dependency_packet,
+            &brief,
+            &snapshot,
+            "bd-blocked",
+            RequestedCandidateLookup::Present {
+                bead: requested_candidate_bead(
+                    "bd-blocked",
+                    "Dependency-blocked explicit leaf",
+                    "open",
+                    None,
+                ),
+                blocked_by: vec!["bd-parent".to_owned()],
+            },
+        );
+        let dependency_gate = dependency_packet.claim_gate(Some("bd-blocked"));
+        assert_eq!(dependency_gate.verdict, "blocked_by_dependency");
+        assert!(!dependency_gate.safe_to_claim);
+        assert!(dependency_gate.claim_command_action.is_none());
+        assert_eq!(
+            dependency_gate
+                .source_authority_snapshot
+                .candidate_evidence
+                .as_ref()
+                .map(|evidence| evidence.lookup_outcome),
+            Some("candidate_contradicted")
+        );
+
+        let mut assigned_packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        assigned_packet
+            .apply_claim_gate_install_freshness(SwarmWorkPacketClaimGateInstallFreshness::fresh());
+        assigned_packet.apply_claim_gate_actionable_queue(SwarmWorkPacketActionableQueueEvidence {
+            collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+            queue_state: ACTIONABLE_QUEUE_STATE_READY,
+            exit_class: "ok",
+            row_count: Some(0),
+            candidate_ids: Vec::new(),
+            exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+        });
+        apply_requested_candidate_lookup(
+            &mut assigned_packet,
+            &brief,
+            &snapshot,
+            "bd-assigned",
+            RequestedCandidateLookup::Present {
+                bead: requested_candidate_bead(
+                    "bd-assigned",
+                    "Assigned explicit leaf",
+                    "open",
+                    Some("PeerAgent"),
+                ),
+                blocked_by: Vec::new(),
+            },
+        );
+        let assigned_gate = assigned_packet.claim_gate(Some("bd-assigned"));
+        assert_eq!(assigned_gate.verdict, "already_owned");
+        assert!(!assigned_gate.safe_to_claim);
+        assert!(assigned_gate.claim_command_action.is_none());
+        assert_eq!(
+            assigned_gate
+                .source_authority_snapshot
+                .candidate_evidence
+                .as_ref()
+                .map(|evidence| evidence.lookup_outcome),
+            Some("candidate_known_non_actionable")
+        );
+        assert!(assigned_gate.source_authority_snapshot.overall.fail_closed);
+        assert_eq!(
+            assigned_packet
+                .source_authority_snapshot(Some("bd-assigned"))
+                .degraded
+                .iter()
+                .find(|entry| { entry.code == "source_authority_candidate_known_non_actionable" })
+                .and_then(|entry| entry.repair.as_deref()),
+            Some("br show bd-assigned --json --no-auto-import --no-auto-flush --allow-stale")
+        );
+        assert!(
+            assigned_gate
+                .unsafe_reasons
+                .iter()
+                .all(|reason| !reason.starts_with("candidate_not_found"))
+        );
+    }
+
+    #[test]
+    fn requested_candidate_lookup_failures_never_become_candidate_not_found() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(Vec::new());
+        for (lookup, expected_outcome) in [
+            (
+                RequestedCandidateLookup::Unavailable {
+                    exit_class: "parse_failed",
+                },
+                "candidate_lookup_unavailable",
+            ),
+            (
+                RequestedCandidateLookup::TimedOut,
+                "candidate_lookup_timed_out",
+            ),
+        ] {
+            let mut packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+            packet.apply_claim_gate_actionable_queue(SwarmWorkPacketActionableQueueEvidence {
+                collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+                queue_state: ACTIONABLE_QUEUE_STATE_READY,
+                exit_class: "ok",
+                row_count: Some(1),
+                candidate_ids: vec!["bd-requested".to_owned()],
+                exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+            });
+            apply_requested_candidate_lookup(
+                &mut packet,
+                &brief,
+                &snapshot,
+                "bd-requested",
+                lookup,
+            );
+
+            let gate = packet.claim_gate(Some("bd-requested"));
+
+            assert_eq!(gate.verdict, "external_state_required");
+            assert!(!gate.safe_to_claim);
+            assert!(gate.selected_candidate.is_none());
+            assert!(gate.claim_command_action.is_none());
+            assert_eq!(
+                gate.source_authority_snapshot
+                    .candidate_evidence
+                    .as_ref()
+                    .map(|evidence| evidence.lookup_outcome),
+                Some(expected_outcome)
+            );
+            assert!(
+                gate.unsafe_reasons
+                    .iter()
+                    .all(|reason| !reason.starts_with("candidate_not_found"))
+            );
+            assert!(gate.recovery_actions.iter().any(|action| {
+                action.kind == "retry_claim_gate"
+                    && action.command_action.as_ref().is_some_and(|command| {
+                        command.argv
+                            == argv(&[
+                                "br",
+                                "show",
+                                "bd-requested",
+                                "--json",
+                                "--no-auto-import",
+                                "--no-auto-flush",
+                                "--allow-stale",
+                            ])
+                    })
+            }));
+        }
+    }
+
+    #[test]
+    fn requested_candidate_direct_source_evidence_is_scoped_to_the_gated_id() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![
+            candidate(
+                "bd-a",
+                "Candidate with timed-out direct evidence",
+                "beads_ready",
+                Some(2),
+            ),
+            candidate(
+                "bd-b",
+                "Independent packet candidate",
+                "beads_ready",
+                Some(2),
+            ),
+        ]);
+        let mut packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        packet.apply_claim_gate_actionable_queue(SwarmWorkPacketActionableQueueEvidence {
+            collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+            queue_state: ACTIONABLE_QUEUE_STATE_READY,
+            exit_class: "ok",
+            row_count: Some(2),
+            candidate_ids: vec!["bd-a".to_owned(), "bd-b".to_owned()],
+            exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+        });
+        apply_requested_candidate_lookup(
+            &mut packet,
+            &brief,
+            &snapshot,
+            "bd-a",
+            RequestedCandidateLookup::TimedOut,
+        );
+
+        let gate = packet.claim_gate(Some("bd-b"));
+        let beads_source = gate
+            .source_authority_snapshot
+            .source_states
+            .iter()
+            .find(|source| source.source_kind == "beads")
+            .expect("Beads source state");
+
+        assert_eq!(gate.verdict, "safe_to_claim");
+        assert!(gate.safe_to_claim);
+        assert_eq!(
+            gate.selected_candidate
+                .as_ref()
+                .map(|candidate| candidate.id.as_str()),
+            Some("bd-b")
+        );
+        assert_ne!(beads_source.state, "timed_out");
+        assert!(
+            gate.source_authority_snapshot
+                .degraded_codes
+                .iter()
+                .all(|code| code != "source_authority_beads_timed_out")
+        );
+
+        let default_gate = packet.claim_gate(None);
+        assert_eq!(default_gate.verdict, "external_state_required");
+        assert!(!default_gate.safe_to_claim);
+        assert!(default_gate.claim_command_action.is_none());
+        assert_eq!(
+            default_gate
+                .source_authority_snapshot
+                .candidate_evidence
+                .as_ref()
+                .map(|evidence| evidence.lookup_outcome),
+            Some("candidate_lookup_timed_out")
+        );
+        assert_eq!(
+            default_gate.source_authority_snapshot.overall.verdict,
+            "fail_closed_timeout"
+        );
+    }
+
+    #[test]
+    fn requested_candidate_queue_timeout_preserves_successful_direct_hydration() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(Vec::new());
+        let mut packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        packet.apply_claim_gate_actionable_queue(SwarmWorkPacketActionableQueueEvidence {
+            collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+            queue_state: ACTIONABLE_QUEUE_STATE_TIMED_OUT,
+            exit_class: "timeout",
+            row_count: None,
+            candidate_ids: Vec::new(),
+            exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+        });
+        apply_requested_candidate_lookup(
+            &mut packet,
+            &brief,
+            &snapshot,
+            "bd-queue-timeout",
+            RequestedCandidateLookup::Present {
+                bead: requested_candidate_bead(
+                    "bd-queue-timeout",
+                    "Direct row survives queue timeout",
+                    "open",
+                    None,
+                ),
+                blocked_by: Vec::new(),
+            },
+        );
+
+        let gate = packet.claim_gate(Some("bd-queue-timeout"));
+        let evidence = gate
+            .source_authority_snapshot
+            .candidate_evidence
+            .as_ref()
+            .expect("candidate evidence");
+
+        assert_eq!(gate.verdict, "external_state_required");
+        assert!(!gate.safe_to_claim);
+        assert_eq!(
+            gate.selected_candidate
+                .as_ref()
+                .map(|candidate| candidate.id.as_str()),
+            Some("bd-queue-timeout")
+        );
+        assert!(gate.claim_command_action.is_none());
+        assert_eq!(evidence.lookup_outcome, "candidate_lookup_timed_out");
+        let full_evidence = packet
+            .source_authority_snapshot(Some("bd-queue-timeout"))
+            .candidate_evidence
+            .expect("full candidate evidence");
+        assert_eq!(full_evidence.present_in, vec!["beads".to_owned()]);
+        assert_eq!(
+            full_evidence.unavailable_in,
+            vec!["actionable_queue".to_owned()]
+        );
+        assert_eq!(
+            gate.source_authority_snapshot.overall.verdict,
+            "fail_closed_timeout"
+        );
+        assert!(gate.recovery_actions.iter().any(|action| {
+            action.kind == "retry_claim_gate"
+                && action.command_action.as_ref().is_some_and(|command| {
+                    command.command_id == ACTIONABLE_QUEUE_COMMAND_ID
+                        && command.argv
+                            == argv(&[
+                                "bash",
+                                ACTIONABLE_QUEUE_SCRIPT_RELATIVE_PATH,
+                                "actionable",
+                                "--json",
+                            ])
+                })
+        }));
+        assert!(gate.recovery_actions.iter().all(|action| {
+            action
+                .command_action
+                .as_ref()
+                .is_none_or(|command| command.command_id != "beads_show_requested_candidate")
+        }));
+        assert_eq!(full_evidence.stale_fallback_presence.present, Some(false));
+        assert_eq!(full_evidence.stale_fallback_presence.source_kind, None);
+    }
+
+    #[test]
+    fn requested_candidate_stale_queue_preserves_fresh_direct_presence_or_absence() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(Vec::new());
+        for (candidate_id, lookup, expected_present, expected_absent) in [
+            (
+                "bd-stale-present",
+                RequestedCandidateLookup::Present {
+                    bead: requested_candidate_bead(
+                        "bd-stale-present",
+                        "Fresh direct row with stale queue",
+                        "open",
+                        None,
+                    ),
+                    blocked_by: Vec::new(),
+                },
+                vec!["beads".to_owned()],
+                Vec::new(),
+            ),
+            (
+                "bd-stale-absent",
+                RequestedCandidateLookup::AbsentConfirmed,
+                Vec::new(),
+                vec!["beads".to_owned()],
+            ),
+        ] {
+            let mut packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+            packet.apply_claim_gate_actionable_queue(SwarmWorkPacketActionableQueueEvidence {
+                collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+                queue_state: ACTIONABLE_QUEUE_STATE_STALE_FALLBACK,
+                exit_class: "ok",
+                row_count: Some(1),
+                candidate_ids: vec![candidate_id.to_owned()],
+                exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+            });
+            apply_requested_candidate_lookup(&mut packet, &brief, &snapshot, candidate_id, lookup);
+
+            let gate = packet.claim_gate(Some(candidate_id));
+            let evidence = packet
+                .source_authority_snapshot(Some(candidate_id))
+                .candidate_evidence
+                .expect("candidate evidence");
+
+            assert_eq!(gate.verdict, "external_state_required");
+            assert!(!gate.safe_to_claim);
+            assert!(gate.claim_command_action.is_none());
+            assert_eq!(evidence.lookup_outcome, "candidate_stale_fallback_only");
+            assert_eq!(evidence.present_in, expected_present);
+            assert_eq!(evidence.absent_from, expected_absent);
+            assert_eq!(
+                evidence.stale_fallback_presence,
+                SwarmSourceAuthorityStaleFallbackPresence {
+                    present: Some(true),
+                    source_kind: Some("actionable_queue"),
+                    fallback_age_ms: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn requested_candidate_tracker_stale_preserves_identity_but_fails_closed() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(Vec::new());
+        let merge_artifact_paths = Vec::new();
+        let tracker_integrity = compose_integrity_report(BeadsIntegrityInputs {
+            jsonl_path: ".beads/issues.jsonl",
+            db_path: ".beads/beads.db",
+            jsonl_record_count: 12,
+            db_record_count: 12,
+            auto_import_enabled: true,
+            external_changes_pending_import: true,
+            dirty_issue_count: 1,
+            merge_artifact_paths: &merge_artifact_paths,
+            jsonl_parse_error: None,
+        });
+        let mut packet = SwarmWorkPacket::from_brief_and_next_action_with_tracker_integrity(
+            &brief,
+            &snapshot,
+            tracker_integrity,
+        );
+        packet.apply_claim_gate_actionable_queue(SwarmWorkPacketActionableQueueEvidence {
+            collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+            queue_state: ACTIONABLE_QUEUE_STATE_READY,
+            exit_class: "ok",
+            row_count: Some(1),
+            candidate_ids: vec!["bd-stale-direct".to_owned()],
+            exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+        });
+        apply_requested_candidate_lookup(
+            &mut packet,
+            &brief,
+            &snapshot,
+            "bd-stale-direct",
+            RequestedCandidateLookup::Present {
+                bead: requested_candidate_bead(
+                    "bd-stale-direct",
+                    "Stale tracker direct candidate",
+                    "open",
+                    None,
+                ),
+                blocked_by: Vec::new(),
+            },
+        );
+
+        let gate = packet.claim_gate(Some("bd-stale-direct"));
+
+        assert_eq!(gate.verdict, "external_state_required");
+        assert!(!gate.safe_to_claim);
+        assert_eq!(
+            gate.selected_candidate
+                .as_ref()
+                .map(|candidate| (candidate.id.as_str(), candidate.decision)),
+            Some(("bd-stale-direct", "external_state_required"))
+        );
+        assert!(gate.claim_command_action.is_none());
+        assert_eq!(
+            gate.source_authority_snapshot
+                .candidate_evidence
+                .as_ref()
+                .map(|evidence| evidence.lookup_outcome),
+            Some("candidate_stale_fallback_only")
+        );
+        assert_eq!(
+            packet
+                .source_authority_snapshot(Some("bd-stale-direct"))
+                .candidate_evidence
+                .expect("candidate evidence")
+                .stale_fallback_presence
+                .source_kind,
+            Some("beads")
+        );
+        assert!(
+            gate.unsafe_reasons
+                .iter()
+                .all(|reason| !reason.starts_with("candidate_not_found"))
+        );
+    }
+
+    #[test]
+    fn requested_candidate_absence_requires_exact_structured_id_match() {
+        assert!(requested_candidate_absence_error(
+            r#"{"error":{"code":"ISSUE_NOT_FOUND","context":{"searched_id":"bd-exact"}}}"#,
+            "bd-exact"
+        ));
+        for payload in [
+            r#"{"error":{"code":"ISSUE_NOT_FOUND","context":{"searched_id":"bd-other"}}}"#,
+            r#"{"error":{"code":"ISSUE_NOT_FOUND"}}"#,
+            r#"{"error":{"code":"OTHER","context":{"searched_id":"bd-exact"}}}"#,
+            "Issue not found: bd-exact",
+            "{",
+        ] {
+            assert!(!requested_candidate_absence_error(payload, "bd-exact"));
+        }
+    }
+
+    #[test]
+    fn requested_candidate_success_parser_requires_one_matching_row_and_keeps_blockers() {
+        let parsed = requested_candidate_lookup_from_stdout(
+            r#"[{"id":"bd-exact","title":"Blocked leaf","status":"open","issue_type":"task","dependencies":[{"id":"bd-parent","status":"open","dependency_type":"blocks"}]}]"#,
+            "bd-exact",
+        );
+        assert!(matches!(
+            parsed,
+            RequestedCandidateLookup::Present { blocked_by, .. }
+                if blocked_by == vec!["bd-parent".to_owned()]
+        ));
+        for payload in [
+            "[]",
+            r#"[{"id":"bd-other","title":"Wrong row","status":"open"}]"#,
+            r#"[{"id":"bd-exact"},{"id":"bd-other"}]"#,
+            "{",
+        ] {
+            assert!(matches!(
+                requested_candidate_lookup_from_stdout(payload, "bd-exact"),
+                RequestedCandidateLookup::Unavailable {
+                    exit_class: "parse_failed"
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn requested_candidate_not_found_requires_two_authoritative_absence_answers() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-absent",
+            "Stale packet row superseded by exact absence",
+            "beads_ready",
+            Some(2),
+        )]);
+        let mut packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        packet.apply_claim_gate_actionable_queue(SwarmWorkPacketActionableQueueEvidence {
+            collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+            queue_state: ACTIONABLE_QUEUE_STATE_READY,
+            exit_class: "ok",
+            row_count: Some(0),
+            candidate_ids: Vec::new(),
+            exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+        });
+        apply_requested_candidate_lookup(
+            &mut packet,
+            &brief,
+            &snapshot,
+            "bd-absent",
+            RequestedCandidateLookup::AbsentConfirmed,
+        );
+
+        let gate = packet.claim_gate(Some("bd-absent"));
+
+        assert_eq!(gate.verdict, "candidate_not_found");
+        assert!(!gate.safe_to_claim);
+        assert!(gate.selected_candidate.is_none());
+        assert!(gate.claim_command_action.is_none());
+        assert_eq!(
+            gate.source_authority_snapshot
+                .candidate_evidence
+                .as_ref()
+                .map(|evidence| evidence.lookup_outcome),
+            Some("candidate_absent_confirmed")
+        );
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"candidate_not_found:bd-absent".to_owned())
+        );
+        assert!(
+            gate.recovery_actions
+                .iter()
+                .all(|action| action.kind != "retry_claim_gate")
+        );
+    }
+
+    #[test]
+    fn requested_candidate_hydration_preserves_collision_and_install_safety_gates() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.file_surface_risks = vec![SwarmBriefFileSurfaceRisk {
+            path_pattern: "src/core/swarm_next_action.rs".to_owned(),
+            git_status_buckets: vec!["modified".to_owned()],
+            reservation_holders: vec!["PeerAgent".to_owned()],
+            related_bead_ids: vec!["bd-peer".to_owned()],
+            severity: "high".to_owned(),
+            score: 100,
+            risk_factors: vec!["active_exclusive_reservation".to_owned()],
+            evidence: Vec::new(),
+            suggested_commands: Vec::new(),
+        }];
+        let mut snapshot = snapshot_with_candidates(Vec::new());
+        snapshot.checkout.dirty_path_count = 1;
+        snapshot.checkout.dirty_paths = vec!["src/core/swarm_next_action.rs".to_owned()];
+        let mut packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        packet.apply_claim_gate_actionable_queue(SwarmWorkPacketActionableQueueEvidence {
+            collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+            queue_state: ACTIONABLE_QUEUE_STATE_READY,
+            exit_class: "ok",
+            row_count: Some(1),
+            candidate_ids: vec!["bd-collision".to_owned()],
+            exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+        });
+        apply_requested_candidate_lookup(
+            &mut packet,
+            &brief,
+            &snapshot,
+            "bd-collision",
+            RequestedCandidateLookup::Present {
+                bead: requested_candidate_bead(
+                    "bd-collision",
+                    "Repair claim-gate hydration",
+                    "open",
+                    None,
+                ),
+                blocked_by: Vec::new(),
+            },
+        );
+
+        let collision_gate = packet.claim_gate(Some("bd-collision"));
+        assert_eq!(collision_gate.verdict, "unsafe_due_to_conflict");
+        assert!(!collision_gate.safe_to_claim);
+        assert!(collision_gate.claim_command_action.is_none());
+        assert!(
+            collision_gate
+                .unsafe_reasons
+                .iter()
+                .any(|reason| reason.starts_with("dirty_path_overlap:"))
+        );
+        assert!(collision_gate.unsafe_reasons.iter().any(|reason| {
+            reason.starts_with("reservation_collision:") || reason.starts_with("file_collision:")
+        }));
+
+        let clean_brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let clean_snapshot = snapshot_with_candidates(Vec::new());
+        let mut stale_install_packet =
+            SwarmWorkPacket::from_brief_and_next_action(&clean_brief, &clean_snapshot);
+        stale_install_packet.apply_claim_gate_install_freshness(
+            SwarmWorkPacketClaimGateInstallFreshness {
+                verdict: "stale",
+                authoritative: Some(false),
+                repair: Some(CLAIM_GATE_INSTALL_FRESHNESS_REPAIR),
+                blocks_claim: true,
+            },
+        );
+        stale_install_packet.apply_claim_gate_actionable_queue(
+            SwarmWorkPacketActionableQueueEvidence {
+                collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+                queue_state: ACTIONABLE_QUEUE_STATE_READY,
+                exit_class: "ok",
+                row_count: Some(1),
+                candidate_ids: vec!["bd-install".to_owned()],
+                exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+            },
+        );
+        apply_requested_candidate_lookup(
+            &mut stale_install_packet,
+            &clean_brief,
+            &clean_snapshot,
+            "bd-install",
+            RequestedCandidateLookup::Present {
+                bead: requested_candidate_bead(
+                    "bd-install",
+                    "Fresh explicit leaf under stale install",
+                    "open",
+                    None,
+                ),
+                blocked_by: Vec::new(),
+            },
+        );
+        let install_gate = stale_install_packet.claim_gate(Some("bd-install"));
+        assert_eq!(install_gate.verdict, "blocked_by_verification");
+        assert!(!install_gate.safe_to_claim);
+        assert!(install_gate.claim_command_action.is_none());
     }
 
     #[test]
@@ -14400,6 +16035,44 @@ mod tests {
             blocked_by_compile_health: false,
             action_hint: "reserve_files_and_start_smallest_useful_slice".to_owned(),
         }
+    }
+
+    fn requested_candidate_bead(
+        id: &str,
+        title: &str,
+        status: &str,
+        assignee: Option<&str>,
+    ) -> SwarmBriefBead {
+        SwarmBriefBead {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            status: status.to_owned(),
+            priority: Some(2),
+            assignee: assignee.map(str::to_owned),
+            issue_type: Some("task".to_owned()),
+            created_at: None,
+            updated_at: None,
+            latest_comment_at: None,
+            comment_count: 0,
+            source_bucket: "direct_lookup".to_owned(),
+        }
+    }
+
+    fn apply_requested_candidate_lookup(
+        packet: &mut SwarmWorkPacket,
+        brief: &SwarmBriefReport,
+        snapshot: &SwarmNextActionSnapshot,
+        candidate_id: &str,
+        lookup: RequestedCandidateLookup,
+    ) {
+        let evidence = work_packet_requested_candidate_evidence_from_lookup(
+            candidate_id,
+            lookup,
+            brief,
+            snapshot,
+            packet,
+        );
+        packet.apply_claim_gate_requested_candidate(evidence);
     }
 
     fn repair_plan_for_source_degradations(

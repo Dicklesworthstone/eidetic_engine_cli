@@ -197,10 +197,17 @@ reservation collisions, stale tracker state, Beads/BV disagreement, or RCH
 blockers, coordinate instead of claiming.
 
 Use `sourceAuthoritySnapshot.candidateEvidence.lookupOutcome` to distinguish a
-confirmed missing candidate from `candidate_lookup_timed_out`,
+confirmed missing candidate (`candidate_absent_confirmed`) from
+`candidate_known_non_actionable`, `candidate_lookup_timed_out`,
 `candidate_lookup_unavailable`, `candidate_stale_fallback_only`, or
-`candidate_contradicted`. Those outcomes require read-only refresh or
-coordination; they must not be rewritten into a plain invalid-candidate story.
+`candidate_contradicted`. A known non-actionable candidate exists but is
+excluded by the safe actionable queue; inspect its blockers or ownership
+instead of calling it unknown. The lookup-failure and contradiction outcomes
+require read-only refresh or coordination. Only `candidate_absent_confirmed`
+may support the `candidate_not_found` gate verdict.
+When the outcome is `candidate_stale_fallback_only`, inspect `presentIn` and
+`staleFallbackPresence.sourceKind` separately: candidate identity can be live
+while a required claimability source such as the actionable queue is stale.
 
 Treat `bv_command_timeout` and `bv_no_output` as graph-triage liveness
 failures, not as "no good work exists." Do not wait indefinitely on raw

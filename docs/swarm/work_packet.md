@@ -305,17 +305,30 @@ work. The same block also carries compact environment-attestation fields:
 `localCargoFallbackObserved`. They summarize the source-authority posture
 without replacing the gate verdict, candidate decision, unsafe reasons, or the
 full `ee diag environment-attestation` surface. `candidate_not_found` and
-`no_candidate` are explicit gate verdicts so
-harnesses do not infer safety from missing candidate data.
+`no_candidate` are explicit gate verdicts so harnesses do not infer safety from
+missing candidate data. `candidate_not_found` is reserved for an explicit
+candidate whose authoritative direct lookup and actionable-queue lookup both
+confirm absence, represented by `lookupOutcome=candidate_absent_confirmed`.
+An explicit `--candidate <id>` is hydrated with a bounded, read-only `br show`
+probe independently of the packet's recommendation rank and bounded candidate
+projection; it still must pass every ordinary claim-safety gate.
 
 `sourceAuthoritySnapshot` is the compact gate-local reference to the redacted
 `ee.source_authority.snapshot.v1` vector used for the verdict. It carries the
 stable `snapshotId`, provenance hash, candidate lookup outcome, ordered source
 states, degraded source codes, and bounded repair guidance. Consumers should
 inspect this block before treating `candidate_not_found` as true absence: a
-timed-out actionable queue, stale Beads fallback, stale tracker authority, or
-cross-source contradiction keeps `safeToClaim=false` and requires a read-only
-refresh or coordination step instead of invalid-candidate language.
+known but non-actionable candidate, timed-out or unavailable direct lookup,
+stale Beads fallback, stale tracker authority, or cross-source contradiction
+keeps `safeToClaim=false` and requires a read-only refresh, blocker inspection,
+or coordination step instead of invalid-candidate language. These states use
+`candidate_known_non_actionable`, `candidate_lookup_timed_out`,
+`candidate_lookup_unavailable`, `candidate_stale_fallback_only`, or
+`candidate_contradicted`; none may be collapsed into `candidate_not_found`.
+`candidate_stale_fallback_only` may still carry live identity evidence in
+`presentIn` when a separate required claimability source, such as the
+actionable queue, is stale; `staleFallbackPresence.sourceKind` identifies the
+fallback source instead of relabeling fresh Beads evidence as stale.
 
 `sourceAuthority.trackerAuthoritative` and `sourceAuthority.trackerHealth`
 carry the tracker authority state described in

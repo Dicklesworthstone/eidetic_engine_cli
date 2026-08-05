@@ -1,0 +1,309 @@
+{
+  "schema": "ee.test_fixture.swarm_work_packet.requested_candidate_hydration.v1",
+  "trackingBead": "bd-3qf29",
+  "description": "A requested candidate is outside the bounded packet recommendation set and beyond the 32 serialized actionable ids, but remains present in the authoritative full actionable queue. The collector must issue one exact read-only br show lookup, hydrate the requested row, and keep every claim-gate projection internally consistent. The integration-test executable is intentionally not treated as an authoritative installed ee binary, so the final verdict remains blocked_by_verification and no claim action is emitted.",
+  "requestedCandidateId": "bd-hydrate-099",
+  "sourceOutputs": {
+    "syncStatus": {
+      "dirty_count": 0,
+      "jsonl_newer": false,
+      "db_newer": false
+    },
+    "ready": [
+      {
+        "id": "bd-hydrate-001",
+        "title": "Document the hydration collector",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "assignee": null
+      },
+      {
+        "id": "bd-hydrate-002",
+        "title": "Document the bounded queue projection",
+        "status": "open",
+        "priority": 2,
+        "issue_type": "task",
+        "assignee": null
+      }
+    ],
+    "blocked": [],
+    "inProgress": [],
+    "deferred": [],
+    "dependencyCycles": {
+      "count": 0,
+      "cycles": []
+    },
+    "doctor": {
+      "ok": true,
+      "checks": [
+        {
+          "name": "jsonl.merge_artifacts",
+          "status": "ok",
+          "message": "No merge artifacts",
+          "details": {
+            "files": []
+          }
+        },
+        {
+          "name": "jsonl.parse",
+          "status": "ok",
+          "message": "Parsed 35 records",
+          "details": {
+            "records": 35
+          }
+        },
+        {
+          "name": "sqlite.integrity_check",
+          "status": "ok"
+        },
+        {
+          "name": "counts.db_vs_jsonl",
+          "status": "ok",
+          "message": "Both have 35 records",
+          "details": {
+            "db": 35,
+            "jsonl": 35
+          }
+        },
+        {
+          "name": "sync.metadata",
+          "status": "ok",
+          "message": "No external changes pending import",
+          "details": {
+            "dirty_issues": 0
+          }
+        }
+      ]
+    },
+    "actionable": [
+      { "id": "bd-hydrate-001", "title": "Queue candidate 001", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-002", "title": "Queue candidate 002", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-003", "title": "Queue candidate 003", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-004", "title": "Queue candidate 004", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-005", "title": "Queue candidate 005", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-006", "title": "Queue candidate 006", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-007", "title": "Queue candidate 007", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-008", "title": "Queue candidate 008", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-009", "title": "Queue candidate 009", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-010", "title": "Queue candidate 010", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-011", "title": "Queue candidate 011", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-012", "title": "Queue candidate 012", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-013", "title": "Queue candidate 013", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-014", "title": "Queue candidate 014", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-015", "title": "Queue candidate 015", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-016", "title": "Queue candidate 016", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-017", "title": "Queue candidate 017", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-018", "title": "Queue candidate 018", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-019", "title": "Queue candidate 019", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-020", "title": "Queue candidate 020", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-021", "title": "Queue candidate 021", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-022", "title": "Queue candidate 022", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-023", "title": "Queue candidate 023", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-024", "title": "Queue candidate 024", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-025", "title": "Queue candidate 025", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-026", "title": "Queue candidate 026", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-027", "title": "Queue candidate 027", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-028", "title": "Queue candidate 028", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-029", "title": "Queue candidate 029", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-030", "title": "Queue candidate 030", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-031", "title": "Queue candidate 031", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-032", "title": "Queue candidate 032", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-033", "title": "Queue candidate 033", "status": "open", "priority": 2, "issue_type": "task", "assignee": null },
+      { "id": "bd-hydrate-099", "title": "Fix claim-gate candidate hydration", "status": "open", "priority": 1, "issue_type": "task", "assignee": null }
+    ],
+    "directCandidate": [
+      {
+        "id": "bd-hydrate-099",
+        "title": "Fix claim-gate candidate hydration",
+        "status": "open",
+        "priority": 1,
+        "issue_type": "task",
+        "assignee": null,
+        "dependencies": []
+      }
+    ]
+  },
+  "scriptedCalls": [
+    {
+      "program": "br",
+      "args": ["sync", "--status", "--json", "--no-auto-import", "--allow-stale"],
+      "outputPointer": "/sourceOutputs/syncStatus"
+    },
+    {
+      "program": "br",
+      "args": ["ready", "--json"],
+      "outputPointer": "/sourceOutputs/ready"
+    },
+    {
+      "program": "br",
+      "args": ["blocked", "--json"],
+      "outputPointer": "/sourceOutputs/blocked"
+    },
+    {
+      "program": "br",
+      "args": ["list", "--status", "in_progress", "--json"],
+      "outputPointer": "/sourceOutputs/inProgress"
+    },
+    {
+      "program": "br",
+      "args": ["list", "--status", "deferred", "--json"],
+      "outputPointer": "/sourceOutputs/deferred"
+    },
+    {
+      "program": "br",
+      "args": ["dep", "cycles", "--json"],
+      "outputPointer": "/sourceOutputs/dependencyCycles"
+    },
+    {
+      "program": "br",
+      "args": ["doctor", "--json", "--no-db"],
+      "outputPointer": "/sourceOutputs/doctor"
+    },
+    {
+      "program": "bash",
+      "args": ["scripts/br_retry.sh", "actionable", "--json"],
+      "outputPointer": "/sourceOutputs/actionable"
+    },
+    {
+      "program": "br",
+      "args": ["show", "bd-hydrate-099", "--json", "--no-auto-import", "--no-auto-flush", "--allow-stale"],
+      "outputPointer": "/sourceOutputs/directCandidate"
+    }
+  ],
+  "expected": {
+    "packetCandidateIds": ["bd-hydrate-001", "bd-hydrate-002"],
+    "recommendedCandidateId": "bd-hydrate-001",
+    "actionableRowCount": 34,
+    "serializedActionableCandidateIds": [
+      "bd-hydrate-001",
+      "bd-hydrate-002",
+      "bd-hydrate-003",
+      "bd-hydrate-004",
+      "bd-hydrate-005",
+      "bd-hydrate-006",
+      "bd-hydrate-007",
+      "bd-hydrate-008",
+      "bd-hydrate-009",
+      "bd-hydrate-010",
+      "bd-hydrate-011",
+      "bd-hydrate-012",
+      "bd-hydrate-013",
+      "bd-hydrate-014",
+      "bd-hydrate-015",
+      "bd-hydrate-016",
+      "bd-hydrate-017",
+      "bd-hydrate-018",
+      "bd-hydrate-019",
+      "bd-hydrate-020",
+      "bd-hydrate-021",
+      "bd-hydrate-022",
+      "bd-hydrate-023",
+      "bd-hydrate-024",
+      "bd-hydrate-025",
+      "bd-hydrate-026",
+      "bd-hydrate-027",
+      "bd-hydrate-028",
+      "bd-hydrate-029",
+      "bd-hydrate-030",
+      "bd-hydrate-031",
+      "bd-hydrate-032"
+    ],
+    "truncatedActionableCandidateCount": 2,
+    "candidateState": "candidate_present_actionable",
+    "lookupOutcome": "candidate_present",
+    "candidateStaleFallbackPresent": false,
+    "sourceAuthorityOverall": {
+      "verdict": "fail_closed_insufficient_authority",
+      "failClosed": true,
+      "authoritativeSourceCount": 2,
+      "degradedSourceCount": 2,
+      "unavailableSourceCount": 8
+    },
+    "sourceAuthoritySourceStates": [
+      { "sourceKind": "actionable_queue", "state": "ready", "authoritative": true, "freshnessState": "fresh", "timedOut": false, "exitClass": "ok" },
+      { "sourceKind": "agent_mail", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
+      { "sourceKind": "beads", "state": "ready", "authoritative": true, "freshnessState": "fresh", "timedOut": false, "exitClass": "ok" },
+      { "sourceKind": "bv", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
+      { "sourceKind": "git", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
+      { "sourceKind": "host_profile", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
+      { "sourceKind": "installed_binary", "state": "stale_fallback", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
+      { "sourceKind": "memory_drift", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
+      { "sourceKind": "rch", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
+      { "sourceKind": "support_bundle", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "unknown" },
+      { "sourceKind": "toolchain", "state": "unavailable", "authoritative": false, "freshnessState": "unknown", "timedOut": false, "exitClass": "ok" },
+      { "sourceKind": "workspace_hygiene", "state": "degraded_read_only", "authoritative": false, "freshnessState": "fresh", "timedOut": false, "exitClass": "ok" }
+    ],
+    "installFreshnessAuthority": {
+      "permittedVerdicts": ["path_binary_missing", "shadowed_binary"],
+      "authoritative": false,
+      "repair": "Run ee install check --json --offline, adopt a current artifact, or request an operator exception."
+    },
+    "degradedCodes": ["stale_binary_suspected"],
+    "unsafeReasonsByInstallFreshnessVerdict": {
+      "path_binary_missing": [
+        "claim_gate_install_freshness_not_authoritative",
+        "gate_verdict:blocked_by_verification",
+        "install_freshness:path_binary_missing"
+      ],
+      "shadowed_binary": [
+        "claim_gate_install_freshness_not_authoritative",
+        "gate_verdict:blocked_by_verification",
+        "install_freshness:shadowed_binary"
+      ]
+    },
+    "selectedCandidateDecision": "safe_to_claim",
+    "recommendedSafeToClaim": true,
+    "integrationTestVerdict": "blocked_by_verification",
+    "safeToClaim": false,
+    "claimCommandActionPresent": false,
+    "recoveryActions": [
+      {
+        "priority": 10,
+        "kind": "verify_source_version",
+        "commandAction": {
+          "commandId": "install_check_offline",
+          "displayCommand": "ee install check --json --offline",
+          "argv": ["ee", "install", "check", "--json", "--offline"],
+          "shellRequired": false,
+          "copySafety": "safe_structured_argv",
+          "mutatesState": false,
+          "requiredSubstrate": "ee",
+          "when": "before_claim_gate_retry",
+          "rationale": "Verify installed binary freshness against the source checkout before trusting claim-gate authority."
+        },
+        "mutatesState": false,
+        "requiredSubstrate": "ee",
+        "rationale": "Confirm whether the installed ee binary is fresh enough for the current claim-gate contract."
+      },
+      {
+        "priority": 11,
+        "kind": "plan_current_artifact_adoption",
+        "commandAction": {
+          "commandId": "install_plan_offline",
+          "displayCommand": "ee install plan --json --offline --manifest <release-manifest.json> --artifact-root <release-artifact-dir>",
+          "argv": ["ee", "install", "plan", "--json", "--offline", "--manifest", "<release-manifest.json>", "--artifact-root", "<release-artifact-dir>"],
+          "shellRequired": false,
+          "copySafety": "safe_structured_argv",
+          "mutatesState": false,
+          "requiredSubstrate": "ee",
+          "when": "after_stale_install_check",
+          "rationale": "Plan adoption from a verified current artifact without running local Cargo."
+        },
+        "mutatesState": false,
+        "requiredSubstrate": "ee",
+        "rationale": "Find a verified current artifact path before any operator-approved install action."
+      },
+      {
+        "priority": 12,
+        "kind": "request_operator_exception",
+        "commandAction": null,
+        "mutatesState": true,
+        "requiredSubstrate": "human",
+        "rationale": "Adopting or overwriting an installed binary is an operator action and needs explicit approval."
+      }
+    ],
+    "forbiddenRecordedArgvMarkers": ["update", "claim", "comments", "close"],
+    "forbiddenUnsafeReasonPrefixes": ["candidate_not_found:", "actionable_queue_candidate_absent:"]
+  }
+}

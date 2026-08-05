@@ -186,8 +186,9 @@ SOURCE_AUTHORITY_SAFE_OVERALL_VERDICTS = {
 SOURCE_AUTHORITY_CANDIDATE_OUTCOMES = {
     "candidate_present",
     "candidate_absent_confirmed",
-    "candidate_lookup_timed_out",
+    "candidate_known_non_actionable",
     "candidate_lookup_unavailable",
+    "candidate_lookup_timed_out",
     "candidate_stale_fallback_only",
     "candidate_contradicted",
 }
@@ -834,6 +835,15 @@ def source_authority_snapshot_consistency_reasons(gate):
             )
         if candidate.get("staleFallbackPresent") is not False:
             reasons.append("claim_gate_source_authority_snapshot_candidate_stale")
+
+    candidate_lookup_outcome = (
+        candidate.get("lookupOutcome") if isinstance(candidate, dict) else None
+    )
+    if (
+        gate.get("verdict") == "candidate_not_found"
+        and candidate_lookup_outcome != "candidate_absent_confirmed"
+    ):
+        reasons.append("claim_gate_candidate_not_found_without_confirmed_absence")
 
     source_states = snapshot.get("sourceStates")
     source_by_kind = {
