@@ -4277,16 +4277,15 @@ fn build_query_assist(
     query: &str,
     explain: bool,
     kept: usize,
-    considered: usize,
+    floor_counts: RelevanceFloorCounts,
     floor: f32,
     top_score_after_floor: Option<f32>,
     dropped_below_floor: usize,
     below_floor_candidates: &[SearchHit],
 ) -> Option<QueryAssistReport> {
-    let weak_result_reason =
-        classify_search_query_miss(kept, considered, floor, top_score_after_floor)
-            .map(SearchQueryMissReason::as_str)
-            .or_else(|| (kept == 0).then_some("empty_results"))?;
+    let weak_result_reason = classify_search_query_miss(floor_counts, floor, top_score_after_floor)
+        .map(SearchQueryMissReason::as_str)
+        .or_else(|| (kept == 0).then_some("empty_results"))?;
     let mode = if explain {
         QueryAssistMode::Explain
     } else {
@@ -4305,7 +4304,7 @@ fn build_query_assist(
         reformulations,
         did_you_mean,
         capture_template: QueryAssistCaptureTemplate::for_query(query),
-        candidate_count: considered,
+        candidate_count: floor_counts.considered,
         dropped_below_floor,
         relevance_floor: Some(floor),
     })
@@ -5636,12 +5635,11 @@ impl SearchQueryMissReason {
 }
 
 fn classify_search_query_miss(
-    kept: usize,
-    considered: usize,
+    floor_counts: RelevanceFloorCounts,
     floor: f32,
     top_score_after_floor: Option<f32>,
 ) -> Option<SearchQueryMissReason> {
-    if kept == 0 && considered > 0 {
+    if floor_counts.has_no_relevant_results() {
         return Some(SearchQueryMissReason::NoRelevantResults);
     }
     if let Some(top) = top_score_after_floor
@@ -5651,7 +5649,7 @@ fn classify_search_query_miss(
     {
         return Some(SearchQueryMissReason::WeakQueryRecall);
     }
-    if considered >= 3 && (kept * 10) < (considered * 3) {
+    if floor_counts.is_low_recall() {
         return Some(SearchQueryMissReason::LowRecallAfterFloor);
     }
     None
@@ -6868,7 +6866,7 @@ fn run_search_inner_with_performance(
                 &options.query,
                 options.explain,
                 kept,
-                pre_floor_count,
+                floor_counts,
                 floor,
                 above_floor.first().map(|hit| hit.score),
                 dropped,
@@ -6937,8 +6935,7 @@ fn run_search_inner_with_performance(
                         Some(executed_details),
                     );
                     if let Some(miss_reason) = classify_search_query_miss(
-                        kept,
-                        pre_floor_count,
+                        floor_counts,
                         floor,
                         above_floor.first().map(|hit| hit.score),
                     ) {
@@ -6948,7 +6945,7 @@ fn run_search_inner_with_performance(
                                 reason: miss_reason,
                                 status,
                                 kept,
-                                considered: pre_floor_count,
+                                considered: floor_counts.considered,
                                 dropped_below_floor: dropped,
                                 floor,
                                 top_score_before_floor: pre_floor_top_score,
@@ -7202,7 +7199,7 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
         &options.query,
         options.explain,
         kept,
-        pre_floor_count,
+        floor_counts,
         floor,
         above_floor.first().map(|hit| hit.score),
         dropped,
@@ -16484,7 +16481,7 @@ mod tests {
     #[test]
     fn search_query_miss_classifies_no_relevant_results_first() {
         assert_eq!(
-            classify_search_query_miss(0, 5, 0.05, None),
+            classify_search_query_miss(RelevanceFloorCounts::new(5, 0), 0.05, None),
             Some(SearchQueryMissReason::NoRelevantResults)
         );
     }
@@ -16492,7 +16489,7 @@ mod tests {
     #[test]
     fn search_query_miss_classifies_weak_recall_above_floor() {
         assert_eq!(
-            classify_search_query_miss(2, 10, 0.05, Some(0.07)),
+            classify_search_query_miss(RelevanceFloorCounts::new(10, 10), 0.05, Some(0.07)),
             Some(SearchQueryMissReason::WeakQueryRecall)
         );
     }
@@ -16500,10 +16497,25 @@ mod tests {
     #[test]
     fn search_query_miss_classifies_low_recall_after_floor() {
         assert_eq!(
-            classify_search_query_miss(2, 10, 0.05, Some(0.30)),
+            classify_search_query_miss(RelevanceFloorCounts::new(10, 2), 0.05, Some(0.30)),
             Some(SearchQueryMissReason::LowRecallAfterFloor)
         );
-        assert_eq!(classify_search_query_miss(2, 6, 0.05, Some(0.30)), None);
+        assert_eq!(
+            classify_search_query_miss(RelevanceFloorCounts::new(6, 2), 0.05, Some(0.30)),
+            None
+        );
+    }
+
+    #[test]
+    fn search_query_miss_ignores_later_visibility_and_limit_drops() {
+        assert_eq!(
+            classify_search_query_miss(RelevanceFloorCounts::new(50, 50), 0.05, Some(0.30)),
+            None
+        );
+        assert_eq!(
+            classify_search_query_miss(RelevanceFloorCounts::new(5, 5), 0.05, None),
+            None
+        );
     }
 
     #[test]
@@ -16518,7 +16530,7 @@ mod tests {
             "installer validation",
             true,
             0,
-            1,
+            RelevanceFloorCounts::new(1, 0),
             0.05,
             None,
             1,
@@ -16545,11 +16557,29 @@ mod tests {
 
     #[test]
     fn query_assist_capture_template_is_deterministic_for_empty_results() {
-        let first = build_query_assist("orbital stapler protocol", false, 0, 0, 0.05, None, 0, &[])
-            .expect("empty result should offer capture template");
-        let second =
-            build_query_assist("orbital stapler protocol", false, 0, 0, 0.05, None, 0, &[])
-                .expect("empty result should offer capture template");
+        let empty_counts = RelevanceFloorCounts::new(0, 0);
+        let first = build_query_assist(
+            "orbital stapler protocol",
+            false,
+            0,
+            empty_counts,
+            0.05,
+            None,
+            0,
+            &[],
+        )
+        .expect("empty result should offer capture template");
+        let second = build_query_assist(
+            "orbital stapler protocol",
+            false,
+            0,
+            empty_counts,
+            0.05,
+            None,
+            0,
+            &[],
+        )
+        .expect("empty result should offer capture template");
         let first_json = first.data_json(true);
         let second_json = second.data_json(true);
 
@@ -16567,9 +16597,35 @@ mod tests {
     #[test]
     fn query_assist_does_not_emit_for_good_results() {
         assert!(
-            build_query_assist("release checklist", false, 3, 3, 0.05, Some(0.30), 0, &[])
-                .is_none()
+            build_query_assist(
+                "release checklist",
+                false,
+                3,
+                RelevanceFloorCounts::new(3, 3),
+                0.05,
+                Some(0.30),
+                0,
+                &[]
+            )
+            .is_none()
         );
+    }
+
+    #[test]
+    fn query_assist_reports_visibility_only_empty_results_honestly() {
+        let assist = build_query_assist(
+            "strictly scoped query",
+            false,
+            0,
+            RelevanceFloorCounts::new(5, 5),
+            0.05,
+            None,
+            0,
+            &[],
+        )
+        .expect("an empty visible result set should still offer capture guidance");
+
+        assert_eq!(assist.weak_result_reason, "empty_results");
     }
 
     #[test]
