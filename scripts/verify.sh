@@ -88,6 +88,7 @@ set -euo pipefail
 #   6.127 Ergonomics E2E       - scripts/e2e_ergonomics.sh
 #   6.1295 Embedding Native E2E - scripts/e2e_embedding_native.sh
 #   6.1296 Bundled Embeddings E2E - scripts/e2e_bundled_embeddings.sh
+#   6.1297 Native Reranker E2E - scripts/e2e_native_reranker.sh
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
@@ -1187,6 +1188,35 @@ run_stage "Embedding Native E2E (bd-2vq2z.19)" "EE_E2E_TMPDIR=/private/tmp ./scr
 # honest hash fallback degradation, eval semantic-recall gain, and the
 # opt-in real-download lifecycle without downloading by default.
 run_stage "Bundled Embeddings E2E (bd-1et0v.19)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_bundled_embeddings.sh"
+
+# Gate 6.1297: pure-Rust native reranker real-binary E2E (bd-1nl13.14).
+# Every profile proves dynamic ORT-free linkage plus honest missing/rejected-
+# artifact degradation. Default and swarm-heavy verification additionally
+# require the cached safetensors archive, a real rerank-induced order change,
+# and registered-model withholding fallback. CI smoke is explicitly degradation-
+# only so its cost and outcome never depend on an ambient host model cache.
+# shellcheck disable=SC2329
+native_reranker_full_e2e() {
+    local archive_path
+    archive_path="${EE_E2E_RERANK_MODEL_ARCHIVE:-${HOME}/.local/share/ee/models/rerank/rerank-default-v1/rerank-default-v1.tar.zst}"
+    EE_E2E_RERANK_MODEL_ARCHIVE="${archive_path}" \
+        EE_E2E_NATIVE_RERANK_REQUIRE_MODEL=1 \
+        EE_E2E_NATIVE_RERANK_DEGRADATION_ONLY=0 \
+        ./scripts/e2e_native_reranker.sh
+}
+
+# shellcheck disable=SC2329
+native_reranker_degradation_e2e() {
+    EE_E2E_NATIVE_RERANK_REQUIRE_MODEL=0 \
+        EE_E2E_NATIVE_RERANK_DEGRADATION_ONLY=1 \
+        ./scripts/e2e_native_reranker.sh
+}
+
+if [ "$CI_SMOKE" != "true" ]; then
+    run_stage "Native Reranker E2E (bd-1nl13.14)" "native_reranker_full_e2e"
+else
+    run_stage "Native Reranker E2E (bd-1nl13.14)" "native_reranker_degradation_e2e"
+fi
 
 # Gate 6.13: Dueling Wizards docs-bootstrap real-binary E2E (bd-1n0np.11.5).
 # Proves ee bootstrap docs --dry-run structural candidates (spans/hashes/anchors/

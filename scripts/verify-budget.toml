@@ -4,9 +4,9 @@
 # regression_factor = 1.5 emits an advisory when elapsed time exceeds p50 * 1.5.
 # scripts/verify.sh fails the run when elapsed time exceeds p50 * 3.
 #
-# Non-benchmark p50 values sum to 745s, matching the roughly 12-minute target for the
+# Non-benchmark p50 values sum to 790s, matching the roughly 13-minute target for the
 # full readiness gate. Benchmarks are optional behind --include-bench.
-total_expected_seconds = 745
+total_expected_seconds = 790
 total_regression_factor = 1.5
 
 [[stage]]
@@ -52,6 +52,11 @@ regression_factor = 1.5
 [[stage]]
 name = "Basic E2E Scripts"
 expected_seconds_p50 = 90
+regression_factor = 1.5
+
+[[stage]]
+name = "Native Reranker E2E (bd-1nl13.14)"
+expected_seconds_p50 = 45
 regression_factor = 1.5
 
 [[stage]]
