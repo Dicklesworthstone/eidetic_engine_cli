@@ -30,8 +30,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use frankensearch_core::traits::{RerankDocument, RerankScore, SyncRerank};
-use frankensearch_rerank::NativeReranker;
+use frankensearch::{NativeReranker, RerankDocument, RerankScore, SyncRerank};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;

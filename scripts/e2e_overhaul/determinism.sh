@@ -442,13 +442,15 @@ fi
 #
 # The model artifact is deliberately external to the source tree. A normal
 # model-free lane records an honest skip; setting EE_E2E_RERANK_REQUIRE_MODEL=1
-# makes every missing input or degraded/fusion-only result fail closed. When a
-# reference vector is supplied, full content order is exact and calibrated
-# scores must stay within the configured cross-platform tolerance.
+# makes every missing model input or degraded/fusion-only result fail closed.
+# Five-target lanes additionally set EE_E2E_RERANK_REQUIRE_REFERENCE=1 and pass
+# a reference vector: full content order is exact and calibrated scores must
+# stay within the configured cross-platform tolerance.
 # ---------------------------------------------------------------------------
 RERANK_QUERY="bd1nl13 release format checklist cargo clippy"
 RERANK_ORIGINAL_HOME="${HOME}"
 RERANK_REQUIRE_MODEL="${EE_E2E_RERANK_REQUIRE_MODEL:-0}"
+RERANK_REQUIRE_REFERENCE="${EE_E2E_RERANK_REQUIRE_REFERENCE:-0}"
 RERANK_MODEL_ARCHIVE="${EE_E2E_RERANK_MODEL_ARCHIVE:-${RERANK_ORIGINAL_HOME}/.local/share/ee/models/rerank/rerank-default-v1/rerank-default-v1.tar.zst}"
 RERANK_REFERENCE_VECTOR="${EE_E2E_RERANK_REFERENCE_VECTOR:-}"
 RERANK_VECTOR_OUT="${EE_E2E_RERANK_VECTOR_OUT:-${EPIC_WORKSPACE}/rerank_determinism_vector.json}"
@@ -459,6 +461,9 @@ RERANK_SCORE_TOLERANCE="${EE_E2E_RERANK_SCORE_TOLERANCE:-0.01}"
 RERANK_JSON_OUTPUT=""
 
 if [ -n "$RERANK_REFERENCE_VECTOR" ]; then
+    RERANK_REQUIRE_MODEL=1
+fi
+if [ "$RERANK_REQUIRE_REFERENCE" = "1" ]; then
     RERANK_REQUIRE_MODEL=1
 fi
 
@@ -524,7 +529,7 @@ run_native_rerank_determinism_lane() {
         return $?
     fi
 
-    if [ "$RERANK_REQUIRE_MODEL" = "1" ] && [ -z "$RERANK_REFERENCE_VECTOR" ]; then
+    if [ "$RERANK_REQUIRE_REFERENCE" = "1" ] && [ -z "$RERANK_REFERENCE_VECTOR" ]; then
         e2e_log_assert_eq "missing EE_E2E_RERANK_REFERENCE_VECTOR" \
             "reference vector file" "rerank_reference_vector_required"
         return 1
