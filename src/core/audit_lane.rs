@@ -1276,10 +1276,11 @@ mod tests {
             };
             let (handle, mut lane) = AuditLane::new(config);
             for seq in 1..=event_count as u64 {
-                prop_assert!(matches!(
+                let enqueued = matches!(
                     handle.enqueue(AuditEvent::new("workspace-a", seq, "memory.create")),
                     AuditEnqueueResult::Enqueued { .. }
-                ));
+                );
+                prop_assert!(enqueued);
             }
 
             let failing_batch = failure_selector % event_count.div_ceil(batch_size);
