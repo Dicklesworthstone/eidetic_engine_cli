@@ -908,7 +908,9 @@ Operator workflow for crowded repos:
    ```
    The wrapper reports open, unassigned, non-epic rows after retrying
    transient Beads JSONL read races. Treat `[]` as no safe claimable leaf.
-   Raw `br ready --json` is still useful for broad inspection, and
+   The full broad inspection command
+   `br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale`
+   is still useful, and
    `bv --robot-triage` is still useful for ranking, but BV claim commands are
    advisory until the candidate also appears in the actionable queue and
    passes the read-only claim gate.
@@ -931,8 +933,11 @@ Operator workflow for crowded repos:
    `sourceAuthority`, verdict, severity, and recovery-action interpretation.
 5. Reserve edit surfaces through Agent Mail and mark the bead with
    `br update <id> --status in_progress --json` only when the gate reports
-   `safeToClaim=true`, `verdict=safe_to_claim`, and a structured
-   `claimCommandAction` for that candidate.
+   `safeToClaim=true`, `verdict=safe_to_claim`,
+   `selectedCandidate.ownership=unassigned`,
+   `selectedCandidate.editScope.state=known` with nonempty paths, and a
+   structured `claimCommandAction` for that candidate. Self-owned work reports
+   `continue_owned_work` and deliberately emits no second claim.
    If the only blocker is missing Agent Mail evidence, generate a redacted
    `ee.agent_mail.snapshot.v1` file and retry the same claim-gate command with
    `--agent-mail-snapshot` before deciding. A snapshot is read-only evidence,
@@ -950,8 +955,9 @@ Operator workflow for crowded repos:
 
 The brief sits beside the existing tools. The `scripts/br_retry.sh actionable --json`
 command is the safe claim queue for open, unassigned, non-epic leaves. Raw
-`br ready --json` remains a broad source of ready-work records and can include
-parent epics or rows that should not be claimed without cross-checking.
+`br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale`
+remains the complete broad source of ready-work records and can include parent
+epics or rows that should not be claimed without cross-checking.
 `bv --robot-triage` remains the graph-aware ranking engine. The
 `ee swarm work-packet --claim-gate --json` command is the claim-safety gate
 that must agree before an agent uses a BV copy-paste claim command or mutates
@@ -969,7 +975,8 @@ explicit external timeout, or route work selection through `ee swarm brief` /
 `ee swarm work-packet`, which converts timeout or no-output cases into
 `bv_command_timeout` / `bv_no_output` degradations. Those degradations make
 BV ranking advisory only: continue from bounded stale-safe Beads evidence such
-as `br --no-auto-import --allow-stale ready --json`, cross-check with
+as `br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale`,
+cross-check with
 `scripts/br_retry.sh actionable --json`, and do not use a BV claim command
 unless the same candidate is present in the actionable queue and the claim gate
 later reports `safeToClaim=true` with a structured `claimCommandAction`.

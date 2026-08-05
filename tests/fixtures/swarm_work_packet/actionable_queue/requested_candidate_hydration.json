@@ -132,7 +132,7 @@
     },
     {
       "program": "br",
-      "args": ["ready", "--json"],
+      "args": ["ready", "--limit", "0", "--json", "--no-auto-import", "--no-auto-flush", "--allow-stale"],
       "outputPointer": "/sourceOutputs/ready"
     },
     {

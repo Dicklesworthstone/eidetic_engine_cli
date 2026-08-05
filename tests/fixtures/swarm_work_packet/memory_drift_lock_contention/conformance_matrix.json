@@ -153,8 +153,14 @@
     "recommendedSafeToClaim": false,
     "selectedCandidate": {
       "id": "bd-md-lock",
+      "ownership": "unassigned",
+      "editScope": {
+        "state": "unknown",
+        "paths": [],
+        "sourceRefs": ["candidate_edit_scope.no_matching_bounded_surface"]
+      },
       "decision": "safe_to_claim",
-      "collisionRisk": "none"
+      "collisionRisk": "unknown"
     },
     "sourceAuthority": {
       "environmentVerdict": "coordinate_before_claim",

@@ -41,7 +41,7 @@
       "status": "timeout_no_output",
       "attemptedCommands": [
         {
-          "command": "scripts/br_retry.sh ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "outcome": "timeout_no_output",
           "timeoutMs": 10000
         },
@@ -68,6 +68,13 @@
       "status": "in_progress",
       "priority": 2,
       "assignee": "cc-pack",
+      "ownership": "unknown",
+      "editScope": {
+        "state": "unknown",
+        "paths": [],
+        "sourceRefs": ["candidate_edit_scope.no_matching_bounded_surface"]
+      },
+      "collisionRisk": "unknown",
       "decision": "blocked",
       "decisionReasons": [
         "source_health:beads_timeout_no_output",
@@ -114,7 +121,7 @@
       {
         "order": 1,
         "kind": "bounded_retry",
-        "command": "br --no-auto-import --allow-stale ready --json",
+        "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
         "why": "Use read-only stale fallback only for inspection while Beads liveness is degraded."
       },
       {

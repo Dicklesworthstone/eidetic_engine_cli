@@ -3049,6 +3049,234 @@ fn work_packet_candidate_decision_vocabulary_is_contractual() -> TestResult {
 }
 
 #[test]
+fn work_packet_candidate_ownership_and_edit_scope_are_contractual() -> TestResult {
+    // bd-z43rx: generic titles must fail closed when their candidate-scoped
+    // edit surface cannot be proved, while a fresh self-owned candidate must
+    // be distinguished from a peer collision and resumed without re-claiming.
+    let packet_case = schema_case_by_id("ee.swarm.work_packet.v1")?;
+    let packet_schema = schema_doc(packet_case)?;
+
+    let candidate_required = string_array_at(
+        &packet_schema,
+        "/definitions/candidate/required",
+        packet_case.id,
+    )?;
+    for required in ["ownership", "editScope"] {
+        if !candidate_required.iter().any(|field| field == required) {
+            return Err(format!(
+                "{} candidate must require {required}",
+                packet_case.id
+            ));
+        }
+    }
+
+    let ownership_values = string_array_at(
+        &packet_schema,
+        "/definitions/candidateOwnership/enum",
+        packet_case.id,
+    )?;
+    let expected_ownership = ["unassigned", "self", "peer", "unknown"];
+    if ownership_values != expected_ownership {
+        return Err(format!(
+            "{} ownership vocabulary drifted: {ownership_values:?}",
+            packet_case.id
+        ));
+    }
+
+    let scope_states = string_array_at(
+        &packet_schema,
+        "/definitions/candidateEditScope/properties/state/enum",
+        packet_case.id,
+    )?;
+    let expected_scope_states = ["known", "unknown"];
+    if scope_states != expected_scope_states {
+        return Err(format!(
+            "{} edit-scope state vocabulary drifted: {scope_states:?}",
+            packet_case.id
+        ));
+    }
+    let scope_required = string_array_at(
+        &packet_schema,
+        "/definitions/candidateEditScope/required",
+        packet_case.id,
+    )?;
+    let expected_scope_required = ["state", "paths", "sourceRefs"];
+    if scope_required != expected_scope_required {
+        return Err(format!(
+            "{} edit-scope required fields drifted: {scope_required:?}",
+            packet_case.id
+        ));
+    }
+    if packet_schema
+        .pointer("/definitions/candidateEditScope/properties/sourceRefs/minItems")
+        .and_then(Value::as_u64)
+        != Some(1)
+    {
+        return Err(format!(
+            "{} editScope.sourceRefs must remain non-empty",
+            packet_case.id
+        ));
+    }
+    let scope_rules = packet_schema
+        .pointer("/definitions/candidateEditScope/allOf")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{} editScope allOf rules missing", packet_case.id))?;
+    let known_requires_path = scope_rules.iter().any(|rule| {
+        rule.pointer("/if/properties/state/const") == Some(&Value::String("known".to_owned()))
+            && rule
+                .pointer("/then/properties/paths/minItems")
+                .and_then(Value::as_u64)
+                == Some(1)
+    });
+    let unknown_forbids_paths = scope_rules.iter().any(|rule| {
+        rule.pointer("/if/properties/state/const") == Some(&Value::String("unknown".to_owned()))
+            && rule
+                .pointer("/then/properties/paths/maxItems")
+                .and_then(Value::as_u64)
+                == Some(0)
+    });
+    if !known_requires_path || !unknown_forbids_paths {
+        return Err(format!(
+            "{} editScope must require paths for known and forbid them for unknown",
+            packet_case.id
+        ));
+    }
+
+    let action_values = string_array_at(
+        &packet_schema,
+        "/definitions/recommendedAction/properties/action/enum",
+        packet_case.id,
+    )?;
+    if !action_values
+        .iter()
+        .any(|action| action == "continue_owned_work")
+        || action_values
+            .iter()
+            .any(|action| action == "continue_existing_claim")
+    {
+        return Err(format!(
+            "{} recommended-action ownership vocabulary drifted: {action_values:?}",
+            packet_case.id
+        ));
+    }
+
+    let gate_case = schema_case_by_id("ee.swarm.work_packet.claim_gate.v1")?;
+    let gate_schema = schema_doc(gate_case)?;
+    let gate_ownership_values = string_array_at(
+        &gate_schema,
+        "/definitions/candidateOwnership/enum",
+        gate_case.id,
+    )?;
+    if gate_ownership_values != expected_ownership {
+        return Err(format!(
+            "{} ownership vocabulary drifted: {gate_ownership_values:?}",
+            gate_case.id
+        ));
+    }
+    let gate_scope_required = string_array_at(
+        &gate_schema,
+        "/definitions/candidateEditScope/required",
+        gate_case.id,
+    )?;
+    if gate_scope_required != expected_scope_required {
+        return Err(format!(
+            "{} edit-scope required fields drifted: {gate_scope_required:?}",
+            gate_case.id
+        ));
+    }
+    let selected_required = string_array_at(
+        &gate_schema,
+        "/definitions/selectedCandidate/required",
+        gate_case.id,
+    )?;
+    for required in ["ownership", "editScope"] {
+        if !selected_required.iter().any(|field| field == required) {
+            return Err(format!(
+                "{} selectedCandidate must require {required}",
+                gate_case.id
+            ));
+        }
+    }
+    for (field, expected_ref) in [
+        ("ownership", "#/definitions/candidateOwnership"),
+        ("editScope", "#/definitions/candidateEditScope"),
+    ] {
+        let pointer = format!("/definitions/selectedCandidate/properties/{field}/$ref");
+        if string_field(&gate_schema, &pointer, gate_case.id)? != expected_ref {
+            return Err(format!(
+                "{} selectedCandidate.{field} must reference {expected_ref}",
+                gate_case.id
+            ));
+        }
+    }
+    let safe_rule = gate_schema
+        .pointer("/allOf")
+        .and_then(Value::as_array)
+        .and_then(|rules| {
+            rules.iter().find(|rule| {
+                rule.pointer("/if/properties/safeToClaim/const")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+            })
+        })
+        .ok_or_else(|| format!("{} safeToClaim=true rule missing", gate_case.id))?;
+    for (pointer, expected) in [
+        (
+            "/then/properties/selectedCandidate/properties/ownership/const",
+            "unassigned",
+        ),
+        (
+            "/then/properties/selectedCandidate/properties/editScope/properties/state/const",
+            "known",
+        ),
+        (
+            "/then/properties/selectedCandidate/properties/collisionRisk/const",
+            "none",
+        ),
+    ] {
+        if string_field(safe_rule, pointer, gate_case.id)? != expected {
+            return Err(format!(
+                "{} safe claim rule must pin {pointer} to {expected}",
+                gate_case.id
+            ));
+        }
+    }
+    if safe_rule
+        .pointer(
+            "/then/properties/selectedCandidate/properties/editScope/properties/paths/minItems",
+        )
+        .and_then(Value::as_u64)
+        != Some(1)
+    {
+        return Err(format!(
+            "{} safe claim rule must require a non-empty editScope.paths",
+            gate_case.id
+        ));
+    }
+
+    for doc_path in [
+        "docs/swarm/work_packet.md",
+        "docs/agent-ux/swarm-work-packet.md",
+    ] {
+        let text = read_text(&repo_root().join(doc_path))?;
+        for required in [
+            "ownership",
+            "editScope",
+            "continue_owned_work",
+            "candidate_edit_scope_unknown",
+        ] {
+            if !text.contains(required) {
+                return Err(format!(
+                    "{doc_path} must document candidate ownership/scope marker {required}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn work_packet_agent_mail_semantic_readiness_gate_is_contractual() -> TestResult {
     // bd-2z5ly.8.1: when Agent Mail responds with healthLevel=green but
     // semantic_readiness.status=fail (for example malformed SQLite storage),
@@ -3816,7 +4044,9 @@ fn work_packet_bv_timeout_no_output_is_contractual() -> TestResult {
         .iter()
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
-    if !command_strings.contains(&"br --no-auto-import --allow-stale ready --json") {
+    if !command_strings
+        .contains(&"br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale")
+    {
         return Err("bv timeout fixture must recommend stale-safe Beads fallback".into());
     }
     for command in command_strings {

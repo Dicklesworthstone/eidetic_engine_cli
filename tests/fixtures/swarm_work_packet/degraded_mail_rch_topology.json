@@ -42,7 +42,7 @@
         "status": "ready",
         "freshness": "current",
         "degradedCodes": [],
-        "provenance": "br ready --json"
+        "provenance": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale"
       }
     ],
     "candidateLane": {
@@ -51,6 +51,13 @@
       "status": "open",
       "priority": 2,
       "assignee": null,
+      "ownership": "unassigned",
+      "editScope": {
+        "state": "unknown",
+        "paths": [],
+        "sourceRefs": ["candidate_edit_scope.no_matching_bounded_surface"]
+      },
+      "collisionRisk": "unknown",
       "decision": "blocked_by_verification",
       "decisionReasons": [
         "remote_only_required",

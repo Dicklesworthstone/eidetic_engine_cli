@@ -114,6 +114,12 @@
         "status": "open",
         "priority": 2,
         "assignee": null,
+        "ownership": "unassigned",
+        "editScope": {
+          "state": "known",
+          "paths": ["README.md", "docs/**"],
+          "sourceRefs": ["swarm_brief.ready_reservation_pressure.likely_surfaces", "work_packet.specialized_title_mapping"]
+        },
         "decision": "external_state_required",
         "collisionRisk": "none",
         "unsafeReasons": [
@@ -134,6 +140,13 @@
       "status": "open",
       "priority": 2,
       "assignee": null,
+      "ownership": "unassigned",
+      "editScope": {
+        "state": "known",
+        "paths": ["README.md", "docs/**"],
+        "sourceRefs": ["swarm_brief.ready_reservation_pressure.likely_surfaces", "work_packet.specialized_title_mapping"]
+      },
+      "collisionRisk": "none",
       "decision": "external_state_required",
       "decisionReasons": [
         "beads_requires_candidate_downgrade",

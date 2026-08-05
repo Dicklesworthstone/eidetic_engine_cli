@@ -45,6 +45,8 @@ COMMAND_SUBSTRATE_VALUES = {
     "none",
 }
 COMMAND_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
+CANDIDATE_OWNERSHIP_VALUES = {"unassigned", "self", "peer", "unknown"}
+CANDIDATE_EDIT_SCOPE_STATE_VALUES = {"known", "unknown"}
 CLAIM_GATE_REQUIRED_FIELDS = [
     ("gateId", "missing_claim_gate_gate_id"),
     ("packetId", "missing_claim_gate_packet_id"),
@@ -556,6 +558,84 @@ def safe_snapshot_string(value, max_length=None):
         and (max_length is None or len(value) <= max_length)
         and not text_requires_redaction(value)
     )
+
+
+def candidate_contract_reasons(candidate, reason_prefix):
+    if not isinstance(candidate, dict):
+        return [f"malformed_{reason_prefix}"]
+
+    reasons = []
+    if "ownership" not in candidate:
+        reasons.append(f"missing_{reason_prefix}_ownership")
+    elif candidate.get("ownership") not in CANDIDATE_OWNERSHIP_VALUES:
+        reasons.append(f"malformed_{reason_prefix}_ownership")
+
+    if "editScope" not in candidate:
+        reasons.append(f"missing_{reason_prefix}_edit_scope")
+        return reasons
+    edit_scope = candidate.get("editScope")
+    if not isinstance(edit_scope, dict):
+        reasons.append(f"malformed_{reason_prefix}_edit_scope")
+        return reasons
+    expected_fields = {"state", "paths", "sourceRefs"}
+    for field in sorted(expected_fields):
+        if field not in edit_scope:
+            reasons.append(f"missing_{reason_prefix}_edit_scope_{field}")
+    if set(edit_scope) - expected_fields:
+        reasons.append(f"malformed_{reason_prefix}_edit_scope_additional_fields")
+
+    state = edit_scope.get("state")
+    if state not in CANDIDATE_EDIT_SCOPE_STATE_VALUES:
+        reasons.append(f"malformed_{reason_prefix}_edit_scope_state")
+    paths = edit_scope.get("paths")
+    if not isinstance(paths, list) or len(paths) > 64:
+        reasons.append(f"malformed_{reason_prefix}_edit_scope_paths")
+        paths = []
+    elif (
+        any(not safe_snapshot_string(path, 240) for path in paths)
+        or len(paths) != len(set(paths))
+    ):
+        reasons.append(f"malformed_{reason_prefix}_edit_scope_paths")
+    source_refs = edit_scope.get("sourceRefs")
+    if not isinstance(source_refs, list) or len(source_refs) > 32:
+        reasons.append(f"malformed_{reason_prefix}_edit_scope_source_refs")
+    elif (
+        any(not safe_snapshot_string(source_ref, 240) for source_ref in source_refs)
+        or len(source_refs) != len(set(source_refs))
+    ):
+        reasons.append(f"malformed_{reason_prefix}_edit_scope_source_refs")
+    elif not source_refs:
+        reasons.append(f"malformed_{reason_prefix}_edit_scope_source_refs_empty")
+    if state == "known" and not paths:
+        reasons.append(f"malformed_{reason_prefix}_edit_scope_known_without_paths")
+    if state == "unknown" and paths:
+        reasons.append(f"malformed_{reason_prefix}_edit_scope_unknown_with_paths")
+    return reasons
+
+
+def candidate_claim_semantic_reasons(candidate, reason_prefix):
+    if not isinstance(candidate, dict):
+        return []
+    reasons = []
+    ownership = candidate.get("ownership")
+    if ownership != "unassigned":
+        reasons.append(
+            f"{reason_prefix}_ownership:{redact_text(ownership or 'unknown', 64)}"
+        )
+    edit_scope = candidate.get("editScope")
+    scope_state = edit_scope.get("state") if isinstance(edit_scope, dict) else None
+    scope_paths = edit_scope.get("paths") if isinstance(edit_scope, dict) else None
+    if scope_state != "known" or not isinstance(scope_paths, list) or not scope_paths:
+        reasons.append(
+            f"{reason_prefix}_edit_scope:{redact_text(scope_state or 'unknown', 64)}"
+        )
+    collision_risk = candidate.get("collisionRisk")
+    if collision_risk != "none":
+        reasons.append(
+            f"{reason_prefix}_collision_risk:"
+            f"{redact_text(collision_risk or 'unknown', 64)}"
+        )
+    return reasons
 
 
 def source_authority_repair_command_is_mutating(command):
@@ -1173,6 +1253,9 @@ def malformed_claim_gate_reasons(gate):
     if candidate is not None and not isinstance(candidate, dict):
         reasons.append("malformed_claim_gate_selected_candidate")
     elif isinstance(candidate, dict):
+        reasons.extend(
+            candidate_contract_reasons(candidate, "claim_gate_candidate")
+        )
         for field, reason in [
             ("id", "malformed_claim_gate_candidate_id"),
             ("decision", "malformed_claim_gate_candidate_decision"),
@@ -1692,6 +1775,9 @@ def selected_candidate(packet):
             "id": lane.get("beadId"),
             "decision": decision,
             "status": lane.get("status"),
+            "ownership": lane.get("ownership"),
+            "editScope": lane.get("editScope"),
+            "collisionRisk": lane.get("collisionRisk"),
             "unsafeReasons": []
             if decision == "safe_to_claim"
             else lane.get("decisionReasons", []),
@@ -1723,6 +1809,8 @@ def packet_safe_to_claim(packet, candidate, envelope_degraded=None):
         and decision == "safe_to_claim"
         and not unsafe_reasons
         and not stale_reasons
+        and not candidate_contract_reasons(candidate, "packet_candidate")
+        and not candidate_claim_semantic_reasons(candidate, "packet_candidate")
         and candidate_status_reason(candidate) is None
         and not compact_list(packet.get("doNotProceedBecause"))
         and not malformed_packet_map_reasons(packet)
@@ -1775,6 +1863,8 @@ def packet_why_not_safe(packet, candidate, safe_to_claim, envelope_degraded=None
             reasons.append(status_reason)
         reasons.extend(compact_list(candidate.get("unsafeReasons")))
         reasons.extend(compact_list(candidate.get("staleReasons")))
+        reasons.extend(candidate_contract_reasons(candidate, "packet_candidate"))
+        reasons.extend(candidate_claim_semantic_reasons(candidate, "packet_candidate"))
         if decision == "stale_but_reclaimable":
             reasons.append("stale_but_reclaimable_requires_inspection")
 
@@ -1863,6 +1953,9 @@ def claim_gate_consistency_reasons(gate, envelope_degraded=None):
                 "claim_gate_candidate_decision:"
                 f"{redact_text(candidate_decision or 'unknown', 64)}"
             )
+        reasons.extend(
+            candidate_claim_semantic_reasons(candidate, "claim_gate_candidate")
+        )
 
     if not isinstance(gate.get("claimCommandAction"), dict):
         reasons.append("claim_gate_missing_claim_action")

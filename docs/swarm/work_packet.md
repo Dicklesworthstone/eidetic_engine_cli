@@ -248,7 +248,7 @@ projection when it emits `safeToClaim=true` and a non-null
 | Decision | Agent meaning | May drive recommended action? |
 | --- | --- | --- |
 | `safe_to_claim` | The candidate is open, unblocked, unowned, and conflict evidence is authoritative enough to claim after normal reservation/coordination steps. | Yes: `inspect_and_claim` only. |
-| `already_owned` | A fresh assignee, active claim, or authoritative coordination signal says another lane owns the work. | No; inspect or coordinate only. |
+| `already_owned` | A fresh assignee or active claim owns the work. Inspect `ownership`: `self` continues the existing lane without another claim; `peer` coordinates with the holder. | `continue_owned_work` for `self`; never emit a second claim. |
 | `unsafe_due_to_conflict` | Dirty files, reservations, or overlapping edit surfaces make an otherwise useful candidate unsafe for autonomous claim. | No; coordinate first. |
 | `blocked_by_dependency` | The candidate itself is blocked by another Bead or prerequisite. | No; work the blocker. |
 | `blocked_by_verification` | RCH, verifier-ledger, or remote-only proof posture prevents responsible progress on the candidate. | No; record blocker or choose static/docs work. |
@@ -265,10 +265,37 @@ projection when it emits `safeToClaim=true` and a non-null
 
 Deterministic ordering is part of the contract: candidates sort by their stable
 struct keys, and each candidate's `unsafeReasons`, `staleReasons`, and
-`sourceRefs` arrays are sorted and deduplicated before `packetId` calculation.
+`sourceRefs` arrays plus `editScope.paths` and `editScope.sourceRefs` are sorted
+and deduplicated before `packetId` calculation.
 Adding, renaming, or reclassifying a decision requires updating the schema,
 this document, the agent UX document, relevant fixtures or goldens, and the
 `work_packet_candidate_decision_vocabulary_is_contractual` lifecycle test.
+
+Every serialized candidate carries candidate-scoped ownership and edit-scope
+evidence:
+
+- `ownership` is `unassigned | self | peer | unknown`, relative only to a
+  fresh, workspace-bound, authoritative Agent Mail identity. An assigned row
+  with unavailable or stale identity is `unknown`, never guessed as self.
+- `editScope.state=known` requires a nonempty, deterministic `paths[]`.
+  `editScope.state=unknown` requires empty paths and a nonempty explanatory
+  `sourceRefs[]`, including
+  `candidate_edit_scope.no_matching_bounded_surface`.
+- Unknown scope fails closed as `coordinate_first`, carries
+  `candidate_edit_scope_unknown`, uses `collisionRisk=unknown`, and offers a
+  read-only `br show` inspection action. It never borrows checkout-global dirty
+  files, reservations, or related Beads and mislabels them as candidate
+  conflicts.
+- A reservation held by the current authoritative identity and the selected
+  candidate's own ID in `relatedBeadIds` are supporting self-ownership
+  evidence, not competing claims. Any peer reservation or other Bead on the
+  same resolved path remains blocking; mixed self/peer evidence stays blocked.
+
+The broad ready collector reads the complete deterministic set with
+`br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale`.
+That full set prevents candidates after the historical default row limit from
+disappearing, but it remains advisory: the actionable queue and every ordinary
+claim-safety gate must still agree.
 
 Implementation contract:
 
@@ -295,8 +322,12 @@ ee.swarm.work_packet.claim_gate.v1`, the source `packetId`, a deterministic
 reason arrays, and the verdict.
 
 `safeToClaim` is `true` only when the selected candidate decision is
-`safe_to_claim`, the source packet's `recommendedAction.safeToClaim` is `true`,
-and source authority has no hard freshness blocker. `sourceAuthority.rchRemoteOnlyRequired` and
+`safe_to_claim`, `ownership=unassigned`, `editScope.state=known` with at least
+one path, `collisionRisk=none`, the source packet's
+`recommendedAction.safeToClaim` is `true`, and source authority has no hard
+freshness blocker. A self-owned candidate instead remains
+`safeToClaim=false`, emits no claim action, and recommends
+`continue_owned_work`. `sourceAuthority.rchRemoteOnlyRequired` and
 `sourceAuthority.rchSafeToLaunchCargoVerification` are separate so harnesses can
 fail closed when remote-only verification is required but the positive RCH proof
 is missing or false; a green local compile posture is not enough to claim Rust
@@ -312,6 +343,9 @@ confirm absence, represented by `lookupOutcome=candidate_absent_confirmed`.
 An explicit `--candidate <id>` is hydrated with a bounded, read-only `br show`
 probe independently of the packet's recommendation rank and bounded candidate
 projection; it still must pass every ordinary claim-safety gate.
+Its environment-attestation reservation posture is derived from the same
+candidate-scoped edit paths. Unknown scope reports insufficient/unknown
+reservation evidence instead of a deceptively safe global reservation verdict.
 
 `sourceAuthoritySnapshot` is the compact gate-local reference to the redacted
 `ee.source_authority.snapshot.v1` vector used for the verdict. It carries the

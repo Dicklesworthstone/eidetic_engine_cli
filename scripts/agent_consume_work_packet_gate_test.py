@@ -101,6 +101,15 @@ def safe_gate():
             "status": "open",
             "priority": 2,
             "assignee": None,
+            "ownership": "unassigned",
+            "editScope": {
+                "state": "known",
+                "paths": ["README.md", "docs/**"],
+                "sourceRefs": [
+                    "swarm_brief.ready_reservation_pressure.likely_surfaces",
+                    "work_packet.specialized_title_mapping",
+                ],
+            },
             "decision": "safe_to_claim",
             "collisionRisk": "none",
         },
@@ -1498,6 +1507,97 @@ class ClaimGateConsumer(unittest.TestCase):
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
         self.assertFalse(claim["runnable"])
 
+    def test_candidate_ownership_must_be_unassigned_for_claim(self):
+        gate = safe_gate()
+        gate["selectedCandidate"]["ownership"] = "self"
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_candidate_ownership:self",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+
+    def test_coherent_self_owned_candidate_continues_without_reclaiming(self):
+        gate = safe_gate()
+        gate["safeToClaim"] = False
+        gate["verdict"] = "already_owned"
+        gate["recommendedAction"] = "continue_owned_work"
+        gate["recommendedSafeToClaim"] = False
+        gate["selectedCandidate"].update(
+            {
+                "status": "in_progress",
+                "assignee": "NavyLotus",
+                "ownership": "self",
+                "decision": "already_owned",
+                "collisionRisk": "none",
+            }
+        )
+        gate["claimCommandAction"] = None
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "already_owned")
+        self.assertEqual(decision["action"], "continue_owned_work")
+        self.assertIn(
+            "claim_gate_candidate_ownership:self",
+            decision["whyNotSafe"],
+        )
+        self.assertFalse(
+            any(action["mutatesState"] for action in decision["argvActions"])
+        )
+
+    def test_candidate_edit_scope_must_be_known_and_nonempty_for_claim(self):
+        gate = safe_gate()
+        gate["selectedCandidate"]["editScope"] = {
+            "state": "unknown",
+            "paths": [],
+            "sourceRefs": ["candidate_edit_scope.no_matching_bounded_surface"],
+        }
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_candidate_edit_scope:unknown",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+
+    def test_candidate_known_edit_scope_without_paths_is_malformed(self):
+        gate = safe_gate()
+        gate["selectedCandidate"]["editScope"]["paths"] = []
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "malformed_claim_gate_candidate_edit_scope_known_without_paths",
+            decision["whyNotSafe"],
+        )
+
+    def test_candidate_scope_and_ownership_fields_are_required(self):
+        gate = safe_gate()
+        del gate["selectedCandidate"]["ownership"]
+        del gate["selectedCandidate"]["editScope"]
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "missing_claim_gate_candidate_ownership",
+            decision["whyNotSafe"],
+        )
+        self.assertIn(
+            "missing_claim_gate_candidate_edit_scope",
+            decision["whyNotSafe"],
+        )
+
     def test_requested_candidate_mismatch_fails_closed(self):
         gate = safe_gate()
         gate["selectedCandidate"]["id"] = "bd-other.1"
@@ -2234,7 +2334,14 @@ class WorkPacketConsumer(unittest.TestCase):
         packet["data"]["candidates"] = [
             {
                 "id": "bd-bounded-actions.1",
+                "ownership": "unassigned",
+                "editScope": {
+                    "state": "known",
+                    "paths": ["docs/**"],
+                    "sourceRefs": ["work_packet.specialized_title_mapping"],
+                },
                 "decision": "safe_to_claim",
+                "collisionRisk": "none",
                 "unsafeReasons": [],
                 "staleReasons": [],
             }
@@ -4402,6 +4509,46 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
         self.assertEqual(
             240,
             command_action["properties"]["rationale"]["maxLength"],
+        )
+        selected_candidate = schema["definitions"]["selectedCandidate"]
+        self.assertIn("ownership", selected_candidate["required"])
+        self.assertIn("editScope", selected_candidate["required"])
+        self.assertEqual(
+            consumer.CANDIDATE_OWNERSHIP_VALUES,
+            set(schema["definitions"]["candidateOwnership"]["enum"]),
+        )
+        edit_scope = schema["definitions"]["candidateEditScope"]
+        self.assertEqual(["state", "paths", "sourceRefs"], edit_scope["required"])
+        self.assertEqual(
+            consumer.CANDIDATE_EDIT_SCOPE_STATE_VALUES,
+            set(edit_scope["properties"]["state"]["enum"]),
+        )
+        self.assertEqual(1, edit_scope["properties"]["sourceRefs"]["minItems"])
+        safe_rule = next(
+            rule
+            for rule in schema["allOf"]
+            if rule["if"]["properties"].get("safeToClaim", {}).get("const") is True
+        )
+        safe_candidate = safe_rule["then"]["properties"]["selectedCandidate"]
+        self.assertEqual(
+            "unassigned",
+            safe_candidate["properties"]["ownership"]["const"],
+        )
+        self.assertEqual(
+            "known",
+            safe_candidate["properties"]["editScope"]["properties"]["state"][
+                "const"
+            ],
+        )
+        self.assertEqual(
+            1,
+            safe_candidate["properties"]["editScope"]["properties"]["paths"][
+                "minItems"
+            ],
+        )
+        self.assertEqual(
+            "none",
+            safe_candidate["properties"]["collisionRisk"]["const"],
         )
 
     def test_command_action_consumer_constants_match_work_packet_schema(self):

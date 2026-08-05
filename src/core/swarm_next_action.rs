@@ -753,10 +753,20 @@ pub struct SwarmWorkPacketCandidate {
     pub status: String,
     pub priority: Option<i64>,
     pub assignee: Option<String>,
+    pub ownership: &'static str,
+    pub edit_scope: SwarmWorkPacketCandidateEditScope,
     pub decision: &'static str,
     pub collision_risk: &'static str,
     pub unsafe_reasons: Vec<String>,
     pub stale_reasons: Vec<String>,
+    pub source_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketCandidateEditScope {
+    pub state: &'static str,
+    pub paths: Vec<String>,
     pub source_refs: Vec<String>,
 }
 
@@ -796,6 +806,8 @@ pub struct SwarmWorkPacketClaimGateCandidate {
     pub status: String,
     pub priority: Option<i64>,
     pub assignee: Option<String>,
+    pub ownership: &'static str,
+    pub edit_scope: SwarmWorkPacketCandidateEditScope,
     pub decision: &'static str,
     pub collision_risk: &'static str,
 }
@@ -1519,6 +1531,11 @@ pub struct SwarmWorkPacketAgentMail {
     pub recovery: Option<SwarmWorkPacketAgentMailRecovery>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub durability_state: Option<&'static str>,
+    /// Fresh, validated snapshot identity used only to distinguish this
+    /// agent's claims and reservations from peer ownership. The public
+    /// contract exposes the derived ownership class, never the raw identity.
+    #[serde(skip)]
+    pub agent_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -3537,7 +3554,11 @@ impl SwarmWorkPacket {
         degraded.dedup();
 
         let coordination = work_packet_coordination(brief, snapshot);
-        let mut candidates = work_packet_candidates(brief, snapshot);
+        let mut candidates = work_packet_candidates(
+            brief,
+            snapshot,
+            coordination.agent_mail.agent_name.as_deref(),
+        );
         candidates.sort();
         candidates.dedup();
         apply_coordination_collision_candidate_downgrade(&mut candidates, snapshot, &coordination);
@@ -3676,7 +3697,8 @@ impl SwarmWorkPacket {
             &actionable_queue,
             install_freshness,
         );
-        let source_authority_attestation = work_packet_claim_gate_attestation_summary(self);
+        let source_authority_attestation =
+            work_packet_claim_gate_attestation_summary_for_candidate(self, candidate);
         let resource_admission = work_packet_resource_admission(
             "claim_gate",
             "coordination",
@@ -3696,6 +3718,8 @@ impl SwarmWorkPacket {
             requested_lookup_outcome,
         );
         let safe_to_claim = verdict == "safe_to_claim" && recommended_safe_to_claim == Some(true);
+        let recommended_action =
+            work_packet_claim_gate_recommended_action(self, candidate, verdict);
         let actions = work_packet_suggested_command_actions(
             candidate
                 .map(|candidate| candidate.id.as_str())
@@ -3788,7 +3812,7 @@ impl SwarmWorkPacket {
             verdict,
             safe_to_claim,
             selected_candidate,
-            recommended_action: self.recommended_action.action,
+            recommended_action,
             recommended_safe_to_claim,
             source_authority: SwarmWorkPacketClaimGateSourceAuthority {
                 tracker_authoritative: self.tracker_integrity.br_reads_authoritative,
@@ -3841,6 +3865,8 @@ impl From<&SwarmWorkPacketCandidate> for SwarmWorkPacketClaimGateCandidate {
             status: candidate.status.clone(),
             priority: candidate.priority,
             assignee: candidate.assignee.clone(),
+            ownership: candidate.ownership,
+            edit_scope: candidate.edit_scope.clone(),
             decision: candidate.decision,
             collision_risk: candidate.collision_risk,
         }
@@ -4760,6 +4786,10 @@ fn work_packet_claim_gate_candidate_recommended_safe_to_claim(
     explicitly_requested: bool,
 ) -> bool {
     candidate.decision == "safe_to_claim"
+        && candidate.ownership == "unassigned"
+        && candidate.edit_scope.state == "known"
+        && !candidate.edit_scope.paths.is_empty()
+        && candidate.collision_risk == "none"
         && (explicitly_requested
             || (packet.recommended_action.safe_to_claim == Some(true)
                 && packet.recommended_action.candidate_id.as_deref()
@@ -4837,6 +4867,16 @@ fn work_packet_claim_gate_verdict(
     if work_packet_toolchain_blocks_claim(packet) {
         return "blocked_by_verification";
     }
+    if requested_lookup_outcome.is_some_and(|outcome| {
+        matches!(
+            outcome,
+            "candidate_lookup_unavailable"
+                | "candidate_lookup_timed_out"
+                | "candidate_stale_fallback_only"
+        )
+    }) {
+        return "external_state_required";
+    }
     if candidate.decision != "safe_to_claim" {
         return candidate.decision;
     }
@@ -4866,6 +4906,31 @@ fn work_packet_claim_gate_verdict(
         return "coordinate_first";
     }
     "safe_to_claim"
+}
+
+fn work_packet_claim_gate_recommended_action(
+    packet: &SwarmWorkPacket,
+    candidate: Option<&SwarmWorkPacketCandidate>,
+    verdict: &str,
+) -> &'static str {
+    if verdict == "already_owned"
+        && candidate.is_some_and(|candidate| {
+            candidate.ownership == "self" && candidate.decision == "already_owned"
+        })
+    {
+        return "continue_owned_work";
+    }
+    match verdict {
+        "safe_to_claim" => "inspect_and_claim",
+        "coordinate_first" | "already_owned" | "unsafe_due_to_conflict" => {
+            "coordinate_before_claim"
+        }
+        "stale_but_reclaimable" => "reopen_stale_work",
+        "external_state_required" if agent_mail_blocks_claim(&packet.coordination.agent_mail) => {
+            "coordinate_before_claim"
+        }
+        _ => packet.recommended_action.action,
+    }
 }
 
 fn work_packet_claim_gate_unsafe_reasons(
@@ -6112,6 +6177,16 @@ fn rch_worker_root_canary_command_action() -> SwarmWorkPacketCommandAction {
 fn work_packet_claim_gate_attestation_summary(
     packet: &SwarmWorkPacket,
 ) -> EnvironmentAttestationSummary {
+    work_packet_claim_gate_attestation_summary_for_candidate(
+        packet,
+        work_packet_claim_gate_candidate(packet, None),
+    )
+}
+
+fn work_packet_claim_gate_attestation_summary_for_candidate(
+    packet: &SwarmWorkPacket,
+    candidate: Option<&SwarmWorkPacketCandidate>,
+) -> EnvironmentAttestationSummary {
     let remote_verification_admitted = work_packet_claim_gate_remote_verification_admitted(packet);
     let local_cargo_fallback_observed = packet
         .degraded
@@ -6129,15 +6204,20 @@ fn work_packet_claim_gate_attestation_summary(
         .degraded
         .iter()
         .any(|degradation| degradation.code == "stale_binary_suspected");
-    let source_authority_ambiguous =
-        packet.rch_proof_posture.remote_only_required && remote_verification_admitted != Some(true);
+    let candidate_edit_scope_unknown =
+        candidate.is_some_and(|candidate| candidate.edit_scope.state == "unknown");
+    let source_authority_ambiguous = candidate_edit_scope_unknown
+        || (packet.rch_proof_posture.remote_only_required
+            && remote_verification_admitted != Some(true));
 
     environment_attestation_summary_from_inputs(EnvironmentAttestationSummaryInputs {
         local_cargo_fallback_observed,
         remote_environment_blocked,
         stale_source_observed: false,
         tracker_stale: !packet.tracker_integrity.br_reads_authoritative,
-        reservation_conflict: work_packet_has_active_reservation_conflict(packet),
+        reservation_conflict: candidate.is_some_and(|candidate| {
+            work_packet_candidate_has_active_reservation_conflict(packet, candidate)
+        }),
         stale_binary_suspected,
         coordination_blocked: agent_mail_blocks_claim(&packet.coordination.agent_mail)
             || work_packet_has_coordination_degradation(packet),
@@ -6187,12 +6267,29 @@ fn environment_attestation_source_test_verdict_label(
     }
 }
 
-fn work_packet_has_active_reservation_conflict(packet: &SwarmWorkPacket) -> bool {
+fn work_packet_candidate_has_active_reservation_conflict(
+    packet: &SwarmWorkPacket,
+    candidate: &SwarmWorkPacketCandidate,
+) -> bool {
+    if candidate.edit_scope.state != "known" {
+        return false;
+    }
     packet
         .coordination
         .file_collisions
         .iter()
-        .any(|collision| !collision.owners.is_empty())
+        .filter(|collision| {
+            candidate
+                .edit_scope
+                .paths
+                .iter()
+                .any(|path| path_patterns_overlap(path, &collision.path_pattern))
+        })
+        .any(|collision| {
+            collision.owners.iter().any(|owner| {
+                packet.coordination.agent_mail.agent_name.as_deref() != Some(owner.as_str())
+            })
+        })
 }
 
 fn work_packet_has_coordination_degradation(packet: &SwarmWorkPacket) -> bool {
@@ -6239,6 +6336,7 @@ fn is_coordination_degradation_code(code: &str) -> bool {
 fn work_packet_candidates(
     brief: &SwarmBriefReport,
     snapshot: &SwarmNextActionSnapshot,
+    current_agent_name: Option<&str>,
 ) -> Vec<SwarmWorkPacketCandidate> {
     let cards_by_candidate = snapshot
         .recommendation_cards()
@@ -6265,6 +6363,7 @@ fn work_packet_candidates(
                 stale.map_or_else(Vec::new, |proposal| proposal.evidence.clone()),
                 brief,
                 snapshot,
+                current_agent_name,
             )
         })
         .collect()
@@ -6278,19 +6377,51 @@ fn work_packet_candidate_from_next_action(
     stale_reasons: Vec<String>,
     brief: &SwarmBriefReport,
     snapshot: &SwarmNextActionSnapshot,
+    current_agent_name: Option<&str>,
 ) -> SwarmWorkPacketCandidate {
-    let decision =
-        work_packet_candidate_decision(candidate, card_decision, stale_decision, brief, snapshot);
+    let ownership =
+        work_packet_candidate_ownership(candidate.assignee.as_deref(), current_agent_name);
+    let edit_scope = work_packet_candidate_edit_scope(candidate, brief);
+    let decision = work_packet_candidate_decision(
+        candidate,
+        card_decision,
+        stale_decision,
+        ownership,
+        &edit_scope,
+        brief,
+        snapshot,
+        current_agent_name,
+    );
     if decision == "unsafe_due_to_conflict" {
         unsafe_reasons.extend(work_packet_candidate_conflict_evidence(
-            candidate, brief, snapshot,
+            candidate,
+            &edit_scope,
+            ownership,
+            brief,
+            snapshot,
+            current_agent_name,
         ));
+    }
+    if edit_scope.state == "unknown" {
+        unsafe_reasons.push("candidate_edit_scope_unknown".to_owned());
+        unsafe_reasons.push("inspect_candidate_before_edit_scope_resolution".to_owned());
+    }
+    match ownership {
+        "self" => {
+            unsafe_reasons.push("candidate_owned_by_self".to_owned());
+        }
+        "peer" => unsafe_reasons.push("candidate_owned_by_peer".to_owned()),
+        "unknown" if candidate.assignee.is_some() => {
+            unsafe_reasons.push("candidate_ownership_unknown".to_owned());
+        }
+        _ => {}
     }
     if decision == "release_operator_required" {
         unsafe_reasons.extend(candidate_release_operator_reasons(candidate));
     }
     unsafe_reasons.sort();
     unsafe_reasons.dedup();
+    let collision_risk = work_packet_collision_risk(candidate, ownership, &edit_scope);
     SwarmWorkPacketCandidate {
         id: candidate.id.clone(),
         title: candidate.title.clone(),
@@ -6298,8 +6429,10 @@ fn work_packet_candidate_from_next_action(
         status: candidate.status.clone(),
         priority: candidate.priority,
         assignee: candidate.assignee.clone(),
+        ownership,
+        edit_scope,
         decision,
-        collision_risk: work_packet_collision_risk(candidate, snapshot),
+        collision_risk,
         unsafe_reasons,
         stale_reasons,
         source_refs: work_packet_candidate_source_refs(candidate),
@@ -6338,10 +6471,10 @@ fn work_packet_requested_candidate_evidence_from_lookup(
                 Vec::new(),
                 brief,
                 snapshot,
+                packet.coordination.agent_mail.agent_name.as_deref(),
             );
             apply_candidate_coordination_collision_downgrade(
                 &mut candidate,
-                &source_candidate,
                 snapshot,
                 &packet.coordination,
             );
@@ -6462,37 +6595,24 @@ fn apply_coordination_collision_candidate_downgrade(
         return;
     }
 
-    let source_candidates = snapshot
-        .candidates
-        .iter()
-        .map(|candidate| (candidate.id.as_str(), candidate))
-        .collect::<BTreeMap<_, _>>();
-
     for candidate in candidates {
-        let Some(source_candidate) = source_candidates.get(candidate.id.as_str()) else {
-            continue;
-        };
-        apply_candidate_coordination_collision_downgrade(
-            candidate,
-            source_candidate,
-            snapshot,
-            coordination,
-        );
+        apply_candidate_coordination_collision_downgrade(candidate, snapshot, coordination);
     }
 }
 
 fn apply_candidate_coordination_collision_downgrade(
     candidate: &mut SwarmWorkPacketCandidate,
-    source_candidate: &SwarmNextActionCandidate,
     snapshot: &SwarmNextActionSnapshot,
     coordination: &SwarmWorkPacketCoordination,
 ) {
     let (reasons, collision_risk) =
-        candidate_coordination_collision_reasons(source_candidate, snapshot, coordination);
+        candidate_coordination_collision_reasons(candidate, snapshot, coordination);
     if reasons.is_empty() {
         return;
     }
-    if candidate.decision == "safe_to_claim" {
+    if candidate.decision == "safe_to_claim"
+        || (candidate.ownership == "self" && candidate.decision == "already_owned")
+    {
         candidate.decision = "unsafe_due_to_conflict";
     }
     if collision_risk == "high" || candidate.collision_risk == "none" {
@@ -6504,13 +6624,13 @@ fn apply_candidate_coordination_collision_downgrade(
 }
 
 fn candidate_coordination_collision_reasons(
-    candidate: &SwarmNextActionCandidate,
+    candidate: &SwarmWorkPacketCandidate,
     snapshot: &SwarmNextActionSnapshot,
     coordination: &SwarmWorkPacketCoordination,
 ) -> (Vec<String>, &'static str) {
-    let likely_paths = candidate_likely_edit_paths(candidate);
+    let likely_paths = &candidate.edit_scope.paths;
     if likely_paths.is_empty() {
-        return (Vec::new(), "none");
+        return (Vec::new(), "unknown");
     }
 
     let mut reasons = BTreeSet::new();
@@ -6522,6 +6642,19 @@ fn candidate_coordination_collision_reasons(
         {
             continue;
         }
+        let peer_owners = collision
+            .owners
+            .iter()
+            .filter(|owner| coordination.agent_mail.agent_name.as_deref() != Some(owner.as_str()))
+            .collect::<Vec<_>>();
+        let competing_bead_ids = collision
+            .related_bead_ids
+            .iter()
+            .filter(|bead_id| bead_id.as_str() != candidate.id)
+            .collect::<Vec<_>>();
+        if peer_owners.is_empty() && competing_bead_ids.is_empty() {
+            continue;
+        }
         if collision.risk == "high" {
             high_risk = true;
         }
@@ -6529,13 +6662,13 @@ fn candidate_coordination_collision_reasons(
             "file_collision:{}:{}",
             collision.risk, collision.path_pattern
         ));
-        for owner in &collision.owners {
+        for owner in peer_owners {
             reasons.insert(format!(
                 "file_collision_owner:{owner}:{}",
                 collision.path_pattern
             ));
         }
-        for bead_id in &collision.related_bead_ids {
+        for bead_id in competing_bead_ids {
             reasons.insert(format!("file_collision_related_bead:{bead_id}"));
         }
     }
@@ -6544,6 +6677,12 @@ fn candidate_coordination_collision_reasons(
         if likely_paths
             .iter()
             .any(|path| path_patterns_overlap(path, dirty_path))
+            && candidate.ownership != "self"
+            && !candidate_dirty_path_covered_by_self_reservation(
+                candidate,
+                dirty_path,
+                coordination,
+            )
         {
             reasons.insert(format!("dirty_path_overlap:{dirty_path}"));
         }
@@ -6559,7 +6698,50 @@ fn candidate_coordination_collision_reasons(
     (reasons.into_iter().collect(), collision_risk)
 }
 
-fn candidate_likely_edit_paths(candidate: &SwarmNextActionCandidate) -> Vec<String> {
+fn candidate_dirty_path_covered_by_self_reservation(
+    candidate: &SwarmWorkPacketCandidate,
+    dirty_path: &str,
+    coordination: &SwarmWorkPacketCoordination,
+) -> bool {
+    let Some(agent_name) = coordination.agent_mail.agent_name.as_deref() else {
+        return false;
+    };
+    coordination.file_collisions.iter().any(|collision| {
+        path_patterns_overlap(&collision.path_pattern, dirty_path)
+            && collision.owners.iter().any(|owner| owner == agent_name)
+            && collision.owners.iter().all(|owner| owner == agent_name)
+            && collision
+                .related_bead_ids
+                .iter()
+                .all(|bead_id| bead_id == &candidate.id)
+    })
+}
+
+fn work_packet_candidate_ownership(
+    assignee: Option<&str>,
+    current_agent_name: Option<&str>,
+) -> &'static str {
+    match (
+        assignee.filter(|value| !value.is_empty()),
+        current_agent_name,
+    ) {
+        (None, _) => "unassigned",
+        (Some(assignee), Some(current_agent_name)) if assignee == current_agent_name => "self",
+        (Some(_), Some(_)) => "peer",
+        (Some(_), None) => "unknown",
+    }
+}
+
+/// Resolve one candidate's prospective edit scope from every bounded source
+/// available to the work-packet builder. The brief's ready-pressure view is
+/// authoritative for its own `likelySurfaces`; specialized mappings add the
+/// concrete packet/claim-gate surfaces that the general brief heuristic does
+/// not know about. Callers must preserve `unknown` rather than widening it to
+/// every dirty or reserved path in the checkout.
+fn work_packet_candidate_edit_scope(
+    candidate: &SwarmNextActionCandidate,
+    brief: &SwarmBriefReport,
+) -> SwarmWorkPacketCandidateEditScope {
     let decision = if candidate.status == "unknown" {
         "new_bead_recommended"
     } else {
@@ -6569,10 +6751,36 @@ fn candidate_likely_edit_paths(candidate: &SwarmNextActionCandidate) -> Vec<Stri
         .into_iter()
         .map(|reservation| reservation.path_pattern)
         .filter(|path| path != ".beads/issues.jsonl")
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
+    let mut source_refs = BTreeSet::new();
+    if !paths.is_empty() {
+        source_refs.insert("work_packet.specialized_title_mapping".to_owned());
+    }
+    for pressure in brief
+        .ready_reservation_pressure
+        .iter()
+        .filter(|pressure| pressure.bead_id == candidate.id)
+    {
+        for path in &pressure.likely_surfaces {
+            if !path.is_empty() && path != ".beads/issues.jsonl" {
+                paths.insert(path.clone());
+            }
+        }
+        if !pressure.likely_surfaces.is_empty() {
+            source_refs.insert("swarm_brief.ready_reservation_pressure.likely_surfaces".to_owned());
+        }
+    }
+    let mut paths = paths.into_iter().collect::<Vec<_>>();
     paths.sort();
     paths.dedup();
-    paths
+    if paths.is_empty() {
+        source_refs.insert("candidate_edit_scope.no_matching_bounded_surface".to_owned());
+    }
+    SwarmWorkPacketCandidateEditScope {
+        state: if paths.is_empty() { "unknown" } else { "known" },
+        paths,
+        source_refs: source_refs.into_iter().collect(),
+    }
 }
 
 fn path_patterns_overlap(left: &str, right: &str) -> bool {
@@ -6591,8 +6799,11 @@ fn work_packet_candidate_decision(
     candidate: &SwarmNextActionCandidate,
     card_decision: Option<&'static str>,
     stale_decision: Option<&'static str>,
+    ownership: &'static str,
+    edit_scope: &SwarmWorkPacketCandidateEditScope,
     brief: &SwarmBriefReport,
     snapshot: &SwarmNextActionSnapshot,
+    current_agent_name: Option<&str>,
 ) -> &'static str {
     if card_decision == Some("duplicate_rejected") {
         return "skip";
@@ -6612,6 +6823,7 @@ fn work_packet_candidate_decision(
         "in_progress" => match stale_decision {
             Some("reopenSuggested") => return "stale_but_reclaimable",
             Some("contactSuggested") => return "stale_review",
+            _ if ownership == "unknown" => return "coordinate_first",
             _ => return "already_owned",
         },
         _ => {}
@@ -6628,13 +6840,30 @@ fn work_packet_candidate_decision(
         Some("leaveAloneActive") => return "already_owned",
         _ => {}
     }
-    if candidate.assignee.is_some() || card_decision == Some("blocked_by_owner") {
+    if candidate.assignee.is_some() {
+        return if ownership == "unknown" {
+            "coordinate_first"
+        } else {
+            "already_owned"
+        };
+    }
+    if card_decision == Some("blocked_by_owner") {
         return "already_owned";
     }
     if candidate_is_rollup(candidate) {
         return "blocked_rollup";
     }
-    if work_packet_candidate_conflict_present(candidate, brief, snapshot) {
+    if edit_scope.state == "unknown" {
+        return "coordinate_first";
+    }
+    if work_packet_candidate_conflict_present(
+        candidate,
+        edit_scope,
+        ownership,
+        brief,
+        snapshot,
+        current_agent_name,
+    ) {
         return "unsafe_due_to_conflict";
     }
     match card_decision {
@@ -6674,20 +6903,34 @@ fn candidate_release_operator_reasons(candidate: &SwarmNextActionCandidate) -> V
 
 fn work_packet_candidate_conflict_present(
     candidate: &SwarmNextActionCandidate,
+    edit_scope: &SwarmWorkPacketCandidateEditScope,
+    ownership: &'static str,
     brief: &SwarmBriefReport,
     snapshot: &SwarmNextActionSnapshot,
+    current_agent_name: Option<&str>,
 ) -> bool {
-    !work_packet_candidate_conflict_evidence(candidate, brief, snapshot).is_empty()
+    !work_packet_candidate_conflict_evidence(
+        candidate,
+        edit_scope,
+        ownership,
+        brief,
+        snapshot,
+        current_agent_name,
+    )
+    .is_empty()
 }
 
 fn work_packet_candidate_conflict_evidence(
     candidate: &SwarmNextActionCandidate,
+    edit_scope: &SwarmWorkPacketCandidateEditScope,
+    ownership: &'static str,
     brief: &SwarmBriefReport,
     snapshot: &SwarmNextActionSnapshot,
+    current_agent_name: Option<&str>,
 ) -> Vec<String> {
-    let likely_paths = candidate_likely_edit_paths(candidate);
+    let likely_paths = &edit_scope.paths;
     if likely_paths.is_empty() {
-        return work_packet_global_conflict_evidence(brief, snapshot);
+        return Vec::new();
     }
 
     let mut evidence = BTreeSet::new();
@@ -6696,9 +6939,18 @@ fn work_packet_candidate_conflict_evidence(
         .dirty_paths
         .iter()
         .filter(|dirty_path| {
+            if ownership == "self" {
+                return false;
+            }
             likely_paths
                 .iter()
                 .any(|path| path_patterns_overlap(path, dirty_path))
+                && !candidate_dirty_path_covered_by_self_reservation_in_brief(
+                    &candidate.id,
+                    dirty_path,
+                    brief,
+                    current_agent_name,
+                )
         })
         .collect::<Vec<_>>();
     if !dirty_overlaps.is_empty() {
@@ -6717,22 +6969,61 @@ fn work_packet_candidate_conflict_evidence(
         {
             continue;
         }
+        let peer_reservation_holders = risk
+            .reservation_holders
+            .iter()
+            .filter(|holder| current_agent_name != Some(holder.as_str()))
+            .collect::<Vec<_>>();
+        let competing_bead_ids = risk
+            .related_bead_ids
+            .iter()
+            .filter(|bead_id| bead_id.as_str() != candidate.id)
+            .collect::<Vec<_>>();
+        if peer_reservation_holders.is_empty() && competing_bead_ids.is_empty() {
+            continue;
+        }
         if risk.severity == "high" {
             evidence.insert(format!("high_risk_dirty_surface:{}", risk.path_pattern));
         }
-        if !risk.reservation_holders.is_empty() {
+        if !peer_reservation_holders.is_empty() {
             evidence.insert(format!("reservation_collision:{}", risk.path_pattern));
         }
-        if !risk.related_bead_ids.is_empty() {
+        if !competing_bead_ids.is_empty() {
             evidence.insert(format!("related_bead_collision:{}", risk.path_pattern));
         }
         evidence.extend(work_packet_same_file_proof_debt_evidence(
             risk,
-            &likely_paths,
+            likely_paths,
             snapshot,
         ));
     }
     evidence.into_iter().collect()
+}
+
+fn candidate_dirty_path_covered_by_self_reservation_in_brief(
+    candidate_id: &str,
+    dirty_path: &str,
+    brief: &SwarmBriefReport,
+    current_agent_name: Option<&str>,
+) -> bool {
+    let Some(agent_name) = current_agent_name else {
+        return false;
+    };
+    brief.file_surface_risks.iter().any(|risk| {
+        path_patterns_overlap(&risk.path_pattern, dirty_path)
+            && risk
+                .reservation_holders
+                .iter()
+                .any(|holder| holder == agent_name)
+            && risk
+                .reservation_holders
+                .iter()
+                .all(|holder| holder == agent_name)
+            && risk
+                .related_bead_ids
+                .iter()
+                .all(|bead_id| bead_id == candidate_id)
+    })
 }
 
 fn work_packet_same_file_proof_debt_evidence(
@@ -6821,44 +7112,16 @@ fn same_file_proof_debt_evidence_text(risk: &SwarmBriefFileSurfaceRisk) -> Vec<S
         .collect()
 }
 
-fn work_packet_global_conflict_evidence(
-    brief: &SwarmBriefReport,
-    snapshot: &SwarmNextActionSnapshot,
-) -> Vec<String> {
-    let mut evidence = BTreeSet::new();
-    if snapshot.checkout.dirty_path_count > 0 {
-        evidence.insert(format!(
-            "dirty_checkout_path_count:{}",
-            snapshot.checkout.dirty_path_count
-        ));
-    }
-    for risk in &brief.file_surface_risks {
-        if risk.severity == "high" {
-            evidence.insert(format!("high_risk_dirty_surface:{}", risk.path_pattern));
-        }
-        if !risk.reservation_holders.is_empty() {
-            evidence.insert(format!("reservation_collision:{}", risk.path_pattern));
-        }
-        if !risk.related_bead_ids.is_empty() {
-            evidence.insert(format!("related_bead_collision:{}", risk.path_pattern));
-        }
-    }
-    evidence.into_iter().collect()
-}
-
 fn work_packet_collision_risk(
     candidate: &SwarmNextActionCandidate,
-    snapshot: &SwarmNextActionSnapshot,
+    ownership: &'static str,
+    edit_scope: &SwarmWorkPacketCandidateEditScope,
 ) -> &'static str {
-    if candidate.assignee.is_some()
-        || snapshot
-            .compile_health
-            .blockers
-            .iter()
-            .any(|blocker| blocker.owner_agent.is_some())
-    {
+    if ownership == "peer" {
         "high"
-    } else if candidate.blocked_by_compile_health || snapshot.checkout.dirty_path_count > 0 {
+    } else if edit_scope.state == "unknown" || ownership == "unknown" {
+        "unknown"
+    } else if candidate.blocked_by_compile_health {
         "medium"
     } else {
         "none"
@@ -7027,6 +7290,11 @@ fn work_packet_agent_mail(
         semantic_readiness,
         recovery,
         durability_state,
+        agent_name: if status == "fresh" {
+            brief.agent_mail_agent_name.clone()
+        } else {
+            None
+        },
     }
 }
 
@@ -7958,6 +8226,12 @@ fn work_packet_recommended_action(
         reasons.push(rch_reason.to_owned());
     }
     reasons.extend(coordination_degradation_codes.iter().cloned());
+    if let Some(candidate) = selected_candidate {
+        reasons.extend(candidate.unsafe_reasons.iter().cloned());
+        if candidate.ownership == "self" && candidate.decision == "already_owned" {
+            reasons.push("continue_owned_work".to_owned());
+        }
+    }
     if agent_mail_blocks_claim(agent_mail) {
         reasons.push(agent_mail_claim_blocker_reason(agent_mail).to_owned());
         if agent_mail.status == "semantic_readiness_failed" {
@@ -8020,6 +8294,14 @@ fn work_packet_recommended_action(
     if selected_candidate.is_some_and(|candidate| candidate.decision == "safe_to_claim") {
         proof_obligations.push("run_claim_gate_before_claim".to_owned());
     }
+    if selected_candidate.is_some_and(|candidate| candidate.edit_scope.state == "unknown") {
+        proof_obligations.push("resolve_candidate_edit_scope_before_claim".to_owned());
+    }
+    if selected_candidate.is_some_and(|candidate| {
+        candidate.ownership == "self" && candidate.decision == "already_owned"
+    }) {
+        proof_obligations.push("continue_owned_work_without_reclaiming".to_owned());
+    }
     proof_obligations.sort();
     proof_obligations.dedup();
 
@@ -8037,6 +8319,7 @@ fn work_packet_recommended_action(
         action: work_packet_action(
             selected_card.map(|card| card.decision),
             selected_candidate.map(|candidate| candidate.decision),
+            selected_candidate.map(|candidate| candidate.ownership),
             agent_mail,
             rch,
             tracker_integrity,
@@ -8061,6 +8344,7 @@ fn work_packet_recommended_action(
 fn work_packet_action(
     card_decision: Option<&'static str>,
     candidate_decision: Option<&'static str>,
+    candidate_ownership: Option<&'static str>,
     agent_mail: &SwarmWorkPacketAgentMail,
     rch: &SwarmWorkPacketRchProofPosture,
     tracker_integrity: &BeadsIntegrityReport,
@@ -8080,6 +8364,9 @@ fn work_packet_action(
         } else {
             "coordinate_before_claim"
         };
+    }
+    if candidate_ownership == Some("self") && candidate_decision == Some("already_owned") {
+        return "continue_owned_work";
     }
     if work_packet_rch_remote_verification_reason(rch).is_some() {
         return "prefer_static_docs_work";
@@ -9547,6 +9834,38 @@ fn suggested_reservations_for_candidate(
     }
     if title.contains("insights") {
         reservations.insert("src/cli/insights/mod.rs".to_owned(), "insights_surface");
+    }
+    if title.contains("[cli]") || title.contains(" cli") || title.contains("command") {
+        reservations.insert("src/cli/**".to_owned(), "cli_surface");
+    }
+    if title.contains("[docs]")
+        || title.contains("docs")
+        || title.contains("document")
+        || title.contains("readme")
+    {
+        reservations.insert("README.md".to_owned(), "documentation_surface");
+        reservations.insert("docs/**".to_owned(), "documentation_surface");
+    }
+    if title.contains("[e2e]")
+        || title.contains("e2e")
+        || title.contains("test")
+        || title.contains("golden")
+        || title.contains("contract")
+    {
+        reservations.insert("tests/**".to_owned(), "test_surface");
+    }
+    if title.contains("pack-quality") || title.contains("eval") {
+        reservations.insert("src/eval/**".to_owned(), "evaluation_surface");
+        reservations.insert(
+            "tests/fixtures/eval/**".to_owned(),
+            "evaluation_fixture_surface",
+        );
+    }
+    if title.contains("support-bundle") || title.contains("support bundle") {
+        reservations.insert(
+            "src/core/support_bundle.rs".to_owned(),
+            "support_bundle_surface",
+        );
     }
     if title.contains("db") || title.contains("sqlmodel") {
         reservations.insert("src/db/**".to_owned(), "storage_schema_surface");
@@ -11458,7 +11777,7 @@ mod tests {
         let brief = brief_with_host_profile("workstation", "fresh");
         let mut snapshot = snapshot_with_candidates(vec![candidate(
             "bd-safe",
-            "Document isolated resource-admission fixture",
+            "Gate safe work-packet resource-admission fixture",
             "beads_ready",
             Some(2),
         )]);
@@ -12896,7 +13215,15 @@ mod tests {
                 SwarmBriefSourceKind::Beads,
                 crate::core::swarm_brief::SwarmBriefSourceProvenance::command(
                     "br",
-                    &["ready", "--json"],
+                    &[
+                        "ready",
+                        "--limit",
+                        "0",
+                        "--json",
+                        "--no-auto-import",
+                        "--no-auto-flush",
+                        "--allow-stale",
+                    ],
                 ),
                 1,
             ),
@@ -13423,7 +13750,7 @@ mod tests {
             Some(1),
         )]);
         snapshot.checkout.dirty_path_count = 1;
-        snapshot.checkout.dirty_paths = vec!["-".to_owned()];
+        snapshot.checkout.dirty_paths = vec!["docs/unrelated.md".to_owned()];
 
         let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
         let candidate = packet
@@ -13437,7 +13764,11 @@ mod tests {
             packet.coordination.file_collisions[0].path_pattern,
             "tests/**"
         );
+        assert_eq!(candidate.ownership, "unassigned");
+        assert_eq!(candidate.edit_scope.state, "known");
+        assert!(!candidate.edit_scope.paths.is_empty());
         assert_eq!(candidate.decision, "safe_to_claim");
+        assert_eq!(candidate.collision_risk, "none");
         assert!(
             !candidate
                 .unsafe_reasons
@@ -13454,6 +13785,13 @@ mod tests {
         assert_eq!(packet.recommended_action.safe_to_claim, Some(true));
         assert_eq!(gate.verdict, "safe_to_claim");
         assert!(gate.safe_to_claim);
+        assert_eq!(gate.recommended_safe_to_claim, Some(true));
+        assert_eq!(
+            gate.selected_candidate
+                .as_ref()
+                .map(|candidate| candidate.collision_risk),
+            Some("none")
+        );
         assert!(gate.unsafe_reasons.is_empty());
         assert_eq!(
             gate.claim_command_action
@@ -13498,11 +13836,16 @@ mod tests {
         let snapshot = snapshot_with_candidates(vec![
             candidate(
                 "bd-one",
-                "Recommended safe candidate",
+                "Recommended safe work-packet candidate",
                 "beads_ready",
                 Some(1),
             ),
-            candidate("bd-two", "Different safe candidate", "beads_ready", Some(2)),
+            candidate(
+                "bd-two",
+                "Different safe work-packet candidate",
+                "beads_ready",
+                Some(2),
+            ),
         ]);
 
         let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
@@ -13606,7 +13949,8 @@ mod tests {
 
     #[test]
     fn requested_candidate_hydration_preserves_dependency_and_assignment_decisions() {
-        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        set_fresh_agent_identity(&mut brief, "NavyLotus");
         let snapshot = snapshot_with_candidates(Vec::new());
         let mut dependency_packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
         dependency_packet
@@ -13706,6 +14050,63 @@ mod tests {
     }
 
     #[test]
+    fn requested_self_owned_candidate_continues_without_reclaiming() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        set_fresh_agent_identity(&mut brief, "NavyLotus");
+        let snapshot = snapshot_with_candidates(Vec::new());
+        let mut packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        packet.apply_claim_gate_actionable_queue(SwarmWorkPacketActionableQueueEvidence {
+            collection_mode: ACTIONABLE_QUEUE_MODE_BR_RETRY_SCRIPT,
+            queue_state: ACTIONABLE_QUEUE_STATE_READY,
+            exit_class: "ok",
+            row_count: Some(0),
+            candidate_ids: Vec::new(),
+            exclusion_accounting: SwarmWorkPacketActionableQueueExclusionAccounting::empty(),
+        });
+        apply_requested_candidate_lookup(
+            &mut packet,
+            &brief,
+            &snapshot,
+            "bd-self",
+            RequestedCandidateLookup::Present {
+                bead: requested_candidate_bead(
+                    "bd-self",
+                    "Improve reliability",
+                    "in_progress",
+                    Some("NavyLotus"),
+                ),
+                blocked_by: Vec::new(),
+            },
+        );
+
+        let gate = packet.claim_gate(Some("bd-self"));
+        let selected = gate
+            .selected_candidate
+            .as_ref()
+            .expect("direct self-owned row remains selected");
+
+        assert_eq!(selected.ownership, "self");
+        assert_eq!(selected.edit_scope.state, "unknown");
+        assert_eq!(selected.decision, "already_owned");
+        assert_eq!(gate.verdict, "already_owned");
+        assert_eq!(gate.recommended_action, "continue_owned_work");
+        assert_eq!(gate.recommended_safe_to_claim, Some(false));
+        assert!(!gate.safe_to_claim);
+        assert!(gate.claim_command_action.is_none());
+        assert_eq!(
+            gate.source_authority_snapshot
+                .candidate_evidence
+                .as_ref()
+                .map(|evidence| evidence.lookup_outcome),
+            Some("candidate_known_non_actionable")
+        );
+        assert!(gate.unsafe_reasons.iter().all(|reason| {
+            !reason.starts_with("candidate_not_found")
+                && !reason.starts_with("reservation_collision:")
+        }));
+    }
+
+    #[test]
     fn requested_candidate_lookup_failures_never_become_candidate_not_found() {
         let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
         let snapshot = snapshot_with_candidates(Vec::new());
@@ -13783,13 +14184,13 @@ mod tests {
         let snapshot = snapshot_with_candidates(vec![
             candidate(
                 "bd-a",
-                "Candidate with timed-out direct evidence",
+                "Work-packet candidate with timed-out direct evidence",
                 "beads_ready",
                 Some(2),
             ),
             candidate(
                 "bd-b",
-                "Independent packet candidate",
+                "Independent work-packet candidate",
                 "beads_ready",
                 Some(2),
             ),
@@ -14767,7 +15168,7 @@ mod tests {
             degraded: vec![lock_degradation.clone()],
         });
         brief.degraded = vec![lock_degradation];
-        brief.beads.ready = vec![bead("bd-lock", "Handle memory-drift lock contention", 2)];
+        brief.beads.ready = vec![bead("bd-lock", "Document memory-drift lock contention", 2)];
 
         let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
         let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
@@ -14873,7 +15274,7 @@ mod tests {
         let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
         let snapshot = snapshot_with_candidates(vec![candidate(
             "bd-stale",
-            "Claim only after tracker reconciliation",
+            "Document claim behavior after tracker reconciliation",
             "beads_ready",
             Some(2),
         )]);
@@ -15000,7 +15401,7 @@ mod tests {
         let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
         let snapshot = snapshot_with_candidates(vec![candidate(
             "bd-metadata-only",
-            "Metadata-only stale marker must not block claims",
+            "Document metadata-only stale marker claim behavior",
             "beads_ready",
             Some(1),
         )]);
@@ -15121,7 +15522,8 @@ mod tests {
 
     #[test]
     fn work_packet_keeps_ready_rows_with_in_progress_status_unclaimable() {
-        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        set_fresh_agent_identity(&mut brief, "NavyLotus");
         let mut owned_ready_row = candidate(
             "bd-owned-ready",
             "Ready source row already owned by another lane",
@@ -15295,7 +15697,8 @@ mod tests {
 
     #[test]
     fn work_packet_marks_owned_candidates_unclaimable_without_claim_command() {
-        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        set_fresh_agent_identity(&mut brief, "NavyLotus");
         let mut owned_candidate = candidate(
             "bd-owned",
             "Owned candidate should remain visible",
@@ -15653,6 +16056,235 @@ mod tests {
     }
 
     #[test]
+    fn generic_candidate_scope_fails_closed_without_inheriting_global_collisions() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.file_surface_risks = vec![same_file_proof_debt_risk(
+            "tests/**",
+            &["bd-peer"],
+            &["PeerAgent"],
+            &["active_exclusive_reservation"],
+            &["reservation:PeerAgent:tests/**"],
+        )];
+        let mut snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-generic",
+            "Improve reliability",
+            "beads_ready",
+            Some(1),
+        )]);
+        snapshot.checkout.dirty_path_count = 1;
+        snapshot.checkout.dirty_paths = vec!["tests/peer_only.rs".to_owned()];
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let candidate = &packet.candidates[0];
+
+        assert_eq!(candidate.ownership, "unassigned");
+        assert_eq!(candidate.edit_scope.state, "unknown");
+        assert!(candidate.edit_scope.paths.is_empty());
+        assert_eq!(
+            candidate.edit_scope.source_refs,
+            vec!["candidate_edit_scope.no_matching_bounded_surface"]
+        );
+        assert_eq!(candidate.decision, "coordinate_first");
+        assert_eq!(candidate.collision_risk, "unknown");
+        assert!(
+            candidate
+                .unsafe_reasons
+                .contains(&"candidate_edit_scope_unknown".to_owned())
+        );
+        assert!(candidate.unsafe_reasons.iter().all(|reason| {
+            !reason.starts_with("reservation_collision:")
+                && !reason.starts_with("related_bead_collision:")
+                && !reason.starts_with("dirty_path_overlap:")
+        }));
+
+        let gate = packet.claim_gate(Some("bd-generic"));
+        let selected = gate
+            .selected_candidate
+            .as_ref()
+            .expect("unknown-scope candidate remains inspectable");
+        assert_eq!(gate.verdict, "coordinate_first");
+        assert!(!gate.safe_to_claim);
+        assert_eq!(gate.recommended_action, "coordinate_before_claim");
+        assert_eq!(selected.edit_scope, candidate.edit_scope);
+        assert!(gate.claim_command_action.is_none());
+        assert_eq!(
+            gate.source_authority.environment_verdict,
+            "source_authority_ambiguous"
+        );
+        assert!(
+            gate.next_command_actions.iter().any(|action| {
+                action.command_id == "bead_show_candidate" && !action.mutates_state
+            })
+        );
+    }
+
+    #[test]
+    fn candidate_edit_scope_unions_brief_and_specialized_surfaces_deterministically() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.ready_reservation_pressure = vec![
+            crate::core::swarm_brief::SwarmBriefReadyReservationPressure {
+                bead_id: "bd-scope".to_owned(),
+                title: "Document golden behavior".to_owned(),
+                priority: Some(1),
+                action: "inspect_full".to_owned(),
+                severity: "low".to_owned(),
+                likely_surfaces: vec!["src/custom/**".to_owned(), "tests/**".to_owned()],
+                reservation_holders: Vec::new(),
+                exclusive_reservation_count: 0,
+                shared_reservation_count: 0,
+                earliest_expires_at: None,
+                max_risk_score: 0,
+                risk_factors: Vec::new(),
+                evidence: Vec::new(),
+                suggested_commands: Vec::new(),
+            },
+        ];
+        let candidate = candidate(
+            "bd-scope",
+            "Document golden behavior",
+            "beads_ready",
+            Some(1),
+        );
+
+        let scope = work_packet_candidate_edit_scope(&candidate, &brief);
+
+        assert_eq!(scope.state, "known");
+        assert_eq!(
+            scope.paths,
+            vec!["README.md", "docs/**", "src/custom/**", "tests/**"]
+        );
+        assert_eq!(
+            scope.source_refs,
+            vec![
+                "swarm_brief.ready_reservation_pressure.likely_surfaces",
+                "work_packet.specialized_title_mapping",
+            ]
+        );
+    }
+
+    #[test]
+    fn self_owned_candidate_ignores_self_collision_and_continues_without_reclaiming() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        set_fresh_agent_identity(&mut brief, "NavyLotus");
+        brief.file_surface_risks = vec![same_file_proof_debt_risk(
+            "docs/**",
+            &["bd-owned"],
+            &["NavyLotus"],
+            &["active_exclusive_reservation"],
+            &["reservation:NavyLotus:docs/**"],
+        )];
+        let mut owned = candidate(
+            "bd-owned",
+            "Document ownership behavior",
+            "beads_ready",
+            Some(1),
+        );
+        owned.status = "in_progress".to_owned();
+        owned.assignee = Some("NavyLotus".to_owned());
+        let mut snapshot = snapshot_with_candidates(vec![owned]);
+        snapshot.checkout.dirty_path_count = 1;
+        snapshot.checkout.dirty_paths = vec!["docs/agent-ux/ownership.md".to_owned()];
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let candidate = &packet.candidates[0];
+
+        assert_eq!(candidate.ownership, "self");
+        assert_eq!(candidate.edit_scope.state, "known");
+        assert_eq!(candidate.decision, "already_owned");
+        assert_eq!(candidate.collision_risk, "none");
+        assert!(candidate.unsafe_reasons.iter().all(|reason| {
+            !reason.starts_with("file_collision:") && !reason.starts_with("dirty_path_overlap:")
+        }));
+        assert_eq!(packet.recommended_action.action, "continue_owned_work");
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+
+        let gate = packet.claim_gate(Some("bd-owned"));
+        assert_eq!(gate.verdict, "already_owned");
+        assert!(!gate.safe_to_claim);
+        assert_eq!(gate.recommended_action, "continue_owned_work");
+        assert_eq!(
+            gate.selected_candidate
+                .as_ref()
+                .map(|candidate| candidate.ownership),
+            Some("self")
+        );
+        assert!(gate.claim_command_action.is_none());
+        assert_ne!(
+            gate.source_authority.environment_verdict,
+            "unsafe_due_to_conflict"
+        );
+    }
+
+    #[test]
+    fn mixed_self_and_peer_reservations_remain_blocking() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        set_fresh_agent_identity(&mut brief, "NavyLotus");
+        brief.file_surface_risks = vec![same_file_proof_debt_risk(
+            "docs/**",
+            &["bd-owned"],
+            &["NavyLotus", "PeerAgent"],
+            &["active_exclusive_reservation"],
+            &["reservation:PeerAgent:docs/**"],
+        )];
+        let mut owned = candidate(
+            "bd-owned",
+            "Document ownership behavior",
+            "beads_ready",
+            Some(1),
+        );
+        owned.status = "in_progress".to_owned();
+        owned.assignee = Some("NavyLotus".to_owned());
+        let snapshot = snapshot_with_candidates(vec![owned]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let candidate = &packet.candidates[0];
+
+        assert_eq!(candidate.ownership, "self");
+        assert_eq!(candidate.decision, "unsafe_due_to_conflict");
+        assert_eq!(candidate.collision_risk, "high");
+        assert!(
+            candidate
+                .unsafe_reasons
+                .contains(&"file_collision_owner:PeerAgent:docs/**".to_owned())
+        );
+        assert!(
+            candidate
+                .unsafe_reasons
+                .iter()
+                .all(|reason| { reason != "file_collision_owner:NavyLotus:docs/**" })
+        );
+        assert_eq!(packet.recommended_action.action, "coordinate_before_claim");
+        let gate = packet.claim_gate(Some("bd-owned"));
+        assert!(!gate.safe_to_claim);
+        assert_eq!(gate.verdict, "unsafe_due_to_conflict");
+        assert_eq!(gate.recommended_action, "coordinate_before_claim");
+        assert_eq!(
+            gate.source_authority.environment_verdict,
+            "unsafe_due_to_conflict"
+        );
+    }
+
+    #[test]
+    fn candidate_ownership_requires_fresh_current_agent_identity() {
+        assert_eq!(
+            work_packet_candidate_ownership(None, Some("NavyLotus")),
+            "unassigned"
+        );
+        assert_eq!(
+            work_packet_candidate_ownership(Some("NavyLotus"), Some("NavyLotus")),
+            "self"
+        );
+        assert_eq!(
+            work_packet_candidate_ownership(Some("PeerAgent"), Some("NavyLotus")),
+            "peer"
+        );
+        assert_eq!(
+            work_packet_candidate_ownership(Some("NavyLotus"), None),
+            "unknown"
+        );
+    }
+
+    #[test]
     fn work_packet_marks_dirty_or_reserved_candidates_unsafe_without_claim_command() {
         let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
         brief.file_surface_risks = vec![crate::core::swarm_brief::SwarmBriefFileSurfaceRisk {
@@ -15854,6 +16486,21 @@ mod tests {
             evidence: evidence.iter().map(|entry| (*entry).to_owned()).collect(),
             suggested_commands: vec!["CI=1 br show bd-2pos6.2 --json".to_owned()],
         }
+    }
+
+    fn set_fresh_agent_identity(brief: &mut SwarmBriefReport, agent_name: &str) {
+        brief.agent_mail_agent_name = Some(agent_name.to_owned());
+        brief
+            .sources
+            .retain(|source| source.source != SwarmBriefSourceKind::AgentMail);
+        brief.sources.push(SwarmBriefSourceSnapshot {
+            source: SwarmBriefSourceKind::AgentMail,
+            status: SwarmBriefSourceStatus::Ready,
+            freshness: SwarmBriefSourceFreshness::current(),
+            provenance: SwarmBriefSourceProvenance::local_probe(),
+            item_count: 0,
+            degraded: Vec::new(),
+        });
     }
 
     fn snapshot_with_candidates(

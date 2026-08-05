@@ -137,7 +137,12 @@ ee swarm work-packet --workspace . --include-rch --claim-gate --json
 After inspecting the packet:
 
 1. If the claim gate reports `safeToClaim=true`, inspect
+   `selectedCandidate.ownership`, `selectedCandidate.editScope`,
    `nextCommandActions[]`, then use `claimCommandAction` for the Beads claim.
+   A safe claim requires `ownership=unassigned`,
+   `editScope.state=known` with nonempty `paths`, and
+   `collisionRisk=none`. `ownership=self` instead yields
+   `continue_owned_work`, `safeToClaim=false`, and no second claim command.
 2. Reserve the packet's suggested file patterns through Agent Mail when Mail is healthy.
 3. Send a short coordination note in the bead thread.
 4. Run only the verification commands listed in `verification.requiredCommands`.
@@ -195,6 +200,16 @@ the retry still reports `safeToClaim=true`, `verdict=safe_to_claim`, and a
 runnable `claimCommandAction`. If `unsafeReasons` or `staleReasons` still name
 reservation collisions, stale tracker state, Beads/BV disagreement, or RCH
 blockers, coordinate instead of claiming.
+
+Ownership is relative only to the fresh authoritative snapshot identity:
+`unassigned | self | peer | unknown`. Self-held reservations and the selected
+Bead's own ID in related collision evidence do not compete with that lane;
+peer or mixed self/peer evidence still blocks. If `editScope.state=unknown`,
+do not apply global checkout collisions to the candidate and do not claim it.
+Run the emitted read-only `br show` action, resolve a bounded nonempty path
+scope, and rerun the gate. The stable
+`candidate_edit_scope.no_matching_bounded_surface` source ref explains why the
+scope is empty.
 
 Use `sourceAuthoritySnapshot.candidateEvidence.lookupOutcome` to distinguish a
 confirmed missing candidate (`candidate_absent_confirmed`) from
@@ -316,6 +331,9 @@ per-fixture decision summary.
 - `redactionStatus` is
   `counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content`.
 - All candidate, source, degraded-code, and command arrays are deterministic.
+- Broad Beads collection uses the complete, shell-free argv
+  `br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale`;
+  rows beyond a tool default limit remain visible and sorted.
 - Every included source has a provenance record, even when the source is
   degraded or unavailable.
 - Agent Mail archive/SQLite parity failures, semantic-readiness contradictions,
@@ -340,6 +358,10 @@ per-fixture decision summary.
   Only `safe_to_claim` may drive `inspect_and_claim`; `stale_but_reclaimable`
   may drive `reopen_stale_work` after explicit inspection; every other value is
   diagnostic and must not emit claim or reopen commands.
+- Every candidate exposes `ownership` and `editScope`. Only
+  `ownership=unassigned` plus a known nonempty edit scope may be claim-safe;
+  `ownership=self` uses `continue_owned_work` without a claim mutation, while
+  peer/unknown ownership and unknown scope fail closed.
 - Candidate arrays and each candidate's `unsafeReasons`, `staleReasons`, and
   `sourceRefs` arrays are sorted deterministically before `packetId`
   calculation. Decision vocabulary changes require schema, docs, fixture or

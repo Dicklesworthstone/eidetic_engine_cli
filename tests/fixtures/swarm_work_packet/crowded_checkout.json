@@ -23,7 +23,7 @@
         "status": "ready",
         "freshness": "current",
         "degradedCodes": [],
-        "provenance": "br ready --json"
+        "provenance": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale"
       },
       {
         "source": "agent_mail",
@@ -46,6 +46,13 @@
       "status": "open",
       "priority": 2,
       "assignee": null,
+      "ownership": "unassigned",
+      "editScope": {
+        "state": "known",
+        "paths": ["src/cass/process.rs"],
+        "sourceRefs": ["candidate_lane.decision_reasons"]
+      },
+      "collisionRisk": "high",
       "decision": "coordinate_first",
       "decisionReasons": [
         "dirty_path_overlap:src/cass/process.rs",

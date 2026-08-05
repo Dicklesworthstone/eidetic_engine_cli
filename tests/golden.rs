@@ -600,7 +600,18 @@ mod tests {
             swarm_source_ready(SwarmBriefSourceKind::AgentMail, None, 1),
             swarm_source_ready(
                 SwarmBriefSourceKind::Beads,
-                Some(("br", &["ready", "--json"])),
+                Some((
+                    "br",
+                    &[
+                        "ready",
+                        "--limit",
+                        "0",
+                        "--json",
+                        "--no-auto-import",
+                        "--no-auto-flush",
+                        "--allow-stale",
+                    ],
+                )),
                 1,
             ),
             swarm_source_ready(
@@ -949,7 +960,7 @@ mod tests {
                 SwarmBriefSourceKind::Beads,
                 "beads_unavailable",
                 "Beads JSON was stale or locked during read-only collection.",
-                "br ready --json",
+                "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
             ),
         );
 
@@ -982,7 +993,18 @@ mod tests {
             &mut beads_dependency_cycles,
             swarm_source_ready(
                 SwarmBriefSourceKind::Beads,
-                Some(("br", &["ready", "--json"])),
+                Some((
+                    "br",
+                    &[
+                        "ready",
+                        "--limit",
+                        "0",
+                        "--json",
+                        "--no-auto-import",
+                        "--no-auto-flush",
+                        "--allow-stale",
+                    ],
+                )),
                 3,
             ),
         );

@@ -34,7 +34,7 @@
           "status": "ready",
           "freshness": "current",
           "itemCount": 1,
-          "command": "br ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
           "degradedCodes": []
@@ -218,7 +218,7 @@
           "status": "ready",
           "freshness": "current",
           "itemCount": 1,
-          "command": "br ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
           "degradedCodes": []
@@ -342,7 +342,7 @@
           "status": "ready",
           "freshness": "current",
           "itemCount": 1,
-          "command": "br ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
           "degradedCodes": []
@@ -560,7 +560,7 @@
           "status": "ready",
           "freshness": "current",
           "itemCount": 1,
-          "command": "br ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
           "degradedCodes": []
@@ -721,7 +721,7 @@
           "status": "ready",
           "freshness": "current",
           "itemCount": 1,
-          "command": "br ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
           "degradedCodes": []
@@ -898,7 +898,7 @@
           "status": "ready",
           "freshness": "current",
           "itemCount": 1,
-          "command": "br ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
           "degradedCodes": []
@@ -1045,7 +1045,7 @@
           "status": "ready",
           "freshness": "current",
           "itemCount": 1,
-          "command": "br ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
           "degradedCodes": []
@@ -1274,7 +1274,7 @@
             "could_not_know:beads:ready, blocked, deferred, and in-progress work"
           ],
           "suggestedCommands": [
-            "br ready --json"
+            "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale"
           ],
           "mustNotDo": [
             "Do not treat degraded beads data as complete evidence."
@@ -1333,7 +1333,7 @@
           "status": "ready",
           "freshness": "current",
           "itemCount": 1,
-          "command": "br ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
           "degradedCodes": []
@@ -1768,7 +1768,7 @@
           "status": "ready",
           "freshness": "current",
           "itemCount": 3,
-          "command": "br ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
           "degradedCodes": []
@@ -1907,7 +1907,7 @@
           "status": "ready",
           "freshness": "current",
           "itemCount": 1,
-          "command": "br ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
           "degradedCodes": []
@@ -2053,7 +2053,7 @@
           "status": "ready",
           "freshness": "current",
           "itemCount": 1,
-          "command": "br ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
           "degradedCodes": []
@@ -2199,7 +2199,7 @@
           "status": "ready",
           "freshness": "current",
           "itemCount": 1,
-          "command": "br ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
           "degradedCodes": []
@@ -2347,7 +2347,7 @@
           "status": "ready",
           "freshness": "current",
           "itemCount": 1,
-          "command": "br ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
           "degradedCodes": []
@@ -2492,7 +2492,7 @@
           "status": "ready",
           "freshness": "current",
           "itemCount": 1,
-          "command": "br ready --json",
+          "command": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
           "degradedCodes": []

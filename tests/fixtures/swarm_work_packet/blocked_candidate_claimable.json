@@ -84,6 +84,12 @@
         "status": "blocked",
         "priority": 1,
         "assignee": null,
+        "ownership": "unassigned",
+        "editScope": {
+          "state": "unknown",
+          "paths": [],
+          "sourceRefs": ["candidate_edit_scope.no_matching_bounded_surface"]
+        },
         "decision": "safe_to_claim",
         "collisionRisk": "none",
         "unsafeReasons": [],

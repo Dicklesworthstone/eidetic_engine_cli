@@ -422,7 +422,7 @@ fn claim_gate_sample_payloads_are_redacted_and_safe() -> TestResult {
         "workspace": "repo:25e38e130474e7f0292de2a3",
         "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
         "requestedCandidateId": "bd-owned.1",
-        "verdict": "already_owned",
+        "verdict": "unsafe_due_to_conflict",
         "safeToClaim": false,
         "selectedCandidate": {
             "id": "bd-owned.1",
@@ -431,7 +431,13 @@ fn claim_gate_sample_payloads_are_redacted_and_safe() -> TestResult {
             "status": "in_progress",
             "priority": 1,
             "assignee": "peer-agent",
-            "decision": "already_owned",
+            "ownership": "peer",
+            "editScope": {
+                "state": "known",
+                "paths": ["src/**"],
+                "sourceRefs": ["work_packet.specialized_title_mapping"]
+            },
+            "decision": "unsafe_due_to_conflict",
             "collisionRisk": "high"
         },
         "recommendedAction": "coordinate_before_claim",
@@ -530,6 +536,28 @@ fn claim_gate_sample_payloads_are_redacted_and_safe() -> TestResult {
             return Err(format!(
                 "{context} must set recommendedSafeToClaim=true when safeToClaim=true"
             ));
+        }
+        if sample.pointer("/safeToClaim").and_then(Value::as_bool) == Some(true) {
+            if string_at(&sample, "/selectedCandidate/ownership", context)? != "unassigned" {
+                return Err(format!(
+                    "{context} must limit safe claims to unassigned candidates"
+                ));
+            }
+            if string_at(&sample, "/selectedCandidate/editScope/state", context)? != "known"
+                || sample
+                    .pointer("/selectedCandidate/editScope/paths")
+                    .and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty)
+            {
+                return Err(format!(
+                    "{context} must require a known non-empty candidate edit scope"
+                ));
+            }
+            if string_at(&sample, "/selectedCandidate/collisionRisk", context)? != "none" {
+                return Err(format!(
+                    "{context} must require collisionRisk=none before claiming"
+                ));
+            }
         }
         if sample.pointer("/safeToClaim").and_then(Value::as_bool) == Some(false)
             && !sample
@@ -1903,6 +1931,15 @@ fn requested_candidate_hydration_escapes_bounded_recommendation_and_queue_projec
         return Err(format!(
             "{context}: selectedCandidate decision expected {expected_decision}, got {}",
             selected.decision
+        ));
+    }
+    if selected.ownership != "unassigned"
+        || selected.edit_scope.state != "known"
+        || selected.edit_scope.paths.is_empty()
+        || selected.edit_scope.source_refs.is_empty()
+    {
+        return Err(format!(
+            "{context}: hydrated candidate must retain unassigned ownership and bounded edit-scope evidence: {selected:?}"
         ));
     }
     let expected_recommended_safe = bool_at(&fixture, "/expected/recommendedSafeToClaim", context)?;

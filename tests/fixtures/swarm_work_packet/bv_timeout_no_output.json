@@ -22,7 +22,7 @@
       "record_bv_timeout_in_beads"
     ],
     "suggestedCommands": [
-      "br --no-auto-import --allow-stale ready --json",
+      "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale",
       "br comments add bd-docs.1 --message 'bv robot source timeout_no_output; coordinating via beads'"
     ]
   },
@@ -34,6 +34,12 @@
       "status": "in_progress",
       "priority": 2,
       "assignee": "peer-agent",
+      "ownership": "unknown",
+      "editScope": {
+        "state": "known",
+        "paths": ["README.md", "docs/**"],
+        "sourceRefs": ["swarm_brief.ready_reservation_pressure.likely_surfaces", "work_packet.specialized_title_mapping"]
+      },
       "decision": "blocked",
       "collisionRisk": "high",
       "unsafeReasons": [
@@ -233,7 +239,7 @@
       "source": "bv",
       "severity": "warning",
       "message": "BV robot triage produced no output, so graph-aware ranking is not authoritative.",
-      "repair": "Use br --no-auto-import --allow-stale ready --json as a read-only fallback and avoid bare interactive bv."
+      "repair": "Use br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale as a read-only fallback and avoid bare interactive bv."
     }
   ]
 }

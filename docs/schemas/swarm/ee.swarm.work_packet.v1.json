@@ -64,6 +64,41 @@
       "type": "array",
       "items": {"type": "string"}
     },
+    "candidateOwnership": {
+      "type": "string",
+      "enum": ["unassigned", "self", "peer", "unknown"],
+      "description": "Candidate ownership relative to the fresh, authoritative current Agent Mail identity. unknown is fail-closed when an assignee exists but self/peer identity cannot be proved."
+    },
+    "candidateEditScope": {
+      "type": "object",
+      "required": ["state", "paths", "sourceRefs"],
+      "additionalProperties": false,
+      "properties": {
+        "state": {"type": "string", "enum": ["known", "unknown"]},
+        "paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "sourceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"state": {"const": "known"}}, "required": ["state"]},
+          "then": {"properties": {"paths": {"minItems": 1}}}
+        },
+        {
+          "if": {"properties": {"state": {"const": "unknown"}}, "required": ["state"]},
+          "then": {"properties": {"paths": {"maxItems": 0}}}
+        }
+      ],
+      "description": "Candidate-scoped, deterministic edit-path evidence. Unknown scope never inherits checkout-global collision evidence and cannot authorize a claim."
+    },
     "safeCommandString": {
       "type": "string",
       "minLength": 1,
@@ -242,7 +277,7 @@
           "enum": [
             "inspect_and_claim",
             "coordinate_before_claim",
-            "continue_existing_claim",
+            "continue_owned_work",
             "prefer_static_docs_work",
             "reopen_stale_work",
             "blocked_no_action"
@@ -273,6 +308,8 @@
         "status",
         "priority",
         "assignee",
+        "ownership",
+        "editScope",
         "decision",
         "collisionRisk",
         "unsafeReasons",
@@ -290,6 +327,8 @@
         "status": {"type": "string"},
         "priority": {"type": ["integer", "null"]},
         "assignee": {"type": ["string", "null"]},
+        "ownership": {"$ref": "#/definitions/candidateOwnership"},
+        "editScope": {"$ref": "#/definitions/candidateEditScope"},
         "decision": {
           "$ref": "#/definitions/candidateDecision"
         },
@@ -969,6 +1008,15 @@
           "status": "open",
           "priority": 2,
           "assignee": null,
+          "ownership": "unassigned",
+          "editScope": {
+            "state": "known",
+            "paths": ["README.md", "docs/**"],
+            "sourceRefs": [
+              "swarm_brief.ready_reservation_pressure.likely_surfaces",
+              "work_packet.specialized_title_mapping"
+            ]
+          },
           "decision": "safe_to_claim",
           "collisionRisk": "none",
           "unsafeReasons": [],
@@ -1060,6 +1108,12 @@
           "status": "open",
           "priority": 1,
           "assignee": null,
+          "ownership": "unassigned",
+          "editScope": {
+            "state": "known",
+            "paths": ["src/core/swarm_brief.rs"],
+            "sourceRefs": ["swarm_brief.ready_reservation_pressure.likely_surfaces"]
+          },
           "decision": "coordinate_first",
           "collisionRisk": "high",
           "unsafeReasons": ["dirty_path_overlap", "active_exclusive_reservation"],
@@ -1154,6 +1208,15 @@
           "status": "open",
           "priority": 2,
           "assignee": null,
+          "ownership": "unassigned",
+          "editScope": {
+            "state": "known",
+            "paths": ["README.md", "docs/**"],
+            "sourceRefs": [
+              "swarm_brief.ready_reservation_pressure.likely_surfaces",
+              "work_packet.specialized_title_mapping"
+            ]
+          },
           "decision": "stale_or_advisory",
           "collisionRisk": "low",
           "unsafeReasons": ["reservation_evidence_not_authoritative", "inbox_evidence_not_authoritative", "rch_remote_verification_blocked"],

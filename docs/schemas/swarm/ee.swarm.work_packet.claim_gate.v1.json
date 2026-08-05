@@ -117,9 +117,19 @@
           "recommendedSafeToClaim": {"const": true},
           "selectedCandidate": {
             "type": "object",
-            "required": ["decision"],
+            "required": ["decision", "ownership", "editScope", "collisionRisk"],
             "properties": {
-              "decision": {"const": "safe_to_claim"}
+              "decision": {"const": "safe_to_claim"},
+              "ownership": {"const": "unassigned"},
+              "editScope": {
+                "type": "object",
+                "required": ["state", "paths"],
+                "properties": {
+                  "state": {"const": "known"},
+                  "paths": {"minItems": 1}
+                }
+              },
+              "collisionRisk": {"const": "none"}
             }
           },
           "claimCommandAction": {"type": "object"},
@@ -141,6 +151,41 @@
     "stringArray": {
       "type": "array",
       "items": {"type": "string"}
+    },
+    "candidateOwnership": {
+      "type": "string",
+      "enum": ["unassigned", "self", "peer", "unknown"],
+      "description": "Candidate ownership relative to the fresh, authoritative current Agent Mail identity. Self-owned work is continued rather than claimed again; peer and unknown ownership fail closed."
+    },
+    "candidateEditScope": {
+      "type": "object",
+      "required": ["state", "paths", "sourceRefs"],
+      "additionalProperties": false,
+      "properties": {
+        "state": {"type": "string", "enum": ["known", "unknown"]},
+        "paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "sourceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"state": {"const": "known"}}, "required": ["state"]},
+          "then": {"properties": {"paths": {"minItems": 1}}}
+        },
+        {
+          "if": {"properties": {"state": {"const": "unknown"}}, "required": ["state"]},
+          "then": {"properties": {"paths": {"maxItems": 0}}}
+        }
+      ],
+      "description": "Candidate-scoped edit-path evidence. Unknown scope never inherits checkout-global conflicts and cannot authorize a claim."
     },
     "safeString": {
       "type": "string",
@@ -298,6 +343,8 @@
         "status",
         "priority",
         "assignee",
+        "ownership",
+        "editScope",
         "decision",
         "collisionRisk"
       ],
@@ -309,6 +356,8 @@
         "status": {"type": "string"},
         "priority": {"type": ["integer", "null"]},
         "assignee": {"type": ["string", "null"]},
+        "ownership": {"$ref": "#/definitions/candidateOwnership"},
+        "editScope": {"$ref": "#/definitions/candidateEditScope"},
         "decision": {"$ref": "#/definitions/gateVerdict"},
         "collisionRisk": {"type": "string", "enum": ["none", "low", "medium", "high", "unknown"]}
       }
@@ -809,6 +858,15 @@
         "status": "open",
         "priority": 2,
         "assignee": null,
+        "ownership": "unassigned",
+        "editScope": {
+          "state": "known",
+          "paths": ["README.md", "docs/**"],
+          "sourceRefs": [
+            "swarm_brief.ready_reservation_pressure.likely_surfaces",
+            "work_packet.specialized_title_mapping"
+          ]
+        },
         "decision": "safe_to_claim",
         "collisionRisk": "none"
       },

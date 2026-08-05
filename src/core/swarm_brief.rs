@@ -86,6 +86,17 @@ const BEADS_COMMAND_TIMEOUT_CODE: &str = "beads_command_timeout";
 const BEADS_NO_OUTPUT_CODE: &str = "beads_no_output";
 const BEADS_TRACKER_METADATA_DRIFT_CODE: &str = "beads_tracker_metadata_drift";
 const BEADS_TRACKER_STALE_CODE: &str = "beads_tracker_stale";
+const BEADS_READY_ARGS: [&str; 7] = [
+    "ready",
+    "--limit",
+    "0",
+    "--json",
+    "--no-auto-import",
+    "--no-auto-flush",
+    "--allow-stale",
+];
+const BEADS_READY_COMMAND: &str =
+    "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale";
 const BV_COMMAND_TIMEOUT_CODE: &str = "bv_command_timeout";
 const BV_NO_OUTPUT_CODE: &str = "bv_no_output";
 const BV_UNAVAILABLE_CODE: &str = "bv_unavailable";
@@ -203,6 +214,12 @@ pub struct SwarmBriefReport {
     pub file_surface_risks: Vec<SwarmBriefFileSurfaceRisk>,
     pub ready_reservation_pressure: Vec<SwarmBriefReadyReservationPressure>,
     pub stalled_bead_liveness: Vec<SwarmBriefStalledBeadLiveness>,
+    /// The identity whose current, workspace-bound Agent Mail snapshot was
+    /// collected. Internal-only so downstream claim gates can distinguish
+    /// self-owned coordination evidence without changing the public brief
+    /// schema or trusting legacy snapshots that lack strict identity proof.
+    #[serde(skip)]
+    pub agent_mail_agent_name: Option<String>,
     pub agent_mail_agents: Vec<SwarmBriefAgentMailAgent>,
     pub inbox: Vec<SwarmBriefInboxSummary>,
     pub threads: Vec<SwarmBriefThreadSummary>,
@@ -270,6 +287,7 @@ impl SwarmBriefReport {
             file_surface_risks: Vec::new(),
             ready_reservation_pressure: Vec::new(),
             stalled_bead_liveness: Vec::new(),
+            agent_mail_agent_name: None,
             agent_mail_agents: Vec::new(),
             inbox: Vec::new(),
             threads: Vec::new(),
@@ -776,6 +794,11 @@ pub struct SwarmBriefThreadSummary {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SwarmBriefAgentMailSnapshot {
+    /// Present only for a strictly validated `ee.agent_mail.snapshot.v1`.
+    /// Legacy coordination snapshots remain readable but cannot supply an
+    /// authoritative self identity to claim-gate consumers.
+    #[serde(skip)]
+    pub agent_name: Option<String>,
     pub file_reservations: Vec<SwarmBriefFileReservation>,
     pub agents: Vec<SwarmBriefAgentMailAgent>,
     pub inbox: Vec<SwarmBriefInboxSummary>,
@@ -1453,6 +1476,7 @@ pub enum SwarmBriefContribution {
     Beads(SwarmBriefBeadsSummary),
     Bv(SwarmBriefBvSummary),
     AgentMail {
+        agent_name: Option<String>,
         file_reservations: Vec<SwarmBriefFileReservation>,
         agents: Vec<SwarmBriefAgentMailAgent>,
         inbox: Vec<SwarmBriefInboxSummary>,
@@ -1633,7 +1657,7 @@ pub struct BeadsSourceAdapter<'a, R> {
 impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for BeadsSourceAdapter<'_, R> {
     fn collect(&self, options: &SwarmBriefCollectOptions) -> SwarmBriefSourceOutput {
         let source = SwarmBriefSourceKind::Beads;
-        let provenance = SwarmBriefSourceProvenance::command("br", &["ready", "--json"]);
+        let provenance = SwarmBriefSourceProvenance::command("br", &BEADS_READY_ARGS);
         let mut freshness = SwarmBriefSourceFreshness::current();
         let mut degraded = collect_beads_freshness(self.runner, options, &mut freshness);
         let mut bucket_degraded = Vec::new();
@@ -1641,7 +1665,7 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for BeadsSourceAdapter<
         let ready = collect_beads_bucket(
             self.runner,
             options,
-            &["ready", "--json"],
+            &BEADS_READY_ARGS,
             "ready",
             &mut bucket_degraded,
         );
@@ -1876,7 +1900,7 @@ fn collect_beads_bucket<R: SwarmBriefCommandRunner>(
                 SwarmBriefSourceKind::Beads,
                 BEADS_UNAVAILABLE_CODE,
                 message,
-                Some("br ready --json".to_string()),
+                Some(beads_command_repair(args)),
             ));
             Vec::new()
         }),
@@ -2024,7 +2048,7 @@ fn bv_no_output_degradation(repair: impl Into<String>) -> SwarmBriefDegradation 
 
 fn bv_bounded_retry_repair(bv_command: &str) -> String {
     format!(
-        "Retry `{bv_command}` with the configured command timeout, or fall back to `br --no-auto-import --allow-stale ready --json`."
+        "Retry `{bv_command}` with the configured command timeout, or fall back to `{BEADS_READY_COMMAND}`."
     )
 }
 
@@ -2070,6 +2094,11 @@ impl SwarmBriefSourceAdapter for AgentMailSnapshotFileAdapter {
                             snapshot.file_reservations.retain(|reservation| {
                                 reservation_is_active(reservation, decision_now.timestamp())
                             });
+                            let agent_name = if freshness.state == "current" {
+                                snapshot.agent_name.take()
+                            } else {
+                                None
+                            };
                             let item_count = snapshot.file_reservations.len()
                                 + snapshot.agents.len()
                                 + snapshot.inbox.len()
@@ -2085,6 +2114,7 @@ impl SwarmBriefSourceAdapter for AgentMailSnapshotFileAdapter {
                                 .with_degraded(degraded)
                                 .with_freshness(freshness),
                                 contribution: SwarmBriefContribution::AgentMail {
+                                    agent_name,
                                     file_reservations: snapshot.file_reservations,
                                     agents: snapshot.agents,
                                     inbox: snapshot.inbox,
@@ -3029,7 +3059,7 @@ pub fn collect_swarm_brief(
         &mut report,
         options,
         SwarmBriefSourceKind::Beads,
-        SwarmBriefSourceProvenance::command("br", &["ready", "--json"]),
+        SwarmBriefSourceProvenance::command("br", &BEADS_READY_ARGS),
         || BeadsSourceAdapter { runner }.collect(options),
     );
     collect_selected_source(
@@ -3334,11 +3364,13 @@ fn apply_source_output(report: &mut SwarmBriefReport, output: SwarmBriefSourceOu
             report.bv = Some(summary);
         }
         SwarmBriefContribution::AgentMail {
+            agent_name,
             file_reservations,
             agents,
             inbox,
             threads,
         } => {
+            report.agent_mail_agent_name = agent_name;
             report.file_reservations.extend(file_reservations);
             report.agent_mail_agents.extend(agents);
             report.inbox.extend(inbox);
@@ -6089,7 +6121,7 @@ fn ready_reservation_pressure_commands(
     let mut commands = BTreeSet::from([format!("br show {bead_id} --json")]);
     match action {
         "choose_another" => {
-            commands.insert("br ready --json".to_string());
+            commands.insert(BEADS_READY_COMMAND.to_string());
         }
         "message_holder" | "wait" => {
             if reservation_holders.is_empty() {
@@ -7059,7 +7091,11 @@ fn likely_surfaces_for_text(text: &str) -> Vec<String> {
     if lower.contains("[cli]") || lower.contains(" cli") || lower.contains("command") {
         surfaces.insert("src/cli/**".to_string());
     }
-    if lower.contains("[docs]") || lower.contains("docs") || lower.contains("readme") {
+    if lower.contains("[docs]")
+        || lower.contains("docs")
+        || lower.contains("readme")
+        || lower.contains("document")
+    {
         surfaces.insert("README.md".to_string());
         surfaces.insert("docs/**".to_string());
     }
@@ -7161,7 +7197,7 @@ fn default_source_repair(source: SwarmBriefSourceKind) -> &'static str {
         SwarmBriefSourceKind::AgentMail => {
             "Configure a redacted Agent Mail snapshot path before collecting the brief."
         }
-        SwarmBriefSourceKind::Beads => "br ready --json",
+        SwarmBriefSourceKind::Beads => BEADS_READY_COMMAND,
         SwarmBriefSourceKind::Bv => "bv --robot-triage --robot-triage-by-track",
         SwarmBriefSourceKind::Git => "git status --short --branch --untracked-files=all",
         SwarmBriefSourceKind::HostProfile => "ee profile probe --json",
@@ -8561,13 +8597,23 @@ fn validate_declared_agent_mail_snapshot_v1(value: &Value) -> Result<(), String>
 pub fn parse_agent_mail_snapshot_json(input: &str) -> Result<SwarmBriefAgentMailSnapshot, String> {
     let value = serde_json::from_str::<Value>(input)
         .map_err(|error| format!("Agent Mail snapshot JSON could not be parsed: {error}"))?;
-    if value.get("schema").and_then(Value::as_str) == Some(AGENT_MAIL_SNAPSHOT_SCHEMA_V1)
+    let declared_v1 =
+        value.get("schema").and_then(Value::as_str) == Some(AGENT_MAIL_SNAPSHOT_SCHEMA_V1);
+    if declared_v1
         || value.get("producer_status").is_some()
         || value.get("source_commands").is_some()
         || value.get("command_statuses").is_some()
     {
         validate_declared_agent_mail_snapshot_v1(&value)?;
     }
+    let agent_name = if declared_v1 {
+        value
+            .get("agent_name")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+    } else {
+        None
+    };
     let degraded = parse_agent_mail_health_degraded(&value);
     let reservations = value
         .get("file_reservations")
@@ -8638,6 +8684,7 @@ pub fn parse_agent_mail_snapshot_json(input: &str) -> Result<SwarmBriefAgentMail
     threads.sort();
     threads.dedup();
     Ok(SwarmBriefAgentMailSnapshot {
+        agent_name,
         file_reservations: reservations,
         agents,
         inbox,
@@ -10597,6 +10644,18 @@ mod tests {
     }
 
     #[test]
+    fn likely_surfaces_map_document_terms_to_docs_scope() {
+        for title in [
+            "Document the swarm claim gate",
+            "Improve coordination documentation",
+        ] {
+            let surfaces = likely_surfaces_for_text(title);
+            assert!(surfaces.contains(&"README.md".to_owned()), "{title}");
+            assert!(surfaces.contains(&"docs/**".to_owned()), "{title}");
+        }
+    }
+
+    #[test]
     fn summary_redacts_raw_content_and_hashes_underlying_brief() {
         let raw_secret = format!("{}{}", "api_key=sk-live-", "A".repeat(32));
         let raw_remote_workspace = "/Users/alice/private/repo";
@@ -11355,7 +11414,7 @@ mod tests {
         assert!(
             pressure
                 .suggested_commands
-                .contains(&"br ready --json".to_string())
+                .contains(&BEADS_READY_COMMAND.to_string())
         );
         assert!(
             report
@@ -12919,6 +12978,7 @@ mod tests {
         let inbox = &snapshot.inbox;
         let threads = &snapshot.threads;
 
+        assert_eq!(snapshot.agent_name, None);
         assert_eq!(reservations.len(), 1);
         assert_eq!(reservations[0].path_pattern, "src/core/*.rs");
         assert_eq!(agents.len(), 1);
@@ -12957,6 +13017,7 @@ mod tests {
             "strict declared-v1 Agent Mail snapshot",
         );
 
+        assert_eq!(snapshot.agent_name.as_deref(), Some("BeigeHollow"));
         assert_eq!(snapshot.agents.len(), 1);
         assert_eq!(snapshot.file_reservations.len(), 1);
         assert_eq!(snapshot.inbox.len(), 1);
@@ -13210,7 +13271,55 @@ mod tests {
                     .any(|item| item.code == AGENT_MAIL_UNAVAILABLE_CODE),
                 expected_degraded
             );
+            match &output.contribution {
+                SwarmBriefContribution::AgentMail { agent_name, .. } => {
+                    assert_eq!(
+                        agent_name.as_deref(),
+                        (expected_freshness == "current").then_some("BeigeHollow")
+                    );
+                }
+                other => panic!("expected Agent Mail contribution, got {other:?}"),
+            }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn agent_mail_identity_survives_authoritative_contribution_and_report_projection()
+    -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let project_key = agent_mail_snapshot_project_key_for_workspace(tempdir.path())?;
+        let mut value = declared_agent_mail_snapshot_v1_example();
+        value["generated_at"] = json!(Utc::now().to_rfc3339());
+        value["project_key"] = json!(project_key);
+        let path = tempdir.path().join("identity-agent-mail.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&value).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let mut options = SwarmBriefCollectOptions::for_workspace(tempdir.path());
+        options.agent_mail_snapshot_path = Some(path);
+
+        let output = AgentMailSnapshotFileAdapter.collect(&options);
+
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Ready);
+        assert_eq!(output.snapshot.freshness.state, "current");
+        match &output.contribution {
+            SwarmBriefContribution::AgentMail { agent_name, .. } => {
+                assert_eq!(agent_name.as_deref(), Some("BeigeHollow"));
+            }
+            other => return Err(format!("expected Agent Mail contribution, got {other:?}")),
+        }
+
+        let mut report = SwarmBriefReport::empty(tempdir.path());
+        apply_source_output(&mut report, output);
+        assert_eq!(report.agent_mail_agent_name.as_deref(), Some("BeigeHollow"));
+        let serialized = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+        assert!(
+            serialized.get("agentMailAgentName").is_none(),
+            "authoritative self identity must stay internal to the brief"
+        );
         Ok(())
     }
 
@@ -13588,6 +13697,78 @@ mod tests {
     }
 
     #[test]
+    fn beads_ready_collection_is_unbounded_sorted_and_deduplicated() {
+        let options = SwarmBriefCollectOptions::for_workspace(".");
+        let mut ready_rows = (0..25)
+            .rev()
+            .map(|index| {
+                json!({
+                    "id": format!("bd-ready-{index:02}"),
+                    "title": format!("Ready work {index:02}"),
+                    "status": "open"
+                })
+            })
+            .collect::<Vec<_>>();
+        ready_rows.push(ready_rows[0].clone());
+        let ready_json = serde_json::to_string(&ready_rows).expect("ready rows serialize");
+        let runner = FakeRunner::default()
+            .with_output(
+                "br",
+                &[
+                    "sync",
+                    "--status",
+                    "--json",
+                    "--no-auto-import",
+                    "--allow-stale",
+                ],
+                r#"{"jsonl_newer":false,"db_newer":false}"#,
+            )
+            .with_output("br", &BEADS_READY_ARGS, &ready_json)
+            .with_output("br", &["blocked", "--json"], "[]")
+            .with_output("br", &["list", "--status", "in_progress", "--json"], "[]")
+            .with_output("br", &["list", "--status", "deferred", "--json"], "[]")
+            .with_output(
+                "br",
+                &["dep", "cycles", "--json"],
+                r#"{"cycles":[],"count":0}"#,
+            );
+
+        let output = BeadsSourceAdapter { runner: &runner }.collect(&options);
+
+        assert_eq!(output.snapshot.item_count, 25);
+        assert_eq!(
+            output.snapshot.provenance.command.as_deref(),
+            Some("br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale")
+        );
+        match output.contribution {
+            SwarmBriefContribution::Beads(summary) => {
+                let ids = summary
+                    .ready
+                    .iter()
+                    .map(|bead| bead.id.clone())
+                    .collect::<Vec<_>>();
+                let expected = (0..25)
+                    .map(|index| format!("bd-ready-{index:02}"))
+                    .collect::<Vec<_>>();
+                assert_eq!(ids, expected);
+            }
+            other => panic!("expected Beads contribution, got {other:?}"),
+        }
+        let calls = runner.calls();
+        assert!(calls.contains(
+            &"br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale".to_owned()
+        ));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("br ready"))
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec![BEADS_READY_COMMAND]
+        );
+    }
+
+    #[test]
     fn beads_sync_status_jsonl_newer_marks_source_degraded_not_unavailable() {
         let options = SwarmBriefCollectOptions::for_workspace(".");
         let runner = FakeRunner::default()
@@ -13604,7 +13785,7 @@ mod tests {
             )
             .with_output(
                 "br",
-                &["ready", "--json"],
+                &BEADS_READY_ARGS,
                 r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
             )
             .with_output("br", &["blocked", "--json"], "[]")
@@ -13659,7 +13840,7 @@ mod tests {
             )
             .with_output(
                 "br",
-                &["ready", "--json"],
+                &BEADS_READY_ARGS,
                 r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
             )
             .with_output("br", &["blocked", "--json"], "[]")
@@ -13715,7 +13896,7 @@ mod tests {
             )
             .with_output(
                 "br",
-                &["ready", "--json"],
+                &BEADS_READY_ARGS,
                 r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
             )
             .with_output("br", &["blocked", "--json"], "[]")
@@ -13760,7 +13941,7 @@ mod tests {
             )
             .with_output(
                 "br",
-                &["ready", "--json"],
+                &BEADS_READY_ARGS,
                 r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
             )
             .with_output("br", &["blocked", "--json"], "[]")
@@ -13806,7 +13987,7 @@ mod tests {
             )
             .with_output(
                 "br",
-                &["ready", "--json"],
+                &BEADS_READY_ARGS,
                 r#"[{"id":"bd-ready","title":"Ready work","status":"open"}]"#,
             )
             .with_output("br", &["blocked", "--json"], "[]")
@@ -13855,7 +14036,7 @@ mod tests {
             )
             .with_error(
                 "br",
-                &["ready", "--json"],
+                &BEADS_READY_ARGS,
                 SwarmBriefCommandError::Unavailable("br ready failed".to_string()),
             )
             .with_error(
@@ -14650,10 +14831,9 @@ mod tests {
                 SwarmBriefSourceKind::Bv,
                 code,
                 message,
-                Some(
-                    "Retry `bv --robot-triage --robot-triage-by-track` with the configured command timeout, or fall back to `br --no-auto-import --allow-stale ready --json`."
-                        .to_string(),
-                ),
+                Some(format!(
+                    "Retry `bv --robot-triage --robot-triage-by-track` with the configured command timeout, or fall back to `{BEADS_READY_COMMAND}`."
+                )),
             )];
 
             apply_swarm_brief_advice(&mut report);
@@ -14682,24 +14862,24 @@ mod tests {
         let degradation = error.to_degradation(
             SwarmBriefSourceKind::Beads,
             BEADS_UNAVAILABLE_CODE,
-            "br ready --json",
+            BEADS_READY_COMMAND,
         );
 
         assert_eq!(degradation.code, BEADS_UNAVAILABLE_CODE);
         assert!(!degradation.message.contains("ghp_"));
-        assert_eq!(degradation.repair.as_deref(), Some("br ready --json"));
+        assert_eq!(degradation.repair.as_deref(), Some(BEADS_READY_COMMAND));
     }
 
     #[test]
     fn beads_timeout_uses_specific_source_health_code() {
         let error = SwarmBriefCommandError::TimedOut { timeout_ms: 1_500 };
-        let degradation = beads_command_error_to_degradation(&error, "br ready --json");
+        let degradation = beads_command_error_to_degradation(&error, BEADS_READY_COMMAND);
 
         assert_eq!(degradation.code, BEADS_COMMAND_TIMEOUT_CODE);
         assert_eq!(degradation.source, SwarmBriefSourceKind::Beads);
         assert!(degradation.message.contains("timed out after 1500 ms"));
         assert!(degradation.message.contains("advisory only"));
-        assert_eq!(degradation.repair.as_deref(), Some("br ready --json"));
+        assert_eq!(degradation.repair.as_deref(), Some(BEADS_READY_COMMAND));
     }
 
     #[test]
@@ -14743,7 +14923,7 @@ mod tests {
         assert!(degradation.message.contains("waiting indefinitely"));
         let repair = degradation.repair.as_deref().unwrap_or_default();
         assert!(repair.contains("bv --robot-triage --robot-triage-by-track"));
-        assert!(repair.contains("br --no-auto-import --allow-stale ready --json"));
+        assert!(repair.contains(BEADS_READY_COMMAND));
     }
 
     #[test]
@@ -14767,7 +14947,7 @@ mod tests {
             .as_deref()
             .unwrap_or_default();
         assert!(repair.contains("bv --robot-triage --robot-triage-by-track"));
-        assert!(repair.contains("br --no-auto-import --allow-stale ready --json"));
+        assert!(repair.contains(BEADS_READY_COMMAND));
         match output.contribution {
             SwarmBriefContribution::None => {}
             _ => panic!("empty bv stdout must not contribute a healthy summary"),
@@ -14806,7 +14986,7 @@ mod tests {
             )
             .with_error(
                 "br",
-                &["ready", "--json"],
+                &BEADS_READY_ARGS,
                 SwarmBriefCommandError::TimedOut { timeout_ms: 1_500 },
             )
             .with_error(
@@ -14901,7 +15081,7 @@ mod source_run_adapter_tests {
     fn passed_execution_returns_stdout_and_stderr() {
         let result = run_through_adapter(
             "br",
-            &["ready", "--json"],
+            &BEADS_READY_ARGS,
             1_500,
             SourceRunExecution::Completed {
                 exit_code: Some(0),
@@ -14920,7 +15100,7 @@ mod source_run_adapter_tests {
     fn nonzero_exit_translates_to_failed_with_exit_code() {
         let result = run_through_adapter(
             "br",
-            &["ready", "--json"],
+            &BEADS_READY_ARGS,
             1_500,
             SourceRunExecution::Completed {
                 exit_code: Some(2),
@@ -14948,7 +15128,7 @@ mod source_run_adapter_tests {
     fn timed_out_execution_propagates_timeout_ms() {
         let result = run_through_adapter(
             "br",
-            &["ready", "--json"],
+            &BEADS_READY_ARGS,
             1_500,
             SourceRunExecution::TimedOut {
                 exit_code: None,
@@ -14971,7 +15151,7 @@ mod source_run_adapter_tests {
     fn spawn_failure_translates_to_unavailable() {
         let result = run_through_adapter(
             "br",
-            &["ready", "--json"],
+            &BEADS_READY_ARGS,
             1_500,
             SourceRunExecution::SpawnFailed {
                 error: "No such file or directory".to_string(),
@@ -14993,12 +15173,12 @@ mod source_run_adapter_tests {
     #[test]
     fn adapter_uses_swarm_brief_output_byte_cap_not_default_tail() {
         // Regression guard: source_run's DEFAULT_TAIL_BYTES_MAX (8 KiB)
-        // would silently truncate `git log` / `br ready --json` payloads
+        // would silently truncate `git log` / broad `br ready` payloads
         // that the existing parsers expect to see in full. The adapter
         // raises tail_bytes_max to SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES
         // (10 MiB) at build_request time.
         let runner = SourceRunSwarmBriefRunner::new(SourceRunKind::Beads);
-        let request = runner.build_request("br", &["ready", "--json"], &PathBuf::from("."), 1_500);
+        let request = runner.build_request("br", &BEADS_READY_ARGS, &PathBuf::from("."), 1_500);
         assert_eq!(
             request.tail_bytes_max,
             SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES

@@ -1235,6 +1235,15 @@
           "status": "open",
           "priority": 2,
           "assignee": null,
+          "ownership": "unassigned",
+          "editScope": {
+            "state": "known",
+            "paths": ["README.md", "docs/**"],
+            "sourceRefs": [
+              "swarm_brief.ready_reservation_pressure.likely_surfaces",
+              "work_packet.specialized_title_mapping"
+            ]
+          },
           "decision": "safe_to_claim",
           "collisionRisk": "none",
           "unsafeReasons": [],
@@ -1319,6 +1328,15 @@
         "status": "open",
         "priority": 2,
         "assignee": null,
+        "ownership": "unassigned",
+        "editScope": {
+          "state": "known",
+          "paths": ["README.md", "docs/**"],
+          "sourceRefs": [
+            "swarm_brief.ready_reservation_pressure.likely_surfaces",
+            "work_packet.specialized_title_mapping"
+          ]
+        },
         "decision": "safe_to_claim",
         "collisionRisk": "none"
       },

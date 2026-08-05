@@ -23,7 +23,7 @@
         "status": "ready",
         "freshness": "current",
         "degradedCodes": [],
-        "provenance": "br ready --json"
+        "provenance": "br ready --limit 0 --json --no-auto-import --no-auto-flush --allow-stale"
       },
       {
         "source": "bv",
@@ -81,8 +81,14 @@
         "status": "open",
         "priority": 2,
         "assignee": null,
+        "ownership": "unassigned",
+        "editScope": {
+          "state": "unknown",
+          "paths": [],
+          "sourceRefs": ["candidate_edit_scope.no_matching_bounded_surface"]
+        },
         "decision": "blocked_rollup",
-        "collisionRisk": "none",
+        "collisionRisk": "unknown",
         "unsafeReasons": [
           "candidate_is_rollup_not_leaf",
           "rollup_has_no_claimable_child"
@@ -99,6 +105,13 @@
       "status": "open",
       "priority": 2,
       "assignee": null,
+      "ownership": "unassigned",
+      "editScope": {
+        "state": "unknown",
+        "paths": [],
+        "sourceRefs": ["candidate_edit_scope.no_matching_bounded_surface"]
+      },
+      "collisionRisk": "unknown",
       "decision": "blocked_rollup",
       "decisionReasons": [
         "candidate_is_rollup_not_leaf",
