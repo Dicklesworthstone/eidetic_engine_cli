@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use frankensearch_core::traits::{RerankDocument, RerankScore, SyncRerank};
+use frankensearch_rerank::NativeReranker;
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -460,4 +462,179 @@ fn governed_pages_reproduce_across_three_invocations() -> TestResult {
         format!("resumed page rejected its own cursor: {resume1}"),
     )?;
     Ok(())
+}
+
+const RERANK_MODEL_DIR_ENV: &str = "EE_E2E_RERANK_MODEL_DIR";
+const RERANK_REQUIRE_MODEL_ENV: &str = "EE_E2E_RERANK_REQUIRE_MODEL";
+const RERANK_QUERY: &str = "bd1nl13 release format checklist cargo clippy";
+
+fn native_reranker_model_dir() -> Result<Option<PathBuf>, String> {
+    let Some(model_dir) = std::env::var_os(RERANK_MODEL_DIR_ENV).map(PathBuf::from) else {
+        if std::env::var(RERANK_REQUIRE_MODEL_ENV).as_deref() == Ok("1") {
+            return Err(format!(
+                "{RERANK_REQUIRE_MODEL_ENV}=1 requires {RERANK_MODEL_DIR_ENV} to name an unpacked reranker model directory"
+            ));
+        }
+        eprintln!(
+            "[determinism_unit] SKIP native reranker lane: set {RERANK_MODEL_DIR_ENV} to an unpacked model directory; set {RERANK_REQUIRE_MODEL_ENV}=1 to make absence fail closed"
+        );
+        return Ok(None);
+    };
+
+    let tokenizer = model_dir.join("tokenizer.json");
+    let primary_weights = model_dir.join("model_f32.safetensors");
+    let fallback_weights = model_dir.join("model.safetensors");
+    if tokenizer.is_file() && (primary_weights.is_file() || fallback_weights.is_file()) {
+        return Ok(Some(model_dir));
+    }
+
+    Err(format!(
+        "{RERANK_MODEL_DIR_ENV}={} is not loadable: tokenizer.json and model_f32.safetensors (or model.safetensors) are required",
+        model_dir.display()
+    ))
+}
+
+fn rerank_determinism_documents() -> Vec<RerankDocument> {
+    [
+        (
+            "trap",
+            "BD1NL13_RERANK_TRAP release release release format format checklist checklist cargo cargo clippy clippy, but this is a noisy lexical trap and not the Rust release policy target.",
+        ),
+        (
+            "target",
+            "BD1NL13_RERANK_TARGET The correct Rust release policy says run cargo fmt --check and cargo clippy before publishing.",
+        ),
+        (
+            "noise_one",
+            "BD1NL13_RERANK_NOISE_ONE Database migration notes cover index ownership and schema upgrade ordering.",
+        ),
+        (
+            "noise_two",
+            "BD1NL13_RERANK_NOISE_TWO Onboarding screenshots and terminal color themes need a design review.",
+        ),
+        (
+            "noise_three",
+            "BD1NL13_RERANK_NOISE_THREE Rust ownership and borrowing prevent memory safety errors at compile time.",
+        ),
+    ]
+    .into_iter()
+    .map(|(doc_id, text)| RerankDocument {
+        doc_id: doc_id.to_owned(),
+        text: text.to_owned(),
+    })
+    .collect()
+}
+
+fn descending_rerank_order(scores: &[RerankScore]) -> Vec<String> {
+    let mut indices: Vec<usize> = (0..scores.len()).collect();
+    indices.sort_by(|left, right| {
+        scores[*right]
+            .score
+            .total_cmp(&scores[*left].score)
+            .then_with(|| scores[*left].doc_id.cmp(&scores[*right].doc_id))
+    });
+    indices
+        .into_iter()
+        .map(|index| scores[index].doc_id.clone())
+        .collect()
+}
+
+/// bd-1nl13.13 — exercise the real frankentorch cross-encoder, not a score stub.
+///
+/// The ordinary model-free lane reports an explicit skip because the 83 MiB
+/// artifact is not a source fixture. Cross-platform release lanes set
+/// `EE_E2E_RERANK_MODEL_DIR`; setting `EE_E2E_RERANK_REQUIRE_MODEL=1` makes a
+/// missing artifact a hard failure. The companion shell harness emits and can
+/// compare a content-addressed numerical vector across target platforms.
+#[test]
+fn native_reranker_scores_and_order_reproduce_across_three_runs() -> TestResult {
+    let Some(model_dir) = native_reranker_model_dir()? else {
+        return Ok(());
+    };
+    let reranker = NativeReranker::load(&model_dir)
+        .map_err(|error| format!("load NativeReranker from {}: {error}", model_dir.display()))?;
+    let documents = rerank_determinism_documents();
+
+    let run = || {
+        reranker
+            .rerank_sync(RERANK_QUERY, &documents)
+            .map_err(|error| format!("native rerank failed: {error}"))
+    };
+    let run1 = run()?;
+    let run2 = run()?;
+    let run3 = run()?;
+
+    for (run_index, scores) in [&run1, &run2, &run3].into_iter().enumerate() {
+        ensure(
+            scores.len() == documents.len(),
+            format!(
+                "rerank run {} returned {} scores for {} documents",
+                run_index + 1,
+                scores.len(),
+                documents.len()
+            ),
+        )?;
+        for (original_rank, score) in scores.iter().enumerate() {
+            ensure(
+                score.original_rank == original_rank,
+                format!(
+                    "rerank run {} changed original_rank for {}: {} != {}",
+                    run_index + 1,
+                    score.doc_id,
+                    score.original_rank,
+                    original_rank
+                ),
+            )?;
+            ensure(
+                score.score.is_finite() && (0.0..=1.0).contains(&score.score),
+                format!(
+                    "rerank run {} produced invalid calibrated score for {}: {}",
+                    run_index + 1,
+                    score.doc_id,
+                    score.score
+                ),
+            )?;
+            ensure(
+                score.raw_logit.is_some_and(f32::is_finite),
+                format!(
+                    "rerank run {} produced no finite raw logit for {}",
+                    run_index + 1,
+                    score.doc_id
+                ),
+            )?;
+        }
+    }
+
+    for (index, ((first, second), third)) in run1.iter().zip(&run2).zip(&run3).enumerate() {
+        ensure(
+            first.doc_id == second.doc_id && second.doc_id == third.doc_id,
+            format!("rerank document identity drifted at input rank {index}"),
+        )?;
+        ensure(
+            first.score == second.score && second.score == third.score,
+            format!(
+                "rerank calibrated score drifted for {}: {} / {} / {}",
+                first.doc_id, first.score, second.score, third.score
+            ),
+        )?;
+        ensure(
+            first.raw_logit == second.raw_logit && second.raw_logit == third.raw_logit,
+            format!(
+                "rerank raw logit drifted for {}: {:?} / {:?} / {:?}",
+                first.doc_id, first.raw_logit, second.raw_logit, third.raw_logit
+            ),
+        )?;
+    }
+
+    let order1 = descending_rerank_order(&run1);
+    let order2 = descending_rerank_order(&run2);
+    let order3 = descending_rerank_order(&run3);
+    ensure(
+        order1 == order2 && order2 == order3,
+        format!("rerank order drifted: {order1:?} / {order2:?} / {order3:?}"),
+    )?;
+    ensure(
+        order1.first().map(String::as_str) == Some("target"),
+        format!("native reranker did not promote the precise release-policy target: {order1:?}"),
+    )
 }

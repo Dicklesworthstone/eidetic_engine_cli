@@ -243,20 +243,43 @@ assert_dueling_wizards_determinism_manifest
 run_3x_assert_identical() {
     local name="$1"
     shift
-    local h1 h2 h3
-    h1=$("$EE_BINARY" "$@" --workspace "$EPIC_WORKSPACE" 2>/dev/null \
+    local run output command_status canonical_hash
+    local -a hashes=()
+    for run in 1 2 3; do
+        output=$("$EE_BINARY" "$@" --workspace "$EPIC_WORKSPACE" 2>/dev/null)
+        command_status=$?
+        if [ "$command_status" -ne 0 ] \
+            || ! printf '%s' "$output" | jq -e \
+                '.schema == "ee.response.v2" and .success == true' >/dev/null 2>&1; then
+            e2e_log_assert_eq "run=$run exit=$command_status" \
+                "exit=0 ee.response.v2 success=true" \
+                "determinism_${name}_run_valid"
+            return 1
+        fi
+        canonical_hash=$(printf '%s' "$output" \
             | strip_variable_fields | jq -S '.' | hash_stdin)
-    h2=$("$EE_BINARY" "$@" --workspace "$EPIC_WORKSPACE" 2>/dev/null \
-            | strip_variable_fields | jq -S '.' | hash_stdin)
-    h3=$("$EE_BINARY" "$@" --workspace "$EPIC_WORKSPACE" 2>/dev/null \
-            | strip_variable_fields | jq -S '.' | hash_stdin)
-    if [ "$h1" = "$h2" ] && [ "$h2" = "$h3" ]; then
+        command_status=$?
+        if [ "$command_status" -ne 0 ] || [ -z "$canonical_hash" ]; then
+            e2e_log_assert_eq \
+                "run=$run canonicalize_exit=$command_status hash=${canonical_hash:-<empty>}" \
+                "canonicalize_exit=0 nonempty_hash" \
+                "determinism_${name}_canonicalize_valid"
+            return 1
+        fi
+        hashes+=("$canonical_hash")
+    done
+    if [ "${hashes[0]}" = "${hashes[1]}" ] && [ "${hashes[1]}" = "${hashes[2]}" ]; then
         e2e_log_assert_eq "true" "true" "determinism_${name}"
-        e2e_log_note "determinism_${name}_hash=$h1"
+        e2e_log_note "determinism_${name}_hash=${hashes[0]}"
     else
-        e2e_log_assert_eq "h1=$h1 h2=$h2 h3=$h3" "all_equal" "determinism_${name}"
-        e2e_log_note "determinism_${name}_diverged h1=$h1 h2=$h2 h3=$h3"
+        e2e_log_assert_eq \
+            "h1=${hashes[0]} h2=${hashes[1]} h3=${hashes[2]}" \
+            "all_equal" "determinism_${name}"
+        e2e_log_note \
+            "determinism_${name}_diverged h1=${hashes[0]} h2=${hashes[1]} h3=${hashes[2]}"
+        return 1
     fi
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -411,6 +434,285 @@ if [ -n "${TIE_A:-}" ] && [ -n "${TIE_B:-}" ]; then
     else
         e2e_log_note "tie_pair_not_both_returned both_present=$BOTH_PRESENT"
     fi
+fi
+
+# ---------------------------------------------------------------------------
+# Native reranker determinism (bd-1nl13.13).
+#
+# The model artifact is deliberately external to the source tree. A normal
+# model-free lane records an honest skip; setting EE_E2E_RERANK_REQUIRE_MODEL=1
+# makes every missing input or degraded/fusion-only result fail closed. When a
+# reference vector is supplied, full content order is exact and calibrated
+# scores must stay within the configured cross-platform tolerance.
+# ---------------------------------------------------------------------------
+RERANK_QUERY="bd1nl13 release format checklist cargo clippy"
+RERANK_ORIGINAL_HOME="${HOME}"
+RERANK_REQUIRE_MODEL="${EE_E2E_RERANK_REQUIRE_MODEL:-0}"
+RERANK_MODEL_ARCHIVE="${EE_E2E_RERANK_MODEL_ARCHIVE:-${RERANK_ORIGINAL_HOME}/.local/share/ee/models/rerank/rerank-default-v1/rerank-default-v1.tar.zst}"
+RERANK_REFERENCE_VECTOR="${EE_E2E_RERANK_REFERENCE_VECTOR:-}"
+RERANK_VECTOR_OUT="${EE_E2E_RERANK_VECTOR_OUT:-${EPIC_WORKSPACE}/rerank_determinism_vector.json}"
+# Cross-platform SIMD/libm paths need a numerical tolerance, not bit identity.
+# 0.01 is tight on the public sigmoid score while leaving the stronger exact
+# ordering contract to catch behaviorally meaningful drift.
+RERANK_SCORE_TOLERANCE="${EE_E2E_RERANK_SCORE_TOLERANCE:-0.01}"
+RERANK_JSON_OUTPUT=""
+
+if [ -n "$RERANK_REFERENCE_VECTOR" ]; then
+    RERANK_REQUIRE_MODEL=1
+fi
+
+run_rerank_json() {
+    local label="${1:?label required}"
+    shift
+    local command_status
+    RERANK_JSON_OUTPUT=$("$EE_BINARY" "$@" --workspace "$EPIC_WORKSPACE" 2>/dev/null)
+    command_status=$?
+    if [ "$command_status" -ne 0 ] \
+        || ! printf '%s' "$RERANK_JSON_OUTPUT" | jq -e \
+            '.schema == "ee.response.v2" and .success == true' >/dev/null 2>&1; then
+        e2e_log_assert_eq \
+            "exit=$command_status schema=$(printf '%s' "$RERANK_JSON_OUTPUT" | jq -r '.schema // "<missing>"' 2>/dev/null) success=$(printf '%s' "$RERANK_JSON_OUTPUT" | jq -r '.success // "<missing>"' 2>/dev/null)" \
+            "exit=0 schema=ee.response.v2 success=true" \
+            "rerank_${label}_valid"
+        return 1
+    fi
+    e2e_log_assert_eq "true" "true" "rerank_${label}_valid"
+    return 0
+}
+
+remember_rerank_fixture() {
+    local label="${1:?label required}"
+    local level="${2:?level required}"
+    local kind="${3:?kind required}"
+    local content="${4:?content required}"
+    run_rerank_json "$label" remember "$content" \
+        --level "$level" --kind "$kind" \
+        --no-auto-link --no-propose-candidates --json
+}
+
+rerank_input_failure_or_skip() {
+    local label="${1:?label required}"
+    local detail="${2:?detail required}"
+    if [ "$RERANK_REQUIRE_MODEL" = "1" ]; then
+        e2e_log_assert_eq "$detail" "available" "$label"
+        return 1
+    fi
+    e2e_log_note "$label skipped: $detail; set EE_E2E_RERANK_REQUIRE_MODEL=1 to fail closed"
+    return 0
+}
+
+run_native_rerank_determinism_lane() {
+    local embed_candidate="${EE_EMBED_MODEL_FIXTURE_DIR:-${EE_EMBED_MODEL_DIR:-${RERANK_ORIGINAL_HOME}/.local/share/ee/models}}"
+    local embed_model_dir=""
+    local rerank_home="${EPIC_WORKSPACE}/rerank-home"
+    local model_fetch_json index_json config_json fusion_json reranked_json
+    local fusion_order reranked_order fusion_ids reranked_ids target_is_top
+    local comparison_status
+
+    if ! jq -en --arg tolerance "$RERANK_SCORE_TOLERANCE" \
+        '$tolerance | tonumber | . >= 0' >/dev/null 2>&1; then
+        e2e_log_assert_eq "$RERANK_SCORE_TOLERANCE" "non-negative number" \
+            "rerank_score_tolerance_valid"
+        return 1
+    fi
+
+    if [ ! -f "$RERANK_MODEL_ARCHIVE" ]; then
+        rerank_input_failure_or_skip "rerank_model_archive_available" \
+            "missing $RERANK_MODEL_ARCHIVE"
+        return $?
+    fi
+
+    if [ -f "$embed_candidate/model.safetensors" ]; then
+        embed_model_dir="$embed_candidate"
+    elif [ -f "$embed_candidate/potion-multilingual-128M/model.safetensors" ]; then
+        embed_model_dir="$embed_candidate/potion-multilingual-128M"
+    elif [ -f "$embed_candidate/model2vec/potion-multilingual-128M/model.safetensors" ]; then
+        embed_model_dir="$embed_candidate/model2vec/potion-multilingual-128M"
+    fi
+    if [ -z "$embed_model_dir" ]; then
+        rerank_input_failure_or_skip "rerank_embedding_fixture_available" \
+            "no model.safetensors below $embed_candidate"
+        return $?
+    fi
+    if [ -n "$RERANK_REFERENCE_VECTOR" ] && [ ! -f "$RERANK_REFERENCE_VECTOR" ]; then
+        e2e_log_assert_eq "missing $RERANK_REFERENCE_VECTOR" "reference vector file" \
+            "rerank_reference_vector_available"
+        return 1
+    fi
+
+    mkdir -p "$rerank_home"
+    export HOME="$rerank_home"
+    export EE_EMBED_DOWNLOAD=off
+    export EE_EMBED_MODEL_DIR="$embed_model_dir"
+    export FRANKENSEARCH_OFFLINE=1
+    export FRANKENSEARCH_ALLOW_DOWNLOAD=0
+
+    run_rerank_json "model_fetch" model fetch rerank-default \
+        --from-file "$RERANK_MODEL_ARCHIVE" --json || return 1
+    model_fetch_json="$RERANK_JSON_OUTPUT"
+    if ! printf '%s' "$model_fetch_json" | jq -e '
+        .data.schema == "ee.model_fetch.v1"
+        and .data.modelId == "rerank-default-v1"
+        and .data.modelPurpose == "reranker"
+        and .data.registryEntry.status == "available"
+    ' >/dev/null 2>&1; then
+        e2e_log_assert_eq "invalid model fetch contract" \
+            "ee.model_fetch.v1 reranker available" "rerank_model_fetch_contract"
+        return 1
+    fi
+    e2e_log_assert_eq "true" "true" "rerank_model_fetch_contract"
+
+    remember_rerank_fixture "seed_trap" semantic fact \
+        "BD1NL13_RERANK_TRAP release release release format format checklist checklist cargo cargo clippy clippy, but this is a noisy lexical trap and not the Rust release policy target." || return 1
+    remember_rerank_fixture "seed_target" procedural rule \
+        "BD1NL13_RERANK_TARGET The correct Rust release policy says run cargo fmt --check and cargo clippy before publishing." || return 1
+    remember_rerank_fixture "seed_noise_one" semantic fact \
+        "BD1NL13_RERANK_NOISE_ONE Database migration notes cover index ownership and schema upgrade ordering." || return 1
+    remember_rerank_fixture "seed_noise_two" semantic fact \
+        "BD1NL13_RERANK_NOISE_TWO Onboarding screenshots and terminal color themes need a design review." || return 1
+    remember_rerank_fixture "seed_noise_three" semantic fact \
+        "BD1NL13_RERANK_NOISE_THREE Rust ownership and borrowing prevent memory safety errors at compile time." || return 1
+
+    run_rerank_json "index_rebuild" index rebuild --json || return 1
+    index_json="$RERANK_JSON_OUTPUT"
+    if ! printf '%s' "$index_json" | jq -e \
+        '(.data.documents_total // .data.documentsTotal // 0) >= 5' >/dev/null 2>&1; then
+        e2e_log_assert_eq \
+            "$(printf '%s' "$index_json" | jq -r '.data.documents_total // .data.documentsTotal // 0')" \
+            ">=5" "rerank_index_document_count"
+        return 1
+    fi
+    e2e_log_assert_eq "true" "true" "rerank_index_document_count"
+
+    run_rerank_json "config_top_k" config set search.rerank_top_k 5 --json || return 1
+    config_json="$RERANK_JSON_OUTPUT"
+    e2e_log_note "rerank_top_k_config=$(printf '%s' "$config_json" | jq -c '.data // {}')"
+    run_rerank_json "config_off" config set search.rerank off --json || return 1
+    run_rerank_json "fusion_search" search "$RERANK_QUERY" \
+        --limit 5 --relevance-floor 0 --explain --json || return 1
+    fusion_json="$RERANK_JSON_OUTPUT"
+    if ! printf '%s' "$fusion_json" | jq -e '
+        .data.rerank.schema == "ee.rerank_posture.v1"
+        and .data.rerank.mode == "fusion_only"
+        and .data.rerank.configured == "off"
+        and .data.rerank.topK == 5
+        and .data.rerank.rerankScoreCount == 0
+        and (.data.results | length) == 5
+        and all(.data.results[]; (has("rerankScore") | not))
+    ' >/dev/null 2>&1; then
+        e2e_log_assert_eq "invalid fusion-only baseline" \
+            "off/fusion_only/topK=5/results=5/no rerankScore" \
+            "rerank_fusion_baseline_contract"
+        return 1
+    fi
+    e2e_log_assert_eq "true" "true" "rerank_fusion_baseline_contract"
+
+    run_rerank_json "config_auto" config set search.rerank auto --json || return 1
+    run_rerank_json "active_search" search "$RERANK_QUERY" \
+        --limit 5 --relevance-floor 0 --explain --json || return 1
+    reranked_json="$RERANK_JSON_OUTPUT"
+    if ! printf '%s' "$reranked_json" | jq -e '
+        .data.rerank.schema == "ee.rerank_posture.v1"
+        and .data.rerank.mode == "reranked"
+        and .data.rerank.configured == "auto"
+        and .data.rerank.topK == 5
+        and .data.rerank.available == true
+        and .data.rerank.rerankScoreCount == 5
+        and (.data.results | length) == 5
+        and all(.data.results[];
+            .scoreKind == "reranked"
+            and (.rerankScore | type) == "number"
+            and .rerankScore >= 0 and .rerankScore <= 1
+            and .score == .rerankScore)
+        and .data.results[0].explanation.factors[0].name == "rerank"
+        and (all((.degraded // [])[]; .code != "rerank_model_unavailable"))
+    ' >/dev/null 2>&1; then
+        e2e_log_assert_eq \
+            "mode=$(printf '%s' "$reranked_json" | jq -r '.data.rerank.mode // "<missing>"') count=$(printf '%s' "$reranked_json" | jq -r '.data.rerank.rerankScoreCount // 0')" \
+            "mode=reranked count=5" "rerank_active_contract"
+        return 1
+    fi
+    e2e_log_assert_eq "true" "true" "rerank_active_contract"
+
+    fusion_order=$(printf '%s' "$fusion_json" | jq -c '[.data.results[].content]')
+    reranked_order=$(printf '%s' "$reranked_json" | jq -c '[.data.results[].content]')
+    fusion_ids=$(printf '%s' "$fusion_json" | jq -c '[.data.results[].memoryId] | sort')
+    reranked_ids=$(printf '%s' "$reranked_json" | jq -c '[.data.results[].memoryId] | sort')
+    target_is_top=$(printf '%s' "$reranked_json" | jq -r \
+        '(.data.results[0].content // "") | startswith("BD1NL13_RERANK_TARGET")')
+    if [ "$fusion_ids" != "$reranked_ids" ] \
+        || [ "$fusion_order" = "$reranked_order" ] \
+        || [ "$target_is_top" != "true" ]; then
+        e2e_log_assert_eq \
+            "same_ids=$([ "$fusion_ids" = "$reranked_ids" ] && printf true || printf false) order_changed=$([ "$fusion_order" != "$reranked_order" ] && printf true || printf false) target_top=$target_is_top" \
+            "same_ids=true order_changed=true target_top=true" \
+            "rerank_order_influenced"
+        return 1
+    fi
+    e2e_log_assert_eq "true" "true" "rerank_order_influenced"
+
+    run_3x_assert_identical "native_rerank_search_json" \
+        search "$RERANK_QUERY" --limit 5 --relevance-floor 0 --explain --json || return 1
+
+    printf '%s' "$reranked_json" | jq -S --arg query "$RERANK_QUERY" \
+        --argjson fusionOrder "$fusion_order" '
+        {
+            schema: "ee.rerank_determinism.vector.v1",
+            query: $query,
+            fusionOnlyOrder: $fusionOrder,
+            rerankedOrder: [.data.results[].content],
+            rerankedScores: [.data.results[] | {content, rerankScore}]
+        }
+    ' >"$RERANK_VECTOR_OUT"
+    comparison_status=$?
+    if [ "$comparison_status" -ne 0 ] \
+        || ! jq -e '.schema == "ee.rerank_determinism.vector.v1"' \
+            "$RERANK_VECTOR_OUT" >/dev/null 2>&1; then
+        e2e_log_assert_eq "vector_write_exit=$comparison_status" \
+            "vector_write_exit=0" "rerank_vector_emitted"
+        return 1
+    fi
+    e2e_log_assert_eq "true" "true" "rerank_vector_emitted"
+    e2e_log_note "rerank_determinism_vector=$RERANK_VECTOR_OUT"
+
+    if [ -n "$RERANK_REFERENCE_VECTOR" ]; then
+        jq -e --argjson tolerance "$RERANK_SCORE_TOLERANCE" \
+            --slurpfile reference "$RERANK_REFERENCE_VECTOR" '
+            . as $actual
+            | $reference[0] as $expected
+            | $actual.schema == "ee.rerank_determinism.vector.v1"
+            and $expected.schema == $actual.schema
+            and $expected.query == $actual.query
+            and $expected.fusionOnlyOrder == $actual.fusionOnlyOrder
+            and $expected.rerankedOrder == $actual.rerankedOrder
+            and ($expected.rerankedScores | length) == ($actual.rerankedScores | length)
+            and all(range(0; ($actual.rerankedScores | length));
+                $actual.rerankedScores[.].content == $expected.rerankedScores[.].content
+                and (($actual.rerankedScores[.].rerankScore
+                    - $expected.rerankedScores[.].rerankScore) | fabs) <= $tolerance)
+        ' "$RERANK_VECTOR_OUT" >/dev/null 2>&1
+        comparison_status=$?
+        if [ "$comparison_status" -ne 0 ]; then
+            e2e_log_assert_eq \
+                "reference_mismatch tolerance=$RERANK_SCORE_TOLERANCE" \
+                "same query/order; scores within tolerance" \
+                "rerank_cross_platform_vector"
+            return 1
+        fi
+        e2e_log_assert_eq "true" "true" "rerank_cross_platform_vector"
+    else
+        e2e_log_note \
+            "rerank_reference_vector_not_set; emitted $RERANK_VECTOR_OUT for cross-platform comparison"
+    fi
+
+    return 0
+}
+
+run_native_rerank_determinism_lane
+RERANK_LANE_STATUS=$?
+e2e_log_note "native_rerank_determinism_lane_status=$RERANK_LANE_STATUS"
+if [ "$RERANK_LANE_STATUS" -ne 0 ]; then
+    exit "$RERANK_LANE_STATUS"
 fi
 
 # Teardown runs via trap; logs the asserts_pass/asserts_fail summary.

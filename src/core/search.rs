@@ -9035,7 +9035,9 @@ fn search_sync_with_performance(
             };
 
             let embedder_start = Instant::now();
-            let fast_embedder = crate::core::index::default_search_embedder_stack().fast_arc();
+            let embedder_stack = crate::core::index::default_search_embedder_stack();
+            let fast_embedder = embedder_stack.fast_arc();
+            let quality_embedder = embedder_stack.quality_arc();
             push_search_performance_timing(
                 &async_timings,
                 "searchSync::embedderInit",
@@ -9043,6 +9045,14 @@ fn search_sync_with_performance(
             );
             let searcher_build_start = Instant::now();
             let mut searcher = TwoTierSearcher::new(index, fast_embedder, config);
+            // bd-1nl13.13: Phase 3 reranking follows Frankensearch's Phase 2
+            // refinement. Dropping the stack's quality embedder here made a
+            // successfully loaded reranker unreachable: the search completed
+            // after fusion with reranked_count=0. Preserve the complete stack
+            // so the real cross-encoder path can execute.
+            if let Some(quality_embedder) = quality_embedder {
+                searcher = searcher.with_quality_embedder(quality_embedder);
+            }
             push_search_performance_timing(
                 &async_timings,
                 "searchSync::searcherBuild",
