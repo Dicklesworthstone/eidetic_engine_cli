@@ -196,7 +196,7 @@ fn trust_model_mentions_lifecycle_events_and_machine_schemas() -> TestResult {
 #[test]
 fn trust_model_mentions_agent_facing_commands_and_safety_contract() -> TestResult {
     for command in [
-        "ee context",
+        "ee pack",
         "ee why",
         "ee outcome",
         "ee curate candidates",
