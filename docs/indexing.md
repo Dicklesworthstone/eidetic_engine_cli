@@ -13,13 +13,27 @@ tier and count, and reaches a caller-owned Asupersync cancellation checkpoint
 before publication. The previous active generation remains readable throughout
 embedding, lexical construction, validation, and cancellation.
 
-Publication uses a short masked commit tail. The staged generation is renamed
-into place only as the associated job transitions commit in one database
-transaction. If that transaction fails, `ee` restores the previous active
-generation and moves the unpublished generation back to its staging path for
-inspection. Cancellation therefore produces no partial active index, leaves no
-running job or advisory lock behind, and preserves the exact caller reason for
-the CLI's typed `cancelled` response and exit code 130.
+Publication uses a short masked in-process tail. Renaming the complete staged
+generation is the filesystem linearization point; the associated database job
+transition follows in the same masked tail. An ordinary transition error or
+panic triggers rollback: `ee` restores the previous active generation and moves
+the unpublished generation into a rejected quarantine for inspection. Recovery
+never promotes quarantined generations, while `ee index vacuum` still reports
+them as reclaimable derived assets. Cooperative cancellation is checked before
+the tail, so it produces no partial active index, leaves no running job or
+advisory lock behind, and preserves the exact caller reason for the CLI's typed
+`cancelled` response and exit code 130.
+
+The filesystem rename and database transition are not a crash-atomic
+cross-store transaction. Abrupt process termination can leave a fully validated
+staged or active generation alongside an orphaned `running` job row; directory
+rename semantics still prevent that process termination from exposing a
+half-built active generation. Power-loss durability is not established by this
+protocol because the publication directories are not fsynced. FrankenSQLite
+remains the source of truth, and generation health marks older derived indexes
+stale. Durable publish-intent, directory-fsync ordering, and orphan-job
+reconciliation require a separate hard-crash protocol and are not claimed by
+this cancellation contract.
 
 Job types named `incremental` and `single_document` remain intake and telemetry
 contracts, not permission to edit active files. They may be coalesced into one

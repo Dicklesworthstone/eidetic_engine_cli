@@ -66,7 +66,7 @@ distilled memory.
 | Capability | What you get |
 |---|---|
 | **Hybrid retrieval** | BM25 + neural-local vector search via Frankensearch's `TwoTierSearcher`; default builds use the pinned `potion-multilingual-128M` Model2Vec embedder, with deterministic hash fallback only when the local model path is unavailable |
-| **Cancellation-safe index intake** | Single-memory and coalesced jobs build a complete validated generation in staging, atomically publish it with their database transitions, and preserve exact cancellation reasons with no partial active index |
+| **Cancellation-safe index intake** | Single-memory and coalesced jobs build a complete validated generation in staging, publish it through a masked rollback-guarded in-process tail, and preserve exact cooperative-cancellation reasons with no partial active index; filesystem/DB hard-crash reconciliation is a separate protocol |
 | **Explainable scores** | Every returned memory shows component scores, freshness, confidence, and which sources support it |
 | **Typed memory fields** | Registry-backed sidecars for failures, decisions, commands, rules, conventions, risks, and anti-patterns; search filters use stable field names instead of prose parsing |
 | **Procedural rules with decay** | Confidence ages out, harmful feedback demotes faster than helpful feedback promotes |
@@ -1237,8 +1237,8 @@ ee outcome <candidate-id> --target-type candidate --signal negative --reason "To
 
 Index intake never mutates active Frankensearch tiers in place. The previous
 generation remains readable while a complete replacement is built and
-validated; a failed commit restores it and preserves the unpublished staging
-generation. See [`docs/indexing.md`](docs/indexing.md) for the cancellation,
+validated; a failed commit restores it and preserves the unpublished generation
+in a non-recoverable rejected quarantine. See [`docs/indexing.md`](docs/indexing.md) for the cancellation,
 equivalence, fallback, and RCH-only E2E contracts.
 
 ### Workspace, models, schemas
