@@ -62,12 +62,13 @@ use crate::core::memory_scope::{
     MemoryScopeContext, MeshDisplayProvenance, MeshQueryVisibility, mesh_query_visibility,
 };
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
+#[cfg(test)]
+use crate::core::search::run_context_search_with_preloaded_memories_and_workspace_state;
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
     SearchOptions, SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus,
     SearchWorkspaceProbeState, elapsed_timing_json, performance_redaction_json,
     query_observation_json, run_context_search_with_preloaded_memories,
-    run_context_search_with_preloaded_memories_and_workspace_state,
     run_context_search_with_preloaded_memories_and_workspace_state_with_cx,
     search_degraded_data_json,
 };
@@ -1102,9 +1103,7 @@ impl std::fmt::Display for ContextPackError {
 
 impl std::error::Error for ContextPackError {}
 
-fn context_pack_cancellation_error(
-    reason: asupersync::CancelReason,
-) -> ContextPackError {
+fn context_pack_cancellation_error(reason: asupersync::CancelReason) -> ContextPackError {
     match reason.kind {
         asupersync::CancelKind::Deadline | asupersync::CancelKind::Timeout => {
             ContextPackError::DeadlineExceeded(reason)

@@ -4,8 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::Mutex;
 use std::sync::{
-    Arc, Mutex, OnceLock,
+    Arc, OnceLock,
     atomic::{AtomicU8, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1969,6 +1971,7 @@ pub(crate) fn process_pending_index_jobs_coalesced(
     .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
 }
 
+#[cfg(test)]
 fn process_pending_index_jobs_coalesced_after_snapshot<F>(
     db: &DbConnection,
     workspace_id: &str,
@@ -2200,6 +2203,7 @@ fn process_one_index_job(
     .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
 }
 
+#[cfg(test)]
 fn process_one_index_job_after_snapshot<F>(
     db: &DbConnection,
     job: &StoredSearchIndexJob,
@@ -2370,7 +2374,9 @@ enum IncrementalFallbackReason {
     GenerationSkew,
     CorpusRevisionMismatch,
     TierUnavailable,
+    #[cfg(test)]
     ForcedReindex,
+    #[cfg(test)]
     DeltaOverThreshold,
 }
 
@@ -2381,7 +2387,9 @@ impl IncrementalFallbackReason {
             Self::GenerationSkew => "generation_skew",
             Self::CorpusRevisionMismatch => INDEX_INTAKE_FALLBACK_CORPUS_REVISION_MISMATCH,
             Self::TierUnavailable => "tier_unavailable",
+            #[cfg(test)]
             Self::ForcedReindex => "forced_reindex",
+            #[cfg(test)]
             Self::DeltaOverThreshold => "delta_over_threshold",
         }
     }
@@ -2397,7 +2405,6 @@ enum IncrementalApplyOutcome {
         reason: IncrementalFallbackReason,
         detail: String,
     },
-    FullRebuildRequired,
 }
 
 #[derive(Debug)]
@@ -3009,6 +3016,7 @@ fn open_quality_vector_index(index_dir: &Path) -> Result<Option<VectorIndex>, In
     })
 }
 
+#[cfg(test)]
 fn compact_incremental_vector_index(
     index: &mut VectorIndex,
     tier: &str,
@@ -3034,6 +3042,7 @@ fn compact_incremental_vector_index(
     Ok(())
 }
 
+#[cfg(test)]
 fn vacuum_incremental_vector_index(
     index: &mut VectorIndex,
     tier: &str,
@@ -3056,7 +3065,7 @@ fn vacuum_incremental_vector_index(
     Ok(())
 }
 
-#[cfg(feature = "lexical-bm25")]
+#[cfg(all(test, feature = "lexical-bm25"))]
 fn open_lexical_index(index_dir: &Path) -> Result<TantivyIndex, IncrementalFallback> {
     let lexical_path = index_dir.join(LEXICAL_INDEX_SUBDIR);
     if !path_exists_no_follow(&lexical_path) {
