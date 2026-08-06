@@ -57,6 +57,7 @@ const ARTIFACT_INDEX_ELIGIBILITY_REVISION_V1: &str = "ee.artifact_index_eligibil
 const RULE_INDEX_ELIGIBILITY_REVISION_V1: &str = "ee.rule_index_eligibility.v1";
 const EVIDENCE_INDEX_ADMISSION_REVISION_V1: &str = "ee.evidence_index_admission.v1";
 const INDEX_STAGING_PREFIX: &str = ".publish-";
+const INDEX_REJECTED_PREFIX: &str = ".rejected-";
 const INDEX_RETAINED_SUFFIX: &str = ".previous";
 const VECTOR_INDEX_FAST_FILE: &str = "vector.fast.idx";
 const VECTOR_INDEX_QUALITY_FILE: &str = "vector.quality.idx";
@@ -272,14 +273,21 @@ fn duration_millis_saturating(duration: Duration) -> u64 {
 /// Release the index publish lock (best-effort, errors are logged but not propagated).
 fn release_index_publish_lock(db: &DbConnection, workspace_id: &str, holder_id: &str) {
     let lock_id = AdvisoryLockId::index(workspace_id);
-    if let Err(error) = db.release_advisory_lock(&lock_id, holder_id) {
-        tracing::error!(
+    match db.release_advisory_lock(&lock_id, holder_id) {
+        Ok(true) => {}
+        Ok(false) => tracing::error!(
+            target: "ee::index",
+            lock_id = %lock_id.canonical_key(),
+            holder_id,
+            "index publish lock release did not match an active owned lease"
+        ),
+        Err(error) => tracing::error!(
             target: "ee::index",
             lock_id = %lock_id.canonical_key(),
             holder_id,
             error = %error,
             "failed to release index publish lock"
-        );
+        ),
     }
 }
 
@@ -306,15 +314,7 @@ fn map_index_search_error(
             reason: backend_reason,
         } => {
             let reason = cx.cancel_reason().unwrap_or_else(|| {
-                let normalized = backend_reason.to_ascii_lowercase();
-                let kind = if normalized.contains("timeout")
-                    || normalized.contains("timed out")
-                    || normalized.contains("deadline")
-                {
-                    asupersync::CancelKind::Timeout
-                } else {
-                    asupersync::CancelKind::User
-                };
+                let kind = crate::core::outcome::cancel_kind_from_backend_reason(&backend_reason);
                 crate::core::outcome::attributed_cancel_reason(
                     cx,
                     kind,
@@ -372,11 +372,20 @@ struct RunningIndexJobFinalizer<'a> {
     cx: &'a asupersync::Cx,
     db: &'a DbConnection,
     job_id: String,
+    explicitly_cancelled: bool,
+}
+
+impl RunningIndexJobFinalizer<'_> {
+    fn mark_cancelled(&mut self) {
+        self.explicitly_cancelled = true;
+    }
 }
 
 impl Drop for RunningIndexJobFinalizer<'_> {
     fn drop(&mut self) {
-        let cancelled = self.cx.cancel_reason().is_some() || self.cx.checkpoint().is_err();
+        let cancelled = self.explicitly_cancelled
+            || self.cx.cancel_reason().is_some()
+            || self.cx.checkpoint().is_err();
         self.cx.masked(|| {
             let _ambient = asupersync::Cx::set_current(Some(self.cx.clone()));
             let job = match self.db.get_search_index_job(&self.job_id) {
@@ -1593,6 +1602,14 @@ pub async fn reembed_index_with_cx(
     cx: &asupersync::Cx,
     options: &IndexReembedOptions,
 ) -> Result<IndexReembedReport, IndexRebuildError> {
+    reembed_index_with_cx_and_stack(cx, options, default_embedder_stack()).await
+}
+
+async fn reembed_index_with_cx_and_stack(
+    cx: &asupersync::Cx,
+    options: &IndexReembedOptions,
+    stack: EmbedderStack,
+) -> Result<IndexReembedReport, IndexRebuildError> {
     index_checkpoint(cx)?;
     let start = Instant::now();
     let database_path = options.resolve_database_path();
@@ -1606,7 +1623,6 @@ pub async fn reembed_index_with_cx(
     } else {
         Some(IndexPublishLockOwner::acquire(cx, &db, &workspace_id)?)
     };
-    let stack = default_embedder_stack();
     let WorkspaceIndexSourceSnapshot {
         generation: source_generation,
         memories_indexed,
@@ -1707,17 +1723,19 @@ pub async fn reembed_index_with_cx(
             return Err(IndexRebuildError::Database(error));
         }
     }
-    let _job_finalizer = RunningIndexJobFinalizer {
+    let mut job_finalizer = RunningIndexJobFinalizer {
         cx,
         db: &db,
         job_id: job_id.clone(),
+        explicitly_cancelled: false,
     };
 
     let _recovery_action = recover_interrupted_publish(&index_dir)?;
     ensure_active_embedding_registry_record(&db, &workspace_id, &stack)?;
-    let build_result = publish_full_index_generation(
+    let build_result = publish_full_index_generation_with_stack(
         cx,
         &index_dir,
+        stack,
         indexable_docs,
         source_generation,
         document_counts,
@@ -1773,6 +1791,7 @@ pub async fn reembed_index_with_cx(
             })
         }
         Err(IndexRebuildError::Cancelled(reason)) => {
+            job_finalizer.mark_cancelled();
             match db.cancel_running_search_index_job(&job_id) {
                 Ok(true) => {}
                 Ok(false) => tracing::error!(
@@ -2029,14 +2048,15 @@ where
     const COALESCED_MODE: &str = "coalesced_full_rebuild";
     let pending = db.list_pending_search_index_jobs(workspace_id, job_limit)?;
     let mut claimed = Vec::new();
-    let mut _job_finalizers = Vec::new();
+    let mut job_finalizers = Vec::new();
     let mut reports = Vec::new();
     for job in pending {
         if db.start_search_index_job(&job.id)? {
-            _job_finalizers.push(RunningIndexJobFinalizer {
+            job_finalizers.push(RunningIndexJobFinalizer {
                 cx,
                 db,
                 job_id: job.id.clone(),
+                explicitly_cancelled: false,
             });
             claimed.push(job);
         } else {
@@ -2067,7 +2087,14 @@ where
         open_job_ids,
         ..
     } = collect_workspace_index_source_snapshot(db, workspace_id)?;
-    after_snapshot()?;
+    if let Err(error) = after_snapshot() {
+        if matches!(&error, IndexRebuildError::Cancelled(_)) {
+            for finalizer in &mut job_finalizers {
+                finalizer.mark_cancelled();
+            }
+        }
+        return Err(error);
+    }
     index_checkpoint(cx)?;
     for job in &claimed {
         update_running_index_job_total(db, &job.id, documents_total)?;
@@ -2156,6 +2183,9 @@ where
             }
         }
         Err(IndexRebuildError::Cancelled(reason)) => {
+            for finalizer in &mut job_finalizers {
+                finalizer.mark_cancelled();
+            }
             return Err(IndexRebuildError::Cancelled(reason));
         }
         Err(error) => {
@@ -2254,10 +2284,11 @@ where
             error: Some("search index job was not pending".to_owned()),
         });
     }
-    let _job_finalizer = RunningIndexJobFinalizer {
+    let mut job_finalizer = RunningIndexJobFinalizer {
         cx,
         db,
         job_id: job.id.clone(),
+        explicitly_cancelled: false,
     };
     let _publish_lock = IndexPublishLockOwner::acquire(cx, db, &job.workspace_id)?;
 
@@ -2269,7 +2300,12 @@ where
         open_job_ids,
         ..
     } = collect_workspace_index_source_snapshot(db, &job.workspace_id)?;
-    after_snapshot()?;
+    if let Err(error) = after_snapshot() {
+        if matches!(&error, IndexRebuildError::Cancelled(_)) {
+            job_finalizer.mark_cancelled();
+        }
+        return Err(error);
+    }
     index_checkpoint(cx)?;
     update_running_index_job_total(db, &job.id, documents_total)?;
 
@@ -2344,7 +2380,10 @@ where
                     },
                 })
             }
-            Err(IndexRebuildError::Cancelled(reason)) => Err(IndexRebuildError::Cancelled(reason)),
+            Err(IndexRebuildError::Cancelled(reason)) => {
+                job_finalizer.mark_cancelled();
+                Err(IndexRebuildError::Cancelled(reason))
+            }
             Err(error) => {
                 let mut error_message = error.to_string();
                 append_failed_index_job_transition(db, &job.id, &mut error_message);
@@ -2471,9 +2510,32 @@ async fn publish_full_index_generation<F>(
 where
     F: FnOnce() -> Result<(), IndexRebuildError>,
 {
+    publish_full_index_generation_with_stack(
+        cx,
+        index_dir,
+        default_embedder_stack(),
+        indexable_docs,
+        generation,
+        document_counts,
+        commit_tail,
+    )
+    .await
+}
+
+async fn publish_full_index_generation_with_stack<F>(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    stack: EmbedderStack,
+    indexable_docs: Vec<crate::search::IndexableDocument>,
+    generation: u64,
+    document_counts: IndexDocumentCounts,
+    commit_tail: F,
+) -> Result<BuildStats, IndexRebuildError>
+where
+    F: FnOnce() -> Result<(), IndexRebuildError>,
+{
     index_checkpoint(cx)?;
     let staging_dir = create_publish_staging_dir(index_dir)?;
-    let stack = default_embedder_stack();
     let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
     let stats = build_index_generation(cx, &staging_dir, stack, indexable_docs).await?;
     let stats = validate_built_generation(&staging_dir, stats, document_counts)
@@ -3238,20 +3300,13 @@ fn recover_interrupted_publish(
         return Ok(IndexPublishRecoveryAction::ActivePresent);
     }
 
-    let retained_dir = retained_index_dir(index_dir)?;
-    if path_exists_no_follow(&retained_dir) {
-        ensure_index_path_has_no_symlinks(
+    if let Some(retained_dir) = find_latest_recoverable_retained_dir(index_dir)? {
+        rename_index_dir(
             &retained_dir,
-            "inspect retained index generation for recovery",
+            index_dir,
+            "restore retained index generation",
         )?;
-        if index_generation_is_recoverable(&retained_dir) {
-            rename_index_dir(
-                &retained_dir,
-                index_dir,
-                "restore retained index generation",
-            )?;
-            return Ok(IndexPublishRecoveryAction::RetainedGenerationRestored);
-        }
+        return Ok(IndexPublishRecoveryAction::RetainedGenerationRestored);
     }
 
     if let Some(staging_dir) = find_complete_staging_dir(index_dir)? {
@@ -3291,8 +3346,48 @@ fn create_publish_staging_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildE
     ))
 }
 
+#[cfg(test)]
 fn publish_staged_index(index_dir: &Path, staging_dir: &Path) -> Result<(), IndexRebuildError> {
     publish_staged_index_inner(index_dir, staging_dir).map(|_| ())
+}
+
+struct PublishedIndexRollbackGuard<'a> {
+    index_dir: &'a Path,
+    staging_dir: &'a Path,
+    retained_dir: Option<PathBuf>,
+    armed: bool,
+}
+
+impl PublishedIndexRollbackGuard<'_> {
+    fn rollback(&mut self) -> Result<(), IndexRebuildError> {
+        let result = rollback_published_index(
+            self.index_dir,
+            self.staging_dir,
+            self.retained_dir.as_deref(),
+        );
+        self.armed = false;
+        result
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PublishedIndexRollbackGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Err(error) = self.rollback() {
+            tracing::error!(
+                target: "ee::index",
+                error = %error,
+                index_dir = %self.index_dir.display(),
+                "failed to roll back index publication while unwinding commit tail"
+            );
+        }
+    }
 }
 
 fn publish_staged_index_with_commit<F>(
@@ -3304,12 +3399,19 @@ where
     F: FnOnce() -> Result<(), IndexRebuildError>,
 {
     let retained_dir = publish_staged_index_inner(index_dir, staging_dir)?;
+    let mut rollback_guard = PublishedIndexRollbackGuard {
+        index_dir,
+        staging_dir,
+        retained_dir,
+        armed: true,
+    };
     match commit_tail() {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            rollback_guard.disarm();
+            Ok(())
+        }
         Err(primary_error) => {
-            if let Err(rollback_error) =
-                rollback_published_index(index_dir, staging_dir, retained_dir.as_deref())
-            {
+            if let Err(rollback_error) = rollback_guard.rollback() {
                 return Err(IndexRebuildError::Index(format!(
                     "index publication commit failed ({primary_error}); filesystem rollback also failed ({rollback_error})"
                 )));
@@ -3379,12 +3481,17 @@ fn rollback_published_index(
             staging_dir.display()
         ));
     } else if path_exists_no_follow(index_dir) {
-        if let Err(error) = rename_index_dir(
-            index_dir,
-            staging_dir,
-            "retain unpublished index generation after commit failure",
-        ) {
-            rollback_errors.push(error.to_string());
+        match allocate_rejected_index_dir(index_dir) {
+            Ok(rejected_dir) => {
+                if let Err(error) = rename_index_dir(
+                    index_dir,
+                    &rejected_dir,
+                    "quarantine unpublished index generation after commit failure",
+                ) {
+                    rollback_errors.push(error.to_string());
+                }
+            }
+            Err(error) => rollback_errors.push(error.to_string()),
         }
     } else {
         rollback_errors.push(format!(
@@ -3812,26 +3919,95 @@ fn find_complete_staging_dir(index_dir: &Path) -> Result<Option<PathBuf>, IndexR
 }
 
 fn index_generation_is_recoverable(index_dir: &Path) -> bool {
+    recoverable_index_generation(index_dir).is_some()
+}
+
+fn recoverable_index_generation(index_dir: &Path) -> Option<u64> {
     let Ok(Some(metadata)) = parse_index_metadata(index_dir) else {
-        return false;
+        return None;
     };
     if index_metadata_compatibility_error(&index_dir.join(INDEX_METADATA_FILE), &metadata).is_some()
     {
-        return false;
+        return None;
     }
     let Some(document_count) = metadata.document_count else {
-        return false;
+        return None;
     };
     let Some(tier_counts) = metadata.tier_document_counts else {
-        return false;
+        return None;
     };
-    verify_published_tier_counts(index_dir, document_count, tier_counts.quality.is_some()).is_ok()
+    verify_published_tier_counts(index_dir, document_count, tier_counts.quality.is_some())
+        .ok()
+        .map(|()| metadata.generation.unwrap_or(0))
 }
 
-fn retained_index_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildError> {
+fn retained_generation_sequence(name: &str, retained_prefix: &str) -> Option<u32> {
+    if name == retained_prefix {
+        return Some(0);
+    }
+    let suffix = name.strip_prefix(retained_prefix)?.strip_prefix('.')?;
+    if suffix.len() != 3 || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let sequence = suffix.parse::<u32>().ok()?;
+    (sequence > 0).then_some(sequence)
+}
+
+fn find_latest_recoverable_retained_dir(
+    index_dir: &Path,
+) -> Result<Option<PathBuf>, IndexRebuildError> {
     let parent = index_parent(index_dir);
-    let base = index_base_name(index_dir)?;
-    Ok(parent.join(format!("{base}{INDEX_RETAINED_SUFFIX}")))
+    if !path_exists_no_follow(parent) {
+        return Ok(None);
+    }
+    let retained_prefix = format!("{}{INDEX_RETAINED_SUFFIX}", index_base_name(index_dir)?);
+    let entries = std::fs::read_dir(parent).map_err(|error| {
+        IndexRebuildError::Index(format!(
+            "Failed to inspect retained index generations in '{}': {error}",
+            parent.display()
+        ))
+    })?;
+    let mut latest: Option<(u64, u32, PathBuf)> = None;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            IndexRebuildError::Index(format!(
+                "Failed to inspect a retained index generation in '{}': {error}",
+                parent.display()
+            ))
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(sequence) = retained_generation_sequence(&name, &retained_prefix) else {
+            continue;
+        };
+        let candidate = entry.path();
+        ensure_index_path_has_no_symlinks(
+            &candidate,
+            "inspect retained index generation for recovery",
+        )?;
+        if !entry
+            .file_type()
+            .map_err(|error| {
+                IndexRebuildError::Index(format!(
+                    "Failed to inspect retained index generation '{}': {error}",
+                    candidate.display()
+                ))
+            })?
+            .is_dir()
+        {
+            continue;
+        }
+        let Some(generation) = recoverable_index_generation(&candidate) else {
+            continue;
+        };
+        let key = (generation, sequence, candidate);
+        if latest.as_ref().is_none_or(|current| &key > current) {
+            latest = Some(key);
+        }
+    }
+
+    Ok(latest.map(|(_, _, path)| path))
 }
 
 fn allocate_retained_index_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildError> {
@@ -3850,6 +4026,24 @@ fn allocate_retained_index_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuild
 
     Err(IndexRebuildError::Index(
         "Failed to allocate retained index generation directory".to_string(),
+    ))
+}
+
+fn allocate_rejected_index_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildError> {
+    let parent = index_parent(index_dir);
+    let base = index_base_name(index_dir)?;
+    let stamp = monotonicish_stamp();
+    for sequence in 0_u32..1000 {
+        let candidate = parent.join(format!(
+            ".{base}{INDEX_REJECTED_PREFIX}{stamp}-{sequence:03}"
+        ));
+        if !path_exists_no_follow(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(IndexRebuildError::Index(
+        "Failed to allocate rejected index generation directory".to_string(),
     ))
 }
 
@@ -4726,6 +4920,16 @@ struct EeLazyModel2VecEmbedder {
     inner: AsyncOnceCell<Arc<dyn crate::search::Embedder>>,
 }
 
+fn model_initialization_checkpoint(cx: &asupersync::Cx, phase: &str) -> Result<(), SearchError> {
+    cx.checkpoint().map_err(|_| SearchError::Cancelled {
+        phase: phase.to_owned(),
+        reason: cx.cancel_reason().map_or_else(
+            || "model initialization cancelled without a recorded reason".to_owned(),
+            |reason| reason.to_string(),
+        ),
+    })
+}
+
 impl EeLazyModel2VecEmbedder {
     fn new(model_root: PathBuf) -> Self {
         Self {
@@ -4752,10 +4956,13 @@ impl EeLazyModel2VecEmbedder {
         &self,
         cx: &asupersync::Cx,
     ) -> Result<Arc<dyn crate::search::Embedder>, SearchError> {
+        model_initialization_checkpoint(cx, "before local model load")?;
         let destination = potion_model_destination_dir(&self.model_root);
         if let Ok(embedder) = Model2VecEmbedder::load_with_name(&destination, POTION_MODEL_NAME) {
+            model_initialization_checkpoint(cx, "after local model load")?;
             return Ok(Arc::new(embedder) as Arc<dyn crate::search::Embedder>);
         }
+        model_initialization_checkpoint(cx, "before model download")?;
 
         let manifest = ModelManifest::potion_128m();
         emit_embedding_download_notice(&destination, manifest.total_size_bytes());
@@ -4798,13 +5005,23 @@ impl EeLazyModel2VecEmbedder {
             backup = backup.as_ref().map(|path| path.display().to_string()).as_deref().unwrap_or(""),
             "ee-managed embedding model download completed"
         );
-        Model2VecEmbedder::load_with_name(&destination, POTION_MODEL_NAME)
-            .map(|embedder| Arc::new(embedder) as Arc<dyn crate::search::Embedder>)
+        model_initialization_checkpoint(cx, "before downloaded model load")?;
+        let embedder = Model2VecEmbedder::load_with_name(&destination, POTION_MODEL_NAME)?;
+        model_initialization_checkpoint(cx, "after downloaded model load")?;
+        Ok(Arc::new(embedder) as Arc<dyn crate::search::Embedder>)
     }
 
     fn mark_failed(&self) {
         self.state
             .store(EE_DOWNLOAD_STATE_FAILED, Ordering::Release);
+    }
+
+    fn record_load_failure(&self, error: &SearchError) -> bool {
+        if matches!(error, SearchError::Cancelled { .. }) {
+            return false;
+        }
+        self.mark_failed();
+        true
     }
 
     fn failed(&self) -> bool {
@@ -4835,7 +5052,9 @@ impl crate::search::Embedder for EeLazyModel2VecEmbedder {
             match self.try_load(cx).await {
                 Ok(embedder) => embedder.embed(cx, text).await,
                 Err(error) => {
-                    self.mark_failed();
+                    if !self.record_load_failure(&error) {
+                        return Err(error);
+                    }
                     tracing::warn!(
                         target: "ee::index::embedder",
                         error = %error,
@@ -4860,7 +5079,9 @@ impl crate::search::Embedder for EeLazyModel2VecEmbedder {
             match self.try_load(cx).await {
                 Ok(embedder) => embedder.embed_batch(cx, texts).await,
                 Err(error) => {
-                    self.mark_failed();
+                    if !self.record_load_failure(&error) {
+                        return Err(error);
+                    }
                     tracing::warn!(
                         target: "ee::index::embedder",
                         error = %error,
@@ -6362,6 +6583,7 @@ fn discover_index_vacuum_candidates(
 
     let base = index_vacuum_base_name(index_dir)?;
     let staging_prefix = format!(".{base}{INDEX_STAGING_PREFIX}");
+    let rejected_prefix = format!(".{base}{INDEX_REJECTED_PREFIX}");
     let retained_prefix = format!("{base}{INDEX_RETAINED_SUFFIX}");
     let mut candidates = Vec::new();
 
@@ -6382,6 +6604,8 @@ fn discover_index_vacuum_candidates(
             } else {
                 IndexVacuumCandidateKind::IncompleteStaging
             }
+        } else if name.starts_with(&rejected_prefix) {
+            IndexVacuumCandidateKind::StagedGeneration
         } else if name == retained_prefix
             || name
                 .strip_prefix(&retained_prefix)
@@ -6785,6 +7009,44 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct BackendCancellingEmbedder;
+
+    impl crate::search::Embedder for BackendCancellingEmbedder {
+        fn embed<'a>(
+            &'a self,
+            _cx: &'a asupersync::Cx,
+            _text: &'a str,
+        ) -> frankensearch::SearchFuture<'a, Vec<f32>> {
+            Box::pin(async {
+                Err(SearchError::Cancelled {
+                    phase: "fast vector embed".to_owned(),
+                    reason: "poll quota: backend embedding budget exhausted".to_owned(),
+                })
+            })
+        }
+
+        fn dimension(&self) -> usize {
+            256
+        }
+
+        fn id(&self) -> &str {
+            "cancel-on-embed-test"
+        }
+
+        fn model_name(&self) -> &str {
+            "cancel-on-embed-test"
+        }
+
+        fn is_semantic(&self) -> bool {
+            false
+        }
+
+        fn category(&self) -> ModelCategory {
+            ModelCategory::HashEmbedder
+        }
+    }
+
     fn test_runtime_profile() -> RuntimeProfileReport {
         RuntimeProfileReport::for_profile(OperatingProfile::Workstation, "test_fixture")
     }
@@ -6813,6 +7075,19 @@ mod tests {
         } else {
             Err(message.into())
         }
+    }
+
+    fn rejected_generation_dirs(root: &Path, index_name: &str) -> Result<Vec<PathBuf>, String> {
+        let prefix = format!(".{index_name}{INDEX_REJECTED_PREFIX}");
+        let mut paths = std::fs::read_dir(root)
+            .map_err(|error| error.to_string())?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        Ok(paths)
     }
 
     #[test]
@@ -7037,6 +7312,76 @@ mod tests {
         ensure(
             embedder.category() == ModelCategory::HashEmbedder,
             "failed lazy model should disclose hash fallback category",
+        )
+    }
+
+    #[test]
+    fn lazy_model2vec_cancellation_does_not_poison_retryable_state() -> TestResult {
+        let embedder = Arc::new(EeLazyModel2VecEmbedder::new(unique_test_dir(
+            "lazy-model-cancelled",
+        )));
+        let first_embedder = Arc::clone(&embedder);
+        let first = crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            cx.set_cancel_reason(asupersync::CancelReason::user(
+                "first caller cancelled model initialization",
+            ));
+            first_embedder.embed(&cx, "cancellation probe").await
+        })
+        .map_err(|error| error.to_string())?;
+        let first_error = match first {
+            Ok(_) => return Err("cancelled model initialization unexpectedly succeeded".to_owned()),
+            Err(error) => error,
+        };
+        ensure(
+            matches!(&first_error, SearchError::Cancelled { .. }),
+            format!("model initialization cancellation lost its type: {first_error:?}"),
+        )?;
+        ensure(
+            !embedder.failed(),
+            "cancelled lazy initialization must remain retryable",
+        )?;
+        ensure(
+            embedder.state.load(Ordering::Acquire) == EE_DOWNLOAD_STATE_PENDING,
+            "cancelled lazy initialization must retain pending state for the next caller",
+        )?;
+        ensure(
+            embedder.id() == POTION_MODEL_NAME,
+            "cancelled lazy initialization must retain the intended semantic model identity",
+        )?;
+
+        let second_embedder = Arc::clone(&embedder);
+        let second = crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            cx.set_cancel_reason(
+                asupersync::CancelReason::deadline()
+                    .with_message("second caller cancelled model initialization"),
+            );
+            second_embedder.embed(&cx, "retry cancellation probe").await
+        })
+        .map_err(|error| error.to_string())?;
+        let second_error = match second {
+            Ok(_) => {
+                return Err(
+                    "retried cancelled model initialization unexpectedly succeeded".to_owned(),
+                );
+            }
+            Err(error) => error,
+        };
+        ensure(
+            matches!(
+                &second_error,
+                SearchError::Cancelled { reason, .. }
+                    if reason.contains("second caller cancelled model initialization")
+            ),
+            format!(
+                "AsyncOnceCell cached the first cancellation instead of retrying: {second_error:?}"
+            ),
+        )?;
+        ensure(
+            !embedder.failed()
+                && embedder.state.load(Ordering::Acquire) == EE_DOWNLOAD_STATE_PENDING,
+            "repeated cancellation must leave lazy model initialization retryable",
         )
     }
 
@@ -9565,6 +9910,24 @@ mod tests {
         )
     }
 
+    fn cancellation_test_embedder_stack() -> EmbedderStack {
+        EmbedderStack::from_parts(
+            Arc::new(HashEmbedder::default_256()) as Arc<dyn crate::search::Embedder>,
+            None,
+        )
+    }
+
+    fn reembed_index_with_test_stack(
+        options: &IndexReembedOptions,
+    ) -> Result<IndexReembedReport, IndexRebuildError> {
+        crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+            reembed_index_with_cx_and_stack(&cx, options, cancellation_test_embedder_stack()).await
+        })
+        .map_err(|error| {
+            IndexRebuildError::Index(format!("Failed to start index runtime: {error}"))
+        })?
+    }
+
     #[test]
     fn lab_runtime_cancellation_after_build_preserves_active_index_and_job_state() -> TestResult {
         let root = unique_test_dir("reembed-cancel-before-publish");
@@ -9573,7 +9936,7 @@ mod tests {
         let index_dir = workspace.join(".ee").join("index");
         seed_reembed_database(&workspace, &database)?;
 
-        reembed_index(&IndexReembedOptions {
+        reembed_index_with_test_stack(&IndexReembedOptions {
             workspace_path: workspace.clone(),
             database_path: Some(database.clone()),
             index_dir: Some(index_dir.clone()),
@@ -9628,7 +9991,13 @@ mod tests {
             .state
             .create_task(lab_root, asupersync::Budget::INFINITE, async move {
                 let result = if let Some(cx) = asupersync::Cx::current() {
-                    match reembed_index_with_cx(&cx, &options).await {
+                    match reembed_index_with_cx_and_stack(
+                        &cx,
+                        &options,
+                        cancellation_test_embedder_stack(),
+                    )
+                    .await
+                    {
                         Err(IndexRebuildError::Cancelled(reason)) => Ok(reason),
                         Err(error) => Err(format!(
                             "pre-publication cancellation must remain typed, got {error:?}"
@@ -9708,6 +10077,69 @@ mod tests {
             "pre-publication cancellation must release the index advisory lock",
         )?;
         connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn backend_originated_cancellation_marks_live_cx_job_cancelled() -> TestResult {
+        let root = unique_test_dir("backend-cancelled-job-finalizer");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        seed_reembed_database(&workspace, &database)?;
+        let stack = EmbedderStack::from_parts(
+            Arc::new(BackendCancellingEmbedder) as Arc<dyn crate::search::Embedder>,
+            None,
+        );
+        let options = IndexReembedOptions {
+            workspace_path: workspace,
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir),
+            dry_run: false,
+        };
+        let (result, caller_reason) = crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            let result = reembed_index_with_cx_and_stack(&cx, &options, stack).await;
+            (result, cx.cancel_reason())
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(
+            caller_reason.is_none(),
+            "backend-only cancellation must leave the caller Cx live",
+        )?;
+        let reason = match result {
+            Err(IndexRebuildError::Cancelled(reason)) => reason,
+            Err(error) => return Err(format!("backend cancellation was laundered: {error:?}")),
+            Ok(report) => {
+                return Err(format!(
+                    "backend cancellation unexpectedly returned a report: {report:?}"
+                ));
+            }
+        };
+        ensure(
+            reason.kind == asupersync::CancelKind::PollQuota,
+            format!("backend cancellation lost its structured kind: {reason:?}"),
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let jobs = connection
+            .list_search_index_jobs("wsp_01234567890123456789012345", None)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|job| job.job_type_enum() == Some(SearchIndexJobType::FullRebuild))
+            .collect::<Vec<_>>();
+        ensure(
+            jobs.len() == 1,
+            format!("production reembed should create one terminal job: {jobs:?}"),
+        )?;
+        let job = &jobs[0];
+        ensure(
+            job.status_enum() == Some(SearchIndexJobStatus::Cancelled),
+            format!("backend cancellation left false job status: {job:?}"),
+        )?;
+        ensure(
+            job.completed_at.is_some() && job.error_message.is_none(),
+            "cancelled production job must be terminal without a failure error",
+        )
     }
 
     #[cfg(unix)]
@@ -10352,16 +10784,103 @@ mod tests {
             "commit failure must leave the previous generation active",
         )?;
         ensure(
-            staging_dir.is_dir(),
-            "uncommitted generation should return to its staging path",
+            !staging_dir.exists(),
+            "uncommitted generation must leave the recoverable staging namespace",
+        )?;
+        let rejected = rejected_generation_dirs(&root, "index")?;
+        ensure(
+            rejected.len() == 1,
+            format!("expected one quarantined generation, found {rejected:?}"),
         )?;
         ensure(
-            read_marker(&staging_dir, "generation.txt")? == "new",
-            "rollback must preserve the uncommitted generation for inspection",
+            read_marker(&rejected[0], "generation.txt")? == "new",
+            "rollback must preserve the quarantined generation for inspection",
         )?;
         ensure(
             !root.join("index.previous").exists(),
             "restored previous generation should no longer occupy the retained path",
+        )
+    }
+
+    #[test]
+    fn publish_commit_panic_rolls_back_before_unwind_escapes() -> TestResult {
+        let root = unique_test_dir("publish-commit-panic-rollback");
+        let index_dir = root.join("index");
+        let staging_dir = root.join(".index.publish-test");
+        write_marker(&index_dir, "generation.txt", "old")?;
+        write_marker(&staging_dir, "generation.txt", "new")?;
+        write_index_metadata(&staging_dir, 2, 1, None).map_err(|error| error.to_string())?;
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = publish_staged_index_with_commit(&index_dir, &staging_dir, || {
+                panic!("simulated commit-tail panic")
+            });
+        }));
+        ensure(
+            unwind.is_err(),
+            "commit-tail panic must escape after rollback",
+        )?;
+        ensure(
+            read_marker(&index_dir, "generation.txt")? == "old",
+            "panic rollback must restore the previous active generation",
+        )?;
+        let rejected = rejected_generation_dirs(&root, "index")?;
+        ensure(
+            rejected.len() == 1 && read_marker(&rejected[0], "generation.txt")? == "new",
+            format!("panic rollback must quarantine the uncommitted generation: {rejected:?}"),
+        )?;
+        ensure(
+            !root.join("index.previous").exists(),
+            "panic rollback must consume the retained generation path",
+        )
+    }
+
+    #[test]
+    fn rejected_first_publish_is_not_recovered_as_committed_generation() -> TestResult {
+        let root = unique_test_dir("publish-first-commit-rollback");
+        let index_dir = root.join("index");
+        let staging_dir = root.join(".index.publish-test");
+        build_current_test_index(
+            &staging_dir,
+            2,
+            vec![test_indexable_doc("mem-rejected", "uncommitted generation")],
+        )?;
+        write_marker(&staging_dir, "generation.txt", "rejected")?;
+
+        let error = publish_staged_index_with_commit(&index_dir, &staging_dir, || {
+            Err(IndexRebuildError::Index(
+                "simulated first database commit failure".to_owned(),
+            ))
+        })
+        .expect_err("first publication commit should fail");
+        ensure(
+            error
+                .to_string()
+                .contains("simulated first database commit failure"),
+            format!("unexpected error: {error}"),
+        )?;
+        ensure(
+            !index_dir.exists(),
+            "failed first publication must leave the active index absent",
+        )?;
+        ensure(
+            !staging_dir.exists(),
+            "rejected first publication must leave the recoverable staging namespace",
+        )?;
+        let rejected = rejected_generation_dirs(&root, "index")?;
+        ensure(
+            rejected.len() == 1 && read_marker(&rejected[0], "generation.txt")? == "rejected",
+            format!("rejected generation was not preserved: {rejected:?}"),
+        )?;
+
+        let action = recover_interrupted_publish(&index_dir).map_err(|error| error.to_string())?;
+        ensure(
+            action == IndexPublishRecoveryAction::NoRecoverableGeneration,
+            format!("recovery promoted an uncommitted generation: {action:?}"),
+        )?;
+        ensure(
+            !index_dir.exists() && rejected[0].is_dir(),
+            "recovery must keep active absent and preserve the rejected generation",
         )
     }
 
@@ -10584,6 +11103,48 @@ mod tests {
         ensure(
             read_marker(&index_dir, "generation.txt")? == "old",
             "restored active index should contain retained generation",
+        )
+    }
+
+    #[test]
+    fn recover_interrupted_publish_restores_newest_retained_generation() -> TestResult {
+        let root = unique_test_dir("recover-newest-retained");
+        let index_dir = root.join("index");
+        let stale_retained = root.join("index.previous");
+        let newest_retained = root.join("index.previous.001");
+        build_current_test_index(
+            &stale_retained,
+            41,
+            vec![test_indexable_doc("mem-stale", "stale retained generation")],
+        )?;
+        write_marker(&stale_retained, "generation.txt", "stale")?;
+        build_current_test_index(
+            &newest_retained,
+            42,
+            vec![test_indexable_doc(
+                "mem-newest",
+                "newest retained generation",
+            )],
+        )?;
+        write_marker(&newest_retained, "generation.txt", "newest")?;
+
+        let action = recover_interrupted_publish(&index_dir).map_err(|error| error.to_string())?;
+
+        ensure(
+            action == IndexPublishRecoveryAction::RetainedGenerationRestored,
+            format!("unexpected recovery action: {action:?}"),
+        )?;
+        ensure(
+            read_marker(&index_dir, "generation.txt")? == "newest",
+            "crash recovery must restore the highest source generation",
+        )?;
+        ensure(
+            stale_retained.is_dir(),
+            "older retained generations must remain available for vacuum inspection",
+        )?;
+        ensure(
+            !newest_retained.exists(),
+            "the selected retained generation should move into the active path",
         )
     }
 
