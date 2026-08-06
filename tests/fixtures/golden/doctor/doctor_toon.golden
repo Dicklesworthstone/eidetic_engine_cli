@@ -3,7 +3,7 @@ success: true
 degraded[0]:
 data:
   command: doctor
-  version: 0.13.0
+  version: <scrubbed:eeVersion>
   posture: degraded_recoverable
   healthy: false
   singleFlight:
@@ -23,17 +23,37 @@ data:
     status: disabled
     enabled: false
     writing: false
-    directory: <scrubbed:directory>
+    directory: /fixture/workspace/obs/flight_recorder
     retentionDays: 7
     maxBytes: 268435456
     redactionLevel: strict
     reason: null
     repair: null
-  qos: <scrubbed:qos>
-  rchWorkerPressure: <scrubbed:rchWorkerPressure>
+  qos:
+    schema: ee.qos.active_lane_summary.v1
+    workspaceHash: "sha256:fixture-qos-workspace"
+    foregroundActiveCount: 0
+    backgroundActiveCount: 0
+    verificationActiveCount: 1
+    maintenanceActiveCount: 0
+    staleIgnoredCount: 0
+    foregroundPressure: false
+    backgroundWorkActive: false
+    registryHealthy: true
+    degraded[0]:
+  rchWorkerPressure:
+    schema: ee.rch.worker_pressure.v1
+    status: healthy_but_pressure_blocked
+    workerCount: 1
+    usableWorkerCount: 0
+    blockedWorkerCount: 1
+    staleWorkerCount: 0
+    unknownWorkerCount: 0
+    workers[1]{workerId,pressureState,confidence,reasonCode,freeGb,freeRatioBps,telemetryFreshness,admissionImpact}:
+      worker-redacted,critical,high,disk_pressure_critical,0,300,fresh,blocked
   verificationPosture:
     schema: ee.verification.posture.v1
-    status: not_initialized
+    status: not_inspected
     windowHours: 24
     recordCount: 0
     recentRunCount: 0
@@ -56,12 +76,12 @@ data:
       localDisallowedCount: 0
       topologyBlockedCount: 0
       issueCount: 1
-      reason: verification_ledger_missing
+      reason: workspace_not_selected
     recoveryActions[1]{priority,kind,command,message,relatedBeadId}:
-      1,initialize_or_inspect_ledger,ee init --workspace .,Verification evidence posture could not inspect the workspace ledger.,null
+      1,initialize_or_inspect_ledger,Run `ee status --workspace . --json` from an initialized workspace.,Verification evidence posture could not inspect the workspace ledger.,null
   verificationLedger:
     schema: ee.rch.verify.ledger_status.v1
-    status: not_initialized
+    status: not_inspected
     ledgerAvailable: false
     activeBlockerCount: 0
     localFallbackRefused: false
@@ -70,8 +90,27 @@ data:
     newestRetryAfter: null
     blockerRefs[0]:
     recoveryActions[1]{priority,kind,command,message}:
-      1,inspect_verification_ledger,ee init --workspace .,Initialize the workspace before relying on durable RCH verifier blockers.
-  hostCalibration: <scrubbed:hostCalibration>
+      1,inspect_verification_ledger,ee status --workspace . --json,Run status or doctor from an initialized workspace to inspect RCH verifier blockers.
+  hostCalibration:
+    schema: ee.host_calibration.posture.v1
+    redactionStatus: label_only_paths_presence_only_env_no_raw_values
+    hostProfileSchema: ee.host_profile.v1
+    hostClass: workstation
+    calibrationFreshness: partial
+    confidence: medium
+    profileCeiling: workstation
+    configuredProfile: portable
+    recommendedProfile: workstation
+    effectiveProfile: workstation
+    targetDirPosture: external
+    topologyWarnings[1]: rch_topology_missing
+    reasonCodes[1]: elevate_to_recommended_profile
+    repairActions[1]{priority,kind,command,message}:
+      0,refresh_host_calibration,rch exec -- scripts/e2e_overhaul/host_calibration.sh,Refresh deterministic host-calibration evidence.
+    budgetDeltas[1]{surface,unit,configuredProfile,recommendedProfile,effectiveProfile,configuredValue,recommendedValue,effectiveValue,reasonCode}:
+      context_pack,tokens,portable,workstation,workstation,4000,8000,8000,elevate_to_recommended_profile
+    degraded[1]{code,severity,message,repair}:
+      host_calibration_partial,warning,Host calibration is partial in the deterministic fixture.,Refresh deterministic host-calibration evidence.
   meshAutoEnrollment:
     schema: ee.doctor.mesh_auto_enrollment.v1
     enabled: false
@@ -231,5 +270,38 @@ data:
       parallelizableGroups[0]:
       estimatedTotalDurationSeconds: 0
     degraded[0]:
-  advisories: <scrubbed:advisories>
-  checks: <scrubbed:checks>
+  advisories[1]{name,tier,severity,message,errorCode,repair}:
+    cass,advisory,warning,CASS binary not found in trusted locations.,EE-E506,Install cass in a trusted system path or set EE_CASS_BINARY to an absolute trusted path
+  checks[6]:
+    - name: runtime
+      tier: core
+      severity: ok
+      message: Asupersync runtime initialized successfully.
+    - name: ee_install_path
+      tier: advisory
+      severity: ok
+      message: Deterministic fixture install posture is local and unshadowed.
+    - name: workspace
+      tier: core
+      severity: warning
+      message: Selected workspace has no .ee state at /workspace.
+      errorCode: EE-E004
+      repair: ee --workspace . --help
+    - name: database
+      tier: core
+      severity: warning
+      message: Database file not found at /workspace/.ee/ee.db.
+      errorCode: EE-E200
+      repair: ee init --workspace .
+    - name: search_index
+      tier: core
+      severity: warning
+      message: Search index is missing for the current workspace.
+      errorCode: EE-E300
+      repair: ee index rebuild
+    - name: cass
+      tier: advisory
+      severity: warning
+      message: CASS binary not found in trusted locations.
+      errorCode: EE-E506
+      repair: Install cass in a trusted system path or set EE_CASS_BINARY to an absolute trusted path

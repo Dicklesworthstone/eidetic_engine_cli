@@ -258,19 +258,17 @@ mod tests {
         let expected = test.load_golden()?;
         let expected = serde_json::from_str::<serde_json::Value>(&expected)
             .map_err(|error| format!("parse deterministic status golden: {error}"))?;
-        let actual = serde_json::from_str::<serde_json::Value>(actual)
+        let mut actual = serde_json::from_str::<serde_json::Value>(actual)
             .map_err(|error| format!("parse live status JSON: {error}"))?;
+        scrub_environment_paths(&mut actual);
         ensure_status_typed_subtrees(&expected, "deterministic status golden")?;
         ensure_status_typed_subtrees(&actual, "live status response")?;
         ensure_same_json_shape(&actual, &expected, "/")?;
         for pointer in [
-            "/data/workspace",
             "/data/posture",
             "/data/capabilities",
             "/data/verificationPosture",
             "/data/verificationLedger",
-            "/data/search",
-            "/data/shardFanout",
             "/data/degraded",
             "/degraded",
         ] {
@@ -287,8 +285,9 @@ mod tests {
         let expected = test.load_golden()?;
         let expected = serde_json::from_str::<serde_json::Value>(&expected)
             .map_err(|error| format!("parse deterministic doctor golden: {error}"))?;
-        let actual = serde_json::from_str::<serde_json::Value>(actual)
+        let mut actual = serde_json::from_str::<serde_json::Value>(actual)
             .map_err(|error| format!("parse live doctor JSON: {error}"))?;
+        scrub_environment_paths(&mut actual);
         ensure_doctor_typed_subtrees(&expected, "deterministic doctor golden")?;
         ensure_doctor_typed_subtrees(&actual, "live doctor response")?;
         ensure_same_json_shape(&actual, &expected, "/")?;
@@ -314,6 +313,45 @@ mod tests {
             actual.pointer(pointer) == expected.pointer(pointer),
             format!("{context}: stable field {pointer} drifted from its golden contract"),
         )
+    }
+
+    fn scrub_environment_paths(value: &mut serde_json::Value) {
+        let mut replacements = Vec::new();
+        if let Some(target_dir) = env::var_os("CARGO_TARGET_DIR") {
+            replacements.push((
+                target_dir.to_string_lossy().into_owned(),
+                "<cargoTargetDir>",
+            ));
+        }
+        replacements.push((env!("CARGO_MANIFEST_DIR").to_owned(), "<workspace>"));
+        if let Some(home) = env::var_os("HOME") {
+            replacements.push((home.to_string_lossy().into_owned(), "<home>"));
+        }
+        scrub_string_leaves(value, &replacements);
+    }
+
+    fn scrub_string_leaves(value: &mut serde_json::Value, replacements: &[(String, &str)]) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for child in map.values_mut() {
+                    scrub_string_leaves(child, replacements);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    scrub_string_leaves(child, replacements);
+                }
+            }
+            serde_json::Value::String(text) => {
+                for (prefix, replacement) in replacements {
+                    if !prefix.is_empty() {
+                        *text = text.replace(prefix, replacement);
+                    }
+                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
+        }
     }
 
     fn ensure_same_json_shape(

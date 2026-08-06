@@ -3,47 +3,46 @@ success: true
 fields: standard
 data:
   command: status
-  version: <ee-version>
+  version: <scrubbed:eeVersion>
   workspace:
     source: explicit
-    root: $STATUS_WORKSPACE
-    configDir: $STATUS_WORKSPACE/.ee
+    root: /workspace
+    configDir: /workspace/.ee
     markerPresent: false
-    canonicalRoot: $STATUS_WORKSPACE
-    fingerprint: <workspace-fingerprint>
-    scopeKind: <workspace-scope-kind>
-    repositoryRoot: <repository-root>
-    repositoryFingerprint: <repository-fingerprint>
-    subprojectPath: <subproject-path>
-    diagnostics[1]{code,severity,message,repair,selectedSource,selectedRoot,conflictingSource,conflictingRoot}:
-      workspace_selected_differs_from_discovered,warning,The selected workspace differs from the nearest initialized workspace discovered from the current directory.,Confirm --workspace/EE_WORKSPACE before running mutating commands.,explicit,$STATUS_WORKSPACE,discovered,$STATUS_REPOSITORY
+    canonicalRoot: /workspace
+    fingerprint: fixture-workspace-fingerprint
+    scopeKind: repository
+    repositoryRoot: /workspace
+    repositoryFingerprint: "repo:fixture-workspace-fingerprint"
+    subprojectPath: null
+    diagnostics[1]{code,severity,message,repair,selectedSource,selectedRoot}:
+      fixture_workspace_resolution,info,Fixture workspace selected for degradation golden coverage.,No repair needed for fixture workspace.,explicit,/workspace
   posture:
     overall: blocked
     workspace:
       storage:
         status: blocked
         checksPassed: 0
-        reason: storage_not_initialized
-        fallback: ee init --workspace .
+        reason: null
+        fallback: null
     thisOperation:
       status: ok
-      subsystemsUsed[13]: runtime,storage,shard_fanout,search,memory,graph_compute,curate,feedback,singleflight,flight_recorder,rch_worker_pressure,maintenance,agent_detection
-      subsystemsSkipped[1]: pack
-      degradationsApplied[6]: storage_not_initialized,search_waiting_for_storage,graph_feature_disabled,memory_health_unavailable,curation_health_unavailable,feedback_health_unavailable
-    subsystems[14]{id,status,checksPassed,reason,fallback}:
+      subsystemsUsed[12]: runtime,storage,shard_fanout,search,memory,graph_compute,curate,feedback,singleflight,flight_recorder,maintenance,agent_detection
+      subsystemsSkipped[0]:
+      degradationsApplied[0]:
+    subsystems[13]{id,status,checksPassed,reason,fallback}:
       runtime,ok,1,null,null
-      storage,blocked,0,storage_not_initialized,ee init --workspace .
+      storage,blocked,0,null,null
       shard_fanout,ok,1,shard_fanout_disabled,null
-      search,initializing,0,waiting_for_storage,ee init --workspace .
-      memory,blocked,0,memory_unavailable,ee init --workspace .
+      search,initializing,0,null,null
+      memory,blocked,0,null,null
       graph_compute,ok,1,null,null
-      pack,blocked,0,pack_blocked_by_storage,ee init --workspace .
-      curate,initializing,0,curation_waiting_for_storage,ee init --workspace .
-      feedback,initializing,0,feedback_waiting_for_storage,ee init --workspace .
+      pack,blocked,0,null,null
+      curate,ok,1,null,null
+      feedback,ok,1,null,null
       singleflight,ok,1,null,null
       flight_recorder,ok,1,null,null
-      rch_worker_pressure,ok,1,null,null
-      maintenance,degraded_recoverable,0,derived_asset_attention_available,ee index rebuild --workspace .
+      maintenance,ok,1,null,null
       agent_detection,ok,1,null,null
   singleFlight:
     schema: ee.singleflight.posture.v1
@@ -57,22 +56,60 @@ data:
     reusedResultCount: 0
     surfaces[1]{surface,status,configured,activeLeaderCount,leaderStartCount,completedLeaderCount,followerJoinCount,followerTimeoutCount,leaderFailureCount,reusedResultCount,statePoisonedCount,followerTimeoutMs,lastKey,suggestedAction}:
       graph_feature_enrichment,idle,true,0,0,0,0,0,0,0,0,30000,null,no action; single-flight is available for duplicate read-heavy work
+  writeGroupCommit:
+    schema: ee.write_group_commit.v1
+    generatedAt: "2026-06-15T04:22:00Z"
+    enabled: false
+    redactionStatus: counts_latencies_no_content
+    batches: 0
+    writesCoalesced: 0
+    avgBatchSize: 0
+    fsyncCount: 0
+    fsyncSaved: 0
+    commitLatencyP50Us: 0
+    commitLatencyP99Us: 0
+    fallbackCount: 0
+    fallbackReasons:
+      disabled: 0
+      degraded: 0
+      oversized: 0
+      single_writer: 0
   flightRecorder:
     schema: ee.flight_recorder.status.v1
     status: disabled
     enabled: false
     writing: false
-    directory: $STATUS_WORKSPACE/obs/flight_recorder
+    directory: /fixture/workspace/obs/flight_recorder
     retentionDays: 7
     maxBytes: 268435456
     redactionLevel: strict
     reason: null
     repair: null
-  qos: <scrubbed:qos>
-  rchWorkerPressure: <scrubbed:rchWorkerPressure>
+  qos:
+    schema: ee.qos.active_lane_summary.v1
+    workspaceHash: "sha256:fixture-qos-workspace"
+    foregroundActiveCount: 0
+    backgroundActiveCount: 0
+    verificationActiveCount: 1
+    maintenanceActiveCount: 0
+    staleIgnoredCount: 0
+    foregroundPressure: false
+    backgroundWorkActive: false
+    registryHealthy: true
+    degraded[0]:
+  rchWorkerPressure:
+    schema: ee.rch.worker_pressure.v1
+    status: healthy_but_pressure_blocked
+    workerCount: 1
+    usableWorkerCount: 0
+    blockedWorkerCount: 1
+    staleWorkerCount: 0
+    unknownWorkerCount: 0
+    workers[1]{workerId,pressureState,confidence,reasonCode,freeGb,freeRatioBps,telemetryFreshness,admissionImpact}:
+      worker-redacted,critical,high,disk_pressure_critical,0,300,fresh,blocked
   verificationPosture:
     schema: ee.verification.posture.v1
-    status: not_initialized
+    status: not_inspected
     windowHours: 24
     recordCount: 0
     recentRunCount: 0
@@ -95,12 +132,12 @@ data:
       localDisallowedCount: 0
       topologyBlockedCount: 0
       issueCount: 1
-      reason: verification_ledger_missing
+      reason: workspace_not_selected
     recoveryActions[1]{priority,kind,command,message,relatedBeadId}:
-      1,initialize_or_inspect_ledger,ee init --workspace .,Verification evidence posture could not inspect the workspace ledger.,null
+      1,initialize_or_inspect_ledger,Run `ee status --workspace . --json` from an initialized workspace.,Verification evidence posture could not inspect the workspace ledger.,null
   verificationLedger:
     schema: ee.rch.verify.ledger_status.v1
-    status: not_initialized
+    status: not_inspected
     ledgerAvailable: false
     activeBlockerCount: 0
     localFallbackRefused: false
@@ -109,8 +146,27 @@ data:
     newestRetryAfter: null
     blockerRefs[0]:
     recoveryActions[1]{priority,kind,command,message}:
-      1,inspect_verification_ledger,ee init --workspace .,Initialize the workspace before relying on durable RCH verifier blockers.
-  hostCalibration: <scrubbed:hostCalibration>
+      1,inspect_verification_ledger,ee status --workspace . --json,Run status or doctor from an initialized workspace to inspect RCH verifier blockers.
+  hostCalibration:
+    schema: ee.host_calibration.posture.v1
+    redactionStatus: label_only_paths_presence_only_env_no_raw_values
+    hostProfileSchema: ee.host_profile.v1
+    hostClass: workstation
+    calibrationFreshness: partial
+    confidence: medium
+    profileCeiling: workstation
+    configuredProfile: portable
+    recommendedProfile: workstation
+    effectiveProfile: workstation
+    targetDirPosture: external
+    topologyWarnings[1]: rch_topology_missing
+    reasonCodes[1]: elevate_to_recommended_profile
+    repairActions[1]{priority,kind,command,message}:
+      0,refresh_host_calibration,rch exec -- scripts/e2e_overhaul/host_calibration.sh,Refresh deterministic host-calibration evidence.
+    budgetDeltas[1]{surface,unit,configuredProfile,recommendedProfile,effectiveProfile,configuredValue,recommendedValue,effectiveValue,reasonCode}:
+      context_pack,tokens,portable,workstation,workstation,4000,8000,8000,elevate_to_recommended_profile
+    degraded[1]{code,severity,message,repair}:
+      host_calibration_partial,warning,Host calibration is partial in the deterministic fixture.,Refresh deterministic host-calibration evidence.
   capabilities:
     runtime: ready
     storage: pending
@@ -142,19 +198,19 @@ data:
     bytes: 0
     frames: 0
     page_size: 0
-    checkpoint_threshold_bytes: 67108864
+    checkpoint_threshold_bytes: 0
   shardFanout:
     schema: ee.shard_fanout.status.v1
     enabled: false
     posture: disabled
-    workspaceId: <workspace-id>
-    workspaceRoot: $STATUS_WORKSPACE
-    legacyDatabasePath: $STATUS_WORKSPACE/.ee/ee.db
-    dataRoot: <data-root>
-    shardRoot: <shard-root>
-    catalogPath: <catalog-path>
-    shardPath: <shard-path>
-    shardId: <shard-id>
+    workspaceId: wsp_golden_fixture
+    workspaceRoot: /fixture/workspace
+    legacyDatabasePath: /fixture/workspace/.ee/ee.db
+    dataRoot: /fixture/ee
+    shardRoot: /fixture/ee/shards
+    catalogPath: /fixture/ee/catalog.db
+    shardPath: /fixture/ee/shards/wsp_golden_fixture.db
+    shardId: wsp_golden_fixture
     catalogExists: false
     shardExists: false
     catalogContract:
@@ -223,17 +279,17 @@ data:
     nextDeterministicAction: run ee init --workspace .
   graphCompute:
     status: available
-    availableAlgorithms[12]: pagerank,betweenness,hits,louvain,communities,k_core,articulation,path,explain_link,centrality_refresh,feature_enrichment,neighborhood
+    availableAlgorithms[1]: pagerank
     liveComputeSupported: true
     fnxRuntimeVersion: 0.1.0
     resultCache:
-      status: unavailable
+      status: not_inspected
       cachedResultCount: 0
       observedComputeCount: 0
       cacheHitRate: null
     lastUsedAt: null
   graphSnapshotArtifact:
-    status: unavailable
+    status: empty
     lastBuiltAt: null
     snapshotPath: null
     snapshotGeneration: null
@@ -245,8 +301,25 @@ data:
       availability: live_compute_available
     nextRefreshVia: ee graph centrality-refresh --workspace .
   search:
-    lexicalRamTier: <scrubbed:lexicalRamTier>
-  derivedAssets[3]:
+    lexicalRamTier:
+      schema: ee.status.search.lexical_ram_tier.v1
+      platform: linux
+      supported: true
+      enabled: false
+      attempted: false
+      succeeded: false
+      hugepagesRequested: false
+      hugepagesGranted: false
+      populateRequested: true
+      bytesMmapped: 0
+      bytesWarmloaded: 0
+      pageFaultsPre: 0
+      pageFaultsPost: 0
+      fallbackPath: disabled_by_operator
+      indexPath: /fixture/workspace/.ee/index/lexical
+      indexRevision: null
+      degradedCodes[1]: lexical_ram_tier_disabled
+  derivedAssets[2]:
     - name: search_index
       kind: persisted_index
       status: missing
@@ -257,29 +330,29 @@ data:
       freshness:
         schema: ee.derived_asset_freshness.v1
         verdict: missing
-        dependencyHash: <derived-asset-hash>
-        sourceDependencyHash: <derived-asset-hash>
-        configHash: <derived-asset-hash>
-        featureFlagsHash: <derived-asset-hash>
+        dependencyHash: "blake3:2803f90f0bce036e45d44817938da43ba0ba584b0d3765a147588aa99c80b3ff"
+        sourceDependencyHash: "blake3:d511baf112ef8cf11e1e6e3f0a056ba7897f313546996c15c33a95d474fb3875"
+        configHash: "blake3:883539a4046448d67c21aa9bcb5587c364b9a487e200f04e26da348713cac183"
+        featureFlagsHash: "blake3:9a9610fcb79f8696e3cf7c6112733e681a029d945f9b9e0872276fc5ab0b5bc4"
         inputManifestHash: null
         invalidates[1]: search_index
-        repairAction: ee index rebuild --workspace .
+        repairAction: Inspect derived asset status.
     - name: graph_snapshot_artifact
       kind: persisted_snapshot
-      status: unavailable
-      sourceHighWatermark: null
+      status: empty
+      sourceHighWatermark: 0
       assetHighWatermark: null
-      highWatermarkLag: null
+      highWatermarkLag: 0
       path: .ee/graph
       freshness:
         schema: ee.derived_asset_freshness.v1
-        verdict: unavailable
-        dependencyHash: <derived-asset-hash>
-        sourceDependencyHash: <derived-asset-hash>
-        configHash: <derived-asset-hash>
-        featureFlagsHash: <derived-asset-hash>
+        verdict: missing
+        dependencyHash: "blake3:982a1d75b530e71125d08b948b54a35b28f533cea93c4418a7c34439cc3c9cb3"
+        sourceDependencyHash: "blake3:002dc6c96c6fe99b6b630622be4855ed95e0569e2848e92bea74796e5f965efd"
+        configHash: "blake3:f8683d52e3f251d64f4c20192d6227d15e4f23cffe22861550ac8206c015a4c3"
+        featureFlagsHash: "blake3:2a5ed65ad4f349a30395a192e329a365016a42c771b9d044b465e6ffb3c41203"
         inputManifestHash: null
-        invalidates[0]:
+        invalidates[1]: graph_snapshot_artifact
         repairAction: ee graph centrality-refresh --workspace .
       lastBuiltAt: null
       memoryGraph:
@@ -288,39 +361,16 @@ data:
         generation: 0
         matchesDbGeneration: false
         availability: live_compute_available
-    - name: pack_l2_cache
-      kind: ephemeral_cache
-      status: current
-      sourceHighWatermark: null
-      assetHighWatermark: null
-      highWatermarkLag: null
-      path: cache.pack_l2
-      freshness:
-        schema: ee.derived_asset_freshness.v1
-        verdict: fresh
-        dependencyHash: <derived-asset-hash>
-        sourceDependencyHash: <derived-asset-hash>
-        configHash: <derived-asset-hash>
-        featureFlagsHash: <derived-asset-hash>
-        inputManifestHash: null
-        invalidates[0]:
-        repairAction: ee pack "<task>" --workspace . --json
   agentInventory:
     schema: ee.agent.status.v1
     status: not_inspected
     formatVersion: 1
     summary:
       detectedCount: 0
-      totalCount: <agent-source-count>
+      totalCount: 26
     inspectionCommand: ee agent status --json
     degraded[0]:
-  degraded[6]:
-    - code: graph_feature_disabled
-      severity: medium
-      message: Knowledge skyline status is disabled by graph.feature.skyline.enabled.
-      repair: ee config set graph.feature.skyline.enabled true
-      repairKind: actionable
-      sources[1]: status
+  degraded[3]:
     - code: search_waiting_for_storage
       severity: medium
       message: Search readiness is pending until workspace storage is initialized.
@@ -333,21 +383,28 @@ data:
       repair: Run `ee init --workspace .`.
       repairKind: unknown
       sources[1]: status
-    - code: curation_health_unavailable
-      severity: low
-      message: Curation health is unavailable because the workspace database is missing.
-      repair: Run `ee init --workspace .` before inspecting curation health.
-      repairKind: unknown
-      sources[1]: status
-    - code: feedback_health_unavailable
-      severity: low
-      message: Feedback health is unavailable because the workspace database is missing.
-      repair: Run `ee init --workspace .` before inspecting feedback health.
-      repairKind: unknown
-      sources[1]: status
     - code: memory_health_unavailable
       severity: low
       message: Memory health is unavailable because the workspace database is missing.
       repair: Run `ee init --workspace .` before inspecting memory health.
       repairKind: unknown
       sources[1]: status
+degraded[3]:
+  - code: search_waiting_for_storage
+    severity: medium
+    message: Search readiness is pending until workspace storage is initialized.
+    repair: Run `ee init --workspace .`.
+    repairKind: unknown
+    sources[1]: status
+  - code: storage_not_initialized
+    severity: medium
+    message: Workspace storage is unavailable because .ee/ee.db is missing.
+    repair: Run `ee init --workspace .`.
+    repairKind: unknown
+    sources[1]: status
+  - code: memory_health_unavailable
+    severity: low
+    message: Memory health is unavailable because the workspace database is missing.
+    repair: Run `ee init --workspace .` before inspecting memory health.
+    repairKind: unknown
+    sources[1]: status

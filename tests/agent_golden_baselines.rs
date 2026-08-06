@@ -263,6 +263,27 @@ fn normalize_status_json_for_golden(text: &str) -> String {
     let trimmed = text.trim();
     if let Ok(mut value) = serde_json::from_str::<Value>(trimmed) {
         scrub_status_volatile_fields(&mut value);
+        scrub_environment_paths(&mut value);
+        for (pointer, replacement) in [
+            (
+                "/data/workspace/fingerprint",
+                "<scrubbed:workspaceFingerprint>",
+            ),
+            ("/data/shardFanout/workspaceId", "<scrubbed:workspaceId>"),
+            ("/data/shardFanout/shardId", "<scrubbed:shardId>"),
+            (
+                "/data/shardFanout/shardPath",
+                "<home>/.local/share/ee/shards/<workspace>.db",
+            ),
+            (
+                "/data/search/lexicalRamTier/platform",
+                "<scrubbed:platform>",
+            ),
+        ] {
+            if let Some(target) = value.pointer_mut(pointer).filter(|value| value.is_string()) {
+                *target = Value::String(replacement.to_owned());
+            }
+        }
         replace_host_backed_subtrees(&mut value);
         return serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned());
     }
@@ -281,6 +302,7 @@ fn normalize_doctor_json_for_golden(text: &str) -> String {
     if let Some(workspace_path) = value.pointer_mut("/data/meshAutoEnrollment/workspacePath") {
         *workspace_path = Value::String("<scrubbed:workspacePath>".to_owned());
     }
+    scrub_environment_paths(&mut value);
     replace_host_backed_subtrees(&mut value);
     serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned())
 }
@@ -333,6 +355,44 @@ fn same_json_shape(candidate: &Value, fixture: &Value) -> bool {
         | (Value::Number(_), Value::Number(_))
         | (Value::String(_), Value::String(_)) => true,
         _ => false,
+    }
+}
+
+fn scrub_environment_paths(value: &mut Value) {
+    let mut replacements = Vec::new();
+    if let Some(target_dir) = env::var_os("CARGO_TARGET_DIR") {
+        replacements.push((
+            target_dir.to_string_lossy().into_owned(),
+            "<cargoTargetDir>",
+        ));
+    }
+    replacements.push((env!("CARGO_MANIFEST_DIR").to_owned(), "<workspace>"));
+    if let Some(home) = env::var_os("HOME") {
+        replacements.push((home.to_string_lossy().into_owned(), "<home>"));
+    }
+    scrub_string_leaves(value, &replacements);
+}
+
+fn scrub_string_leaves(value: &mut Value, replacements: &[(String, &str)]) {
+    match value {
+        Value::Object(map) => {
+            for child in map.values_mut() {
+                scrub_string_leaves(child, replacements);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                scrub_string_leaves(child, replacements);
+            }
+        }
+        Value::String(text) => {
+            for (prefix, replacement) in replacements {
+                if !prefix.is_empty() {
+                    *text = text.replace(prefix, replacement);
+                }
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
