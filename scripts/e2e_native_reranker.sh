@@ -21,6 +21,8 @@ set -uo pipefail
 TEST_ID="native_reranker_e2e"
 BEAD_ID="bd-1nl13.14"
 SEARCH_QUERY="cargo fmt check and cargo clippy before publishing"
+RERANK_VECTOR_OUT="${EE_E2E_RERANK_VECTOR_OUT:-}"
+TARGET_TRIPLE="${EE_E2E_TARGET_TRIPLE:-unspecified}"
 
 if ! command -v jq >/dev/null 2>&1; then
     printf '{"schema":"ee.test_event.v1","ts":"%s","test_id":"native_reranker_e2e","kind":"assert_fail","fields":{"bead_id":"bd-1nl13.14","label":"jq_available","expected":"jq executable on PATH","actual":"missing","schema_validation_status":"not_run","redaction_status":"passed","first_failure_diagnosis":"jq executable missing before harness initialization","stdout_artifact_path":"not_initialized","stderr_artifact_path":"stderr","sanitized_env":{"HOME":"[UNREAD]"}}}\n' \
@@ -98,6 +100,15 @@ now_iso() {
 
 now_ms() {
     python3 -c 'import time; print(int(time.time() * 1000))'
+}
+
+native_path() {
+    local path="${1:?path required}"
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -w "${path}"
+    else
+        printf '%s' "${path}"
+    fi
 }
 
 hash_args() {
@@ -218,19 +229,24 @@ run_ee_json() {
     STEP=$((STEP + 1))
     local stdout_file stderr_file
     local argv_hash arg_count start_ms end_ms elapsed_ms exit_code
+    local native_home native_root native_workspace native_empty_embed_model
     local -a command_env
     stdout_file="${LOG_DIR}/step_$(printf '%02d' "${STEP}")_${label//[^A-Za-z0-9_]/_}.stdout.json"
     stderr_file="${LOG_DIR}/step_$(printf '%02d' "${STEP}")_${label//[^A-Za-z0-9_]/_}.stderr.txt"
     argv_hash="$(hash_args "$@")"
     arg_count=$#
+    native_home="$(native_path "${home_dir}")"
+    native_root="$(native_path "${ROOT}")"
+    native_workspace="$(native_path "${workspace}")"
+    native_empty_embed_model="$(native_path "${EMPTY_EMBED_MODEL_DIR}")"
     command_env=(
         env -i
-        "HOME=${home_dir}"
+        "HOME=${native_home}"
         "PATH=${PATH:-/usr/bin:/bin}"
-        "TMPDIR=${ROOT}"
+        "TMPDIR=${native_root}"
         "NO_COLOR=1"
         "EE_EMBED_DOWNLOAD=off"
-        "EE_EMBED_MODEL_DIR=${EMPTY_EMBED_MODEL_DIR}"
+        "EE_EMBED_MODEL_DIR=${native_empty_embed_model}"
         "FRANKENSEARCH_OFFLINE=1"
         "FRANKENSEARCH_ALLOW_DOWNLOAD=0"
     )
@@ -241,7 +257,7 @@ run_ee_json() {
         '{bead_id:$bead,surface:"native_reranker_e2e",label:$label,command:"ee",arg_count:$argCount,argv_hash:$argvHash,workspace:"[RUN_WORKSPACE]",cwd:"[REPO_ROOT]",schema_validation_status:"pending",redaction_status:"passed",sanitized_env:{HOME:"[ISOLATED_HOME]",NO_COLOR:"1",EE_EMBED_DOWNLOAD:"off",EE_EMBED_MODEL_DIR:"[EMPTY_MODEL_DIR]",FRANKENSEARCH_OFFLINE:"1",FRANKENSEARCH_ALLOW_DOWNLOAD:"0"}}')"
 
     start_ms="$(now_ms)"
-    "${command_env[@]}" "${REAL_EE}" --workspace "${workspace}" "$@" \
+    "${command_env[@]}" "${REAL_EE}" --workspace "${native_workspace}" "$@" \
         >"${stdout_file}" 2>"${stderr_file}"
     exit_code=$?
     end_ms="$(now_ms)"
@@ -323,9 +339,21 @@ inspect_binary_linkage() {
     elif command -v ldd >/dev/null 2>&1; then
         tool="ldd"
         command=(ldd "${REAL_EE}")
+    elif command -v llvm-objdump.exe >/dev/null 2>&1; then
+        tool="llvm-objdump"
+        command=(llvm-objdump.exe -p "$(native_path "${REAL_EE}")")
+    elif command -v objdump.exe >/dev/null 2>&1; then
+        tool="objdump"
+        command=(objdump.exe -p "$(native_path "${REAL_EE}")")
+    elif command -v dumpbin.exe >/dev/null 2>&1; then
+        tool="dumpbin"
+        command=(dumpbin.exe /dependents "$(native_path "${REAL_EE}")")
+    elif command -v objdump >/dev/null 2>&1; then
+        tool="objdump"
+        command=(objdump -p "${REAL_EE}")
     else
         record_failure "native linkage inspection tool available" \
-            "neither otool nor ldd is available"
+            "none of otool, ldd, llvm-objdump, objdump, or dumpbin is available"
         return
     fi
 
@@ -337,7 +365,12 @@ inspect_binary_linkage() {
         --arg argvHash "${argv_hash}" --argjson argCount "${arg_count}" \
         '{bead_id:$bead,surface:"native_reranker_e2e",label:"binary_linkage",command:$tool,arg_count:$argCount,argv_hash:$argvHash,cwd:"[REPO_ROOT]",schema_validation_status:"not_applicable",redaction_status:"passed",sanitized_env:{HOME:"[ORIGINAL_HOME]"}}')"
     start_ms="$(now_ms)"
-    "${command[@]}" >"${stdout_file}" 2>"${stderr_file}"
+    if [[ "${tool}" == "dumpbin" ]]; then
+        MSYS2_ARG_CONV_EXCL='*' "${command[@]}" \
+            >"${stdout_file}" 2>"${stderr_file}"
+    else
+        "${command[@]}" >"${stdout_file}" 2>"${stderr_file}"
+    fi
     exit_code=$?
     end_ms="$(now_ms)"
     elapsed_ms=$((end_ms - start_ms))
@@ -371,6 +404,55 @@ inspect_binary_linkage() {
             "forbidden ONNX Runtime linkage found in ${stdout_file}"
     else
         record_pass "ee binary is ORT-free"
+    fi
+}
+
+write_rerank_vector() {
+    local fusion_file="${1:?fusion result required}"
+    local reranked_file="${2:?reranked result required}"
+    local vector_parent
+
+    if [[ -z "${RERANK_VECTOR_OUT}" ]]; then
+        return
+    fi
+    vector_parent="$(dirname "${RERANK_VECTOR_OUT}")"
+    if ! mkdir -p "${vector_parent}"; then
+        record_failure "reranker determinism vector parent is writable" \
+            "failed to create ${vector_parent}"
+        return
+    fi
+    if ! jq -S \
+        --arg query "${SEARCH_QUERY}" \
+        --argjson fusionOrder "$(jq -c '[.data.results[].content]' "${fusion_file}")" \
+        '{
+            schema: "ee.rerank_determinism.vector.v1",
+            query: $query,
+            fusionOnlyOrder: $fusionOrder,
+            rerankedOrder: [.data.results[].content],
+            rerankedScores: [.data.results[] | {content, rerankScore}]
+        }' "${reranked_file}" >"${RERANK_VECTOR_OUT}"; then
+        record_failure "reranker determinism vector is emitted" \
+            "jq failed while writing ${RERANK_VECTOR_OUT}"
+        return
+    fi
+    if jq -e '
+        .schema == "ee.rerank_determinism.vector.v1"
+        and (.query | type) == "string"
+        and (.fusionOnlyOrder | length) == 5
+        and (.rerankedOrder | length) == 5
+        and (.rerankedScores | length) == 5
+        and all(.rerankedScores[];
+            (.content | type) == "string"
+            and (.rerankScore | type) == "number")
+    ' "${RERANK_VECTOR_OUT}" >/dev/null 2>&1; then
+        record_pass "reranker determinism vector is emitted"
+        emit_event "note" "$(jq -cn \
+            --arg bead "${BEAD_ID}" --arg target "${TARGET_TRIPLE}" \
+            --arg vector "${RERANK_VECTOR_OUT}" \
+            '{bead_id:$bead,surface:"native_reranker_e2e",label:"rerank_determinism_vector",target:$target,artifact_path:$vector,schema_validation_status:"passed",redaction_status:"passed",sanitized_env:{HOME:"[ISOLATED_HOME]"}}')"
+    else
+        record_failure "reranker determinism vector is emitted" \
+            "invalid vector contract: ${RERANK_VECTOR_OUT}"
     fi
 }
 
@@ -446,6 +528,9 @@ run_model_backed_lane() {
     fi
 
     if [[ -n "${archive}" ]]; then
+        require_model=1
+    fi
+    if [[ -n "${RERANK_VECTOR_OUT}" ]]; then
         require_model=1
     fi
     if [[ -z "${archive}" ]]; then
@@ -558,6 +643,7 @@ run_model_backed_lane() {
         and ((.data.results[1].content // "") | startswith("BD1NL1314_RERANK_TRAP"))
         and (.data.results[0].rerankScore > .data.results[1].rerankScore)' \
         "native reranker ranks the precise release policy above the lexical trap"
+    write_rerank_vector "${fusion_file}" "${reranked_file}"
 
     unpacked_dir="${home_dir}/.local/share/ee/models/rerank/rerank-default-v1/rerank-default-v1"
     withheld_dir="${unpacked_dir}.withheld"
@@ -651,6 +737,12 @@ finish() {
     if [[ "${LOGGING_FAILURES}" -gt 0 ]]; then
         record_failure "all structured event writes succeed" \
             "event serialization or append failures=${LOGGING_FAILURES}"
+    fi
+    if [[ -n "${RERANK_VECTOR_OUT}" ]] \
+        && ! jq -e '.schema == "ee.rerank_determinism.vector.v1"' \
+            "${RERANK_VECTOR_OUT}" >/dev/null 2>&1; then
+        record_failure "requested reranker determinism vector is retained" \
+            "missing or invalid vector: ${RERANK_VECTOR_OUT}"
     fi
 
     if validate_event_log; then
