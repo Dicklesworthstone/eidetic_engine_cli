@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::{self, IsTerminal, Write};
@@ -92,12 +94,42 @@ const READ_SURFACE_AUDIT_ACTIONS: [&str; 6] = [
     crate::db::audit_actions::WHY_INSPECTED,
 ];
 
-/// Lock TTL for index publish operations (5 minutes).
-const INDEX_PUBLISH_LOCK_TTL_SECS: u64 = 300;
+/// Lock TTL for index publish operations.
+///
+/// The bounded production request is five minutes; the lease keeps a second
+/// five-minute cleanup margin so a cancellation at the budget edge cannot let
+/// another publisher enter while the short masked commit tail is finishing.
+const INDEX_PUBLISH_LOCK_TTL_SECS: u64 = 600;
 const INDEX_PUBLISH_LOCK_RETRY_ATTEMPTS: usize = 200;
 pub const INDEX_PUBLISH_LOCK_CONTENTION_CODE: &str = "index_publish_lock_contention";
 static INDEX_METADATA_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static INDEX_CORPUS_REVISION: OnceLock<CorpusRevision> = OnceLock::new();
+#[cfg(test)]
+type BeforeIndexPublishHook = Box<dyn FnOnce(&asupersync::Cx)>;
+#[cfg(test)]
+std::thread_local! {
+    static BEFORE_INDEX_PUBLISH_HOOK: RefCell<Option<BeforeIndexPublishHook>> =
+        const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn install_before_index_publish_hook(hook: impl FnOnce(&asupersync::Cx) + 'static) {
+    BEFORE_INDEX_PUBLISH_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_before_index_publish_hook(cx: &asupersync::Cx) {
+    BEFORE_INDEX_PUBLISH_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(cx);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_before_index_publish_hook(_cx: &asupersync::Cx) {}
 
 /// Generate a unique holder ID for advisory locks.
 fn generate_index_holder_id() -> String {
@@ -111,11 +143,13 @@ fn generate_index_holder_id() -> String {
 
 /// Acquire the index publish lock or return an error.
 fn acquire_index_publish_lock(
+    cx: &asupersync::Cx,
     db: &DbConnection,
     workspace_id: &str,
     holder_id: &str,
 ) -> Result<(), IndexRebuildError> {
     acquire_index_publish_lock_with_retry(
+        cx,
         db,
         workspace_id,
         holder_id,
@@ -134,6 +168,7 @@ fn index_publish_lock_retry_attempts() -> usize {
 }
 
 fn acquire_index_publish_lock_with_retry<F>(
+    cx: &asupersync::Cx,
     db: &DbConnection,
     workspace_id: &str,
     holder_id: &str,
@@ -152,12 +187,22 @@ where
     let mut waited = Duration::ZERO;
     let mut last_holder = None;
     for attempt in 0..attempts {
-        match db.acquire_advisory_lock(
+        index_checkpoint(cx)?;
+        let acquisition = match db.acquire_advisory_lock(
             &lock_id,
             holder_id,
             Some(INDEX_PUBLISH_LOCK_TTL_SECS),
             Some("index publish"),
-        )? {
+        ) {
+            Ok(acquisition) => acquisition,
+            Err(error) => {
+                if cx.checkpoint().is_err() {
+                    return index_checkpoint(cx);
+                }
+                return Err(IndexRebuildError::Database(error));
+            }
+        };
+        match acquisition {
             AcquireLockResult::Acquired(_) | AcquireLockResult::Expired { .. } => return Ok(()),
             AcquireLockResult::AlreadyHeld {
                 holder_id: other,
@@ -180,8 +225,13 @@ where
                         );
                     }
                     if !delay.is_zero() {
-                        crate::db::sleep_retry_delay_or_cancel(DbOperation::Execute, delay)
-                            .map_err(IndexRebuildError::Database)?;
+                        let mut remaining = delay;
+                        while !remaining.is_zero() {
+                            let chunk = remaining.min(Duration::from_millis(5));
+                            std::thread::sleep(chunk);
+                            remaining = remaining.saturating_sub(chunk);
+                            index_checkpoint(cx)?;
+                        }
                     }
                 }
             }
@@ -220,7 +270,215 @@ fn duration_millis_saturating(duration: Duration) -> u64 {
 /// Release the index publish lock (best-effort, errors are logged but not propagated).
 fn release_index_publish_lock(db: &DbConnection, workspace_id: &str, holder_id: &str) {
     let lock_id = AdvisoryLockId::index(workspace_id);
-    let _ = db.release_advisory_lock(&lock_id, holder_id);
+    if let Err(error) = db.release_advisory_lock(&lock_id, holder_id) {
+        tracing::error!(
+            target: "ee::index",
+            lock_id = %lock_id.canonical_key(),
+            holder_id,
+            error = %error,
+            "failed to release index publish lock"
+        );
+    }
+}
+
+fn index_checkpoint(cx: &asupersync::Cx) -> Result<(), IndexRebuildError> {
+    cx.checkpoint().map_err(|_| {
+        IndexRebuildError::Cancelled(cx.cancel_reason().unwrap_or_else(|| {
+            crate::core::outcome::attributed_cancel_reason(
+                cx,
+                asupersync::CancelKind::User,
+                "index operation cancelled without a recorded reason",
+            )
+        }))
+    })
+}
+
+fn map_index_search_error(
+    cx: &asupersync::Cx,
+    phase: &str,
+    error: SearchError,
+) -> IndexRebuildError {
+    match error {
+        SearchError::Cancelled {
+            phase: backend_phase,
+            reason: backend_reason,
+        } => {
+            let reason = cx.cancel_reason().unwrap_or_else(|| {
+                let normalized = backend_reason.to_ascii_lowercase();
+                let kind = if normalized.contains("timeout")
+                    || normalized.contains("timed out")
+                    || normalized.contains("deadline")
+                {
+                    asupersync::CancelKind::Timeout
+                } else {
+                    asupersync::CancelKind::User
+                };
+                crate::core::outcome::attributed_cancel_reason(
+                    cx,
+                    kind,
+                    format!(
+                        "{phase}: Frankensearch cancelled during {backend_phase}: {backend_reason}"
+                    ),
+                )
+            });
+            IndexRebuildError::Cancelled(reason)
+        }
+        error => IndexRebuildError::Index(format!("{phase}: {error}")),
+    }
+}
+
+/// Owns one advisory index-publish lease and releases it on every exit path.
+struct IndexPublishLockOwner<'a> {
+    cx: &'a asupersync::Cx,
+    db: &'a DbConnection,
+    workspace_id: &'a str,
+    holder_id: String,
+}
+
+impl<'a> IndexPublishLockOwner<'a> {
+    fn acquire(
+        cx: &'a asupersync::Cx,
+        db: &'a DbConnection,
+        workspace_id: &'a str,
+    ) -> Result<Self, IndexRebuildError> {
+        index_checkpoint(cx)?;
+        let holder_id = generate_index_holder_id();
+        acquire_index_publish_lock(cx, db, workspace_id, &holder_id)?;
+        let owner = Self {
+            cx,
+            db,
+            workspace_id,
+            holder_id,
+        };
+        index_checkpoint(cx)?;
+        Ok(owner)
+    }
+}
+
+impl Drop for IndexPublishLockOwner<'_> {
+    fn drop(&mut self) {
+        self.cx.masked(|| {
+            let _ambient = asupersync::Cx::set_current(Some(self.cx.clone()));
+            release_index_publish_lock(self.db, self.workspace_id, &self.holder_id);
+        });
+    }
+}
+
+/// Ensures a claimed job cannot remain `running` when control unwinds through
+/// an error or cancellation checkpoint.
+struct RunningIndexJobFinalizer<'a> {
+    cx: &'a asupersync::Cx,
+    db: &'a DbConnection,
+    job_id: String,
+}
+
+impl Drop for RunningIndexJobFinalizer<'_> {
+    fn drop(&mut self) {
+        let cancelled = self.cx.cancel_reason().is_some() || self.cx.checkpoint().is_err();
+        self.cx.masked(|| {
+            let _ambient = asupersync::Cx::set_current(Some(self.cx.clone()));
+            let job = match self.db.get_search_index_job(&self.job_id) {
+                Ok(Some(job)) => job,
+                Ok(None) => {
+                    tracing::error!(
+                        target: "ee::index",
+                        job_id = self.job_id,
+                        "failed to finalize index job because its row disappeared"
+                    );
+                    return;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        target: "ee::index",
+                        job_id = self.job_id,
+                        error = %error,
+                        "failed to inspect index job during finalization"
+                    );
+                    return;
+                }
+            };
+            if job.status_enum() != Some(SearchIndexJobStatus::Running) {
+                return;
+            }
+            let transition = if cancelled {
+                self.db.cancel_running_search_index_job(&self.job_id)
+            } else {
+                self.db.fail_search_index_job(
+                    &self.job_id,
+                    "index worker exited before recording a terminal job outcome",
+                )
+            };
+            match transition {
+                Ok(true) => {}
+                Ok(false) => tracing::error!(
+                    target: "ee::index",
+                    job_id = self.job_id,
+                    cancelled,
+                    "index job finalization did not change a running row"
+                ),
+                Err(error) => tracing::error!(
+                    target: "ee::index",
+                    job_id = self.job_id,
+                    cancelled,
+                    error = %error,
+                    "failed to finalize index job"
+                ),
+            }
+        });
+    }
+}
+
+fn require_index_job_transition(
+    changed: bool,
+    job_id: &str,
+    transition: &str,
+) -> Result<(), IndexRebuildError> {
+    if changed {
+        Ok(())
+    } else {
+        Err(IndexRebuildError::Index(format!(
+            "search index job {job_id} rejected required transition {transition}"
+        )))
+    }
+}
+
+fn update_running_index_job_total(
+    db: &DbConnection,
+    job_id: &str,
+    documents_total: u32,
+) -> Result<(), IndexRebuildError> {
+    let changed = db.update_search_index_job_total(job_id, documents_total)?;
+    require_index_job_transition(changed, job_id, "running_total_updated")
+}
+
+fn commit_running_index_job_success(
+    db: &DbConnection,
+    job_id: &str,
+    documents_total: u32,
+) -> Result<(), IndexRebuildError> {
+    db.with_transaction_error(|| {
+        let progressed = db.update_search_index_job_progress(job_id, documents_total)?;
+        require_index_job_transition(progressed, job_id, "running_progress_updated")?;
+        let completed = db.complete_search_index_job(job_id, documents_total)?;
+        require_index_job_transition(completed, job_id, "running_completed")
+    })
+}
+
+fn append_failed_index_job_transition(
+    db: &DbConnection,
+    job_id: &str,
+    error_message: &mut String,
+) {
+    match db.fail_search_index_job(job_id, error_message) {
+        Ok(true) => {}
+        Ok(false) => error_message.push_str(
+            "; failed to mark search index job failed: running row was not updated",
+        ),
+        Err(error) => {
+            error_message.push_str("; failed to mark search index job failed: ");
+            error_message.push_str(&error.to_string());
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1146,6 +1404,7 @@ pub enum IndexRebuildError {
     Database(DbError),
     Index(String),
     LockContention(IndexPublishLockContention),
+    Cancelled(asupersync::CancelReason),
     NoWorkspace,
 }
 
@@ -1158,6 +1417,7 @@ impl IndexRebuildError {
             Self::LockContention(_) => Some(
                 "Wait for the active index operation to finish, then retry. Use `ee index status --workspace . --json` to inspect index state.",
             ),
+            Self::Cancelled(_) => None,
             Self::NoWorkspace => Some("ee init --workspace ."),
         }
     }
@@ -1166,7 +1426,7 @@ impl IndexRebuildError {
     pub const fn stable_code(&self) -> Option<&'static str> {
         match self {
             Self::LockContention(_) => Some(INDEX_PUBLISH_LOCK_CONTENTION_CODE),
-            Self::Database(_) | Self::Index(_) | Self::NoWorkspace => None,
+            Self::Database(_) | Self::Index(_) | Self::Cancelled(_) | Self::NoWorkspace => None,
         }
     }
 }
@@ -1185,6 +1445,7 @@ impl std::fmt::Display for IndexRebuildError {
                 contention.attempts,
                 contention.waited_ms
             ),
+            Self::Cancelled(reason) => f.write_str(&crate::core::outcome::cancel_message(reason)),
             Self::NoWorkspace => write!(f, "No workspace found"),
         }
     }
@@ -1208,6 +1469,17 @@ impl From<DbError> for IndexRebuildError {
 pub fn rebuild_index(
     options: &IndexRebuildOptions,
 ) -> Result<IndexRebuildReport, IndexRebuildError> {
+    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+        rebuild_index_with_cx(&cx, options).await
+    })
+    .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
+}
+
+pub async fn rebuild_index_with_cx(
+    cx: &asupersync::Cx,
+    options: &IndexRebuildOptions,
+) -> Result<IndexRebuildReport, IndexRebuildError> {
+    index_checkpoint(cx)?;
     let start = Instant::now();
     let database_path = options.resolve_database_path();
     let index_dir = options.resolve_index_dir();
@@ -1215,6 +1487,11 @@ pub fn rebuild_index(
 
     let db = DbConnection::open_file(&database_path)?;
     let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
+    let _publish_lock = if options.dry_run {
+        None
+    } else {
+        Some(IndexPublishLockOwner::acquire(cx, &db, &workspace_id)?)
+    };
     let WorkspaceIndexSourceSnapshot {
         generation: source_generation,
         memories_indexed,
@@ -1228,6 +1505,7 @@ pub fn rebuild_index(
         evidence_admission,
         open_job_ids: _,
     } = collect_workspace_index_source_snapshot(&db, &workspace_id)?;
+    index_checkpoint(cx)?;
 
     if options.dry_run {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -1248,83 +1526,77 @@ pub fn rebuild_index(
         });
     }
 
-    // Acquire index publish lock to prevent concurrent publish races.
-    let holder_id = generate_index_holder_id();
-    acquire_index_publish_lock(&db, &workspace_id, &holder_id)?;
+    let _recovery_action = recover_interrupted_publish(&index_dir)?;
+    let registry_stack = default_embedder_stack();
+    ensure_active_embedding_registry_record(&db, &workspace_id, &registry_stack)?;
+    let build_result = publish_full_index_generation(
+        cx,
+        &index_dir,
+        indexable_docs,
+        source_generation,
+        document_counts,
+        || Ok(()),
+    )
+    .await;
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    let result = (|| -> Result<IndexRebuildReport, IndexRebuildError> {
-        let _recovery_action = recover_interrupted_publish(&index_dir)?;
-        let staging_dir = create_publish_staging_dir(&index_dir)?;
-
-        let stack = default_embedder_stack();
-        let registry_stack = stack.clone();
-
-        let build_result = build_index_generation_sync(&staging_dir, stack, indexable_docs)
-            .and_then(|stats| validate_built_generation(&staging_dir, stats, document_counts));
-
-        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-        match build_result {
-            Ok(stats) => {
-                ensure_active_embedding_registry_record(&db, &workspace_id, &registry_stack)?;
-                let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&registry_stack);
-                write_index_metadata(
-                    &staging_dir,
-                    source_generation,
-                    document_counts,
-                    embedder_fingerprint.as_ref(),
-                )?;
-                publish_staged_index(&index_dir, &staging_dir)?;
-
-                Ok(IndexRebuildReport {
-                    status: if documents_total == 0 {
-                        IndexRebuildStatus::NoDocuments
-                    } else {
-                        IndexRebuildStatus::Success
-                    },
-                    memories_indexed,
-                    sessions_indexed,
-                    artifacts_indexed,
-                    rules_indexed,
-                    evidence_indexed,
-                    documents_total,
-                    index_dir,
-                    elapsed_ms,
-                    dry_run: false,
-                    evidence_admission: evidence_admission.clone(),
-                    errors: stats
-                        .errors
-                        .iter()
-                        .map(|(id, e)| format!("{id}: {e}"))
-                        .collect(),
-                    runtime_profile: runtime_profile.clone(),
-                })
-            }
-            Err(e) => Ok(IndexRebuildReport {
-                status: IndexRebuildStatus::IndexError,
-                memories_indexed,
-                sessions_indexed,
-                artifacts_indexed,
-                rules_indexed,
-                evidence_indexed,
-                documents_total,
-                index_dir,
-                elapsed_ms,
-                dry_run: false,
-                evidence_admission,
-                errors: vec![e],
-                runtime_profile: runtime_profile.clone(),
-            }),
-        }
-    })();
-
-    release_index_publish_lock(&db, &workspace_id, &holder_id);
-    result
+    match build_result {
+        Ok(stats) => Ok(IndexRebuildReport {
+            status: if documents_total == 0 {
+                IndexRebuildStatus::NoDocuments
+            } else {
+                IndexRebuildStatus::Success
+            },
+            memories_indexed,
+            sessions_indexed,
+            artifacts_indexed,
+            rules_indexed,
+            evidence_indexed,
+            documents_total,
+            index_dir,
+            elapsed_ms,
+            dry_run: false,
+            evidence_admission: evidence_admission.clone(),
+            errors: stats
+                .errors
+                .iter()
+                .map(|(id, e)| format!("{id}: {e}"))
+                .collect(),
+            runtime_profile: runtime_profile.clone(),
+        }),
+        Err(IndexRebuildError::Cancelled(reason)) => Err(IndexRebuildError::Cancelled(reason)),
+        Err(error) => Ok(IndexRebuildReport {
+            status: IndexRebuildStatus::IndexError,
+            memories_indexed,
+            sessions_indexed,
+            artifacts_indexed,
+            rules_indexed,
+            evidence_indexed,
+            documents_total,
+            index_dir,
+            elapsed_ms,
+            dry_run: false,
+            evidence_admission,
+            errors: vec![error.to_string()],
+            runtime_profile: runtime_profile.clone(),
+        }),
+    }
 }
 
 pub fn reembed_index(
     options: &IndexReembedOptions,
 ) -> Result<IndexReembedReport, IndexRebuildError> {
+    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+        reembed_index_with_cx(&cx, options).await
+    })
+    .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
+}
+
+pub async fn reembed_index_with_cx(
+    cx: &asupersync::Cx,
+    options: &IndexReembedOptions,
+) -> Result<IndexReembedReport, IndexRebuildError> {
+    index_checkpoint(cx)?;
     let start = Instant::now();
     let database_path = options.resolve_database_path();
     let index_dir = options.resolve_index_dir();
@@ -1332,6 +1604,11 @@ pub fn reembed_index(
 
     let db = DbConnection::open_file(&database_path)?;
     let workspace_id = resolve_index_workspace_id(&db, &options.workspace_path)?;
+    let _publish_lock = if options.dry_run {
+        None
+    } else {
+        Some(IndexPublishLockOwner::acquire(cx, &db, &workspace_id)?)
+    };
     let stack = default_embedder_stack();
     let WorkspaceIndexSourceSnapshot {
         generation: source_generation,
@@ -1346,6 +1623,7 @@ pub fn reembed_index(
         evidence_admission,
         open_job_ids: _,
     } = collect_workspace_index_source_snapshot(&db, &workspace_id)?;
+    index_checkpoint(cx)?;
     let current_vector_coverage =
         embedding_vector_coverage(&index_dir, documents_total, read_fast_vector_record_count);
     let embedding = reembed_embedding_summary(&db, &workspace_id, &stack, current_vector_coverage)?;
@@ -1397,166 +1675,179 @@ pub fn reembed_index(
         Ok(true) => {}
         Ok(false) => {
             let message = format!("Failed to start re-embedding job {job_id}");
-            if let Err(fail_error) = db.fail_search_index_job(&job_id, &message) {
-                tracing::error!(
+            match db.fail_search_index_job(&job_id, &message) {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    target: "ee::index::reembed",
+                    job_id,
+                    "unstartable re-embedding job was not running, so the failure transition was not applied"
+                ),
+                Err(fail_error) => tracing::error!(
                     target: "ee::index::reembed",
                     job_id,
                     error = %fail_error,
                     "failed to mark unstartable re-embedding job failed"
-                );
+                ),
             }
             return Err(IndexRebuildError::Index(message));
         }
         Err(error) => {
             let message = error.to_string();
-            if let Err(fail_error) = db.fail_search_index_job(&job_id, &message) {
-                tracing::error!(
+            match db.fail_search_index_job(&job_id, &message) {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    target: "ee::index::reembed",
+                    job_id,
+                    "re-embedding job start failed before a running row was available to fail"
+                ),
+                Err(fail_error) => tracing::error!(
                     target: "ee::index::reembed",
                     job_id,
                     error = %fail_error,
                     "failed to mark re-embedding job failed after start error"
-                );
+                ),
             }
             return Err(IndexRebuildError::Database(error));
         }
     }
+    let _job_finalizer = RunningIndexJobFinalizer {
+        cx,
+        db: &db,
+        job_id: job_id.clone(),
+    };
 
-    // Acquire index publish lock to prevent concurrent publish races.
-    let holder_id = generate_index_holder_id();
-    if let Err(error) = acquire_index_publish_lock(&db, &workspace_id, &holder_id) {
-        let message = error.to_string();
-        if let Err(fail_error) = db.fail_search_index_job(&job_id, &message) {
-            tracing::error!(
-                target: "ee::index::reembed",
-                job_id,
-                error = %fail_error,
-                "failed to mark re-embedding job failed after publish-lock error"
+    let _recovery_action = recover_interrupted_publish(&index_dir)?;
+    ensure_active_embedding_registry_record(&db, &workspace_id, &stack)?;
+    let build_result = publish_full_index_generation(
+        cx,
+        &index_dir,
+        indexable_docs,
+        source_generation,
+        document_counts,
+        || commit_running_index_job_success(&db, &job_id, documents_total),
+    )
+    .await;
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    match build_result {
+        Ok(stats) => {
+            let published_coverage = EmbeddingVectorCoverage::new(
+                usize::try_from(documents_total).unwrap_or(usize::MAX),
+                usize::try_from(documents_total).unwrap_or(usize::MAX),
             );
-        }
-        return Err(error);
-    }
-
-    let result = (|| -> Result<IndexReembedReport, IndexRebuildError> {
-        let _recovery_action = recover_interrupted_publish(&index_dir)?;
-        let staging_dir = create_publish_staging_dir(&index_dir)?;
-
-        let registry_stack = stack.clone();
-        let build_result = build_index_generation_sync(&staging_dir, stack, indexable_docs)
-            .and_then(|stats| validate_built_generation(&staging_dir, stats, document_counts));
-        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-        match build_result {
-            Ok(stats) => {
-                ensure_active_embedding_registry_record(&db, &workspace_id, &registry_stack)?;
-                db.update_search_index_job_progress(&job_id, documents_total)?;
-                let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&registry_stack);
-                write_index_metadata(
-                    &staging_dir,
-                    source_generation,
-                    document_counts,
-                    embedder_fingerprint.as_ref(),
-                )
-                .and_then(|()| publish_staged_index(&index_dir, &staging_dir))?;
-                db.complete_search_index_job(&job_id, documents_total)?;
-                let published_coverage = EmbeddingVectorCoverage::new(
-                    usize::try_from(documents_total).unwrap_or(usize::MAX),
-                    usize::try_from(documents_total).unwrap_or(usize::MAX),
-                );
-                let published_embedding = ReembedEmbeddingSummary::from_posture(
-                    embedding
-                        .posture
-                        .clone()
-                        .with_vector_coverage(published_coverage),
-                );
-                let documents_embedded = published_embedding.documents_embedded();
-
-                Ok(IndexReembedReport {
-                    status: if documents_total == 0 {
-                        IndexReembedStatus::NoDocuments
-                    } else {
-                        IndexReembedStatus::Success
-                    },
-                    job_id: Some(job_id.clone()),
-                    job_status: "completed".to_owned(),
-                    job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
-                    document_source: None,
-                    embedding_scope: "all_documents".to_owned(),
-                    embedding: published_embedding,
-                    memories_indexed,
-                    sessions_indexed,
-                    artifacts_indexed,
-                    rules_indexed,
-                    evidence_indexed,
-                    documents_embedded,
-                    documents_total,
-                    index_dir,
-                    elapsed_ms,
-                    dry_run: false,
-                    idempotency_key,
-                    evidence_admission: evidence_admission.clone(),
-                    errors: stats
-                        .errors
-                        .iter()
-                        .map(|(id, e)| format!("{id}: {e}"))
-                        .collect(),
-                    runtime_profile: runtime_profile.clone(),
-                })
-            }
-            Err(error) => {
-                let primary_error = error;
-                let mut errors = vec![primary_error.clone()];
-                if let Err(fail_error) = db.fail_search_index_job(&job_id, &primary_error) {
-                    errors.push(format!(
-                        "failed to mark re-embedding job failed: {fail_error}"
-                    ));
-                }
-                let documents_embedded = embedding.documents_embedded();
-
-                Ok(IndexReembedReport {
-                    status: IndexReembedStatus::IndexError,
-                    job_id: Some(job_id.clone()),
-                    job_status: "failed".to_owned(),
-                    job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
-                    document_source: None,
-                    embedding_scope: "all_documents".to_owned(),
-                    embedding,
-                    memories_indexed,
-                    sessions_indexed,
-                    artifacts_indexed,
-                    rules_indexed,
-                    evidence_indexed,
-                    documents_embedded,
-                    documents_total,
-                    index_dir,
-                    elapsed_ms,
-                    dry_run: false,
-                    idempotency_key,
-                    evidence_admission,
-                    errors,
-                    runtime_profile: runtime_profile.clone(),
-                })
-            }
-        }
-    })();
-
-    if let Err(error) = &result {
-        let message = error.to_string();
-        if let Err(fail_error) = db.fail_search_index_job(&job_id, &message) {
-            tracing::error!(
-                target: "ee::index::reembed",
-                job_id,
-                error = %fail_error,
-                "failed to mark re-embedding job failed after publication error"
+            let published_embedding = ReembedEmbeddingSummary::from_posture(
+                embedding
+                    .posture
+                    .clone()
+                    .with_vector_coverage(published_coverage),
             );
+            let documents_embedded = published_embedding.documents_embedded();
+
+            Ok(IndexReembedReport {
+                status: if documents_total == 0 {
+                    IndexReembedStatus::NoDocuments
+                } else {
+                    IndexReembedStatus::Success
+                },
+                job_id: Some(job_id.clone()),
+                job_status: "completed".to_owned(),
+                job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
+                document_source: None,
+                embedding_scope: "all_documents".to_owned(),
+                embedding: published_embedding,
+                memories_indexed,
+                sessions_indexed,
+                artifacts_indexed,
+                rules_indexed,
+                evidence_indexed,
+                documents_embedded,
+                documents_total,
+                index_dir,
+                elapsed_ms,
+                dry_run: false,
+                idempotency_key,
+                evidence_admission: evidence_admission.clone(),
+                errors: stats
+                    .errors
+                    .iter()
+                    .map(|(id, e)| format!("{id}: {e}"))
+                    .collect(),
+                runtime_profile: runtime_profile.clone(),
+            })
+        }
+        Err(IndexRebuildError::Cancelled(reason)) => {
+            match db.cancel_running_search_index_job(&job_id) {
+                Ok(true) => {}
+                Ok(false) => tracing::error!(
+                    target: "ee::index::reembed",
+                    job_id,
+                    "failed to mark cancelled re-embedding job cancelled because its running row was not updated"
+                ),
+                Err(cancel_error) => tracing::error!(
+                    target: "ee::index::reembed",
+                    job_id,
+                    error = %cancel_error,
+                    "failed to mark cancelled re-embedding job cancelled"
+                ),
+            }
+            Err(IndexRebuildError::Cancelled(reason))
+        }
+        Err(error) => {
+            let primary_error = error.to_string();
+            let mut errors = vec![primary_error.clone()];
+            match db.fail_search_index_job(&job_id, &primary_error) {
+                Ok(true) => {}
+                Ok(false) => errors.push(
+                    "failed to mark re-embedding job failed: running row was not updated"
+                        .to_owned(),
+                ),
+                Err(fail_error) => errors.push(format!(
+                    "failed to mark re-embedding job failed: {fail_error}"
+                )),
+            }
+            let documents_embedded = embedding.documents_embedded();
+
+            Ok(IndexReembedReport {
+                status: IndexReembedStatus::IndexError,
+                job_id: Some(job_id.clone()),
+                job_status: "failed".to_owned(),
+                job_type: SearchIndexJobType::FullRebuild.as_str().to_owned(),
+                document_source: None,
+                embedding_scope: "all_documents".to_owned(),
+                embedding,
+                memories_indexed,
+                sessions_indexed,
+                artifacts_indexed,
+                rules_indexed,
+                evidence_indexed,
+                documents_embedded,
+                documents_total,
+                index_dir,
+                elapsed_ms,
+                dry_run: false,
+                idempotency_key,
+                evidence_admission,
+                errors,
+                runtime_profile: runtime_profile.clone(),
+            })
         }
     }
-    release_index_publish_lock(&db, &workspace_id, &holder_id);
-    result
 }
 
 pub fn process_index_jobs(
     options: &IndexProcessingOptions,
 ) -> Result<IndexProcessingReport, IndexRebuildError> {
+    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+        process_index_jobs_with_cx(&cx, options).await
+    })
+    .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
+}
+
+pub async fn process_index_jobs_with_cx(
+    cx: &asupersync::Cx,
+    options: &IndexProcessingOptions,
+) -> Result<IndexProcessingReport, IndexRebuildError> {
+    index_checkpoint(cx)?;
     let start = Instant::now();
     let database_path = options.resolve_database_path();
     let index_dir = options.resolve_index_dir();
@@ -1629,7 +1920,7 @@ pub fn process_index_jobs(
     let mut failed_jobs = 0_u32;
 
     for job in pending_jobs {
-        let result = process_one_index_job(&db, &job, &index_dir)?;
+        let result = process_one_index_job_with_cx(cx, &db, &job, &index_dir).await?;
         if result.outcome == "failed" {
             failed_jobs = failed_jobs.saturating_add(1);
         } else {
@@ -1676,13 +1967,11 @@ pub(crate) fn process_pending_index_jobs_coalesced(
     index_dir: &Path,
     job_limit: Option<u32>,
 ) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError> {
-    process_pending_index_jobs_coalesced_after_snapshot(
-        db,
-        workspace_id,
-        index_dir,
-        job_limit,
-        || Ok(()),
-    )
+    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+        process_pending_index_jobs_coalesced_with_cx(&cx, db, workspace_id, index_dir, job_limit)
+            .await
+    })
+    .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
 }
 
 fn process_pending_index_jobs_coalesced_after_snapshot<F>(
@@ -1695,15 +1984,62 @@ fn process_pending_index_jobs_coalesced_after_snapshot<F>(
 where
     F: FnOnce() -> Result<(), IndexRebuildError>,
 {
+    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+        process_pending_index_jobs_coalesced_after_snapshot_with_cx(
+            &cx,
+            db,
+            workspace_id,
+            index_dir,
+            job_limit,
+            after_snapshot,
+        )
+        .await
+    })
+    .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
+}
+
+pub(crate) async fn process_pending_index_jobs_coalesced_with_cx(
+    cx: &asupersync::Cx,
+    db: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+    job_limit: Option<u32>,
+) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError> {
+    process_pending_index_jobs_coalesced_after_snapshot_with_cx(
+        cx,
+        db,
+        workspace_id,
+        index_dir,
+        job_limit,
+        || Ok(()),
+    )
+    .await
+}
+
+async fn process_pending_index_jobs_coalesced_after_snapshot_with_cx<F>(
+    cx: &asupersync::Cx,
+    db: &DbConnection,
+    workspace_id: &str,
+    index_dir: &Path,
+    job_limit: Option<u32>,
+    after_snapshot: F,
+) -> Result<Vec<IndexProcessingJobReport>, IndexRebuildError>
+where
+    F: FnOnce() -> Result<(), IndexRebuildError>,
+{
+    index_checkpoint(cx)?;
     const COALESCED_MODE: &str = "coalesced_full_rebuild";
-    // bd-d67os.7: mode reported when the coalesced batch applied its K touched
-    // docs as a single incremental merge step instead of a full rebuild.
-    const COALESCED_INCREMENTAL_MODE: &str = "coalesced_incremental";
     let pending = db.list_pending_search_index_jobs(workspace_id, job_limit)?;
     let mut claimed = Vec::new();
+    let mut _job_finalizers = Vec::new();
     let mut reports = Vec::new();
     for job in pending {
         if db.start_search_index_job(&job.id)? {
+            _job_finalizers.push(RunningIndexJobFinalizer {
+                cx,
+                db,
+                job_id: job.id.clone(),
+            });
             claimed.push(job);
         } else {
             reports.push(IndexProcessingJobReport {
@@ -1723,6 +2059,7 @@ where
     if claimed.is_empty() {
         return Ok(reports);
     }
+    let _publish_lock = IndexPublishLockOwner::acquire(cx, db, workspace_id)?;
 
     let WorkspaceIndexSourceSnapshot {
         generation: published_generation,
@@ -1733,17 +2070,15 @@ where
         ..
     } = collect_workspace_index_source_snapshot(db, workspace_id)?;
     after_snapshot()?;
+    index_checkpoint(cx)?;
     for job in &claimed {
-        db.update_search_index_job_total(&job.id, documents_total)?;
+        update_running_index_job_total(db, &job.id, documents_total)?;
     }
 
-    // bd-d67os.7: when every coalesced job is a simple single-document upsert to
-    // a doc that is currently present, and the index already exists, apply the K
-    // touched docs as ONE incremental merge step instead of a full rebuild — this
-    // is where group-commit (Track B) and incremental intake (Track C) compound.
-    // Any FullRebuild job, deleted/missing target, absent index, or incremental
-    // error falls back to the proven full-rebuild path, so the published index
-    // state is always correct; only the all-upsert case takes the merge path.
+    // Cancellation-aware intake publishes only a complete staged generation.
+    // We still probe the former incremental eligibility contract so reports
+    // preserve an actionable fallback reason, but never mutate the active fast,
+    // quality, or lexical tiers in place.
     let claimed_ids = claimed
         .iter()
         .map(|job| job.id.as_str())
@@ -1760,70 +2095,58 @@ where
     if uncovered_open_job {
         processing_mode.push_str("_open_sibling_full_rebuild");
     }
-    let mut fallback_to_full = None;
-    let holder_id = generate_index_holder_id();
-    acquire_index_publish_lock(db, workspace_id, &holder_id)?;
-    let incremental_outcome = match incremental_batch {
-        Some(documents) => apply_incremental_index_batch_sync(
-            index_dir,
-            default_embedder_stack(),
-            documents,
-            published_generation,
-            document_counts,
-        ),
-        None => IncrementalApplyOutcome::FullRebuildRequired,
-    };
-    let full_rebuild_required = match incremental_outcome {
-        IncrementalApplyOutcome::Applied { .. } => {
-            processing_mode = COALESCED_INCREMENTAL_MODE.to_owned();
-            false
-        }
-        IncrementalApplyOutcome::Fallback { reason, detail } => {
-            tracing::info!(
-                target: "ee::index",
-                workspace_id = %workspace_id,
-                claimed_jobs = claimed.len(),
-                fallback_to_full = reason.as_str(),
-                detail = %detail,
-                "coalesced incremental index intake fell back to full rebuild"
-            );
-            processing_mode.push_str("_fallback_to_full");
-            fallback_to_full = Some(reason.as_str().to_owned());
-            true
-        }
-        IncrementalApplyOutcome::FullRebuildRequired => true,
-    };
-    let build_result = if full_rebuild_required {
-        (|| -> Result<(), String> {
-            let _recovery_action =
-                recover_interrupted_publish(index_dir).map_err(|error| error.to_string())?;
-            let staging_dir =
-                create_publish_staging_dir(index_dir).map_err(|error| error.to_string())?;
-            let stack = default_embedder_stack();
-            let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
-            build_index_generation_sync(&staging_dir, stack, indexable_docs)
-                .and_then(|stats| validate_built_generation(&staging_dir, stats, document_counts))
-                .and_then(|_stats| {
-                    write_index_metadata(
-                        &staging_dir,
-                        published_generation,
-                        document_counts,
-                        embedder_fingerprint.as_ref(),
-                    )
-                    .and_then(|()| publish_staged_index(index_dir, &staging_dir))
-                    .map_err(|error| error.to_string())
-                })
-        })()
-    } else {
-        Ok(())
-    };
-    release_index_publish_lock(db, workspace_id, &holder_id);
+    let fallback_to_full = incremental_batch.as_ref().and_then(|documents| {
+        let max_generation_lag = u64::try_from(documents.len()).unwrap_or(u64::MAX).max(1);
+        validate_incremental_index_metadata(index_dir, published_generation, max_generation_lag)
+            .err()
+            .map(|fallback| {
+                let reason = fallback.reason;
+                let detail = fallback.detail;
+                tracing::info!(
+                    target: "ee::index",
+                    workspace_id = %workspace_id,
+                    claimed_jobs = claimed.len(),
+                    fallback_to_full = reason.as_str(),
+                    detail = %detail,
+                    "coalesced incremental index intake fell back to full rebuild"
+                );
+                processing_mode.push_str("_fallback_to_full");
+                reason.as_str().to_owned()
+            })
+    });
+    if incremental_batch.is_some() && fallback_to_full.is_none() {
+        processing_mode.push_str("_staged_full_rebuild");
+    }
+
+    let _recovery_action = recover_interrupted_publish(index_dir)?;
+    let build_result = publish_full_index_generation(
+        cx,
+        index_dir,
+        indexable_docs,
+        published_generation,
+        document_counts,
+        || {
+            db.with_transaction_error(|| {
+                for job in &claimed {
+                    let progressed =
+                        db.update_search_index_job_progress(&job.id, documents_total)?;
+                    require_index_job_transition(
+                        progressed,
+                        &job.id,
+                        "running_progress_updated",
+                    )?;
+                    let completed = db.complete_search_index_job(&job.id, documents_total)?;
+                    require_index_job_transition(completed, &job.id, "running_completed")?;
+                }
+                Ok(())
+            })
+        },
+    )
+    .await;
 
     match build_result {
-        Ok(()) => {
+        Ok(_) => {
             for job in &claimed {
-                db.update_search_index_job_progress(&job.id, documents_total)?;
-                db.complete_search_index_job(&job.id, documents_total)?;
                 reports.push(IndexProcessingJobReport {
                     job_id: job.id.clone(),
                     job_type: job.job_type.clone(),
@@ -1838,13 +2161,14 @@ where
                 });
             }
         }
+        Err(IndexRebuildError::Cancelled(reason)) => {
+            return Err(IndexRebuildError::Cancelled(reason));
+        }
         Err(error) => {
+            let primary_error = error.to_string();
             for job in &claimed {
-                let mut error_message = error.clone();
-                if let Err(fail_error) = db.fail_search_index_job(&job.id, &error_message) {
-                    error_message.push_str("; failed to mark search index job failed: ");
-                    error_message.push_str(&fail_error.to_string());
-                }
+                let mut error_message = primary_error.clone();
+                append_failed_index_job_transition(db, &job.id, &mut error_message);
                 reports.push(IndexProcessingJobReport {
                     job_id: job.id.clone(),
                     job_type: job.job_type.clone(),
@@ -1879,7 +2203,10 @@ fn process_one_index_job(
     job: &StoredSearchIndexJob,
     index_dir: &Path,
 ) -> Result<IndexProcessingJobReport, IndexRebuildError> {
-    process_one_index_job_after_snapshot(db, job, index_dir, || Ok(()))
+    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+        process_one_index_job_with_cx(&cx, db, job, index_dir).await
+    })
+    .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
 }
 
 fn process_one_index_job_after_snapshot<F>(
@@ -1891,6 +2218,32 @@ fn process_one_index_job_after_snapshot<F>(
 where
     F: FnOnce() -> Result<(), IndexRebuildError>,
 {
+    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+        process_one_index_job_after_snapshot_with_cx(&cx, db, job, index_dir, after_snapshot).await
+    })
+    .map_err(|error| IndexRebuildError::Index(format!("Failed to start index runtime: {error}")))?
+}
+
+async fn process_one_index_job_with_cx(
+    cx: &asupersync::Cx,
+    db: &DbConnection,
+    job: &StoredSearchIndexJob,
+    index_dir: &Path,
+) -> Result<IndexProcessingJobReport, IndexRebuildError> {
+    process_one_index_job_after_snapshot_with_cx(cx, db, job, index_dir, || Ok(())).await
+}
+
+async fn process_one_index_job_after_snapshot_with_cx<F>(
+    cx: &asupersync::Cx,
+    db: &DbConnection,
+    job: &StoredSearchIndexJob,
+    index_dir: &Path,
+    after_snapshot: F,
+) -> Result<IndexProcessingJobReport, IndexRebuildError>
+where
+    F: FnOnce() -> Result<(), IndexRebuildError>,
+{
+    index_checkpoint(cx)?;
     let mut processing_mode = processing_mode_for_job(job).to_owned();
     if !db.start_search_index_job(&job.id)? {
         return Ok(IndexProcessingJobReport {
@@ -1906,6 +2259,12 @@ where
             error: Some("search index job was not pending".to_owned()),
         });
     }
+    let _job_finalizer = RunningIndexJobFinalizer {
+        cx,
+        db,
+        job_id: job.id.clone(),
+    };
+    let _publish_lock = IndexPublishLockOwner::acquire(cx, db, &job.workspace_id)?;
 
     let WorkspaceIndexSourceSnapshot {
         generation: published_generation,
@@ -1916,15 +2275,9 @@ where
         ..
     } = collect_workspace_index_source_snapshot(db, &job.workspace_id)?;
     after_snapshot()?;
-    db.update_search_index_job_total(&job.id, documents_total)?;
+    index_checkpoint(cx)?;
+    update_running_index_job_total(db, &job.id, documents_total)?;
 
-    let incremental_target = incremental_document_id_for_job(job);
-    let incremental_document = incremental_target.and_then(|document_id| {
-        indexable_docs
-            .iter()
-            .find(|document| document.id == document_id)
-            .cloned()
-    });
     // bd-2qmvp: the single-document incremental path upserts only its own
     // document yet stamps the current MAX workspace generation (see
     // `published_generation` below). Under concurrent single-document writes a
@@ -1947,7 +2300,9 @@ where
     if job_is_single_document && sibling_index_jobs_pending {
         processing_mode.push_str("_sibling_pending_full_rebuild");
     }
-    let should_try_incremental = job_is_single_document && !sibling_index_jobs_pending;
+    if job_is_single_document && !sibling_index_jobs_pending {
+        processing_mode.push_str("_staged_full_rebuild");
+    }
 
     // Publish the index at the database generation (the audit-inclusive
     // max of source-document and audited-mutation counts), matching the
@@ -1956,91 +2311,21 @@ where
     // behind db_generation after `ee remember` wrote its audit rows, which
     // falsely tripped `search_index_stale` on the very next search even
     // though the job had already applied synchronously. (agent-UX item 5)
-    // Acquire index publish lock to prevent concurrent publish races.
-    let holder_id = generate_index_holder_id();
-    acquire_index_publish_lock(db, &job.workspace_id, &holder_id)?;
-
-    let result = (|| -> Result<IndexProcessingJobReport, IndexRebuildError> {
+    let result = async {
         let _recovery_action = recover_interrupted_publish(index_dir)?;
-        let incremental_outcome = if should_try_incremental {
-            match incremental_target {
-                Some(document_id) => apply_incremental_index_change_sync(
-                    index_dir,
-                    default_embedder_stack(),
-                    document_id,
-                    incremental_document.clone(),
-                    published_generation,
-                    document_counts,
-                ),
-                None => IncrementalApplyOutcome::Fallback {
-                    reason: missing_incremental_target_reason(job),
-                    detail: "incremental search index job did not include a document_id".to_owned(),
-                },
-            }
-        } else {
-            IncrementalApplyOutcome::FullRebuildRequired
-        };
-
-        let fallback_to_full = match incremental_outcome {
-            IncrementalApplyOutcome::Applied { documents_indexed } => {
-                db.update_search_index_job_progress(&job.id, documents_indexed)?;
-                db.complete_search_index_job(&job.id, documents_indexed)?;
-                return Ok(IndexProcessingJobReport {
-                    job_id: job.id.clone(),
-                    job_type: job.job_type.clone(),
-                    document_source: job.document_source.clone(),
-                    document_id: job.document_id.clone(),
-                    outcome: "completed".to_owned(),
-                    processing_mode,
-                    fallback_to_full: None,
-                    documents_total,
-                    documents_indexed,
-                    error: None,
-                });
-            }
-            IncrementalApplyOutcome::Fallback { reason, detail } => {
-                tracing::info!(
-                    target: "ee::index",
-                    job_id = %job.id,
-                    job_type = %job.job_type,
-                    document_source = ?job.document_source,
-                    document_id = ?job.document_id,
-                    fallback_to_full = reason.as_str(),
-                    detail = %detail,
-                    "incremental index intake fell back to full rebuild"
-                );
-                processing_mode.push_str("_fallback_to_full");
-                if documents_total == 0 && reason == IncrementalFallbackReason::IndexAbsent {
-                    db.complete_search_index_job(&job.id, 0)?;
-                    return Ok(IndexProcessingJobReport {
-                        job_id: job.id.clone(),
-                        job_type: job.job_type.clone(),
-                        document_source: job.document_source.clone(),
-                        document_id: job.document_id.clone(),
-                        outcome: "completed_no_documents".to_owned(),
-                        processing_mode,
-                        fallback_to_full: Some(reason.as_str().to_owned()),
-                        documents_total: 0,
-                        documents_indexed: 0,
-                        error: None,
-                    });
-                }
-                Some(reason.as_str().to_owned())
-            }
-            IncrementalApplyOutcome::FullRebuildRequired => None,
-        };
-
+        let fallback_to_full = None;
         let build_result = publish_full_index_generation(
+            cx,
             index_dir,
             indexable_docs,
             published_generation,
             document_counts,
-        );
+            || commit_running_index_job_success(db, &job.id, documents_total),
+        )
+        .await;
 
         match build_result {
             Ok(stats) => {
-                db.update_search_index_job_progress(&job.id, documents_total)?;
-                db.complete_search_index_job(&job.id, documents_total)?;
                 let mut errors = stats
                     .errors
                     .iter()
@@ -2064,12 +2349,10 @@ where
                     },
                 })
             }
+            Err(IndexRebuildError::Cancelled(reason)) => Err(IndexRebuildError::Cancelled(reason)),
             Err(error) => {
-                let mut error_message = error;
-                if let Err(fail_error) = db.fail_search_index_job(&job.id, &error_message) {
-                    error_message.push_str("; failed to mark search index job failed: ");
-                    error_message.push_str(&fail_error.to_string());
-                }
+                let mut error_message = error.to_string();
+                append_failed_index_job_transition(db, &job.id, &mut error_message);
                 Ok(IndexProcessingJobReport {
                     job_id: job.id.clone(),
                     job_type: job.job_type.clone(),
@@ -2084,9 +2367,9 @@ where
                 })
             }
         }
-    })();
+    }
+    .await;
 
-    release_index_publish_lock(db, &job.workspace_id, &holder_id);
     result
 }
 
@@ -2114,6 +2397,7 @@ impl IncrementalFallbackReason {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 enum IncrementalApplyOutcome {
     Applied {
         documents_indexed: u32,
@@ -2168,14 +2452,6 @@ fn coalesced_incremental_batch(
     (!documents.is_empty()).then_some(documents)
 }
 
-fn missing_incremental_target_reason(job: &StoredSearchIndexJob) -> IncrementalFallbackReason {
-    if job.documents_total > 1 {
-        IncrementalFallbackReason::DeltaOverThreshold
-    } else {
-        IncrementalFallbackReason::ForcedReindex
-    }
-}
-
 fn incremental_fallback(
     reason: IncrementalFallbackReason,
     detail: impl Into<String>,
@@ -2186,30 +2462,39 @@ fn incremental_fallback(
     }
 }
 
-fn publish_full_index_generation(
+async fn publish_full_index_generation<F>(
+    cx: &asupersync::Cx,
     index_dir: &Path,
     indexable_docs: Vec<crate::search::IndexableDocument>,
     generation: u64,
     document_counts: IndexDocumentCounts,
-) -> Result<BuildStats, String> {
-    let staging_dir = create_publish_staging_dir(index_dir).map_err(|error| error.to_string())?;
+    commit_tail: F,
+) -> Result<BuildStats, IndexRebuildError>
+where
+    F: FnOnce() -> Result<(), IndexRebuildError>,
+{
+    index_checkpoint(cx)?;
+    let staging_dir = create_publish_staging_dir(index_dir)?;
     let stack = default_embedder_stack();
     let embedder_fingerprint = embedder_fingerprint_for_index_metadata(&stack);
-    build_index_generation_sync(&staging_dir, stack, indexable_docs)
-        .and_then(|stats| validate_built_generation(&staging_dir, stats, document_counts))
-        .and_then(|stats| {
-            write_index_metadata(
-                &staging_dir,
-                generation,
-                document_counts,
-                embedder_fingerprint.as_ref(),
-            )
-            .and_then(|()| publish_staged_index(index_dir, &staging_dir))
-            .map_err(|error| error.to_string())?;
-            Ok(stats)
-        })
+    let stats = build_index_generation(cx, &staging_dir, stack, indexable_docs).await?;
+    let stats = validate_built_generation(&staging_dir, stats, document_counts)
+        .map_err(IndexRebuildError::Index)?;
+    run_before_index_publish_hook(cx);
+    index_checkpoint(cx)?;
+    cx.masked(|| {
+        write_index_metadata(
+            &staging_dir,
+            generation,
+            document_counts,
+            embedder_fingerprint.as_ref(),
+        )?;
+        publish_staged_index_with_commit(index_dir, &staging_dir, commit_tail)
+    })?;
+    Ok(stats)
 }
 
+#[cfg(test)]
 fn apply_incremental_index_change_sync(
     index_dir: &Path,
     stack: EmbedderStack,
@@ -2283,6 +2568,7 @@ fn apply_incremental_index_change_sync(
 /// Mirrors [`apply_incremental_index_change_sync`] but upserts K documents into
 /// the existing index in one publish step; any error/panic degrades to a
 /// `Fallback`, which the caller turns into a full rebuild.
+#[cfg(test)]
 fn apply_incremental_index_batch_sync(
     index_dir: &Path,
     stack: EmbedderStack,
@@ -2354,6 +2640,7 @@ fn apply_incremental_index_batch_sync(
 /// same per-document merge the single-write path uses, so the resulting index
 /// state matches a full rebuild of the same corpus; metadata-existence is still
 /// validated up front so an absent/stale index degrades to a full rebuild.
+#[cfg(test)]
 async fn apply_incremental_index_batch(
     cx: &asupersync::Cx,
     index_dir: &Path,
@@ -2394,6 +2681,7 @@ async fn apply_incremental_index_batch(
     })
 }
 
+#[cfg(test)]
 async fn apply_incremental_index_change(
     cx: &asupersync::Cx,
     index_dir: &Path,
@@ -2549,6 +2837,7 @@ fn validate_incremental_index_metadata(
     Ok(())
 }
 
+#[cfg(test)]
 async fn upsert_incremental_document(
     cx: &asupersync::Cx,
     index_dir: &Path,
@@ -2626,6 +2915,7 @@ async fn upsert_incremental_document(
     Ok(())
 }
 
+#[cfg(test)]
 async fn delete_incremental_document(
     cx: &asupersync::Cx,
     index_dir: &Path,
@@ -3002,6 +3292,39 @@ fn create_publish_staging_dir(index_dir: &Path) -> Result<PathBuf, IndexRebuildE
 }
 
 fn publish_staged_index(index_dir: &Path, staging_dir: &Path) -> Result<(), IndexRebuildError> {
+    publish_staged_index_inner(index_dir, staging_dir).map(|_| ())
+}
+
+fn publish_staged_index_with_commit<F>(
+    index_dir: &Path,
+    staging_dir: &Path,
+    commit_tail: F,
+) -> Result<(), IndexRebuildError>
+where
+    F: FnOnce() -> Result<(), IndexRebuildError>,
+{
+    let retained_dir = publish_staged_index_inner(index_dir, staging_dir)?;
+    match commit_tail() {
+        Ok(()) => Ok(()),
+        Err(primary_error) => {
+            if let Err(rollback_error) = rollback_published_index(
+                index_dir,
+                staging_dir,
+                retained_dir.as_deref(),
+            ) {
+                return Err(IndexRebuildError::Index(format!(
+                    "index publication commit failed ({primary_error}); filesystem rollback also failed ({rollback_error})"
+                )));
+            }
+            Err(primary_error)
+        }
+    }
+}
+
+fn publish_staged_index_inner(
+    index_dir: &Path,
+    staging_dir: &Path,
+) -> Result<Option<PathBuf>, IndexRebuildError> {
     ensure_index_path_has_no_symlinks(staging_dir, "publish staged index generation")?;
     ensure_index_path_has_no_symlinks(index_dir, "publish staged index generation")?;
 
@@ -3022,7 +3345,7 @@ fn publish_staged_index(index_dir: &Path, staging_dir: &Path) -> Result<(), Inde
 
     if let Err(error) = rename_index_dir(staging_dir, index_dir, "publish staged index generation")
     {
-        if let Some(retained) = retained_dir
+        if let Some(retained) = retained_dir.as_deref()
             && !path_exists_no_follow(index_dir)
         {
             if let Err(recovery_error) =
@@ -3034,7 +3357,69 @@ fn publish_staged_index(index_dir: &Path, staging_dir: &Path) -> Result<(), Inde
         return Err(error);
     }
 
-    Ok(())
+    Ok(retained_dir)
+}
+
+fn rollback_published_index(
+    index_dir: &Path,
+    staging_dir: &Path,
+    retained_dir: Option<&Path>,
+) -> Result<(), IndexRebuildError> {
+    ensure_index_path_has_no_symlinks(index_dir, "roll back published index generation")?;
+    ensure_index_path_has_no_symlinks(staging_dir, "roll back published index generation")?;
+    if let Some(retained_dir) = retained_dir {
+        ensure_index_path_has_no_symlinks(
+            retained_dir,
+            "restore retained index generation after commit failure",
+        )?;
+    }
+
+    let mut rollback_errors = Vec::new();
+    if path_exists_no_follow(staging_dir) {
+        rollback_errors.push(format!(
+            "staging path unexpectedly exists: {}",
+            staging_dir.display()
+        ));
+    } else if path_exists_no_follow(index_dir) {
+        if let Err(error) = rename_index_dir(
+            index_dir,
+            staging_dir,
+            "retain unpublished index generation after commit failure",
+        ) {
+            rollback_errors.push(error.to_string());
+        }
+    } else {
+        rollback_errors.push(format!(
+            "published index path disappeared before rollback: {}",
+            index_dir.display()
+        ));
+    }
+
+    if let Some(retained_dir) = retained_dir {
+        if path_exists_no_follow(index_dir) {
+            rollback_errors.push(format!(
+                "cannot restore retained generation while active path still exists: {}",
+                index_dir.display()
+            ));
+        } else if !path_exists_no_follow(retained_dir) {
+            rollback_errors.push(format!(
+                "retained generation disappeared before rollback: {}",
+                retained_dir.display()
+            ));
+        } else if let Err(error) = rename_index_dir(
+            retained_dir,
+            index_dir,
+            "restore retained index generation after commit failure",
+        ) {
+            rollback_errors.push(error.to_string());
+        }
+    }
+
+    if rollback_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(IndexRebuildError::Index(rollback_errors.join("; ")))
+    }
 }
 
 /// GH#19: the embedder fingerprint stamped into `.ee/index/meta.json` at
@@ -3814,24 +4199,31 @@ struct BuildStats {
 /// it is what removes the last tombstoned/superseded document and advances the
 /// manifest to the captured database generation. The empty path creates the
 /// same fast/quality/lexical tiers as a normal build, just without records.
-fn build_index_generation_sync(
+async fn build_index_generation(
+    cx: &asupersync::Cx,
     index_dir: &Path,
     stack: EmbedderStack,
     documents: Vec<crate::search::IndexableDocument>,
-) -> Result<BuildStats, String> {
+) -> Result<BuildStats, IndexRebuildError> {
+    index_checkpoint(cx)?;
     if documents.is_empty() {
-        build_empty_index_sync(index_dir, stack)
+        build_empty_index(cx, index_dir, stack).await
     } else {
-        build_index_sync(index_dir, stack, documents)
+        build_index(cx, index_dir, stack, documents).await
     }
 }
 
-fn build_empty_index_sync(index_dir: &Path, stack: EmbedderStack) -> Result<BuildStats, String> {
+async fn build_empty_index(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    stack: EmbedderStack,
+) -> Result<BuildStats, IndexRebuildError> {
+    index_checkpoint(cx)?;
     std::fs::create_dir_all(index_dir).map_err(|error| {
-        format!(
+        IndexRebuildError::Index(format!(
             "failed to create empty index directory {}: {error}",
             index_dir.display()
-        )
+        ))
     })?;
 
     let has_quality_index = stack.quality().is_some();
@@ -3841,10 +4233,13 @@ fn build_empty_index_sync(index_dir: &Path, stack: EmbedderStack) -> Result<Buil
         fast_embedder.id(),
         fast_embedder.dimension(),
     )
-    .map_err(|error| format!("failed to create empty fast vector tier: {error}"))?;
-    fast_writer
-        .finish()
-        .map_err(|error| format!("failed to finish empty fast vector tier: {error}"))?;
+    .map_err(|error| {
+        IndexRebuildError::Index(format!("failed to create empty fast vector tier: {error}"))
+    })?;
+    fast_writer.finish().map_err(|error| {
+        IndexRebuildError::Index(format!("failed to finish empty fast vector tier: {error}"))
+    })?;
+    index_checkpoint(cx)?;
 
     if let Some(quality_embedder) = stack.quality_arc() {
         let quality_writer = VectorIndex::create(
@@ -3852,27 +4247,29 @@ fn build_empty_index_sync(index_dir: &Path, stack: EmbedderStack) -> Result<Buil
             quality_embedder.id(),
             quality_embedder.dimension(),
         )
-        .map_err(|error| format!("failed to create empty quality vector tier: {error}"))?;
-        quality_writer
-            .finish()
-            .map_err(|error| format!("failed to finish empty quality vector tier: {error}"))?;
+        .map_err(|error| {
+            IndexRebuildError::Index(format!(
+                "failed to create empty quality vector tier: {error}"
+            ))
+        })?;
+        quality_writer.finish().map_err(|error| {
+            IndexRebuildError::Index(format!(
+                "failed to finish empty quality vector tier: {error}"
+            ))
+        })?;
+        index_checkpoint(cx)?;
     }
 
     #[cfg(feature = "lexical-bm25")]
     {
         let lexical_path = index_dir.join(LEXICAL_INDEX_SUBDIR);
-        let lexical_result = crate::core::run_cli_future(async move {
-            let cx = asupersync::Cx::current()
-                .ok_or_else(|| "empty lexical index runtime context is unavailable".to_owned())?;
-            let lexical = TantivyIndex::create(&lexical_path)
-                .map_err(|error| format!("failed to create empty lexical tier: {error}"))?;
-            lexical
-                .commit(&cx)
-                .await
-                .map_err(|error| format!("failed to commit empty lexical tier: {error}"))
-        })
-        .map_err(|error| format!("empty lexical index runtime failed: {error}"))?;
-        lexical_result?;
+        let lexical = TantivyIndex::create(&lexical_path).map_err(|error| {
+            IndexRebuildError::Index(format!("failed to create empty lexical tier: {error}"))
+        })?;
+        lexical.commit(cx).await.map_err(|error| {
+            map_index_search_error(cx, "failed to commit empty lexical tier", error)
+        })?;
+        index_checkpoint(cx)?;
     }
 
     Ok(BuildStats {
@@ -3902,107 +4299,107 @@ pub(crate) async fn build_lexical_tier(
     cx: &asupersync::Cx,
     index_dir: &Path,
     documents: &[crate::search::IndexableDocument],
-) -> Result<(), String> {
+) -> Result<(), IndexRebuildError> {
+    index_checkpoint(cx)?;
     if documents.is_empty() {
         return Ok(());
     }
     let lexical_path = index_dir.join(LEXICAL_INDEX_SUBDIR);
-    let lexical = TantivyIndex::create(&lexical_path)
-        .map_err(|error| format!("failed to create lexical tier: {error}"))?;
+    let lexical = TantivyIndex::create(&lexical_path).map_err(|error| {
+        IndexRebuildError::Index(format!("failed to create lexical tier: {error}"))
+    })?;
     for document in documents {
-        if let Err(error) = lexical.index_document(cx, document).await {
-            tracing::warn!(
-                doc_id = %document.id,
-                error = %error,
-                "lexical indexing failed for document"
-            );
+        match lexical.index_document(cx, document).await {
+            Ok(()) => {}
+            Err(error @ SearchError::Cancelled { .. }) => {
+                return Err(map_index_search_error(
+                    cx,
+                    "lexical indexing cancelled",
+                    error,
+                ));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    doc_id = %document.id,
+                    error = %error,
+                    "lexical indexing failed for document"
+                );
+            }
         }
+        index_checkpoint(cx)?;
     }
     lexical
         .commit(cx)
         .await
-        .map_err(|error| format!("failed to commit lexical tier: {error}"))
+        .map_err(|error| map_index_search_error(cx, "failed to commit lexical tier", error))?;
+    index_checkpoint(cx)
 }
 
+async fn build_index(
+    cx: &asupersync::Cx,
+    index_dir: &Path,
+    stack: EmbedderStack,
+    documents: Vec<crate::search::IndexableDocument>,
+) -> Result<BuildStats, IndexRebuildError> {
+    index_checkpoint(cx)?;
+    let source_count = documents.len();
+    // frankensearch d117ce1f made Quill the backend of its `lexical`
+    // feature, so `IndexBuilder` no longer compiles a Tantivy write arm under
+    // ee's `lexical-tantivy` lane. Stage the same corpus for ee's Tantivy tier.
+    #[cfg(feature = "lexical-bm25")]
+    let lexical_documents = documents.clone();
+    let builder = IndexBuilder::new(index_dir)
+        .with_embedder_stack(stack)
+        .add_documents(documents);
+
+    let stats = builder
+        .build(cx)
+        .await
+        .map_err(|error| map_index_search_error(cx, "index build failed", error))?;
+    index_checkpoint(cx)?;
+
+    #[cfg(feature = "lexical-bm25")]
+    build_lexical_tier(cx, index_dir, &lexical_documents).await?;
+    index_checkpoint(cx)?;
+
+    let errors = stats
+        .errors
+        .into_iter()
+        .map(|(id, error)| (id, format!("fast tier: {error}")))
+        .collect::<Vec<_>>();
+    Ok(BuildStats {
+        source_count,
+        doc_count: stats.doc_count,
+        error_count: stats.error_count,
+        has_quality_index: stats.has_quality_index,
+        errors,
+    })
+}
+
+#[cfg(test)]
 fn build_index_sync(
     index_dir: &Path,
     stack: EmbedderStack,
     documents: Vec<crate::search::IndexableDocument>,
 ) -> Result<BuildStats, String> {
-    let index_dir_owned = index_dir.to_path_buf();
-    let result_holder: Arc<Mutex<Option<Result<BuildStats, String>>>> = Arc::new(Mutex::new(None));
-    let task_result = Arc::clone(&result_holder);
-    let runtime_error_result = Arc::clone(&result_holder);
+    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+        build_index(&cx, index_dir, stack, documents).await
+    })
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
+}
 
-    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let runtime_result = crate::core::run_cli_future(async move {
-            // Invariant: run_cli_future's block_on installs an ambient runtime Cx.
-            #[allow(clippy::expect_used)]
-            let cx = asupersync::Cx::current()
-                .expect("run_cli_future's block_on installs an ambient runtime Cx");
-            let source_count = documents.len();
-            // frankensearch d117ce1f made Quill the backend of its `lexical`
-            // feature, so `IndexBuilder` no longer compiles a Tantivy write
-            // arm under ee's `lexical-tantivy` (cass-compat) lane. ee builds
-            // the Tantivy tier itself below, preserving the retired arm's
-            // exact semantics; stage a copy of every source document first,
-            // mirroring the builder's old deep-clone lexical staging (vector
-            // -tier embedding failures never excluded a document from the
-            // lexical arm).
-            #[cfg(feature = "lexical-bm25")]
-            let lexical_documents = documents.clone();
-            let builder = IndexBuilder::new(&index_dir_owned)
-                .with_embedder_stack(stack)
-                .add_documents(documents);
-
-            let build_result = builder.build(&cx).await;
-            let converted = match build_result {
-                Ok(stats) => {
-                    #[cfg(feature = "lexical-bm25")]
-                    let lexical_result =
-                        build_lexical_tier(&cx, &index_dir_owned, &lexical_documents).await;
-                    #[cfg(not(feature = "lexical-bm25"))]
-                    let lexical_result: Result<(), String> = Ok(());
-                    match lexical_result {
-                        Ok(()) => {
-                            let errors = stats
-                                .errors
-                                .into_iter()
-                                .map(|(id, error)| (id, format!("fast tier: {error}")))
-                                .collect::<Vec<_>>();
-                            Ok(BuildStats {
-                                source_count,
-                                doc_count: stats.doc_count,
-                                error_count: stats.error_count,
-                                has_quality_index: stats.has_quality_index,
-                                errors,
-                            })
-                        }
-                        Err(error) => Err(format!("Index build failed: {error}")),
-                    }
-                }
-                Err(e) => Err(format!("Index build failed: {e}")),
-            };
-            if let Ok(mut guard) = task_result.lock() {
-                *guard = Some(converted);
-            }
-        });
-
-        if let Err(e) = runtime_result
-            && let Ok(mut guard) = runtime_error_result.lock()
-        {
-            *guard = Some(Err(format!("Runtime failed: {e}")));
-        }
-    }));
-
-    match panic_result {
-        Ok(()) => result_holder
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.take())
-            .unwrap_or_else(|| Err("Index build result not captured".to_string())),
-        Err(_) => Err("Index build panicked".to_string()),
-    }
+#[cfg(test)]
+fn build_index_generation_sync(
+    index_dir: &Path,
+    stack: EmbedderStack,
+    documents: Vec<crate::search::IndexableDocument>,
+) -> Result<BuildStats, String> {
+    crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+        build_index_generation(&cx, index_dir, stack, documents).await
+    })
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
 }
 
 fn validate_built_generation(
@@ -9168,6 +9565,151 @@ mod tests {
         )
     }
 
+    #[test]
+    fn lab_runtime_cancellation_after_build_preserves_active_index_and_job_state() -> TestResult {
+        let root = unique_test_dir("reembed-cancel-before-publish");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        seed_reembed_database(&workspace, &database)?;
+
+        reembed_index(&IndexReembedOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: false,
+        })
+        .map_err(|error| format!("build baseline re-embedding index: {error}"))?;
+        let baseline = index_regular_file_snapshot(&index_dir)?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                "mem_01234567890123456789012346",
+                &crate::db::CreateMemoryInput {
+                    workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "This newer row must not appear in a cancelled index generation."
+                        .to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: Some("test://cancel-before-index-publish".to_owned()),
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: Some("unit-test".to_owned()),
+                    tags: vec!["cancellation".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let expected_message = "caller cancelled after index build before publication";
+        install_before_index_publish_hook(move |cx| {
+            cx.set_cancel_reason(asupersync::CancelReason::user(expected_message));
+        });
+
+        let options = IndexReembedOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: false,
+        };
+        let observation: Arc<Mutex<Option<Result<asupersync::CancelReason, String>>>> =
+            Arc::new(Mutex::new(None));
+        let task_observation = Arc::clone(&observation);
+        let mut lab =
+            asupersync::LabRuntime::new(asupersync::LabConfig::new(0xEE_90D).max_steps(256));
+        let lab_root = lab.state.create_root_region(asupersync::Budget::INFINITE);
+        let (task_id, _handle) = lab
+            .state
+            .create_task(lab_root, asupersync::Budget::INFINITE, async move {
+                let result = if let Some(cx) = asupersync::Cx::current() {
+                    match reembed_index_with_cx(&cx, &options).await {
+                        Err(IndexRebuildError::Cancelled(reason)) => Ok(reason),
+                        Err(error) => Err(format!(
+                            "pre-publication cancellation must remain typed, got {error:?}"
+                        )),
+                        Ok(report) => Err(format!(
+                            "cancelled re-embedding unexpectedly published: {report:?}"
+                        )),
+                    }
+                } else {
+                    Err("LabRuntime re-embedding task did not install a Cx".to_owned())
+                };
+                if let Ok(mut slot) = task_observation.lock() {
+                    *slot = Some(result);
+                }
+                asupersync::Outcome::<(), String>::Ok(())
+            })
+            .map_err(|error| format!("create pre-publication cancellation task: {error}"))?;
+        lab.scheduler.lock().schedule(task_id, 0);
+
+        let report = lab.run_until_quiescent_with_report();
+        ensure(
+            report.quiescent,
+            "pre-publication cancellation LabRuntime must quiesce",
+        )?;
+        ensure(
+            report.invariant_violations.is_empty(),
+            format!(
+                "pre-publication cancellation must preserve LabRuntime invariants: {:?}",
+                report.invariant_violations
+            ),
+        )?;
+        let reason = observation
+            .lock()
+            .map_err(|_| "pre-publication cancellation observation poisoned".to_owned())?
+            .take()
+            .ok_or_else(|| "pre-publication cancellation observation missing".to_owned())??;
+        ensure(
+            reason.kind == asupersync::CancelKind::User,
+            format!(
+                "unexpected pre-publication cancellation kind: {:?}",
+                reason.kind
+            ),
+        )?;
+        ensure(
+            reason.message.as_deref() == Some(expected_message),
+            format!(
+                "unexpected pre-publication cancellation message: {:?}",
+                reason.message
+            ),
+        )?;
+        ensure(
+            index_regular_file_snapshot(&index_dir)? == baseline,
+            "cancellation after validation must leave every active index file byte-identical",
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let jobs = connection
+            .list_search_index_jobs("wsp_01234567890123456789012345", None)
+            .map_err(|error| error.to_string())?;
+        let cancelled_jobs = jobs
+            .iter()
+            .filter(|job| job.status_enum() == Some(SearchIndexJobStatus::Cancelled))
+            .collect::<Vec<_>>();
+        ensure(
+            cancelled_jobs.len() == 1,
+            format!("expected exactly one cancelled re-embedding job: {jobs:?}"),
+        )?;
+        ensure(
+            cancelled_jobs[0].completed_at.is_some(),
+            "cancelled re-embedding job must have a completion timestamp",
+        )?;
+        ensure(
+            connection
+                .list_active_advisory_locks()
+                .map_err(|error| error.to_string())?
+                .is_empty(),
+            "pre-publication cancellation must release the index advisory lock",
+        )?;
+        connection.close().map_err(|error| error.to_string())
+    }
+
     #[cfg(unix)]
     #[test]
     fn index_reembed_marks_job_failed_when_recovery_rejects_active_symlink() -> TestResult {
@@ -9774,6 +10316,47 @@ mod tests {
         ensure(
             read_marker(&retained_dir, "generation.txt")? == "old",
             "retained index should contain previous generation",
+        )
+    }
+
+    #[test]
+    fn publish_commit_failure_restores_active_and_preserves_staging_generation() -> TestResult {
+        let root = unique_test_dir("publish-commit-rollback");
+        let index_dir = root.join("index");
+        let staging_dir = root.join(".index.publish-test");
+        write_marker(&index_dir, "generation.txt", "old")?;
+        write_marker(&staging_dir, "generation.txt", "new")?;
+        write_index_metadata(&staging_dir, 2, 1, None).map_err(|error| error.to_string())?;
+
+        let error = match publish_staged_index_with_commit(&index_dir, &staging_dir, || {
+            Err(IndexRebuildError::Index(
+                "simulated database commit failure".to_owned(),
+            ))
+        }) {
+            Ok(()) => return Err("unexpected publish success".to_owned()),
+            Err(error) => error,
+        };
+
+        ensure(
+            error.to_string().contains("simulated database commit failure"),
+            format!("unexpected error: {error}"),
+        )?;
+        ensure(index_dir.is_dir(), "previous active index should be restored")?;
+        ensure(
+            read_marker(&index_dir, "generation.txt")? == "old",
+            "commit failure must leave the previous generation active",
+        )?;
+        ensure(
+            staging_dir.is_dir(),
+            "uncommitted generation should return to its staging path",
+        )?;
+        ensure(
+            read_marker(&staging_dir, "generation.txt")? == "new",
+            "rollback must preserve the uncommitted generation for inspection",
+        )?;
+        ensure(
+            !root.join("index.previous").exists(),
+            "restored previous generation should no longer occupy the retained path",
         )
     }
 

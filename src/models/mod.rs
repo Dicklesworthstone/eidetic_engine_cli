@@ -2163,6 +2163,8 @@ pub enum ProcessExitCode {
     PolicyDenied = 7,
     MigrationRequired = 8,
     EvalFailure = 9,
+    /// Operation was cancelled by the caller, a deadline, or a runtime budget.
+    Cancelled = 130,
 }
 
 impl From<ProcessExitCode> for ExitCode {
@@ -2221,6 +2223,7 @@ mod tests {
         assert_eq!(ProcessExitCode::PolicyDenied as u8, 7);
         assert_eq!(ProcessExitCode::MigrationRequired as u8, 8);
         assert_eq!(ProcessExitCode::EvalFailure as u8, 9);
+        assert_eq!(ProcessExitCode::Cancelled as u8, 130);
     }
 
     #[test]

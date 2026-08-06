@@ -9,6 +9,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use asupersync::types::CancelReason;
 use clap::error::ErrorKind;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
@@ -183,10 +184,10 @@ use crate::core::memory::{
 };
 use crate::core::orient::{OrientDecisionOptions, orient_decisions};
 use crate::core::outcome::{
-    DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+    CliCancelReason, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
     OutcomeQuarantineListOptions, OutcomeQuarantineListReport, OutcomeQuarantineReviewOptions,
-    OutcomeQuarantineReviewReport, OutcomeRecordOptions, list_feedback_quarantine, record_outcome,
-    review_feedback_quarantine,
+    OutcomeQuarantineReviewReport, OutcomeRecordOptions, cancel_kind_code, cancel_message,
+    list_feedback_quarantine, record_outcome, review_feedback_quarantine,
 };
 use crate::core::perf_forensics::{
     BUDGET_CHECK_SCHEMA_V1, BudgetCheckReport, COMPARE_RESULT_SCHEMA_V1, CompareReport,
@@ -242,7 +243,7 @@ use crate::core::rule::{
     protect_rule, show_rule, update_rule,
 };
 use crate::core::search::{
-    SearchDedupMode, SearchDegradation, SearchOptions, SearchReport,
+    SearchDedupMode, SearchDegradation, SearchError, SearchOptions, SearchReport,
     SearchScoreRecalibrationReport, SearchSourceMode, SimilarError, SimilarOptions, SimilarReport,
     TypedMemoryFieldFilter, elapsed_timing_json, normalize_memory_kind_filter,
     recalibrate_search_score_calibration, run_diag_search, run_search, run_search_with_filters,
@@ -15272,14 +15273,15 @@ where
 fn collect_eval_run_reports(
     scenario_id: Option<&str>,
     dir: &std::path::Path,
-) -> Result<Vec<crate::eval::EvalRunReport>, DomainError> {
+) -> Result<Vec<crate::eval::EvalRunReport>, CancellationAwareCliError> {
     let start = std::time::Instant::now();
     let fixtures = crate::eval::discover_fixtures(dir)?;
     if fixtures.is_empty() {
         return Err(crate::models::DomainError::Configuration {
             message: "No fixtures found in fixture directory".into(),
             repair: Some(format!("Add fixtures to {}", dir.display())),
-        });
+        }
+        .into());
     }
 
     let target_fixtures = if let Some(id) = scenario_id {
@@ -15296,7 +15298,8 @@ fn collect_eval_run_reports(
             resource: "fixture".into(),
             id: scenario_id.unwrap_or("*").into(),
             repair: Some("ee eval list".into()),
-        });
+        }
+        .into());
     }
 
     let mut reports = Vec::with_capacity(target_fixtures.len());
@@ -15355,7 +15358,12 @@ where
     let dir = fixture_dir.unwrap_or(&default_dir);
     let reports = match collect_eval_run_reports(scenario_id, dir) {
         Ok(reports) => reports,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(CancellationAwareCliError::Cancelled(reason)) => {
+            return write_cancelled_error(&reason, cli.wants_json(), stdout, stderr);
+        }
+        Err(CancellationAwareCliError::Domain(error)) => {
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
     };
     let passed = reports
         .iter()
@@ -15443,7 +15451,12 @@ where
     let dir = fixture_dir.unwrap_or(&default_dir);
     let reports = match collect_eval_run_reports(scenario_id, dir) {
         Ok(reports) => reports,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(CancellationAwareCliError::Cancelled(reason)) => {
+            return write_cancelled_error(&reason, cli.wants_json(), stdout, stderr);
+        }
+        Err(CancellationAwareCliError::Domain(error)) => {
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
     };
     let summary = eval_report_summary(&reports);
     let data_hashes = reports
@@ -15714,7 +15727,12 @@ where
             &cases,
         ) {
             Ok(actuals) => actuals,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            Err(CancellationAwareCliError::Cancelled(reason)) => {
+                return write_cancelled_error(&reason, cli.wants_json(), stdout, stderr);
+            }
+            Err(CancellationAwareCliError::Domain(error)) => {
+                return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+            }
         };
 
         artifact_paths.extend(pack_quality_artifact_paths(fixture, &scenario, &cases));
@@ -15813,12 +15831,13 @@ fn pack_quality_actuals_for_cases(
     source: &crate::eval::SourceMemoryFile,
     memories: &[crate::eval::SourceMemory],
     cases: &[crate::eval::PackQualityCase],
-) -> Result<Vec<crate::eval::PackQualityActual>, DomainError> {
+) -> Result<Vec<crate::eval::PackQualityActual>, CancellationAwareCliError> {
     if memories.is_empty() {
         return Err(DomainError::Configuration {
             message: format!("eval fixture {} contains no memories", source.fixture_id),
             repair: Some("Add source memories or generated tiers before running eval.".into()),
-        });
+        }
+        .into());
     }
 
     let tempdir = tempfile::Builder::new()
@@ -15865,9 +15884,12 @@ fn pack_quality_actuals_for_cases(
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
         })
-        .map_err(|error| DomainError::SearchIndex {
-            message: format!("pack-quality eval search failed for `{query}`: {error}"),
-            repair: error.repair_hint().map(str::to_owned),
+        .map_err(|error| match error {
+            SearchError::Cancelled(reason) => CancellationAwareCliError::Cancelled(reason),
+            error => CancellationAwareCliError::Domain(DomainError::SearchIndex {
+                message: format!("pack-quality eval search failed for `{query}`: {error}"),
+                repair: error.repair_hint().map(str::to_owned),
+            }),
         })?;
         let selected_memory_ids = report
             .results
@@ -16125,7 +16147,7 @@ fn build_query_expectations(
 
 fn run_eval_retrieval_queries(
     source: &crate::eval::SourceMemoryFile,
-) -> Result<Vec<crate::eval::QueryMetrics>, DomainError> {
+) -> Result<Vec<crate::eval::QueryMetrics>, CancellationAwareCliError> {
     let memories = crate::eval::materialize_source_memories(source)?;
     let query_expectations = build_query_expectations(&memories);
     if query_expectations.is_empty() {
@@ -16166,9 +16188,12 @@ fn run_eval_retrieval_queries(
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
         })
-        .map_err(|error| DomainError::SearchIndex {
-            message: format!("eval fixture search failed for `{query}`: {error}"),
-            repair: error.repair_hint().map(str::to_owned),
+        .map_err(|error| match error {
+            SearchError::Cancelled(reason) => CancellationAwareCliError::Cancelled(reason),
+            error => CancellationAwareCliError::Domain(DomainError::SearchIndex {
+                message: format!("eval fixture search failed for `{query}`: {error}"),
+                repair: error.repair_hint().map(str::to_owned),
+            }),
         })?;
         let retrieved_ids = report
             .results
@@ -16188,7 +16213,7 @@ fn run_eval_retrieval_queries(
 fn build_eval_search_index(
     index_dir: &Path,
     source: &crate::eval::SourceMemoryFile,
-) -> Result<(), DomainError> {
+) -> Result<(), CancellationAwareCliError> {
     let memories = crate::eval::materialize_source_memories(source)?;
     build_eval_search_index_from_memories(index_dir, &source.fixture_id, &memories)
 }
@@ -16197,7 +16222,7 @@ fn build_eval_search_index_from_memories(
     index_dir: &Path,
     fixture_id: &str,
     memories: &[crate::eval::SourceMemory],
-) -> Result<(), DomainError> {
+) -> Result<(), CancellationAwareCliError> {
     let documents = memories
         .iter()
         .map(eval_source_memory_document)
@@ -16209,54 +16234,69 @@ fn build_eval_search_index_from_memories(
             repair: Some(
                 "Add memories to source_memory.json before running retrieval eval.".into(),
             ),
-        });
+        }
+        .into());
     }
 
     let documents_total = u32::try_from(documents.len()).unwrap_or(u32::MAX);
     let index_dir = index_dir.to_path_buf();
     let metadata_index_dir = index_dir.clone();
-    crate::core::run_cli_future(async move {
-        // Invariant: run_cli_future's block_on installs an ambient runtime Cx.
-        #[allow(clippy::expect_used)]
-        let cx = asupersync::Cx::current()
-            .expect("run_cli_future's block_on installs an ambient runtime Cx");
-        IndexBuilder::new(&index_dir)
+    let stats = crate::core::run_cli_with_cx(Duration::from_secs(300), |cx| async move {
+        match IndexBuilder::new(&index_dir)
             .with_embedder_stack(eval_embedder_stack())
             .add_documents(documents)
             .build(&cx)
             .await
+        {
+            Ok(stats) => Ok(stats),
+            Err(error) if matches!(error, frankensearch::SearchError::Cancelled { .. }) => {
+                let reason = cx.cancel_reason().unwrap_or_else(|| {
+                    crate::core::outcome::attributed_cancel_reason(
+                        &cx,
+                        asupersync::CancelKind::User,
+                        "eval index build cancelled without a recorded reason",
+                    )
+                });
+                Err(CancellationAwareCliError::Cancelled(reason))
+            }
+            Err(error) => Err(CancellationAwareCliError::Domain(
+                DomainError::SearchIndex {
+                    message: format!("eval fixture index build failed: {error}"),
+                    repair: Some(
+                        "Inspect source_memory.json for invalid indexable content.".to_owned(),
+                    ),
+                },
+            )),
+        }
     })
-    .map_err(|error| DomainError::SearchIndex {
-        message: format!("eval fixture index runtime failed: {error}"),
-        repair: Some("Re-run eval after checking Asupersync runtime health.".to_owned()),
-    })?
-    .map_err(|error| DomainError::SearchIndex {
-        message: format!("eval fixture index build failed: {error}"),
-        repair: Some("Inspect source_memory.json for invalid indexable content.".to_owned()),
-    })
-    .and_then(|stats| {
-        if stats.errors.is_empty() {
-            crate::core::index::write_memory_eval_index_metadata(
-                &metadata_index_dir,
-                documents_total,
-            )
-            .map_err(|error| DomainError::SearchIndex {
+    .map_err(|error| {
+        CancellationAwareCliError::Domain(DomainError::SearchIndex {
+            message: format!("eval fixture index runtime failed: {error}"),
+            repair: Some("Re-run eval after checking Asupersync runtime health.".to_owned()),
+        })
+    })??;
+
+    if !stats.errors.is_empty() {
+        let details = stats
+            .errors
+            .iter()
+            .map(|(id, error)| format!("{id}: {error}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(DomainError::SearchIndex {
+            message: format!("eval fixture index skipped documents: {details}"),
+            repair: Some("Fix invalid fixture memory records before running eval.".to_owned()),
+        }
+        .into());
+    }
+
+    crate::core::index::write_memory_eval_index_metadata(&metadata_index_dir, documents_total)
+        .map_err(|error| {
+            CancellationAwareCliError::Domain(DomainError::SearchIndex {
                 message: format!("failed to finalize eval fixture index metadata: {error}"),
                 repair: Some("Check the temporary index path and retry the evaluation.".to_owned()),
             })
-        } else {
-            let details = stats
-                .errors
-                .iter()
-                .map(|(id, error)| format!("{id}: {error}"))
-                .collect::<Vec<_>>()
-                .join("; ");
-            Err(DomainError::SearchIndex {
-                message: format!("eval fixture index skipped documents: {details}"),
-                repair: Some("Fix invalid fixture memory records before running eval.".to_owned()),
-            })
-        }
-    })
+        })
 }
 
 fn eval_embedder_stack() -> EmbedderStack {
@@ -20916,6 +20956,10 @@ where
     W: Write,
     E: Write,
 {
+    if let IndexRebuildError::Cancelled(reason) = error {
+        return write_cancelled_error(reason, wants_json, stdout, stderr);
+    }
+
     if wants_json && let IndexRebuildError::LockContention(contention) = error {
         let json = serde_json::json!({
             "schema": crate::models::ERROR_SCHEMA_V2,
@@ -31262,13 +31306,7 @@ where
                 | output::Renderer::Hook => write_stdout(stdout, &(json + "\n")),
             }
         }
-        Err(error) => {
-            let domain_error = DomainError::SearchIndex {
-                message: error.to_string(),
-                repair: error.repair_hint().map(str::to_string),
-            };
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
-        }
+        Err(error) => write_search_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
 
@@ -35560,9 +35598,10 @@ fn write_context_stream_terminal_error<W>(
 where
     W: Write,
 {
+    let cancellation = context_cancellation_reason(error);
     let domain_error = context_error_to_domain(error);
     let stream_error = context_stream_error_from_context_pack_error(error, &domain_error);
-    let mut terminal = if matches!(error, ContextPackError::Cancelled(_)) {
+    let mut terminal = if cancellation.is_some() {
         output::streaming::TerminalFrame::cancelled(Some(options.pack_id.clone()), stream_error)
     } else {
         output::streaming::TerminalFrame::error(Some(options.pack_id.clone()), stream_error)
@@ -35572,13 +35611,25 @@ where
     writer
         .write_frame(&output::streaming::PackStreamFrame::Terminal(terminal))
         .map_err(|write_error| write_error.to_string())?;
-    Ok(domain_error.exit_code())
+    Ok(if cancellation.is_some() {
+        ProcessExitCode::Cancelled
+    } else {
+        domain_error.exit_code()
+    })
 }
 
 fn context_stream_error_from_context_pack_error(
     error: &ContextPackError,
     domain_error: &DomainError,
 ) -> output::streaming::StreamError {
+    if let ContextPackError::Search(SearchError::Cancelled(reason)) = error {
+        return output::streaming::StreamError::new(
+            "context_stream_cancelled",
+            cancel_message(reason),
+            output::streaming::StreamSeverity::Low,
+            None,
+        );
+    }
     let (code, severity) = match error {
         ContextPackError::Storage(_) => (
             "context_stream_storage_error",
@@ -35659,9 +35710,9 @@ fn context_error_to_domain(error: &ContextPackError) -> DomainError {
             message: message.clone(),
             repair: Some("Use redaction.policy=respect or remove redaction bypass.".to_string()),
         },
-        ContextPackError::DeadlineExceeded(message) | ContextPackError::Cancelled(message) => {
+        ContextPackError::DeadlineExceeded(reason) | ContextPackError::Cancelled(reason) => {
             DomainError::Usage {
-                message: message.clone(),
+                message: cancel_message(reason),
                 repair: error.repair_hint().map(str::to_string),
             }
         }
@@ -36030,6 +36081,9 @@ where
                     output::ContextJsonRenderOptions::from(output_options),
                 );
                 orient_component_data_from_envelope(&raw)
+            }
+            Err(error) if context_cancellation_reason(&error).is_some() => {
+                return write_context_pack_error(&error, cli.wants_json(), stdout, stderr);
             }
             Err(error) => {
                 degraded.push(orient_degradation_value(
@@ -36526,20 +36580,14 @@ where
     if args.explain_performance {
         return match run_context_pack_with_performance(&options, command) {
             Ok(run) => write_stdout(stdout, &(run.performance.to_string() + "\n")),
-            Err(error) => {
-                let domain_error = context_error_to_domain(&error);
-                write_domain_error(&domain_error, true, stdout, stderr)
-            }
+            Err(error) => write_context_pack_error(&error, true, stdout, stderr),
         };
     }
 
     if args.stream && !args.explain_gaps {
         let request = match context_request_from_options(&options) {
             Ok(request) => request,
-            Err(error) => {
-                let domain_error = context_error_to_domain(&error);
-                return write_domain_error(&domain_error, true, stdout, stderr);
-            }
+            Err(error) => return write_context_pack_error(&error, true, stdout, stderr),
         };
         let mut frame_options =
             context_stream_options_for_request(&request, &options, &workspace_path);
@@ -36692,10 +36740,7 @@ where
                 stdout,
             )
         }
-        Err(error) => {
-            let domain_error = context_error_to_domain(&error);
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
-        }
+        Err(error) => write_context_pack_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
 
@@ -38939,6 +38984,17 @@ struct MigrationIndexRebuildAudit<'a> {
     error: Option<&'a str>,
 }
 
+enum CancellationAwareCliError {
+    Cancelled(CancelReason),
+    Domain(DomainError),
+}
+
+impl From<DomainError> for CancellationAwareCliError {
+    fn from(error: DomainError) -> Self {
+        Self::Domain(error)
+    }
+}
+
 fn insert_migration_index_rebuild_audit(
     conn: &crate::db::DbConnection,
     audit: MigrationIndexRebuildAudit<'_>,
@@ -39089,7 +39145,7 @@ fn run_post_migration_index_rebuild(
     database_path: &Path,
     applied: &[u32],
     schema_version: Option<u32>,
-) -> Result<serde_json::Value, DomainError> {
+) -> Result<serde_json::Value, CancellationAwareCliError> {
     if applied.is_empty() {
         return Ok(migration_index_rebuild_skipped_json());
     }
@@ -39103,6 +39159,31 @@ fn run_post_migration_index_rebuild(
 
     let report = match rebuild_index(&options) {
         Ok(report) => report,
+        Err(IndexRebuildError::Cancelled(reason)) => {
+            let message = cancel_message(&reason);
+            let audit_result = insert_migration_index_rebuild_audit(
+                conn,
+                MigrationIndexRebuildAudit {
+                    workspace_path,
+                    database_path,
+                    applied,
+                    schema_version,
+                    status: "cancelled",
+                    report: None,
+                    error: Some(&message),
+                },
+            );
+            if let Err(audit_error) = audit_result {
+                tracing::error!(
+                    target: "ee::migration",
+                    step_id = POST_MIGRATION_INDEX_REBUILD_STEP_ID,
+                    error = %message,
+                    audit_error = %audit_error,
+                    "post-migration index rebuild was cancelled and audit insertion failed"
+                );
+            }
+            return Err(CancellationAwareCliError::Cancelled(reason));
+        }
         Err(error) => {
             let message = error.to_string();
             let audit_result = insert_migration_index_rebuild_audit(
@@ -39137,13 +39218,15 @@ fn run_post_migration_index_rebuild(
                     );
                 }
             }
-            return Err(DomainError::SearchIndex {
-                message: format!("Post-migration index rebuild failed: {message}"),
-                repair: error
-                    .repair_hint()
-                    .map(str::to_string)
-                    .or_else(|| Some("ee index rebuild --workspace . --json".to_string())),
-            });
+            return Err(CancellationAwareCliError::Domain(
+                DomainError::SearchIndex {
+                    message: format!("Post-migration index rebuild failed: {message}"),
+                    repair: error
+                        .repair_hint()
+                        .map(str::to_string)
+                        .or_else(|| Some("ee index rebuild --workspace . --json".to_string())),
+                },
+            ));
         }
     };
 
@@ -39186,13 +39269,15 @@ fn run_post_migration_index_rebuild(
     if audit_status == "completed" {
         Ok(migration_index_rebuild_report_json(&report, &audit_id))
     } else {
-        Err(DomainError::SearchIndex {
-            message: format!(
-                "Post-migration index rebuild ended with status {}",
-                report.status.as_str()
-            ),
-            repair: Some("ee index rebuild --workspace . --json".to_string()),
-        })
+        Err(CancellationAwareCliError::Domain(
+            DomainError::SearchIndex {
+                message: format!(
+                    "Post-migration index rebuild ended with status {}",
+                    report.status.as_str()
+                ),
+                repair: Some("ee index rebuild --workspace . --json".to_string()),
+            },
+        ))
     }
 }
 
@@ -39316,7 +39401,12 @@ where
         post_version,
     ) {
         Ok(report) => report,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(CancellationAwareCliError::Cancelled(reason)) => {
+            return write_cancelled_error(&reason, cli.wants_json(), stdout, stderr);
+        }
+        Err(CancellationAwareCliError::Domain(error)) => {
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
     };
     let post_migration_index_rebuild_status = post_migration_index_rebuild
         .get("status")
@@ -40019,10 +40109,7 @@ where
     if args.explain_performance {
         return match run_context_pack_with_performance(&options, PACK_COMMAND) {
             Ok(run) => write_stdout(stdout, &(run.performance.to_string() + "\n")),
-            Err(error) => {
-                let domain_error = context_error_to_domain(&error);
-                write_domain_error(&domain_error, true, stdout, stderr)
-            }
+            Err(error) => write_context_pack_error(&error, true, stdout, stderr),
         };
     }
 
@@ -40058,15 +40145,12 @@ where
                 stdout,
             )
         }
-        Err(error) => {
-            let domain_error = context_error_to_domain(&error);
-            write_domain_error(
-                &domain_error,
-                cli.wants_json() || matches!(renderer, output::Renderer::Json),
-                stdout,
-                stderr,
-            )
-        }
+        Err(error) => write_context_pack_error(
+            &error,
+            cli.wants_json() || matches!(renderer, output::Renderer::Json),
+            stdout,
+            stderr,
+        ),
     }
 }
 
@@ -42536,12 +42620,8 @@ where
         match recalibrate_search_score_calibration(&workspace_path, args.database.as_deref()) {
             Ok(report) => Some(report),
             Err(error) => {
-                let domain_error = DomainError::SearchIndex {
-                    message: error.to_string(),
-                    repair: error.repair_hint().map(str::to_string),
-                };
-                return write_domain_error(
-                    &domain_error,
+                return write_search_error(
+                    &error,
                     cli.wants_json() || args.explain_performance,
                     stdout,
                     stderr,
@@ -42672,13 +42752,7 @@ where
                 }
                 write_stdout(stdout, &(payload.to_string() + "\n"))
             }
-            Err(error) => {
-                let domain_error = DomainError::SearchIndex {
-                    message: error.to_string(),
-                    repair: error.repair_hint().map(str::to_string),
-                };
-                write_domain_error(&domain_error, true, stdout, stderr)
-            }
+            Err(error) => write_search_error(&error, true, stdout, stderr),
         };
     }
 
@@ -42704,18 +42778,12 @@ where
                 ) + "\n"),
             ),
         },
-        Err(error) => {
-            let domain_error = DomainError::SearchIndex {
-                message: error.to_string(),
-                repair: error.repair_hint().map(str::to_string),
-            };
-            write_domain_error(
-                &domain_error,
-                cli.wants_json() || args.explain_performance,
-                stdout,
-                stderr,
-            )
-        }
+        Err(error) => write_search_error(
+            &error,
+            cli.wants_json() || args.explain_performance,
+            stdout,
+            stderr,
+        ),
     }
 }
 
@@ -42764,6 +42832,9 @@ where
                 write_stdout(stdout, &(format_similar_json(&report) + "\n"))
             }
         },
+        Err(SimilarError::Search(SearchError::Cancelled(reason))) => {
+            write_cancelled_error(&reason, cli.wants_json(), stdout, stderr)
+        }
         Err(error) => {
             let domain_error = similar_error_to_domain_error(&error);
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
@@ -47171,8 +47242,7 @@ where
         {
             Ok(report) => report,
             Err(error) => {
-                let domain_error = context_error_to_domain(&error);
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                return write_context_pack_error(&error, cli.wants_json(), stdout, stderr);
             }
         };
         return write_coverage_gap_report(cli.renderer(), cli.format, None, &report, stdout);
@@ -47199,8 +47269,7 @@ where
     let report = match explain_why_not_default(&options, memory_id) {
         Ok(report) => report,
         Err(error) => {
-            let domain_error = context_error_to_domain(&error);
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_context_pack_error(&error, cli.wants_json(), stdout, stderr);
         }
     };
 
@@ -48562,6 +48631,92 @@ fn parse_completion_audit_evidence_input(input: &str) -> Result<EvidenceBundle, 
     };
 
     Ok(evidence_bundle_from_verification_records(&records))
+}
+
+fn write_cancelled_error<W, E>(
+    reason: &CancelReason,
+    wants_json: bool,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let kind = cancel_kind_code(reason.kind);
+    let message = cancel_message(reason);
+    if wants_json {
+        let json = serde_json::json!({
+            "schema": crate::models::ERROR_SCHEMA_V2,
+            "error": {
+                "code": "cancelled",
+                "message": message,
+                "severity": "low",
+                "details": {
+                    "cancelKind": kind,
+                    "cancelClass": CliCancelReason::from(reason).as_str(),
+                }
+            }
+        });
+        let rendered = output::redact_mesh_approval_bearers(&(json.to_string() + "\n"));
+        let _ = stdout.write_all(rendered.as_bytes());
+    } else {
+        let rendered = output::redact_mesh_approval_bearers(&format!(
+            "error: cancelled ({kind}): {message}\n"
+        ));
+        let _ = stderr.write_all(rendered.as_bytes());
+    }
+    ProcessExitCode::Cancelled
+}
+
+fn write_search_error<W, E>(
+    error: &SearchError,
+    wants_json: bool,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if let SearchError::Cancelled(reason) = error {
+        return write_cancelled_error(reason, wants_json, stdout, stderr);
+    }
+    let domain_error = DomainError::SearchIndex {
+        message: error.to_string(),
+        repair: error.repair_hint().map(str::to_string),
+    };
+    write_domain_error(&domain_error, wants_json, stdout, stderr)
+}
+
+fn context_cancellation_reason(error: &ContextPackError) -> Option<&CancelReason> {
+    match error {
+        ContextPackError::DeadlineExceeded(reason) | ContextPackError::Cancelled(reason) => {
+            Some(reason)
+        }
+        ContextPackError::Search(SearchError::Cancelled(reason)) => Some(reason),
+        ContextPackError::Storage(_)
+        | ContextPackError::Search(_)
+        | ContextPackError::Pack(_)
+        | ContextPackError::PolicyDenied(_) => None,
+    }
+}
+
+fn write_context_pack_error<W, E>(
+    error: &ContextPackError,
+    wants_json: bool,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if let Some(reason) = context_cancellation_reason(error) {
+        return write_cancelled_error(reason, wants_json, stdout, stderr);
+    }
+    let domain_error = context_error_to_domain(error);
+    write_domain_error(&domain_error, wants_json, stdout, stderr)
 }
 
 fn write_domain_error<W, E>(

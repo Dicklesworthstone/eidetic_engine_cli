@@ -67,7 +67,9 @@ use crate::core::search::{
     SearchOptions, SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus,
     SearchWorkspaceProbeState, elapsed_timing_json, performance_redaction_json,
     query_observation_json, run_context_search_with_preloaded_memories,
-    run_context_search_with_preloaded_memories_and_workspace_state, search_degraded_data_json,
+    run_context_search_with_preloaded_memories_and_workspace_state,
+    run_context_search_with_preloaded_memories_and_workspace_state_with_cx,
+    search_degraded_data_json,
 };
 use crate::db::read_pool::{
     PoolConfig, PoolStats, READ_POOL_ACQUIRE_TIMEOUT_CODE, READ_POOL_UNDERSIZED_CODE,
@@ -510,6 +512,31 @@ pub struct CommandContext {
     capabilities: CapabilitySet,
 }
 
+/// A command checkpoint can fail because an ee resource budget was exceeded
+/// or because Asupersync cancelled the caller-owned task context.
+///
+/// Keeping the two cases typed prevents a user, deadline, or parent
+/// cancellation from being rewritten as a fabricated wall-clock budget
+/// breach at the CLI boundary.
+#[derive(Clone, Debug)]
+pub enum CommandCancellation {
+    BudgetExceeded(crate::core::budget::BudgetExceeded),
+    Cancelled(asupersync::CancelReason),
+}
+
+impl std::fmt::Display for CommandCancellation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BudgetExceeded(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Cancelled(reason) => {
+                formatter.write_str(&crate::core::outcome::cancel_message(reason))
+            }
+        }
+    }
+}
+
+impl std::error::Error for CommandCancellation {}
+
 impl CommandContext {
     /// Build a new context. The CLI entry point constructs one of
     /// these from the resolved workspace, the parsed CLI flags, and
@@ -562,19 +589,22 @@ impl CommandContext {
 
     /// Checks the request budget and the Cx cooperative-cancellation signal.
     ///
-    /// A cancelled Cx is mapped to a sentinel `BudgetExceeded` so callers see
-    /// a uniform error type regardless of which limit fired.
-    pub fn check_cancellation(
-        &self,
-        cx: &asupersync::Cx,
-    ) -> Result<(), crate::core::budget::BudgetExceeded> {
-        self.budget.check()?;
-        cx.checkpoint()
-            .map_err(|_| crate::core::budget::BudgetExceeded {
-                dimension: crate::core::budget::BudgetDimension::WallClock,
-                limit: 0,
-                used: 1,
-            })
+    /// Resource-budget exhaustion wins when both signals are already set, but
+    /// an Asupersync cancellation otherwise retains its complete
+    /// [`asupersync::CancelReason`] provenance.
+    pub fn check_cancellation(&self, cx: &asupersync::Cx) -> Result<(), CommandCancellation> {
+        self.budget
+            .check()
+            .map_err(CommandCancellation::BudgetExceeded)?;
+        cx.checkpoint().map_err(|_| {
+            CommandCancellation::Cancelled(cx.cancel_reason().unwrap_or_else(|| {
+                crate::core::outcome::attributed_cancel_reason(
+                    cx,
+                    asupersync::CancelKind::User,
+                    "command checkpoint cancelled without a recorded reason",
+                )
+            }))
+        })
     }
 
     /// Return a clone whose capability set is the element-wise `min`
@@ -1035,8 +1065,8 @@ pub enum ContextPackError {
     Search(SearchError),
     Pack(String),
     PolicyDenied(String),
-    DeadlineExceeded(String),
-    Cancelled(String),
+    DeadlineExceeded(asupersync::CancelReason),
+    Cancelled(asupersync::CancelReason),
 }
 
 impl ContextPackError {
@@ -1059,17 +1089,29 @@ impl ContextPackError {
 impl std::fmt::Display for ContextPackError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Storage(message)
-            | Self::Pack(message)
-            | Self::PolicyDenied(message)
-            | Self::DeadlineExceeded(message)
-            | Self::Cancelled(message) => formatter.write_str(message),
+            Self::Storage(message) | Self::Pack(message) | Self::PolicyDenied(message) => {
+                formatter.write_str(message)
+            }
+            Self::DeadlineExceeded(reason) | Self::Cancelled(reason) => {
+                formatter.write_str(&crate::core::outcome::cancel_message(reason))
+            }
             Self::Search(error) => std::fmt::Display::fmt(error, formatter),
         }
     }
 }
 
 impl std::error::Error for ContextPackError {}
+
+fn context_pack_cancellation_error(
+    reason: asupersync::CancelReason,
+) -> ContextPackError {
+    match reason.kind {
+        asupersync::CancelKind::Deadline | asupersync::CancelKind::Timeout => {
+            ContextPackError::DeadlineExceeded(reason)
+        }
+        _ => ContextPackError::Cancelled(reason),
+    }
+}
 
 fn context_pack_persist_failed_message_and_repair(persist_error: &str) -> (String, String) {
     if context_pack_persist_error_is_contention(persist_error) {
@@ -1497,14 +1539,26 @@ pub fn run_context_pack_with_performance(
     options: &ContextPackOptions,
     command: &'static str,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
+    crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+        run_context_pack_with_performance_with_cx(&cx, options, command).await
+    })
+    .map_err(|error| ContextPackError::Pack(format!("Failed to start pack runtime: {error}")))?
+}
+
+pub async fn run_context_pack_with_performance_with_cx(
+    cx: &asupersync::Cx,
+    options: &ContextPackOptions,
+    command: &'static str,
+) -> Result<ContextPackPerformanceRun, ContextPackError> {
     let determinism = Deterministic::from_seed(0);
     run_context_pack_with_performance_inner(
         options,
         command,
         &determinism,
         PackRecordPersistence::Ambient,
-        ContextPackControl::unbounded(),
+        ContextPackControl::new(cx, None, None),
     )
+    .await
 }
 
 pub fn context_request_from_options(
@@ -1565,14 +1619,21 @@ pub fn run_context_pack_with_performance_controlled(
     deadline: Option<Duration>,
     cancellation_flag: Option<&AtomicBool>,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
-    let determinism = Deterministic::from_seed(0);
-    run_context_pack_with_performance_inner(
-        options,
-        command,
-        &determinism,
-        PackRecordPersistence::Ambient,
-        ContextPackControl::new(deadline, cancellation_flag),
-    )
+    let runtime_timeout = deadline
+        .unwrap_or(Duration::from_secs(60))
+        .max(Duration::from_secs(60));
+    crate::core::run_cli_with_cx(runtime_timeout, |cx| async move {
+        let determinism = Deterministic::from_seed(0);
+        run_context_pack_with_performance_inner(
+            options,
+            command,
+            &determinism,
+            PackRecordPersistence::Ambient,
+            ContextPackControl::new(&cx, deadline, cancellation_flag),
+        )
+        .await
+    })
+    .map_err(|error| ContextPackError::Pack(format!("Failed to start pack runtime: {error}")))?
 }
 
 pub fn run_context_pack_with_performance_seeded(
@@ -1580,13 +1641,17 @@ pub fn run_context_pack_with_performance_seeded(
     command: &'static str,
     determinism: &Deterministic<Seed>,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
-    run_context_pack_with_performance_inner(
-        options,
-        command,
-        determinism,
-        PackRecordPersistence::Seeded(determinism),
-        ContextPackControl::unbounded(),
-    )
+    crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
+        run_context_pack_with_performance_inner(
+            options,
+            command,
+            determinism,
+            PackRecordPersistence::Seeded(determinism),
+            ContextPackControl::new(&cx, None, None),
+        )
+        .await
+    })
+    .map_err(|error| ContextPackError::Pack(format!("Failed to start pack runtime: {error}")))?
 }
 
 #[derive(Clone, Copy)]
@@ -1597,21 +1662,20 @@ enum PackRecordPersistence<'a> {
 
 #[derive(Clone, Copy)]
 struct ContextPackControl<'a> {
+    cx: &'a asupersync::Cx,
     deadline: Option<Instant>,
     cancellation_flag: Option<&'a AtomicBool>,
 }
 
 impl<'a> ContextPackControl<'a> {
-    fn unbounded() -> Self {
-        Self {
-            deadline: None,
-            cancellation_flag: None,
-        }
-    }
-
-    fn new(deadline: Option<Duration>, cancellation_flag: Option<&'a AtomicBool>) -> Self {
+    fn new(
+        cx: &'a asupersync::Cx,
+        deadline: Option<Duration>,
+        cancellation_flag: Option<&'a AtomicBool>,
+    ) -> Self {
         let now = Instant::now();
         Self {
+            cx,
             deadline: deadline.and_then(|duration| now.checked_add(duration)),
             cancellation_flag,
         }
@@ -1622,17 +1686,33 @@ impl<'a> ContextPackControl<'a> {
             && flag.load(Ordering::SeqCst)
         {
             return Err(ContextPackError::Cancelled(
-                "context pack cancelled by caller shutdown signal".to_owned(),
+                crate::core::outcome::attributed_cancel_reason(
+                    self.cx,
+                    asupersync::CancelKind::Shutdown,
+                    "context pack cancelled by caller shutdown signal",
+                ),
             ));
         }
         if let Some(deadline) = self.deadline
             && Instant::now() >= deadline
         {
             return Err(ContextPackError::DeadlineExceeded(
-                "context pack deadline expired before the next execution checkpoint".to_owned(),
+                crate::core::outcome::attributed_cancel_reason(
+                    self.cx,
+                    asupersync::CancelKind::Deadline,
+                    "context pack deadline expired before the next execution checkpoint",
+                ),
             ));
         }
-        Ok(())
+        self.cx.checkpoint().map_err(|_| {
+            context_pack_cancellation_error(self.cx.cancel_reason().unwrap_or_else(|| {
+                crate::core::outcome::attributed_cancel_reason(
+                    self.cx,
+                    asupersync::CancelKind::User,
+                    "context pack cancelled without a recorded reason",
+                )
+            }))
+        })
     }
 }
 
@@ -1967,7 +2047,7 @@ fn reconstruct_not_retrieved_candidate(
 }
 
 #[allow(clippy::expect_used)]
-fn run_context_pack_with_performance_inner(
+async fn run_context_pack_with_performance_inner(
     options: &ContextPackOptions,
     command: &'static str,
     determinism: &Deterministic<Seed>,
@@ -2093,51 +2173,58 @@ fn run_context_pack_with_performance_inner(
     };
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut search_preloaded_memories = BTreeMap::new();
-    let mut search_report = match run_context_search_with_preloaded_memories_and_workspace_state(
-        &SearchOptions {
-            workspace_path: options.workspace_path.clone(),
-            database_path: Some(database_path.clone()),
-            index_dir: options.index_dir.clone(),
-            query: request.query.clone(),
-            limit: request.candidate_pool,
-            speed: options.speed,
-            explain: false,
-            as_of: context_validity_reference_time(options, &effective_filters),
-            include_tombstoned: options.include_tombstoned,
-            include_expired: context_include_expired(options, &effective_filters),
-            include_future: context_include_future(options, &effective_filters),
-            include_stale: context_include_stale(options, &effective_filters),
-            // Context packing owns relevance and budget filtering after retrieval.
-            // Keep the default candidate pool broad so an exact single-memory match
-            // is not dropped by the interactive search command's presentation floor.
-            // An explicit caller floor still applies for diagnostic/e2e paths.
-            relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
-            dedup_mode: crate::core::search::SearchDedupMode::DocId,
-            source_mode: options.source_mode,
-            strict_source_mode: options.strict_source_mode,
-            memory_scope: options.memory_scope,
-            strict_scope: options.strict_scope,
-        },
-        read_connection,
-        context_write_connection.as_ref(),
-        Some(&SearchWorkspaceProbeState {
-            runtime_profile: runtime_profile.clone(),
-            output_redaction_enabled,
-        }),
-        determinism,
-    ) {
-        Ok(context_search) => {
-            search_preloaded_memories = context_search.preloaded_memories;
-            trace.record_search_subspans(context_search.performance);
-            context_search.report
-        }
-        Err(SearchError::NoIndex) => missing_index_search_report(
-            &request.query,
-            request.candidate_pool,
-            runtime_profile.clone(),
-        ),
-        Err(error) => return Err(ContextPackError::Search(error)),
-    };
+    let mut search_report =
+        match run_context_search_with_preloaded_memories_and_workspace_state_with_cx(
+            control.cx,
+            &SearchOptions {
+                workspace_path: options.workspace_path.clone(),
+                database_path: Some(database_path.clone()),
+                index_dir: options.index_dir.clone(),
+                query: request.query.clone(),
+                limit: request.candidate_pool,
+                speed: options.speed,
+                explain: false,
+                as_of: context_validity_reference_time(options, &effective_filters),
+                include_tombstoned: options.include_tombstoned,
+                include_expired: context_include_expired(options, &effective_filters),
+                include_future: context_include_future(options, &effective_filters),
+                include_stale: context_include_stale(options, &effective_filters),
+                // Context packing owns relevance and budget filtering after retrieval.
+                // Keep the default candidate pool broad so an exact single-memory match
+                // is not dropped by the interactive search command's presentation floor.
+                // An explicit caller floor still applies for diagnostic/e2e paths.
+                relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: options.source_mode,
+                strict_source_mode: options.strict_source_mode,
+                memory_scope: options.memory_scope,
+                strict_scope: options.strict_scope,
+            },
+            read_connection,
+            context_write_connection.as_ref(),
+            Some(&SearchWorkspaceProbeState {
+                runtime_profile: runtime_profile.clone(),
+                output_redaction_enabled,
+            }),
+            determinism,
+        )
+        .await
+        {
+            Ok(context_search) => {
+                search_preloaded_memories = context_search.preloaded_memories;
+                trace.record_search_subspans(context_search.performance);
+                context_search.report
+            }
+            Err(SearchError::NoIndex) => missing_index_search_report(
+                &request.query,
+                request.candidate_pool,
+                runtime_profile.clone(),
+            ),
+            Err(SearchError::Cancelled(reason)) => {
+                return Err(context_pack_cancellation_error(reason));
+            }
+            Err(error) => return Err(ContextPackError::Search(error)),
+        };
     trace.index_status_checks = trace.index_status_checks.saturating_add(1);
     trace.record_elapsed("search", search_start);
     control.check()?;
@@ -10541,12 +10628,13 @@ mod tests {
     use asupersync::{CancelReason, Cx};
 
     use super::{
-        AccessLevel, CandidateResolutionMetrics, CapabilitySet, CommandContext, ContextPagination,
-        ContextPerformanceTrace, PackPersistenceSubspans, PackSlotAcquisition, PerformanceTiming,
-        ReadSnapshotTrace, apply_pagination, candidate_selection_why, context_performance_json,
-        focus_candidate_why, focus_relevance, open_pack_slot_lock_file, pack_assembly_slo_for_run,
-        push_evidence_freshness_degradation, push_pack_budget_too_small_degradation,
-        push_search_degradations, try_acquire_pack_slot, unit_score,
+        AccessLevel, CandidateResolutionMetrics, CapabilitySet, CommandCancellation,
+        CommandContext, ContextPagination, ContextPerformanceTrace, PackPersistenceSubspans,
+        PackSlotAcquisition, PerformanceTiming, ReadSnapshotTrace, apply_pagination,
+        candidate_selection_why, context_performance_json, focus_candidate_why, focus_relevance,
+        open_pack_slot_lock_file, pack_assembly_slo_for_run, push_evidence_freshness_degradation,
+        push_pack_budget_too_small_degradation, push_search_degradations, try_acquire_pack_slot,
+        unit_score,
     };
     use crate::config::{ReadPoolConfig, WorkspaceLocation};
     use crate::core::budget::{BudgetDimension, RequestBudget};
@@ -10686,20 +10774,25 @@ mod tests {
     }
 
     #[test]
-    fn check_cancellation_maps_cancelled_cx_to_wall_clock_budget_error() -> Result<(), String> {
+    fn check_cancellation_preserves_asupersync_cancel_reason() -> Result<(), String> {
         let cx = Cx::for_testing();
         cx.set_cancel_reason(CancelReason::user("context cancellation test"));
         let error = ctx(CapabilitySet::read_only())
             .check_cancellation(&cx)
             .expect_err("cancelled Cx must fail check_cancellation");
-
+        let CommandCancellation::Cancelled(reason) = error else {
+            return Err("cancelled Cx must retain a typed cancellation reason".to_owned());
+        };
         ensure_equal(
-            &error.dimension,
-            &BudgetDimension::WallClock,
-            "cancelled Cx dimension",
+            &reason.kind,
+            &asupersync::CancelKind::User,
+            "cancelled Cx reason kind",
         )?;
-        ensure_equal(&error.limit, &0, "cancelled Cx sentinel limit")?;
-        ensure_equal(&error.used, &1, "cancelled Cx sentinel used")
+        ensure_equal(
+            &reason.message.as_deref(),
+            &Some("context cancellation test"),
+            "cancelled Cx reason message",
+        )
     }
 
     #[test]
@@ -10711,7 +10804,9 @@ mod tests {
         let error = ctx_with_budget(budget)
             .check_cancellation(&cx)
             .expect_err("exceeded budget must fail check_cancellation");
-
+        let CommandCancellation::BudgetExceeded(error) = error else {
+            return Err("request budget breach must win an already-cancelled Cx".to_owned());
+        };
         ensure_equal(
             &error.dimension,
             &BudgetDimension::Tokens,

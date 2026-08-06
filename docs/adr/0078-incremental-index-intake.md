@@ -48,17 +48,18 @@ when reopened from their persisted files.
 ## Decision
 
 Because frankensearch already supports incremental intake on both tiers, Track C
-**wires the existing incremental APIs** rather than inventing a custom
-delta-segment + merge scheme inside ee.
+does not invent a custom delta-segment + merge scheme inside ee. The upstream
+capability remains useful, but capability does not by itself make in-place
+mutation of ee's active generation cancellation-safe.
 
 `ee.index_intake.v1` is the normative intake-telemetry schema. The intake path
 gains three modes:
 
 | `intake_mode` | When | Mechanism |
 | --- | --- | --- |
-| `full_rebuild` | First build, recovery, or forced reindex. | Existing `build_index_sync` over all documents + atomic swap. The safe fallback. |
-| `incremental` | Single-document or small-delta writes against an already-built index. | Reopen persisted tiers; vector tier `append` / `soft_delete` (WAL), lexical tier `index_document` (upsert) / `delete_document`; commit. No full rebuild. |
-| `segment_merge` | Periodic maintenance when WAL/segment pressure crosses a bound. | `compact()` / `vacuum()` the vector WAL into the base; Tantivy segment merge is internal. Maintenance, not per-write. |
+| `full_rebuild` | First build, recovery, forced reindex, or the current cancellation-safe production intake for queued single/coalesced changes. | Capture one authoritative DB snapshot, build and validate a complete sibling generation, then atomically swap it into the active path. The safe fallback and current production publication path. |
+| `incremental` | A single-document or small-delta intake that can be applied to a private staged generation. | Copy-on-write only: seed a sibling staging generation from the immutable active base, reopen and mutate the staged vector/lexical tiers, validate the complete staged union, then atomically publish. Direct mutation of active tier files is forbidden. Until this staged delta path is complete, eligible jobs use `full_rebuild`. |
+| `segment_merge` | Periodic maintenance when WAL/segment pressure crosses a bound. | Compact/vacuum a private staged generation, validate it, then atomically publish. Maintenance never compacts the reader-visible active generation in place. |
 
 Schema fields: `intake_mode`, `docs_touched`, `base_doc_count`,
 `segment_doc_count` (WAL/uncompacted), `rebuild_avoided_count`, `merge_count`,
@@ -99,6 +100,47 @@ This ADR records the contract for the runtime behavior. The core delta path
 landed in `bd-d67os.6`, integration in `.7`, and the equivalence-property plus
 flat-latency perf proof in `.8`.
 
+### Cancellation-safety amendment (2026-08-06, `bd-e90wu`)
+
+Runtime-facing search and index operations receive the caller-owned Asupersync
+`&Cx`; they do not manufacture `Cx::for_testing()` contexts or start a nested
+runtime. Cancellation, deadline, and budget reasons remain typed through
+Frankensearch and back to the command boundary.
+
+Index publication is a two-phase copy-on-write effect:
+
+1. acquire the workspace's index-publication lease;
+2. capture one authoritative database generation and document corpus;
+3. build every vector and lexical artifact in a uniquely named sibling staging
+   directory, checking the caller context at collection and tier boundaries;
+4. validate document counts, tier counts, corpus revision, and generation while
+   the active generation is still untouched;
+5. perform one final cancellation checkpoint;
+6. enter a short masked commit tail that writes staged metadata, atomically
+   swaps the staged directory into the active path, and records associated job
+   completion.
+
+Cancellation before step 6 returns the original `CancelReason`, leaves the
+active generation byte-for-byte unchanged, and makes an incomplete staging
+directory ineligible for recovery. RAII lease ownership releases the advisory
+lock on every exit path. A claimed job has a finalizer: cancellation records a
+terminal `cancelled` job state; an unrelated abnormal return records `failed`,
+so no worker exit can strand a job in `running`.
+
+Once the masked commit tail begins, cancellation is deferred until the
+publication and its job-state bookkeeping finish. There is deliberately no
+checkpoint between the active-directory swap and the terminal job update. This
+is the smallest non-interruptible region that prevents a published generation
+from being reported as cancelled or an old generation from being reported as
+complete.
+
+The amendment supersedes the earlier interpretation that reopening and
+mutating the active persisted tiers was an acceptable production incremental
+path. Frankensearch's WAL and Tantivy mutation APIs are still the intended
+building blocks for a future incremental optimization, but ee may invoke them
+only against a private staged generation and publish the result with the same
+validation/checkpoint/masked-tail protocol as a full rebuild.
+
 ## Relationship To Existing Work
 
 - **Group-commit write intake** (Track B, ADR 0077) reduces `fsync`s on the
@@ -138,10 +180,11 @@ flat-latency perf proof in `.8`.
 - **Async background re-indexer (tokio):** rejected — `tokio` is forbidden, and a
   detached indexer would break the deterministic generation/staleness contract
   and the audited, synchronous write path.
-- **Mutating the `TwoTierIndex` composite in place:** rejected — its builder is
-  terminal by design. The supported incremental path is to reopen the persisted
-  per-tier files (`VectorIndex::open`, `TantivyIndex::open`), mutate, commit, and
-  reopen the composite.
+- **Mutating the active `TwoTierIndex` or its persisted tiers in place:**
+  rejected — the composite builder is terminal, and reopening the reader-visible
+  vector/Tantivy files would expose partial mutation if cancellation lands
+  between tier commits. Reopen/mutate APIs are permitted only on a private
+  copy-on-write staging generation followed by validation and atomic publish.
 
 ## Verification
 
@@ -155,6 +198,13 @@ flat-latency perf proof in `.8`.
   incremental add/update/delete intakes must answer queries identically to the
   same final documents built by one full rebuild (deterministic ranking,
   identical result sets, identical rounded scores).
+- Deterministic Asupersync contract tests inject caller cancellation/deadline at
+  search collection and index build/publication boundaries. They assert exact
+  `CancelReason` propagation, runtime quiescence, no leaked publication lease,
+  terminal `cancelled` job state, and byte-identical active metadata/generation
+  after a pre-commit cancellation. A static contract also rejects
+  `Cx::for_testing()` in the production portions of search, pack, and index
+  sources.
 - The perf leaf (`bd-d67os.8`) carries the no-mock
   `scripts/e2e_incremental_index.sh` proof. It writes a growing corpus through
   `ee remember`, emits `ee.test_event.v1` `bench_iteration` rows, compares

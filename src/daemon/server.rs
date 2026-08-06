@@ -2759,7 +2759,10 @@ fn dispatch_context(request: &DaemonRequest, shutdown: &AtomicBool) -> DaemonRes
                 request.agent_id.clone(),
                 request.workspace_id.clone(),
                 DAEMON_CONTEXT_DEADLINE_EXCEEDED_CODE,
-                format!("ee.daemon.context deadline expired: {error}"),
+                format!(
+                    "ee.daemon.context deadline expired: {}",
+                    crate::core::outcome::cancel_message(&error)
+                ),
             );
         }
         Err(ContextPackError::Cancelled(_)) => {

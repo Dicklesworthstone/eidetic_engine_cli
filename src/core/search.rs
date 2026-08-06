@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -151,6 +153,32 @@ fn search_content_preview(content: &str, max_chars: usize) -> String {
 
 static SEARCH_INDEX_STATUS_CACHE: OnceLock<Mutex<HashMap<IndexStatusCacheKey, CachedIndexStatus>>> =
     OnceLock::new();
+#[cfg(test)]
+type BeforeSearchCollectHook = Box<dyn FnOnce(&asupersync::Cx)>;
+#[cfg(test)]
+std::thread_local! {
+    static BEFORE_SEARCH_COLLECT_HOOK: RefCell<Option<BeforeSearchCollectHook>> =
+        const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn install_before_search_collect_hook(hook: impl FnOnce(&asupersync::Cx) + 'static) {
+    BEFORE_SEARCH_COLLECT_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_before_search_collect_hook(cx: &asupersync::Cx) {
+    BEFORE_SEARCH_COLLECT_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(cx);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_before_search_collect_hook(_cx: &asupersync::Cx) {}
 // bd-2r38i: RwLock (was Mutex) so cache-hit reads via the
 // fingerprint-keyed lookup at `load_search_score_calibration_jsonl`
 // can take `.read()` and run concurrently. This is the simplest
@@ -5032,6 +5060,7 @@ fn round_metric_f64(score: f64) -> f64 {
 pub enum SearchError {
     Index(String),
     NoIndex,
+    Cancelled(asupersync::CancelReason),
     SourceModeUnavailable {
         requested: SearchSourceMode,
         reason: String,
@@ -5044,6 +5073,7 @@ impl SearchError {
         match self {
             Self::Index(_) => Some("Check index directory and permissions"),
             Self::NoIndex => Some("ee index rebuild --workspace ."),
+            Self::Cancelled(_) => None,
             Self::SourceModeUnavailable { .. } => {
                 Some("Rebuild with the requested search features, or omit --strict-source-mode")
             }
@@ -5056,6 +5086,7 @@ impl std::fmt::Display for SearchError {
         match self {
             Self::Index(e) => write!(f, "Index error: {e}"),
             Self::NoIndex => write!(f, "Search index not found"),
+            Self::Cancelled(reason) => f.write_str(&crate::core::outcome::cancel_message(reason)),
             Self::SourceModeUnavailable { requested, reason } => write!(
                 f,
                 "Requested source mode {} is unavailable: {reason}",
@@ -5795,6 +5826,30 @@ pub fn run_search_with_performance_and_filters(
     kind_filter: Option<&str>,
     typed_field_filters: &[TypedMemoryFieldFilter],
 ) -> Result<SearchPerformanceRun, SearchError> {
+    crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+        run_search_with_performance_and_filters_with_cx(
+            &cx,
+            options,
+            kind_filter,
+            typed_field_filters,
+        )
+        .await
+    })
+    .map_err(|error| SearchError::Index(format!("Failed to start search runtime: {error}")))?
+}
+
+/// Execute search with the caller-owned Asupersync request context.
+///
+/// This is the canonical production seam for CLI handlers, context packing,
+/// and deterministic LabRuntime cancellation tests. The synchronous wrapper
+/// above only mints a bounded root context and delegates here.
+pub async fn run_search_with_performance_and_filters_with_cx(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    kind_filter: Option<&str>,
+    typed_field_filters: &[TypedMemoryFieldFilter],
+) -> Result<SearchPerformanceRun, SearchError> {
+    search_checkpoint(cx)?;
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
 
@@ -5828,6 +5883,7 @@ pub fn run_search_with_performance_and_filters(
                 ));
             }
             run_search_inner_with_performance(
+                cx,
                 options,
                 Some(connection),
                 &determinism,
@@ -5837,6 +5893,7 @@ pub fn run_search_with_performance_and_filters(
                 true,
                 None,
             )
+            .await
             .and_then(|mut run| {
                 apply_memory_kind_and_typed_field_filters_to_report_with_connection(
                     connection,
@@ -5857,6 +5914,7 @@ pub fn run_search_with_performance_and_filters(
     }
 
     let run = run_search_inner_with_performance(
+        cx,
         options,
         None,
         &determinism,
@@ -5865,7 +5923,8 @@ pub fn run_search_with_performance_and_filters(
         None,
         true,
         None,
-    )?;
+    )
+    .await?;
     if kind_filter.is_some() || !typed_field_filters.is_empty() {
         return Err(SearchError::Index(format!(
             "Database not found at {}; typed memory filters require an initialized workspace",
@@ -5875,23 +5934,73 @@ pub fn run_search_with_performance_and_filters(
     Ok(run)
 }
 
+fn search_checkpoint(cx: &asupersync::Cx) -> Result<(), SearchError> {
+    cx.checkpoint().map_err(|_| {
+        SearchError::Cancelled(cx.cancel_reason().unwrap_or_else(|| {
+            crate::core::outcome::attributed_cancel_reason(
+                cx,
+                asupersync::CancelKind::User,
+                "search checkpoint cancelled without a recorded reason",
+            )
+        }))
+    })
+}
+
+fn with_search_root<F, Fut, T>(operation: F) -> Result<T, SearchError>
+where
+    F: FnOnce(asupersync::Cx) -> Fut,
+    Fut: std::future::Future<Output = Result<T, SearchError>>,
+{
+    crate::core::run_cli_with_cx(Duration::from_secs(30), operation)
+        .map_err(|error| SearchError::Index(format!("Failed to start search runtime: {error}")))?
+}
+
 pub fn run_search_seeded(
+    options: &SearchOptions,
+    determinism: &Deterministic<Seed>,
+) -> Result<SearchReport, SearchError> {
+    with_search_root(|cx| async move { run_search_seeded_with_cx(&cx, options, determinism).await })
+}
+
+pub async fn run_search_seeded_with_cx(
+    cx: &asupersync::Cx,
     options: &SearchOptions,
     determinism: &Deterministic<Seed>,
 ) -> Result<SearchReport, SearchError> {
     // Search determinism controls ranking/output replay. Audit rows are durable
     // side effects, so they must remain unique across repeated seeded calls.
     let mut audit_ids = SearchAuditIdSource::Ambient;
-    run_search_inner(options, None, determinism, &mut audit_ids, None, true, None)
+    run_search_inner(
+        cx,
+        options,
+        None,
+        determinism,
+        &mut audit_ids,
+        None,
+        true,
+        None,
+    )
+    .await
 }
 
 pub fn run_search_with_read_connection(
     options: &SearchOptions,
     read_connection: &DbConnection,
 ) -> Result<SearchReport, SearchError> {
+    with_search_root(|cx| async move {
+        run_search_with_read_connection_with_cx(&cx, options, read_connection).await
+    })
+}
+
+pub async fn run_search_with_read_connection_with_cx(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    read_connection: &DbConnection,
+) -> Result<SearchReport, SearchError> {
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
     run_search_inner(
+        cx,
         options,
         Some(read_connection),
         &determinism,
@@ -5900,9 +6009,22 @@ pub fn run_search_with_read_connection(
         true,
         None,
     )
+    .await
 }
 
 pub fn run_search_with_read_connection_seeded(
+    options: &SearchOptions,
+    read_connection: &DbConnection,
+    determinism: &Deterministic<Seed>,
+) -> Result<SearchReport, SearchError> {
+    with_search_root(|cx| async move {
+        run_search_with_read_connection_seeded_with_cx(&cx, options, read_connection, determinism)
+            .await
+    })
+}
+
+pub async fn run_search_with_read_connection_seeded_with_cx(
+    cx: &asupersync::Cx,
     options: &SearchOptions,
     read_connection: &DbConnection,
     determinism: &Deterministic<Seed>,
@@ -5911,6 +6033,7 @@ pub fn run_search_with_read_connection_seeded(
     // side effects, so they must remain unique across repeated seeded calls.
     let mut audit_ids = SearchAuditIdSource::Ambient;
     run_search_inner(
+        cx,
         options,
         Some(read_connection),
         determinism,
@@ -5919,6 +6042,7 @@ pub fn run_search_with_read_connection_seeded(
         true,
         None,
     )
+    .await
 }
 
 pub fn run_search_with_read_connection_seeded_and_audit_connection(
@@ -5927,10 +6051,30 @@ pub fn run_search_with_read_connection_seeded_and_audit_connection(
     audit_connection: Option<&DbConnection>,
     determinism: &Deterministic<Seed>,
 ) -> Result<SearchReport, SearchError> {
+    with_search_root(|cx| async move {
+        run_search_with_read_connection_seeded_and_audit_connection_with_cx(
+            &cx,
+            options,
+            read_connection,
+            audit_connection,
+            determinism,
+        )
+        .await
+    })
+}
+
+pub async fn run_search_with_read_connection_seeded_and_audit_connection_with_cx(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    read_connection: &DbConnection,
+    audit_connection: Option<&DbConnection>,
+    determinism: &Deterministic<Seed>,
+) -> Result<SearchReport, SearchError> {
     // Search determinism controls ranking/output replay. Audit rows are durable
     // side effects, so they must remain unique across repeated seeded calls.
     let mut audit_ids = SearchAuditIdSource::Ambient;
     run_search_inner(
+        cx,
         options,
         Some(read_connection),
         determinism,
@@ -5939,6 +6083,7 @@ pub fn run_search_with_read_connection_seeded_and_audit_connection(
         true,
         None,
     )
+    .await
 }
 
 pub fn run_context_search_with_read_connection_seeded_and_audit_connection(
@@ -5947,13 +6092,17 @@ pub fn run_context_search_with_read_connection_seeded_and_audit_connection(
     audit_connection: Option<&DbConnection>,
     determinism: &Deterministic<Seed>,
 ) -> Result<SearchReport, SearchError> {
-    Ok(run_context_search_with_preloaded_memories(
-        options,
-        read_connection,
-        audit_connection,
-        determinism,
-    )?
-    .report)
+    with_search_root(|cx| async move {
+        run_context_search_with_preloaded_memories_with_cx(
+            &cx,
+            options,
+            read_connection,
+            audit_connection,
+            determinism,
+        )
+        .await
+        .map(|run| run.report)
+    })
 }
 
 pub fn run_context_search_with_preloaded_memories(
@@ -5962,16 +6111,58 @@ pub fn run_context_search_with_preloaded_memories(
     audit_connection: Option<&DbConnection>,
     determinism: &Deterministic<Seed>,
 ) -> Result<ContextSearchReport, SearchError> {
-    run_context_search_with_preloaded_memories_and_workspace_state(
+    with_search_root(|cx| async move {
+        run_context_search_with_preloaded_memories_with_cx(
+            &cx,
+            options,
+            read_connection,
+            audit_connection,
+            determinism,
+        )
+        .await
+    })
+}
+
+pub async fn run_context_search_with_preloaded_memories_with_cx(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+    read_connection: &DbConnection,
+    audit_connection: Option<&DbConnection>,
+    determinism: &Deterministic<Seed>,
+) -> Result<ContextSearchReport, SearchError> {
+    run_context_search_with_preloaded_memories_and_workspace_state_with_cx(
+        cx,
         options,
         read_connection,
         audit_connection,
         None,
         determinism,
     )
+    .await
 }
 
 pub fn run_context_search_with_preloaded_memories_and_workspace_state(
+    options: &SearchOptions,
+    read_connection: &DbConnection,
+    audit_connection: Option<&DbConnection>,
+    workspace_state: Option<&SearchWorkspaceProbeState>,
+    determinism: &Deterministic<Seed>,
+) -> Result<ContextSearchReport, SearchError> {
+    with_search_root(|cx| async move {
+        run_context_search_with_preloaded_memories_and_workspace_state_with_cx(
+            &cx,
+            options,
+            read_connection,
+            audit_connection,
+            workspace_state,
+            determinism,
+        )
+        .await
+    })
+}
+
+pub async fn run_context_search_with_preloaded_memories_and_workspace_state_with_cx(
+    cx: &asupersync::Cx,
     options: &SearchOptions,
     read_connection: &DbConnection,
     audit_connection: Option<&DbConnection>,
@@ -5983,6 +6174,7 @@ pub fn run_context_search_with_preloaded_memories_and_workspace_state(
     let mut audit_ids = SearchAuditIdSource::Ambient;
     let mut preloaded_memories = BTreeMap::new();
     let run = run_search_inner_with_performance(
+        cx,
         options,
         Some(read_connection),
         determinism,
@@ -5991,7 +6183,8 @@ pub fn run_context_search_with_preloaded_memories_and_workspace_state(
         workspace_state,
         false,
         Some(&mut preloaded_memories),
-    )?;
+    )
+    .await?;
     Ok(ContextSearchReport {
         report: run.report,
         preloaded_memories,
@@ -6058,6 +6251,21 @@ fn resolve_similar_seed_memory(
 }
 
 pub fn run_similar(options: &SimilarOptions) -> Result<SimilarReport, SimilarError> {
+    crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+        run_similar_with_cx(&cx, options).await
+    })
+    .map_err(|error| {
+        SimilarError::Search(SearchError::Index(format!(
+            "Failed to start similar-search runtime: {error}"
+        )))
+    })?
+}
+
+pub async fn run_similar_with_cx(
+    cx: &asupersync::Cx,
+    options: &SimilarOptions,
+) -> Result<SimilarReport, SimilarError> {
+    search_checkpoint(cx)?;
     let database_path = options.resolve_database_path();
     let connection = DbConnection::open_file_read_only(&database_path)?;
     // Resolve the requested workspace and memory scope BEFORE the seed lookup so
@@ -6111,6 +6319,7 @@ pub fn run_similar(options: &SimilarOptions) -> Result<SimilarReport, SimilarErr
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
     let mut report = run_search_inner(
+        cx,
         &search_options,
         Some(&connection),
         &determinism,
@@ -6118,7 +6327,8 @@ pub fn run_similar(options: &SimilarOptions) -> Result<SimilarReport, SimilarErr
         Some(&connection),
         true,
         None,
-    )?;
+    )
+    .await?;
     if initial_semantic_request_capable
         && !embedding_posture.semantic
         && let Ok(updated) =
@@ -6586,7 +6796,8 @@ impl RelevanceFloorCounts {
     }
 }
 
-fn run_search_inner(
+async fn run_search_inner(
+    cx: &asupersync::Cx,
     options: &SearchOptions,
     read_connection: Option<&DbConnection>,
     determinism: &Deterministic<Seed>,
@@ -6596,6 +6807,7 @@ fn run_search_inner(
     preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
 ) -> Result<SearchReport, SearchError> {
     run_search_inner_with_performance(
+        cx,
         options,
         read_connection,
         determinism,
@@ -6605,10 +6817,12 @@ fn run_search_inner(
         include_passthrough_scope_analysis_metadata,
         preloaded_memories,
     )
+    .await
     .map(|run| run.report)
 }
 
-fn run_search_inner_with_performance(
+async fn run_search_inner_with_performance(
+    cx: &asupersync::Cx,
     options: &SearchOptions,
     read_connection: Option<&DbConnection>,
     determinism: &Deterministic<Seed>,
@@ -6618,6 +6832,7 @@ fn run_search_inner_with_performance(
     include_passthrough_scope_analysis_metadata: bool,
     mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
 ) -> Result<SearchPerformanceRun, SearchError> {
+    search_checkpoint(cx)?;
     let start = Instant::now();
     let mut trace = SearchPerformanceTrace::default();
     let setup_start = Instant::now();
@@ -6712,6 +6927,7 @@ fn run_search_inner_with_performance(
     }
     let retrieve_start = Instant::now();
     let search_result = search_sync_with_performance(
+        cx,
         &index_dir,
         &options.query,
         effective_limit as usize,
@@ -6722,7 +6938,8 @@ fn run_search_inner_with_performance(
         rerank_runtime,
         fusion_weights,
         &mut trace,
-    );
+    )
+    .await;
     trace.record_elapsed("search::retrieve", retrieve_start);
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -7070,7 +7287,9 @@ fn run_search_inner_with_performance(
                 performance: trace,
             })
         }
-        Err(e) => {
+        Err(SearchError::Cancelled(reason)) => Err(SearchError::Cancelled(reason)),
+        Err(error) => {
+            let e = error.to_string();
             let mut degraded = degraded;
             let index_error_already_explained = degraded.iter().any(|degradation| {
                 matches!(degradation.code.as_str(), "index_corrupt" | "index_missing")
@@ -7115,6 +7334,21 @@ fn run_search_inner_with_performance(
 }
 
 pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport, SearchError> {
+    crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+        run_diag_search_with_cx(&cx, options).await
+    })
+    .map_err(|error| {
+        SearchError::Index(format!(
+            "Failed to start diagnostic-search runtime: {error}"
+        ))
+    })?
+}
+
+pub async fn run_diag_search_with_cx(
+    cx: &asupersync::Cx,
+    options: &SearchOptions,
+) -> Result<SearchDiagnosticReport, SearchError> {
+    search_checkpoint(cx)?;
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
@@ -7140,6 +7374,7 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
     let config = options.two_tier_config_for_limit(effective_limit);
     let fusion_weights = resolved_search_fusion_weights(&options.workspace_path);
     let mut diag_result = diag_search_sync(
+        cx,
         &index_dir,
         &options.query,
         effective_limit as usize,
@@ -7148,7 +7383,7 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
         options.source_mode,
         fusion_weights,
     )
-    .map_err(SearchError::Index)?;
+    .await?;
     apply_live_evidence_visibility_to_diag(options, &mut diag_result, &mut degraded);
 
     let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(diag_result.final_hits);
@@ -7802,7 +8037,8 @@ struct DiagSearchSyncResult {
 }
 
 #[allow(clippy::too_many_lines)]
-fn diag_search_sync(
+async fn diag_search_sync(
+    cx: &asupersync::Cx,
     index_dir: &Path,
     query: &str,
     limit: usize,
@@ -7810,90 +8046,115 @@ fn diag_search_sync(
     explain: bool,
     source_mode: SearchSourceMode,
     fusion_weights: SearchFusionWeights,
-) -> Result<DiagSearchSyncResult, String> {
+) -> Result<DiagSearchSyncResult, SearchError> {
+    search_checkpoint(cx)?;
     let index_dir_owned = index_dir.to_path_buf();
     let query_owned = query.to_string();
     #[allow(clippy::type_complexity)]
-    let result_holder: Arc<Mutex<Option<Result<DiagSearchSyncResult, String>>>> =
+    let result_holder: Arc<Mutex<Option<Result<DiagSearchSyncResult, SearchError>>>> =
         Arc::new(Mutex::new(None));
     let task_result = Arc::clone(&result_holder);
-    let runtime_error_result = Arc::clone(&result_holder);
+    let operation_cx = cx.clone();
 
-    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let runtime_result = crate::core::run_cli_future(async move {
-            // Invariant: run_cli_future's block_on installs an ambient runtime Cx.
-            #[allow(clippy::expect_used)]
-            let cx = asupersync::Cx::current()
-                .expect("run_cli_future's block_on installs an ambient runtime Cx");
-            let index = match TwoTierIndex::open(&index_dir_owned, config.clone()) {
-                Ok(idx) => Arc::new(idx),
-                Err(error) => {
-                    if let Ok(mut guard) = task_result.lock() {
-                        *guard = Some(Err(format!("Failed to open index: {error}")));
-                    }
-                    return;
+    async move {
+        let cx = operation_cx;
+        if let Err(error) = search_checkpoint(&cx) {
+            if let Ok(mut guard) = task_result.lock() {
+                *guard = Some(Err(error));
+            }
+            return;
+        }
+        let index = match TwoTierIndex::open(&index_dir_owned, config.clone()) {
+            Ok(idx) => Arc::new(idx),
+            Err(error) => {
+                if let Ok(mut guard) = task_result.lock() {
+                    *guard = Some(Err(map_frankensearch_error(
+                        &cx,
+                        "Failed to open diagnostic index",
+                        error,
+                    )));
                 }
-            };
+                return;
+            }
+        };
 
-            let candidate_limit = limit
-                .max(1)
-                .saturating_mul(config.candidate_multiplier.max(1));
-            let fast_embedder = crate::core::index::default_search_embedder_stack().fast_arc();
-            let lexical = match open_lexical_searcher_for_diag(&index_dir_owned) {
-                Ok(lexical) => lexical,
-                Err(error) => {
-                    if let Ok(mut guard) = task_result.lock() {
-                        *guard = Some(Err(error));
-                    }
-                    return;
+        let candidate_limit = limit
+            .max(1)
+            .saturating_mul(config.candidate_multiplier.max(1));
+        let fast_embedder = crate::core::index::default_search_embedder_stack().fast_arc();
+        let lexical = match open_lexical_searcher_for_diag(&index_dir_owned) {
+            Ok(lexical) => lexical,
+            Err(error) => {
+                if let Ok(mut guard) = task_result.lock() {
+                    *guard = Some(Err(SearchError::Index(error)));
                 }
-            };
+                return;
+            }
+        };
 
-            let lexical_start = Instant::now();
-            let lexical_result = match lexical.as_ref() {
-                Some(lexical) => match lexical.search(&cx, &query_owned, candidate_limit).await {
-                    Ok(results) => SearchArmDiagnostics {
-                        available: true,
-                        score_scale: "bm25_tfidf",
-                        elapsed_ms: lexical_start.elapsed().as_secs_f64() * 1000.0,
-                        results: scored_results_to_arm_hits(&results),
-                        error: None,
-                    },
-                    Err(error) => SearchArmDiagnostics {
-                        available: true,
-                        score_scale: "bm25_tfidf",
-                        elapsed_ms: lexical_start.elapsed().as_secs_f64() * 1000.0,
-                        results: Vec::new(),
-                        error: Some(error.to_string()),
-                    },
+        let lexical_start = Instant::now();
+        let lexical_result = match lexical.as_ref() {
+            Some(lexical) => match lexical.search(&cx, &query_owned, candidate_limit).await {
+                Ok(results) => SearchArmDiagnostics {
+                    available: true,
+                    score_scale: "bm25_tfidf",
+                    elapsed_ms: lexical_start.elapsed().as_secs_f64() * 1000.0,
+                    results: scored_results_to_arm_hits(&results),
+                    error: None,
                 },
-                None => SearchArmDiagnostics {
-                    available: false,
+                Err(error @ frankensearch::SearchError::Cancelled { .. }) => {
+                    if let Ok(mut guard) = task_result.lock() {
+                        *guard = Some(Err(map_frankensearch_error(
+                            &cx,
+                            "Diagnostic lexical arm cancelled",
+                            error,
+                        )));
+                    }
+                    return;
+                }
+                Err(error) => SearchArmDiagnostics {
+                    available: true,
                     score_scale: "bm25_tfidf",
                     elapsed_ms: lexical_start.elapsed().as_secs_f64() * 1000.0,
                     results: Vec::new(),
-                    error: Some("lexical index not found".to_string()),
+                    error: Some(error.to_string()),
                 },
-            };
+            },
+            None => SearchArmDiagnostics {
+                available: false,
+                score_scale: "bm25_tfidf",
+                elapsed_ms: lexical_start.elapsed().as_secs_f64() * 1000.0,
+                results: Vec::new(),
+                error: Some("lexical index not found".to_string()),
+            },
+        };
+        if let Err(error) = search_checkpoint(&cx) {
+            if let Ok(mut guard) = task_result.lock() {
+                *guard = Some(Err(error));
+            }
+            return;
+        }
 
-            let semantic_start = Instant::now();
-            let semantic_result = match fast_embedder.embed(&cx, &query_owned).await {
-                Ok(query_vec) => match index.search_fast(&query_vec, candidate_limit) {
-                    Ok(results) => SearchArmDiagnostics {
-                        available: true,
-                        score_scale: "cosine_similarity",
-                        elapsed_ms: semantic_start.elapsed().as_secs_f64() * 1000.0,
-                        results: vector_hits_to_arm_hits(&results),
-                        error: None,
-                    },
-                    Err(error) => SearchArmDiagnostics {
-                        available: true,
-                        score_scale: "cosine_similarity",
-                        elapsed_ms: semantic_start.elapsed().as_secs_f64() * 1000.0,
-                        results: Vec::new(),
-                        error: Some(error.to_string()),
-                    },
+        let semantic_start = Instant::now();
+        let semantic_result = match fast_embedder.embed(&cx, &query_owned).await {
+            Ok(query_vec) => match index.search_fast(&query_vec, candidate_limit) {
+                Ok(results) => SearchArmDiagnostics {
+                    available: true,
+                    score_scale: "cosine_similarity",
+                    elapsed_ms: semantic_start.elapsed().as_secs_f64() * 1000.0,
+                    results: vector_hits_to_arm_hits(&results),
+                    error: None,
                 },
+                Err(error @ frankensearch::SearchError::Cancelled { .. }) => {
+                    if let Ok(mut guard) = task_result.lock() {
+                        *guard = Some(Err(map_frankensearch_error(
+                            &cx,
+                            "Diagnostic vector arm cancelled",
+                            error,
+                        )));
+                    }
+                    return;
+                }
                 Err(error) => SearchArmDiagnostics {
                     available: true,
                     score_scale: "cosine_similarity",
@@ -7901,79 +8162,102 @@ fn diag_search_sync(
                     results: Vec::new(),
                     error: Some(error.to_string()),
                 },
-            };
-
-            let fusion_start = Instant::now();
-            let fusion = build_fusion_diagnostics(
-                &lexical_result.results,
-                &semantic_result.results,
-                config.rrf_k,
-                limit,
-            );
-            let fusion = FusionDiagnostics {
-                elapsed_ms: fusion_start.elapsed().as_secs_f64() * 1000.0,
-                ..fusion
-            };
-
-            let final_start = Instant::now();
-            let searcher =
-                TwoTierSearcher::new(Arc::clone(&index), Arc::clone(&fast_embedder), config);
-            let searcher = if let Some(lexical) = lexical {
-                searcher.with_lexical(lexical)
-            } else {
-                searcher
-            };
-            let final_result = searcher.search_collect(&cx, &query_owned, limit).await;
-            let converted = match final_result {
-                Ok((results, _metrics)) => {
-                    let mut hits: Vec<SearchHit> = results
-                        .into_iter()
-                        .map(|result| {
-                            search_hit_from_scored_result(
-                                result,
-                                explain,
-                                source_mode,
-                                fusion_weights,
-                            )
-                        })
-                        .collect();
-                    let rerank_seed = Deterministic::from_seed(0).shared_child("search.rerank");
-                    canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
-                    sort_search_hits_by_score_order(&mut hits);
-                    Ok(DiagSearchSyncResult {
-                        pre_fusion: PreFusionDiagnostics {
-                            lexical: lexical_result,
-                            semantic_fast: semantic_result,
-                        },
-                        fusion,
-                        final_hits: hits,
-                        final_elapsed_ms: final_start.elapsed().as_secs_f64() * 1000.0,
-                        errors: Vec::new(),
-                    })
+            },
+            Err(error @ frankensearch::SearchError::Cancelled { .. }) => {
+                if let Ok(mut guard) = task_result.lock() {
+                    *guard = Some(Err(map_frankensearch_error(
+                        &cx,
+                        "Diagnostic embedding arm cancelled",
+                        error,
+                    )));
                 }
-                Err(error) => Err(format!("Search failed: {error}")),
-            };
-
-            if let Ok(mut guard) = task_result.lock() {
-                *guard = Some(converted);
+                return;
             }
-        });
-
-        if let Err(error) = runtime_result
-            && let Ok(mut guard) = runtime_error_result.lock()
-        {
-            *guard = Some(Err(format!("Runtime failed: {error}")));
+            Err(error) => SearchArmDiagnostics {
+                available: true,
+                score_scale: "cosine_similarity",
+                elapsed_ms: semantic_start.elapsed().as_secs_f64() * 1000.0,
+                results: Vec::new(),
+                error: Some(error.to_string()),
+            },
+        };
+        if let Err(error) = search_checkpoint(&cx) {
+            if let Ok(mut guard) = task_result.lock() {
+                *guard = Some(Err(error));
+            }
+            return;
         }
-    }));
 
-    match panic_result {
-        Ok(()) => result_holder
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.take())
-            .unwrap_or_else(|| Err("Diagnostic search result not captured".to_string())),
-        Err(_) => Err("Diagnostic search panicked".to_string()),
+        let fusion_start = Instant::now();
+        let fusion = build_fusion_diagnostics(
+            &lexical_result.results,
+            &semantic_result.results,
+            config.rrf_k,
+            limit,
+        );
+        let fusion = FusionDiagnostics {
+            elapsed_ms: fusion_start.elapsed().as_secs_f64() * 1000.0,
+            ..fusion
+        };
+
+        let final_start = Instant::now();
+        let searcher = TwoTierSearcher::new(Arc::clone(&index), Arc::clone(&fast_embedder), config);
+        let searcher = if let Some(lexical) = lexical {
+            searcher.with_lexical(lexical)
+        } else {
+            searcher
+        };
+        let final_result = searcher.search_collect(&cx, &query_owned, limit).await;
+        if let Err(error) = search_checkpoint(&cx) {
+            if let Ok(mut guard) = task_result.lock() {
+                *guard = Some(Err(error));
+            }
+            return;
+        }
+        let converted = match final_result {
+            Ok((results, _metrics)) => {
+                let mut hits: Vec<SearchHit> = results
+                    .into_iter()
+                    .map(|result| {
+                        search_hit_from_scored_result(result, explain, source_mode, fusion_weights)
+                    })
+                    .collect();
+                let rerank_seed = Deterministic::from_seed(0).shared_child("search.rerank");
+                canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
+                sort_search_hits_by_score_order(&mut hits);
+                Ok(DiagSearchSyncResult {
+                    pre_fusion: PreFusionDiagnostics {
+                        lexical: lexical_result,
+                        semantic_fast: semantic_result,
+                    },
+                    fusion,
+                    final_hits: hits,
+                    final_elapsed_ms: final_start.elapsed().as_secs_f64() * 1000.0,
+                    errors: Vec::new(),
+                })
+            }
+            Err(error) => Err(map_frankensearch_error(
+                &cx,
+                "Diagnostic search failed",
+                error,
+            )),
+        };
+
+        if let Ok(mut guard) = task_result.lock() {
+            *guard = Some(converted);
+        }
     }
+    .await;
+
+    result_holder
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take())
+        .unwrap_or_else(|| {
+            Err(SearchError::Index(
+                "Diagnostic search result not captured".to_owned(),
+            ))
+        })
 }
 
 #[cfg(feature = "lexical-bm25")]
@@ -8885,6 +9169,47 @@ fn trace_query_plan_cache_lookup(
     );
 }
 
+fn search_backend_cancelled(
+    cx: &asupersync::Cx,
+    caller_phase: &str,
+    backend_phase: &str,
+    backend_reason: &str,
+) -> SearchError {
+    let reason = cx.cancel_reason().unwrap_or_else(|| {
+        let normalized = backend_reason.to_ascii_lowercase();
+        let kind = if normalized.contains("timeout")
+            || normalized.contains("timed out")
+            || normalized.contains("deadline")
+        {
+            asupersync::CancelKind::Timeout
+        } else {
+            asupersync::CancelKind::User
+        };
+        crate::core::outcome::attributed_cancel_reason(
+            cx,
+            kind,
+            format!(
+                "{caller_phase}: Frankensearch cancelled during {backend_phase}: {backend_reason}"
+            ),
+        )
+    });
+    SearchError::Cancelled(reason)
+}
+
+fn map_frankensearch_error(
+    cx: &asupersync::Cx,
+    phase: &str,
+    error: frankensearch::SearchError,
+) -> SearchError {
+    match error {
+        frankensearch::SearchError::Cancelled {
+            phase: backend_phase,
+            reason,
+        } => search_backend_cancelled(cx, phase, &backend_phase, &reason),
+        error => SearchError::Index(format!("{phase}: {error}")),
+    }
+}
+
 #[cfg(test)]
 fn search_sync(
     index_dir: &Path,
@@ -8896,22 +9221,29 @@ fn search_sync(
     determinism: &Deterministic<Seed>,
 ) -> Result<(Vec<SearchHit>, Vec<String>), String> {
     let mut trace = SearchPerformanceTrace::default();
-    search_sync_with_performance(
-        index_dir,
-        query,
-        limit,
-        config,
-        explain,
-        source_mode,
-        determinism,
-        SearchRerankRuntime::disabled(),
-        SearchFusionWeights::default(),
-        &mut trace,
-    )
+    crate::core::run_cli_with_cx(Duration::from_secs(30), |cx| async move {
+        search_sync_with_performance(
+            &cx,
+            index_dir,
+            query,
+            limit,
+            config,
+            explain,
+            source_mode,
+            determinism,
+            SearchRerankRuntime::disabled(),
+            SearchFusionWeights::default(),
+            &mut trace,
+        )
+        .await
+    })
+    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn search_sync_with_performance(
+async fn search_sync_with_performance(
+    cx: &asupersync::Cx,
     index_dir: &Path,
     query: &str,
     limit: usize,
@@ -8922,7 +9254,8 @@ fn search_sync_with_performance(
     rerank_runtime: SearchRerankRuntime,
     fusion_weights: SearchFusionWeights,
     trace: &mut SearchPerformanceTrace,
-) -> Result<(Vec<SearchHit>, Vec<String>), String> {
+) -> Result<(Vec<SearchHit>, Vec<String>), SearchError> {
+    search_checkpoint(cx)?;
     let plan_cache_key =
         search_plan_cache_key(index_dir, query, limit, &config, explain, source_mode);
     let plan_cache_capacity = resolved_query_plan_cache_capacity();
@@ -8951,229 +9284,75 @@ fn search_sync_with_performance(
         "threaded deterministic token through search_sync"
     );
     #[allow(clippy::type_complexity)]
-    let result_holder: Arc<Mutex<Option<Result<(Vec<SearchHit>, Vec<String>), String>>>> =
+    let result_holder: Arc<Mutex<Option<Result<(Vec<SearchHit>, Vec<String>), SearchError>>>> =
         Arc::new(Mutex::new(None));
     let task_result = Arc::clone(&result_holder);
-    let runtime_error_result = Arc::clone(&result_holder);
     let sync_timings: Arc<Mutex<Vec<SearchPerformanceTiming>>> = Arc::new(Mutex::new(Vec::new()));
     let async_timings = Arc::clone(&sync_timings);
+    let operation_cx = cx.clone();
 
     let runtime_start = Instant::now();
-    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let runtime_result = crate::core::run_cli_future(async move {
-            // Invariant: run_cli_future's block_on installs an ambient runtime Cx.
-            #[allow(clippy::expect_used)]
-            let cx = asupersync::Cx::current()
-                .expect("run_cli_future's block_on installs an ambient runtime Cx");
-            if source_mode == SearchSourceMode::LexicalOnly {
-                let lexical_open_start = Instant::now();
-                let lexical = match open_lexical_searcher(&index_dir_owned) {
-                    Ok(Some(lexical)) => {
-                        push_search_performance_timing(
-                            &async_timings,
-                            "searchSync::lexicalOpen",
-                            lexical_open_start.elapsed(),
-                        );
-                        lexical
-                    }
-                    Ok(None) => {
-                        push_search_performance_timing(
-                            &async_timings,
-                            "searchSync::lexicalOpen",
-                            lexical_open_start.elapsed(),
-                        );
-                        if let Ok(mut guard) = task_result.lock() {
-                            *guard = Some(Err("Lexical index not found".to_string()));
-                        }
-                        return;
-                    }
-                    Err(error) => {
-                        push_search_performance_timing(
-                            &async_timings,
-                            "searchSync::lexicalOpen",
-                            lexical_open_start.elapsed(),
-                        );
-                        if let Ok(mut guard) = task_result.lock() {
-                            *guard = Some(Err(error));
-                        }
-                        return;
-                    }
-                };
-
-                let lexical_search_start = Instant::now();
-                let search_result = lexical.search(&cx, &query_owned, limit).await;
-                push_search_performance_timing(
-                    &async_timings,
-                    "searchSync::lexicalSearch",
-                    lexical_search_start.elapsed(),
-                );
-                let convert_start = Instant::now();
-                let converted = match search_result {
-                    Ok(results) => {
-                        let mut hits: Vec<SearchHit> = results
-                            .into_iter()
-                            .map(|result| {
-                                search_hit_from_scored_result(
-                                    result,
-                                    explain,
-                                    source_mode,
-                                    fusion_weights,
-                                )
-                            })
-                            .collect();
-                        canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
-                        sort_search_hits_by_score_order(&mut hits);
-                        Ok((hits, Vec::new()))
-                    }
-                    Err(error) => Err(format!("Lexical search failed: {error}")),
-                };
-                push_search_performance_timing(
-                    &async_timings,
-                    "searchSync::hitConversion",
-                    convert_start.elapsed(),
-                );
-
-                if let Ok(mut guard) = task_result.lock() {
-                    *guard = Some(converted);
-                }
-                return;
+    async move {
+        let cx = operation_cx;
+        if let Err(error) = search_checkpoint(&cx) {
+            if let Ok(mut guard) = task_result.lock() {
+                *guard = Some(Err(error));
             }
-
-            let two_tier_open_start = Instant::now();
-            let index = match TwoTierIndex::open(&index_dir_owned, config.clone()) {
-                Ok(idx) => {
+            return;
+        }
+        if source_mode == SearchSourceMode::LexicalOnly {
+            let lexical_open_start = Instant::now();
+            let lexical = match open_lexical_searcher(&index_dir_owned) {
+                Ok(Some(lexical)) => {
                     push_search_performance_timing(
                         &async_timings,
-                        "searchSync::twoTierOpen",
-                        two_tier_open_start.elapsed(),
+                        "searchSync::lexicalOpen",
+                        lexical_open_start.elapsed(),
                     );
-                    Arc::new(idx)
+                    lexical
                 }
-                Err(e) => {
+                Ok(None) => {
                     push_search_performance_timing(
                         &async_timings,
-                        "searchSync::twoTierOpen",
-                        two_tier_open_start.elapsed(),
+                        "searchSync::lexicalOpen",
+                        lexical_open_start.elapsed(),
                     );
                     if let Ok(mut guard) = task_result.lock() {
-                        *guard = Some(Err(format!("Failed to open index: {e}")));
+                        *guard = Some(Err(SearchError::Index(
+                            "Lexical index not found".to_owned(),
+                        )));
+                    }
+                    return;
+                }
+                Err(error) => {
+                    push_search_performance_timing(
+                        &async_timings,
+                        "searchSync::lexicalOpen",
+                        lexical_open_start.elapsed(),
+                    );
+                    if let Ok(mut guard) = task_result.lock() {
+                        *guard = Some(Err(SearchError::Index(error)));
                     }
                     return;
                 }
             };
 
-            let embedder_start = Instant::now();
-            let fast_embedder = crate::core::index::default_search_embedder_stack().fast_arc();
+            let lexical_search_start = Instant::now();
+            let search_result = lexical.search(&cx, &query_owned, limit).await;
             push_search_performance_timing(
                 &async_timings,
-                "searchSync::embedderInit",
-                embedder_start.elapsed(),
+                "searchSync::lexicalSearch",
+                lexical_search_start.elapsed(),
             );
-            let searcher_build_start = Instant::now();
-            let mut searcher = TwoTierSearcher::new(index, fast_embedder, config);
-            push_search_performance_timing(
-                &async_timings,
-                "searchSync::searcherBuild",
-                searcher_build_start.elapsed(),
-            );
-            searcher = if source_mode == SearchSourceMode::Hybrid {
-                let attach_start = Instant::now();
-                match attach_lexical_searcher(searcher, &index_dir_owned) {
-                    Ok(searcher) => {
-                        push_search_performance_timing(
-                            &async_timings,
-                            "searchSync::attachLexical",
-                            attach_start.elapsed(),
-                        );
-                        searcher
-                    }
-                    Err(error) => {
-                        push_search_performance_timing(
-                            &async_timings,
-                            "searchSync::attachLexical",
-                            attach_start.elapsed(),
-                        );
-                        if let Ok(mut guard) = task_result.lock() {
-                            *guard = Some(Err(error));
-                        }
-                        return;
-                    }
+            if let Err(error) = search_checkpoint(&cx) {
+                if let Ok(mut guard) = task_result.lock() {
+                    *guard = Some(Err(error));
                 }
-            } else {
-                searcher
-            };
-
-            let collect_start = Instant::now();
-            let collect_limit = rerank_runtime_owned.collect_limit(limit);
-            let search_result =
-                if let Some(text_provider) = rerank_runtime_owned.text_provider.clone() {
-                    searcher
-                        .search_collect_with_text(&cx, &query_owned, collect_limit, move |doc_id| {
-                            text_provider.text_for_doc(doc_id)
-                        })
-                        .await
-                } else {
-                    searcher
-                        .search_collect(&cx, &query_owned, collect_limit)
-                        .await
-                };
-            let search_result = match search_result {
-                Ok((mut results, metrics)) => {
-                    if let (Some(reranker), Some(text_provider)) = (
-                        rerank_runtime_owned.reranker.clone(),
-                        rerank_runtime_owned.text_provider.clone(),
-                    ) {
-                        let rerank_start = Instant::now();
-                        let rerank_result = apply_search_rerank(
-                            &cx,
-                            &query_owned,
-                            &mut results,
-                            reranker.as_ref(),
-                            |doc_id| text_provider.text_for_doc(doc_id),
-                            rerank_runtime_owned.top_k,
-                        )
-                        .await;
-                        push_search_performance_timing(
-                            &async_timings,
-                            "searchSync::rerank",
-                            rerank_start.elapsed(),
-                        );
-                        match rerank_result {
-                            Ok(()) => Ok((results, metrics)),
-                            Err(error) => Err(error),
-                        }
-                    } else {
-                        Ok((results, metrics))
-                    }
-                }
-                Err(error) => Err(error),
-            };
-            push_search_performance_timing(
-                &async_timings,
-                "searchSync::searchCollect",
-                collect_start.elapsed(),
-            );
-
+                return;
+            }
             let convert_start = Instant::now();
             let converted = match search_result {
-                Ok((results, _metrics)) => {
-                    let reranked_count = results
-                        .iter()
-                        .filter(|result| result.rerank_score.is_some())
-                        .count();
-                    if rerank_runtime_owned.is_enabled() {
-                        tracing::info!(
-                            target: "ee::search::rerank",
-                            event = "rerank_stage_completed",
-                            model_id = rerank_runtime_owned
-                                .model_id
-                                .as_deref()
-                                .unwrap_or("unknown"),
-                            requested_top_k = rerank_runtime_owned.top_k,
-                            collect_limit,
-                            reranked_count,
-                        );
-                    }
+                Ok(results) => {
                     let mut hits: Vec<SearchHit> = results
                         .into_iter()
                         .map(|result| {
@@ -9189,7 +9368,7 @@ fn search_sync_with_performance(
                     sort_search_hits_by_score_order(&mut hits);
                     Ok((hits, Vec::new()))
                 }
-                Err(e) => Err(format!("Search failed: {e}")),
+                Err(error) => Err(map_frankensearch_error(&cx, "Lexical search failed", error)),
             };
             push_search_performance_timing(
                 &async_timings,
@@ -9200,14 +9379,180 @@ fn search_sync_with_performance(
             if let Ok(mut guard) = task_result.lock() {
                 *guard = Some(converted);
             }
-        });
-
-        if let Err(e) = runtime_result
-            && let Ok(mut guard) = runtime_error_result.lock()
-        {
-            *guard = Some(Err(format!("Runtime failed: {e}")));
+            return;
         }
-    }));
+
+        let two_tier_open_start = Instant::now();
+        let index = match TwoTierIndex::open(&index_dir_owned, config.clone()) {
+            Ok(idx) => {
+                push_search_performance_timing(
+                    &async_timings,
+                    "searchSync::twoTierOpen",
+                    two_tier_open_start.elapsed(),
+                );
+                Arc::new(idx)
+            }
+            Err(e) => {
+                push_search_performance_timing(
+                    &async_timings,
+                    "searchSync::twoTierOpen",
+                    two_tier_open_start.elapsed(),
+                );
+                if let Ok(mut guard) = task_result.lock() {
+                    *guard = Some(Err(map_frankensearch_error(&cx, "Failed to open index", e)));
+                }
+                return;
+            }
+        };
+
+        let embedder_start = Instant::now();
+        let fast_embedder = crate::core::index::default_search_embedder_stack().fast_arc();
+        push_search_performance_timing(
+            &async_timings,
+            "searchSync::embedderInit",
+            embedder_start.elapsed(),
+        );
+        let searcher_build_start = Instant::now();
+        let mut searcher = TwoTierSearcher::new(index, fast_embedder, config);
+        push_search_performance_timing(
+            &async_timings,
+            "searchSync::searcherBuild",
+            searcher_build_start.elapsed(),
+        );
+        searcher = if source_mode == SearchSourceMode::Hybrid {
+            let attach_start = Instant::now();
+            match attach_lexical_searcher(searcher, &index_dir_owned) {
+                Ok(searcher) => {
+                    push_search_performance_timing(
+                        &async_timings,
+                        "searchSync::attachLexical",
+                        attach_start.elapsed(),
+                    );
+                    searcher
+                }
+                Err(error) => {
+                    push_search_performance_timing(
+                        &async_timings,
+                        "searchSync::attachLexical",
+                        attach_start.elapsed(),
+                    );
+                    if let Ok(mut guard) = task_result.lock() {
+                        *guard = Some(Err(SearchError::Index(error)));
+                    }
+                    return;
+                }
+            }
+        } else {
+            searcher
+        };
+
+        let collect_start = Instant::now();
+        let collect_limit = rerank_runtime_owned.collect_limit(limit);
+        run_before_search_collect_hook(&cx);
+        let search_result = if let Some(text_provider) = rerank_runtime_owned.text_provider.clone()
+        {
+            searcher
+                .search_collect_with_text(&cx, &query_owned, collect_limit, move |doc_id| {
+                    text_provider.text_for_doc(doc_id)
+                })
+                .await
+        } else {
+            searcher
+                .search_collect(&cx, &query_owned, collect_limit)
+                .await
+        };
+        if let Err(error) = search_checkpoint(&cx) {
+            if let Ok(mut guard) = task_result.lock() {
+                *guard = Some(Err(error));
+            }
+            return;
+        }
+        let search_result = match search_result {
+            Ok((mut results, metrics)) => {
+                if let (Some(reranker), Some(text_provider)) = (
+                    rerank_runtime_owned.reranker.clone(),
+                    rerank_runtime_owned.text_provider.clone(),
+                ) {
+                    let rerank_start = Instant::now();
+                    let rerank_result = apply_search_rerank(
+                        &cx,
+                        &query_owned,
+                        &mut results,
+                        reranker.as_ref(),
+                        |doc_id| text_provider.text_for_doc(doc_id),
+                        rerank_runtime_owned.top_k,
+                    )
+                    .await;
+                    push_search_performance_timing(
+                        &async_timings,
+                        "searchSync::rerank",
+                        rerank_start.elapsed(),
+                    );
+                    if let Err(error) = search_checkpoint(&cx) {
+                        if let Ok(mut guard) = task_result.lock() {
+                            *guard = Some(Err(error));
+                        }
+                        return;
+                    }
+                    match rerank_result {
+                        Ok(()) => Ok((results, metrics)),
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    Ok((results, metrics))
+                }
+            }
+            Err(error) => Err(error),
+        };
+        push_search_performance_timing(
+            &async_timings,
+            "searchSync::searchCollect",
+            collect_start.elapsed(),
+        );
+
+        let convert_start = Instant::now();
+        let converted = match search_result {
+            Ok((results, _metrics)) => {
+                let reranked_count = results
+                    .iter()
+                    .filter(|result| result.rerank_score.is_some())
+                    .count();
+                if rerank_runtime_owned.is_enabled() {
+                    tracing::info!(
+                        target: "ee::search::rerank",
+                        event = "rerank_stage_completed",
+                        model_id = rerank_runtime_owned
+                            .model_id
+                            .as_deref()
+                            .unwrap_or("unknown"),
+                        requested_top_k = rerank_runtime_owned.top_k,
+                        collect_limit,
+                        reranked_count,
+                    );
+                }
+                let mut hits: Vec<SearchHit> = results
+                    .into_iter()
+                    .map(|result| {
+                        search_hit_from_scored_result(result, explain, source_mode, fusion_weights)
+                    })
+                    .collect();
+                canonicalize_equivalent_component_scores(&mut hits, &rerank_seed);
+                sort_search_hits_by_score_order(&mut hits);
+                Ok((hits, Vec::new()))
+            }
+            Err(error) => Err(map_frankensearch_error(&cx, "Search failed", error)),
+        };
+        push_search_performance_timing(
+            &async_timings,
+            "searchSync::hitConversion",
+            convert_start.elapsed(),
+        );
+
+        if let Ok(mut guard) = task_result.lock() {
+            *guard = Some(converted);
+        }
+    }
+    .await;
     trace.record_duration("searchSync::runtime", runtime_start.elapsed());
     if let Ok(mut guard) = sync_timings.lock() {
         for timing in guard.drain(..) {
@@ -9215,14 +9560,11 @@ fn search_sync_with_performance(
         }
     }
 
-    match panic_result {
-        Ok(()) => result_holder
-            .lock()
-            .ok()
-            .and_then(|mut guard| guard.take())
-            .unwrap_or_else(|| Err("Search result not captured".to_string())),
-        Err(_) => Err("Search panicked".to_string()),
-    }
+    result_holder
+        .lock()
+        .ok()
+        .and_then(|mut guard| guard.take())
+        .unwrap_or_else(|| Err(SearchError::Index("Search result not captured".to_owned())))
 }
 
 fn push_search_performance_timing(
@@ -10224,6 +10566,14 @@ mod tests {
 
     type TestResult = Result<(), String>;
 
+    fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
+        if condition {
+            Ok(())
+        } else {
+            Err(message.into())
+        }
+    }
+
     fn unique_test_dir(label: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -10239,6 +10589,108 @@ mod tests {
     fn write_current_index_metadata(index_dir: &Path, documents_total: u32) -> TestResult {
         crate::core::index::write_memory_eval_index_metadata(index_dir, documents_total)
             .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn lab_runtime_cancellation_at_search_collection_preserves_reason() -> TestResult {
+        let index_dir = unique_test_dir("collection-cancellation");
+        let build_index_dir = index_dir.clone();
+        crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            IndexBuilder::new(&build_index_dir)
+                .with_embedder_stack(crate::core::index::default_search_embedder_stack())
+                .add_documents(vec![IndexableDocument::new(
+                    "mem_collection_cancel",
+                    "Preserve exact caller cancellation during Frankensearch collection.",
+                )])
+                .build(&cx)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        })
+        .map_err(|error| error.to_string())??;
+
+        let expected_message = "caller stopped search during collection";
+        install_before_search_collect_hook(move |cx| {
+            cx.set_cancel_reason(
+                asupersync::CancelReason::deadline().with_message(expected_message),
+            );
+        });
+
+        let observation: Arc<Mutex<Option<Result<asupersync::CancelReason, String>>>> =
+            Arc::new(Mutex::new(None));
+        let task_observation = Arc::clone(&observation);
+        let mut lab =
+            asupersync::LabRuntime::new(asupersync::LabConfig::new(0xEE_90C).max_steps(256));
+        let root = lab.state.create_root_region(asupersync::Budget::INFINITE);
+        let (task_id, _handle) = lab
+            .state
+            .create_task(root, asupersync::Budget::INFINITE, async move {
+                let result = if let Some(cx) = asupersync::Cx::current() {
+                    let mut trace = SearchPerformanceTrace::default();
+                    let determinism = Deterministic::from_seed(0xEE_90C);
+                    match search_sync_with_performance(
+                        &cx,
+                        &index_dir,
+                        "cancellation collection",
+                        5,
+                        TwoTierConfig::default(),
+                        false,
+                        SearchSourceMode::SemanticOnly,
+                        &determinism,
+                        SearchRerankRuntime::disabled(),
+                        SearchFusionWeights::default(),
+                        &mut trace,
+                    )
+                    .await
+                    {
+                        Err(SearchError::Cancelled(reason)) => Ok(reason),
+                        Err(error) => Err(format!(
+                            "collection cancellation must remain typed, got {error:?}"
+                        )),
+                        Ok((hits, errors)) => Err(format!(
+                            "cancelled collection returned hits={hits:?}, errors={errors:?}"
+                        )),
+                    }
+                } else {
+                    Err("LabRuntime search task did not install a Cx".to_owned())
+                };
+                if let Ok(mut slot) = task_observation.lock() {
+                    *slot = Some(result);
+                }
+                asupersync::Outcome::<(), String>::Ok(())
+            })
+            .map_err(|error| format!("create collection cancellation task: {error}"))?;
+        lab.scheduler.lock().schedule(task_id, 0);
+
+        let report = lab.run_until_quiescent_with_report();
+        ensure(
+            report.quiescent,
+            "collection cancellation LabRuntime must quiesce",
+        )?;
+        ensure(
+            report.invariant_violations.is_empty(),
+            format!(
+                "collection cancellation must preserve LabRuntime invariants: {:?}",
+                report.invariant_violations
+            ),
+        )?;
+        let reason = observation
+            .lock()
+            .map_err(|_| "collection cancellation observation poisoned".to_owned())?
+            .take()
+            .ok_or_else(|| "collection cancellation observation missing".to_owned())??;
+        ensure(
+            reason.kind == asupersync::CancelKind::Deadline,
+            format!("unexpected collection cancellation kind: {:?}", reason.kind),
+        )?;
+        ensure(
+            reason.message.as_deref() == Some(expected_message),
+            format!(
+                "unexpected collection cancellation message: {:?}",
+                reason.message
+            ),
+        )
     }
 
     fn seeded_search_audit_ids(seed: u64) -> Result<Vec<String>, String> {
@@ -10735,7 +11187,8 @@ mod tests {
                 .map_err(|error| error.to_string())?;
             #[cfg(feature = "lexical-bm25")]
             crate::core::index::build_lexical_tier(&cx, &build_index_dir, &lexical_documents)
-                .await?;
+                .await
+                .map_err(|error| error.to_string())?;
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
@@ -13808,7 +14261,8 @@ mod tests {
                 .await
                 .map_err(|error| error.to_string())?;
             crate::core::index::build_lexical_tier(&cx, &build_index_dir, &lexical_documents)
-                .await?;
+                .await
+                .map_err(|error| error.to_string())?;
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
@@ -13953,7 +14407,8 @@ mod tests {
                 .await
                 .map_err(|error| error.to_string())?;
             crate::core::index::build_lexical_tier(&cx, &build_index_dir, &lexical_documents)
-                .await?;
+                .await
+                .map_err(|error| error.to_string())?;
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
@@ -14095,7 +14550,8 @@ mod tests {
                 .await
                 .map_err(|error| error.to_string())?;
             crate::core::index::build_lexical_tier(&cx, &build_index_dir, &lexical_documents)
-                .await?;
+                .await
+                .map_err(|error| error.to_string())?;
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;

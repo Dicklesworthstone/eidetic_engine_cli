@@ -146,7 +146,7 @@ pub mod workspace;
 pub mod write_owner;
 
 pub use budget::{BudgetDimension, BudgetExceeded, BudgetSnapshot, RequestBudget};
-pub use context::{AccessLevel, CapabilitySet, CommandContext};
+pub use context::{AccessLevel, CapabilitySet, CommandCancellation, CommandContext};
 pub use outcome::{
     CliCancelReason, CliOutcomeClass, CliOutcomeSummary, EXIT_CANCELLED, EXIT_PANICKED,
     OutcomeFeedbackSummary, OutcomeRecordOptions, OutcomeRecordReport, OutcomeRecordStatus,
@@ -538,6 +538,29 @@ where
 {
     let runtime = build_cli_runtime()?;
     Ok(runtime.block_on(future))
+}
+
+/// Run a synchronous CLI operation with an explicit, bounded production
+/// request context.
+///
+/// The context is minted by [`asupersync::runtime::Runtime`] so it inherits
+/// the runtime's drivers and capability mask. This is the production root for
+/// sync adapters that must pass a caller-owned [`asupersync::Cx`] into async
+/// search, pack, or index work; those adapters must not recover authority via
+/// `Cx::current()` or manufacture it with a test constructor.
+pub fn run_cli_with_cx<F, Fut, T>(timeout: Duration, operation: F) -> RuntimeResult<T>
+where
+    F: FnOnce(asupersync::Cx) -> Fut,
+    Fut: Future<Output = T>,
+{
+    let runtime = build_cli_runtime()?;
+    let bootstrap = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
+    let budget = bootstrap.budget_for_timeout(timeout);
+    let cx = runtime.request_cx_with_budget(budget);
+    Ok(runtime.block_on(async move {
+        let _ambient = asupersync::Cx::set_current(Some(cx.clone()));
+        operation(cx).await
+    }))
 }
 
 /// Serialize a value to JSON, returning a stable error envelope on failure.

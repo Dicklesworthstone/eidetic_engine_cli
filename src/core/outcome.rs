@@ -55,7 +55,7 @@ use crate::models::{
 use crate::runtime::determinism::{Deterministic, Seed};
 
 /// Exit code for cancelled operations (SIGINT convention).
-pub const EXIT_CANCELLED: u8 = 130;
+pub const EXIT_CANCELLED: u8 = ProcessExitCode::Cancelled as u8;
 
 /// Exit code for panicked operations (Rust panic convention).
 pub const EXIT_PANICKED: u8 = 101;
@@ -189,6 +189,41 @@ pub fn cancel_message(reason: &CancelReason) -> String {
         CancelKind::Shutdown => "Runtime shutdown.".to_string(),
         CancelKind::LinkedExit => "Linked task exited.".to_string(),
     }
+}
+
+/// Stable machine-facing code for the exact Asupersync cancellation kind.
+#[must_use]
+pub const fn cancel_kind_code(kind: CancelKind) -> &'static str {
+    match kind {
+        CancelKind::User => "user",
+        CancelKind::Timeout => "timeout",
+        CancelKind::Deadline => "deadline",
+        CancelKind::PollQuota => "poll_quota",
+        CancelKind::CostBudget => "cost_budget",
+        CancelKind::FailFast => "fail_fast",
+        CancelKind::RaceLost => "race_lost",
+        CancelKind::ParentCancelled => "parent_cancelled",
+        CancelKind::ResourceUnavailable => "resource_unavailable",
+        CancelKind::Shutdown => "shutdown",
+        CancelKind::LinkedExit => "linked_exit",
+    }
+}
+
+/// Build a fully attributed cancellation reason at a caller-owned context.
+///
+/// `CancelReason::new` and convenience constructors intentionally use testing
+/// attribution. Production fallback paths use this helper so even a backend
+/// that reports cancellation without recording a reason retains the caller's
+/// region, task, and runtime clock.
+#[must_use]
+pub fn attributed_cancel_reason(
+    cx: &asupersync::Cx,
+    kind: CancelKind,
+    message: impl Into<String>,
+) -> CancelReason {
+    CancelReason::with_origin(kind, cx.region_id(), cx.now_for_observability())
+        .with_task(cx.task_id())
+        .with_message(message.into())
 }
 
 /// Extract a human-readable message from a panicked outcome.

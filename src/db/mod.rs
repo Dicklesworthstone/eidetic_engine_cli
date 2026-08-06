@@ -22391,6 +22391,26 @@ impl DbConnection {
         Ok(affected > 0)
     }
 
+    /// Cancel a claimed search index job after cooperative runtime shutdown.
+    ///
+    /// This transition is deliberately separate from pending-job cancellation:
+    /// only the worker that successfully moved a job to `running` may use it,
+    /// and terminal rows remain immutable.
+    pub fn cancel_running_search_index_job(&self, id: &str) -> Result<bool> {
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE search_index_jobs SET status = ?1, completed_at = ?2 WHERE id = ?3 AND status = ?4",
+            &[
+                Value::Text(SearchIndexJobStatus::Cancelled.as_str().to_string()),
+                Value::Text(now),
+                Value::Text(id.to_string()),
+                Value::Text(SearchIndexJobStatus::Running.as_str().to_string()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
     /// Get the latest search index job for a workspace (regardless of status).
     pub fn latest_search_index_job(
         &self,

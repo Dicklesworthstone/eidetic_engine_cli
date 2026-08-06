@@ -377,6 +377,11 @@ pub const EXIT_CODES: &[ExitCodeEntry] = &[
         name: "eval_failure",
         description: "Evaluation completed and found regressions",
     },
+    ExitCodeEntry {
+        code: 130,
+        name: "cancelled",
+        description: "Operation was cancelled by the caller, deadline, or runtime budget",
+    },
 ];
 
 #[derive(Clone, Debug)]
@@ -1473,12 +1478,14 @@ mod tests {
     }
 
     #[test]
-    fn exit_codes_are_sequential() -> TestResult {
-        for (i, code) in EXIT_CODES.iter().enumerate() {
-            ensure_equal(
-                &(code.code as usize),
-                &i,
-                &format!("exit code {} sequential", i),
+    fn exit_codes_are_unique_and_sorted() -> TestResult {
+        for window in EXIT_CODES.windows(2) {
+            ensure(
+                window[0].code < window[1].code,
+                format!(
+                    "exit codes must be strictly increasing: {} then {}",
+                    window[0].code, window[1].code
+                ),
             )?;
         }
         Ok(())
@@ -1497,6 +1504,7 @@ mod tests {
             ("policy", ProcessExitCode::PolicyDenied),
             ("migration", ProcessExitCode::MigrationRequired),
             ("eval_failure", ProcessExitCode::EvalFailure),
+            ("cancelled", ProcessExitCode::Cancelled),
         ];
         ensure_equal(&EXIT_CODES.len(), &expected.len(), "exit code count")?;
         for (entry, (name, code)) in EXIT_CODES.iter().zip(expected) {
