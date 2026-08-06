@@ -483,7 +483,8 @@ candidates, and rebuilds the index. It requires `ee model status --json` to repo
 `data.modelLifecycle.semanticReadiness.state == "available"` and
 `mode == "semantic"`. It then requires `ee search --json` to report five
 model-backed results with `data.rerank.mode == "reranked"`, positive rerank
-scores, and no `rerank_model_unavailable` degradation. This proves a default
+scores in the documented unit interval, per-result `scoreKind == "reranked"`,
+and no `rerank_model_unavailable` degradation. This proves a default
 online release can perform both the one-time Model2Vec download and native
 reranker bootstrap without a stub or fusion-only false positive.
 

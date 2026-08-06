@@ -1160,6 +1160,8 @@ run_semantic_first_use_smoke() {
   semantic_smoke_enabled || return 0
 
   local smoke_ws archive rerank_url fetch_json status_json search_json compact
+  local rerank_score_matches reranked_kind_matches
+  local observed_rerank_scores observed_reranked_kinds
   smoke_ws="$TMP/semantic-first-use-workspace"
   archive="$TMP/rerank-default-v1.tar.zst"
   rerank_url="${EE_INSTALL_RERANK_MODEL_URL:-https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/rerank-default-v1/rerank-default-v1.tar.zst}"
@@ -1194,9 +1196,10 @@ run_semantic_first_use_smoke() {
   fi
   compact=$(tr -d '\n' <"$fetch_json")
   if ! printf '%s' "$compact" | grep -Eq '"success"[[:space:]]*:[[:space:]]*true' \
+     || ! printf '%s' "$compact" | grep -Eq '"schema"[[:space:]]*:[[:space:]]*"ee.model_fetch.v1"' \
      || ! printf '%s' "$compact" | grep -Eq '"modelId"[[:space:]]*:[[:space:]]*"rerank-default-v1"' \
      || ! printf '%s' "$compact" | grep -Eq '"modelPurpose"[[:space:]]*:[[:space:]]*"reranker"' \
-     || ! printf '%s' "$compact" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"available"'; then
+     || ! printf '%s' "$compact" | grep -Eq '"registryEntry"[[:space:]]*:[[:space:]]*\{[^}]*"status"[[:space:]]*:[[:space:]]*"available"'; then
     semantic_smoke_fail_or_warn "Native-reranker first-use smoke model fetch did not return an available reranker"
     return $?
   fi
@@ -1259,13 +1262,26 @@ EOF_RERANK_SMOKE
     return $?
   fi
   compact=$(printf '%s' "$search_json" | tr -d '\n')
+  rerank_score_matches=$(printf '%s' "$compact" \
+    | grep -Eo '"rerankScore"[[:space:]]*:[[:space:]]*[-+0-9.eE]+' || true)
+  reranked_kind_matches=$(printf '%s' "$compact" \
+    | grep -Eo '"scoreKind"[[:space:]]*:[[:space:]]*"reranked"' || true)
+  observed_rerank_scores=$(printf '%s\n' "$rerank_score_matches" \
+    | awk 'NF { count += 1 } END { print count + 0 }')
+  observed_reranked_kinds=$(printf '%s\n' "$reranked_kind_matches" \
+    | awk 'NF { count += 1 } END { print count + 0 }')
   if ! printf '%s' "$compact" | grep -Eq '"success"[[:space:]]*:[[:space:]]*true' \
      || ! printf '%s' "$compact" | grep -Eq '"schema"[[:space:]]*:[[:space:]]*"ee.rerank_posture.v1"' \
      || ! printf '%s' "$compact" | grep -Eq '"mode"[[:space:]]*:[[:space:]]*"reranked"' \
      || ! printf '%s' "$compact" | grep -Eq '"configured"[[:space:]]*:[[:space:]]*"auto"' \
      || ! printf '%s' "$compact" | grep -Eq '"available"[[:space:]]*:[[:space:]]*true' \
-     || ! printf '%s' "$compact" | grep -Eq '"rerankScoreCount"[[:space:]]*:[[:space:]]*5' \
-     || ! printf '%s' "$compact" | grep -Eq '"scoreKind"[[:space:]]*:[[:space:]]*"reranked"' \
+     || ! printf '%s' "$compact" | grep -Eq '"returnedCount"[[:space:]]*:[[:space:]]*5[,}]' \
+     || ! printf '%s' "$compact" | grep -Eq '"resultCount"[[:space:]]*:[[:space:]]*5[,}]' \
+     || ! printf '%s' "$compact" | grep -Eq '"rerankScoreCount"[[:space:]]*:[[:space:]]*5[,}]' \
+     || [ "$observed_rerank_scores" -ne 5 ] \
+     || [ "$observed_reranked_kinds" -ne 6 ] \
+     || ! printf '%s\n' "$rerank_score_matches" | awk -F: \
+          'NF { value = $NF + 0; if (!(value > 0 && value <= 1)) exit 1; count += 1 } END { if (count != 5) exit 1 }' \
      || printf '%s' "$compact" | grep -q 'rerank_model_unavailable'; then
     semantic_smoke_fail_or_warn "Native-reranker first-use smoke did not produce five model-backed reranked results"
     return $?

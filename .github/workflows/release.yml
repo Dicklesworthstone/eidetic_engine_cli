@@ -531,6 +531,9 @@ jobs:
           (
             cd release
             for checksum_file in ee-*.tar.xz.sha256; do
+              normalized_checksum="${checksum_file}.normalized"
+              tr -d '\r' <"$checksum_file" >"$normalized_checksum"
+              mv "$normalized_checksum" "$checksum_file"
               sha256sum --check "$checksum_file"
             done
             sha256sum ee-*.tar.xz | LC_ALL=C sort -k2 > SHA256SUMS
