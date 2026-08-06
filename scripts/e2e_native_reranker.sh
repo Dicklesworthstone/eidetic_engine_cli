@@ -20,7 +20,7 @@ set -uo pipefail
 
 TEST_ID="native_reranker_e2e"
 BEAD_ID="bd-1nl13.14"
-SEARCH_QUERY="bd1nl1314 rerank release format checklist cargo clippy"
+SEARCH_QUERY="cargo fmt check and cargo clippy before publishing"
 
 if ! command -v jq >/dev/null 2>&1; then
     printf '{"schema":"ee.test_event.v1","ts":"%s","test_id":"native_reranker_e2e","kind":"assert_fail","fields":{"bead_id":"bd-1nl13.14","label":"jq_available","expected":"jq executable on PATH","actual":"missing","schema_validation_status":"not_run","redaction_status":"passed","first_failure_diagnosis":"jq executable missing before harness initialization","stdout_artifact_path":"not_initialized","stderr_artifact_path":"stderr","sanitized_env":{"HOME":"[UNREAD]"}}}\n' \
@@ -554,8 +554,10 @@ run_model_backed_lane() {
             "reranked order equals fusion-only order"
     fi
     assert_json_file "${reranked_file}" \
-        '(.data.results[0].content // "") | startswith("BD1NL1314_RERANK_TARGET")' \
-        "native reranker promotes the precise release policy target"
+        '((.data.results[0].content // "") | startswith("BD1NL1314_RERANK_TARGET"))
+        and ((.data.results[1].content // "") | startswith("BD1NL1314_RERANK_TRAP"))
+        and (.data.results[0].rerankScore > .data.results[1].rerankScore)' \
+        "native reranker ranks the precise release policy above the lexical trap"
 
     unpacked_dir="${home_dir}/.local/share/ee/models/rerank/rerank-default-v1/rerank-default-v1"
     withheld_dir="${unpacked_dir}.withheld"
