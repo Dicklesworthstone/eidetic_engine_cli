@@ -107,8 +107,8 @@ struct AggregatedAccumulator {
 ///    observed across emitters of the same code, ranked by the
 ///    6-tier `info < low < warning < medium < high < critical`
 ///    vocabulary. The retired `advisory` value is normalized to `low`;
-///    unknown values are normalized to `info`, so emitted severity strings
-///    always satisfy the response contract.
+///    unknown values emit as `info` but retain an internal rank below genuine
+///    `info`, so output stays canonical without allowing typos to win.
 /// 3. **Repair-hint deduplication** — the canonical repair hint is
 ///    the one emitted by the highest-severity source. When two
 ///    emitters tie on severity, the lexicographically smallest
@@ -149,9 +149,9 @@ where
 {
     let mut by_code: BTreeMap<String, AggregatedAccumulator> = BTreeMap::new();
     for report in entries {
-        let normalized_severity = DegradationSeverity::parse_lossy(&report.severity);
+        let (normalized_severity, normalized_severity_rank) =
+            normalize_severity_for_aggregation(&report.severity);
         let normalized_severity_name = normalized_severity.as_str().to_owned();
-        let normalized_severity_rank = i16::from(normalized_severity.rank());
         let acc = by_code
             .entry(report.code.clone())
             .or_insert_with(|| AggregatedAccumulator {
@@ -190,26 +190,30 @@ where
         }
     }
 
-    let mut aggregates: Vec<AggregatedDegradation> = by_code
+    let mut ranked_aggregates: Vec<(AggregatedDegradation, i16)> = by_code
         .into_values()
         .map(|acc| {
             let mut sources = acc.sources;
             sources.sort_unstable();
             sources.dedup();
-            AggregatedDegradation {
-                code: acc.code,
-                severity: acc.severity,
-                message: acc.message,
-                repair: acc.repair,
-                sources,
-            }
+            (
+                AggregatedDegradation {
+                    code: acc.code,
+                    severity: acc.severity,
+                    message: acc.message,
+                    repair: acc.repair,
+                    sources,
+                },
+                acc.severity_rank,
+            )
         })
         .collect();
-    aggregates.sort_by(|a, b| {
-        let a_rank = severity_rank_for(&a.severity);
-        let b_rank = severity_rank_for(&b.severity);
-        b_rank.cmp(&a_rank).then_with(|| a.code.cmp(&b.code))
-    });
+    ranked_aggregates
+        .sort_by(|(a, a_rank), (b, b_rank)| b_rank.cmp(a_rank).then_with(|| a.code.cmp(&b.code)));
+    let mut aggregates: Vec<AggregatedDegradation> = ranked_aggregates
+        .into_iter()
+        .map(|(degradation, _rank)| degradation)
+        .collect();
 
     if aggregates.len() <= DEGRADED_AGGREGATION_MAX_ENTRIES {
         return aggregates;
@@ -242,8 +246,17 @@ where
     aggregates
 }
 
-fn severity_rank_for(severity: &str) -> i16 {
-    DegradationSeverity::parse(severity).map_or(-1, |severity| i16::from(severity.rank()))
+fn normalize_severity_for_aggregation(severity: &str) -> (DegradationSeverity, i16) {
+    if let Some(canonical) = DegradationSeverity::parse(severity) {
+        return (canonical, i16::from(canonical.rank()));
+    }
+    if severity.trim().eq_ignore_ascii_case("advisory") {
+        return (
+            DegradationSeverity::Low,
+            i16::from(DegradationSeverity::Low.rank()),
+        );
+    }
+    (DegradationSeverity::Info, -1)
 }
 
 #[cfg(test)]
@@ -579,6 +592,49 @@ mod tests {
                 && entry.severity != "advisory"
                 && entry.severity != "criticla"
         }));
+    }
+
+    #[test]
+    fn unknown_severity_ranks_below_genuine_info_after_normalization() {
+        let entries = vec![
+            (
+                "real",
+                report("zzz_real_code", "info", "info-msg", "info-fix"),
+            ),
+            (
+                "typo",
+                report("aaa_typo_code", "criticla", "typo-msg", "typo-fix"),
+            ),
+        ];
+
+        let aggregates = aggregate_degraded(entries);
+
+        assert_eq!(aggregates.len(), 2);
+        assert_eq!(aggregates[0].code, "zzz_real_code");
+        assert_eq!(aggregates[0].severity, "info");
+        assert_eq!(aggregates[1].code, "aaa_typo_code");
+        assert_eq!(aggregates[1].severity, "info");
+    }
+
+    #[test]
+    fn genuine_info_hint_beats_unknown_hint_for_the_same_code() {
+        let entries = vec![
+            (
+                "aaa_typo",
+                report("same_code", "criticla", "typo-msg", "typo-fix"),
+            ),
+            (
+                "zzz_real",
+                report("same_code", "info", "info-msg", "info-fix"),
+            ),
+        ];
+
+        let aggregates = aggregate_degraded(entries);
+
+        assert_eq!(aggregates.len(), 1);
+        assert_eq!(aggregates[0].severity, "info");
+        assert_eq!(aggregates[0].message, "info-msg");
+        assert_eq!(aggregates[0].repair, "info-fix");
     }
 
     #[test]

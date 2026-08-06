@@ -18,13 +18,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use ee::models::DegradationSeverity;
+
 const VALID_CODES: &[&str] = &[
     "plan_mtime_age_days",
     "vision_coverage_gap_low",
     "in_progress_beads_mtime",
 ];
-
-const VALID_SEVERITIES: &[&str] = &["info", "low", "medium", "high", "critical"];
 
 fn duration_millis_saturating(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
@@ -136,8 +136,8 @@ fn bridge_staleness_report_matches_schema_v1() {
             .and_then(Value::as_str)
             .expect("signal must carry severity");
         assert!(
-            VALID_SEVERITIES.contains(&severity),
-            "unknown severity {severity:?}; expected one of {VALID_SEVERITIES:?}"
+            DegradationSeverity::parse(severity).is_some_and(|parsed| parsed.as_str() == severity),
+            "unknown or noncanonical severity {severity:?}"
         );
         assert!(
             signal
