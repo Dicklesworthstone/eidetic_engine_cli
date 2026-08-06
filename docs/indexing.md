@@ -4,15 +4,28 @@
 source of truth, and `ee index rebuild --workspace . --json` can reconstruct the
 search index when generation, file, or tier integrity checks fail.
 
-## Incremental Intake
+## Cancellation-Safe Intake
 
-The production write path uses incremental intake for single-document memory
-writes when an active index already exists. The path updates the persisted
-Frankensearch tiers directly: vector rows are appended or soft-deleted through
-the vector tier, and lexical rows are upserted or deleted through Tantivy. A full
-rebuild remains the safe fallback for first build, generation skew, missing
-index files, corpus-revision mismatch, unavailable tiers, forced reindex, or
-deltas that exceed the bounded incremental threshold.
+Production intake never mutates the active Frankensearch tiers in place. A
+single-document or coalesced job captures one writer-fenced database snapshot,
+builds a complete generation in a sibling staging directory, validates every
+tier and count, and reaches a caller-owned Asupersync cancellation checkpoint
+before publication. The previous active generation remains readable throughout
+embedding, lexical construction, validation, and cancellation.
+
+Publication uses a short masked commit tail. The staged generation is renamed
+into place only as the associated job transitions commit in one database
+transaction. If that transaction fails, `ee` restores the previous active
+generation and moves the unpublished generation back to its staging path for
+inspection. Cancellation therefore produces no partial active index, leaves no
+running job or advisory lock behind, and preserves the exact caller reason for
+the CLI's typed `cancelled` response and exit code 130.
+
+Job types named `incremental` and `single_document` remain intake and telemetry
+contracts, not permission to edit active files. They may be coalesced into one
+staged full-generation build. Generation skew, missing files,
+corpus-revision mismatch, unavailable tiers, forced reindex, and large deltas
+remain explicit fallback reasons in `ee.index_intake.v1` telemetry.
 
 `ee.index_intake.v1` is the redaction-safe telemetry contract for this behavior.
 It records modes and counts only: no memory content, query text, or provenance
@@ -20,11 +33,13 @@ body is emitted.
 
 ## Correctness Contract
 
-Incremental intake is correct only when the resulting search index is equivalent
-to a full rebuild of the same final document set. The load-bearing proof is in
-`src/core/index.rs`: randomized add/update/delete sequences are applied through
-the incremental path and then compared against a full rebuild using deterministic
-hash embeddings and stable search-result snapshots.
+Every intake result must be equivalent to a full rebuild of the same final
+document set. The load-bearing proof is in `src/core/index.rs`: randomized
+add/update/delete sequences exercise the historical incremental model and are
+compared against full rebuilds using deterministic hash embeddings and stable
+search-result snapshots. Production additionally has deterministic LabRuntime
+coverage for cancellation during construction and after validation but before
+publication.
 
 The equivalence requirement covers:
 
@@ -37,13 +52,14 @@ The equivalence requirement covers:
 Each active `meta.json` uses `ee.index_metadata.v2` and records a deterministic
 `corpusRevision`, exact memory/session/artifact/rule/evidence counts, and
 per-tier counts. Missing legacy revisions fail closed as stale. Full rebuild,
-re-embed, incremental intake, and interrupted-publish recovery verify those
-counts before publishing a current generation; a per-document build failure can
-never be published as a complete corpus.
+re-embed, staged intake, and interrupted-publish recovery verify those counts
+before publishing a current generation; a per-document build failure can never
+be published as a complete corpus.
 
 ## E2E And Perf Proof
 
-`scripts/e2e_incremental_index.sh` exercises the real CLI path:
+`scripts/e2e_incremental_index.sh` exercises the real CLI intake path (the
+historical script name and artifact schema are retained):
 
 ```bash
 EE_BINARY=/path/to/ee EE_E2E_TMPDIR=/private/tmp scripts/e2e_incremental_index.sh
