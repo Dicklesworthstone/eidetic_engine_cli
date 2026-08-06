@@ -61985,6 +61985,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
 
+    use asupersync::{CancelKind, CancelReason};
     use clap::{Parser, error::ErrorKind};
     use fs4::fs_std::FileExt as Fs4FileExt;
 
@@ -62024,7 +62025,8 @@ mod tests {
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
         plan_cache_diag_degraded, plan_cache_diag_response_json,
         read_environment_attestation_fixture_json, render_bootstrap_degradations, run,
-        write_context_stream_terminal_error, write_domain_error, write_index_rebuild_error,
+        write_cancelled_error, write_context_stream_terminal_error, write_domain_error,
+        write_index_rebuild_error,
     };
     use crate::cass::CassImportError;
     use crate::config::MeshCommandMode;
@@ -62035,8 +62037,8 @@ mod tests {
     use crate::core::index::IndexRebuildError;
     use crate::core::lab::{InterventionType, SwapRevisionMode};
     use crate::core::search::{
-        ScoreExplanation, ScoreFactor, ScoreSource, SearchHit, SearchReport, SearchSourceMode,
-        SearchStatus,
+        ScoreExplanation, ScoreFactor, ScoreSource, SearchError, SearchHit, SearchReport,
+        SearchSourceMode, SearchStatus,
     };
     use crate::core::why::{
         AgentProfileSelectionExplanation, CoordinationFallbackEvidenceSummary,
@@ -62164,6 +62166,109 @@ mod tests {
             baseline_write: None,
             no_lod: false,
         }
+    }
+
+    #[test]
+    fn cancelled_error_json_preserves_exact_reason_and_exit_130() -> TestResult {
+        let reason =
+            CancelReason::deadline().with_message("caller search deadline elapsed exactly");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = write_cancelled_error(&reason, true, &mut stdout, &mut stderr);
+        let payload: serde_json::Value = serde_json::from_slice(&stdout)
+            .map_err(|error| format!("cancelled JSON parse failed: {error}"))?;
+
+        ensure_equal(
+            &payload["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "cancelled JSON schema",
+        )?;
+        ensure_equal(
+            &payload["error"]["code"],
+            &serde_json::json!("cancelled"),
+            "cancelled JSON code",
+        )?;
+        ensure_equal(
+            &payload["error"]["message"],
+            &serde_json::json!("caller search deadline elapsed exactly"),
+            "cancelled JSON message",
+        )?;
+        ensure_equal(
+            &payload["error"]["details"]["cancelKind"],
+            &serde_json::json!("deadline"),
+            "cancelled JSON exact kind",
+        )?;
+        ensure_equal(
+            &payload["error"]["details"]["cancelClass"],
+            &serde_json::json!("budget_exhausted"),
+            "cancelled JSON stable class",
+        )?;
+        ensure_equal(&(exit as u8), &130, "cancelled JSON numeric exit")?;
+        ensure(stderr.is_empty(), "cancelled JSON must not write stderr")
+    }
+
+    #[test]
+    fn cancelled_error_human_uses_stderr_only_and_exit_130() -> TestResult {
+        let reason = CancelReason::user("caller requested an exact stop");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = write_cancelled_error(&reason, false, &mut stdout, &mut stderr);
+        let stderr = String::from_utf8(stderr).map_err(|error| error.to_string())?;
+
+        ensure(
+            stdout.is_empty(),
+            "human cancellation must not write stdout",
+        )?;
+        ensure_equal(
+            &stderr,
+            &"error: cancelled (user): caller requested an exact stop\n".to_owned(),
+            "human cancellation rendering",
+        )?;
+        ensure_equal(&(exit as u8), &130, "human cancellation numeric exit")
+    }
+
+    #[test]
+    fn nested_search_cancellation_writes_cancelled_stream_terminal() -> TestResult {
+        let reason = CancelReason::timeout().with_message("nested search collection timed out");
+        ensure_equal(
+            &reason.kind,
+            &CancelKind::Timeout,
+            "fixture cancellation kind",
+        )?;
+        let error = ContextPackError::Search(SearchError::Cancelled(reason));
+        let frame_options = output::streaming::ContextStreamFrameOptions::new(
+            "pack_cancel_test".to_owned(),
+            "wsp_cancel_test".to_owned(),
+            "request_cancel_test".to_owned(),
+            "2026-08-06T00:00:00Z".to_owned(),
+            "2026-08-06T00:00:00Z".to_owned(),
+        );
+        let probe = SharedWriteBuffer::default();
+        let mut writer = output::streaming::PackStreamWriter::new(probe.clone());
+
+        let exit = write_context_stream_terminal_error(&error, &frame_options, &mut writer)
+            .map_err(|write_error| format!("cancelled terminal write failed: {write_error}"))?;
+        let terminal: serde_json::Value = serde_json::from_str(probe.text().trim())
+            .map_err(|parse_error| format!("cancelled terminal parse failed: {parse_error}"))?;
+
+        ensure_equal(
+            &terminal["kind"],
+            &serde_json::json!("cancelled"),
+            "cancelled stream terminal kind",
+        )?;
+        ensure_equal(
+            &terminal["error"]["code"],
+            &serde_json::json!("context_stream_cancelled"),
+            "cancelled stream error code",
+        )?;
+        ensure_equal(
+            &terminal["error"]["message"],
+            &serde_json::json!("nested search collection timed out"),
+            "cancelled stream exact message",
+        )?;
+        ensure_equal(&(exit as u8), &130, "cancelled stream numeric exit")
     }
 
     #[test]
