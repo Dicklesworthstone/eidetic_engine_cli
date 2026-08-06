@@ -3029,6 +3029,7 @@ fn golden_normalizers_scrub_only_the_volatile_rch_target_root() -> TestResult {
         "message": format!("running binary at {rch_binary}"),
         "typed": {"status": "ready", "workerCount": 1},
     });
+    let expected_typed = json!({"status": "ready", "workerCount": 1});
 
     scrub_environment_paths(&mut value);
 
@@ -3038,8 +3039,8 @@ fn golden_normalizers_scrub_only_the_volatile_rch_target_root() -> TestResult {
         "RCH target root is the only canonicalized path segment",
     )?;
     ensure_equal(
-        value.pointer("/typed"),
-        Some(&json!({"status": "ready", "workerCount": 1})),
+        &value.pointer("/typed"),
+        &Some(&expected_typed),
         "RCH path canonicalization preserves adjacent typed data",
     )
 }
