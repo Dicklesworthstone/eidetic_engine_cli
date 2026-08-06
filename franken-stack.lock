@@ -1,8 +1,9 @@
 # ee.franken-stack.lock.v1
 #
-# Full commit IDs are mandatory. This set pins the synchronized 0.3.10 runtime,
-# 0.3.2 search/SQLModel, and 0.1.19 FrankenSQLite dependency closure used by ee.
-asupersync	e19be513985f678fd2e9812f7b5d973d2a3e4631
+# Full commit IDs are mandatory. This set pins the synchronized 0.3.10 runtime
+# with its ambient-free request-Cx boundary, 0.3.2 search/SQLModel, and 0.1.19
+# FrankenSQLite dependency closure used by ee.
+asupersync	24eb7ec6c62e9ba037d70fed4a69c4e733785926
 franken_agent_detection	f839b370a91e0d403fc4e2e16c1dc9d19b5a5ceb
 franken_networkx	bec1d4b9edfd832bc31c3a56713c918a0bf682b9
 frankensearch	b559c92e03242336614b995c562a13dfd1269eed

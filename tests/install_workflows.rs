@@ -966,7 +966,7 @@ printf 'matching-tag=accepted\n'
 #[test]
 fn franken_stack_lock_pins_complete_full_sha_closure() -> TestResult {
     const EXPECTED: &[(&str, &str)] = &[
-        ("asupersync", "e19be513985f678fd2e9812f7b5d973d2a3e4631"),
+        ("asupersync", "24eb7ec6c62e9ba037d70fed4a69c4e733785926"),
         (
             "franken_agent_detection",
             "f839b370a91e0d403fc4e2e16c1dc9d19b5a5ceb",
