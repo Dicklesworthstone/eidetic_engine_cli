@@ -31,6 +31,7 @@ use ee::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptions,
     run_context_pack_with_performance_controlled,
 };
+use ee::core::outcome::cancel_message;
 use ee::core::search::SearchSourceMode;
 use ee::daemon::{
     DAEMON_METHOD_UNAUTHORIZED_CODE, DAEMON_REQUEST_MAX_BYTES, DAEMON_REQUEST_SCHEMA_V1,
@@ -772,9 +773,9 @@ fn daemon_context_controlled_runner_honors_deadline_and_cancellation_before_db_w
         run_context_pack_with_performance_controlled(&options, "pack", Some(Duration::ZERO), None)
             .expect_err("pre-expired deadline must stop before storage access");
     match deadline_error {
-        ContextPackError::DeadlineExceeded(message) => ensure(
-            message.contains("deadline"),
-            format!("deadline error should name deadline, got: {message}"),
+        ContextPackError::DeadlineExceeded(reason) => ensure(
+            cancel_message(&reason).contains("deadline"),
+            format!("deadline error should name deadline, got: {reason:?}"),
         )?,
         other => {
             return Err(format!(
@@ -788,9 +789,9 @@ fn daemon_context_controlled_runner_honors_deadline_and_cancellation_before_db_w
         run_context_pack_with_performance_controlled(&options, "pack", None, Some(&shutdown))
             .expect_err("pre-set cancellation flag must stop before storage access");
     match cancellation_error {
-        ContextPackError::Cancelled(message) => ensure(
-            message.contains("shutdown"),
-            format!("cancellation error should name shutdown, got: {message}"),
+        ContextPackError::Cancelled(reason) => ensure(
+            cancel_message(&reason).contains("shutdown"),
+            format!("cancellation error should name shutdown, got: {reason:?}"),
         )?,
         other => {
             return Err(format!(

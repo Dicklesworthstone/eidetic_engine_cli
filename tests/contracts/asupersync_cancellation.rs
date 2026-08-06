@@ -9,15 +9,27 @@ use asupersync::{
     Budget, CancelKind, CancelReason, Cx, LabConfig, LabRuntime, Outcome, OutcomeError,
     PanicPayload,
 };
+use ee::core::index::{
+    IndexRebuildError, IndexRebuildOptions, IndexStatusOptions, get_index_status, rebuild_index,
+    rebuild_index_with_cx,
+};
+use ee::core::memory::{RememberMemoryOptions, remember_memory};
+use ee::core::search::{
+    SearchDedupMode, SearchError, SearchOptions, SearchSourceMode,
+    run_search_with_performance_and_filters_with_cx,
+};
 use ee::core::{
     CliCancelReason, CliOutcomeClass, CliOutcomeSummary, EXIT_CANCELLED, EXIT_PANICKED,
     outcome_class, outcome_exit_code, run_cli_future,
 };
-use ee::models::{DomainError, ProcessExitCode};
+use ee::db::DbConnection;
+use ee::models::{DomainError, MemoryScope, ProcessExitCode};
+use ee::search::scoring::SpeedMode;
 use ee::steward::{
     DaemonForegroundOptions, JobPriority, JobType, ManualRunner, RunOutcome, RunnerOptions,
     RunnerReport, run_daemon_foreground_supervised,
 };
+use tempfile::TempDir;
 
 type TestResult = Result<(), String>;
 
@@ -100,6 +112,124 @@ fn storage_failure(message: &str) -> DomainError {
         message: message.to_string(),
         repair: Some("ee status --json".to_string()),
     }
+}
+
+struct IndexedWorkspaceFixture {
+    _tempdir: TempDir,
+    workspace: std::path::PathBuf,
+    database: std::path::PathBuf,
+    index_dir: std::path::PathBuf,
+}
+
+fn remember_fixture_memory(
+    workspace: &std::path::Path,
+    database: &std::path::Path,
+    content: &str,
+) -> TestResult {
+    remember_memory(&RememberMemoryOptions {
+        workspace_path: workspace.to_path_buf(),
+        database_path: Some(database.to_path_buf()),
+        content,
+        workflow_id: None,
+        level: "procedural",
+        kind: "rule",
+        tags: Some("asupersync,cancellation"),
+        confidence: 0.9,
+        source: None,
+        allow_secret_mention: false,
+        valid_from: None,
+        valid_to: None,
+        dry_run: false,
+        auto_link: false,
+        propose_candidates: false,
+    })
+    .map_err(|error| format!("remember cancellation fixture memory: {error:?}"))?;
+    Ok(())
+}
+
+fn indexed_workspace_fixture() -> Result<IndexedWorkspaceFixture, String> {
+    let tempdir = tempfile::tempdir()
+        .map_err(|error| format!("create cancellation fixture tempdir: {error}"))?;
+    let workspace = tempdir
+        .path()
+        .canonicalize()
+        .map_err(|error| format!("canonicalize cancellation fixture workspace: {error}"))?;
+    let database = workspace.join(".ee").join("ee.db");
+    let index_dir = workspace.join(".ee").join("index");
+    std::fs::create_dir_all(
+        database
+            .parent()
+            .ok_or_else(|| "cancellation fixture database has no parent".to_owned())?,
+    )
+    .map_err(|error| format!("create cancellation fixture .ee directory: {error}"))?;
+
+    let connection = DbConnection::open_file(&database)
+        .map_err(|error| format!("open cancellation fixture database: {error}"))?;
+    connection
+        .migrate()
+        .map_err(|error| format!("migrate cancellation fixture database: {error}"))?;
+    drop(connection);
+
+    remember_fixture_memory(
+        &workspace,
+        &database,
+        "Run the cancellation contract before publishing a derived index generation.",
+    )?;
+    let rebuild = rebuild_index(&IndexRebuildOptions {
+        workspace_path: workspace.clone(),
+        database_path: Some(database.clone()),
+        index_dir: Some(index_dir.clone()),
+        dry_run: false,
+    })
+    .map_err(|error| format!("build cancellation fixture index: {error:?}"))?;
+    ensure(
+        rebuild.errors.is_empty(),
+        format!(
+            "cancellation fixture index must build without document errors: {:?}",
+            rebuild.errors
+        ),
+    )?;
+
+    Ok(IndexedWorkspaceFixture {
+        _tempdir: tempdir,
+        workspace,
+        database,
+        index_dir,
+    })
+}
+
+fn cancellation_search_options(fixture: &IndexedWorkspaceFixture) -> SearchOptions {
+    SearchOptions {
+        workspace_path: fixture.workspace.clone(),
+        database_path: Some(fixture.database.clone()),
+        index_dir: Some(fixture.index_dir.clone()),
+        query: "cancellation contract derived index".to_owned(),
+        limit: 10,
+        speed: SpeedMode::Default,
+        explain: false,
+        as_of: None,
+        include_tombstoned: false,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
+        relevance_floor: Some(0.0),
+        dedup_mode: SearchDedupMode::DocId,
+        source_mode: SearchSourceMode::Hybrid,
+        strict_source_mode: false,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+    }
+}
+
+fn take_cancel_observation(
+    observation: &Arc<StdMutex<Option<Result<CancelReason, String>>>>,
+    context: &str,
+) -> Result<CancelReason, String> {
+    observation
+        .lock()
+        .map_err(|_| format!("{context} observation slot poisoned"))?
+        .take()
+        .ok_or_else(|| format!("{context} observation was not recorded"))?
 }
 
 fn run_lab_cancel_probe(seed: u64) -> Result<LabCancelProbeReport, String> {
@@ -363,6 +493,228 @@ fn lab_runtime_cancellation_report_is_seed_deterministic() -> TestResult {
     let second = run_lab_cancel_probe(0xEE_208)?;
 
     ensure_equal(&first, &second, "same-seed lab cancellation report")
+}
+
+#[test]
+fn caller_deadline_reaches_search_surface_without_reason_laundering() -> TestResult {
+    let fixture = indexed_workspace_fixture()?;
+    let options = cancellation_search_options(&fixture);
+    let observation: Arc<StdMutex<Option<Result<CancelReason, String>>>> =
+        Arc::new(StdMutex::new(None));
+    let task_observation = Arc::clone(&observation);
+    let mut lab = LabRuntime::new(LabConfig::new(0xEE_90A).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+
+    let (task_id, _handle) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let result = if let Some(cx) = Cx::current() {
+                cx.set_cancel_reason(
+                    CancelReason::deadline().with_message("caller search deadline elapsed"),
+                );
+                match run_search_with_performance_and_filters_with_cx(&cx, &options, None, &[])
+                    .await
+                {
+                    Err(SearchError::Cancelled(reason)) => Ok(reason),
+                    Err(error) => Err(format!(
+                        "search deadline must remain typed cancellation, got {error:?}"
+                    )),
+                    Ok(report) => Err(format!(
+                        "search deadline must not return a report, got status {:?}",
+                        report.report.status
+                    )),
+                }
+            } else {
+                Err("LabRuntime search task did not install a Cx".to_owned())
+            };
+            if let Ok(mut slot) = task_observation.lock() {
+                *slot = Some(result);
+            }
+            Outcome::<(), String>::Ok(())
+        })
+        .map_err(|error| format!("create LabRuntime search deadline task: {error}"))?;
+    lab.scheduler.lock().schedule(task_id, 0);
+
+    let report = lab.run_until_quiescent_with_report();
+    ensure(report.quiescent, "search deadline LabRuntime must quiesce")?;
+    ensure(
+        report.invariant_violations.is_empty(),
+        format!(
+            "search deadline LabRuntime must preserve invariants: {:?}",
+            report.invariant_violations
+        ),
+    )?;
+
+    let reason = take_cancel_observation(&observation, "search deadline")?;
+    ensure_equal(
+        &reason.kind,
+        &CancelKind::Deadline,
+        "search deadline cancellation kind",
+    )?;
+    ensure_equal(
+        &reason.message.as_deref(),
+        &Some("caller search deadline elapsed"),
+        "search deadline cancellation message",
+    )
+}
+
+#[test]
+fn caller_cancelled_rebuild_leaves_active_generation_and_lock_state_unchanged() -> TestResult {
+    let fixture = indexed_workspace_fixture()?;
+    let status_options = IndexStatusOptions {
+        workspace_path: fixture.workspace.clone(),
+        database_path: Some(fixture.database.clone()),
+        index_dir: Some(fixture.index_dir.clone()),
+    };
+    let baseline_status = get_index_status(&status_options)
+        .map_err(|error| format!("read baseline cancellation index status: {error}"))?;
+    let baseline_metadata = std::fs::read(fixture.index_dir.join("meta.json"))
+        .map_err(|error| format!("read baseline cancellation index metadata: {error}"))?;
+
+    remember_fixture_memory(
+        &fixture.workspace,
+        &fixture.database,
+        "A cancelled rebuild must never publish this newer database generation.",
+    )?;
+    let stale_status = get_index_status(&status_options)
+        .map_err(|error| format!("read stale cancellation index status: {error}"))?;
+    ensure_equal(
+        &stale_status.index_generation,
+        &baseline_status.index_generation,
+        "remembering a new row must not mutate the active derived index",
+    )?;
+    ensure(
+        matches!(
+            (stale_status.db_generation, stale_status.index_generation),
+            (Some(database), Some(index)) if database > index
+        ),
+        format!(
+            "fixture must owe an index generation before cancellation: db={:?}, index={:?}",
+            stale_status.db_generation, stale_status.index_generation
+        ),
+    )?;
+
+    let options = IndexRebuildOptions {
+        workspace_path: fixture.workspace.clone(),
+        database_path: Some(fixture.database.clone()),
+        index_dir: Some(fixture.index_dir.clone()),
+        dry_run: false,
+    };
+    let observation: Arc<StdMutex<Option<Result<CancelReason, String>>>> =
+        Arc::new(StdMutex::new(None));
+    let task_observation = Arc::clone(&observation);
+    let mut lab = LabRuntime::new(LabConfig::new(0xEE_90B).max_steps(128));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (task_id, _handle) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let result = if let Some(cx) = Cx::current() {
+                cx.set_cancel_reason(CancelReason::user(
+                    "caller cancelled rebuild before publication",
+                ));
+                match rebuild_index_with_cx(&cx, &options).await {
+                    Err(IndexRebuildError::Cancelled(reason)) => Ok(reason),
+                    Err(error) => Err(format!(
+                        "rebuild cancellation must remain typed, got {error:?}"
+                    )),
+                    Ok(report) => Err(format!(
+                        "cancelled rebuild must not return a report, got status {:?}",
+                        report.status
+                    )),
+                }
+            } else {
+                Err("LabRuntime rebuild task did not install a Cx".to_owned())
+            };
+            if let Ok(mut slot) = task_observation.lock() {
+                *slot = Some(result);
+            }
+            Outcome::<(), String>::Ok(())
+        })
+        .map_err(|error| format!("create LabRuntime rebuild cancellation task: {error}"))?;
+    lab.scheduler.lock().schedule(task_id, 0);
+
+    let report = lab.run_until_quiescent_with_report();
+    ensure(
+        report.quiescent,
+        "rebuild cancellation LabRuntime must quiesce",
+    )?;
+    ensure(
+        report.invariant_violations.is_empty(),
+        format!(
+            "rebuild cancellation LabRuntime must preserve invariants: {:?}",
+            report.invariant_violations
+        ),
+    )?;
+
+    let reason = take_cancel_observation(&observation, "rebuild cancellation")?;
+    ensure_equal(&reason.kind, &CancelKind::User, "rebuild cancellation kind")?;
+    ensure_equal(
+        &reason.message.as_deref(),
+        &Some("caller cancelled rebuild before publication"),
+        "rebuild cancellation message",
+    )?;
+
+    let after_metadata = std::fs::read(fixture.index_dir.join("meta.json"))
+        .map_err(|error| format!("read index metadata after cancellation: {error}"))?;
+    ensure_equal(
+        &after_metadata,
+        &baseline_metadata,
+        "cancelled rebuild must not publish new active metadata",
+    )?;
+    let after_status = get_index_status(&status_options)
+        .map_err(|error| format!("read index status after cancellation: {error}"))?;
+    ensure_equal(
+        &after_status.index_generation,
+        &baseline_status.index_generation,
+        "cancelled rebuild active generation",
+    )?;
+    ensure(
+        matches!(
+            (after_status.db_generation, after_status.index_generation),
+            (Some(database), Some(index)) if database > index
+        ),
+        format!(
+            "cancelled rebuild must leave the newer database generation visibly stale: db={:?}, index={:?}",
+            after_status.db_generation, after_status.index_generation
+        ),
+    )?;
+
+    let connection = DbConnection::open_file(&fixture.database)
+        .map_err(|error| format!("open database for cancellation lock check: {error}"))?;
+    let active_index_locks = connection
+        .list_active_advisory_locks()
+        .map_err(|error| format!("list advisory locks after cancellation: {error}"))?
+        .into_iter()
+        .filter(|lock| lock.id.resource_type() == "index")
+        .collect::<Vec<_>>();
+    ensure(
+        active_index_locks.is_empty(),
+        format!("cancelled rebuild leaked index locks: {active_index_locks:?}"),
+    )
+}
+
+#[test]
+fn production_search_pack_and_index_sources_do_not_manufacture_testing_contexts() -> TestResult {
+    for (path, source) in [
+        (
+            "src/core/search.rs",
+            include_str!("../../src/core/search.rs"),
+        ),
+        (
+            "src/core/context.rs",
+            include_str!("../../src/core/context.rs"),
+        ),
+        ("src/core/index.rs", include_str!("../../src/core/index.rs")),
+    ] {
+        let production = source
+            .split_once("#[cfg(test)]\nmod tests")
+            .map_or(source, |(production, _tests)| production);
+        ensure(
+            !production.contains("Cx::for_testing"),
+            format!("{path} production source must not call Cx::for_testing"),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
