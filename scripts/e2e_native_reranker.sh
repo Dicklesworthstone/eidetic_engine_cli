@@ -42,10 +42,15 @@ emit_assert_fail_with_artifact_paths() {
         '{schema:"ee.test_event.v1",ts:$ts,test_id:"native_reranker_e2e",kind:"assert_fail",fields:{bead_id:"bd-1nl13.14",label:$label,expected:$expected,actual:$actual,schema_validation_status:"not_run",redaction_status:"passed",first_failure_diagnosis:$diagnosis,stdout_artifact_path:"not_initialized",stderr_artifact_path:"stderr",sanitized_env:{HOME:"[UNREAD]"}}}' >&2
 }
 
-if ! command -v python3 >/dev/null 2>&1; then
+PYTHON_COMMAND=""
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_COMMAND="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_COMMAND="python"
+else
     emit_assert_fail_with_artifact_paths "python3_available" \
-        "python3 executable on PATH" "missing" \
-        "python3 is required for monotonic millisecond timing"
+        "python3 or python executable on PATH" "missing" \
+        "Python is required for monotonic millisecond timing"
     exit 3
 fi
 
@@ -93,13 +98,14 @@ STEP=0
 FINISHED=0
 LOGGING_FAILURES=0
 LAST_STDOUT_FILE=""
+VECTOR_EMITTED=0
 
 now_iso() {
     date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
 now_ms() {
-    python3 -c 'import time; print(int(time.time() * 1000))'
+    "${PYTHON_COMMAND}" -c 'import time; print(int(time.time() * 1000))'
 }
 
 native_path() {
@@ -230,6 +236,7 @@ run_ee_json() {
     local stdout_file stderr_file
     local argv_hash arg_count start_ms end_ms elapsed_ms exit_code
     local native_home native_root native_workspace native_empty_embed_model
+    local native_appdata native_localappdata system_root windows_dir comspec
     local -a command_env
     stdout_file="${LOG_DIR}/step_$(printf '%02d' "${STEP}")_${label//[^A-Za-z0-9_]/_}.stdout.json"
     stderr_file="${LOG_DIR}/step_$(printf '%02d' "${STEP}")_${label//[^A-Za-z0-9_]/_}.stderr.txt"
@@ -239,17 +246,41 @@ run_ee_json() {
     native_root="$(native_path "${ROOT}")"
     native_workspace="$(native_path "${workspace}")"
     native_empty_embed_model="$(native_path "${EMPTY_EMBED_MODEL_DIR}")"
+    if ! mkdir -p "${home_dir}/AppData/Roaming" "${home_dir}/AppData/Local"; then
+        record_failure "isolated Windows application-data roots are writable" \
+            "failed to create application-data roots below ${home_dir}"
+        return 1
+    fi
+    native_appdata="$(native_path "${home_dir}/AppData/Roaming")"
+    native_localappdata="$(native_path "${home_dir}/AppData/Local")"
+    system_root="${SYSTEMROOT:-${SystemRoot:-}}"
+    windows_dir="${WINDIR:-${windir:-}}"
+    comspec="${COMSPEC:-${ComSpec:-}}"
     command_env=(
         env -i
         "HOME=${native_home}"
+        "USERPROFILE=${native_home}"
+        "APPDATA=${native_appdata}"
+        "LOCALAPPDATA=${native_localappdata}"
         "PATH=${PATH:-/usr/bin:/bin}"
         "TMPDIR=${native_root}"
+        "TMP=${native_root}"
+        "TEMP=${native_root}"
         "NO_COLOR=1"
         "EE_EMBED_DOWNLOAD=off"
         "EE_EMBED_MODEL_DIR=${native_empty_embed_model}"
         "FRANKENSEARCH_OFFLINE=1"
         "FRANKENSEARCH_ALLOW_DOWNLOAD=0"
     )
+    if [[ -n "${system_root}" ]]; then
+        command_env+=("SYSTEMROOT=${system_root}")
+    fi
+    if [[ -n "${windows_dir}" ]]; then
+        command_env+=("WINDIR=${windows_dir}")
+    fi
+    if [[ -n "${comspec}" ]]; then
+        command_env+=("COMSPEC=${comspec}")
+    fi
     printf '[%02d] %s\n' "${STEP}" "${label}" >&2
     emit_event "command_start" "$(jq -cn \
         --arg bead "${BEAD_ID}" --arg label "${label}" \
@@ -328,30 +359,48 @@ EOF
 inspect_binary_linkage() {
     STEP=$((STEP + 1))
     local stdout_file stderr_file
-    local tool exit_code=0 start_ms end_ms elapsed_ms argv_hash arg_count
-    local -a command
+    local tool="" exit_code=0 start_ms end_ms elapsed_ms argv_hash arg_count os_name
+    local -a command=()
     stdout_file="${LOG_DIR}/step_$(printf '%02d' "${STEP}")_binary_linkage.stdout.txt"
     stderr_file="${LOG_DIR}/step_$(printf '%02d' "${STEP}")_binary_linkage.stderr.txt"
 
-    if command -v otool >/dev/null 2>&1; then
-        tool="otool"
-        command=(otool -L "${REAL_EE}")
-    elif command -v ldd >/dev/null 2>&1; then
-        tool="ldd"
-        command=(ldd "${REAL_EE}")
-    elif command -v llvm-objdump.exe >/dev/null 2>&1; then
-        tool="llvm-objdump"
-        command=(llvm-objdump.exe -p "$(native_path "${REAL_EE}")")
-    elif command -v objdump.exe >/dev/null 2>&1; then
-        tool="objdump"
-        command=(objdump.exe -p "$(native_path "${REAL_EE}")")
-    elif command -v dumpbin.exe >/dev/null 2>&1; then
-        tool="dumpbin"
-        command=(dumpbin.exe /dependents "$(native_path "${REAL_EE}")")
-    elif command -v objdump >/dev/null 2>&1; then
-        tool="objdump"
-        command=(objdump -p "${REAL_EE}")
-    else
+    os_name="$(uname -s)"
+    case "${os_name}" in
+        Darwin*)
+            if command -v otool >/dev/null 2>&1; then
+                tool="otool"
+                command=(otool -L "${REAL_EE}")
+            fi
+            ;;
+        MINGW* | MSYS* | CYGWIN*)
+            if command -v dumpbin.exe >/dev/null 2>&1; then
+                tool="dumpbin"
+                command=(dumpbin.exe /DEPENDENTS "$(native_path "${REAL_EE}")")
+            elif command -v llvm-objdump.exe >/dev/null 2>&1; then
+                tool="llvm-objdump"
+                command=(llvm-objdump.exe -p "$(native_path "${REAL_EE}")")
+            elif command -v llvm-objdump >/dev/null 2>&1; then
+                tool="llvm-objdump"
+                command=(llvm-objdump -p "$(native_path "${REAL_EE}")")
+            elif command -v objdump.exe >/dev/null 2>&1; then
+                tool="objdump"
+                command=(objdump.exe -p "$(native_path "${REAL_EE}")")
+            elif command -v objdump >/dev/null 2>&1; then
+                tool="objdump"
+                command=(objdump -p "$(native_path "${REAL_EE}")")
+            fi
+            ;;
+        *)
+            if command -v ldd >/dev/null 2>&1; then
+                tool="ldd"
+                command=(ldd "${REAL_EE}")
+            elif command -v objdump >/dev/null 2>&1; then
+                tool="objdump"
+                command=(objdump -p "${REAL_EE}")
+            fi
+            ;;
+    esac
+    if [[ -z "${tool}" ]]; then
         record_failure "native linkage inspection tool available" \
             "none of otool, ldd, llvm-objdump, objdump, or dumpbin is available"
         return
@@ -398,13 +447,38 @@ inspect_binary_linkage() {
         record_pass "binary linkage command succeeds"
     fi
 
-    if grep -Eiq 'libonnxruntime|onnxruntime|libort([.-]|$)' \
+    if grep -Eiq 'libonnxruntime|onnxruntime|libort([.-]|$)|(^|[[:space:]\\/])ort\.dll($|[[:space:]])' \
         "${stdout_file}" "${stderr_file}"; then
         record_failure "ee binary is ORT-free" \
             "forbidden ONNX Runtime linkage found in ${stdout_file}"
     else
         record_pass "ee binary is ORT-free"
     fi
+}
+
+validate_rerank_vector() {
+    local vector="${1:?vector required}"
+    jq -e --arg query "${SEARCH_QUERY}" '
+        (keys | sort) == [
+            "fusionOnlyOrder",
+            "query",
+            "rerankedOrder",
+            "rerankedScores",
+            "schema"
+        ]
+        and .schema == "ee.rerank_determinism.vector.v1"
+        and .query == $query
+        and (.fusionOnlyOrder | length) == 5
+        and all(.fusionOnlyOrder[]; type == "string")
+        and (.rerankedOrder | length) == 5
+        and all(.rerankedOrder[]; type == "string")
+        and (.rerankedScores | length) == 5
+        and [.rerankedScores[].content] == .rerankedOrder
+        and all(.rerankedScores[];
+            (.rerankScore | type) == "number"
+            and .rerankScore >= 0
+            and .rerankScore <= 1)
+    ' "${vector}" >/dev/null 2>&1
 }
 
 write_rerank_vector() {
@@ -435,16 +509,8 @@ write_rerank_vector() {
             "jq failed while writing ${RERANK_VECTOR_OUT}"
         return
     fi
-    if jq -e '
-        .schema == "ee.rerank_determinism.vector.v1"
-        and (.query | type) == "string"
-        and (.fusionOnlyOrder | length) == 5
-        and (.rerankedOrder | length) == 5
-        and (.rerankedScores | length) == 5
-        and all(.rerankedScores[];
-            (.content | type) == "string"
-            and (.rerankScore | type) == "number")
-    ' "${RERANK_VECTOR_OUT}" >/dev/null 2>&1; then
+    if validate_rerank_vector "${RERANK_VECTOR_OUT}"; then
+        VECTOR_EMITTED=1
         record_pass "reranker determinism vector is emitted"
         emit_event "note" "$(jq -cn \
             --arg bead "${BEAD_ID}" --arg target "${TARGET_TRIPLE}" \
@@ -516,6 +582,9 @@ run_model_backed_lane() {
     local unpacked_dir withheld_dir corrupt_order
     local fusion_file reranked_file fusion_order reranked_order fusion_ids reranked_ids
 
+    if [[ -n "${RERANK_VECTOR_OUT}" ]]; then
+        require_model=1
+    fi
     if [[ "${require_model}" == "1" && "${degradation_only}" == "1" ]]; then
         record_failure "native reranker profile flags do not conflict" \
             "EE_E2E_NATIVE_RERANK_REQUIRE_MODEL=1 cannot be combined with EE_E2E_NATIVE_RERANK_DEGRADATION_ONLY=1"
@@ -528,9 +597,6 @@ run_model_backed_lane() {
     fi
 
     if [[ -n "${archive}" ]]; then
-        require_model=1
-    fi
-    if [[ -n "${RERANK_VECTOR_OUT}" ]]; then
         require_model=1
     fi
     if [[ -z "${archive}" ]]; then
@@ -643,8 +709,6 @@ run_model_backed_lane() {
         and ((.data.results[1].content // "") | startswith("BD1NL1314_RERANK_TRAP"))
         and (.data.results[0].rerankScore > .data.results[1].rerankScore)' \
         "native reranker ranks the precise release policy above the lexical trap"
-    write_rerank_vector "${fusion_file}" "${reranked_file}"
-
     unpacked_dir="${home_dir}/.local/share/ee/models/rerank/rerank-default-v1/rerank-default-v1"
     withheld_dir="${unpacked_dir}.withheld"
     if [[ "${unpacked_dir}" != "${home_dir}/"* || ! -d "${unpacked_dir}" \
@@ -680,6 +744,7 @@ run_model_backed_lane() {
     corrupt_order="$(jq -c '[.data.results[].content]' "${LAST_STDOUT_FILE}" 2>/dev/null || printf '[]')"
     assert_eq "${corrupt_order}" "${fusion_order}" \
         "missing registered model restores deterministic fusion-only order"
+    write_rerank_vector "${fusion_file}" "${reranked_file}"
 }
 
 validate_event_log() {
@@ -739,10 +804,10 @@ finish() {
             "event serialization or append failures=${LOGGING_FAILURES}"
     fi
     if [[ -n "${RERANK_VECTOR_OUT}" ]] \
-        && ! jq -e '.schema == "ee.rerank_determinism.vector.v1"' \
-            "${RERANK_VECTOR_OUT}" >/dev/null 2>&1; then
+        && { [[ "${VECTOR_EMITTED}" != "1" ]] \
+            || ! validate_rerank_vector "${RERANK_VECTOR_OUT}"; }; then
         record_failure "requested reranker determinism vector is retained" \
-            "missing or invalid vector: ${RERANK_VECTOR_OUT}"
+            "not emitted by this run, missing, or invalid: ${RERANK_VECTOR_OUT}"
     fi
 
     if validate_event_log; then

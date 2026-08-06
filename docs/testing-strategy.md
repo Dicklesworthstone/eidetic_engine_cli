@@ -525,6 +525,46 @@ deterministic hash baseline. A real download lifecycle is opt-in only via
 `EE_E2E_ALLOW_REAL_DOWNLOAD=1`; that branch verifies clean JSON stdout,
 downloaded model identity, and a second cached fetch.
 
+### Native Reranker Five-Target Release Gate
+
+The `cross-platform-determinism` CI matrix is the release gate for the pure-Rust
+native reranker. It has five counted, natively hosted rows:
+
+- `aarch64-apple-darwin`
+- `x86_64-apple-darwin`
+- `aarch64-unknown-linux-gnu`
+- `x86_64-unknown-linux-gnu`
+- `x86_64-pc-windows-msvc`
+
+Every push and pull request builds and links `ee`, compiles the full unit,
+contract, golden, binary, integration, and example test surface with `--no-run`,
+runs the graph determinism test, and audits that target's resolved Cargo feature
+tree. Each row first proves that the Frankensearch checkout matches the exact
+revision in `franken-stack.lock`; the evidence sidecar records that revision.
+The `x86_64-unknown-linux-musl` row remains useful extra determinism coverage but
+does not count among the five release targets.
+
+Real-model execution is an explicit, fail-closed `workflow_dispatch` profile.
+The caller must enable `run_native_reranker_release_matrix` and supply
+`rerank_model_url`. CI does not assume the manifest URL is live: it verifies the
+downloaded archive is exactly 82,767,464 bytes with SHA-256
+`adaada3ccc15ae535e9bea238d2ec05e4f39726bdcad07dd87cba9f85dc10edb`
+before using it. Hosting and publishing that immutable artifact belongs to the
+release bead, not to this test gate.
+
+The strict profile runs the complete `ee` suite, the upstream
+`frankensearch-rerank` suite with `--no-default-features --features native`, and
+`scripts/e2e_native_reranker.sh` against the built binary on every target. The
+upstream model files are staged at its required real-model fixture path so those
+tests cannot silently count a missing model as green; the gate also rejects any
+upstream real-model skip diagnostic. The E2E harness emits an
+`ee.rerank_determinism.vector.v1` artifact per target. The aggregate job requires
+exactly five unique target artifacts, exact query/fusion/reranked ordering, and
+reranker scores within `0.01` of the x86_64 Linux reference. Per-command UTC
+start/completion/status logs and all available per-target artifacts are retained
+when a target fails; the aggregate job then fails without issuing a passing
+verdict.
+
 ## Determinism Rules
 
 Tests must make nondeterminism impossible to miss:
@@ -710,6 +750,12 @@ The dependency contract matrix must record the owning integration surface for
 each franken-stack family. If an upstream feature pulls a forbidden dependency,
 that feature is blocked or quarantined behind an explicit adapter gate with a
 removal plan; it must not be hidden inside default features.
+
+The five-target native-reranker release gate repeats this audit against each
+target-resolved feature tree and additionally rejects `ort`, `ort-sys`,
+`onnxruntime`, and `onnxruntime-sys`. Scanning a lockfile is insufficient because
+it may contain an inactive optional backend; the target-resolved tree is the
+release evidence.
 
 ## Closeout Rules For Beads
 

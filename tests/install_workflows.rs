@@ -13,6 +13,7 @@ const FRANKEN_STACK_POWERSHELL: &str = include_str!("../scripts/checkout-franken
 const CI_WORKFLOW: &str = include_str!("../.github/workflows/ci.yml");
 const RELEASE_WORKFLOW: &str = include_str!("../.github/workflows/release.yml");
 const MACOS_ARTIFACT_WORKFLOW: &str = include_str!("../.github/workflows/macos-ee-artifact.yml");
+const NATIVE_RERANKER_E2E: &str = include_str!("../scripts/e2e_native_reranker.sh");
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
@@ -963,30 +964,26 @@ printf 'matching-tag=accepted\n'
 }
 
 #[test]
-fn franken_stack_lock_is_complete_full_sha_and_ci_proven() -> TestResult {
+fn franken_stack_lock_pins_complete_full_sha_closure() -> TestResult {
     const EXPECTED: &[(&str, &str)] = &[
-        ("asupersync", "e464a484cb65c1a55be0d9c925e6e9c20318edcb"),
+        ("asupersync", "e19be513985f678fd2e9812f7b5d973d2a3e4631"),
         (
             "franken_agent_detection",
-            "6d24c532667aebdf31ecac8a9ddb457bef32b3f7",
+            "f839b370a91e0d403fc4e2e16c1dc9d19b5a5ceb",
         ),
         (
             "franken_networkx",
-            "8b7dff824838baf0c1cd4277254ef43be6284501",
+            "bec1d4b9edfd832bc31c3a56713c918a0bf682b9",
         ),
-        ("frankensearch", "4fb891b2838cd3880324e25bafbc0c9e3851be7c"),
+        ("frankensearch", "b559c92e03242336614b995c562a13dfd1269eed"),
         ("frankensqlite", "6a86c07176830dcab0fd845a71a3dd070694ea28"),
-        ("sqlmodel_rust", "173592d5e5ab0c7adfc8d8b2f83b4aec4e9b6fa4"),
-        ("toon_rust", "48f185768cdfb30b865a3e19a3c040e92519baeb"),
+        ("sqlmodel_rust", "84e4f0a9d2f1098afeeae19142442d8208c0f265"),
+        ("toon_rust", "e46b71957fad5397d4bae9eef9d428c8ac8b52aa"),
     ];
 
     ensure(
-        FRANKEN_STACK_LOCK.contains("GitHub Actions run 29846907389"),
-        "lock should record the CI run that compiled the complete dependency stack",
-    )?;
-    ensure(
-        FRANKEN_STACK_LOCK.contains("verify job 88689705551"),
-        "lock should record the proving CI job",
+        FRANKEN_STACK_LOCK.starts_with("# ee.franken-stack.lock.v1\n"),
+        "lock should declare the versioned synchronized-stack contract",
     )?;
 
     let rows = FRANKEN_STACK_LOCK
@@ -1061,6 +1058,219 @@ fn all_build_and_install_paths_use_the_locked_franken_stack() -> TestResult {
         windows_installer.contains(r#"& $checkoutHelper -DestinationRoot $sourceRoot"#),
         "install.ps1 -FromSource should provision locked sibling dependencies",
     )
+}
+
+#[test]
+fn ci_proves_five_target_native_reranker_release_gate() -> TestResult {
+    let (_, cross_and_rest) = CI_WORKFLOW
+        .split_once("\n  cross-platform-determinism:\n")
+        .ok_or_else(|| "CI is missing the cross-platform-determinism job".to_owned())?;
+    let (cross, aggregate_and_rest) = cross_and_rest
+        .split_once("\n  native-reranker-release-proof:\n")
+        .ok_or_else(|| "CI is missing the native-reranker aggregate job".to_owned())?;
+    let (aggregate, _) = aggregate_and_rest
+        .split_once("\n  windows-installer-static-conformance:\n")
+        .ok_or_else(|| "CI native-reranker aggregate job has no stable boundary".to_owned())?;
+    let (_, strict_and_rest) = cross
+        .split_once("      - name: Run fail-closed native-reranker release proof\n")
+        .ok_or_else(|| "cross-platform job is missing its strict model lane".to_owned())?;
+    let (strict, _) = strict_and_rest
+        .split_once("      - name: Upload per-target native-reranker evidence\n")
+        .ok_or_else(|| "strict native-reranker lane has no evidence-upload boundary".to_owned())?;
+    let (_, matrix_and_steps) = cross
+        .split_once("        include:\n")
+        .ok_or_else(|| "cross-platform job is missing its include matrix".to_owned())?;
+    let (matrix, _) = matrix_and_steps
+        .split_once("    steps:\n")
+        .ok_or_else(|| "cross-platform matrix has no steps boundary".to_owned())?;
+    let rows = matrix
+        .split("          - os: ")
+        .filter(|row| !row.trim().is_empty())
+        .collect::<Vec<_>>();
+
+    let expected = [
+        ("aarch64-apple-darwin", "macos-15"),
+        ("x86_64-apple-darwin", "macos-15-intel"),
+        ("aarch64-unknown-linux-gnu", "ubuntu-24.04-arm"),
+        ("x86_64-unknown-linux-gnu", "ubuntu-latest"),
+        ("x86_64-pc-windows-msvc", "windows-latest"),
+    ];
+    ensure_equal(
+        matrix.matches("            release_target: true\n").count(),
+        expected.len(),
+        "exactly five matrix rows should count as release targets",
+    )?;
+    for (target, runner) in expected {
+        let target_marker = format!("target: {target}\n");
+        let matching = rows
+            .iter()
+            .copied()
+            .filter(|row| row.contains(&target_marker))
+            .collect::<Vec<_>>();
+        ensure_equal(matching.len(), 1, &format!("matrix row count for {target}"))?;
+        let row = matching[0];
+        ensure(
+            row.starts_with(runner) && row.contains("release_target: true"),
+            &format!("{target} should run natively on {runner} and count toward the proof"),
+        )?;
+    }
+    let musl_row = rows
+        .iter()
+        .find(|row| row.contains("target: x86_64-unknown-linux-musl\n"))
+        .ok_or_else(|| "the extra musl determinism row should remain present".to_owned())?;
+    ensure(
+        musl_row.contains("release_target: false"),
+        "musl is useful extra coverage but must not count among the five release targets",
+    )?;
+
+    let (_, dispatch_and_rest) = CI_WORKFLOW
+        .split_once("      run_native_reranker_release_matrix:\n")
+        .ok_or_else(|| "CI is missing the native-reranker dispatch input".to_owned())?;
+    let (dispatch_input, model_url_and_rest) = dispatch_and_rest
+        .split_once("      rerank_model_url:\n")
+        .ok_or_else(|| "CI is missing the reranker model URL input".to_owned())?;
+    let (model_url_input, _) = model_url_and_rest
+        .split_once("  schedule:\n")
+        .ok_or_else(|| "CI model URL input has no schedule boundary".to_owned())?;
+    ensure(
+        dispatch_input.contains("default: false")
+            && dispatch_input.contains("type: boolean")
+            && model_url_input.contains("type: string")
+            && cross.contains("inputs.run_native_reranker_release_matrix == true"),
+        "the real-model matrix should be an explicit boolean dispatch that requires a model URL",
+    )?;
+    for contract in [
+        "cargo build --locked --workspace --bin ee --target",
+        "run_logged full-suite-link",
+        "--no-run --target \"$TARGET\"",
+        "cargo tree --locked --target \"$TARGET\" -e features --prefix none",
+        "timestamps.tsv",
+        "if: ${{ always() && matrix.release_target }}",
+        "b559c92e03242336614b995c562a13dfd1269eed",
+    ] {
+        ensure(
+            cross.contains(contract),
+            &format!("cross-platform release proof is missing {contract:?}"),
+        )?;
+    }
+    for dependency in [
+        "tokio",
+        "tokio-util",
+        "hyper",
+        "axum",
+        "tower",
+        "reqwest",
+        "async-std",
+        "smol",
+        "rusqlite",
+        "sqlx",
+        "diesel",
+        "sea-orm",
+        "petgraph",
+        "ort",
+        "ort-sys",
+        "onnxruntime",
+        "onnxruntime-sys",
+    ] {
+        ensure(
+            cross.contains(&format!("\"{dependency}\"")),
+            &format!("target-resolved audit should reject {dependency}"),
+        )?;
+    }
+    for contract in [
+        "82767464",
+        "adaada3ccc15ae535e9bea238d2ec05e4f39726bdcad07dd87cba9f85dc10edb",
+        "EE_E2E_RERANK_REQUIRE_MODEL=1",
+        "EE_E2E_NATIVE_RERANK_REQUIRE_MODEL=1",
+        "run_logged full-ee-suite",
+        "-p frankensearch-rerank --no-default-features --features native",
+        "bash scripts/e2e_native_reranker.sh",
+        "rerank-vector.json",
+    ] {
+        ensure(
+            strict.contains(contract),
+            &format!("strict native-reranker lane is missing {contract:?}"),
+        )?;
+    }
+    for contract in [
+        "RERANK_MODEL_URL: ${{ inputs.rerank_model_url }}",
+        "if [[ -z \"$RERANK_MODEL_URL\" ]]",
+        "cargo test --locked --workspace --lib --bins --tests --examples",
+        "--no-default-features --features native",
+        "[native_reranker] SKIP",
+        "[native_reranker] ranking(desc)=",
+    ] {
+        ensure(
+            strict.contains(contract),
+            &format!("strict fail-closed execution is missing {contract:?}"),
+        )?;
+    }
+    ensure(
+        !strict.contains("--no-run"),
+        "strict full-suite execution must run tests rather than compile only",
+    )?;
+
+    for target in [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+    ] {
+        ensure(
+            aggregate.contains(&format!("\"{target}\"")),
+            &format!("aggregate proof should require {target}"),
+        )?;
+    }
+    for contract in [
+        "len(records) != 5",
+        "ee.rerank_determinism.vector.v1",
+        "fusionOnlyOrder",
+        "rerankedOrder",
+        "tolerance = 0.01",
+        "abs(actual[\"rerankScore\"] - expected[\"rerankScore\"])",
+        "if: ${{ always()",
+        "needs.cross-platform-determinism.result",
+        "strict-completed-at.txt",
+        "MATRIX_RESULT",
+    ] {
+        ensure(
+            aggregate.contains(contract),
+            &format!("aggregate vector comparison is missing {contract:?}"),
+        )?;
+    }
+
+    for contract in [
+        "EE_E2E_RERANK_VECTOR_OUT",
+        "EE_E2E_TARGET_TRIPLE",
+        "ee.rerank_determinism.vector.v1",
+        "VECTOR_EMITTED=0",
+        "USERPROFILE=",
+        "APPDATA=",
+        "LOCALAPPDATA=",
+        "dumpbin.exe",
+        "llvm-objdump",
+        "objdump",
+        "ort\\.dll",
+    ] {
+        ensure(
+            NATIVE_RERANKER_E2E.contains(contract),
+            &format!("native reranker E2E portability contract is missing {contract:?}"),
+        )?;
+    }
+
+    #[cfg(unix)]
+    {
+        let script =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/e2e_native_reranker.sh");
+        let status = Command::new("bash")
+            .arg("-n")
+            .arg(&script)
+            .status()
+            .map_err(|error| format!("failed to parse {}: {error}", script.display()))?;
+        ensure(status.success(), "native reranker E2E should pass bash -n")?;
+    }
+    Ok(())
 }
 
 #[test]

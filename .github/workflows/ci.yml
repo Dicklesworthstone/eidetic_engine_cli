@@ -17,6 +17,16 @@ on:
         options:
           - 'false'
           - 'true'
+      run_native_reranker_release_matrix:
+        description: 'Run the fail-closed five-target native-reranker release proof'
+        required: false
+        default: false
+        type: boolean
+      rerank_model_url:
+        description: 'Verified rerank-default-v1 archive URL used only by the opt-in release proof'
+        required: false
+        default: ''
+        type: string
   schedule:
     - cron: '17 9 * * 1'
 
@@ -242,22 +252,36 @@ jobs:
     if: github.event_name != 'schedule'
     name: cross-platform-determinism (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            release_target: true
+            binary: ee
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             runner: cross
+            release_target: false
+            binary: ee
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-          - os: macos-14
+            release_target: true
+            binary: ee
+          - os: macos-15
             target: aarch64-apple-darwin
+            release_target: true
+            binary: ee
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            release_target: true
+            binary: ee
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            release_target: true
+            binary: ee.exe
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -304,6 +328,16 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
+
+      - name: Install Python for target evidence checks
+        if: matrix.release_target == true
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Activate MSVC developer tools
+        if: runner.os == 'Windows' && matrix.release_target == true
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Install cross
         if: matrix.runner == 'cross'
@@ -358,13 +392,303 @@ jobs:
           Get-Content $cgseManifest -TotalCount 10 | Write-Host
           Write-Host "::endgroup::"
 
+      - name: Build, link, audit, and compile-test release target
+        if: matrix.release_target == true
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY_NAME: ${{ matrix.binary }}
+          FRANKENSEARCH_EXPECTED_REV: b559c92e03242336614b995c562a13dfd1269eed
+        run: |
+          set -euo pipefail
+          runner_temp="$RUNNER_TEMP"
+          if command -v cygpath >/dev/null 2>&1; then
+            runner_temp="$(cygpath -u "$runner_temp")"
+          fi
+          proof_root="$runner_temp/bd-1nl13.7/$TARGET"
+          mkdir -p "$proof_root"
+          timestamps="$proof_root/timestamps.tsv"
+
+          run_logged() {
+            local label="$1"
+            shift
+            local log="$proof_root/$label.log"
+            local started completed status
+            started="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            printf '%s\t%s\tstarted\n' "$started" "$label" >>"$timestamps"
+            set +e
+            "$@" 2>&1 | tee "$log"
+            status=$?
+            set -e
+            completed="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            printf '%s\t%s\tcompleted\t%s\n' "$completed" "$label" "$status" >>"$timestamps"
+            return "$status"
+          }
+
+          locked_revision="$(awk -F '\t' '$1 == "frankensearch" { print $2 }' franken-stack.lock)"
+          checked_out_revision="$(git -C .ci/franken-stack/projects/frankensearch rev-parse HEAD)"
+          if [[ "$locked_revision" != "$FRANKENSEARCH_EXPECTED_REV" \
+            || "$checked_out_revision" != "$FRANKENSEARCH_EXPECTED_REV" ]]; then
+            printf 'expected latest Frankensearch %s, lock=%s checkout=%s\n' \
+              "$FRANKENSEARCH_EXPECTED_REV" "$locked_revision" "$checked_out_revision" >&2
+            exit 1
+          fi
+          printf '{"target":"%s","frankensearchRevision":"%s"}\n' \
+            "$TARGET" "$checked_out_revision" >"$proof_root/target.json"
+
+          run_logged build \
+            cargo build --locked --workspace --bin ee --target "$TARGET"
+          run_logged full-suite-link \
+            cargo test --locked --workspace --lib --bins --tests --examples \
+              --no-run --target "$TARGET"
+          run_logged graph-determinism \
+            cargo test --locked --workspace --test cross_platform_determinism \
+              --target "$TARGET" -- --nocapture
+          run_logged cargo-tree \
+            cargo tree --locked --target "$TARGET" -e features --prefix none
+
+          python - "$proof_root/cargo-tree.log" "$TARGET" <<'PY'
+          import pathlib
+          import sys
+
+          forbidden = {
+              "tokio", "tokio-util", "hyper", "axum", "tower", "reqwest",
+              "async-std", "smol", "rusqlite", "sqlx", "diesel", "sea-orm",
+              "petgraph", "ort", "ort-sys", "onnxruntime", "onnxruntime-sys",
+          }
+          tree_path = pathlib.Path(sys.argv[1])
+          target = sys.argv[2]
+          found = sorted({
+              parts[0]
+              for line in tree_path.read_text(encoding="utf-8").splitlines()
+              if len(parts := line.split()) >= 2
+              and parts[0] in forbidden
+              and parts[1].startswith("v")
+          })
+          if found:
+              tree_path.with_name("dependency-audit.txt").write_text(
+                  f"{target}: forbidden dependencies: {', '.join(found)}\n",
+                  encoding="utf-8",
+              )
+              raise SystemExit(
+                  f"{target}: forbidden target-resolved dependencies: {', '.join(found)}"
+              )
+          verdict = f"{target}: target-resolved dependency tree is project-forbidden-dep and ORT free"
+          tree_path.with_name("dependency-audit.txt").write_text(
+              verdict + "\n", encoding="utf-8"
+          )
+          print(verdict)
+          PY
+
+          date -u +"%Y-%m-%dT%H:%M:%SZ" >"$proof_root/completed-at.txt"
+
       - name: Cross-platform graph determinism
-        if: matrix.runner != 'cross'
+        if: matrix.release_target != true && matrix.runner != 'cross'
         run: cargo test --workspace --test cross_platform_determinism --target ${{ matrix.target }} -- --nocapture
 
       - name: Cross-platform graph determinism (cross)
         if: matrix.runner == 'cross'
         run: cross test --workspace --test cross_platform_determinism --target ${{ matrix.target }} -- --nocapture
+
+      - name: Run fail-closed native-reranker release proof
+        if: github.event_name == 'workflow_dispatch' && inputs.run_native_reranker_release_matrix == true && matrix.release_target == true
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BINARY_NAME: ${{ matrix.binary }}
+          RERANK_MODEL_URL: ${{ inputs.rerank_model_url }}
+          RERANK_MODEL_BYTES: '82767464'
+          RERANK_MODEL_SHA256: adaada3ccc15ae535e9bea238d2ec05e4f39726bdcad07dd87cba9f85dc10edb
+        run: |
+          set -euo pipefail
+          if [[ -z "$RERANK_MODEL_URL" ]]; then
+            echo "::error::rerank_model_url is required for the native-reranker release proof"
+            exit 1
+          fi
+          for tool in cargo curl git jq python; do
+            command -v "$tool" >/dev/null 2>&1 || {
+              echo "::error::required release-proof tool is missing: $tool"
+              exit 1
+            }
+          done
+
+          runner_temp="$RUNNER_TEMP"
+          workspace_root="$GITHUB_WORKSPACE"
+          if command -v cygpath >/dev/null 2>&1; then
+            runner_temp="$(cygpath -u "$runner_temp")"
+            workspace_root="$(cygpath -u "$workspace_root")"
+          fi
+          proof_root="$runner_temp/bd-1nl13.7/$TARGET"
+          model_root="$runner_temp/bd-1nl13.7-model/$TARGET"
+          archive="$model_root/rerank-default-v1.tar.zst"
+          timestamps="$proof_root/timestamps.tsv"
+          mkdir -p "$proof_root" "$model_root"
+
+          run_logged() {
+            local label="$1"
+            shift
+            local log="$proof_root/$label.log"
+            local started completed status
+            started="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            printf '%s\t%s\tstarted\n' "$started" "$label" >>"$timestamps"
+            set +e
+            "$@" 2>&1 | tee "$log"
+            status=$?
+            set -e
+            completed="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            printf '%s\t%s\tcompleted\t%s\n' "$completed" "$label" "$status" >>"$timestamps"
+            return "$status"
+          }
+
+          native_path() {
+            if command -v cygpath >/dev/null 2>&1; then
+              cygpath -w "$1"
+            else
+              printf '%s' "$1"
+            fi
+          }
+
+          sha256_file() {
+            if command -v shasum >/dev/null 2>&1; then
+              shasum -a 256 "$1" | awk '{ print $1 }'
+            else
+              sha256sum "$1" | awk '{ print $1 }'
+            fi
+          }
+
+          run_logged model-download \
+            curl --fail --location --retry 3 --retry-all-errors \
+              --output "$archive" "$RERANK_MODEL_URL"
+          actual_bytes="$(wc -c <"$archive" | tr -d '[:space:]')"
+          actual_sha256="$(sha256_file "$archive")"
+          if [[ "$actual_bytes" != "$RERANK_MODEL_BYTES" \
+            || "$actual_sha256" != "$RERANK_MODEL_SHA256" ]]; then
+            printf 'reranker artifact mismatch: expected bytes=%s sha256=%s; got bytes=%s sha256=%s\n' \
+              "$RERANK_MODEL_BYTES" "$RERANK_MODEL_SHA256" \
+              "$actual_bytes" "$actual_sha256" >&2
+            exit 1
+          fi
+
+          target_dir="$(cargo metadata --locked --no-deps --format-version 1 \
+            | python -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+          if command -v cygpath >/dev/null 2>&1; then
+            target_dir="$(cygpath -u "$target_dir")"
+          fi
+          binary="$target_dir/$TARGET/debug/$BINARY_NAME"
+          if [[ ! -x "$binary" ]]; then
+            echo "::error::compiled ee binary is missing or non-executable: $binary"
+            exit 1
+          fi
+          model_home="$model_root/home"
+          model_workspace="$model_root/workspace"
+          model_tmp="$model_root/tmp"
+          mkdir -p "$model_home/AppData/Roaming" "$model_home/AppData/Local" \
+            "$model_workspace" "$model_tmp"
+          native_home="$(native_path "$model_home")"
+          native_workspace="$(native_path "$model_workspace")"
+          native_tmp="$(native_path "$model_tmp")"
+          native_archive="$(native_path "$archive")"
+          native_appdata="$(native_path "$model_home/AppData/Roaming")"
+          native_localappdata="$(native_path "$model_home/AppData/Local")"
+          run_logged model-init env \
+            HOME="$native_home" USERPROFILE="$native_home" \
+            APPDATA="$native_appdata" LOCALAPPDATA="$native_localappdata" \
+            TMPDIR="$native_tmp" TMP="$native_tmp" TEMP="$native_tmp" \
+            "$binary" --workspace "$native_workspace" init --json
+          run_logged model-fetch env \
+            HOME="$native_home" USERPROFILE="$native_home" \
+            APPDATA="$native_appdata" LOCALAPPDATA="$native_localappdata" \
+            TMPDIR="$native_tmp" TMP="$native_tmp" TEMP="$native_tmp" \
+            "$binary" --workspace "$native_workspace" \
+              model fetch rerank-default --from-file "$native_archive" --json
+
+          unpacked_dir="$model_home/.local/share/ee/models/rerank/rerank-default-v1/rerank-default-v1"
+          if [[ ! -f "$unpacked_dir/tokenizer.json" ]] \
+            || [[ ! -f "$unpacked_dir/model_f32.safetensors" \
+              && ! -f "$unpacked_dir/model.safetensors" ]]; then
+            echo "::error::verified model fetch did not produce the native reranker files"
+            exit 1
+          fi
+
+          case "$RUNNER_OS" in
+            Linux)
+              upstream_model_dir="/private/tmp/ee-reranker-port/model"
+              sudo mkdir -p "$upstream_model_dir"
+              sudo chown -R "$(id -u):$(id -g)" /private/tmp/ee-reranker-port
+              ;;
+            Windows)
+              workspace_native="$(cygpath -w "$workspace_root")"
+              drive_letter="$(printf '%s' "$workspace_native" | cut -d: -f1)"
+              upstream_model_dir="$(cygpath -u "$drive_letter:\\private\\tmp\\ee-reranker-port\\model")"
+              mkdir -p "$upstream_model_dir"
+              ;;
+            *)
+              upstream_model_dir="/private/tmp/ee-reranker-port/model"
+              mkdir -p "$upstream_model_dir"
+              ;;
+          esac
+          cp -R "$unpacked_dir/." "$upstream_model_dir/"
+          test -f "$upstream_model_dir/tokenizer.json"
+
+          native_model_dir="$(native_path "$unpacked_dir")"
+          run_logged full-ee-suite env \
+            EE_E2E_RERANK_MODEL_DIR="$native_model_dir" \
+            EE_E2E_RERANK_REQUIRE_MODEL=1 \
+            EE_E2E_NATIVE_RERANK_REQUIRE_MODEL=1 \
+            cargo test --locked --workspace --lib --bins --tests --examples \
+              --target "$TARGET" -- --test-threads=1 --nocapture
+
+          run_logged frankensearch-rerank-suite \
+            cargo test --locked \
+              --manifest-path "$workspace_root/.ci/franken-stack/projects/frankensearch/Cargo.toml" \
+              -p frankensearch-rerank --no-default-features --features native \
+              --target "$TARGET" \
+              -- --test-threads=1 --nocapture
+          if grep -F '[native_reranker] SKIP' \
+            "$proof_root/frankensearch-rerank-suite.log"; then
+            echo "::error::upstream native reranker tests skipped their real model"
+            exit 1
+          fi
+          if ! grep -F '[native_reranker] ranking(desc)=' \
+            "$proof_root/frankensearch-rerank-suite.log" >/dev/null; then
+            echo "::error::upstream native reranker parity proof was not observed"
+            exit 1
+          fi
+
+          e2e_tmp="$model_root/native-e2e"
+          vector="$proof_root/rerank-vector.json"
+          mkdir -p "$e2e_tmp"
+          if run_logged native-reranker-e2e env \
+            EE_BINARY="$binary" \
+            EE_E2E_TMPDIR="$e2e_tmp" \
+            EE_E2E_RERANK_MODEL_ARCHIVE="$archive" \
+            EE_E2E_NATIVE_RERANK_REQUIRE_MODEL=1 \
+            EE_E2E_RERANK_VECTOR_OUT="$vector" \
+            EE_E2E_TARGET_TRIPLE="$TARGET" \
+            bash scripts/e2e_native_reranker.sh; then
+            e2e_status=0
+          else
+            e2e_status=$?
+          fi
+          e2e_run="$(find "$e2e_tmp" -mindepth 1 -maxdepth 1 -type d \
+            -name 'ee-native-reranker-e2e.*' | head -1)"
+          if [[ -n "$e2e_run" && -d "$e2e_run/logs" ]]; then
+            mkdir -p "$proof_root/native-e2e-logs"
+            cp -R "$e2e_run/logs/." "$proof_root/native-e2e-logs/"
+          fi
+          if [[ "$e2e_status" -ne 0 ]]; then
+            exit "$e2e_status"
+          fi
+          date -u +"%Y-%m-%dT%H:%M:%SZ" >"$proof_root/strict-completed-at.txt"
+
+      - name: Upload per-target native-reranker evidence
+        if: ${{ always() && matrix.release_target }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bd-1nl13.7-${{ matrix.target }}
+          path: ${{ runner.temp }}/bd-1nl13.7/${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Build macOS ee artifact
         if: ${{ matrix.target == 'aarch64-apple-darwin' }}
@@ -391,6 +715,161 @@ jobs:
             dist/ee-${{ matrix.target }}-debug.tar.gz.sha256
           if-no-files-found: error
           retention-days: 3
+
+  native-reranker-release-proof:
+    name: native-reranker-release-proof
+    needs:
+      - cross-platform-determinism
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_native_reranker_release_matrix == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download all per-target proof artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: bd-1nl13.7-*
+          path: ${{ runner.temp }}/bd-1nl13.7-aggregate
+
+      - name: Require five targets and compare reranker vectors
+        env:
+          PROOF_ROOT: ${{ runner.temp }}/bd-1nl13.7-aggregate
+          MATRIX_RESULT: ${{ needs.cross-platform-determinism.result }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$PROOF_ROOT"
+          if [[ "$MATRIX_RESULT" != "success" ]]; then
+            printf 'cross-platform-determinism result=%s; refusing a passing aggregate proof\n' \
+              "$MATRIX_RESULT" | tee "$PROOF_ROOT/aggregate.log"
+            exit 1
+          fi
+          python - "$PROOF_ROOT" <<'PY' 2>&1 | tee -a "$PROOF_ROOT/aggregate.log"
+          import datetime
+          import json
+          import math
+          import pathlib
+          import sys
+
+          expected_targets = {
+              "aarch64-apple-darwin",
+              "x86_64-apple-darwin",
+              "aarch64-unknown-linux-gnu",
+              "x86_64-unknown-linux-gnu",
+              "x86_64-pc-windows-msvc",
+          }
+          expected_revision = "b559c92e03242336614b995c562a13dfd1269eed"
+          tolerance = 0.01
+          root = pathlib.Path(sys.argv[1])
+          records = {}
+
+          for sidecar in sorted(root.glob("bd-1nl13.7-*/target.json")):
+              target_data = json.loads(sidecar.read_text(encoding="utf-8"))
+              target = target_data.get("target")
+              if target in records:
+                  raise SystemExit(f"duplicate target evidence: {target}")
+              if target_data.get("frankensearchRevision") != expected_revision:
+                  raise SystemExit(
+                      f"{target}: Frankensearch revision is not {expected_revision}"
+                  )
+              for marker in ("completed-at.txt", "strict-completed-at.txt"):
+                  if not sidecar.with_name(marker).is_file():
+                      raise SystemExit(f"{target}: success marker is missing: {marker}")
+              timestamps_path = sidecar.with_name("timestamps.tsv")
+              if not timestamps_path.is_file():
+                  raise SystemExit(f"{target}: timestamps.tsv is missing")
+              completed = [
+                  line.split("\t")
+                  for line in timestamps_path.read_text(encoding="utf-8").splitlines()
+                  if "\tcompleted\t" in line
+              ]
+              if not completed or any(fields[-1] != "0" for fields in completed):
+                  raise SystemExit(f"{target}: a timestamped proof command failed")
+              vector_path = sidecar.with_name("rerank-vector.json")
+              if not vector_path.is_file():
+                  raise SystemExit(f"{target}: rerank-vector.json is missing")
+              vector = json.loads(vector_path.read_text(encoding="utf-8"))
+              expected_keys = {
+                  "schema", "query", "fusionOnlyOrder",
+                  "rerankedOrder", "rerankedScores",
+              }
+              if set(vector) != expected_keys:
+                  raise SystemExit(f"{target}: invalid vector keys")
+              if vector["schema"] != "ee.rerank_determinism.vector.v1":
+                  raise SystemExit(f"{target}: invalid vector schema")
+              if len(vector["fusionOnlyOrder"]) != 5 \
+                  or len(vector["rerankedOrder"]) != 5 \
+                  or len(vector["rerankedScores"]) != 5:
+                  raise SystemExit(f"{target}: vector must contain five candidates")
+              score_contents = [
+                  item.get("content") for item in vector["rerankedScores"]
+              ]
+              scores = [
+                  item.get("rerankScore") for item in vector["rerankedScores"]
+              ]
+              if score_contents != vector["rerankedOrder"]:
+                  raise SystemExit(f"{target}: score/content order is inconsistent")
+              if not all(
+                  isinstance(score, (int, float))
+                  and not isinstance(score, bool)
+                  and math.isfinite(score)
+                  and 0.0 <= score <= 1.0
+                  for score in scores
+              ):
+                  raise SystemExit(f"{target}: reranker scores must be finite numbers")
+              records[target] = vector
+
+          if set(records) != expected_targets or len(records) != 5:
+              missing = sorted(expected_targets - set(records))
+              extra = sorted(set(records) - expected_targets)
+              raise SystemExit(
+                  f"expected exactly five release targets; missing={missing} extra={extra}"
+              )
+
+          reference_target = "x86_64-unknown-linux-gnu"
+          reference = records[reference_target]
+          for target, vector in sorted(records.items()):
+              if vector["query"] != reference["query"]:
+                  raise SystemExit(f"{target}: rerank query drifted")
+              if vector["fusionOnlyOrder"] != reference["fusionOnlyOrder"]:
+                  raise SystemExit(f"{target}: fusion-only order drifted")
+              if vector["rerankedOrder"] != reference["rerankedOrder"]:
+                  raise SystemExit(f"{target}: reranked order drifted")
+              for index, (actual, expected) in enumerate(zip(
+                  vector["rerankedScores"], reference["rerankedScores"], strict=True
+              )):
+                  if actual["content"] != expected["content"] \
+                      or abs(actual["rerankScore"] - expected["rerankScore"]) > tolerance:
+                      raise SystemExit(
+                          f"{target}: score {index} exceeds tolerance {tolerance}"
+                      )
+
+          aggregate = {
+              "schema": "ee.rerank_release_proof.v1",
+              "generatedAt": datetime.datetime.now(
+                  datetime.timezone.utc
+              ).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+              "frankensearchRevision": expected_revision,
+              "referenceTarget": reference_target,
+              "scoreTolerance": tolerance,
+              "targets": sorted(records),
+              "targetCount": len(records),
+              "verdict": "pass",
+          }
+          (root / "aggregate-proof.json").write_text(
+              json.dumps(aggregate, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(aggregate, sort_keys=True))
+          PY
+
+      - name: Upload aggregate five-target proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bd-1nl13.7-five-target-proof
+          path: ${{ runner.temp }}/bd-1nl13.7-aggregate
+          if-no-files-found: error
+          retention-days: 14
 
   windows-installer-static-conformance:
     if: github.event_name != 'schedule'
