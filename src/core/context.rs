@@ -62,8 +62,6 @@ use crate::core::memory_scope::{
     MemoryScopeContext, MeshDisplayProvenance, MeshQueryVisibility, mesh_query_visibility,
 };
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
-#[cfg(test)]
-use crate::core::search::run_context_search_with_preloaded_memories_and_workspace_state;
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
     SearchOptions, SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus,
@@ -1143,7 +1141,7 @@ pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse,
 
 pub fn run_context_pack_seeded(
     options: &ContextPackOptions,
-    determinism: &Deterministic<Seed>,
+    determinism: Deterministic<Seed>,
 ) -> Result<ContextResponse, ContextPackError> {
     run_context_pack_with_performance_seeded(options, PACK_COMMAND, determinism)
         .map(|run| run.response)
@@ -1202,8 +1200,12 @@ fn trace_pack_dna_explain_orchestration_with_timeout(
 }
 
 #[cfg(test)]
+type AfterPackPersistenceHook = Box<dyn FnOnce(&asupersync::Cx, bool)>;
+
+#[cfg(test)]
 thread_local! {
     static CONTEXT_PACK_DNA_COMPUTE_ERROR: RefCell<Option<crate::graph::GraphError>> = const { RefCell::new(None) };
+    static AFTER_PACK_PERSISTENCE_HOOK: RefCell<Option<AfterPackPersistenceHook>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1212,6 +1214,25 @@ fn set_context_pack_dna_compute_error(error: Option<crate::graph::GraphError>) {
         *slot.borrow_mut() = error;
     });
 }
+
+#[cfg(test)]
+fn install_after_pack_persistence_hook(hook: impl FnOnce(&asupersync::Cx, bool) + 'static) {
+    AFTER_PACK_PERSISTENCE_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_after_pack_persistence_hook(cx: &asupersync::Cx, succeeded: bool) {
+    AFTER_PACK_PERSISTENCE_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(cx, succeeded);
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_after_pack_persistence_hook(_cx: &asupersync::Cx, _succeeded: bool) {}
 
 fn compute_context_pack_dna(
     projection: &crate::graph::MemoryGraphProjection,
@@ -1553,7 +1574,7 @@ pub async fn run_context_pack_with_performance_with_cx(
     run_context_pack_with_performance_inner(
         options,
         command,
-        &determinism,
+        determinism,
         PackRecordPersistence::Ambient,
         ContextPackControl::new(cx, None, None),
     )
@@ -1626,7 +1647,7 @@ pub fn run_context_pack_with_performance_controlled(
         run_context_pack_with_performance_inner(
             options,
             command,
-            &determinism,
+            determinism,
             PackRecordPersistence::Ambient,
             ContextPackControl::new(&cx, deadline, cancellation_flag),
         )
@@ -1638,14 +1659,14 @@ pub fn run_context_pack_with_performance_controlled(
 pub fn run_context_pack_with_performance_seeded(
     options: &ContextPackOptions,
     command: &'static str,
-    determinism: &Deterministic<Seed>,
+    determinism: Deterministic<Seed>,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
     crate::core::run_cli_with_cx(Duration::from_secs(60), |cx| async move {
         run_context_pack_with_performance_inner(
             options,
             command,
             determinism,
-            PackRecordPersistence::Seeded(determinism),
+            PackRecordPersistence::Seeded,
             ContextPackControl::new(&cx, None, None),
         )
         .await
@@ -1654,9 +1675,9 @@ pub fn run_context_pack_with_performance_seeded(
 }
 
 #[derive(Clone, Copy)]
-enum PackRecordPersistence<'a> {
+enum PackRecordPersistence {
     Ambient,
-    Seeded(&'a Deterministic<Seed>),
+    Seeded,
 }
 
 #[derive(Clone, Copy)]
@@ -2049,8 +2070,8 @@ fn reconstruct_not_retrieved_candidate(
 async fn run_context_pack_with_performance_inner(
     options: &ContextPackOptions,
     command: &'static str,
-    determinism: &Deterministic<Seed>,
-    pack_record_persistence: PackRecordPersistence<'_>,
+    determinism: Deterministic<Seed>,
+    pack_record_persistence: PackRecordPersistence,
     control: ContextPackControl<'_>,
 ) -> Result<ContextPackPerformanceRun, ContextPackError> {
     let total_start = Instant::now();
@@ -2205,7 +2226,7 @@ async fn run_context_pack_with_performance_inner(
                 runtime_profile: runtime_profile.clone(),
                 output_redaction_enabled,
             }),
-            determinism,
+            determinism.shared_child("search.rerank"),
         )
         .await
         {
@@ -2741,7 +2762,7 @@ async fn run_context_pack_with_performance_inner(
             // golden harness proves byte-identical output.
             arena_mode: crate::pack::ArenaMode::Disabled,
         },
-        determinism,
+        &determinism,
     )
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
     apply_context_pack_contradiction_guard(read_connection, &mut draft);
@@ -2915,21 +2936,19 @@ async fn run_context_pack_with_performance_inner(
                         &mut pack_persistence,
                     )
                     .map_err(|error| error.to_string()),
-                    PackRecordPersistence::Seeded(pack_id_seed) => {
-                        persist_pack_record_seeded_measured(
-                            &connection,
-                            &options.workspace_path,
-                            &request,
-                            &draft,
-                            &response_degraded,
-                            pack_id_seed,
-                            options.task_lens.as_ref(),
-                            options.baseline_write.as_ref(),
-                            &mut pack_persistence,
-                        )
-                        .map(|_| ())
-                        .map_err(|error| error.to_string())
-                    }
+                    PackRecordPersistence::Seeded => persist_pack_record_seeded_measured(
+                        &connection,
+                        &options.workspace_path,
+                        &request,
+                        &draft,
+                        &response_degraded,
+                        &determinism,
+                        options.task_lens.as_ref(),
+                        options.baseline_write.as_ref(),
+                        &mut pack_persistence,
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
                 };
                 persist_connection = Some(connection);
                 result
@@ -2951,21 +2970,19 @@ async fn run_context_pack_with_performance_inner(
                                 &mut pack_persistence,
                             )
                             .map_err(|error| error.to_string()),
-                            PackRecordPersistence::Seeded(pack_id_seed) => {
-                                persist_pack_record_seeded_measured(
-                                    &connection,
-                                    &options.workspace_path,
-                                    &request,
-                                    &draft,
-                                    &response_degraded,
-                                    pack_id_seed,
-                                    options.task_lens.as_ref(),
-                                    options.baseline_write.as_ref(),
-                                    &mut pack_persistence,
-                                )
-                                .map(|_| ())
-                                .map_err(|error| error.to_string())
-                            }
+                            PackRecordPersistence::Seeded => persist_pack_record_seeded_measured(
+                                &connection,
+                                &options.workspace_path,
+                                &request,
+                                &draft,
+                                &response_degraded,
+                                &determinism,
+                                options.task_lens.as_ref(),
+                                options.baseline_write.as_ref(),
+                                &mut pack_persistence,
+                            )
+                            .map(|_| ())
+                            .map_err(|error| error.to_string()),
                         };
                         persist_connection = Some(connection);
                         result
@@ -2981,6 +2998,10 @@ async fn run_context_pack_with_performance_inner(
     } else {
         Ok(())
     };
+    if options.persist_pack {
+        run_after_pack_persistence_hook(control.cx, persist_result.is_ok());
+    }
+    control.check()?;
     let persist_succeeded = options.persist_pack && persist_result.is_ok();
     pack_persistence.succeeded = persist_succeeded;
     if let Err(persist_error) = persist_result {
@@ -3023,6 +3044,7 @@ async fn run_context_pack_with_performance_inner(
         response.data.pagination = Some(pagination_info.into_response());
     }
 
+    control.check()?;
     if let Some(l2_context) = &l2_cache_context {
         let degraded_count_before_l2_store = response.data.degraded.len();
         context_pack_l2_store(l2_context, options, &search_report, &mut response);
@@ -3042,6 +3064,7 @@ async fn run_context_pack_with_performance_inner(
         }
     }
 
+    control.check()?;
     // Bead bd-17c65.7.7 (G8): best-effort audit-log instrumentation for
     // pack assembly. One `pack.assembled` row per call + one
     // `pack.included_mem` row per selected item. Privacy: only the
@@ -3078,6 +3101,7 @@ async fn run_context_pack_with_performance_inner(
             .expect("context response carries pack SLO before performance JSON"),
     );
 
+    control.check()?;
     Ok(ContextPackPerformanceRun {
         response,
         performance,
@@ -10619,6 +10643,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use proptest::prelude::*;
@@ -14936,7 +14961,7 @@ pub fn unrelated_context() -> u64 {{
                     baseline_write: None,
                     no_lod: false,
                 },
-                &determinism,
+                determinism,
             )
             .map_err(|error| error.to_string())?;
 
@@ -14963,6 +14988,172 @@ pub fn unrelated_context() -> u64 {{
         assert_eq!(first, replay);
         assert_ne!(first, other_seed);
         assert!(first.starts_with("pack_"));
+        Ok(())
+    }
+
+    #[test]
+    fn lab_runtime_cancellation_after_pack_persistence_is_not_laundered() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let db_path = ee_dir.join("ee.db");
+        let empty_index_dir = tempdir.path().join("empty-index");
+        std::fs::create_dir_all(&empty_index_dir).map_err(|error| error.to_string())?;
+
+        let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = super::stable_context_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("workspace".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                &MemoryId::from_uuid(uuid::Uuid::from_u128(4243)).to_string(),
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Run cargo fmt --check before release.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.95,
+                    utility: 0.80,
+                    importance: 0.70,
+                    provenance_uri: None,
+                    trust_class: TrustClass::HumanExplicit.as_str().to_owned(),
+                    trust_subclass: Some("test".to_owned()),
+                    tags: vec!["release".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let query = "format before release";
+        let options = super::ContextPackOptions {
+            workspace_path: workspace,
+            database_path: Some(db_path.clone()),
+            index_dir: Some(empty_index_dir),
+            query: query.to_owned(),
+            speed: crate::search::SpeedMode::Default,
+            source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+            strict_source_mode: false,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(400),
+            candidate_pool: Some(10),
+            max_results: None,
+            include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            redaction_level: crate::models::RedactionLevel::Minimal,
+            memory_scope: MemoryScope::Workspace,
+            strict_scope: false,
+            ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
+            pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            task_lens: None,
+            require_fresh_sentinels: false,
+            output_options: Default::default(),
+            persist_pack: true,
+            baseline_write: None,
+            no_lod: false,
+        };
+
+        let expected_message = "caller cancelled immediately after pack persistence";
+        let hook_result = Arc::new(Mutex::new(None));
+        let hook_result_for_hook = Arc::clone(&hook_result);
+        super::install_after_pack_persistence_hook(move |cx, succeeded| {
+            if let Ok(mut observed) = hook_result_for_hook.lock() {
+                *observed = Some(succeeded);
+            }
+            cx.set_cancel_reason(CancelReason::user(expected_message));
+        });
+
+        let observation: Arc<Mutex<Option<Result<CancelReason, String>>>> =
+            Arc::new(Mutex::new(None));
+        let task_observation = Arc::clone(&observation);
+        let mut lab =
+            asupersync::LabRuntime::new(asupersync::LabConfig::new(0xEE_90E).max_steps(256));
+        let root = lab.state.create_root_region(asupersync::Budget::INFINITE);
+        let (task_id, _handle) = lab
+            .state
+            .create_task(root, asupersync::Budget::INFINITE, async move {
+                let result = if let Some(cx) = Cx::current() {
+                    match super::run_context_pack_with_performance_with_cx(&cx, &options, "pack")
+                        .await
+                    {
+                        Err(super::ContextPackError::Cancelled(reason)) => Ok(reason),
+                        Err(error) => Err(format!(
+                            "post-persistence cancellation must remain typed, got {error:?}"
+                        )),
+                        Ok(run) => Err(format!(
+                            "post-persistence cancellation returned success with degraded={:?}",
+                            run.response.data.degraded
+                        )),
+                    }
+                } else {
+                    Err("LabRuntime pack task did not install a Cx".to_owned())
+                };
+                if let Ok(mut slot) = task_observation.lock() {
+                    *slot = Some(result);
+                }
+                asupersync::Outcome::<(), String>::Ok(())
+            })
+            .map_err(|error| format!("create post-persistence cancellation task: {error}"))?;
+        lab.scheduler.lock().schedule(task_id, 0);
+
+        let report = lab.run_until_quiescent_with_report();
+        assert!(
+            report.quiescent,
+            "pack cancellation LabRuntime must quiesce"
+        );
+        assert!(
+            report.invariant_violations.is_empty(),
+            "pack cancellation must preserve LabRuntime invariants: {:?}",
+            report.invariant_violations
+        );
+        assert_eq!(
+            hook_result
+                .lock()
+                .map_err(|_| "pack persistence hook observation poisoned".to_owned())?
+                .take(),
+            Some(true),
+            "test hook must observe an atomically committed pack record"
+        );
+        let reason = observation
+            .lock()
+            .map_err(|_| "pack cancellation observation poisoned".to_owned())?
+            .take()
+            .ok_or_else(|| "pack cancellation observation missing".to_owned())??;
+        assert_eq!(reason.kind, asupersync::CancelKind::User);
+        assert_eq!(reason.message.as_deref(), Some(expected_message));
+
+        let connection = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        let record = connection
+            .get_latest_pack_record_for_query(&workspace_id, query)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            record.is_some(),
+            "the completed atomic pack transaction must remain durable"
+        );
         Ok(())
     }
 
