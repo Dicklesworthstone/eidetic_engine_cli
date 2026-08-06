@@ -127,8 +127,8 @@ fn remember_fixture_memory(
     content: &str,
 ) -> TestResult {
     remember_memory(&RememberMemoryOptions {
-        workspace_path: workspace.to_path_buf(),
-        database_path: Some(database.to_path_buf()),
+        workspace_path: workspace,
+        database_path: Some(database),
         content,
         workflow_id: None,
         level: "procedural",
