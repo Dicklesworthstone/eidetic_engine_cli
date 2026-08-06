@@ -8,7 +8,7 @@
 use std::env;
 use std::fmt::Debug;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use ee::config::{WorkspaceDiagnosticSeverity, WorkspaceResolutionSource};
@@ -360,6 +360,15 @@ fn same_json_shape(candidate: &Value, fixture: &Value) -> bool {
 
 fn scrub_environment_paths(value: &mut Value) {
     let mut replacements = Vec::new();
+    if let Some(target_dir) = Path::new(env!("CARGO_BIN_EXE_ee"))
+        .parent()
+        .and_then(Path::parent)
+    {
+        replacements.push((
+            target_dir.to_string_lossy().into_owned(),
+            "<cargoTargetDir>",
+        ));
+    }
     if let Some(target_dir) = env::var_os("CARGO_TARGET_DIR") {
         replacements.push((
             target_dir.to_string_lossy().into_owned(),
@@ -2480,6 +2489,7 @@ fn status_degradation_projection(report: &StatusReport) -> Result<String, String
     pretty_json(&json!({
         "schema": value.get("schema"),
         "success": value.get("success"),
+        "degraded": value.get("degraded"),
         "data": {
             "command": data.get("command"),
             "capabilities": data.get("capabilities"),
