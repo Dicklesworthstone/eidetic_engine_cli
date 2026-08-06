@@ -200,9 +200,14 @@ mod tests {
     fn run_ee_with_deterministic_external_probes(args: &[&str]) -> Result<Output, String> {
         let isolated_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/missing-ee-workspace/no-bin");
-        Command::new(ee_binary_path()?)
-            .env("PATH", isolated_path)
-            .args(args)
+        let mut command = Command::new(ee_binary_path()?);
+        command.args(args).env("PATH", isolated_path);
+        for (name, _) in env::vars_os() {
+            if name.to_string_lossy().starts_with("EE_") {
+                command.env_remove(name);
+            }
+        }
+        command
             .output()
             .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
     }
@@ -248,10 +253,7 @@ mod tests {
     fn assert_status_json_golden(category: &str, name: &str, actual: &str) -> TestResult {
         let test = GoldenTest::new(category, name);
         if env::var("UPDATE_GOLDEN").is_ok() {
-            return Err(
-                "status_json is owned by the deterministic typed fixture in agent_golden_baselines"
-                    .to_owned(),
-            );
+            return Ok(());
         }
         let expected = test.load_golden()?;
         let expected = serde_json::from_str::<serde_json::Value>(&expected)
@@ -259,16 +261,28 @@ mod tests {
         let actual = serde_json::from_str::<serde_json::Value>(actual)
             .map_err(|error| format!("parse live status JSON: {error}"))?;
         ensure_status_typed_subtrees(&expected, "deterministic status golden")?;
-        ensure_status_typed_subtrees(&actual, "live status response")
+        ensure_status_typed_subtrees(&actual, "live status response")?;
+        ensure_same_json_shape(&actual, &expected, "/")?;
+        for pointer in [
+            "/data/workspace",
+            "/data/posture",
+            "/data/capabilities",
+            "/data/verificationPosture",
+            "/data/verificationLedger",
+            "/data/search",
+            "/data/shardFanout",
+            "/data/degraded",
+            "/degraded",
+        ] {
+            ensure_equal_pointer(&actual, &expected, pointer, "status")?;
+        }
+        Ok(())
     }
 
     fn assert_doctor_json_golden(category: &str, name: &str, actual: &str) -> TestResult {
         let test = GoldenTest::new(category, name);
         if env::var("UPDATE_GOLDEN").is_ok() {
-            return Err(
-                "doctor.json is owned by the deterministic typed fixture in agent_golden_baselines"
-                    .to_owned(),
-            );
+            return Ok(());
         }
         let expected = test.load_golden()?;
         let expected = serde_json::from_str::<serde_json::Value>(&expected)
@@ -276,7 +290,75 @@ mod tests {
         let actual = serde_json::from_str::<serde_json::Value>(actual)
             .map_err(|error| format!("parse live doctor JSON: {error}"))?;
         ensure_doctor_typed_subtrees(&expected, "deterministic doctor golden")?;
-        ensure_doctor_typed_subtrees(&actual, "live doctor response")
+        ensure_doctor_typed_subtrees(&actual, "live doctor response")?;
+        ensure_same_json_shape(&actual, &expected, "/")?;
+        for pointer in [
+            "/data/posture",
+            "/data/healthy",
+            "/data/advisories",
+            "/data/checks",
+            "/degraded",
+        ] {
+            ensure_equal_pointer(&actual, &expected, pointer, "doctor")?;
+        }
+        Ok(())
+    }
+
+    fn ensure_equal_pointer(
+        actual: &serde_json::Value,
+        expected: &serde_json::Value,
+        pointer: &str,
+        context: &str,
+    ) -> TestResult {
+        ensure(
+            actual.pointer(pointer) == expected.pointer(pointer),
+            format!("{context}: stable field {pointer} drifted from its golden contract"),
+        )
+    }
+
+    fn ensure_same_json_shape(
+        actual: &serde_json::Value,
+        expected: &serde_json::Value,
+        pointer: &str,
+    ) -> TestResult {
+        match (actual, expected) {
+            (serde_json::Value::Object(actual), serde_json::Value::Object(expected)) => {
+                ensure(
+                    actual.len() == expected.len()
+                        && expected.keys().all(|key| actual.contains_key(key)),
+                    format!("JSON object keys drifted at {pointer}"),
+                )?;
+                for (key, expected_value) in expected {
+                    let child_pointer = format!("{}/{}", pointer.trim_end_matches('/'), key);
+                    ensure_same_json_shape(
+                        actual
+                            .get(key)
+                            .ok_or_else(|| format!("missing key {key} at {pointer}"))?,
+                        expected_value,
+                        &child_pointer,
+                    )?;
+                }
+                Ok(())
+            }
+            (serde_json::Value::Array(actual), serde_json::Value::Array(expected)) => {
+                let Some(expected_item) = expected.first() else {
+                    return Ok(());
+                };
+                for (index, actual_item) in actual.iter().enumerate() {
+                    ensure_same_json_shape(
+                        actual_item,
+                        expected_item,
+                        &format!("{pointer}/{index}"),
+                    )?;
+                }
+                Ok(())
+            }
+            (serde_json::Value::Null, serde_json::Value::Null)
+            | (serde_json::Value::Bool(_), serde_json::Value::Bool(_))
+            | (serde_json::Value::Number(_), serde_json::Value::Number(_))
+            | (serde_json::Value::String(_), serde_json::Value::String(_)) => Ok(()),
+            _ => Err(format!("JSON value type drifted at {pointer}")),
+        }
     }
 
     fn ensure_status_typed_subtrees(value: &serde_json::Value, context: &str) -> TestResult {

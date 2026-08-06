@@ -21,7 +21,10 @@ use ee::core::profile::{
     HOST_PROFILE_PROBE_SCHEMA_V1, HostCalibrationFreshness, HostClass, HostClassDegradation,
     HostClassRepairAction, OperatingProfile,
 };
-use ee::core::qos::{QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1, QosLaneSummary};
+use ee::core::qos::{
+    QOS_ACTIVE_LANE_RECORD_SCHEMA_V1, QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1, QosLane, QosLaneRecord,
+    QosLaneStatus, QosLaneSummary,
+};
 use ee::core::status::{
     CapabilityReport, CurationHealthReport, DegradationReport, DerivedAssetReport,
     DerivedAssetStatus, FeedbackHealthReport, FeedbackHealthStatus, FlightRecorderStatusReport,
@@ -30,7 +33,9 @@ use ee::core::status::{
     MemoryHealthStatus, PackBudgetBucketReport, ReadPoolStatusReport, RuntimeReport, StatusReport,
     WalStatusReport, WorkspaceDiagnosticReport, WorkspaceStatusReport,
 };
-use ee::core::swarm_brief::RchWorkerPressureReport;
+use ee::core::swarm_brief::{
+    RCH_WORKER_PRESSURE_SCHEMA_V1, RchWorkerPressureObservation, RchWorkerPressureReport,
+};
 use ee::core::verify::VerificationPostureReport;
 use ee::core::verify_ledger::RchVerifyLedgerStatusReport;
 use ee::db::shard::{
@@ -43,7 +48,10 @@ use ee::models::{
     CapabilityStatus, SingleFlightPostureReport, SingleFlightSurface, SingleFlightSurfaceCounters,
     SingleFlightSurfacePosture, error_codes,
 };
-use ee::output::{render_doctor_json, render_doctor_toon, render_status_json, render_status_toon};
+use ee::output::{
+    FieldProfile, render_doctor_json, render_doctor_toon, render_status_json,
+    render_status_json_filtered, render_status_toon,
+};
 use ee::search::lexical_ram_tier::{
     LexicalRamTierConfig, LexicalRamTierResult, pin_lexical_index_files,
 };
@@ -66,9 +74,14 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
 fn run_ee_with_deterministic_external_probes(args: &[&str]) -> Result<Output, String> {
     let isolated_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/missing-ee-workspace/no-bin");
-    Command::new(env!("CARGO_BIN_EXE_ee"))
-        .env("PATH", isolated_path)
-        .args(args)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ee"));
+    command.args(args).env("PATH", isolated_path);
+    for (name, _) in env::vars_os() {
+        if name.to_string_lossy().starts_with("EE_") {
+            command.env_remove(name);
+        }
+    }
+    command
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
 }
@@ -250,6 +263,7 @@ fn normalize_status_json_for_golden(text: &str) -> String {
     let trimmed = text.trim();
     if let Ok(mut value) = serde_json::from_str::<Value>(trimmed) {
         scrub_status_volatile_fields(&mut value);
+        replace_host_backed_subtrees(&mut value);
         return serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned());
     }
     trimmed.to_owned()
@@ -264,7 +278,62 @@ fn normalize_doctor_json_for_golden(text: &str) -> String {
     if let Some(version) = value.pointer_mut("/data/version") {
         *version = Value::String("<scrubbed:eeVersion>".to_owned());
     }
+    if let Some(workspace_path) = value.pointer_mut("/data/meshAutoEnrollment/workspacePath") {
+        *workspace_path = Value::String("<scrubbed:workspacePath>".to_owned());
+    }
+    replace_host_backed_subtrees(&mut value);
     serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned())
+}
+
+/// Substitute full, typed Rust fixtures for host-backed report blocks. This
+/// keeps every public object, array, and enum field under golden comparison
+/// without making ambient worker load or calibration state part of the bytes.
+fn replace_host_backed_subtrees(value: &mut Value) {
+    let fixture = render_status_json_filtered(&status_missing_db_report(), FieldProfile::Standard);
+    let Ok(fixture) = serde_json::from_str::<Value>(&fixture) else {
+        return;
+    };
+    for pointer in [
+        "/data/qos",
+        "/data/rchWorkerPressure",
+        "/data/hostCalibration",
+    ] {
+        let Some(replacement) = fixture.pointer(pointer).cloned() else {
+            continue;
+        };
+        if let Some(target) = value
+            .pointer_mut(pointer)
+            .filter(|target| same_json_shape(target, &replacement))
+        {
+            *target = replacement;
+        }
+    }
+}
+
+fn same_json_shape(candidate: &Value, fixture: &Value) -> bool {
+    match (candidate, fixture) {
+        (Value::Object(candidate), Value::Object(fixture)) => {
+            candidate.len() == fixture.len()
+                && fixture.iter().all(|(key, fixture_value)| {
+                    candidate
+                        .get(key)
+                        .is_some_and(|value| same_json_shape(value, fixture_value))
+                })
+        }
+        (Value::Array(candidate), Value::Array(fixture)) => {
+            let Some(item_fixture) = fixture.first() else {
+                return true;
+            };
+            candidate
+                .iter()
+                .all(|item| same_json_shape(item, item_fixture))
+        }
+        (Value::Null, Value::Null)
+        | (Value::Bool(_), Value::Bool(_))
+        | (Value::Number(_), Value::Number(_))
+        | (Value::String(_), Value::String(_)) => true,
+        _ => false,
+    }
 }
 
 fn normalize_doctor_degradation_json_for_golden(text: &str) -> String {
@@ -296,7 +365,11 @@ fn normalize_version_json_for_golden(text: &str) -> String {
 }
 
 fn normalize_doctor_toon_for_golden(text: &str) -> String {
-    scrub_toon_version_leaf(text.trim())
+    scrub_toon_leaf(
+        &scrub_toon_version_leaf(text.trim()),
+        "workspacePath",
+        "<scrubbed:workspacePath>",
+    )
 }
 
 fn normalize_status_toon_for_golden(text: &str) -> String {
@@ -304,13 +377,17 @@ fn normalize_status_toon_for_golden(text: &str) -> String {
 }
 
 fn scrub_toon_version_leaf(text: &str) -> String {
+    scrub_toon_leaf(text, "version", "<scrubbed:eeVersion>")
+}
+
+fn scrub_toon_leaf(text: &str, key: &str, replacement: &str) -> String {
     text.lines()
         .map(|line| {
             let trimmed = line.trim_start();
-            if trimmed.starts_with("version:") {
+            if trimmed.starts_with(&format!("{key}:")) {
                 format!(
-                    "{}version: <scrubbed:eeVersion>",
-                    " ".repeat(line.len() - trimmed.len())
+                    "{}{key}: {replacement}",
+                    " ".repeat(line.len() - trimmed.len()),
                 )
             } else {
                 line.to_owned()
@@ -1117,8 +1194,6 @@ fn validate_contract_golden(
 
 fn deterministic_contract_golden_output(case: ContractCase) -> Option<String> {
     match case.name {
-        "status_json" => Some(render_status_json(&status_missing_db_report())),
-        "doctor_json" => Some(render_doctor_json(&doctor_missing_db_report())),
         "doctor_toon" => Some(render_doctor_toon(&doctor_missing_db_report())),
         _ => None,
     }
@@ -1386,8 +1461,7 @@ fn doctor_json_output_matches_golden() -> TestResult {
     ensure_contains(&stdout, "\"command\":\"doctor\"", "doctor JSON command")?;
     ensure_contains(&stdout, "\"checks\":[", "doctor JSON checks array")?;
 
-    let deterministic = render_doctor_json(&doctor_missing_db_report());
-    assert_golden("agent", "doctor.json", &deterministic)
+    assert_golden("agent", "doctor.json", &stdout)
 }
 
 #[test]
@@ -1687,13 +1761,49 @@ fn fixture_qos_posture() -> QosLaneSummary {
     QosLaneSummary {
         schema: QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1.to_owned(),
         workspace_hash: "sha256:fixture-qos-workspace".to_owned(),
-        active_records: Vec::new(),
+        active_records: vec![QosLaneRecord {
+            schema: QOS_ACTIVE_LANE_RECORD_SCHEMA_V1.to_owned(),
+            record_id: "qos-fixture-record".to_owned(),
+            workspace_hash: "sha256:fixture-qos-workspace".to_owned(),
+            lane: QosLane::VerificationRch,
+            command_class: "cargo_test".to_owned(),
+            process_id: Some(42),
+            profile_label: Some("workstation".to_owned()),
+            budget_label: Some("golden".to_owned()),
+            request_hash: Some("sha256:fixture-request".to_owned()),
+            started_at_epoch_ms: 1_750_000_000_000,
+            deadline_epoch_ms: 1_750_000_030_000,
+            ttl_ms: 30_000,
+            status: QosLaneStatus::Active,
+        }],
         foreground_active_count: 0,
         background_active_count: 0,
-        verification_active_count: 0,
+        verification_active_count: 1,
         maintenance_active_count: 0,
         stale_ignored_count: 0,
         degraded: Vec::new(),
+    }
+}
+
+fn fixture_rch_worker_pressure() -> RchWorkerPressureReport {
+    RchWorkerPressureReport {
+        schema: RCH_WORKER_PRESSURE_SCHEMA_V1,
+        status: "healthy_but_pressure_blocked".to_owned(),
+        worker_count: 1,
+        usable_worker_count: 0,
+        blocked_worker_count: 1,
+        stale_worker_count: 0,
+        unknown_worker_count: 0,
+        workers: vec![RchWorkerPressureObservation {
+            worker_id: "worker-redacted".to_owned(),
+            pressure_state: "critical".to_owned(),
+            confidence: "high".to_owned(),
+            reason_code: "disk_pressure_critical".to_owned(),
+            free_gb: Some(0),
+            free_ratio_bps: Some(300),
+            telemetry_freshness: "fresh".to_owned(),
+            admission_impact: "blocked".to_owned(),
+        }],
     }
 }
 
@@ -1944,13 +2054,14 @@ fn fixture_flight_recorder() -> FlightRecorderStatusReport {
 }
 
 fn fixture_capabilities(storage: CapabilityStatus, search: CapabilityStatus) -> CapabilityReport {
-    let mut capabilities = CapabilityReport::gather();
-    capabilities.runtime = CapabilityStatus::Ready;
-    capabilities.storage = storage;
-    capabilities.search = search;
-    capabilities.output_toon = CapabilityStatus::Ready;
-    capabilities.agent_detection = CapabilityStatus::Ready;
-    capabilities
+    CapabilityReport {
+        runtime: CapabilityStatus::Ready,
+        storage,
+        search,
+        mesh: CapabilityStatus::Pending,
+        output_toon: CapabilityStatus::Ready,
+        agent_detection: CapabilityStatus::Ready,
+    }
 }
 
 fn fixture_shard_fanout() -> ShardFanoutStatusReport {
@@ -2005,7 +2116,7 @@ fn status_missing_db_report() -> StatusReport {
         shard_fanout: fixture_shard_fanout(),
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
-        rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        rch_worker_pressure: fixture_rch_worker_pressure(),
         verification_posture: VerificationPostureReport::not_inspected(),
         verification_ledger: RchVerifyLedgerStatusReport::not_inspected(),
         host_calibration: Some(fixture_host_calibration()),
@@ -2336,7 +2447,7 @@ fn doctor_missing_db_report() -> DoctorReport {
         singleflight_posture: fixture_singleflight_posture(),
         flight_recorder: fixture_flight_recorder(),
         qos_posture: fixture_qos_posture(),
-        rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        rch_worker_pressure: fixture_rch_worker_pressure(),
         verification_posture: VerificationPostureReport::not_inspected(),
         verification_ledger: RchVerifyLedgerStatusReport::not_inspected(),
         host_calibration: Some(fixture_host_calibration()),
@@ -2380,7 +2491,7 @@ fn doctor_pending_migration_report() -> DoctorReport {
         singleflight_posture: fixture_singleflight_posture(),
         flight_recorder: fixture_flight_recorder(),
         qos_posture: fixture_qos_posture(),
-        rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        rch_worker_pressure: fixture_rch_worker_pressure(),
         verification_posture: VerificationPostureReport::not_inspected(),
         verification_ledger: RchVerifyLedgerStatusReport::not_inspected(),
         host_calibration: Some(fixture_host_calibration()),
@@ -2435,8 +2546,7 @@ fn status_json_output_matches_golden() -> TestResult {
     )?;
     ensure_contains(&stdout, "\"command\":\"status\"", "status JSON command")?;
 
-    let deterministic = render_status_json(&status_missing_db_report());
-    assert_golden("status", "status_json", &deterministic)
+    assert_golden("status", "status_json", &stdout)
 }
 
 #[test]
@@ -2794,6 +2904,28 @@ fn golden_normalizers_preserve_public_container_and_leaf_types() -> TestResult {
 }
 
 #[test]
+fn typed_host_canonicalization_rejects_shape_regressions() -> TestResult {
+    let rendered = render_status_json_filtered(&status_missing_db_report(), FieldProfile::Standard);
+    let mut malformed: Value = serde_json::from_str(&rendered)
+        .map_err(|error| format!("parse typed status fixture: {error}"))?;
+    *malformed
+        .pointer_mut("/data/rchWorkerPressure/workers/0/freeGb")
+        .ok_or_else(|| "typed pressure fixture missing freeGb".to_owned())? =
+        Value::String("wrong-type".to_owned());
+
+    let normalized = normalize_status_json_for_golden(&malformed.to_string());
+    let normalized: Value = serde_json::from_str(&normalized)
+        .map_err(|error| format!("parse malformed normalized status: {error}"))?;
+    ensure_equal(
+        &normalized
+            .pointer("/data/rchWorkerPressure/workers/0/freeGb")
+            .and_then(Value::as_str),
+        &Some("wrong-type"),
+        "wrong nested leaf types must remain visible to golden comparison",
+    )
+}
+
+#[test]
 fn toon_normalizers_preserve_typed_blocks() -> TestResult {
     let input = "data:\n  version: 0.0.0-test\n  qos:\n    activeRecords[0]:\n  rchWorkerPressure:\n    workerCount: 0\n    workers[0]:\n  hostCalibration:\n    budgetDeltas[0]:\n  advisories[0]:\n  checks[1]:\n    - name: fixture\n      severity: warning\n      message: Keep this exact message template.";
     let normalized = normalize_doctor_toon_for_golden(input);
@@ -2829,6 +2961,8 @@ fn status_and_doctor_goldens_have_no_full_subtree_sentinels() -> TestResult {
         "<scrubbed:hostCalibration>",
         "<scrubbed:advisories>",
         "<scrubbed:checks>",
+        "<scrubbed:message>",
+        "<scrubbed:advisorySeverity>",
     ];
     for (category, name) in [
         ("status", "status_json"),
