@@ -308,3 +308,11 @@ gemini.mcp.json
 windsurf.mcp.json
 # br doctor per-run artifacts
 .doctor/
+
+# === multi-repo ephemeral hygiene 2026-08-06 ===
+# Nested beads lock files under test fixtures (not just repo-root .beads/)
+**/.beads/.write.lock
+**/.beads/.sync.lock
+**/.beads/.bv.lock
+# Golden-test runtime outputs (authoritative fixtures use *.snap)
+*.actual
