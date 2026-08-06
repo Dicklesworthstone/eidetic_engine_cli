@@ -464,16 +464,11 @@ fn commit_running_index_job_success(
     })
 }
 
-fn append_failed_index_job_transition(
-    db: &DbConnection,
-    job_id: &str,
-    error_message: &mut String,
-) {
+fn append_failed_index_job_transition(db: &DbConnection, job_id: &str, error_message: &mut String) {
     match db.fail_search_index_job(job_id, error_message) {
         Ok(true) => {}
-        Ok(false) => error_message.push_str(
-            "; failed to mark search index job failed: running row was not updated",
-        ),
+        Ok(false) => error_message
+            .push_str("; failed to mark search index job failed: running row was not updated"),
         Err(error) => {
             error_message.push_str("; failed to mark search index job failed: ");
             error_message.push_str(&error.to_string());
@@ -2130,11 +2125,7 @@ where
                 for job in &claimed {
                     let progressed =
                         db.update_search_index_job_progress(&job.id, documents_total)?;
-                    require_index_job_transition(
-                        progressed,
-                        &job.id,
-                        "running_progress_updated",
-                    )?;
+                    require_index_job_transition(progressed, &job.id, "running_progress_updated")?;
                     let completed = db.complete_search_index_job(&job.id, documents_total)?;
                     require_index_job_transition(completed, &job.id, "running_completed")?;
                 }
@@ -3307,11 +3298,9 @@ where
     match commit_tail() {
         Ok(()) => Ok(()),
         Err(primary_error) => {
-            if let Err(rollback_error) = rollback_published_index(
-                index_dir,
-                staging_dir,
-                retained_dir.as_deref(),
-            ) {
+            if let Err(rollback_error) =
+                rollback_published_index(index_dir, staging_dir, retained_dir.as_deref())
+            {
                 return Err(IndexRebuildError::Index(format!(
                     "index publication commit failed ({primary_error}); filesystem rollback also failed ({rollback_error})"
                 )));
@@ -7425,7 +7414,9 @@ mod tests {
             "first lock must be acquired",
         )?;
 
+        let cx = asupersync::Cx::for_testing();
         let error = match acquire_index_publish_lock_with_retry(
+            &cx,
             &connection,
             workspace_id,
             "agent_waiting",
@@ -10338,10 +10329,15 @@ mod tests {
         };
 
         ensure(
-            error.to_string().contains("simulated database commit failure"),
+            error
+                .to_string()
+                .contains("simulated database commit failure"),
             format!("unexpected error: {error}"),
         )?;
-        ensure(index_dir.is_dir(), "previous active index should be restored")?;
+        ensure(
+            index_dir.is_dir(),
+            "previous active index should be restored",
+        )?;
         ensure(
             read_marker(&index_dir, "generation.txt")? == "old",
             "commit failure must leave the previous generation active",

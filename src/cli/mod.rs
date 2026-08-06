@@ -35598,38 +35598,40 @@ fn write_context_stream_terminal_error<W>(
 where
     W: Write,
 {
-    let cancellation = context_cancellation_reason(error);
-    let domain_error = context_error_to_domain(error);
-    let stream_error = context_stream_error_from_context_pack_error(error, &domain_error);
-    let mut terminal = if cancellation.is_some() {
-        output::streaming::TerminalFrame::cancelled(Some(options.pack_id.clone()), stream_error)
+    let (mut terminal, exit_code) = if let Some(reason) = context_cancellation_reason(error) {
+        let stream_error = output::streaming::StreamError::new(
+            "context_stream_cancelled",
+            cancel_message(reason),
+            output::streaming::StreamSeverity::Low,
+            None,
+        );
+        (
+            output::streaming::TerminalFrame::cancelled(
+                Some(options.pack_id.clone()),
+                stream_error,
+            ),
+            ProcessExitCode::Cancelled,
+        )
     } else {
-        output::streaming::TerminalFrame::error(Some(options.pack_id.clone()), stream_error)
+        let domain_error = context_error_to_domain(error);
+        let stream_error = context_stream_error_from_context_pack_error(error, &domain_error);
+        (
+            output::streaming::TerminalFrame::error(Some(options.pack_id.clone()), stream_error),
+            domain_error.exit_code(),
+        )
     };
     terminal.emitted_items = Some(writer.frames_written().saturating_sub(1));
     terminal.completed_at = Some(chrono::Utc::now().to_rfc3339());
     writer
         .write_frame(&output::streaming::PackStreamFrame::Terminal(terminal))
         .map_err(|write_error| write_error.to_string())?;
-    Ok(if cancellation.is_some() {
-        ProcessExitCode::Cancelled
-    } else {
-        domain_error.exit_code()
-    })
+    Ok(exit_code)
 }
 
 fn context_stream_error_from_context_pack_error(
     error: &ContextPackError,
     domain_error: &DomainError,
 ) -> output::streaming::StreamError {
-    if let ContextPackError::Search(SearchError::Cancelled(reason)) = error {
-        return output::streaming::StreamError::new(
-            "context_stream_cancelled",
-            cancel_message(reason),
-            output::streaming::StreamSeverity::Low,
-            None,
-        );
-    }
     let (code, severity) = match error {
         ContextPackError::Storage(_) => (
             "context_stream_storage_error",
