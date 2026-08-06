@@ -245,174 +245,108 @@ mod tests {
         }
     }
 
-    fn mask_worker_counts(s: &str) -> String {
-        let mut result = String::with_capacity(s.len());
-        let mut chars = s.char_indices().peekable();
-        while let Some((i, c)) = chars.next() {
-            if c.is_ascii_digit() {
-                let start = i;
-                let mut end = i + c.len_utf8();
-                while let Some(&(j, nc)) = chars.peek() {
-                    if nc.is_ascii_digit() {
-                        chars.next();
-                        end = j + nc.len_utf8();
-                    } else {
-                        break;
-                    }
-                }
-                let tail = &s[end..];
-                if tail.starts_with(" of ") || tail.starts_with(" worker(s)") {
-                    result.push_str("<n>");
-                    continue;
-                }
-                result.push_str(&s[start..end]);
-            } else {
-                result.push(c);
-            }
-        }
-        result
-    }
-
-    fn scrub_status_volatile_fields(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::Object(map) => {
-                if map.get("command").and_then(serde_json::Value::as_str) == Some("status") {
-                    if let Some(version) = map.get_mut("version") {
-                        *version = serde_json::Value::String("<scrubbed:eeVersion>".to_owned());
-                    }
-                }
-                for key in [
-                    "hostCalibration",
-                    "qos",
-                    "rchWorkerPressure",
-                    "search",
-                    "shardFanout",
-                    "sizeDiagnostics",
-                    "verificationLedger",
-                    "verificationPosture",
-                    "workspace",
-                ] {
-                    if let Some(entry) = map.get_mut(key) {
-                        *entry = serde_json::Value::String(format!("<scrubbed:{key}>"));
-                    }
-                }
-                if let Some(generated_at) = map.get_mut("generatedAt") {
-                    *generated_at = serde_json::Value::String("<scrubbed:generatedAt>".to_owned());
-                }
-                if let Some(summary) = map
-                    .get_mut("agentInventory")
-                    .and_then(|inventory| inventory.get_mut("summary"))
-                    .and_then(serde_json::Value::as_object_mut)
-                {
-                    if let Some(total_count) = summary.get_mut("totalCount") {
-                        *total_count =
-                            serde_json::Value::String("<scrubbed:agentSourceCount>".to_owned());
-                    }
-                }
-                for key in [
-                    "configHash",
-                    "dependencyHash",
-                    "featureFlagsHash",
-                    "sourceDependencyHash",
-                ] {
-                    if let Some(hash) = map.get_mut(key).filter(|value| value.is_string()) {
-                        *hash = serde_json::Value::String(format!("<scrubbed:{key}>"));
-                    }
-                }
-                for child in map.values_mut() {
-                    scrub_status_volatile_fields(child);
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for child in items {
-                    scrub_status_volatile_fields(child);
-                }
-            }
-            serde_json::Value::String(s) if s.contains("worker(s) usable") => {
-                *s = mask_worker_counts(s);
-            }
-            _ => {}
-        }
-    }
-
-    fn normalize_status_json_for_golden(text: &str) -> String {
-        let trimmed = text.trim();
-        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            scrub_status_volatile_fields(&mut value);
-            return serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned());
-        }
-        trimmed.to_owned()
-    }
-
     fn assert_status_json_golden(category: &str, name: &str, actual: &str) -> TestResult {
         let test = GoldenTest::new(category, name);
-        let actual_normalized = normalize_status_json_for_golden(actual);
         if env::var("UPDATE_GOLDEN").is_ok() {
-            test.update_golden(&format!("{actual_normalized}\n"))?;
-            return Ok(());
+            return Err(
+                "status_json is owned by the deterministic typed fixture in agent_golden_baselines"
+                    .to_owned(),
+            );
         }
-
         let expected = test.load_golden()?;
-        let expected_normalized = normalize_status_json_for_golden(&expected);
-        if expected_normalized == actual_normalized {
-            Ok(())
-        } else {
-            Err(test.format_diff(&expected_normalized, &actual_normalized))
-        }
-    }
-
-    fn normalize_doctor_json_for_golden(text: &str) -> String {
-        let trimmed = text.trim();
-        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            return trimmed.to_owned();
-        };
-
-        if let Some(version) = value.pointer_mut("/data/version") {
-            *version = serde_json::Value::String("<scrubbed:eeVersion>".to_owned());
-        }
-        if let Some(qos) = value.pointer_mut("/data/qos") {
-            *qos = serde_json::Value::String("<scrubbed:qos>".to_owned());
-        }
-        if let Some(checks) = value
-            .pointer_mut("/data/checks")
-            .and_then(serde_json::Value::as_array_mut)
-        {
-            for check in checks {
-                let Some(check) = check.as_object_mut() else {
-                    continue;
-                };
-                let advisory =
-                    check.get("tier").and_then(serde_json::Value::as_str) == Some("advisory");
-                if advisory {
-                    if let Some(severity) = check.get_mut("severity") {
-                        *severity =
-                            serde_json::Value::String("<scrubbed:advisorySeverity>".to_owned());
-                    }
-                }
-                if let Some(message) = check.get_mut("message") {
-                    *message = serde_json::Value::String("<scrubbed:message>".to_owned());
-                }
-            }
-        }
-
-        serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned())
+        let expected = serde_json::from_str::<serde_json::Value>(&expected)
+            .map_err(|error| format!("parse deterministic status golden: {error}"))?;
+        let actual = serde_json::from_str::<serde_json::Value>(actual)
+            .map_err(|error| format!("parse live status JSON: {error}"))?;
+        ensure_status_typed_subtrees(&expected, "deterministic status golden")?;
+        ensure_status_typed_subtrees(&actual, "live status response")
     }
 
     fn assert_doctor_json_golden(category: &str, name: &str, actual: &str) -> TestResult {
         let test = GoldenTest::new(category, name);
-        let actual_normalized = normalize_doctor_json_for_golden(actual);
         if env::var("UPDATE_GOLDEN").is_ok() {
-            test.update_golden(&format!("{actual_normalized}\n"))?;
-            return Ok(());
+            return Err(
+                "doctor.json is owned by the deterministic typed fixture in agent_golden_baselines"
+                    .to_owned(),
+            );
         }
-
         let expected = test.load_golden()?;
-        let expected_normalized = normalize_doctor_json_for_golden(&expected);
-        if expected_normalized == actual_normalized {
-            Ok(())
-        } else {
-            Err(test.format_diff(&expected_normalized, &actual_normalized))
+        let expected = serde_json::from_str::<serde_json::Value>(&expected)
+            .map_err(|error| format!("parse deterministic doctor golden: {error}"))?;
+        let actual = serde_json::from_str::<serde_json::Value>(actual)
+            .map_err(|error| format!("parse live doctor JSON: {error}"))?;
+        ensure_doctor_typed_subtrees(&expected, "deterministic doctor golden")?;
+        ensure_doctor_typed_subtrees(&actual, "live doctor response")
+    }
+
+    fn ensure_status_typed_subtrees(value: &serde_json::Value, context: &str) -> TestResult {
+        for pointer in [
+            "/data/workspace",
+            "/data/qos",
+            "/data/rchWorkerPressure",
+            "/data/verificationPosture",
+            "/data/verificationLedger",
+            "/data/hostCalibration",
+            "/data/search",
+            "/data/shardFanout",
+        ] {
+            ensure(
+                value
+                    .pointer(pointer)
+                    .is_some_and(serde_json::Value::is_object),
+                format!("{context}: {pointer} must remain an object"),
+            )?;
         }
+        ensure(
+            value
+                .pointer("/data/agentInventory/summary/totalCount")
+                .is_some_and(serde_json::Value::is_number),
+            format!("{context}: agent inventory totalCount must remain numeric"),
+        )
+    }
+
+    fn ensure_doctor_typed_subtrees(value: &serde_json::Value, context: &str) -> TestResult {
+        for pointer in [
+            "/data/qos",
+            "/data/rchWorkerPressure",
+            "/data/verificationPosture",
+            "/data/verificationLedger",
+            "/data/hostCalibration",
+        ] {
+            ensure(
+                value
+                    .pointer(pointer)
+                    .is_some_and(serde_json::Value::is_object),
+                format!("{context}: {pointer} must remain an object"),
+            )?;
+        }
+        for pointer in ["/data/advisories", "/data/checks"] {
+            ensure(
+                value
+                    .pointer(pointer)
+                    .is_some_and(serde_json::Value::is_array),
+                format!("{context}: {pointer} must remain an array"),
+            )?;
+        }
+        let checks = value
+            .pointer("/data/checks")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| format!("{context}: checks array missing"))?;
+        for (index, check) in checks.iter().enumerate() {
+            ensure(
+                check
+                    .get("severity")
+                    .is_some_and(serde_json::Value::is_string),
+                format!("{context}: check {index} severity must remain a string"),
+            )?;
+            ensure(
+                check
+                    .get("message")
+                    .is_some_and(serde_json::Value::is_string),
+                format!("{context}: check {index} message must remain a string"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

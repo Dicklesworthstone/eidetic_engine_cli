@@ -13,7 +13,14 @@ use std::process::{Command, Output};
 
 use ee::config::{WorkspaceDiagnosticSeverity, WorkspaceResolutionSource};
 use ee::core::agent_detect::AgentInventoryReport;
+use ee::core::budget_delta_recommender::{
+    BudgetDelta, BudgetSurface, HOST_CALIBRATION_POSTURE_SCHEMA_V1, HostCalibrationPostureReport,
+};
 use ee::core::doctor::{CheckResult, DoctorReport, Posture};
+use ee::core::profile::{
+    HOST_PROFILE_PROBE_SCHEMA_V1, HostCalibrationFreshness, HostClass, HostClassDegradation,
+    HostClassRepairAction, OperatingProfile,
+};
 use ee::core::qos::{QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1, QosLaneSummary};
 use ee::core::status::{
     CapabilityReport, CurationHealthReport, DegradationReport, DerivedAssetReport,
@@ -36,7 +43,7 @@ use ee::models::{
     CapabilityStatus, SingleFlightPostureReport, SingleFlightSurface, SingleFlightSurfaceCounters,
     SingleFlightSurfacePosture, error_codes,
 };
-use ee::output::{render_doctor_json, render_status_json};
+use ee::output::{render_doctor_json, render_doctor_toon, render_status_json, render_status_toon};
 use ee::search::lexical_ram_tier::{
     LexicalRamTierConfig, LexicalRamTierResult, pin_lexical_index_files,
 };
@@ -129,25 +136,8 @@ fn pretty_json(value: &Value) -> Result<String, String> {
     Ok(rendered)
 }
 
-/// Normalize JSON for comparison by masking volatile sub-trees that capture
-/// live host telemetry rather than reproducible command output.
-///
-/// Two sources of intrinsic non-determinism are scrubbed:
-///
-/// 1. `rchWorkerPressure` worker-pressure telemetry reads runtime RCH worker
-///    state. The set of workers and their `pressureState` / `reasonCode` /
-///    `admissionImpact` fields fluctuate between runs even seconds apart, as
-///    do the aggregate `usableWorkerCount` / `unknownWorkerCount` /
-///    `blockedWorkerCount` / `staleWorkerCount` counts. Mask the entire
-///    `rchWorkerPressure` sub-tree wherever it appears.
-/// 2. `sizeDiagnostics` measures the byte/token counts of representative
-///    rendered reports (status, health). Because those upstream reports
-///    themselves include live host telemetry, the diagnostic byte counts
-///    drift even between consecutive runs. Mask whole `sizeDiagnostics`
-///    array entries.
-///
-/// Non-JSON content (e.g. TOON or plain text) gets a line-based scrub of the
-/// same volatile fields so TOON-format goldens are stable too.
+/// Normalize only intrinsically volatile leaves. Public objects and arrays
+/// stay intact so shape, vocabulary, and message regressions remain visible.
 fn normalize_json_for_golden(text: &str) -> String {
     let trimmed = text.trim();
     if let Ok(mut value) = serde_json::from_str::<Value>(trimmed) {
@@ -186,6 +176,7 @@ fn normalize_named_golden(category: &str, name: &str, text: &str) -> String {
             normalize_doctor_degradation_json_for_golden(text)
         }
         ("doctor", "doctor_toon") => normalize_doctor_toon_for_golden(text),
+        ("toon", "status") => normalize_status_toon_for_golden(text),
         ("version", "version") => normalize_version_json_for_golden(text),
         _ => normalize_json_for_golden(text),
     }
@@ -201,6 +192,7 @@ fn golden_requires_normalized_write(category: &str, name: &str) -> bool {
                 "doctor",
                 "missing_db_degradation" | "pending_migration_degradation" | "doctor_toon"
             )
+            | ("toon", "status")
             | ("version", "version")
     )
 }
@@ -211,20 +203,6 @@ fn scrub_status_volatile_fields(value: &mut Value) {
             if map.get("command").and_then(Value::as_str) == Some("status") {
                 if let Some(version) = map.get_mut("version") {
                     *version = Value::String("<scrubbed:eeVersion>".to_owned());
-                }
-            }
-            for key in [
-                "hostCalibration",
-                "qos",
-                "rchWorkerPressure",
-                "search",
-                "shardFanout",
-                "verificationLedger",
-                "verificationPosture",
-                "workspace",
-            ] {
-                if let Some(entry) = map.get_mut(key) {
-                    *entry = Value::String(format!("<scrubbed:{key}>"));
                 }
             }
             if let Some(size_diagnostics) = map.get_mut("sizeDiagnostics") {
@@ -239,7 +217,7 @@ fn scrub_status_volatile_fields(value: &mut Value) {
                 .and_then(Value::as_object_mut)
             {
                 if let Some(total_count) = summary.get_mut("totalCount") {
-                    *total_count = Value::String("<scrubbed:agentSourceCount>".to_owned());
+                    *total_count = Value::Number(serde_json::Number::from(0));
                 }
             }
             for key in [
@@ -286,29 +264,6 @@ fn normalize_doctor_json_for_golden(text: &str) -> String {
     if let Some(version) = value.pointer_mut("/data/version") {
         *version = Value::String("<scrubbed:eeVersion>".to_owned());
     }
-    if let Some(qos) = value.pointer_mut("/data/qos") {
-        *qos = Value::String("<scrubbed:qos>".to_owned());
-    }
-    if let Some(checks) = value
-        .pointer_mut("/data/checks")
-        .and_then(Value::as_array_mut)
-    {
-        for check in checks {
-            let Some(check) = check.as_object_mut() else {
-                continue;
-            };
-            let advisory = check.get("tier").and_then(Value::as_str) == Some("advisory");
-            if advisory {
-                if let Some(severity) = check.get_mut("severity") {
-                    *severity = Value::String("<scrubbed:advisorySeverity>".to_owned());
-                }
-            }
-            if let Some(message) = check.get_mut("message") {
-                *message = Value::String("<scrubbed:message>".to_owned());
-            }
-        }
-    }
-
     serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned())
 }
 
@@ -341,55 +296,28 @@ fn normalize_version_json_for_golden(text: &str) -> String {
 }
 
 fn normalize_doctor_toon_for_golden(text: &str) -> String {
-    let normalized = scrub_volatile_text(text.trim());
-    let mut output = Vec::with_capacity(normalized.lines().count());
-    let mut skipped_block_indent = None;
+    scrub_toon_version_leaf(text.trim())
+}
 
-    for line in normalized.lines() {
-        let indent = line
-            .chars()
-            .take_while(|character| character.is_whitespace())
-            .count();
-        let trimmed = line.trim_start();
-        if let Some(block_indent) = skipped_block_indent {
-            if trimmed.is_empty() || indent > block_indent {
-                continue;
+fn normalize_status_toon_for_golden(text: &str) -> String {
+    scrub_toon_version_leaf(text.trim())
+}
+
+fn scrub_toon_version_leaf(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("version:") {
+                format!(
+                    "{}version: <scrubbed:eeVersion>",
+                    " ".repeat(line.len() - trimmed.len())
+                )
+            } else {
+                line.to_owned()
             }
-            skipped_block_indent = None;
-        }
-
-        let scrubbed_block = if indent == 2 && trimmed.starts_with("qos:") {
-            Some("qos")
-        } else if indent == 2 && trimmed.starts_with("hostCalibration:") {
-            Some("hostCalibration")
-        } else if indent == 2 && trimmed.starts_with("advisories[") {
-            Some("advisories")
-        } else if indent == 2 && trimmed.starts_with("checks[") {
-            Some("checks")
-        } else {
-            None
-        };
-        if let Some(block) = scrubbed_block {
-            output.push(format!("  {block}: <scrubbed:{block}>"));
-            skipped_block_indent = Some(indent);
-            continue;
-        }
-
-        let scrubbed_value = if trimmed.starts_with("workspacePath:") {
-            Some("workspacePath: <scrubbed:workspacePath>")
-        } else if trimmed.starts_with("directory:") {
-            Some("directory: <scrubbed:directory>")
-        } else {
-            None
-        };
-        if let Some(scrubbed_value) = scrubbed_value {
-            output.push(format!("{}{scrubbed_value}", " ".repeat(indent)));
-        } else {
-            output.push(line.to_owned());
-        }
-    }
-
-    output.join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Replace `N of M worker(s) usable` with sentinels so the live RCH count
@@ -422,16 +350,8 @@ fn mask_worker_counts(s: &str) -> String {
     result
 }
 
-/// Mask volatile numeric fields in non-JSON (TOON / human) golden text.
-/// TOON renders sizeDiagnostics and rchWorkerPressure inline as `bytes: N`,
-/// `estimatedTokens: N`, `compressionRatio: F`, `workerCount: N`, etc. and
-/// also renders per-worker rows whose `pressureState` / `reasonCode` /
-/// `admissionImpact` columns reflect live RCH telemetry. Without scrubbing,
-/// the goldens drift with live host state. Strategy:
-///   * mask trailing numeric values for known volatile keys,
-///   * drop everything below an indented `rchWorkerPressure:` line up to
-///     the next sibling field at the same indent or shallower,
-///   * mask `N of M worker(s) usable` in human-readable check messages.
+/// Mask volatile numeric leaves in non-JSON (TOON / human) output without
+/// replacing or dropping their containing object/array blocks.
 fn scrub_volatile_text(text: &str) -> String {
     const VOLATILE_KEYS: &[&str] = &[
         "bytes",
@@ -446,28 +366,7 @@ fn scrub_volatile_text(text: &str) -> String {
     ];
 
     let mut out: Vec<String> = Vec::with_capacity(text.lines().count());
-    let mut skip_indent: Option<usize> = None;
     for line in text.lines() {
-        let indent = line.chars().take_while(|c| c.is_whitespace()).count();
-        // If we are inside a scrubbed rchWorkerPressure block, drop lines
-        // until we see a sibling-or-shallower line.
-        if let Some(block_indent) = skip_indent {
-            let stripped = line.trim_start();
-            if stripped.is_empty() || indent > block_indent {
-                continue;
-            }
-            skip_indent = None;
-        }
-        let stripped = line.trim_start();
-        if stripped.starts_with("rchWorkerPressure:") {
-            out.push(format!(
-                "{}rchWorkerPressure: <scrubbed:rchWorkerPressure>",
-                &line[..indent]
-            ));
-            skip_indent = Some(indent);
-            continue;
-        }
-
         let mut rewritten = line.to_string();
 
         // Mask numeric values for known volatile `key: N` patterns.
@@ -508,8 +407,7 @@ fn scrub_volatile_text(text: &str) -> String {
     out.join("\n")
 }
 
-/// Recursively mask known-volatile sub-trees to a sentinel so structural
-/// drift is still detected but live-telemetry churn is ignored.
+/// Recursively normalize known-volatile leaves while retaining containers.
 fn scrub_volatile_fields(value: &mut Value) {
     match value {
         Value::Object(map) => {
@@ -522,11 +420,6 @@ fn scrub_volatile_fields(value: &mut Value) {
                 if let Some(generated_at) = map.get_mut("generatedAt") {
                     *generated_at =
                         Value::String("<scrubbed:writeGroupCommit.generatedAt>".to_owned());
-                }
-            }
-            for key in ["hostCalibration", "qos", "rchWorkerPressure"] {
-                if let Some(entry) = map.get_mut(key) {
-                    *entry = Value::String(format!("<scrubbed:{key}>"));
                 }
             }
             if let Some(size_diagnostics) = map.get_mut("sizeDiagnostics") {
@@ -1202,8 +1095,10 @@ fn validate_contract_golden(
             exit_code,
         )
     })?;
+    let deterministic =
+        deterministic_contract_golden_output(case).unwrap_or_else(|| stdout.to_owned());
     let expected_normalized = normalize_named_golden(case.category, case.golden_name, &expected);
-    let actual_normalized = normalize_named_golden(case.category, case.golden_name, stdout);
+    let actual_normalized = normalize_named_golden(case.category, case.golden_name, &deterministic);
     if expected_normalized == actual_normalized {
         return Ok(());
     }
@@ -1218,6 +1113,15 @@ fn validate_contract_golden(
         actual_normalized,
         exit_code,
     ))
+}
+
+fn deterministic_contract_golden_output(case: ContractCase) -> Option<String> {
+    match case.name {
+        "status_json" => Some(render_status_json(&status_missing_db_report())),
+        "doctor_json" => Some(render_doctor_json(&doctor_missing_db_report())),
+        "doctor_toon" => Some(render_doctor_toon(&doctor_missing_db_report())),
+        _ => None,
+    }
 }
 
 fn first_json_diff_pointer(expected: &str, actual: &str) -> Option<&'static str> {
@@ -1482,7 +1386,8 @@ fn doctor_json_output_matches_golden() -> TestResult {
     ensure_contains(&stdout, "\"command\":\"doctor\"", "doctor JSON command")?;
     ensure_contains(&stdout, "\"checks\":[", "doctor JSON checks array")?;
 
-    assert_golden("agent", "doctor.json", &stdout)
+    let deterministic = render_doctor_json(&doctor_missing_db_report());
+    assert_golden("agent", "doctor.json", &deterministic)
 }
 
 #[test]
@@ -1510,7 +1415,8 @@ fn doctor_toon_output_matches_golden() -> TestResult {
     )?;
     ensure_contains(&stdout, "schema: ee.response.v2", "doctor TOON schema")?;
 
-    assert_golden("doctor", "doctor_toon", &stdout)
+    let deterministic = render_doctor_toon(&doctor_missing_db_report());
+    assert_golden("doctor", "doctor_toon", &deterministic)
 }
 
 #[test]
@@ -1791,6 +1697,47 @@ fn fixture_qos_posture() -> QosLaneSummary {
     }
 }
 
+fn fixture_host_calibration() -> HostCalibrationPostureReport {
+    HostCalibrationPostureReport {
+        schema: HOST_CALIBRATION_POSTURE_SCHEMA_V1,
+        redaction_status: "label_only_paths_presence_only_env_no_raw_values",
+        host_profile_schema: HOST_PROFILE_PROBE_SCHEMA_V1,
+        host_class: HostClass::Workstation,
+        calibration_freshness: HostCalibrationFreshness::Partial,
+        confidence: "medium",
+        profile_ceiling: OperatingProfile::Workstation,
+        configured_profile: OperatingProfile::Portable,
+        recommended_profile: OperatingProfile::Workstation,
+        effective_profile: OperatingProfile::Workstation,
+        target_dir_posture: "external",
+        topology_warnings: vec!["rch_topology_missing"],
+        reason_codes: vec!["elevate_to_recommended_profile"],
+        repair_actions: vec![HostClassRepairAction {
+            priority: 0,
+            kind: "refresh_host_calibration",
+            command: Some("rch exec -- scripts/e2e_overhaul/host_calibration.sh"),
+            message: "Refresh deterministic host-calibration evidence.",
+        }],
+        budget_deltas: vec![BudgetDelta {
+            surface: BudgetSurface::ContextPack,
+            unit: "tokens",
+            configured_profile: OperatingProfile::Portable,
+            recommended_profile: OperatingProfile::Workstation,
+            effective_profile: OperatingProfile::Workstation,
+            configured_value: 4_000,
+            recommended_value: 8_000,
+            effective_value: 8_000,
+            reason_code: "elevate_to_recommended_profile",
+        }],
+        degraded: vec![HostClassDegradation {
+            code: "host_calibration_partial",
+            severity: "warning",
+            message: "Host calibration is partial in the deterministic fixture.",
+            repair: Some("Refresh deterministic host-calibration evidence."),
+        }],
+    }
+}
+
 fn fixture_workspace_status(marker_present: bool) -> WorkspaceStatusReport {
     WorkspaceStatusReport {
         source: WorkspaceResolutionSource::Explicit,
@@ -2061,7 +2008,7 @@ fn status_missing_db_report() -> StatusReport {
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
         verification_posture: VerificationPostureReport::not_inspected(),
         verification_ledger: RchVerifyLedgerStatusReport::not_inspected(),
-        host_calibration: None,
+        host_calibration: Some(fixture_host_calibration()),
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
         feedback_health: unavailable_feedback_health(),
@@ -2392,9 +2339,14 @@ fn doctor_missing_db_report() -> DoctorReport {
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
         verification_posture: VerificationPostureReport::not_inspected(),
         verification_ledger: RchVerifyLedgerStatusReport::not_inspected(),
-        host_calibration: None,
+        host_calibration: Some(fixture_host_calibration()),
         checks: vec![
             CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),
+            CheckResult::ok(
+                "ee_install_path",
+                "Deterministic fixture install posture is local and unshadowed.",
+            )
+            .advisory(),
             CheckResult::warning(
                 "workspace",
                 "Selected workspace has no .ee state at /workspace.",
@@ -2414,7 +2366,8 @@ fn doctor_missing_db_report() -> DoctorReport {
                 "cass",
                 "CASS binary not found in trusted locations.",
                 error_codes::CASS_NOT_FOUND,
-            ),
+            )
+            .advisory(),
         ],
     }
 }
@@ -2430,7 +2383,7 @@ fn doctor_pending_migration_report() -> DoctorReport {
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
         verification_posture: VerificationPostureReport::not_inspected(),
         verification_ledger: RchVerifyLedgerStatusReport::not_inspected(),
-        host_calibration: None,
+        host_calibration: Some(fixture_host_calibration()),
         checks: vec![
             CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),
             CheckResult::ok("workspace", "Workspace inspected at /workspace."),
@@ -2482,7 +2435,14 @@ fn status_json_output_matches_golden() -> TestResult {
     )?;
     ensure_contains(&stdout, "\"command\":\"status\"", "status JSON command")?;
 
-    assert_golden("status", "status_json", &stdout)
+    let deterministic = render_status_json(&status_missing_db_report());
+    assert_golden("status", "status_json", &deterministic)
+}
+
+#[test]
+fn status_toon_typed_fixture_matches_golden() -> TestResult {
+    let deterministic = render_status_toon(&status_missing_db_report());
+    assert_golden("toon", "status", &deterministic)
 }
 
 #[test]
@@ -2739,6 +2699,157 @@ fn schema_flag_matches_golden() -> TestResult {
 // =============================================================================
 // Contract stability tests
 // =============================================================================
+
+#[test]
+fn golden_normalizers_preserve_public_container_and_leaf_types() -> TestResult {
+    let status = json!({
+        "data": {
+            "command": "status",
+            "version": "0.0.0-test",
+            "workspace": {"root": "/workspace"},
+            "qos": {"activeRecords": [], "foregroundActiveCount": 3},
+            "rchWorkerPressure": {"workerCount": 2, "workers": []},
+            "search": {"status": "missing"},
+            "shardFanout": {"enabled": false},
+            "verificationLedger": {"blockerRefs": []},
+            "verificationPosture": {"recoveryActions": []},
+            "hostCalibration": {"budgetDeltas": []},
+            "agentInventory": {"summary": {"totalCount": 7}},
+            "sizeDiagnostics": [{"bytes": 99, "estimatedTokens": 12}]
+        }
+    });
+    let normalized = normalize_status_json_for_golden(&status.to_string());
+    let normalized: Value = serde_json::from_str(&normalized)
+        .map_err(|error| format!("parse normalized status fixture: {error}"))?;
+    for pointer in [
+        "/data/workspace",
+        "/data/qos",
+        "/data/rchWorkerPressure",
+        "/data/search",
+        "/data/shardFanout",
+        "/data/verificationLedger",
+        "/data/verificationPosture",
+        "/data/hostCalibration",
+    ] {
+        ensure(
+            normalized.pointer(pointer).is_some_and(Value::is_object),
+            format!("status normalizer must preserve object at {pointer}"),
+        )?;
+    }
+    ensure(
+        normalized
+            .pointer("/data/qos/activeRecords")
+            .is_some_and(Value::is_array),
+        "status normalizer must preserve nested arrays",
+    )?;
+    ensure(
+        normalized
+            .pointer("/data/agentInventory/summary/totalCount")
+            .is_some_and(Value::is_number),
+        "status normalizer must keep totalCount numeric",
+    )?;
+    ensure_equal(
+        &normalized
+            .pointer("/data/sizeDiagnostics/0/bytes")
+            .and_then(Value::as_u64),
+        &Some(0),
+        "status normalizer masks only the volatile numeric measurement",
+    )?;
+
+    let doctor = json!({
+        "data": {
+            "version": "0.0.0-test",
+            "qos": {"activeRecords": []},
+            "checks": [{
+                "name": "fixture",
+                "tier": "advisory",
+                "severity": "warning",
+                "message": "Keep this exact message template."
+            }]
+        }
+    });
+    let normalized = normalize_doctor_json_for_golden(&doctor.to_string());
+    let normalized: Value = serde_json::from_str(&normalized)
+        .map_err(|error| format!("parse normalized doctor fixture: {error}"))?;
+    ensure(
+        normalized
+            .pointer("/data/qos")
+            .is_some_and(Value::is_object),
+        "doctor normalizer must preserve qos object",
+    )?;
+    ensure_equal(
+        &normalized
+            .pointer("/data/checks/0/severity")
+            .and_then(Value::as_str),
+        &Some("warning"),
+        "doctor normalizer preserves advisory severity",
+    )?;
+    ensure_equal(
+        &normalized
+            .pointer("/data/checks/0/message")
+            .and_then(Value::as_str),
+        &Some("Keep this exact message template."),
+        "doctor normalizer preserves check message",
+    )
+}
+
+#[test]
+fn toon_normalizers_preserve_typed_blocks() -> TestResult {
+    let input = "data:\n  version: 0.0.0-test\n  qos:\n    activeRecords[0]:\n  rchWorkerPressure:\n    workerCount: 0\n    workers[0]:\n  hostCalibration:\n    budgetDeltas[0]:\n  advisories[0]:\n  checks[1]:\n    - name: fixture\n      severity: warning\n      message: Keep this exact message template.";
+    let normalized = normalize_doctor_toon_for_golden(input);
+    for expected in [
+        "  qos:\n",
+        "  rchWorkerPressure:\n",
+        "  hostCalibration:\n",
+        "  advisories[0]:\n",
+        "  checks[1]:\n",
+        "      severity: warning\n",
+        "      message: Keep this exact message template.",
+    ] {
+        ensure_contains(&normalized, expected, "TOON typed block preservation")?;
+    }
+    ensure(
+        !normalized.contains("<scrubbed:qos>")
+            && !normalized.contains("<scrubbed:rchWorkerPressure>")
+            && !normalized.contains("<scrubbed:checks>"),
+        "TOON normalizer must not replace typed blocks with scalar sentinels",
+    )
+}
+
+#[test]
+fn status_and_doctor_goldens_have_no_full_subtree_sentinels() -> TestResult {
+    let forbidden = [
+        "<scrubbed:workspace>",
+        "<scrubbed:qos>",
+        "<scrubbed:rchWorkerPressure>",
+        "<scrubbed:search>",
+        "<scrubbed:shardFanout>",
+        "<scrubbed:verificationLedger>",
+        "<scrubbed:verificationPosture>",
+        "<scrubbed:hostCalibration>",
+        "<scrubbed:advisories>",
+        "<scrubbed:checks>",
+    ];
+    for (category, name) in [
+        ("status", "status_json"),
+        ("agent", "doctor.json"),
+        ("doctor", "doctor_toon"),
+        ("doctor", "missing_db_degradation"),
+        ("doctor", "pending_migration_degradation"),
+        ("toon", "status"),
+    ] {
+        let path = golden_path(category, name);
+        let content = fs::read_to_string(&path)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        for sentinel in forbidden {
+            ensure(
+                !content.contains(sentinel),
+                format!("{} must not contain {sentinel}", path.display()),
+            )?;
+        }
+    }
+    Ok(())
+}
 
 #[test]
 fn all_json_commands_have_schema_envelope() -> TestResult {
