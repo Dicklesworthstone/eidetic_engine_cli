@@ -2,14 +2,12 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
     tags:
       - 'v*'
-    # GitHub does not evaluate path filters for tag pushes, so v* tags
-    # still trigger releases even though branch pushes are Cargo.toml-scoped.
-    paths:
-      - 'Cargo.toml'
+
+# Releases are tag-only. The Sigstore trust boundary below intentionally accepts
+# release.yml identities from refs/tags/v* only, and a simultaneous main-branch
+# run would be an unauthoritative competing publisher for the same version.
 
 permissions:
   contents: write
@@ -45,45 +43,25 @@ jobs:
 
           echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
 
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            TAG_VERSION="${GITHUB_REF_NAME#v}"
-            if [ "$CURRENT" != "$TAG_VERSION" ]; then
-              echo "::error title=Version mismatch::Tag $GITHUB_REF_NAME does not match Cargo.toml version $CURRENT"
-              exit 1
-            fi
-            echo "Running release from existing tag $GITHUB_REF_NAME"
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            echo "::error title=Invalid release ref::Releases must run from an existing v* tag, got $GITHUB_REF"
+            exit 1
           fi
 
-          # Extract previous version
-          git show HEAD^:Cargo.toml > /tmp/prev_cargo.toml 2>/dev/null || echo 'version = "0.0.0"' > /tmp/prev_cargo.toml
-          PREVIOUS=$(grep '^version = ' /tmp/prev_cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          echo "Previous version: $PREVIOUS"
-
-          if [ "$CURRENT" != "$PREVIOUS" ]; then
-            echo "Version changed from $PREVIOUS to $CURRENT"
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Version unchanged"
-            echo "changed=false" >> "$GITHUB_OUTPUT"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$CURRENT" != "$TAG_VERSION" ]; then
+            echo "::error title=Version mismatch::Tag $GITHUB_REF_NAME does not match Cargo.toml version $CURRENT"
+            exit 1
           fi
+          echo "Running release from existing tag $GITHUB_REF_NAME"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
 
   gates:
     needs: check-version
     if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
-    # NOTE (v0.3.6): bumped from 60 → 120. The gates job's "Performance
-    # benchmarks (advisory)" step compiles the full franken-stack via
-    # path-deps (asupersync, frankensearch, frankensqlite, fnx-*) which
-    # alone can take 50-60min from cold cache. v0.3.5 (run 26674710915)
-    # hit the 60min timeout while compiling fsqlite-error. The advisory
-    # step is correctly non-blocking via `|| { ::warning }`, but the
-    # job's own timeout still applies to the compile time. 120min gives
-    # comfortable headroom; a future deeper fix is to skip perf-bench
-    # entirely on release-tag commits (the artifact is for downstream
-    # dashboards, not release gating — and dashboards don't need every
-    # release-tag run).
+    # Cold Franken-stack dependency and audit builds can exceed one hour on a
+    # fresh runner, so keep enough headroom for the blocking release gates.
     timeout-minutes: 120
     steps:
       - name: Checkout
@@ -120,9 +98,8 @@ jobs:
       - name: Forbidden dependency audit
         run: ./scripts/check-forbidden-deps.sh
 
-      # Supply-chain RustSec advisory gate (bd-2efax). Runs in the pre-flight
-      # guard job — BEFORE the tag is pushed and the build/sign matrix runs —
-      # so a release cannot ship a Sigstore-signed binary whose resolved tree
+      # Supply-chain RustSec advisory gate (bd-2efax). Runs before the
+      # build/sign matrix so a release cannot ship a Sigstore-signed binary whose resolved tree
       # (incl. the fsqlite/frankensearch path-dep stack) carries an open
       # RustSec advisory. Mirrors the CI gate; `deny.toml [advisories]` is
       # version=2 gate mode. Closes the "signed but unscanned" false-assurance
@@ -156,32 +133,6 @@ jobs:
             echo "::warning title=Vision coverage gap::${GAP}% of documented surfaces are missing or stubbed (advisory; see report artifact)"
           fi
 
-      - name: Performance benchmarks
-        # NOTE (v0.3.7): on release-tag reruns, skip the perf-bench
-        # step entirely. It alone compiles the full franken-stack
-        # via path-deps (asupersync, frankensearch, frankensqlite,
-        # fnx-*) which takes 60-90min from cold cache and has
-        # already cancelled v0.3.5 (60min timeout) and v0.3.6
-        # (120min timeout). The branch-push release path of THIS
-        # workflow (`on: push: branches: main`) runs the perf gate
-        # before creating the tag, so version-bump releases cannot
-        # reach tag/build/sign without this check passing.
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        run: |
-          set -euo pipefail
-          ./scripts/bench_perf_regression.sh --check-regression --json > ee-perf.v1.json
-          ./scripts/sync_perf_table.sh --input benches/baselines/perf_v0_2.json --readme README.md --check
-          echo "::notice title=Performance results::Benchmark artifact generated"
-
-      - name: Upload perf artifact
-        # Upload the perf report even when the release-blocking check fails.
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ee-perf
-          path: ee-perf.v1.json
-          if-no-files-found: ignore
-
   tag:
     needs: [check-version, gates]
     if: needs.check-version.outputs.changed == 'true'
@@ -193,31 +144,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create and push tag
+      - name: Validate existing release tag
         id: tag
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           VERSION="${{ needs.check-version.outputs.version }}"
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            TAG="$GITHUB_REF_NAME"
-            echo "Using existing tag: $TAG"
-            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            echo "::error title=Invalid release ref::Expected an existing v* tag, got $GITHUB_REF"
+            exit 1
           fi
-
-          TAG="v${VERSION}"
+          TAG="$GITHUB_REF_NAME"
+          if [ "$TAG" != "v${VERSION}" ]; then
+            echo "::error title=Version mismatch::Tag $TAG does not match validated version $VERSION"
+            exit 1
+          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
-          # Configure git
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Create annotated tag
-          git tag -a "$TAG" -m "Release $TAG"
-          git push origin "$TAG"
-          echo "Created and pushed tag: $TAG"
+          echo "Using existing tag: $TAG"
 
   build:
     needs: [check-version, tag]

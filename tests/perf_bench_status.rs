@@ -574,47 +574,39 @@ fn graph_full_stack_benchmark_covers_cross_feature_perf_gate() -> TestResult {
 }
 
 #[test]
-fn release_workflow_perf_gate_is_release_blocking_for_branch_releases() -> TestResult {
+fn release_publication_is_tag_only_and_benchmarks_stay_explicit() -> TestResult {
     let workflow = fs::read_to_string(".github/workflows/release.yml")
         .map_err(|error| format!("failed to read .github/workflows/release.yml: {error}"))?;
-    let perf_start = workflow
-        .find("- name: Performance benchmarks")
-        .ok_or_else(|| "release workflow missing Performance benchmarks step".to_owned())?;
-    let upload_start = workflow[perf_start..]
-        .find("- name: Upload perf artifact")
-        .map(|offset| perf_start + offset)
-        .ok_or_else(|| "release workflow missing Upload perf artifact step".to_owned())?;
-    let perf_step = &workflow[perf_start..upload_start];
+    let trigger = workflow
+        .split_once("\npermissions:\n")
+        .map(|(trigger, _)| trigger)
+        .ok_or_else(|| "release workflow has no stable trigger boundary".to_owned())?;
+    if !trigger.contains("  push:\n    tags:\n      - 'v*'")
+        || trigger.contains("branches:")
+        || trigger.contains("paths:")
+    {
+        return Err("release publication must be triggered only by an existing v* tag".to_owned());
+    }
+    if workflow.contains("- name: Performance benchmarks")
+        || workflow.contains("./scripts/bench_perf_regression.sh")
+    {
+        return Err(
+            "artifact publication must not hide a skipped or duplicate performance gate".to_owned(),
+        );
+    }
 
+    let verify = fs::read_to_string("scripts/verify.sh")
+        .map_err(|error| format!("failed to read scripts/verify.sh: {error}"))?;
     for expected in [
-        "if: ${{ !startsWith(github.ref, 'refs/tags/') }}",
-        "set -euo pipefail",
-        "./scripts/bench_perf_regression.sh --check-regression --json > ee-perf.v1.json",
-        "./scripts/sync_perf_table.sh --input benches/baselines/perf_v0_2.json --readme README.md --check",
-        "Performance results::Benchmark artifact generated",
+        "if [ \"$INCLUDE_BENCH\" = \"true\" ]; then",
+        "run_stage \"Performance Benchmarks\" \"./scripts/bench_perf_regression.sh --check-regression\"",
     ] {
-        if !perf_step.contains(expected) {
+        if !verify.contains(expected) {
             return Err(format!(
-                "release workflow perf gate missing required blocking contract `{expected}`"
+                "explicit benchmark gate is missing required contract `{expected}`"
             ));
         }
     }
-
-    for forbidden in [
-        "Performance benchmarks (advisory)",
-        "continue-on-error: true",
-        "set -uo pipefail",
-        "advisory only",
-        "not blocking release",
-        "|| {",
-    ] {
-        if perf_step.contains(forbidden) {
-            return Err(format!(
-                "release workflow perf gate must not contain advisory bypass `{forbidden}`"
-            ));
-        }
-    }
-
     Ok(())
 }
 

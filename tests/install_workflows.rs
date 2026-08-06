@@ -1136,7 +1136,20 @@ fn release_installer_model_smoke_is_pinned_and_fail_closed() -> TestResult {
 
 #[test]
 fn release_workflow_proves_checksums_bash_and_native_reranker_smoke() -> TestResult {
+    let (trigger, _) = RELEASE_WORKFLOW
+        .split_once("\npermissions:\n")
+        .ok_or_else(|| "release workflow has no stable trigger boundary".to_owned())?;
+    ensure(
+        trigger.contains("  push:\n    tags:\n      - 'v*'")
+            && !trigger.contains("branches:")
+            && !trigger.contains("paths:"),
+        "release publication must be tag-only so a main push cannot compete with the trusted tag run",
+    )?;
+
     for contract in [
+        "Releases are tag-only",
+        "Releases must run from an existing v* tag",
+        "Expected an existing v* tag",
         "for checksum_file in ee-*.tar.xz.sha256",
         "tr -d '\\r' <\"$checksum_file\" >\"$normalized_checksum\"",
         "mv \"$normalized_checksum\" \"$checksum_file\"",
