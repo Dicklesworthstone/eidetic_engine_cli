@@ -100,7 +100,7 @@ pub use decision::{
 };
 pub use degradation::{
     ALL_DEGRADATION_CODES, ActiveDegradation, DegradationCode, DegradationSeverity,
-    DegradedSubsystem,
+    DegradedSubsystem, ParseDegradationSeverityError,
 };
 pub use demo::{
     DEMO_ARTIFACT_OUTPUT_SCHEMA_V1, DEMO_COMMAND_SCHEMA_V1, DEMO_ENTRY_SCHEMA_V1,

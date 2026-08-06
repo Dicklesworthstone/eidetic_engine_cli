@@ -20,6 +20,8 @@ use crate::models::{
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
+pub use crate::models::DegradationSeverity as ContextResponseSeverity;
+
 pub mod binary;
 pub mod budget_classifier;
 
@@ -4972,36 +4974,6 @@ pub const fn category_for_code(code: &str) -> DegradedCategory {
         // Everything else affects the current response (the safe
         // default for unknown codes too).
         _ => DegradedCategory::AffectsThisResponse,
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ContextResponseSeverity {
-    Info,
-    Low,
-    Warning,
-    Medium,
-    High,
-    Critical,
-}
-
-impl ContextResponseSeverity {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Info => "info",
-            Self::Low => "low",
-            Self::Warning => "warning",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::Critical => "critical",
-        }
-    }
-}
-
-impl fmt::Display for ContextResponseSeverity {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
     }
 }
 

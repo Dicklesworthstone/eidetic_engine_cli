@@ -4864,7 +4864,7 @@ mod tests {
 
     #[test]
     fn degradation_matrix_all_codes_have_required_fields() -> TestResult {
-        use ee::models::degradation::ALL_DEGRADATION_CODES;
+        use ee::models::degradation::{ALL_DEGRADATION_CODES, DegradationSeverity};
 
         for code in ALL_DEGRADATION_CODES {
             ensure(!code.id.is_empty(), format!("code {:?} has empty id", code))?;
@@ -4879,6 +4879,18 @@ mod tests {
             ensure(
                 !code.behavior_change.is_empty(),
                 format!("code {} has empty behavior_change", code.id),
+            )?;
+            ensure(
+                DegradationSeverity::parse(code.severity.as_str()) == Some(code.severity),
+                format!(
+                    "code {} has noncanonical severity {}",
+                    code.id,
+                    code.severity.as_str()
+                ),
+            )?;
+            ensure(
+                code.severity.as_str() != "advisory",
+                format!("code {} still uses retired advisory severity", code.id),
             )?;
         }
         Ok(())

@@ -24961,10 +24961,8 @@ fn pack_ledger_degradation_is_valid(value: &serde_json::Value) -> bool {
             .get("severity")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|severity| {
-                matches!(
-                    severity,
-                    "info" | "low" | "warning" | "medium" | "high" | "critical"
-                )
+                crate::models::DegradationSeverity::parse(severity)
+                    .is_some_and(|parsed| parsed.as_str() == severity)
             })
         && object.get("repair").is_none_or(|repair| {
             repair.is_null()

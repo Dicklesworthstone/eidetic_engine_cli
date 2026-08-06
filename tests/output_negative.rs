@@ -728,7 +728,36 @@ fn response_envelope_failure_has_correct_structure() -> TestResult {
 
 #[test]
 fn degradation_severity_as_str_covers_all_levels() -> TestResult {
-    ensure(DegradationSeverity::Low.as_str(), "low", "low")?;
-    ensure(DegradationSeverity::Medium.as_str(), "medium", "medium")?;
-    ensure(DegradationSeverity::High.as_str(), "high", "high")
+    let expected = ["info", "low", "warning", "medium", "high", "critical"];
+    ensure(
+        DegradationSeverity::ALL.map(DegradationSeverity::as_str),
+        expected,
+        "canonical severity vocabulary",
+    )?;
+
+    for severity in DegradationSeverity::ALL {
+        let pack: ee::pack::ContextResponseSeverity = severity;
+        let stream: ee::output::streaming::StreamSeverity = severity;
+        let session: ee::core::session_budget::SessionBudgetSeverity = severity;
+        let source_run: ee::core::source_run::SourceRunSeverity = severity;
+        let regression: ee::models::RegressionCausalitySeverity = severity;
+        ensure(pack.as_str(), severity.as_str(), "pack severity alias")?;
+        ensure(stream.as_str(), severity.as_str(), "stream severity alias")?;
+        ensure(
+            session.as_str(),
+            severity.as_str(),
+            "session severity alias",
+        )?;
+        ensure(
+            source_run.as_str(),
+            severity.as_str(),
+            "source-run severity alias",
+        )?;
+        ensure(
+            regression.as_str(),
+            severity.as_str(),
+            "regression severity alias",
+        )?;
+    }
+    Ok(())
 }

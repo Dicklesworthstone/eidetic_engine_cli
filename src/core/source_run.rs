@@ -23,6 +23,8 @@ use crate::models::RecoveryKind;
 use crate::models::producer::{ProducerMetadata, ProducerSourceSystem};
 use crate::policy::redact_secret_like_content;
 
+pub use crate::models::DegradationSeverity as SourceRunSeverity;
+
 pub const SOURCE_RUN_EVIDENCE_SCHEMA_V1: &str = "ee.source_run_evidence.v1";
 
 const DEFAULT_TAIL_BYTES_MAX: usize = 8192;
@@ -503,17 +505,6 @@ pub struct SourceRunDegradation {
     pub severity: SourceRunSeverity,
     pub message: String,
     pub repair: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceRunSeverity {
-    Info,
-    Low,
-    Warning,
-    Medium,
-    High,
-    Critical,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

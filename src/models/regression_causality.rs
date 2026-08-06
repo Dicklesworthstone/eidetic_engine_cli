@@ -11,6 +11,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+pub use super::degradation::DegradationSeverity as RegressionCausalitySeverity;
+
 pub const REGRESSION_CAUSALITY_SCHEMA_V1: &str = "ee.regression_causality.v1";
 pub const REGRESSION_EVIDENCE_NORMALIZATION_SCHEMA_V1: &str =
     "ee.regression_evidence_normalization.v1";
@@ -195,46 +197,6 @@ impl RegressionSourceMaterialization {
 }
 
 impl fmt::Display for RegressionSourceMaterialization {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RegressionCausalitySeverity {
-    Info,
-    Low,
-    Warning,
-    Medium,
-    High,
-    Critical,
-}
-
-impl RegressionCausalitySeverity {
-    pub const ALL: [Self; 6] = [
-        Self::Info,
-        Self::Low,
-        Self::Warning,
-        Self::Medium,
-        Self::High,
-        Self::Critical,
-    ];
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Info => "info",
-            Self::Low => "low",
-            Self::Warning => "warning",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::Critical => "critical",
-        }
-    }
-}
-
-impl fmt::Display for RegressionCausalitySeverity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }

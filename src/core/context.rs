@@ -1489,15 +1489,8 @@ fn push_pack_dna_feature_disabled_degradation(degraded: &mut Vec<ContextResponse
     );
 }
 
-const fn context_severity_from_pack_dna(severity: &str) -> ContextResponseSeverity {
-    match severity.as_bytes() {
-        b"info" => ContextResponseSeverity::Info,
-        b"warning" => ContextResponseSeverity::Warning,
-        b"medium" => ContextResponseSeverity::Medium,
-        b"high" => ContextResponseSeverity::High,
-        b"critical" => ContextResponseSeverity::Critical,
-        _ => ContextResponseSeverity::Low,
-    }
+fn context_severity_from_pack_dna(severity: &str) -> ContextResponseSeverity {
+    ContextResponseSeverity::parse_lossy(severity)
 }
 
 pub fn run_context_pack_with_performance(
@@ -3484,14 +3477,7 @@ fn push_search_degradations(
     search_degraded: &[SearchDegradation],
 ) {
     for entry in search_degraded {
-        let severity = match entry.severity.as_str() {
-            "info" => ContextResponseSeverity::Info,
-            "warning" => ContextResponseSeverity::Warning,
-            "medium" => ContextResponseSeverity::Medium,
-            "high" => ContextResponseSeverity::High,
-            "critical" => ContextResponseSeverity::Critical,
-            _ => ContextResponseSeverity::Low,
-        };
+        let severity = ContextResponseSeverity::parse_lossy(entry.severity.as_str());
         push_degradation(
             degraded,
             &entry.code,
@@ -3613,14 +3599,7 @@ fn highest_risk_context_memory_drift_hint(
 fn context_severity_for_memory_drift_hint(
     hint: &MemoryDriftSelectionHint,
 ) -> ContextResponseSeverity {
-    match hint.severity.as_str() {
-        "critical" => ContextResponseSeverity::Critical,
-        "high" => ContextResponseSeverity::High,
-        "warning" => ContextResponseSeverity::Warning,
-        "medium" => ContextResponseSeverity::Medium,
-        "info" => ContextResponseSeverity::Info,
-        _ => ContextResponseSeverity::Low,
-    }
+    ContextResponseSeverity::parse_lossy(hint.severity.as_str())
 }
 
 #[allow(clippy::too_many_arguments)]

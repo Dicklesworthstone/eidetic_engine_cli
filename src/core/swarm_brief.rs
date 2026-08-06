@@ -8430,10 +8430,8 @@ fn validate_declared_agent_mail_snapshot_v1(value: &Value) -> Result<(), String>
     for degradation in &wire.degraded {
         if !agent_mail_snapshot_v1_nonempty(&degradation.code)
             || !agent_mail_snapshot_v1_nonempty(&degradation.source)
-            || !matches!(
-                degradation.severity.as_str(),
-                "info" | "low" | "warning" | "medium" | "high" | "critical"
-            )
+            || crate::models::DegradationSeverity::parse(&degradation.severity)
+                .is_none_or(|parsed| parsed.as_str() != degradation.severity)
             || degradation
                 .error_class
                 .as_deref()

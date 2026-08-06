@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::core::status::DegradationReport;
+use crate::models::DegradationSeverity;
 
 /// Maximum number of aggregated entries returned in any single
 /// response. Excess entries are folded into a synthetic truncation
@@ -34,20 +35,6 @@ pub const DEGRADED_AGGREGATION_MAX_ENTRIES: usize = 20;
 /// match this constant to know that one or more aggregate entries
 /// were dropped from the visible array.
 pub const DEGRADED_AGGREGATION_TRUNCATED_CODE: &str = "degraded_array_truncated";
-
-/// Severity-tier ordering used for escalation. Lower index = lower
-/// severity; aggregate severity is the maximum observed across all
-/// emitters of the same code. Mirrors the 6-tier vocabulary
-/// documented in `tests/fixtures/failure_modes/SCHEMA.md` and
-/// surfaced in `docs/degraded_code_taxonomy.md`.
-const SEVERITY_RANK: &[(&str, i8)] = &[
-    ("info", 0),
-    ("low", 1),
-    ("warning", 2),
-    ("medium", 3),
-    ("high", 4),
-    ("critical", 5),
-];
 
 /// One entry in the aggregated `degraded[]` array.
 ///
@@ -102,7 +89,7 @@ impl DegradationAggregationInput {
 struct AggregatedAccumulator {
     code: String,
     severity: String,
-    severity_rank: i8,
+    severity_rank: i16,
     canonical_source: String,
     message: String,
     repair: String,
@@ -119,8 +106,9 @@ struct AggregatedAccumulator {
 /// 2. **Severity escalation** — aggregate severity is the maximum
 ///    observed across emitters of the same code, ranked by the
 ///    6-tier `info < low < warning < medium < high < critical`
-///    vocabulary. Unknown severities sort below `info` so a typo'd
-///    severity never silently outranks a real one.
+///    vocabulary. The retired `advisory` value is normalized to `low`;
+///    unknown values are normalized to `info`, so emitted severity strings
+///    always satisfy the response contract.
 /// 3. **Repair-hint deduplication** — the canonical repair hint is
 ///    the one emitted by the highest-severity source. When two
 ///    emitters tie on severity, the lexicographically smallest
@@ -161,18 +149,21 @@ where
 {
     let mut by_code: BTreeMap<String, AggregatedAccumulator> = BTreeMap::new();
     for report in entries {
+        let normalized_severity = DegradationSeverity::parse_lossy(&report.severity);
+        let normalized_severity_name = normalized_severity.as_str().to_owned();
+        let normalized_severity_rank = i16::from(normalized_severity.rank());
         let acc = by_code
             .entry(report.code.clone())
             .or_insert_with(|| AggregatedAccumulator {
                 code: report.code.clone(),
-                severity: report.severity.clone(),
-                severity_rank: severity_rank_for(&report.severity),
+                severity: normalized_severity_name.clone(),
+                severity_rank: normalized_severity_rank,
                 canonical_source: report.source.clone(),
                 message: report.message.clone(),
                 repair: report.repair.clone(),
                 sources: Vec::new(),
             });
-        let report_rank = severity_rank_for(&report.severity);
+        let report_rank = normalized_severity_rank;
         if report_rank > acc.severity_rank
             || report_rank == acc.severity_rank
                 && (
@@ -185,7 +176,7 @@ where
                     acc.repair.as_str(),
                 )
         {
-            acc.severity = report.severity.clone();
+            acc.severity = normalized_severity_name;
             acc.severity_rank = report_rank;
             acc.canonical_source = report.source.clone();
             // Use the message and repair from the highest-severity emitter.
@@ -251,11 +242,8 @@ where
     aggregates
 }
 
-fn severity_rank_for(severity: &str) -> i8 {
-    SEVERITY_RANK
-        .iter()
-        .find_map(|(name, rank)| (*name == severity).then_some(*rank))
-        .unwrap_or(-1)
+fn severity_rank_for(severity: &str) -> i16 {
+    DegradationSeverity::parse(severity).map_or(-1, |severity| i16::from(severity.rank()))
 }
 
 #[cfg(test)]
@@ -566,29 +554,54 @@ mod tests {
         assert_eq!(agg_a[0].severity, "high");
     }
 
-    /// Unknown / typo'd severities must not silently outrank known
-    /// ones — they sort below `info`.
     #[test]
-    fn unknown_severity_sorts_below_known_severities() {
+    fn legacy_and_unknown_severities_are_normalized_before_emission() {
         let entries = vec![
             (
-                "real",
-                report("zzz_real_code", "info", "info-msg", "info-fix"),
+                "legacy",
+                report("legacy_code", "advisory", "legacy-msg", "legacy-fix"),
             ),
             (
                 "typo",
-                report("aaa_typo_code", "criticla", "typo-msg", "typo-fix"),
+                report("typo_code", "criticla", "typo-msg", "typo-fix"),
             ),
         ];
 
         let aggregates = aggregate_degraded(entries);
 
         assert_eq!(aggregates.len(), 2);
+        assert_eq!(aggregates[0].code, "legacy_code");
+        assert_eq!(aggregates[0].severity, "low");
+        assert_eq!(aggregates[1].code, "typo_code");
+        assert_eq!(aggregates[1].severity, "info");
+        assert!(aggregates.iter().all(|entry| {
+            DegradationSeverity::parse(&entry.severity).is_some()
+                && entry.severity != "advisory"
+                && entry.severity != "criticla"
+        }));
+    }
+
+    #[test]
+    fn all_six_severities_sort_in_descending_canonical_order() {
+        let entries = DegradationSeverity::ALL.map(|severity| {
+            DegradationAggregationInput::new(
+                severity.as_str(),
+                format!("code_{}", severity.as_str()),
+                severity.as_str(),
+                "message",
+                "repair",
+            )
+        });
+
+        let aggregates = aggregate_degraded_entries(entries);
+        let actual: Vec<&str> = aggregates
+            .iter()
+            .map(|entry| entry.severity.as_str())
+            .collect();
         assert_eq!(
-            aggregates[0].code, "zzz_real_code",
-            "real info entry must rank above the typo'd severity"
+            actual,
+            vec!["critical", "high", "medium", "warning", "low", "info"]
         );
-        assert_eq!(aggregates[1].code, "aaa_typo_code");
     }
 
     /// Empty input must produce empty output, not a trailer.

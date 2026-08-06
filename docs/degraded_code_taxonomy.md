@@ -1029,6 +1029,12 @@ ordered: `info < low < warning < medium < high < critical`.
 A code's severity is documented in `tests/fixtures/failure_modes/<code>.json`
 and asserted by the J6 catalog validator.
 
+`src/models/degradation.rs` is the implementation source of truth for this
+ordering. Response, pack, stream, session-budget, source-run, and regression
+causality surfaces re-export that one type so their serializers cannot drift.
+The retired `advisory` degradation value is accepted only by the explicit
+lossy adapter and is normalized to `low`; canonical parsers reject it.
+
 ## Test plan (deferred to a sibling bead)
 
 `tests/degraded_code_taxonomy_consistency_test.rs` (NOT yet authored):

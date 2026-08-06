@@ -12,7 +12,7 @@ use crate::pack::{ContextResponse, ContextResponseDegradation, ContextResponseSe
 
 use super::{ContextJsonRenderOptions, render_context_response_json_with_options};
 
-pub use crate::models::PACK_STREAM_SCHEMA_V1;
+pub use crate::models::{DegradationSeverity as StreamSeverity, PACK_STREAM_SCHEMA_V1};
 pub const CONTEXT_STREAM_PARTIAL_EMISSION_CODE: &str = "context_stream_partial_emission";
 const CONTEXT_STREAM_PARTIAL_EMISSION_MESSAGE: &str =
     "Context stream ended before a terminal frame arrived.";
@@ -60,50 +60,6 @@ impl StreamDegradation {
     pub fn with_detail(mut self, key: impl Into<String>, value: JsonValue) -> Self {
         self.details.insert(key.into(), value);
         self
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StreamSeverity {
-    Info,
-    Low,
-    Warning,
-    Medium,
-    High,
-    Critical,
-}
-
-impl StreamSeverity {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Info => "info",
-            Self::Low => "low",
-            Self::Warning => "warning",
-            Self::Medium => "medium",
-            Self::High => "high",
-            Self::Critical => "critical",
-        }
-    }
-}
-
-impl fmt::Display for StreamSeverity {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl From<ContextResponseSeverity> for StreamSeverity {
-    fn from(severity: ContextResponseSeverity) -> Self {
-        match severity {
-            ContextResponseSeverity::Info => Self::Info,
-            ContextResponseSeverity::Low => Self::Low,
-            ContextResponseSeverity::Warning => Self::Warning,
-            ContextResponseSeverity::Medium => Self::Medium,
-            ContextResponseSeverity::High => Self::High,
-            ContextResponseSeverity::Critical => Self::Critical,
-        }
     }
 }
 
@@ -722,15 +678,7 @@ fn stream_degradation_from_aggregate(degradation: AggregatedDegradation) -> Stre
 }
 
 fn stream_severity_from_str(severity: &str) -> StreamSeverity {
-    match severity {
-        "info" => StreamSeverity::Info,
-        "low" => StreamSeverity::Low,
-        "warning" => StreamSeverity::Warning,
-        "medium" => StreamSeverity::Medium,
-        "high" => StreamSeverity::High,
-        "critical" => StreamSeverity::Critical,
-        _ => StreamSeverity::Info,
-    }
+    StreamSeverity::parse_lossy(severity)
 }
 
 fn validate_generated_frames(frames: &[PackStreamFrame]) -> Result<(), ContextStreamAdapterError> {

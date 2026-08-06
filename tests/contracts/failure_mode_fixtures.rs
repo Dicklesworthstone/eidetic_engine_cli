@@ -9,7 +9,7 @@
 //!    `severity`, `repair_present`, `trigger`, `expected_emission`)
 //!    exist with the right types.
 //! 3. Filename stem matches the fixture's `code`.
-//! 4. `severity` is one of {info, low, medium, high, critical}.
+//! 4. `severity` is one of {info, low, warning, medium, high, critical}.
 //! 5. The `code` string appears as a literal in `src/` so a fixture
 //!    cannot document a fictional code or stay behind after a code
 //!    removal.
@@ -28,6 +28,8 @@ use std::process::Command;
 
 use regex_lite::Regex;
 use serde_json::Value;
+
+use ee::models::DegradationSeverity;
 
 type TestResult = Result<(), String>;
 const CURRENT_MIGRATION_REPAIR_COMMAND: &str = "ee migrate run --workspace . --json";
@@ -65,8 +67,9 @@ fn docs_dir() -> PathBuf {
 }
 
 fn allowed_severities() -> BTreeSet<&'static str> {
-    ["info", "low", "warning", "medium", "high", "critical"]
+    DegradationSeverity::ALL
         .into_iter()
+        .map(DegradationSeverity::as_str)
         .collect()
 }
 

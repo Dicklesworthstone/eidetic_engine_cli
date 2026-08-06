@@ -8,7 +8,7 @@
 //! - A stable identifier (e.g., `D001`)
 //! - A subsystem that's affected
 //! - A description of the degraded behavior
-//! - Severity level (advisory, warning, critical)
+//! - Canonical response severity (`info` through `critical`)
 //! - Whether it's recoverable without user intervention
 //!
 //! These codes appear in:
@@ -16,50 +16,100 @@
 //! - The `_meta.degraded` field in any response envelope
 //! - Diagnostic output from `ee doctor`
 
-use std::{convert::Infallible, fmt};
+use std::{fmt, str::FromStr};
 
-/// Degradation severity levels.
+use serde::{Deserialize, Serialize};
+
+/// Canonical response-degradation severity levels.
 ///
-/// Determines UI treatment and whether the condition should block agents.
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+/// The declaration order is the public severity order. Keep it aligned with
+/// `tests/fixtures/failure_modes/SCHEMA.md` and the response-envelope contract.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DegradationSeverity {
-    /// Informational - operation continues normally with minor limitations.
+    /// Purely informational; no action is required.
     #[default]
-    Advisory,
-    /// Warning - some features unavailable but core functionality works.
+    Info,
+    /// Informational, but worth surfacing to the agent.
+    Low,
+    /// Degraded behavior that remains non-blocking.
     Warning,
-    /// Critical - significant functionality impaired; user action advised.
+    /// The response was affected and repair is recommended.
+    Medium,
+    /// The response is unreliable and repair is strongly recommended.
+    High,
+    /// Unrecoverable degradation requiring operator action.
     Critical,
 }
 
 impl DegradationSeverity {
+    /// Every canonical value in ascending severity order.
+    pub const ALL: [Self; 6] = [
+        Self::Info,
+        Self::Low,
+        Self::Warning,
+        Self::Medium,
+        Self::High,
+        Self::Critical,
+    ];
+
     /// Stable string representation for JSON output.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Advisory => "advisory",
+            Self::Info => "info",
+            Self::Low => "low",
             Self::Warning => "warning",
+            Self::Medium => "medium",
+            Self::High => "high",
             Self::Critical => "critical",
         }
     }
 
-    /// Parse from string.
+    /// Stable zero-based rank in the canonical ordering.
+    #[must_use]
+    pub const fn rank(self) -> u8 {
+        self as u8
+    }
+
+    /// Parse a canonical severity value, accepting surrounding whitespace and
+    /// ASCII case differences but rejecting non-contract vocabulary.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "info" => Some(Self::Info),
+            "low" => Some(Self::Low),
+            "warning" => Some(Self::Warning),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "critical" => Some(Self::Critical),
+            _ => None,
+        }
+    }
+
+    /// Parse external input with an explicit lowest-severity fallback.
+    ///
+    /// The retired `advisory` severity maps to `low`, preserving its meaning as
+    /// a real but minor limitation. Other unknown values map to `info`.
+    /// Contract validation should use [`Self::parse`] or [`FromStr`] when
+    /// accepting an unknown value would be unsafe.
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "advisory" => Self::Advisory,
-            "warning" => Self::Warning,
-            "critical" => Self::Critical,
-            _ => Self::Advisory,
+        if s.trim().eq_ignore_ascii_case("advisory") {
+            Self::Low
+        } else {
+            Self::parse(s).unwrap_or(Self::Info)
         }
     }
 }
 
-impl std::str::FromStr for DegradationSeverity {
-    type Err = Infallible;
+impl FromStr for DegradationSeverity {
+    type Err = ParseDegradationSeverityError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self::parse_lossy(s))
+        Self::parse(s).ok_or_else(|| ParseDegradationSeverityError {
+            value: s.to_owned(),
+        })
     }
 }
 
@@ -68,6 +118,24 @@ impl fmt::Display for DegradationSeverity {
         f.write_str(self.as_str())
     }
 }
+
+/// Error returned when a value is outside the canonical severity vocabulary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParseDegradationSeverityError {
+    value: String,
+}
+
+impl fmt::Display for ParseDegradationSeverityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "unknown degradation severity {:?}; expected info, low, warning, medium, high, or critical",
+            self.value
+        )
+    }
+}
+
+impl std::error::Error for ParseDegradationSeverityError {}
 
 /// Subsystem affected by degradation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -182,7 +250,7 @@ pub const EMBEDDING_MODEL_MISSING: DegradationCode = DegradationCode {
 pub const SEARCH_INDEX_STALE: DegradationCode = DegradationCode {
     id: "D003",
     subsystem: DegradedSubsystem::Search,
-    severity: DegradationSeverity::Advisory,
+    severity: DegradationSeverity::Low,
     description: "Search index is behind database",
     behavior_change: "Recent memories may not appear in search results",
     auto_recoverable: true,
@@ -213,7 +281,7 @@ pub const DATABASE_READ_ONLY: DegradationCode = DegradationCode {
 pub const WAL_MODE_DISABLED: DegradationCode = DegradationCode {
     id: "D101",
     subsystem: DegradedSubsystem::Storage,
-    severity: DegradationSeverity::Advisory,
+    severity: DegradationSeverity::Low,
     description: "WAL mode not enabled",
     behavior_change: "Reduced concurrent read performance",
     auto_recoverable: false,
@@ -223,7 +291,7 @@ pub const WAL_MODE_DISABLED: DegradationCode = DegradationCode {
 pub const LARGE_DATABASE: DegradationCode = DegradationCode {
     id: "D102",
     subsystem: DegradedSubsystem::Storage,
-    severity: DegradationSeverity::Advisory,
+    severity: DegradationSeverity::Low,
     description: "Database size exceeds recommended threshold",
     behavior_change: "Some operations may be slower",
     auto_recoverable: false,
@@ -303,7 +371,7 @@ pub const CASS_VERSION_MISMATCH: DegradationCode = DegradationCode {
 pub const CASS_INDEX_STALE: DegradationCode = DegradationCode {
     id: "D202",
     subsystem: DegradedSubsystem::Cass,
-    severity: DegradationSeverity::Advisory,
+    severity: DegradationSeverity::Low,
     description: "CASS index is stale",
     behavior_change: "Recent sessions may not be available for import",
     auto_recoverable: true,
@@ -314,7 +382,7 @@ pub const CASS_INDEX_STALE: DegradationCode = DegradationCode {
 pub const GRAPH_SNAPSHOT_STALE: DegradationCode = DegradationCode {
     id: "D300",
     subsystem: DegradedSubsystem::Graph,
-    severity: DegradationSeverity::Advisory,
+    severity: DegradationSeverity::Low,
     description: "Graph snapshot is stale",
     behavior_change: "Graph metrics may not reflect recent changes",
     auto_recoverable: true,
@@ -392,7 +460,7 @@ pub const SPRT_QUARANTINE_CODE: &str = "sprt_quarantine";
 pub const TOKEN_BUDGET_EXCEEDED: DegradationCode = DegradationCode {
     id: "D400",
     subsystem: DegradedSubsystem::Pack,
-    severity: DegradationSeverity::Advisory,
+    severity: DegradationSeverity::Low,
     description: "Token budget exceeded",
     behavior_change: "Context pack truncated; some memories omitted",
     auto_recoverable: true,
@@ -402,7 +470,7 @@ pub const TOKEN_BUDGET_EXCEEDED: DegradationCode = DegradationCode {
 pub const MMR_FALLBACK: DegradationCode = DegradationCode {
     id: "D401",
     subsystem: DegradedSubsystem::Pack,
-    severity: DegradationSeverity::Advisory,
+    severity: DegradationSeverity::Low,
     description: "MMR diversity selection disabled",
     behavior_change: "Pack may contain redundant memories",
     auto_recoverable: true,
@@ -423,7 +491,7 @@ pub const PACK_BUDGET_TOO_SMALL: DegradationCode = DegradationCode {
 pub const CURATION_QUEUE_FULL: DegradationCode = DegradationCode {
     id: "D500",
     subsystem: DegradedSubsystem::Curate,
-    severity: DegradationSeverity::Advisory,
+    severity: DegradationSeverity::Low,
     description: "Curation candidate queue is full",
     behavior_change: "New candidates will be dropped until reviewed",
     auto_recoverable: false,
@@ -433,7 +501,7 @@ pub const CURATION_QUEUE_FULL: DegradationCode = DegradationCode {
 pub const AUTO_CURATION_DISABLED: DegradationCode = DegradationCode {
     id: "D501",
     subsystem: DegradedSubsystem::Curate,
-    severity: DegradationSeverity::Advisory,
+    severity: DegradationSeverity::Low,
     description: "Automatic curation disabled",
     behavior_change: "Rules will not auto-promote; manual review required",
     auto_recoverable: false,
@@ -454,7 +522,7 @@ pub const POLICY_NOT_LOADED: DegradationCode = DegradationCode {
 pub const REDACTION_PATTERNS_STALE: DegradationCode = DegradationCode {
     id: "D601",
     subsystem: DegradedSubsystem::Policy,
-    severity: DegradationSeverity::Advisory,
+    severity: DegradationSeverity::Low,
     description: "Redaction patterns may be outdated",
     behavior_change: "Some sensitive data may not be caught",
     auto_recoverable: false,
@@ -752,44 +820,66 @@ mod tests {
 
     #[test]
     fn severity_ordering() -> TestResult {
-        ensure(
-            DegradationSeverity::Advisory < DegradationSeverity::Warning,
-            true,
-            "advisory < warning",
-        )?;
-        ensure(
-            DegradationSeverity::Warning < DegradationSeverity::Critical,
-            true,
-            "warning < critical",
-        )
+        for pair in DegradationSeverity::ALL.windows(2) {
+            ensure(pair[0] < pair[1], true, "canonical severity ordering")?;
+        }
+        Ok(())
     }
 
     #[test]
     fn severity_strings_are_stable() -> TestResult {
-        ensure(
-            DegradationSeverity::Advisory.as_str(),
-            "advisory",
-            "advisory",
-        )?;
-        ensure(DegradationSeverity::Warning.as_str(), "warning", "warning")?;
-        ensure(
-            DegradationSeverity::Critical.as_str(),
-            "critical",
-            "critical",
-        )
+        let expected = [
+            (DegradationSeverity::Info, "info", 0),
+            (DegradationSeverity::Low, "low", 1),
+            (DegradationSeverity::Warning, "warning", 2),
+            (DegradationSeverity::Medium, "medium", 3),
+            (DegradationSeverity::High, "high", 4),
+            (DegradationSeverity::Critical, "critical", 5),
+        ];
+        for (severity, name, rank) in expected {
+            ensure(severity.as_str(), name, "severity string")?;
+            ensure(severity.rank(), rank, "severity rank")?;
+            ensure(
+                serde_json::to_string(&severity).map_err(|error| error.to_string())?,
+                format!("\"{name}\""),
+                "serialized severity",
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
-    fn severity_parse_lossy_normalizes_external_values() -> TestResult {
+    fn severity_parsers_distinguish_contract_values_from_fallbacks() -> TestResult {
         ensure(
-            DegradationSeverity::parse_lossy(" Warning "),
-            DegradationSeverity::Warning,
-            "warning trims and lowercases",
+            DegradationSeverity::parse(" Warning "),
+            Some(DegradationSeverity::Warning),
+            "strict parser trims and lowercases",
         )?;
         ensure(
-            DegradationSeverity::parse_lossy(" CRITICAL "),
-            DegradationSeverity::Critical,
-            "critical trims and lowercases",
+            DegradationSeverity::parse("advisory"),
+            None,
+            "retired advisory value is not canonical",
+        )?;
+        ensure(
+            "unknown".parse::<DegradationSeverity>().is_err(),
+            true,
+            "FromStr rejects unknown values",
+        )?;
+        ensure(
+            DegradationSeverity::parse_lossy("advisory"),
+            DegradationSeverity::Low,
+            "retired advisory maps to low",
+        )?;
+        ensure(
+            DegradationSeverity::parse_lossy("unknown"),
+            DegradationSeverity::Info,
+            "unknown values fall back to info",
+        )?;
+        ensure(
+            serde_json::from_str::<DegradationSeverity>("\"medium\"")
+                .map_err(|error| error.to_string())?,
+            DegradationSeverity::Medium,
+            "deserialized severity",
         )
     }
 

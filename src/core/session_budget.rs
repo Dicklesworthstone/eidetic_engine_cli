@@ -17,6 +17,8 @@ use serde_json::Value;
 
 use crate::models::SESSION_BUDGET_SCHEMA_V1;
 
+pub use crate::models::DegradationSeverity as SessionBudgetSeverity;
+
 pub const SESSION_BUDGET_REDACTION_STATUS: &str = "paths_counts_hashes_no_content";
 pub const SESSION_BUDGET_PATH_POLICY: &str = "workspace_relative_or_hashed";
 const SESSION_BUDGET_LEDGER_MAX_BYTES: u64 = 8 * 1024 * 1024;
@@ -192,17 +194,6 @@ pub enum SessionBudgetDegradedSource {
     Bv,
     Memory,
     Unknown,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionBudgetSeverity {
-    Info,
-    Low,
-    Warning,
-    Medium,
-    High,
-    Critical,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]

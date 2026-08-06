@@ -73,6 +73,8 @@ pub mod jsonl_export;
 pub(crate) mod markdown;
 pub mod streaming;
 
+pub use crate::models::DegradationSeverity;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Renderer {
     #[default]
@@ -1129,25 +1131,6 @@ impl OutputContext {
     #[must_use]
     pub const fn is_machine_output(&self) -> bool {
         self.renderer.is_machine_readable()
-    }
-}
-
-/// Severity level for degradation notices in the ee.response.v2 envelope.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DegradationSeverity {
-    Low,
-    Medium,
-    High,
-}
-
-impl DegradationSeverity {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
     }
 }
 
@@ -2488,14 +2471,8 @@ pub fn response_degraded_from_data(data: &serde_json::Value) -> serde_json::Valu
 fn normalize_response_degradation(value: &serde_json::Value) -> Option<serde_json::Value> {
     let source = value.as_object()?;
     let code = source.get("code")?.as_str()?;
-    let severity = source.get("severity")?.as_str()?;
+    let severity = DegradationSeverity::parse(source.get("severity")?.as_str()?)?;
     let message = source.get("message")?.as_str()?;
-    if !matches!(
-        severity,
-        "info" | "low" | "warning" | "medium" | "high" | "critical"
-    ) {
-        return None;
-    }
 
     let mut normalized = serde_json::Map::new();
     normalized.insert(
@@ -2504,7 +2481,7 @@ fn normalize_response_degradation(value: &serde_json::Value) -> Option<serde_jso
     );
     normalized.insert(
         "severity".to_string(),
-        serde_json::Value::String(severity.to_string()),
+        serde_json::Value::String(severity.as_str().to_owned()),
     );
     normalized.insert(
         "message".to_string(),
@@ -3795,15 +3772,7 @@ fn context_degradation_source(code: &str) -> &'static str {
 }
 
 fn context_severity_from_str(severity: &str) -> ContextResponseSeverity {
-    match severity {
-        "info" => ContextResponseSeverity::Info,
-        "low" => ContextResponseSeverity::Low,
-        "warning" => ContextResponseSeverity::Warning,
-        "medium" => ContextResponseSeverity::Medium,
-        "high" => ContextResponseSeverity::High,
-        "critical" => ContextResponseSeverity::Critical,
-        _ => ContextResponseSeverity::Info,
-    }
+    ContextResponseSeverity::parse_lossy(severity)
 }
 
 fn top_context_item_ids(response: &ContextResponse) -> String {
@@ -22143,9 +22112,11 @@ mod tests {
 
     #[test]
     fn degradation_severity_strings_are_stable() -> TestResult {
-        ensure_equal(&DegradationSeverity::Low.as_str(), &"low", "low")?;
-        ensure_equal(&DegradationSeverity::Medium.as_str(), &"medium", "medium")?;
-        ensure_equal(&DegradationSeverity::High.as_str(), &"high", "high")
+        ensure_equal(
+            &DegradationSeverity::ALL.map(DegradationSeverity::as_str),
+            &["info", "low", "warning", "medium", "high", "critical"],
+            "canonical severity vocabulary",
+        )
     }
 
     #[test]

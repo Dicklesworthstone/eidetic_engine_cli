@@ -253,8 +253,8 @@ fn contains_unresolved_metavariable(repair: &str) -> bool {
 /// Validate that severity accurately reflects impact.
 ///
 /// Critical should only be used when core functionality is impaired.
-/// Advisory is for minor inconveniences.
-/// Warning is for significant but non-blocking issues.
+/// Low is for minor, recoverable limitations; info requires no action.
+/// Warning through high are significant but non-critical issues.
 #[must_use]
 pub fn validate_severity_honesty(code: &DegradationCode) -> HonestyCheckResult {
     match code.severity {
@@ -267,16 +267,19 @@ pub fn validate_severity_honesty(code: &DegradationCode) -> HonestyCheckResult {
                 );
             }
         }
-        DegradationSeverity::Advisory => {
+        DegradationSeverity::Low => {
             if !code.auto_recoverable && code.repair.is_none() {
                 return HonestyCheckResult::fail_for(
-                    "severity_advisory_has_path_forward",
+                    "severity_low_has_path_forward",
                     code.id,
-                    "Advisory degradations should be auto-recoverable or have repair",
+                    "Low degradations should be auto-recoverable or have repair",
                 );
             }
         }
-        DegradationSeverity::Warning => {}
+        DegradationSeverity::Info
+        | DegradationSeverity::Warning
+        | DegradationSeverity::Medium
+        | DegradationSeverity::High => {}
     }
 
     HonestyCheckResult::pass_for("severity_honest", code.id)
@@ -1097,7 +1100,7 @@ mod tests {
         let code = DegradationCode {
             id: "TEST",
             subsystem: DegradedSubsystem::Search,
-            severity: DegradationSeverity::Advisory,
+            severity: DegradationSeverity::Low,
             description: "",
             behavior_change: "Test behavior",
             auto_recoverable: true,
@@ -1115,7 +1118,7 @@ mod tests {
         let code = DegradationCode {
             id: "TEST",
             subsystem: DegradedSubsystem::Search,
-            severity: DegradationSeverity::Advisory,
+            severity: DegradationSeverity::Low,
             description: "Test description here",
             behavior_change: "",
             auto_recoverable: true,

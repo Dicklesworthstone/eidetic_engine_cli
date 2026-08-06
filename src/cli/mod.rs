@@ -37203,15 +37203,7 @@ fn push_context_delta_degradation(
 }
 
 fn context_delta_severity(severity: &str) -> ContextResponseSeverity {
-    match severity {
-        "info" => ContextResponseSeverity::Info,
-        "low" => ContextResponseSeverity::Low,
-        "warning" => ContextResponseSeverity::Warning,
-        "medium" => ContextResponseSeverity::Medium,
-        "high" => ContextResponseSeverity::High,
-        "critical" => ContextResponseSeverity::Critical,
-        _ => ContextResponseSeverity::Info,
-    }
+    ContextResponseSeverity::parse_lossy(severity)
 }
 
 fn attach_revisable_pack_metadata(
