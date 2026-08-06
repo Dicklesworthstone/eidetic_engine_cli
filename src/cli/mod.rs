@@ -16249,12 +16249,17 @@ fn build_eval_search_index_from_memories(
             .await
         {
             Ok(stats) => Ok(stats),
-            Err(error) if matches!(error, frankensearch::SearchError::Cancelled { .. }) => {
+            Err(frankensearch::SearchError::Cancelled {
+                phase,
+                reason: backend_reason,
+            }) => {
                 let reason = cx.cancel_reason().unwrap_or_else(|| {
+                    let kind =
+                        crate::core::outcome::cancel_kind_from_backend_reason(&backend_reason);
                     crate::core::outcome::attributed_cancel_reason(
                         &cx,
-                        asupersync::CancelKind::User,
-                        "eval index build cancelled without a recorded reason",
+                        kind,
+                        format!("eval index build cancelled during {phase}: {backend_reason}"),
                     )
                 });
                 Err(CancellationAwareCliError::Cancelled(reason))
