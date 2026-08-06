@@ -209,6 +209,59 @@ pub const fn cancel_kind_code(kind: CancelKind) -> &'static str {
     }
 }
 
+/// Recover the structured cancellation kind from a backend's string-only
+/// cancellation reason.
+///
+/// Asupersync's `CancelReason` display starts with the stable, lowercase kind
+/// followed by `:`, but adapters may instead return snake-case codes or short
+/// prose. Honor that explicit prefix before inspecting the message body, then
+/// match prose from most specific to least specific. In prose, a wall-clock
+/// timeout wins over a bare mention of the deadline at which it occurred.
+#[must_use]
+pub(crate) fn cancel_kind_from_backend_reason(reason: &str) -> CancelKind {
+    let normalized = reason.trim().to_ascii_lowercase().replace('_', " ");
+    if let Some((prefix, _)) = normalized.split_once(':') {
+        let explicit_kind = match prefix.trim() {
+            "user" => Some(CancelKind::User),
+            "timeout" => Some(CancelKind::Timeout),
+            "deadline" => Some(CancelKind::Deadline),
+            "poll quota" => Some(CancelKind::PollQuota),
+            "cost budget" => Some(CancelKind::CostBudget),
+            "fail-fast" | "fail fast" => Some(CancelKind::FailFast),
+            "race lost" => Some(CancelKind::RaceLost),
+            "parent cancelled" => Some(CancelKind::ParentCancelled),
+            "resource unavailable" => Some(CancelKind::ResourceUnavailable),
+            "shutdown" => Some(CancelKind::Shutdown),
+            "linked exit" => Some(CancelKind::LinkedExit),
+            _ => None,
+        };
+        if let Some(kind) = explicit_kind {
+            return kind;
+        }
+    }
+    for (needle, kind) in [
+        ("parent cancelled", CancelKind::ParentCancelled),
+        ("resource unavailable", CancelKind::ResourceUnavailable),
+        ("poll quota", CancelKind::PollQuota),
+        ("poll budget", CancelKind::PollQuota),
+        ("cost budget", CancelKind::CostBudget),
+        ("fail-fast", CancelKind::FailFast),
+        ("fail fast", CancelKind::FailFast),
+        ("race lost", CancelKind::RaceLost),
+        ("linked exit", CancelKind::LinkedExit),
+        ("shutdown", CancelKind::Shutdown),
+        ("shutting down", CancelKind::Shutdown),
+        ("timeout", CancelKind::Timeout),
+        ("timed out", CancelKind::Timeout),
+        ("deadline", CancelKind::Deadline),
+    ] {
+        if normalized.contains(needle) {
+            return kind;
+        }
+    }
+    CancelKind::User
+}
+
 /// Build a fully attributed cancellation reason at a caller-owned context.
 ///
 /// `CancelReason::new` and convenience constructors intentionally use testing
@@ -221,9 +274,10 @@ pub fn attributed_cancel_reason(
     kind: CancelKind,
     message: impl Into<String>,
 ) -> CancelReason {
-    CancelReason::with_origin(kind, cx.region_id(), cx.now_for_observability())
-        .with_task(cx.task_id())
-        .with_message(message.into())
+    let mut reason = CancelReason::with_origin(kind, cx.region_id(), cx.now_for_observability())
+        .with_task(cx.task_id());
+    reason.message = Some(message.into());
+    reason
 }
 
 /// Extract a human-readable message from a panicked outcome.
@@ -4034,10 +4088,11 @@ mod tests {
         HARMFUL_BURST_QUARANTINE_CODE, OUTCOME_QUARANTINE_LIST_SCHEMA_V1, OutcomeFeedbackSummary,
         OutcomeQuarantineListReport, OutcomeQuarantineRecord, OutcomeQuarantineSummary,
         OutcomeRecordOptions, OutcomeRecordReport, OutcomeRecordStatus, SPRT_QUARANTINE_CODE,
-        default_feedback_weight, feedback_quarantine_audit_details,
-        feedback_quarantine_review_audit_details, generate_feedback_event_id,
-        harmful_burst_quarantine_degradation, outcome_audit_details, outcome_class,
-        outcome_exit_code, record_outcome, record_outcome_seeded, validate_feedback_event_id,
+        cancel_kind_from_backend_reason, default_feedback_weight,
+        feedback_quarantine_audit_details, feedback_quarantine_review_audit_details,
+        generate_feedback_event_id, harmful_burst_quarantine_degradation, outcome_audit_details,
+        outcome_class, outcome_exit_code, record_outcome, record_outcome_seeded,
+        validate_feedback_event_id,
     };
     use crate::models::{DomainError, ProcessExitCode};
     use crate::runtime::determinism::Deterministic;
@@ -4855,6 +4910,39 @@ mod tests {
             "cancelled",
         )?;
         ensure_equal(&CliOutcomeClass::Panicked.is_terminal(), &true, "panicked")
+    }
+
+    #[test]
+    fn backend_cancel_reason_recovers_every_structured_kind() -> TestResult {
+        let cases = [
+            ("user: caller stopped", CancelKind::User),
+            ("timeout: operation timed out", CancelKind::Timeout),
+            ("deadline: request budget expired", CancelKind::Deadline),
+            (
+                "timeout: resource unavailable at deadline",
+                CancelKind::Timeout,
+            ),
+            ("deadline: operation timed out", CancelKind::Deadline),
+            ("user: deadline expired", CancelKind::User),
+            (
+                "writer lock timed out at deadline Instant(42)",
+                CancelKind::Timeout,
+            ),
+            ("poll_quota exhausted", CancelKind::PollQuota),
+            ("poll budget exhausted", CancelKind::PollQuota),
+            ("cost budget exhausted", CancelKind::CostBudget),
+            ("fail-fast: sibling failed", CancelKind::FailFast),
+            ("race_lost", CancelKind::RaceLost),
+            ("parent cancelled", CancelKind::ParentCancelled),
+            ("resource_unavailable", CancelKind::ResourceUnavailable),
+            ("runtime shutdown", CancelKind::Shutdown),
+            ("linked_exit", CancelKind::LinkedExit),
+            ("backend worker stopped", CancelKind::User),
+        ];
+        for (reason, expected) in cases {
+            ensure_equal(&cancel_kind_from_backend_reason(reason), &expected, reason)?;
+        }
+        Ok(())
     }
 
     #[test]
