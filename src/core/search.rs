@@ -156,8 +156,12 @@ static SEARCH_INDEX_STATUS_CACHE: OnceLock<Mutex<HashMap<IndexStatusCacheKey, Ca
 #[cfg(test)]
 type BeforeSearchCollectHook = Box<dyn FnOnce(&asupersync::Cx)>;
 #[cfg(test)]
+type AfterSearchCollectHook = Box<dyn FnOnce(&asupersync::Cx, bool)>;
+#[cfg(test)]
 std::thread_local! {
     static BEFORE_SEARCH_COLLECT_HOOK: RefCell<Option<BeforeSearchCollectHook>> =
+        const { RefCell::new(None) };
+    static AFTER_SEARCH_COLLECT_HOOK: RefCell<Option<AfterSearchCollectHook>> =
         const { RefCell::new(None) };
 }
 
@@ -177,8 +181,26 @@ fn run_before_search_collect_hook(cx: &asupersync::Cx) {
     });
 }
 
+#[cfg(test)]
+fn install_after_search_collect_hook(hook: impl FnOnce(&asupersync::Cx, bool) + 'static) {
+    AFTER_SEARCH_COLLECT_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_after_search_collect_hook(cx: &asupersync::Cx, succeeded: bool) {
+    AFTER_SEARCH_COLLECT_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(cx, succeeded);
+        }
+    });
+}
+
 #[cfg(not(test))]
 fn run_before_search_collect_hook(_cx: &asupersync::Cx) {}
+#[cfg(not(test))]
+fn run_after_search_collect_hook(_cx: &asupersync::Cx, _succeeded: bool) {}
 // bd-2r38i: RwLock (was Mutex) so cache-hit reads via the
 // fingerprint-keyed lookup at `load_search_score_calibration_jsonl`
 // can take `.read()` and run concurrently. This is the simplest
@@ -5959,13 +5981,14 @@ pub fn run_search_seeded(
     options: &SearchOptions,
     determinism: &Deterministic<Seed>,
 ) -> Result<SearchReport, SearchError> {
-    with_search_root(|cx| async move { run_search_seeded_with_cx(&cx, options, determinism).await })
+    let rerank_seed = determinism.shared_child("search.rerank");
+    with_search_root(|cx| async move { run_search_seeded_with_cx(&cx, options, rerank_seed).await })
 }
 
 pub async fn run_search_seeded_with_cx(
     cx: &asupersync::Cx,
     options: &SearchOptions,
-    determinism: &Deterministic<Seed>,
+    rerank_seed: Deterministic<Seed>,
 ) -> Result<SearchReport, SearchError> {
     // Search determinism controls ranking/output replay. Audit rows are durable
     // side effects, so they must remain unique across repeated seeded calls.
@@ -5974,7 +5997,7 @@ pub async fn run_search_seeded_with_cx(
         cx,
         options,
         None,
-        determinism.shared_child("search.rerank"),
+        rerank_seed,
         &mut audit_ids,
         None,
         true,
@@ -6017,8 +6040,9 @@ pub fn run_search_with_read_connection_seeded(
     read_connection: &DbConnection,
     determinism: &Deterministic<Seed>,
 ) -> Result<SearchReport, SearchError> {
+    let rerank_seed = determinism.shared_child("search.rerank");
     with_search_root(|cx| async move {
-        run_search_with_read_connection_seeded_with_cx(&cx, options, read_connection, determinism)
+        run_search_with_read_connection_seeded_with_cx(&cx, options, read_connection, rerank_seed)
             .await
     })
 }
@@ -6027,7 +6051,7 @@ pub async fn run_search_with_read_connection_seeded_with_cx(
     cx: &asupersync::Cx,
     options: &SearchOptions,
     read_connection: &DbConnection,
-    determinism: &Deterministic<Seed>,
+    rerank_seed: Deterministic<Seed>,
 ) -> Result<SearchReport, SearchError> {
     // Search determinism controls ranking/output replay. Audit rows are durable
     // side effects, so they must remain unique across repeated seeded calls.
@@ -6036,7 +6060,7 @@ pub async fn run_search_with_read_connection_seeded_with_cx(
         cx,
         options,
         Some(read_connection),
-        determinism.shared_child("search.rerank"),
+        rerank_seed,
         &mut audit_ids,
         None,
         true,
@@ -6051,13 +6075,14 @@ pub fn run_search_with_read_connection_seeded_and_audit_connection(
     audit_connection: Option<&DbConnection>,
     determinism: &Deterministic<Seed>,
 ) -> Result<SearchReport, SearchError> {
+    let rerank_seed = determinism.shared_child("search.rerank");
     with_search_root(|cx| async move {
         run_search_with_read_connection_seeded_and_audit_connection_with_cx(
             &cx,
             options,
             read_connection,
             audit_connection,
-            determinism,
+            rerank_seed,
         )
         .await
     })
@@ -6068,7 +6093,7 @@ pub async fn run_search_with_read_connection_seeded_and_audit_connection_with_cx
     options: &SearchOptions,
     read_connection: &DbConnection,
     audit_connection: Option<&DbConnection>,
-    determinism: &Deterministic<Seed>,
+    rerank_seed: Deterministic<Seed>,
 ) -> Result<SearchReport, SearchError> {
     // Search determinism controls ranking/output replay. Audit rows are durable
     // side effects, so they must remain unique across repeated seeded calls.
@@ -6077,7 +6102,7 @@ pub async fn run_search_with_read_connection_seeded_and_audit_connection_with_cx
         cx,
         options,
         Some(read_connection),
-        determinism.shared_child("search.rerank"),
+        rerank_seed,
         &mut audit_ids,
         audit_connection,
         true,
@@ -6092,13 +6117,14 @@ pub fn run_context_search_with_read_connection_seeded_and_audit_connection(
     audit_connection: Option<&DbConnection>,
     determinism: &Deterministic<Seed>,
 ) -> Result<SearchReport, SearchError> {
+    let rerank_seed = determinism.shared_child("search.rerank");
     with_search_root(|cx| async move {
         run_context_search_with_preloaded_memories_with_cx(
             &cx,
             options,
             read_connection,
             audit_connection,
-            determinism,
+            rerank_seed,
         )
         .await
         .map(|run| run.report)
@@ -6111,13 +6137,14 @@ pub fn run_context_search_with_preloaded_memories(
     audit_connection: Option<&DbConnection>,
     determinism: &Deterministic<Seed>,
 ) -> Result<ContextSearchReport, SearchError> {
+    let rerank_seed = determinism.shared_child("search.rerank");
     with_search_root(|cx| async move {
         run_context_search_with_preloaded_memories_with_cx(
             &cx,
             options,
             read_connection,
             audit_connection,
-            determinism,
+            rerank_seed,
         )
         .await
     })
@@ -6128,7 +6155,7 @@ pub async fn run_context_search_with_preloaded_memories_with_cx(
     options: &SearchOptions,
     read_connection: &DbConnection,
     audit_connection: Option<&DbConnection>,
-    determinism: &Deterministic<Seed>,
+    rerank_seed: Deterministic<Seed>,
 ) -> Result<ContextSearchReport, SearchError> {
     run_context_search_with_preloaded_memories_and_workspace_state_with_cx(
         cx,
@@ -6136,7 +6163,7 @@ pub async fn run_context_search_with_preloaded_memories_with_cx(
         read_connection,
         audit_connection,
         None,
-        determinism,
+        rerank_seed,
     )
     .await
 }
@@ -6148,6 +6175,7 @@ pub fn run_context_search_with_preloaded_memories_and_workspace_state(
     workspace_state: Option<&SearchWorkspaceProbeState>,
     determinism: &Deterministic<Seed>,
 ) -> Result<ContextSearchReport, SearchError> {
+    let rerank_seed = determinism.shared_child("search.rerank");
     with_search_root(|cx| async move {
         run_context_search_with_preloaded_memories_and_workspace_state_with_cx(
             &cx,
@@ -6155,7 +6183,7 @@ pub fn run_context_search_with_preloaded_memories_and_workspace_state(
             read_connection,
             audit_connection,
             workspace_state,
-            determinism,
+            rerank_seed,
         )
         .await
     })
@@ -6167,7 +6195,7 @@ pub async fn run_context_search_with_preloaded_memories_and_workspace_state_with
     read_connection: &DbConnection,
     audit_connection: Option<&DbConnection>,
     workspace_state: Option<&SearchWorkspaceProbeState>,
-    determinism: &Deterministic<Seed>,
+    rerank_seed: Deterministic<Seed>,
 ) -> Result<ContextSearchReport, SearchError> {
     // Context candidate conversion batch-loads memories itself, so passthrough
     // swarm/workspace scopes do not need search-analysis metadata on every hit.
@@ -6177,7 +6205,7 @@ pub async fn run_context_search_with_preloaded_memories_and_workspace_state_with
         cx,
         options,
         Some(read_connection),
-        determinism.shared_child("search.rerank"),
+        rerank_seed,
         &mut audit_ids,
         audit_connection,
         workspace_state,
@@ -6892,6 +6920,7 @@ async fn run_search_inner_with_performance(
     trace.record_elapsed("search::rerankResolve", rerank_resolve_start);
     let fusion_weights = resolved_search_fusion_weights(&options.workspace_path);
     if source_mode.unavailable_no_results {
+        search_checkpoint(cx)?;
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         trace.record_elapsed("search::total", start);
         return Ok(SearchPerformanceRun {
@@ -6937,10 +6966,12 @@ async fn run_search_inner_with_performance(
         rerank_seed,
         rerank_runtime,
         fusion_weights,
+        None,
         &mut trace,
     )
     .await;
     trace.record_elapsed("search::retrieve", retrieve_start);
+    search_checkpoint(cx)?;
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -7142,6 +7173,8 @@ async fn run_search_inner_with_performance(
                 );
             }
 
+            search_checkpoint(cx)?;
+
             // Search is a canonical no-write surface. Audit rows are only
             // emitted when an enclosing mutating operation supplies its
             // already-owned write connection (for example, persisted pack
@@ -7260,6 +7293,7 @@ async fn run_search_inner_with_performance(
                 }
             }
 
+            search_checkpoint(cx)?;
             trace.record_elapsed("search::total", start);
             Ok(SearchPerformanceRun {
                 report: SearchReport {
@@ -9176,15 +9210,7 @@ fn search_backend_cancelled(
     backend_reason: &str,
 ) -> SearchError {
     let reason = cx.cancel_reason().unwrap_or_else(|| {
-        let normalized = backend_reason.to_ascii_lowercase();
-        let kind = if normalized.contains("timeout")
-            || normalized.contains("timed out")
-            || normalized.contains("deadline")
-        {
-            asupersync::CancelKind::Timeout
-        } else {
-            asupersync::CancelKind::User
-        };
+        let kind = crate::core::outcome::cancel_kind_from_backend_reason(backend_reason);
         crate::core::outcome::attributed_cancel_reason(
             cx,
             kind,
@@ -9233,6 +9259,7 @@ fn search_sync(
             determinism.shared_child("search.rerank"),
             SearchRerankRuntime::disabled(),
             SearchFusionWeights::default(),
+            None,
             &mut trace,
         )
         .await
@@ -9253,6 +9280,7 @@ async fn search_sync_with_performance(
     rerank_seed: Deterministic<Seed>,
     rerank_runtime: SearchRerankRuntime,
     fusion_weights: SearchFusionWeights,
+    fast_embedder_override: Option<Arc<dyn crate::search::Embedder>>,
     trace: &mut SearchPerformanceTrace,
 ) -> Result<(Vec<SearchHit>, Vec<String>), SearchError> {
     search_checkpoint(cx)?;
@@ -9405,7 +9433,8 @@ async fn search_sync_with_performance(
         };
 
         let embedder_start = Instant::now();
-        let fast_embedder = crate::core::index::default_search_embedder_stack().fast_arc();
+        let fast_embedder = fast_embedder_override
+            .unwrap_or_else(|| crate::core::index::default_search_embedder_stack().fast_arc());
         push_search_performance_timing(
             &async_timings,
             "searchSync::embedderInit",
@@ -9460,6 +9489,7 @@ async fn search_sync_with_performance(
                 .search_collect(&cx, &query_owned, collect_limit)
                 .await
         };
+        run_after_search_collect_hook(&cx, search_result.is_ok());
         if let Err(error) = search_checkpoint(&cx) {
             if let Ok(mut guard) = task_result.lock() {
                 *guard = Some(Err(error));
@@ -10590,14 +10620,17 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
-    #[test]
-    fn lab_runtime_cancellation_at_search_collection_preserves_reason() -> TestResult {
-        let index_dir = unique_test_dir("collection-cancellation");
+    fn collection_cancellation_index(label: &str) -> Result<PathBuf, String> {
+        let index_dir = unique_test_dir(label);
         let build_index_dir = index_dir.clone();
         crate::core::run_cli_future(async move {
             let cx = asupersync::Cx::for_testing();
+            let stack = EmbedderStack::from_parts(
+                Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>,
+                None,
+            );
             IndexBuilder::new(&build_index_dir)
-                .with_embedder_stack(crate::core::index::default_search_embedder_stack())
+                .with_embedder_stack(stack)
                 .add_documents(vec![IndexableDocument::new(
                     "mem_collection_cancel",
                     "Preserve exact caller cancellation during Frankensearch collection.",
@@ -10608,26 +10641,24 @@ mod tests {
             Ok::<(), String>(())
         })
         .map_err(|error| error.to_string())??;
+        Ok(index_dir)
+    }
 
-        let expected_message = "caller stopped search during collection";
-        install_before_search_collect_hook(move |cx| {
-            cx.set_cancel_reason(
-                asupersync::CancelReason::deadline().with_message(expected_message),
-            );
-        });
-
+    fn run_collection_cancellation_probe(
+        index_dir: PathBuf,
+        seed: u64,
+    ) -> Result<asupersync::CancelReason, String> {
         let observation: Arc<Mutex<Option<Result<asupersync::CancelReason, String>>>> =
             Arc::new(Mutex::new(None));
         let task_observation = Arc::clone(&observation);
-        let mut lab =
-            asupersync::LabRuntime::new(asupersync::LabConfig::new(0xEE_90C).max_steps(256));
+        let mut lab = asupersync::LabRuntime::new(asupersync::LabConfig::new(seed).max_steps(256));
         let root = lab.state.create_root_region(asupersync::Budget::INFINITE);
         let (task_id, _handle) = lab
             .state
             .create_task(root, asupersync::Budget::INFINITE, async move {
                 let result = if let Some(cx) = asupersync::Cx::current() {
                     let mut trace = SearchPerformanceTrace::default();
-                    let determinism = Deterministic::from_seed(0xEE_90C);
+                    let determinism = Deterministic::from_seed(seed);
                     match search_sync_with_performance(
                         &cx,
                         &index_dir,
@@ -10639,6 +10670,7 @@ mod tests {
                         determinism.shared_child("search.rerank"),
                         SearchRerankRuntime::disabled(),
                         SearchFusionWeights::default(),
+                        Some(Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>),
                         &mut trace,
                     )
                     .await
@@ -10674,11 +10706,25 @@ mod tests {
                 report.invariant_violations
             ),
         )?;
-        let reason = observation
+        let observed = observation
             .lock()
             .map_err(|_| "collection cancellation observation poisoned".to_owned())?
             .take()
-            .ok_or_else(|| "collection cancellation observation missing".to_owned())??;
+            .ok_or_else(|| "collection cancellation observation missing".to_owned())?;
+        observed
+    }
+
+    #[test]
+    fn lab_runtime_cancellation_at_search_collection_preserves_reason() -> TestResult {
+        let index_dir = collection_cancellation_index("collection-cancellation")?;
+        let expected_message = "caller stopped search during collection";
+        install_before_search_collect_hook(move |cx| {
+            cx.set_cancel_reason(
+                asupersync::CancelReason::deadline().with_message(expected_message),
+            );
+        });
+
+        let reason = run_collection_cancellation_probe(index_dir, 0xEE_90C)?;
         ensure(
             reason.kind == asupersync::CancelKind::Deadline,
             format!("unexpected collection cancellation kind: {:?}", reason.kind),
@@ -10687,6 +10733,44 @@ mod tests {
             reason.message.as_deref() == Some(expected_message),
             format!(
                 "unexpected collection cancellation message: {:?}",
+                reason.message
+            ),
+        )
+    }
+
+    #[test]
+    fn lab_runtime_cancellation_after_search_collection_cannot_escape_as_success() -> TestResult {
+        let index_dir = collection_cancellation_index("post-collection-cancellation")?;
+        let expected_message = "caller stopped search immediately after collection";
+        let collection_succeeded = Arc::new(Mutex::new(None));
+        let collection_succeeded_for_hook = Arc::clone(&collection_succeeded);
+        install_after_search_collect_hook(move |cx, succeeded| {
+            if let Ok(mut observed) = collection_succeeded_for_hook.lock() {
+                *observed = Some(succeeded);
+            }
+            cx.set_cancel_reason(asupersync::CancelReason::user(expected_message));
+        });
+
+        let reason = run_collection_cancellation_probe(index_dir, 0xEE_90F)?;
+        ensure(
+            collection_succeeded
+                .lock()
+                .map_err(|_| "post-collection hook observation poisoned".to_owned())?
+                .take()
+                == Some(true),
+            "post-collection hook must run after a successful Frankensearch collection",
+        )?;
+        ensure(
+            reason.kind == asupersync::CancelKind::User,
+            format!(
+                "unexpected post-collection cancellation kind: {:?}",
+                reason.kind
+            ),
+        )?;
+        ensure(
+            reason.message.as_deref() == Some(expected_message),
+            format!(
+                "unexpected post-collection cancellation message: {:?}",
                 reason.message
             ),
         )
