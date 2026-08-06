@@ -8,7 +8,7 @@ use serde_json::Value as JsonValue;
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
 };
-use crate::pack::{ContextResponse, ContextResponseDegradation, ContextResponseSeverity};
+use crate::pack::{ContextResponse, ContextResponseDegradation};
 
 use super::{ContextJsonRenderOptions, render_context_response_json_with_options};
 
