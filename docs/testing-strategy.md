@@ -473,20 +473,26 @@ Initial matrix:
 No degraded response may silently look complete. If a result is useful but
 partial, the output must say which capability was missing and what that means.
 
-### Release Installer Semantic Smoke
+### Release Installer Model Smoke
 
-Release packaging lanes set `EE_INSTALL_SEMANTIC_SMOKE=require` when invoking
-`install.sh` / `install.ps1`. That opt-in smoke creates a temporary workspace,
-stores one explicit semantic memory, rebuilds the index, and requires
-`ee model status --json` to report
+Release Unix packaging lanes set `EE_INSTALL_SEMANTIC_SMOKE=require` when invoking
+`install.sh`. That opt-in smoke creates a temporary workspace,
+downloads the pinned `rerank-default-v1` archive, registers it through the
+manifest-verifying `ee model fetch --from-file` path, stores five retrieval
+candidates, and rebuilds the index. It requires `ee model status --json` to report
 `data.modelLifecycle.semanticReadiness.state == "available"` and
-`mode == "semantic"`. This proves a default online install can perform the
-one-time model2vec first-use download without operator steps.
+`mode == "semantic"`. It then requires `ee search --json` to report five
+model-backed results with `data.rerank.mode == "reranked"`, positive rerank
+scores, and no `rerank_model_unavailable` degradation. This proves a default
+online release can perform both the one-time Model2Vec download and native
+reranker bootstrap without a stub or fusion-only false positive.
 
-Normal installer `--verify` stays concise and does not download the model unless
+Normal `install.sh --verify` stays concise and does not download either model unless
 `EE_INSTALL_SEMANTIC_SMOKE` is set. Offline or air-gapped release checks must
 exercise the documented hash-fallback path separately, or use an explicitly
-pre-provisioned model cache before running the same smoke.
+pre-provisioned model cache before running the same smoke. The PowerShell
+installer keeps its separate Model2Vec first-use smoke; native Windows reranker
+coverage runs in the five-target release-proof matrix.
 
 ### Embedding-Native Retrieval E2E
 

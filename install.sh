@@ -33,6 +33,11 @@
 #                      set to 1 to require provenance verification
 #   EE_INSTALL_REQUIRE_KEYLESS
 #                      set to 1 to refuse pinned-key fallback verification
+#   EE_INSTALL_SEMANTIC_SMOKE
+#                      warn|require: prove Model2Vec + native reranker first use
+#   EE_INSTALL_RERANK_MODEL_URL
+#                      alternate reranker archive URL for the first-use smoke;
+#                      bytes must still match the manifest embedded in ee
 #   HTTPS_PROXY / HTTP_PROXY   honored for every network call
 #
 set -euo pipefail
@@ -342,6 +347,10 @@ Environment variables:
                      == --require-provenance
   EE_INSTALL_REQUIRE_KEYLESS=1
                      refuse pinned-key fallback; require a keyless Sigstore identity match
+  EE_INSTALL_SEMANTIC_SMOKE=warn|require
+                     run the Model2Vec + native-reranker first-use smoke; require fails closed
+  EE_INSTALL_RERANK_MODEL_URL=URL
+                     alternate reranker archive URL for that smoke (embedded hashes still apply)
   HTTPS_PROXY        Proxy URL honored on every curl call
 EOFU
 }
@@ -1150,31 +1159,82 @@ run_semantic_first_use_smoke() {
   local bin="$1"
   semantic_smoke_enabled || return 0
 
-  local smoke_ws status_json compact
+  local smoke_ws archive rerank_url fetch_json status_json search_json compact
   smoke_ws="$TMP/semantic-first-use-workspace"
+  archive="$TMP/rerank-default-v1.tar.zst"
+  rerank_url="${EE_INSTALL_RERANK_MODEL_URL:-https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/rerank-default-v1/rerank-default-v1.tar.zst}"
   if ! mkdir -p "$smoke_ws" 2>/dev/null; then
     semantic_smoke_fail_or_warn "Semantic first-use smoke could not create workspace at $smoke_ws"
     return $?
   fi
 
-  info "Running semantic first-use smoke (EE_INSTALL_SEMANTIC_SMOKE=$(semantic_smoke_mode))"
+  if [ "$OFFLINE" = "1" ]; then
+    semantic_smoke_fail_or_warn "Semantic first-use smoke requires network access; --offline was requested"
+    return $?
+  fi
+
+  info "Running semantic + native-reranker first-use smoke (EE_INSTALL_SEMANTIC_SMOKE=$(semantic_smoke_mode))"
   if ! "$bin" init --workspace "$smoke_ws" --json >/dev/null 2>&1; then
     semantic_smoke_fail_or_warn "Semantic first-use smoke failed during ee init"
     return $?
   fi
-  if ! "$bin" remember \
-        --workspace "$smoke_ws" \
-        --level semantic \
-        --kind fact \
-        --tags install-smoke,semantic \
-        --json \
-        "Release installer semantic first-use smoke memory for bundled model2vec retrieval." \
-        >/dev/null 2>&1; then
-    semantic_smoke_fail_or_warn "Semantic first-use smoke failed during ee remember"
+
+  info "Downloading the pinned native reranker for first-use verification"
+  if ! ee_curl "$rerank_url" -o "$archive"; then
+    semantic_smoke_fail_or_warn "Native-reranker first-use smoke could not download the pinned model archive"
     return $?
   fi
+
+  fetch_json="$TMP/rerank-model-fetch.json"
+  if ! "$bin" --workspace "$smoke_ws" \
+        model fetch rerank-default --from-file "$archive" --json \
+        >"$fetch_json" 2>&1; then
+    semantic_smoke_fail_or_warn "Native-reranker first-use smoke failed during ee model fetch"
+    return $?
+  fi
+  compact=$(tr -d '\n' <"$fetch_json")
+  if ! printf '%s' "$compact" | grep -Eq '"success"[[:space:]]*:[[:space:]]*true' \
+     || ! printf '%s' "$compact" | grep -Eq '"modelId"[[:space:]]*:[[:space:]]*"rerank-default-v1"' \
+     || ! printf '%s' "$compact" | grep -Eq '"modelPurpose"[[:space:]]*:[[:space:]]*"reranker"' \
+     || ! printf '%s' "$compact" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"available"'; then
+    semantic_smoke_fail_or_warn "Native-reranker first-use smoke model fetch did not return an available reranker"
+    return $?
+  fi
+
+  while IFS='|' read -r level kind content; do
+    if ! "$bin" remember \
+          --workspace "$smoke_ws" \
+          --level "$level" \
+          --kind "$kind" \
+          --tags install-smoke,semantic,rerank \
+          --no-auto-link \
+          --no-propose-candidates \
+          --json \
+          "$content" \
+          >/dev/null 2>&1; then
+      semantic_smoke_fail_or_warn "Semantic first-use smoke failed while seeding the reranker corpus"
+      return $?
+    fi
+  done <<'EOF_RERANK_SMOKE'
+semantic|fact|EE_INSTALL_RERANK_TRAP release installer model bootstrap release release checklist checklist cargo cargo clippy clippy, but this is noisy release prose rather than the policy target.
+procedural|rule|EE_INSTALL_RERANK_TARGET release installer model bootstrap: run cargo fmt --check and cargo clippy before publishing a Rust release.
+semantic|fact|EE_INSTALL_RERANK_NOISE_ONE release installer model bootstrap evidence also tracks database migration ordering and index ownership.
+semantic|fact|EE_INSTALL_RERANK_NOISE_TWO release installer model bootstrap evidence includes onboarding screenshots and terminal theme review.
+semantic|fact|EE_INSTALL_RERANK_NOISE_THREE release installer model bootstrap evidence notes that Rust ownership prevents memory-safety errors.
+EOF_RERANK_SMOKE
+
   if ! "$bin" index rebuild --workspace "$smoke_ws" --json >/dev/null 2>&1; then
     semantic_smoke_fail_or_warn "Semantic first-use smoke failed during ee index rebuild"
+    return $?
+  fi
+  if ! "$bin" config set search.rerank_top_k 5 \
+        --workspace "$smoke_ws" --json >/dev/null 2>&1; then
+    semantic_smoke_fail_or_warn "Native-reranker first-use smoke failed to set rerank_top_k"
+    return $?
+  fi
+  if ! "$bin" config set search.rerank auto \
+        --workspace "$smoke_ws" --json >/dev/null 2>&1; then
+    semantic_smoke_fail_or_warn "Native-reranker first-use smoke failed to enable rerank auto mode"
     return $?
   fi
   if ! status_json=$("$bin" model status --workspace "$smoke_ws" --json 2>&1); then
@@ -1183,12 +1243,35 @@ run_semantic_first_use_smoke() {
   fi
 
   compact=$(printf '%s' "$status_json" | tr -d '\n')
-  if printf '%s' "$compact" | grep -Eq '"semanticReadiness"[[:space:]]*:[[:space:]]*\{[^}]*"state"[[:space:]]*:[[:space:]]*"available"[^}]*"mode"[[:space:]]*:[[:space:]]*"semantic"'; then
-    ok "Semantic first-use smoke: model status is semantic/available"
-    return 0
+  if ! printf '%s' "$compact" | grep -Eq '"semanticReadiness"[[:space:]]*:[[:space:]]*\{[^}]*"state"[[:space:]]*:[[:space:]]*"available"[^}]*"mode"[[:space:]]*:[[:space:]]*"semantic"'; then
+    semantic_smoke_fail_or_warn "Semantic first-use smoke did not reach semanticReadiness.state=available mode=semantic"
+    return $?
   fi
 
-  semantic_smoke_fail_or_warn "Semantic first-use smoke did not reach semanticReadiness.state=available mode=semantic"
+  if ! search_json=$("$bin" search \
+        "release installer model bootstrap cargo formatting before publishing" \
+        --workspace "$smoke_ws" \
+        --limit 5 \
+        --relevance-floor 0 \
+        --explain \
+        --json 2>&1); then
+    semantic_smoke_fail_or_warn "Native-reranker first-use smoke failed during ee search"
+    return $?
+  fi
+  compact=$(printf '%s' "$search_json" | tr -d '\n')
+  if ! printf '%s' "$compact" | grep -Eq '"success"[[:space:]]*:[[:space:]]*true' \
+     || ! printf '%s' "$compact" | grep -Eq '"schema"[[:space:]]*:[[:space:]]*"ee.rerank_posture.v1"' \
+     || ! printf '%s' "$compact" | grep -Eq '"mode"[[:space:]]*:[[:space:]]*"reranked"' \
+     || ! printf '%s' "$compact" | grep -Eq '"configured"[[:space:]]*:[[:space:]]*"auto"' \
+     || ! printf '%s' "$compact" | grep -Eq '"available"[[:space:]]*:[[:space:]]*true' \
+     || ! printf '%s' "$compact" | grep -Eq '"rerankScoreCount"[[:space:]]*:[[:space:]]*5' \
+     || ! printf '%s' "$compact" | grep -Eq '"scoreKind"[[:space:]]*:[[:space:]]*"reranked"' \
+     || printf '%s' "$compact" | grep -q 'rerank_model_unavailable'; then
+    semantic_smoke_fail_or_warn "Native-reranker first-use smoke did not produce five model-backed reranked results"
+    return $?
+  fi
+
+  ok "Semantic + native-reranker first-use smoke passed"
 }
 
 # ───────────────────────────────────────────────────────────────────────────

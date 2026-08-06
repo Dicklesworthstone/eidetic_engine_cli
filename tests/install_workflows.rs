@@ -12,6 +12,7 @@ const FRANKEN_STACK_BASH: &str = include_str!("../scripts/checkout-franken-stack
 const FRANKEN_STACK_POWERSHELL: &str = include_str!("../scripts/checkout-franken-stack.ps1");
 const CI_WORKFLOW: &str = include_str!("../.github/workflows/ci.yml");
 const RELEASE_WORKFLOW: &str = include_str!("../.github/workflows/release.yml");
+const UNIX_INSTALLER: &str = include_str!("../install.sh");
 const MACOS_ARTIFACT_WORKFLOW: &str = include_str!("../.github/workflows/macos-ee-artifact.yml");
 const NATIVE_RERANKER_E2E: &str = include_str!("../scripts/e2e_native_reranker.sh");
 
@@ -1057,6 +1058,117 @@ fn all_build_and_install_paths_use_the_locked_franken_stack() -> TestResult {
     ensure(
         windows_installer.contains(r#"& $checkoutHelper -DestinationRoot $sourceRoot"#),
         "install.ps1 -FromSource should provision locked sibling dependencies",
+    )
+}
+
+#[test]
+fn release_installer_model_smoke_is_pinned_and_fail_closed() -> TestResult {
+    let (_, smoke_and_rest) = UNIX_INSTALLER
+        .split_once("run_semantic_first_use_smoke() {\n")
+        .ok_or_else(|| "install.sh is missing its first-use model smoke".to_owned())?;
+    let (smoke, _) = smoke_and_rest
+        .split_once("\n# ───────────────────────────────────────────────────────────────────────────\n# Build-from-source helpers")
+        .ok_or_else(|| "first-use model smoke has no stable function boundary".to_owned())?;
+
+    for contract in [
+        "EE_INSTALL_RERANK_MODEL_URL",
+        "rerank-default-v1/rerank-default-v1.tar.zst",
+        "model fetch rerank-default --from-file \"$archive\" --json",
+        "\"modelId\"[[:space:]]*:[[:space:]]*\"rerank-default-v1\"",
+        "\"modelPurpose\"[[:space:]]*:[[:space:]]*\"reranker\"",
+        "config set search.rerank_top_k 5",
+        "config set search.rerank auto",
+        "--limit 5",
+        "--relevance-floor 0",
+        "\"mode\"[[:space:]]*:[[:space:]]*\"reranked\"",
+        "\"rerankScoreCount\"[[:space:]]*:[[:space:]]*5",
+        "\"scoreKind\"[[:space:]]*:[[:space:]]*\"reranked\"",
+        "rerank_model_unavailable",
+        "Semantic + native-reranker first-use smoke passed",
+    ] {
+        ensure(
+            smoke.contains(contract),
+            &format!("installer first-use model smoke is missing {contract:?}"),
+        )?;
+    }
+
+    let seeded_candidates = smoke
+        .lines()
+        .filter(|line| {
+            (line.starts_with("semantic|") || line.starts_with("procedural|"))
+                && line.contains("EE_INSTALL_RERANK_")
+        })
+        .count();
+    ensure_equal(
+        seeded_candidates,
+        5,
+        "installer smoke should seed the native reranker's five-candidate minimum",
+    )?;
+    ensure(
+        smoke.contains("semantic_smoke_fail_or_warn")
+            && smoke.contains("if [ \"$OFFLINE\" = \"1\" ]"),
+        "required first-use smoke failures must fail closed, including offline execution",
+    )?;
+    ensure(
+        UNIX_INSTALLER.contains("run_semantic_first_use_smoke \"$DEST/$BINARY\"")
+            && UNIX_INSTALLER.contains("EE_INSTALL_SEMANTIC_SMOKE=warn|require"),
+        "installer should invoke and document the opt-in model smoke",
+    )?;
+
+    #[cfg(unix)]
+    {
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+        let status = Command::new("bash")
+            .arg("-n")
+            .arg(&script)
+            .status()
+            .map_err(|error| format!("failed to parse {}: {error}", script.display()))?;
+        ensure(status.success(), "install.sh should pass bash -n")?;
+    }
+    Ok(())
+}
+
+#[test]
+fn release_workflow_proves_checksums_bash_and_native_reranker_smoke() -> TestResult {
+    for contract in [
+        "for checksum_file in ee-*.tar.xz.sha256",
+        "sha256sum --check \"$checksum_file\"",
+        "sha256sum ee-*.tar.xz | LC_ALL=C sort -k2 > SHA256SUMS",
+        "sha256sum --check SHA256SUMS",
+        "## Native reranking on every platform",
+        "pure-Rust native reranker backend",
+        "no ONNX Runtime",
+        "ee model fetch rerank-default --workspace . --from-file",
+    ] {
+        ensure(
+            RELEASE_WORKFLOW.contains(contract),
+            &format!("release workflow is missing {contract:?}"),
+        )?;
+    }
+
+    let (_, smoke_and_rest) = RELEASE_WORKFLOW
+        .split_once("\n  smoke-test:\n")
+        .ok_or_else(|| "release workflow is missing the Linux smoke job".to_owned())?;
+    let (smoke, _) = smoke_and_rest
+        .split_once("\n  smoke-test-macos:\n")
+        .ok_or_else(|| "release Linux smoke job has no stable macOS boundary".to_owned())?;
+    ensure(
+        smoke.contains(
+            "- name: Install dependencies\n        shell: sh\n        run: |\n          set -eu",
+        ) && smoke.contains("apt-get install -y bash curl ca-certificates xz-utils"),
+        "minimal release containers should bootstrap Bash without asking sh for pipefail",
+    )?;
+    ensure_equal(
+        smoke.matches("shell: bash\n").count(),
+        2,
+        "installer and verification steps should run under Bash after bootstrap",
+    )?;
+    ensure(
+        smoke.contains("EE_INSTALL_SEMANTIC_SMOKE=require")
+            && RELEASE_WORKFLOW
+                .split_once("\n  smoke-test-macos:\n")
+                .is_some_and(|(_, macos)| macos.contains("EE_INSTALL_SEMANTIC_SMOKE=require")),
+        "Linux and macOS release installs should require the full model smoke",
     )
 }
 

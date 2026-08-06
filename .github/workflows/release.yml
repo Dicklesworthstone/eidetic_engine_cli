@@ -526,6 +526,17 @@ jobs:
           cp install.sh release/
           cp install.ps1 release/
 
+          # Publish one deterministic aggregate alongside the per-archive
+          # checksum files. Validate both forms before any release mutation.
+          (
+            cd release
+            for checksum_file in ee-*.tar.xz.sha256; do
+              sha256sum --check "$checksum_file"
+            done
+            sha256sum ee-*.tar.xz | LC_ALL=C sort -k2 > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
@@ -596,6 +607,9 @@ jobs:
           VERSION="${{ needs.check-version.outputs.version }}"
           TAG="${{ needs.tag.outputs.tag }}"
           NOTES=""
+          BACKSLASH="\\"
+          BACKTICK='`'
+          DOLLAR='$'
 
           # Try to extract from CHANGELOG.md
           if [ -f CHANGELOG.md ]; then
@@ -624,41 +638,50 @@ jobs:
             printf '%s\n\n' '```'
             printf '%s\n' '### Windows (PowerShell)'
             printf '%s\n' '```powershell'
-            printf '$f = Join-Path $env:TEMP '\''install-ee.ps1'\''; Invoke-WebRequest -UseBasicParsing https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/%s/install.ps1 -OutFile $f; & $f -Version "%s"\n' "$TAG" "$VERSION"
+            printf '%s\n' "${DOLLAR}f = Join-Path ${DOLLAR}env:TEMP 'install-ee.ps1'; Invoke-WebRequest -UseBasicParsing https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/${TAG}/install.ps1 -OutFile ${DOLLAR}f; & ${DOLLAR}f -Version \"${VERSION}\""
             printf '%s\n\n' '```'
             printf '%s\n\n' '## Verification'
-            printf '%s\n' 'All release artifacts are signed with Sigstore. The official `install.sh` accepts'
+            printf '%s\n' "All platform archives and their provenance statements are signed with Sigstore. The official ${BACKTICK}install.sh${BACKTICK} accepts"
             printf '%s\n' 'either keyless workflow signatures (this release) or the pinned long-lived EE'
             printf '%s\n\n' 'release key (used as a fallback for manual maintainer-cut releases).'
             printf '%s\n' '### Keyless (workflow-built releases — recommended)'
             printf '%s\n' '```bash'
-            printf '%s\n' 'cosign verify-blob \'
-            printf '%s\n' '  --bundle ee-<target>.tar.xz.sigstore.json \'
-            printf '%s\n' '  --insecure-ignore-tlog=false \'
-            printf '%s\n' '  --certificate-identity-regexp "^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/tags/v[0-9].*$" \'
-            printf '%s\n' '  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \'
+            printf '%s %s\n' 'cosign verify-blob' "$BACKSLASH"
+            printf '%s %s\n' '  --bundle ee-<target>.tar.xz.sigstore.json' "$BACKSLASH"
+            printf '%s %s\n' '  --insecure-ignore-tlog=false' "$BACKSLASH"
+            printf '%s %s\n' "  --certificate-identity-regexp \"^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/tags/v[0-9].*\$\"" "$BACKSLASH"
+            printf '%s %s\n' '  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"' "$BACKSLASH"
             printf '%s\n' '  ee-<target>.tar.xz'
             printf '%s\n\n' '```'
             printf '%s\n' '### Pinned key (manual-cut fallback releases)'
             printf '%s\n' 'When release.yml is unavailable, the maintainer may sign with the pinned EE release key.'
             printf '%s\n' 'The official installer tries keyless signatures first and only uses this fallback when keyless verification does not match.'
             printf '%s\n' 'Set EE_INSTALL_REQUIRE_KEYLESS=1 to refuse the pinned-key fallback.'
-            printf '%s\n' 'The public key lives at `signing/cosign.pub` in the repo. Verify with:'
+            printf '%s\n' "The public key lives at ${BACKTICK}signing/cosign.pub${BACKTICK} in the repo. Verify with:"
             printf '%s\n' '```bash'
-            printf '%s\n' 'cosign verify-blob \'
-            printf '%s\n' '  --bundle ee-<target>.tar.xz.sigstore.json \'
-            printf '%s\n' '  --insecure-ignore-tlog=false \'
-            printf '%s\n' '  --key https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/signing/cosign.pub \'
+            printf '%s %s\n' 'cosign verify-blob' "$BACKSLASH"
+            printf '%s %s\n' '  --bundle ee-<target>.tar.xz.sigstore.json' "$BACKSLASH"
+            printf '%s %s\n' '  --insecure-ignore-tlog=false' "$BACKSLASH"
+            printf '%s %s\n' '  --key https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/signing/cosign.pub' "$BACKSLASH"
             printf '%s\n' '  ee-<target>.tar.xz'
             printf '%s\n\n' '```'
             printf '%s\n' 'Each tarball also ships SLSA provenance. Verify it with the same keyless or pinned-key flow:'
             printf '%s\n' '```bash'
-            printf '%s\n' 'cosign verify-blob \'
-            printf '%s\n' '  --bundle ee-<target>.provenance.json.sigstore.json \'
-            printf '%s\n' '  --insecure-ignore-tlog=false \'
-            printf '%s\n' '  --certificate-identity-regexp "^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/tags/v[0-9].*$" \'
-            printf '%s\n' '  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \'
+            printf '%s %s\n' 'cosign verify-blob' "$BACKSLASH"
+            printf '%s %s\n' '  --bundle ee-<target>.provenance.json.sigstore.json' "$BACKSLASH"
+            printf '%s %s\n' '  --insecure-ignore-tlog=false' "$BACKSLASH"
+            printf '%s %s\n' "  --certificate-identity-regexp \"^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/tags/v[0-9].*\$\"" "$BACKSLASH"
+            printf '%s %s\n' '  --certificate-oidc-issuer "https://token.actions.githubusercontent.com"' "$BACKSLASH"
             printf '%s\n' '  ee-<target>.provenance.json'
+            printf '%s\n\n' '```'
+            printf '%s\n\n' '## Native reranking on every platform'
+            printf '%s\n' 'Every published target uses the pure-Rust native reranker backend: no ONNX Runtime or platform-specific ORT dependency.'
+            printf '%s\n' "The installer release gate downloads the pinned safetensors archive, verifies it through the manifest embedded in ${BACKTICK}ee${BACKTICK},"
+            printf '%s\n' 'registers it explicitly, and requires five model-backed reranked search results.'
+            printf '%s\n' 'For a workspace-local manual bootstrap, run:'
+            printf '%s\n' '```bash'
+            printf '%s\n' 'curl -fL -o rerank-default-v1.tar.zst https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/rerank-default-v1/rerank-default-v1.tar.zst'
+            printf '%s\n' 'ee model fetch rerank-default --workspace . --from-file rerank-default-v1.tar.zst --json'
             printf '%s\n\n' '```'
             printf '%s\n\n' '## Changes'
           } > release_notes.md
@@ -698,18 +721,23 @@ jobs:
       image: ${{ matrix.image }}
     steps:
       - name: Install dependencies
+        shell: sh
         run: |
-          set -euo pipefail
+          set -eu
           apt-get update
-          apt-get install -y curl ca-certificates xz-utils
+          apt-get install -y bash curl ca-certificates xz-utils
 
       - name: Download and install ee
+        shell: bash
         run: |
           set -euo pipefail
           curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/${{ needs.tag.outputs.tag }}/install.sh \
-            | EE_VERSION="${{ needs.tag.outputs.tag }}" EE_INSTALL_SEMANTIC_SMOKE=require bash -s -- --verify
+            | EE_VERSION="${{ needs.tag.outputs.tag }}" \
+                EE_INSTALL_SEMANTIC_SMOKE=require \
+                bash -s -- --verify
 
       - name: Verify installation
+        shell: bash
         run: |
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
