@@ -696,6 +696,8 @@ fn caller_cancelled_rebuild_leaves_active_generation_and_lock_state_unchanged() 
 #[test]
 fn production_search_pack_and_index_sources_do_not_manufacture_testing_contexts() -> TestResult {
     for (path, source) in [
+        ("src/core/mod.rs", include_str!("../../src/core/mod.rs")),
+        ("src/cli/mod.rs", include_str!("../../src/cli/mod.rs")),
         (
             "src/core/search.rs",
             include_str!("../../src/core/search.rs"),
