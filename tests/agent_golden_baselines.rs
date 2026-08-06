@@ -359,6 +359,7 @@ fn same_json_shape(candidate: &Value, fixture: &Value) -> bool {
 }
 
 fn scrub_environment_paths(value: &mut Value) {
+    scrub_rch_target_paths(value);
     let mut replacements = Vec::new();
     if let Ok(current_exe) = env::current_exe()
         && let Some(target_dir) = current_exe
@@ -391,6 +392,40 @@ fn scrub_environment_paths(value: &mut Value) {
         replacements.push((home.to_string_lossy().into_owned(), "<home>"));
     }
     scrub_string_leaves(value, &replacements);
+}
+
+fn scrub_rch_target_paths(value: &mut Value) {
+    let target_prefix = format!("{}/.rch-target-", env!("CARGO_MANIFEST_DIR"));
+    scrub_rch_target_path_leaves(value, &target_prefix);
+}
+
+fn scrub_rch_target_path_leaves(value: &mut Value, target_prefix: &str) {
+    match value {
+        Value::Object(map) => {
+            for child in map.values_mut() {
+                scrub_rch_target_path_leaves(child, target_prefix);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                scrub_rch_target_path_leaves(child, target_prefix);
+            }
+        }
+        Value::String(text) => {
+            let mut search_from = 0;
+            while let Some(relative_start) = text[search_from..].find(target_prefix) {
+                let start = search_from + relative_start;
+                let target_name_start = start + target_prefix.len();
+                let Some(relative_end) = text[target_name_start..].find('/') else {
+                    break;
+                };
+                let end = target_name_start + relative_end;
+                text.replace_range(start..end, "<cargoTargetDir>");
+                search_from = start + "<cargoTargetDir>".len();
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 fn scrub_string_leaves(value: &mut Value, replacements: &[(String, &str)]) {
@@ -2981,6 +3016,31 @@ fn golden_normalizers_preserve_public_container_and_leaf_types() -> TestResult {
             .and_then(Value::as_str),
         &Some("Keep this exact message template."),
         "doctor normalizer preserves check message",
+    )
+}
+
+#[test]
+fn golden_normalizers_scrub_only_the_volatile_rch_target_root() -> TestResult {
+    let rch_binary = format!(
+        "{}/.rch-target-vmi1152480-pool-fixture/debug/ee",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut value = json!({
+        "message": format!("running binary at {rch_binary}"),
+        "typed": {"status": "ready", "workerCount": 1},
+    });
+
+    scrub_environment_paths(&mut value);
+
+    ensure_equal(
+        &value.pointer("/message").and_then(Value::as_str),
+        &Some("running binary at <cargoTargetDir>/debug/ee"),
+        "RCH target root is the only canonicalized path segment",
+    )?;
+    ensure_equal(
+        value.pointer("/typed"),
+        Some(&json!({"status": "ready", "workerCount": 1})),
+        "RCH path canonicalization preserves adjacent typed data",
     )
 }
 

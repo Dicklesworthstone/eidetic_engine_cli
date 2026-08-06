@@ -316,6 +316,7 @@ mod tests {
     }
 
     fn scrub_environment_paths(value: &mut serde_json::Value) {
+        scrub_rch_target_paths(value);
         let mut replacements = Vec::new();
         if let Ok(current_exe) = env::current_exe()
             && let Some(target_dir) = current_exe
@@ -339,6 +340,41 @@ mod tests {
             replacements.push((home.to_string_lossy().into_owned(), "<home>"));
         }
         scrub_string_leaves(value, &replacements);
+    }
+
+    fn scrub_rch_target_paths(value: &mut serde_json::Value) {
+        let target_prefix = format!("{}/.rch-target-", env!("CARGO_MANIFEST_DIR"));
+        scrub_rch_target_path_leaves(value, &target_prefix);
+    }
+
+    fn scrub_rch_target_path_leaves(value: &mut serde_json::Value, target_prefix: &str) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for child in map.values_mut() {
+                    scrub_rch_target_path_leaves(child, target_prefix);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    scrub_rch_target_path_leaves(child, target_prefix);
+                }
+            }
+            serde_json::Value::String(text) => {
+                let mut search_from = 0;
+                while let Some(relative_start) = text[search_from..].find(target_prefix) {
+                    let start = search_from + relative_start;
+                    let target_name_start = start + target_prefix.len();
+                    let Some(relative_end) = text[target_name_start..].find('/') else {
+                        break;
+                    };
+                    let end = target_name_start + relative_end;
+                    text.replace_range(start..end, "<cargoTargetDir>");
+                    search_from = start + "<cargoTargetDir>".len();
+                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
+        }
     }
 
     fn scrub_string_leaves(value: &mut serde_json::Value, replacements: &[(String, &str)]) {
