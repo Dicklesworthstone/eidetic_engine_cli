@@ -360,6 +360,17 @@ fn same_json_shape(candidate: &Value, fixture: &Value) -> bool {
 
 fn scrub_environment_paths(value: &mut Value) {
     let mut replacements = Vec::new();
+    if let Ok(current_exe) = env::current_exe()
+        && let Some(target_dir) = current_exe
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+    {
+        replacements.push((
+            target_dir.to_string_lossy().into_owned(),
+            "<cargoTargetDir>",
+        ));
+    }
     if let Some(target_dir) = Path::new(env!("CARGO_BIN_EXE_ee"))
         .parent()
         .and_then(Path::parent)
