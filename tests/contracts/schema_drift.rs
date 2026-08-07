@@ -577,6 +577,11 @@ pub const VERIFICATION_SCHEMAS: &[SchemaEntry] = &[
         SchemaCategory::Verification,
     ),
     SchemaEntry::new(
+        "remote_build_artifact_verification",
+        "ee.remote_build_artifact_manifest.verification.v1",
+        SchemaCategory::Verification,
+    ),
+    SchemaEntry::new(
         "resource_admission",
         "ee.resource_admission.v1",
         SchemaCategory::Verification,
@@ -2801,6 +2806,42 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn remote_build_artifact_verification_schema_is_registered_and_exported() -> TestResult {
+        let versions: Vec<&str> = VERIFICATION_SCHEMAS.iter().map(|s| s.version).collect();
+        ensure(
+            versions.contains(&"ee.remote_build_artifact_manifest.verification.v1"),
+            "verification schemas must include remote artifact consumer verification",
+        )?;
+        let schema_path =
+            repo_path("docs/schemas/ee.remote_build_artifact_manifest.verification.v1.json");
+        let documented: JsonValue = serde_json::from_str(
+            &fs::read_to_string(&schema_path).map_err(|error| {
+                format!(
+                    "read remote artifact verification schema {}: {error}",
+                    schema_path.display()
+                )
+            })?,
+        )
+        .map_err(|error| {
+            format!(
+                "parse remote artifact verification schema {}: {error}",
+                schema_path.display()
+            )
+        })?;
+        let exported: JsonValue = serde_json::from_str(&ee::output::render_schema_export_json(
+            Some("ee.remote_build_artifact_manifest.verification.v1"),
+        ))
+        .map_err(|error| {
+            format!("schema export ee.remote_build_artifact_manifest.verification.v1: {error}")
+        })?;
+        ensure_equal(
+            &exported,
+            &documented,
+            "remote artifact verification export must match the docs file",
+        )
     }
 
     #[test]

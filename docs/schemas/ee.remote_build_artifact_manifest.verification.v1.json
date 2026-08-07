@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.remote_build_artifact_manifest.verification.v1.json",
+  "title": "ee.remote_build_artifact_manifest.verification.v1",
+  "description": "Consumer-side verification result for an ee remote build artifact manifest and the exact downloaded packaged bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "accepted",
+    "artifactName",
+    "artifactId",
+    "repository",
+    "workflow",
+    "runId",
+    "runAttempt",
+    "sourceCommit",
+    "gitTree",
+    "manifestHash",
+    "buildCommandHash",
+    "effectiveInputHash",
+    "provenanceHash",
+    "target",
+    "profile",
+    "binaryHash",
+    "archiveHash",
+    "archiveSizeBytes",
+    "checksumStatus",
+    "probeStatus",
+    "probes",
+    "rejections",
+    "rawOutputIncluded",
+    "verificationHash"
+  ],
+  "properties": {
+    "schema": {"const": "ee.remote_build_artifact_manifest.verification.v1"},
+    "status": {"enum": ["verified", "rejected"]},
+    "accepted": {"type": "boolean"},
+    "artifactName": {"type": ["string", "null"]},
+    "artifactId": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^[1-9][0-9]*$"}
+      ]
+    },
+    "repository": {"type": ["string", "null"]},
+    "workflow": {"type": ["string", "null"]},
+    "runId": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^[1-9][0-9]*$"}
+      ]
+    },
+    "runAttempt": {"type": ["integer", "null"], "minimum": 1},
+    "sourceCommit": {"$ref": "#/$defs/nullableGitObject"},
+    "gitTree": {"$ref": "#/$defs/nullableGitObject"},
+    "manifestHash": {"$ref": "#/$defs/nullableHash"},
+    "buildCommandHash": {"$ref": "#/$defs/nullableHash"},
+    "effectiveInputHash": {"$ref": "#/$defs/nullableHash"},
+    "provenanceHash": {"$ref": "#/$defs/nullableHash"},
+    "target": {"type": ["string", "null"]},
+    "profile": {"type": ["string", "null"]},
+    "binaryHash": {"$ref": "#/$defs/nullableHash"},
+    "archiveHash": {"$ref": "#/$defs/nullableHash"},
+    "archiveSizeBytes": {"type": ["integer", "null"], "minimum": 1},
+    "checksumStatus": {"enum": ["verified", "missing", "mismatch"]},
+    "probeStatus": {"enum": ["passed", "failed"]},
+    "probes": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"$ref": "#/$defs/probe"}
+    },
+    "rejections": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "rawOutputIncluded": {"const": false},
+    "verificationHash": {"$ref": "#/$defs/hash"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "verified"}}},
+      "then": {
+        "properties": {
+          "accepted": {"const": true},
+          "checksumStatus": {"const": "verified"},
+          "probeStatus": {"const": "passed"},
+          "rejections": {"maxItems": 0}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "rejected"}}},
+      "then": {"properties": {"accepted": {"const": false}}}
+    }
+  ],
+  "$defs": {
+    "gitObject": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "nullableGitObject": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/gitObject"}]
+    },
+    "nullableHash": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/hash"}]
+    },
+    "assertionValue": {"type": ["string", "boolean", "null"]},
+    "semanticAssertion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "expected", "observed", "matched"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^/"},
+        "expected": {"$ref": "#/$defs/assertionValue"},
+        "observed": {"$ref": "#/$defs/assertionValue"},
+        "matched": {"type": "boolean"}
+      }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "argvHash",
+        "exitCode",
+        "stdoutHash",
+        "stderrHash",
+        "status",
+        "semanticAssertions"
+      ],
+      "properties": {
+        "id": {"type": ["string", "null"]},
+        "argvHash": {"$ref": "#/$defs/nullableHash"},
+        "exitCode": {"type": ["integer", "null"]},
+        "stdoutHash": {"$ref": "#/$defs/nullableHash"},
+        "stderrHash": {"$ref": "#/$defs/nullableHash"},
+        "status": {"enum": ["passed", "failed", null]},
+        "semanticAssertions": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/semanticAssertion"}
+        }
+      }
+    }
+  }
+}
