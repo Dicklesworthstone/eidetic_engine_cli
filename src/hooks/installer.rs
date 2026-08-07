@@ -1064,7 +1064,6 @@ impl HookStatusReport {
     }
 }
 
-#[cfg(test)]
 fn hook_path_is_executable(path: &Path, existing: ExistingHookStatus) -> bool {
     if !matches!(
         existing,
