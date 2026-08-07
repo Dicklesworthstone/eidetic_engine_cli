@@ -341,6 +341,10 @@ pub const ENVIRONMENT_ATTESTATION_SCHEMA_V1: &str = "ee.environment_attestation.
 /// Schema identifier for CI proof-lane queue and artifact freshness snapshots.
 pub const CI_PROOF_LANE_SNAPSHOT_SCHEMA_V1: &str = "ee.ci_proof_lane_snapshot.v1";
 
+/// Schema identifier for source-bound remote build artifact manifests.
+pub const REMOTE_BUILD_ARTIFACT_MANIFEST_SCHEMA_V1: &str =
+    "ee.remote_build_artifact_manifest.v1";
+
 /// Schema identifier for proof-broker fingerprints and ledger rows.
 pub const PROOF_BROKER_SCHEMA_V1: &str = "ee.proof_broker.v1";
 
@@ -10438,6 +10442,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: ci_proof_lane_snapshot_schema_definition,
         },
         SchemaEntry {
+            id: REMOTE_BUILD_ARTIFACT_MANIFEST_SCHEMA_V1,
+            version: "1",
+            description: "Source-bound build inputs, packaged bytes, and behavior probes for a remote ee artifact",
+            category: "verification",
+            definition: remote_build_artifact_manifest_schema_definition,
+        },
+        SchemaEntry {
             id: MCP_MANIFEST_SCHEMA_V1,
             version: "1",
             description: "MCP adapter manifest generated from ee's public command and schema registries",
@@ -11788,6 +11799,10 @@ fn environment_attestation_schema_definition() -> String {
 
 fn ci_proof_lane_snapshot_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.ci_proof_lane_snapshot.v1.json").to_string()
+}
+
+fn remote_build_artifact_manifest_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.remote_build_artifact_manifest.v1.json").to_string()
 }
 
 fn proof_broker_schema_definition() -> String {

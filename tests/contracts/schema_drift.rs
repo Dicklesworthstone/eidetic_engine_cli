@@ -572,6 +572,11 @@ pub const VERIFICATION_SCHEMAS: &[SchemaEntry] = &[
         SchemaCategory::Verification,
     ),
     SchemaEntry::new(
+        "remote_build_artifact_manifest",
+        "ee.remote_build_artifact_manifest.v1",
+        SchemaCategory::Verification,
+    ),
+    SchemaEntry::new(
         "resource_admission",
         "ee.resource_admission.v1",
         SchemaCategory::Verification,
@@ -2749,6 +2754,56 @@ mod tests {
     }
 
     #[test]
+    fn remote_build_artifact_manifest_schema_is_registered_and_exported() -> TestResult {
+        let versions: Vec<&str> = VERIFICATION_SCHEMAS.iter().map(|s| s.version).collect();
+        ensure(
+            versions.contains(&"ee.remote_build_artifact_manifest.v1"),
+            "verification schemas must include the remote build artifact manifest",
+        )?;
+
+        let schema_path = repo_path("docs/schemas/ee.remote_build_artifact_manifest.v1.json");
+        let documented: JsonValue =
+            serde_json::from_str(&fs::read_to_string(&schema_path).map_err(|error| {
+                format!(
+                    "read remote build artifact manifest schema {}: {error}",
+                    schema_path.display()
+                )
+            })?)
+            .map_err(|error| {
+                format!(
+                    "parse remote build artifact manifest schema {}: {error}",
+                    schema_path.display()
+                )
+            })?;
+        let exported: JsonValue = serde_json::from_str(&ee::output::render_schema_export_json(
+            Some("ee.remote_build_artifact_manifest.v1"),
+        ))
+        .map_err(|error| {
+            format!("schema export ee.remote_build_artifact_manifest.v1: {error}")
+        })?;
+
+        ensure_equal(
+            &exported,
+            &documented,
+            "remote build artifact manifest export must match the docs file",
+        )?;
+        ensure_equal(
+            &documented["properties"]["schema"]["const"],
+            &JsonValue::String("ee.remote_build_artifact_manifest.v1".to_owned()),
+            "remote build artifact manifest schema const",
+        )?;
+        for required in ["source", "build", "artifact", "probes", "manifestHash"] {
+            ensure(
+                documented["required"]
+                    .as_array()
+                    .is_some_and(|fields| fields.contains(&JsonValue::String(required.to_owned()))),
+                format!("remote build artifact manifest must require {required}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn ci_proof_lane_schema_freezes_verdict_and_redaction_contract() -> TestResult {
         let schema_path = repo_path("docs/schemas/ee.ci_proof_lane_snapshot.v1.json");
         let schema: JsonValue =
@@ -2791,6 +2846,8 @@ mod tests {
             "artifact_stale",
             "checksum_mismatch",
             "surface_probe_failed",
+            "artifact_attestation_required",
+            "artifact_attestation_invalid",
             "abstain_manual_review",
         ] {
             ensure(
@@ -2809,6 +2866,8 @@ mod tests {
             "ci_proof_lane_artifact_stale",
             "ci_proof_lane_checksum_mismatch",
             "ci_proof_lane_surface_probe_failed",
+            "ci_proof_lane_unknown_source",
+            "ci_proof_lane_artifact_attestation_invalid",
         ] {
             ensure(
                 degraded_enum.contains(&JsonValue::String(code.to_owned())),
