@@ -75,8 +75,9 @@ fn mesh_import_ledger_schema_is_in_the_public_inventory() -> TestResult {
             matches.len()
         ));
     }
-    let definition: Value = serde_json::from_str(&(matches[0].definition)())
-        .map_err(|error| format!("parse registered {SCHEMA_NAME}: {error}"))?;
+    let definition: Value =
+        serde_json::from_str(&ee::output::render_schema_export_json(Some(SCHEMA_NAME)))
+            .map_err(|error| format!("parse registered {SCHEMA_NAME}: {error}"))?;
     if definition["properties"]["schema"]["const"] != SCHEMA_NAME {
         return Err("registered mesh import-ledger definition drifted".to_owned());
     }
