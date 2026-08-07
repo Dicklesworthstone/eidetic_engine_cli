@@ -4473,7 +4473,7 @@ mod tests {
             "remote_required": true
         });
         let evidence = crate::models::verification_evidence_record_from_rch_verify(&proof)
-            .map_err(std::io::Error::other)?;
+            .map_err(|error| error.to_string())?;
 
         let ingest = record_validated_verification_evidence(
             VerificationRecordOptions {

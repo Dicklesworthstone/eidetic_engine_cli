@@ -185,7 +185,11 @@ fn remote_artifact_verification_report(binary_hash: &str) -> Value {
     let canonical = canonical_json_value(&verification_body);
     let bytes = serde_json::to_vec(&canonical).expect("canonical report serializes");
     let digest = Sha256::digest(bytes);
-    report["verificationHash"] = json!(format!("sha256:{digest:x}"));
+    let digest_hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    report["verificationHash"] = json!(format!("sha256:{digest_hex}"));
     report
 }
 
