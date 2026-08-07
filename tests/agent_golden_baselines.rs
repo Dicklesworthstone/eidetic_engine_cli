@@ -311,7 +311,12 @@ fn normalize_doctor_json_for_golden(text: &str) -> String {
 /// keeps every public object, array, and enum field under golden comparison
 /// without making ambient worker load or calibration state part of the bytes.
 fn replace_host_backed_subtrees(value: &mut Value) {
-    let fixture = render_status_json_filtered(&status_missing_db_report(), FieldProfile::Standard);
+    let profile = if value.pointer("/fields").and_then(Value::as_str) == Some("full") {
+        FieldProfile::Full
+    } else {
+        FieldProfile::Standard
+    };
+    let fixture = render_status_json_filtered(&status_missing_db_report(), profile);
     let Ok(fixture) = serde_json::from_str::<Value>(&fixture) else {
         return;
     };
@@ -3064,6 +3069,27 @@ fn typed_host_canonicalization_rejects_shape_regressions() -> TestResult {
             .and_then(Value::as_str),
         &Some("wrong-type"),
         "wrong nested leaf types must remain visible to golden comparison",
+    )
+}
+
+#[test]
+fn doctor_full_host_canonicalization_uses_full_profile_shape() -> TestResult {
+    let fixture = render_status_json_filtered(&status_missing_db_report(), FieldProfile::Full);
+    let fixture: Value = serde_json::from_str(&fixture)
+        .map_err(|error| format!("parse typed full-profile fixture: {error}"))?;
+    let mut live = fixture.clone();
+    *live
+        .pointer_mut("/data/qos/workspaceHash")
+        .ok_or_else(|| "full-profile fixture missing qos workspaceHash".to_owned())? =
+        Value::String("sha256:volatile-live-workspace".to_owned());
+
+    let normalized = normalize_doctor_json_for_golden(&live.to_string());
+    let normalized: Value = serde_json::from_str(&normalized)
+        .map_err(|error| format!("parse normalized full-profile doctor: {error}"))?;
+    ensure_equal(
+        &normalized.pointer("/data/qos"),
+        &fixture.pointer("/data/qos"),
+        "full doctor normalization must replace profile-shaped host QoS state",
     )
 }
 
