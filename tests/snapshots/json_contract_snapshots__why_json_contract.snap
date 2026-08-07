@@ -307,7 +307,7 @@ expression: why
       "workflowId": null
     },
     "verificationEvidence": [],
-    "version": "0.13.0"
+    "version": "0.13.1"
   },
   "degraded": [
     {

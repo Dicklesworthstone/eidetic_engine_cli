@@ -3,7 +3,7 @@ success: true
 fields: standard
 data:
   command: capabilities
-  version: 0.13.0
+  version: 0.13.1
   subsystems[6]{name,status}:
     runtime,ready
     storage,pending

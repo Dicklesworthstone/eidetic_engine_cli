@@ -19,7 +19,7 @@
   ],
   "data": {
     "command": "why",
-    "version": "0.13.0",
+    "version": "0.13.1",
     "memoryId": "mem_00000000000000000000000001",
     "found": true,
     "content": "Run cargo fmt --check before release.",

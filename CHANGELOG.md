@@ -13,19 +13,21 @@ checked-in Beads records. The durable research ledger is
 | 2026-04-29 → 2026-05-20 | Full archaeology pass that created this file (see historical note below). |
 | 2026-05-15 → 2026-06-16 | Published GitHub Releases `v0.1.0` … `v0.12.0` (assets on GitHub; detailed prose below is still incomplete for `0.4.0`–`0.12.0`). |
 | 2026-06-16 → 2026-07-30 | **`0.13.0`** fully researched below (`v0.12.0`..`HEAD`, 673 non-merge commits). |
+| 2026-07-30 → 2026-08-06 | **`0.13.1`** native-reranker completion and release-hardening patch. |
 
-Release surface (as of 2026-07-30):
+Release surface (as of 2026-08-06):
 
-- Latest **published** GitHub Release before this cut: [`v0.12.0`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.12.0) (2026-06-16).
-- `Cargo.toml` already carried `version = "0.13.0"` from
-  [`861d5fb7`](https://github.com/Dicklesworthstone/eidetic_engine_cli/commit/861d5fb7) (2026-06-21); this cut tags and ships that version with post-bump fixes.
+- Latest **published** GitHub Release before this cut: [`v0.13.0`](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.13.0) (2026-07-30).
+- `Cargo.toml` carries `version = "0.13.1"` for this cut; the historical
+  `v0.13.0` tag and release remain unchanged.
 - Install path: `curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/install.sh?$(date +%s)" | bash -s -- --easy-mode --verify`
 
 ### Version timeline (tags and GitHub Releases)
 
 | Version | Date | GitHub Release | Notes |
 | --- | --- | --- | --- |
-| [0.13.0](#0130---2026-07-30) | 2026-07-30 | this cut | User-global store, Learn→Pack loop, pack-ledger integrity, group-commit / incremental index, installer hardening |
+| [0.13.1](#0131---2026-08-06) | 2026-08-06 | this cut | Pure-Rust native reranking on every release target, model bootstrap, checksum and publication hardening |
+| [0.13.0](#0130---2026-07-30) | 2026-07-30 | yes | User-global store, Learn→Pack loop, pack-ledger integrity, group-commit / incremental index, installer hardening |
 | [0.12.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.12.0) | 2026-06-16 | yes | Contention observability, RCH topology canary, ask/decide/session-budget wave |
 | [0.11.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.11.0) | 2026-06-15 | yes | `ee decide`, `ee ask`, memory-debt doctor, scale envelope |
 | [0.10.0](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/tag/v0.10.0) | 2026-06-15 | yes | See release notes on GitHub |
@@ -46,7 +48,37 @@ future changelog pass expands those rows into full capability sections.
 
 ## [Unreleased]
 
-_Nothing staged beyond 0.13.0 at cut time._
+_Nothing staged beyond 0.13.1 at cut time._
+
+## [0.13.1] - 2026-08-06
+
+Patch release completing the pure-Rust native-reranker rollout and associated
+release hardening.
+
+### Changed
+
+- All six published archive targets use Frankensearch's pure-Rust native
+  reranker without ONNX Runtime. The strict proof covers the five required
+  cross-platform targets; x86_64 Linux musl remains the installer-preferred
+  extra. Frankensearch is pinned to
+  `b559c92e03242336614b995c562a13dfd1269eed`.
+- Search, index publication, context persistence, and cancellation reporting
+  received the post-0.13.0 correctness work already present on `main`.
+
+### Fixed
+
+- Published the manifest-pinned `rerank-default-v1` safetensors archive and
+  made release installer smoke tests fetch, register, and require five genuine
+  model-backed reranked results.
+- Normalized Windows checksum line endings before aggregate `SHA256SUMS`
+  verification.
+- Hardened cross-platform reranker determinism, forbidden-dependency, and
+  ORT-absence evidence.
+
+### Verification
+
+- Strict five-target native-reranker proof:
+  [GitHub Actions run 31128786161](https://github.com/Dicklesworthstone/eidetic_engine_cli/actions/runs/31128786161).
 
 ## [0.13.0] - 2026-07-30
 
