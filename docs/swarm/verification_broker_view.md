@@ -86,8 +86,8 @@ Run broker lookup before spending a fresh RCH slot on common closeout checks:
    first when available; otherwise run the narrowest RCH command that can prove
    the bead.
 
-Suggested commands must prefer reuse or coordination before RCH. The broker does
-not override Beads, BV, Agent Mail, Git reservations, or RCH admission policy,
+Suggested commands must prefer reuse or coordination before RCH. The broker
+does not override Beads, BV, Agent Mail, Git reservations, or RCH admission policy,
 and broker lookup itself does not run Cargo.
 
 ## Command Examples
