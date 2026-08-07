@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.mesh.import_ledger.v1.json",
+  "title": "ee.mesh.import_ledger.v1",
+  "description": "Read-only, redaction-safe inspection of receiver-local mesh replay chain and admission decisions. Raw transported event JSON and body-cache references are deliberately omitted.",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "workspaceId",
+    "eventCount",
+    "events",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.mesh.import_ledger.v1"
+    },
+    "command": {
+      "type": "string",
+      "const": "mesh ledger"
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "eventCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "events": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/entry" }
+    },
+    "degraded": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/degradation" }
+    }
+  },
+  "$defs": {
+    "entry": {
+      "type": "object",
+      "required": [
+        "eventId",
+        "originNodeId",
+        "originWorkspaceId",
+        "producerPeerId",
+        "seq",
+        "prevEventHash",
+        "eventHash",
+        "eventKind",
+        "logicalMemoryId",
+        "contentHash",
+        "materialLane",
+        "redactionClass",
+        "trustLane",
+        "importDecision",
+        "localMemoryId",
+        "policyFailureSurface",
+        "policyDecision",
+        "importedAt"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "eventId": { "type": "string", "minLength": 1 },
+        "originNodeId": { "type": "string", "minLength": 1 },
+        "originWorkspaceId": { "type": "string", "minLength": 1 },
+        "producerPeerId": { "type": ["string", "null"] },
+        "seq": { "type": "integer", "minimum": 0 },
+        "prevEventHash": { "type": ["string", "null"] },
+        "eventHash": { "type": "string", "minLength": 1 },
+        "eventKind": { "type": "string", "minLength": 1 },
+        "logicalMemoryId": { "type": "string", "minLength": 1 },
+        "contentHash": { "type": "string", "minLength": 1 },
+        "materialLane": {
+          "type": "string",
+          "enum": [
+            "metadata",
+            "body",
+            "embedding",
+            "graphLink",
+            "revisionNotice",
+            "curationSignal"
+          ]
+        },
+        "redactionClass": { "type": "string", "minLength": 1 },
+        "trustLane": {
+          "type": "string",
+          "enum": [
+            "localHuman",
+            "peerHumanViaPeer",
+            "peerAgent",
+            "peerDerived",
+            "untrusted"
+          ]
+        },
+        "importDecision": {
+          "type": "string",
+          "enum": ["allow", "deny", "quarantine", "reject"]
+        },
+        "localMemoryId": { "type": ["string", "null"] },
+        "policyFailureSurface": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "ee.mesh.policy_failure_surface.v1.json" }
+          ]
+        },
+        "policyDecision": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "required": ["schema", "direction", "action", "reason"],
+              "properties": {
+                "schema": {
+                  "type": "string",
+                  "const": "ee.mesh.policy_decision.v1"
+                },
+                "direction": { "type": "string", "const": "inbound" },
+                "action": {
+                  "type": "string",
+                  "enum": ["allow", "deny", "quarantine", "reject"]
+                },
+                "reason": { "type": "string", "minLength": 1 }
+              }
+            }
+          ]
+        },
+        "importedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "repair": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

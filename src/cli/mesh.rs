@@ -47,9 +47,9 @@ use crate::mesh::foreground_cli::{
     MESH_CLI_EXPORT_SCHEMA_V1, MESH_CLI_IMPORT_SCHEMA_V1, MESH_CLI_SYNC_SCHEMA_V1,
     MESH_EXPORT_ARTIFACT_SCHEMA_V1, MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE, MeshCliDegradation,
     MeshCliExportReport, MeshCliImportReport, MeshCliPeersReport, MeshCliStatusReport,
-    MeshCliSyncReport, MeshExportArtifact, MeshForegroundSnapshot, MeshStorageCounts,
-    MeshSyncSupervisorOptions, MeshSyncSupervisorReport, apply_outbound_export_policy,
-    foreground_degradations, run_mesh_sync_supervisor_supervised,
+    MeshCliSyncReport, MeshExportArtifact, MeshForegroundSnapshot, MeshImportLedgerReport,
+    MeshStorageCounts, MeshSyncSupervisorOptions, MeshSyncSupervisorReport,
+    apply_outbound_export_policy, foreground_degradations, run_mesh_sync_supervisor_supervised,
 };
 use crate::mesh::hello_responder::HelloResponderStatusReport;
 use crate::mesh::peer::{
@@ -156,6 +156,8 @@ pub enum MeshCommand {
     Peer(MeshPeerArgs),
     /// Report local mesh posture, cache counts, and repair commands.
     Status(MeshStatusArgs),
+    /// Inspect receiver-local import decisions without printing event bodies.
+    Ledger(MeshLedgerArgs),
     /// Immediately contain mesh activity without deleting local truth.
     Disable(MeshDisableArgs),
     /// Re-enable mesh after explicit containment review.
@@ -670,6 +672,14 @@ pub struct MeshStatusArgs {
     pub database: Option<PathBuf>,
 }
 
+/// Arguments for `ee mesh ledger`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct MeshLedgerArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
 /// Arguments for `ee mesh auto-enroll`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct MeshAutoEnrollArgs {
@@ -854,6 +864,7 @@ where
         MeshCommand::Peers(args) => handle_mesh_peers(cli, args, stdout, stderr),
         MeshCommand::Peer(args) => handle_mesh_peer(cli, args, stdout, stderr),
         MeshCommand::Status(args) => handle_mesh_status(cli, args, stdout, stderr),
+        MeshCommand::Ledger(args) => handle_mesh_ledger(cli, args, stdout, stderr),
         MeshCommand::Disable(args) => handle_mesh_disable(cli, args, stdout, stderr),
         MeshCommand::Reenable(args) => handle_mesh_reenable(cli, args, stdout, stderr),
         MeshCommand::AutoEnroll(args) => handle_mesh_auto_enroll(cli, args, stdout, stderr),
@@ -2482,6 +2493,38 @@ where
         return write_mesh_status_json_with_autodiscovery(stdout, &report, &autodiscovery);
     }
     write_mesh_report(cli, &report, &render_mesh_status_human(&report), stdout)
+}
+
+fn handle_mesh_ledger<W, E>(
+    cli: &Cli,
+    args: &MeshLedgerArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let snapshot = match build_snapshot(cli, args.database.as_deref()) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let report = match snapshot.import_ledger_report() {
+        Ok(report) => report,
+        Err(error) => {
+            let error = DomainError::Storage {
+                message: format!(
+                    "Failed to decode a stored mesh import-ledger policy decision: {error}"
+                ),
+                repair: Some(
+                    "Run `ee doctor --json` and inspect the affected mesh import-ledger row."
+                        .to_owned(),
+                ),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    write_mesh_report(cli, &report, &render_mesh_ledger_human(&report), stdout)
 }
 
 fn handle_mesh_disable<W, E>(
@@ -6071,6 +6114,26 @@ fn render_mesh_peers_human(report: &MeshCliPeersReport) -> String {
     output
 }
 
+fn render_mesh_ledger_human(report: &MeshImportLedgerReport) -> String {
+    let mut output = format!(
+        "Mesh import ledger\n  Workspace ID: {}\n  Events: {}\n",
+        report.workspace_id, report.event_count,
+    );
+    for event in &report.events {
+        output.push_str(&format!(
+            "    - {} seq={} lane={} decision={} origin={}/{}\n",
+            event.event_id,
+            event.seq,
+            event.material_lane,
+            event.import_decision,
+            event.origin_node_id,
+            event.origin_workspace_id,
+        ));
+    }
+    append_degradations(&mut output, &report.degraded);
+    output
+}
+
 fn render_mesh_peer_command_human(report: &MeshPeerCommandReport) -> String {
     let mut output = format!(
         "Mesh peer: {command}\n  Success: {success}\n  Message: {message}\n",
@@ -6185,6 +6248,24 @@ mod tests {
         TailscalePeerEeCapability, TailscalePeerReport, TailscaleProbeMethod,
     };
     use crate::mesh::tailscale_autodiscovery::TailscaleAutodiscoveryPeer;
+
+    #[test]
+    fn mesh_ledger_command_parses_as_read_only_inspection_leaf() {
+        let cli = Cli::try_parse_from([
+            "ee",
+            "mesh",
+            "ledger",
+            "--database",
+            "/tmp/mesh-ledger.db",
+            "--json",
+        ])
+        .expect("parse mesh ledger command");
+        let Some(crate::cli::Command::Mesh(MeshCommand::Ledger(args))) = cli.command else {
+            panic!("mesh ledger must parse to its dedicated leaf");
+        };
+        assert_eq!(args.database, Some(PathBuf::from("/tmp/mesh-ledger.db")));
+        assert!(cli.json);
+    }
 
     fn mesh_approval_bearer_canary() -> String {
         format!(
@@ -8118,6 +8199,213 @@ max_bytes = 0
         assert!(
             index_jobs.is_empty(),
             "body lane is denied; nothing is admitted to local truth"
+        );
+    }
+
+    #[test]
+    fn export_import_policy_matrix_records_every_receiver_local_lane_verdict() {
+        let connection = DbConnection::open_memory().expect("open memory db");
+        connection.migrate().expect("migrate db");
+        connection
+            .insert_workspace(
+                REPLAY_WORKSPACE_ID,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-mesh-export-import-matrix".to_owned(),
+                    name: Some("mesh export import matrix".to_owned()),
+                },
+            )
+            .expect("insert workspace");
+        enroll_replay_test_peer(&connection, REPLAY_WORKSPACE_ID);
+
+        let lanes = [
+            ("metadata", "metadataOnly", '1'),
+            ("body", "body", '2'),
+            ("embedding", "embedding", '3'),
+            ("graphLink", "metadataOnly", '4'),
+            ("revisionNotice", "metadataOnly", '5'),
+            ("curationSignal", "metadataOnly", '6'),
+        ];
+        let mut events = Vec::new();
+        for (index, (lane, redaction, hash_character)) in lanes.iter().enumerate() {
+            let mut event = mesh_import_test_event();
+            reseal_mesh_test_event(&mut event, |object| {
+                object.insert("seq".to_owned(), json!((index + 1) as u64));
+                object.insert("materialLane".to_owned(), json!(lane));
+                object.insert("redactionClass".to_owned(), json!(redaction));
+                object.insert(
+                    "logicalMemoryId".to_owned(),
+                    json!(format!("mem_mesh_matrix_{index}")),
+                );
+                object.insert(
+                    "contentHash".to_owned(),
+                    json!(hash_for_test(*hash_character)),
+                );
+            });
+            events.push(event);
+        }
+
+        let sender_config = crate::config::ConfigFile::parse(
+            r#"
+[[mesh.peer_policies]]
+policy_id = "pol_full_export_matrix"
+workspace_id = "wsp_remote00000000000000000001"
+peer_id = "peer_mesh_replay_counts"
+origin_workspace_ids = ["wsp_remote00000000000000000001"]
+trust_lane = "peerAgent"
+import_trust_class = "agent_validated"
+default_action = "deny"
+
+[mesh.peer_policies.allowed_lanes]
+metadata = "allow"
+body = "allow"
+embedding = "allow"
+graph_link = "allow"
+revision_notice = "allow"
+curation_signal = "allow"
+
+[mesh.peer_policies.redaction]
+metadata = "share"
+preview = "share"
+body = "share"
+embedding = "share"
+
+[mesh.peer_policies.body_fetch]
+allowed = true
+requires_consent = false
+max_bytes = 1048576
+"#,
+        )
+        .expect("full sender export policy parses");
+        let sender_registry =
+            crate::mesh::policy::MeshPeerPolicyRegistry::from_config(&sender_config);
+        let exported = apply_outbound_export_policy(
+            events,
+            &sender_registry,
+            "wsp_remote00000000000000000001",
+            "peer_mesh_replay_counts",
+        );
+        assert_eq!(exported.events.len(), lanes.len());
+        assert!(
+            exported
+                .decisions
+                .iter()
+                .all(|decision| { decision.action == "allow" && !decision.event_dropped })
+        );
+
+        let mut artifact = mesh_export_artifact_for_import_counts();
+        artifact.events = exported.events;
+        let (bindings, registry) = admitting_replay_authority();
+        let counts = import_mesh_artifact_into_connection(
+            &connection,
+            REPLAY_WORKSPACE_ID,
+            &artifact,
+            &bindings,
+            &registry,
+        )
+        .expect("import full exported lane matrix");
+        assert_eq!(counts, (0, 1, lanes.len()));
+
+        let ledger = connection
+            .list_mesh_import_ledger_events_for_workspace(REPLAY_WORKSPACE_ID)
+            .expect("list matrix ledger");
+        let actual = ledger
+            .iter()
+            .map(|event| (event.material_lane.as_str(), event.import_decision.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                ("metadata", "allow"),
+                ("body", "deny"),
+                ("embedding", "deny"),
+                ("graphLink", "allow"),
+                ("revisionNotice", "allow"),
+                ("curationSignal", "allow"),
+            ]
+        );
+        assert_eq!(
+            connection
+                .list_search_index_jobs(REPLAY_WORKSPACE_ID, None)
+                .expect("list matrix index jobs")
+                .len(),
+            4,
+            "only receiver-authorized lanes may gain local search side effects"
+        );
+    }
+
+    #[test]
+    fn legacy_file_replay_cannot_smuggle_live_origin_or_local_policy_authority() {
+        let connection = DbConnection::open_memory().expect("open memory db");
+        connection.migrate().expect("migrate db");
+        connection
+            .insert_workspace(
+                REPLAY_WORKSPACE_ID,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-mesh-legacy-authority-confusion".to_owned(),
+                    name: Some("mesh legacy authority confusion".to_owned()),
+                },
+            )
+            .expect("insert workspace");
+
+        let mut artifact = mesh_export_artifact_for_import_counts();
+        let attested_event_count = artifact.events.len() as u32;
+        let event = &mut artifact.events[0];
+        event.import_decision = "allow".to_owned();
+        event.local_memory_id = Some("mem_sender_chosen_local_truth".to_owned());
+        event.body_cache_key = Some("sender-chosen-body-cache".to_owned());
+        event.policy_attestation = Some(crate::policy::MeshExportPolicyAttestation::allowed(
+            attested_event_count,
+        ));
+        event.policy_decision_json = Some(
+            json!({
+                "schema": "ee.mesh.policy_decision.v1",
+                "direction": "inbound",
+                "action": "allow",
+                "reason": "sender_claimed_live_origin_authority",
+                "trustLane": "localHuman",
+            })
+            .to_string(),
+        );
+
+        let empty_registry = crate::mesh::policy::MeshPeerPolicyRegistry::from_config(
+            &crate::config::ConfigFile::default(),
+        );
+        import_mesh_artifact_into_connection(
+            &connection,
+            REPLAY_WORKSPACE_ID,
+            &artifact,
+            &[],
+            &empty_registry,
+        )
+        .expect("legacy replay records a local denial");
+
+        let ledger = connection
+            .list_mesh_import_ledger_events_for_workspace(REPLAY_WORKSPACE_ID)
+            .expect("list authority-confusion ledger");
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].import_decision, "deny");
+        assert!(ledger[0].local_memory_id.is_none());
+        assert!(ledger[0].body_cache_key.is_none());
+        assert!(
+            ledger[0]
+                .policy_decision_json
+                .as_deref()
+                .is_some_and(|decision| !decision.contains("sender_claimed_live_origin_authority"))
+        );
+        let canonical_event: serde_json::Value =
+            serde_json::from_str(&ledger[0].event_json).expect("parse retained file replay event");
+        assert_eq!(
+            canonical_event["schema"],
+            crate::models::MESH_EVENT_SCHEMA_V1
+        );
+        assert!(canonical_event.get("signature").is_none());
+        assert!(canonical_event.get("signingKeyId").is_none());
+        assert!(
+            connection
+                .list_search_index_jobs(REPLAY_WORKSPACE_ID, None)
+                .expect("list authority-confusion index jobs")
+                .is_empty(),
+            "unsigned file replay cannot create live-origin local-truth effects"
         );
     }
 

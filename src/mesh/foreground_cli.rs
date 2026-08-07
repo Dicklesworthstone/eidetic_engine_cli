@@ -47,6 +47,7 @@ pub const MESH_CLI_IMPORT_SCHEMA_V1: &str = "ee.mesh.cli.import.v1";
 pub const MESH_CLI_SYNC_SCHEMA_V1: &str = "ee.mesh.cli.sync.v1";
 pub const MESH_EXPORT_ARTIFACT_SCHEMA_V1: &str = "ee.mesh.foreground_export.v1";
 pub const MESH_AUTO_STATUS_SCHEMA_V1: &str = "ee.mesh.auto_status.v1";
+pub const MESH_IMPORT_LEDGER_SCHEMA_V1: &str = "ee.mesh.import_ledger.v1";
 
 pub const MESH_WORKSPACE_UNINITIALIZED_CODE: &str = "mesh_workspace_uninitialized";
 pub const MESH_DISABLED_POSTURE_CODE: &str = "mesh_disabled";
@@ -1062,6 +1063,81 @@ pub struct MeshCliPeersReport {
     pub degraded: Vec<MeshCliDegradation>,
 }
 
+/// Redaction-safe inspection projection for one locally recorded import.
+///
+/// The raw `event_json` and destination-local body-cache key intentionally do
+/// not cross this surface. Operators get the chain, idempotency, provenance,
+/// and receiver-local policy verdict needed to diagnose admission without
+/// accidentally printing transported body material.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshImportLedgerEntry {
+    pub event_id: String,
+    pub origin_node_id: String,
+    pub origin_workspace_id: String,
+    pub producer_peer_id: Option<String>,
+    pub seq: u64,
+    pub prev_event_hash: Option<String>,
+    pub event_hash: String,
+    pub event_kind: String,
+    pub logical_memory_id: String,
+    pub content_hash: String,
+    pub material_lane: String,
+    pub redaction_class: String,
+    pub trust_lane: String,
+    pub import_decision: String,
+    pub local_memory_id: Option<String>,
+    pub policy_failure_surface: Option<serde_json::Value>,
+    pub policy_decision: Option<serde_json::Value>,
+    pub imported_at: String,
+}
+
+impl TryFrom<&MeshEventRow> for MeshImportLedgerEntry {
+    type Error = serde_json::Error;
+
+    fn try_from(event: &MeshEventRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            event_id: event.event_id.clone(),
+            origin_node_id: event.origin_node_id.clone(),
+            origin_workspace_id: event.origin_workspace_id.clone(),
+            producer_peer_id: event.producer_peer_id.clone(),
+            seq: event.seq,
+            prev_event_hash: event.prev_event_hash.clone(),
+            event_hash: event.event_hash.clone(),
+            event_kind: event.event_kind.clone(),
+            logical_memory_id: event.logical_memory_id.clone(),
+            content_hash: event.content_hash.clone(),
+            material_lane: event.material_lane.clone(),
+            redaction_class: event.redaction_class.clone(),
+            trust_lane: event.trust_lane.clone(),
+            import_decision: event.import_decision.clone(),
+            local_memory_id: event.local_memory_id.clone(),
+            policy_failure_surface: event
+                .policy_failure_surface_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
+            policy_decision: event
+                .policy_decision_json
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
+            imported_at: event.imported_at.clone(),
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshImportLedgerReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub workspace_id: String,
+    pub event_count: usize,
+    pub events: Vec<MeshImportLedgerEntry>,
+    pub degraded: Vec<MeshCliDegradation>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshExportArtifact {
@@ -1722,6 +1798,23 @@ impl MeshForegroundSnapshot {
             cursors: self.cursors.clone(),
             degraded: self.degraded.clone(),
         }
+    }
+
+    /// Build the stable, redaction-safe import-ledger inspection contract.
+    pub fn import_ledger_report(&self) -> Result<MeshImportLedgerReport, serde_json::Error> {
+        let events = self
+            .events
+            .iter()
+            .map(MeshImportLedgerEntry::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(MeshImportLedgerReport {
+            schema: MESH_IMPORT_LEDGER_SCHEMA_V1,
+            command: "mesh ledger",
+            workspace_id: self.workspace_id.clone(),
+            event_count: events.len(),
+            events,
+            degraded: self.degraded.clone(),
+        })
     }
 
     #[must_use]
@@ -2637,7 +2730,7 @@ pub fn foreground_degradations(
 mod tests {
     use super::{
         AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE, AUTO_ENROLLMENT_TAILNET_CHANGED_CODE,
-        MESH_AUTO_STATUS_SCHEMA_V1, MESH_EXPORT_ARTIFACT_SCHEMA_V1,
+        MESH_AUTO_STATUS_SCHEMA_V1, MESH_EXPORT_ARTIFACT_SCHEMA_V1, MESH_IMPORT_LEDGER_SCHEMA_V1,
         MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE, MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE,
         MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE, MESH_WORKSPACE_UNINITIALIZED_CODE,
         MeshAutoStatusSignals, MeshCliDegradation, MeshCursorRow, MeshEventContractError,
@@ -3835,6 +3928,41 @@ max_bytes = 1048576
             events: Vec::new(),
             degraded: Vec::new(),
         }
+    }
+
+    #[test]
+    fn import_ledger_report_exposes_local_verdict_without_event_body() {
+        let mut event = export_event("ledger_secret_body", "metadata", Some("body-cache-secret"));
+        event.policy_decision_json = Some(
+            serde_json::json!({
+                "schema": "ee.mesh.policy_decision.v1",
+                "direction": "inbound",
+                "action": "allow",
+                "reason": "policy_allows_lane",
+            })
+            .to_string(),
+        );
+        let mut snapshot = sample_snapshot(Vec::new());
+        snapshot.events = vec![event];
+
+        let report = snapshot
+            .import_ledger_report()
+            .expect("stored policy JSON should decode");
+        assert_eq!(report.schema, MESH_IMPORT_LEDGER_SCHEMA_V1);
+        assert_eq!(report.event_count, 1);
+        assert_eq!(report.events[0].import_decision, "allow");
+        assert_eq!(
+            report.events[0]
+                .policy_decision
+                .as_ref()
+                .and_then(|value| { value.get("reason").and_then(serde_json::Value::as_str) }),
+            Some("policy_allows_lane")
+        );
+
+        let rendered = serde_json::to_value(&report).expect("serialize ledger report");
+        assert!(rendered["events"][0].get("eventJson").is_none());
+        assert!(rendered["events"][0].get("bodyCacheKey").is_none());
+        assert!(!rendered.to_string().contains("body-cache-secret"));
     }
 
     fn sample_peer(peer_id: &str, enabled: bool) -> MeshPeerRow {

@@ -1564,6 +1564,10 @@ impl EffectManifest {
                 "Inspect mesh hello-responder status",
             ),
             CommandEffect::read_only_db("mesh init", "Preview mesh initialization state"),
+            CommandEffect::read_only_db(
+                "mesh ledger",
+                "Inspect receiver-local mesh import decisions",
+            ),
             CommandEffect::read_only_db("mesh peer list", "List mesh peers"),
             CommandEffect::read_only_db("mesh peer show", "Show one mesh peer"),
             CommandEffect::read_only_db(

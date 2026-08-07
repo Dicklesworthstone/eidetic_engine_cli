@@ -10983,6 +10983,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: mesh_hello_schema_definition,
         },
         SchemaEntry {
+            id: "ee.mesh.import_ledger.v1",
+            version: "1",
+            description: "Redaction-safe receiver-local mesh import chain and policy-decision ledger.",
+            category: "mesh",
+            definition: mesh_import_ledger_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.mesh.lane_grant_preview.v2",
             version: "2",
             description: "Canonical authenticated lane-grant snapshot emitted by `ee mesh preview-grant <peer-id> --lane <lane>`.",
@@ -11484,6 +11491,13 @@ pub const OUTPUT_TRUNCATION_REGISTRY: &[governor::TruncationPoint] = &[
         array_path: &["entries"],
         per_section_items: false,
         position_key_field: "entryId",
+    },
+    governor::TruncationPoint {
+        schema_id: "ee.mesh.import_ledger.v1",
+        command: "mesh ledger",
+        array_path: &["events"],
+        per_section_items: false,
+        position_key_field: "eventId",
     },
     governor::TruncationPoint {
         schema_id: "",
@@ -12401,6 +12415,10 @@ fn mesh_event_schema_definition() -> String {
 
 fn mesh_grant_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.mesh.grant.v1.json").to_string()
+}
+
+fn mesh_import_ledger_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.mesh.import_ledger.v1.json").to_string()
 }
 
 fn mesh_hello_responder_status_schema_definition() -> String {

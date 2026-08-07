@@ -462,6 +462,9 @@ mod mesh_disable_revoke_schemas;
 #[path = "contracts/mesh_auto_status_schema.rs"]
 mod mesh_auto_status_schema;
 
+#[path = "contracts/mesh_import_ledger_schema.rs"]
+mod mesh_import_ledger_schema;
+
 #[path = "contracts/closeout_audit_schema.rs"]
 mod closeout_audit_schema;
 

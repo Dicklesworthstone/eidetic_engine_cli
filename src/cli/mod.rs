@@ -60662,6 +60662,7 @@ impl NormalizedInvocation {
                         }
                     },
                     mesh::MeshCommand::Status(_) => "mesh status".to_string(),
+                    mesh::MeshCommand::Ledger(_) => "mesh ledger".to_string(),
                     mesh::MeshCommand::Disable(_) => "mesh disable".to_string(),
                     mesh::MeshCommand::Reenable(_) => "mesh reenable".to_string(),
                     mesh::MeshCommand::Export(_) => "mesh export".to_string(),
