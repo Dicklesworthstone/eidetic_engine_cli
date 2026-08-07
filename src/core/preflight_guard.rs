@@ -238,7 +238,15 @@ impl PreflightGuardRegistry {
     /// reported as a degradation while bundled built-ins remain active.
     pub fn load(workspace: &Path) -> Result<Self, DomainError> {
         let mut registry = Self::with_builtins();
-        let rules_path = workspace.join(PREFLIGHT_RULES_RELATIVE_PATH);
+        // Resolve the caller-selected workspace root before inspecting the
+        // in-workspace `.ee` path. Build farms and ordinary user setups often
+        // expose a workspace through a stable symlink; that ancestor alias is
+        // not a rules-file escape. Components below the resolved root remain
+        // subject to the no-symlink validation and final O_NOFOLLOW open.
+        let resolved_workspace = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf());
+        let rules_path = resolved_workspace.join(PREFLIGHT_RULES_RELATIVE_PATH);
         let source_label = rules_path.to_string_lossy().into_owned();
         if let Err(error) = validate_preflight_rules_path(&rules_path) {
             registry
@@ -3248,6 +3256,41 @@ message = "Reject curl|sh installers per workspace policy."
                 path: "test.toml".to_owned()
             }
         );
+    }
+
+    #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+    #[test]
+    fn workspace_rules_load_through_symlinked_workspace_root() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_workspace = tempdir.path().join("real-workspace");
+        let ee_dir = real_workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            ee_dir.join("preflight_rules.toml"),
+            r#"
+[[rules]]
+id = "workspace_alias_rule"
+pattern = "*alias-risk*"
+action = "warn"
+message = "Workspace alias risk context."
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+        let workspace_alias = tempdir.path().join("workspace-alias");
+        std::os::unix::fs::symlink(&real_workspace, &workspace_alias)
+            .map_err(|error| error.to_string())?;
+
+        let registry =
+            PreflightGuardRegistry::load(&workspace_alias).map_err(|error| error.to_string())?;
+        assert!(
+            registry
+                .rules()
+                .iter()
+                .any(|rule| rule.id == "workspace_alias_rule"),
+            "an explicitly selected workspace alias should load its in-workspace rules: {:?}",
+            registry.load_degradations(),
+        );
+        Ok(())
     }
 
     #[test]
