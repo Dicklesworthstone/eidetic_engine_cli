@@ -47,264 +47,144 @@ fn bypass_token_authority_is_absent_from_the_compiled_core_surface() {
 // the compiled product.
 #[cfg(any())]
 mod historical {
-// These contract-style tests fail fast on setup drift so assertion failures keep the token lifecycle signal readable.
+    // These contract-style tests fail fast on setup drift so assertion failures keep the token lifecycle signal readable.
 
-use std::collections::HashSet;
+    use std::collections::HashSet;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use chrono::{Duration, Utc};
-use ee::core::preflight_guard::{
-    GuardAction, GuardMatch, MatchResolution, PreflightMemoryMatch, RuleSource,
-};
-use ee::core::preflight_token::{
-    BYPASS_RATE_LIMIT_EXCEEDED, BYPASS_TOKEN_EXPIRED, BYPASS_TOKEN_REVOKED, DEFAULT_TTL_MINUTES,
-    IssueBypassTokenOptions, RecordPreflightBypassAuditOptions, RevokeBypassTokenOptions,
-    VerifyBypassTokenOptions, generate_bypass_token, issue_bypass_token, list_bypass_tokens,
-    record_preflight_bypass_audit, revoke_bypass_token, token_hash, verify_bypass_token,
-};
-use ee::db::{CreateWorkspaceInput, DbConnection, audit_actions};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use chrono::{Duration, Utc};
+    use ee::core::preflight_guard::{
+        GuardAction, GuardMatch, MatchResolution, PreflightMemoryMatch, RuleSource,
+    };
+    use ee::core::preflight_token::{
+        BYPASS_RATE_LIMIT_EXCEEDED, BYPASS_TOKEN_EXPIRED, BYPASS_TOKEN_REVOKED,
+        DEFAULT_TTL_MINUTES, IssueBypassTokenOptions, RecordPreflightBypassAuditOptions,
+        RevokeBypassTokenOptions, VerifyBypassTokenOptions, generate_bypass_token,
+        issue_bypass_token, list_bypass_tokens, record_preflight_bypass_audit, revoke_bypass_token,
+        token_hash, verify_bypass_token,
+    };
+    use ee::db::{CreateWorkspaceInput, DbConnection, audit_actions};
 
-const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
-const APPROVED_COMMAND: &str = "rm -rf /tmp/work";
-const APPROVED_RULE_ID: &str = "builtin:rm_rf_tmp";
+    const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
+    const APPROVED_COMMAND: &str = "rm -rf /tmp/work";
+    const APPROVED_RULE_ID: &str = "builtin:rm_rf_tmp";
 
-fn test_connection() -> DbConnection {
-    let connection = DbConnection::open_memory().expect("memory database opens");
-    connection.migrate().expect("schema migration succeeds");
-    connection
-        .insert_workspace(
-            WORKSPACE_ID,
-            &CreateWorkspaceInput {
-                path: "/tmp/preflight-token-test".to_owned(),
-                name: Some("preflight-token-test".to_owned()),
+    fn test_connection() -> DbConnection {
+        let connection = DbConnection::open_memory().expect("memory database opens");
+        connection.migrate().expect("schema migration succeeds");
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: "/tmp/preflight-token-test".to_owned(),
+                    name: Some("preflight-token-test".to_owned()),
+                },
+            )
+            .expect("workspace inserts");
+        connection
+    }
+
+    fn issue_options(reason: &str, max_uses: u32) -> IssueBypassTokenOptions {
+        IssueBypassTokenOptions {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            issuer_workspace: "/tmp/preflight-token-test".to_owned(),
+            command: APPROVED_COMMAND.to_owned(),
+            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
+            reason: reason.to_owned(),
+            ttl_minutes: Some(DEFAULT_TTL_MINUTES),
+            max_uses: Some(max_uses),
+            actor: Some("test-agent".to_owned()),
+            now: Some(Utc::now()),
+        }
+    }
+
+    #[test]
+    fn generated_tokens_are_256_bit_base64url_values() {
+        let mut seen = HashSet::new();
+        for _ in 0..10_000 {
+            let token = generate_bypass_token().expect("token generation succeeds");
+            assert!(!token.contains('='));
+            assert!(
+                token
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+            );
+            let bytes = URL_SAFE_NO_PAD
+                .decode(token.as_bytes())
+                .expect("token decodes as base64url-no-pad");
+            assert_eq!(bytes.len(), 32);
+            assert!(
+                seen.insert(token),
+                "token collision in 10k generated samples"
+            );
+        }
+    }
+
+    #[test]
+    fn issued_token_is_stored_as_hash_metadata_and_audited() {
+        let connection = test_connection();
+        let report = issue_bypass_token(&connection, &issue_options("approve one command", 1))
+            .expect("token issues");
+        let hash = token_hash(&report.token);
+        let stored = connection
+            .get_preflight_bypass_token(&hash)
+            .expect("token lookup succeeds")
+            .expect("token row exists");
+
+        assert_eq!(stored.token_hash, hash);
+        assert_ne!(stored.token_hash, report.token);
+        assert_eq!(stored.used_count, 0);
+        assert_eq!(stored.max_uses, 1);
+        assert_eq!(stored.reason, "approve one command");
+        assert_eq!(stored.command, APPROVED_COMMAND);
+        assert_eq!(stored.rule_ids_json, r#"["builtin:rm_rf_tmp"]"#);
+        assert_eq!(stored.command_hash, report.command_hash);
+        assert_eq!(report.command, APPROVED_COMMAND);
+        assert_eq!(report.rule_ids, vec![APPROVED_RULE_ID.to_owned()]);
+        assert!(stored.revoked_at.is_none());
+
+        let listed = list_bypass_tokens(&connection, WORKSPACE_ID).expect("tokens list");
+        assert_eq!(listed.tokens.len(), 1);
+        assert_eq!(listed.tokens[0].token_hash_prefix, report.token_hash_prefix);
+        assert!(
+            !serde_json::to_string(&listed)
+                .unwrap()
+                .contains(&report.token)
+        );
+
+        let audits = connection
+            .list_audit_by_action(audit_actions::PREFLIGHT_BYPASS_TOKEN_ISSUE, Some(10))
+            .expect("issue audit is listable");
+        assert_eq!(audits.len(), 1);
+        assert_eq!(
+            audits[0].target_id.as_deref(),
+            Some(report.token_hash_prefix.as_str())
+        );
+    }
+
+    #[test]
+    fn one_shot_token_allows_first_use_and_rejects_second_use() {
+        let connection = test_connection();
+        let issued =
+            issue_bypass_token(&connection, &issue_options("one shot", 1)).expect("token issues");
+        let use_report = verify_bypass_token(
+            &connection,
+            &VerifyBypassTokenOptions {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                token: issued.token.clone(),
+                command: APPROVED_COMMAND.to_owned(),
+                rule_ids: vec![APPROVED_RULE_ID.to_owned()],
+                actor: Some("test-agent".to_owned()),
+                now: Some(Utc::now()),
             },
         )
-        .expect("workspace inserts");
-    connection
-}
+        .expect("first use succeeds");
 
-fn issue_options(reason: &str, max_uses: u32) -> IssueBypassTokenOptions {
-    IssueBypassTokenOptions {
-        workspace_id: WORKSPACE_ID.to_owned(),
-        issuer_workspace: "/tmp/preflight-token-test".to_owned(),
-        command: APPROVED_COMMAND.to_owned(),
-        rule_ids: vec![APPROVED_RULE_ID.to_owned()],
-        reason: reason.to_owned(),
-        ttl_minutes: Some(DEFAULT_TTL_MINUTES),
-        max_uses: Some(max_uses),
-        actor: Some("test-agent".to_owned()),
-        now: Some(Utc::now()),
-    }
-}
+        assert_eq!(use_report.used_count, 1);
+        assert_eq!(use_report.remaining_uses, 0);
 
-#[test]
-fn generated_tokens_are_256_bit_base64url_values() {
-    let mut seen = HashSet::new();
-    for _ in 0..10_000 {
-        let token = generate_bypass_token().expect("token generation succeeds");
-        assert!(!token.contains('='));
-        assert!(
-            token
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
-        );
-        let bytes = URL_SAFE_NO_PAD
-            .decode(token.as_bytes())
-            .expect("token decodes as base64url-no-pad");
-        assert_eq!(bytes.len(), 32);
-        assert!(
-            seen.insert(token),
-            "token collision in 10k generated samples"
-        );
-    }
-}
-
-#[test]
-fn issued_token_is_stored_as_hash_metadata_and_audited() {
-    let connection = test_connection();
-    let report = issue_bypass_token(&connection, &issue_options("approve one command", 1))
-        .expect("token issues");
-    let hash = token_hash(&report.token);
-    let stored = connection
-        .get_preflight_bypass_token(&hash)
-        .expect("token lookup succeeds")
-        .expect("token row exists");
-
-    assert_eq!(stored.token_hash, hash);
-    assert_ne!(stored.token_hash, report.token);
-    assert_eq!(stored.used_count, 0);
-    assert_eq!(stored.max_uses, 1);
-    assert_eq!(stored.reason, "approve one command");
-    assert_eq!(stored.command, APPROVED_COMMAND);
-    assert_eq!(stored.rule_ids_json, r#"["builtin:rm_rf_tmp"]"#);
-    assert_eq!(stored.command_hash, report.command_hash);
-    assert_eq!(report.command, APPROVED_COMMAND);
-    assert_eq!(report.rule_ids, vec![APPROVED_RULE_ID.to_owned()]);
-    assert!(stored.revoked_at.is_none());
-
-    let listed = list_bypass_tokens(&connection, WORKSPACE_ID).expect("tokens list");
-    assert_eq!(listed.tokens.len(), 1);
-    assert_eq!(listed.tokens[0].token_hash_prefix, report.token_hash_prefix);
-    assert!(
-        !serde_json::to_string(&listed)
-            .unwrap()
-            .contains(&report.token)
-    );
-
-    let audits = connection
-        .list_audit_by_action(audit_actions::PREFLIGHT_BYPASS_TOKEN_ISSUE, Some(10))
-        .expect("issue audit is listable");
-    assert_eq!(audits.len(), 1);
-    assert_eq!(
-        audits[0].target_id.as_deref(),
-        Some(report.token_hash_prefix.as_str())
-    );
-}
-
-#[test]
-fn one_shot_token_allows_first_use_and_rejects_second_use() {
-    let connection = test_connection();
-    let issued =
-        issue_bypass_token(&connection, &issue_options("one shot", 1)).expect("token issues");
-    let use_report = verify_bypass_token(
-        &connection,
-        &VerifyBypassTokenOptions {
-            workspace_id: WORKSPACE_ID.to_owned(),
-            token: issued.token.clone(),
-            command: APPROVED_COMMAND.to_owned(),
-            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
-            actor: Some("test-agent".to_owned()),
-            now: Some(Utc::now()),
-        },
-    )
-    .expect("first use succeeds");
-
-    assert_eq!(use_report.used_count, 1);
-    assert_eq!(use_report.remaining_uses, 0);
-
-    let second_use = verify_bypass_token(
-        &connection,
-        &VerifyBypassTokenOptions {
-            workspace_id: WORKSPACE_ID.to_owned(),
-            token: issued.token,
-            command: APPROVED_COMMAND.to_owned(),
-            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
-            actor: Some("test-agent".to_owned()),
-            now: Some(Utc::now()),
-        },
-    )
-    .expect_err("second use is rejected");
-    assert_eq!(second_use.code, "bypass_token_exhausted");
-}
-
-#[test]
-fn token_scope_mismatch_fails_closed_without_consuming_use() {
-    let connection = test_connection();
-    let issued =
-        issue_bypass_token(&connection, &issue_options("scoped command", 1)).expect("token issues");
-
-    let command_mismatch = verify_bypass_token(
-        &connection,
-        &VerifyBypassTokenOptions {
-            workspace_id: WORKSPACE_ID.to_owned(),
-            token: issued.token.clone(),
-            command: "rm -rf /tmp/other".to_owned(),
-            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
-            actor: Some("test-agent".to_owned()),
-            now: Some(Utc::now()),
-        },
-    )
-    .expect_err("different command is rejected");
-    assert_eq!(command_mismatch.code, "bypass_token_invalid");
-
-    let rule_mismatch = verify_bypass_token(
-        &connection,
-        &VerifyBypassTokenOptions {
-            workspace_id: WORKSPACE_ID.to_owned(),
-            token: issued.token.clone(),
-            command: APPROVED_COMMAND.to_owned(),
-            rule_ids: vec!["builtin:rm_rf_root".to_owned()],
-            actor: Some("test-agent".to_owned()),
-            now: Some(Utc::now()),
-        },
-    )
-    .expect_err("different rule set is rejected");
-    assert_eq!(rule_mismatch.code, "bypass_token_invalid");
-
-    let use_report = verify_bypass_token(
-        &connection,
-        &VerifyBypassTokenOptions {
-            workspace_id: WORKSPACE_ID.to_owned(),
-            token: issued.token,
-            command: APPROVED_COMMAND.to_owned(),
-            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
-            actor: Some("test-agent".to_owned()),
-            now: Some(Utc::now()),
-        },
-    )
-    .expect("approved command and rule set still succeeds");
-    assert_eq!(use_report.used_count, 1);
-    assert_eq!(use_report.remaining_uses, 0);
-}
-
-#[test]
-fn expiry_revocation_and_rate_limit_are_enforced() {
-    let connection = test_connection();
-    let now = Utc::now();
-
-    let expired = issue_bypass_token(
-        &connection,
-        &IssueBypassTokenOptions {
-            now: Some(now - Duration::minutes(20)),
-            ..issue_options("expired", 1)
-        },
-    )
-    .expect("expired fixture token issues");
-    let expired_error = verify_bypass_token(
-        &connection,
-        &VerifyBypassTokenOptions {
-            workspace_id: WORKSPACE_ID.to_owned(),
-            token: expired.token,
-            command: APPROVED_COMMAND.to_owned(),
-            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
-            actor: Some("test-agent".to_owned()),
-            now: Some(now),
-        },
-    )
-    .expect_err("expired token is rejected");
-    assert_eq!(expired_error.code, BYPASS_TOKEN_EXPIRED);
-
-    let revoked = issue_bypass_token(&connection, &issue_options("revoke", 1))
-        .expect("revocation fixture token issues");
-    revoke_bypass_token(
-        &connection,
-        &RevokeBypassTokenOptions {
-            workspace_id: WORKSPACE_ID.to_owned(),
-            token: revoked.token.clone(),
-            actor: Some("test-agent".to_owned()),
-            now: Some(Utc::now()),
-        },
-    )
-    .expect("token revokes");
-    let revoked_error = verify_bypass_token(
-        &connection,
-        &VerifyBypassTokenOptions {
-            workspace_id: WORKSPACE_ID.to_owned(),
-            token: revoked.token,
-            command: APPROVED_COMMAND.to_owned(),
-            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
-            actor: Some("test-agent".to_owned()),
-            now: Some(Utc::now()),
-        },
-    )
-    .expect_err("revoked token is rejected");
-    assert_eq!(revoked_error.code, BYPASS_TOKEN_REVOKED);
-
-    for index in 0..5 {
-        let issued = issue_bypass_token(&connection, &issue_options(&format!("rate {index}"), 1))
-            .expect("rate fixture token issues");
-        verify_bypass_token(
+        let second_use = verify_bypass_token(
             &connection,
             &VerifyBypassTokenOptions {
                 workspace_id: WORKSPACE_ID.to_owned(),
@@ -315,140 +195,262 @@ fn expiry_revocation_and_rate_limit_are_enforced() {
                 now: Some(Utc::now()),
             },
         )
-        .expect("token use within hourly limit succeeds");
+        .expect_err("second use is rejected");
+        assert_eq!(second_use.code, "bypass_token_exhausted");
     }
 
-    let over_limit = issue_bypass_token(&connection, &issue_options("rate limit", 1))
-        .expect("rate limit fixture token issues");
-    let rate_error = verify_bypass_token(
-        &connection,
-        &VerifyBypassTokenOptions {
-            workspace_id: WORKSPACE_ID.to_owned(),
-            token: over_limit.token,
-            command: APPROVED_COMMAND.to_owned(),
-            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
-            actor: Some("test-agent".to_owned()),
-            now: Some(Utc::now()),
-        },
-    )
-    .expect_err("sixth hourly token use is rejected");
-    assert_eq!(rate_error.code, BYPASS_RATE_LIMIT_EXCEEDED);
-}
+    #[test]
+    fn token_scope_mismatch_fails_closed_without_consuming_use() {
+        let connection = test_connection();
+        let issued = issue_bypass_token(&connection, &issue_options("scoped command", 1))
+            .expect("token issues");
 
-#[test]
-fn final_consume_update_rejects_revoked_and_expired_rows() {
-    let connection = test_connection();
-    let now = Utc::now();
+        let command_mismatch = verify_bypass_token(
+            &connection,
+            &VerifyBypassTokenOptions {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                token: issued.token.clone(),
+                command: "rm -rf /tmp/other".to_owned(),
+                rule_ids: vec![APPROVED_RULE_ID.to_owned()],
+                actor: Some("test-agent".to_owned()),
+                now: Some(Utc::now()),
+            },
+        )
+        .expect_err("different command is rejected");
+        assert_eq!(command_mismatch.code, "bypass_token_invalid");
 
-    let revoked = issue_bypass_token(&connection, &issue_options("revoke before consume", 1))
-        .expect("revoked fixture token issues");
-    let revoked_hash = token_hash(&revoked.token);
-    connection
-        .revoke_preflight_bypass_token(&revoked_hash, &now.to_rfc3339())
-        .expect("fixture token revokes");
-    let consumed_revoked = connection
-        .increment_preflight_bypass_token_use(&revoked_hash, &now.to_rfc3339())
-        .expect("revoked consume check executes");
-    assert!(
-        !consumed_revoked,
-        "revoked bypass tokens must not be consumed by the final update"
-    );
+        let rule_mismatch = verify_bypass_token(
+            &connection,
+            &VerifyBypassTokenOptions {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                token: issued.token.clone(),
+                command: APPROVED_COMMAND.to_owned(),
+                rule_ids: vec!["builtin:rm_rf_root".to_owned()],
+                actor: Some("test-agent".to_owned()),
+                now: Some(Utc::now()),
+            },
+        )
+        .expect_err("different rule set is rejected");
+        assert_eq!(rule_mismatch.code, "bypass_token_invalid");
 
-    let expired = issue_bypass_token(
-        &connection,
-        &IssueBypassTokenOptions {
-            now: Some(now - Duration::minutes(DEFAULT_TTL_MINUTES + 1)),
-            ..issue_options("expire before consume", 1)
-        },
-    )
-    .expect("expired fixture token issues");
-    let expired_hash = token_hash(&expired.token);
-    let consumed_expired = connection
-        .increment_preflight_bypass_token_use(&expired_hash, &now.to_rfc3339())
-        .expect("expired consume check executes");
-    assert!(
-        !consumed_expired,
-        "expired bypass tokens must not be consumed by the final update"
-    );
-}
+        let use_report = verify_bypass_token(
+            &connection,
+            &VerifyBypassTokenOptions {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                token: issued.token,
+                command: APPROVED_COMMAND.to_owned(),
+                rule_ids: vec![APPROVED_RULE_ID.to_owned()],
+                actor: Some("test-agent".to_owned()),
+                now: Some(Utc::now()),
+            },
+        )
+        .expect("approved command and rule set still succeeds");
+        assert_eq!(use_report.used_count, 1);
+        assert_eq!(use_report.remaining_uses, 0);
+    }
 
-#[test]
-fn bypass_audit_records_token_hash_matches_and_blocking_memories() {
-    let connection = test_connection();
-    let issued =
-        issue_bypass_token(&connection, &issue_options("audited bypass", 1)).expect("token issues");
-    let report = record_preflight_bypass_audit(
-        &connection,
-        &RecordPreflightBypassAuditOptions {
-            workspace_id: WORKSPACE_ID.to_owned(),
-            token: issued.token.clone(),
-            actor: Some("test-agent".to_owned()),
-            command: "rm -rf /tmp/work".to_owned(),
-            matches: vec![GuardMatch {
-                rule_id: "builtin:rm_rf_tmp".to_owned(),
-                pattern: "*rm -rf /tmp/*".to_owned(),
-                action: GuardAction::Halt,
-                message: "Destructive recursive delete requires confirmation.".to_owned(),
-                source: RuleSource::Builtin {
-                    name: "rm_rf_tmp".to_owned(),
+    #[test]
+    fn expiry_revocation_and_rate_limit_are_enforced() {
+        let connection = test_connection();
+        let now = Utc::now();
+
+        let expired = issue_bypass_token(
+            &connection,
+            &IssueBypassTokenOptions {
+                now: Some(now - Duration::minutes(20)),
+                ..issue_options("expired", 1)
+            },
+        )
+        .expect("expired fixture token issues");
+        let expired_error = verify_bypass_token(
+            &connection,
+            &VerifyBypassTokenOptions {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                token: expired.token,
+                command: APPROVED_COMMAND.to_owned(),
+                rule_ids: vec![APPROVED_RULE_ID.to_owned()],
+                actor: Some("test-agent".to_owned()),
+                now: Some(now),
+            },
+        )
+        .expect_err("expired token is rejected");
+        assert_eq!(expired_error.code, BYPASS_TOKEN_EXPIRED);
+
+        let revoked = issue_bypass_token(&connection, &issue_options("revoke", 1))
+            .expect("revocation fixture token issues");
+        revoke_bypass_token(
+            &connection,
+            &RevokeBypassTokenOptions {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                token: revoked.token.clone(),
+                actor: Some("test-agent".to_owned()),
+                now: Some(Utc::now()),
+            },
+        )
+        .expect("token revokes");
+        let revoked_error = verify_bypass_token(
+            &connection,
+            &VerifyBypassTokenOptions {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                token: revoked.token,
+                command: APPROVED_COMMAND.to_owned(),
+                rule_ids: vec![APPROVED_RULE_ID.to_owned()],
+                actor: Some("test-agent".to_owned()),
+                now: Some(Utc::now()),
+            },
+        )
+        .expect_err("revoked token is rejected");
+        assert_eq!(revoked_error.code, BYPASS_TOKEN_REVOKED);
+
+        for index in 0..5 {
+            let issued =
+                issue_bypass_token(&connection, &issue_options(&format!("rate {index}"), 1))
+                    .expect("rate fixture token issues");
+            verify_bypass_token(
+                &connection,
+                &VerifyBypassTokenOptions {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    token: issued.token,
+                    command: APPROVED_COMMAND.to_owned(),
+                    rule_ids: vec![APPROVED_RULE_ID.to_owned()],
+                    actor: Some("test-agent".to_owned()),
+                    now: Some(Utc::now()),
                 },
-                resolution: MatchResolution::BypassedWithToken,
-            }],
-            matched_memories: vec![PreflightMemoryMatch {
-                memory_id: "mem_risk000000000000000000001".to_owned(),
-                kind: "risk".to_owned(),
-                content: "Prior rm -rf /tmp/work incident".to_owned(),
-                provenance_uri: Some("cass-session://incident-rm-rf#L1-L3".to_owned()),
-                severity: "high",
-                severity_source: "inferred_from_memory_kind",
-                score: 0.75,
-                matched_terms: vec!["rm".to_owned(), "recursive".to_owned()],
-            }],
-        },
-    )
-    .expect("bypass audit records");
+            )
+            .expect("token use within hourly limit succeeds");
+        }
 
-    assert_eq!(report.token_hash_prefix, issued.token_hash_prefix);
-    assert_eq!(report.command_hash, issued.command_hash);
+        let over_limit = issue_bypass_token(&connection, &issue_options("rate limit", 1))
+            .expect("rate limit fixture token issues");
+        let rate_error = verify_bypass_token(
+            &connection,
+            &VerifyBypassTokenOptions {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                token: over_limit.token,
+                command: APPROVED_COMMAND.to_owned(),
+                rule_ids: vec![APPROVED_RULE_ID.to_owned()],
+                actor: Some("test-agent".to_owned()),
+                now: Some(Utc::now()),
+            },
+        )
+        .expect_err("sixth hourly token use is rejected");
+        assert_eq!(rate_error.code, BYPASS_RATE_LIMIT_EXCEEDED);
+    }
 
-    let audits = connection
-        .list_audit_by_action(audit_actions::PREFLIGHT_BYPASS, Some(10))
-        .expect("bypass audit is listable");
-    assert_eq!(audits.len(), 1);
-    assert_eq!(
-        audits[0].target_id.as_deref(),
-        Some(issued.token_hash_prefix.as_str())
-    );
-    assert_eq!(
-        audits[0].target_type.as_deref(),
-        Some("preflight_bypass_token")
-    );
+    #[test]
+    fn final_consume_update_rejects_revoked_and_expired_rows() {
+        let connection = test_connection();
+        let now = Utc::now();
 
-    let details: serde_json::Value =
-        serde_json::from_str(audits[0].details.as_deref().expect("audit details"))
-            .expect("details are JSON");
-    assert_eq!(details["schema"], "ee.preflight.bypass.v1");
-    assert_eq!(details["token_hash_prefix"], issued.token_hash_prefix);
-    assert_eq!(details["command"], "rm -rf /tmp/work");
-    assert_eq!(details["commandHash"], issued.command_hash);
-    assert_eq!(details["rule_ids"][0], "builtin:rm_rf_tmp");
-    assert_eq!(
-        details["matched_memory_ids"][0],
-        "mem_risk000000000000000000001"
-    );
-    // 547a5b23 restored the guard schema contract: memory matches
-    // serialize camelCase keys through the redacting serializer.
-    assert_eq!(
-        details["matched_memories"][0]["provenanceUri"],
-        "cass-session://incident-rm-rf#L1-L3"
-    );
-    assert!(
-        !audits[0]
-            .details
-            .as_deref()
-            .expect("audit details")
-            .contains(&issued.token),
-        "raw bypass token must not be written to audit details"
-    );
-}
+        let revoked = issue_bypass_token(&connection, &issue_options("revoke before consume", 1))
+            .expect("revoked fixture token issues");
+        let revoked_hash = token_hash(&revoked.token);
+        connection
+            .revoke_preflight_bypass_token(&revoked_hash, &now.to_rfc3339())
+            .expect("fixture token revokes");
+        let consumed_revoked = connection
+            .increment_preflight_bypass_token_use(&revoked_hash, &now.to_rfc3339())
+            .expect("revoked consume check executes");
+        assert!(
+            !consumed_revoked,
+            "revoked bypass tokens must not be consumed by the final update"
+        );
+
+        let expired = issue_bypass_token(
+            &connection,
+            &IssueBypassTokenOptions {
+                now: Some(now - Duration::minutes(DEFAULT_TTL_MINUTES + 1)),
+                ..issue_options("expire before consume", 1)
+            },
+        )
+        .expect("expired fixture token issues");
+        let expired_hash = token_hash(&expired.token);
+        let consumed_expired = connection
+            .increment_preflight_bypass_token_use(&expired_hash, &now.to_rfc3339())
+            .expect("expired consume check executes");
+        assert!(
+            !consumed_expired,
+            "expired bypass tokens must not be consumed by the final update"
+        );
+    }
+
+    #[test]
+    fn bypass_audit_records_token_hash_matches_and_blocking_memories() {
+        let connection = test_connection();
+        let issued = issue_bypass_token(&connection, &issue_options("audited bypass", 1))
+            .expect("token issues");
+        let report = record_preflight_bypass_audit(
+            &connection,
+            &RecordPreflightBypassAuditOptions {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                token: issued.token.clone(),
+                actor: Some("test-agent".to_owned()),
+                command: "rm -rf /tmp/work".to_owned(),
+                matches: vec![GuardMatch {
+                    rule_id: "builtin:rm_rf_tmp".to_owned(),
+                    pattern: "*rm -rf /tmp/*".to_owned(),
+                    action: GuardAction::Halt,
+                    message: "Destructive recursive delete requires confirmation.".to_owned(),
+                    source: RuleSource::Builtin {
+                        name: "rm_rf_tmp".to_owned(),
+                    },
+                    resolution: MatchResolution::BypassedWithToken,
+                }],
+                matched_memories: vec![PreflightMemoryMatch {
+                    memory_id: "mem_risk000000000000000000001".to_owned(),
+                    kind: "risk".to_owned(),
+                    content: "Prior rm -rf /tmp/work incident".to_owned(),
+                    provenance_uri: Some("cass-session://incident-rm-rf#L1-L3".to_owned()),
+                    severity: "high",
+                    severity_source: "inferred_from_memory_kind",
+                    score: 0.75,
+                    matched_terms: vec!["rm".to_owned(), "recursive".to_owned()],
+                }],
+            },
+        )
+        .expect("bypass audit records");
+
+        assert_eq!(report.token_hash_prefix, issued.token_hash_prefix);
+        assert_eq!(report.command_hash, issued.command_hash);
+
+        let audits = connection
+            .list_audit_by_action(audit_actions::PREFLIGHT_BYPASS, Some(10))
+            .expect("bypass audit is listable");
+        assert_eq!(audits.len(), 1);
+        assert_eq!(
+            audits[0].target_id.as_deref(),
+            Some(issued.token_hash_prefix.as_str())
+        );
+        assert_eq!(
+            audits[0].target_type.as_deref(),
+            Some("preflight_bypass_token")
+        );
+
+        let details: serde_json::Value =
+            serde_json::from_str(audits[0].details.as_deref().expect("audit details"))
+                .expect("details are JSON");
+        assert_eq!(details["schema"], "ee.preflight.bypass.v1");
+        assert_eq!(details["token_hash_prefix"], issued.token_hash_prefix);
+        assert_eq!(details["command"], "rm -rf /tmp/work");
+        assert_eq!(details["commandHash"], issued.command_hash);
+        assert_eq!(details["rule_ids"][0], "builtin:rm_rf_tmp");
+        assert_eq!(
+            details["matched_memory_ids"][0],
+            "mem_risk000000000000000000001"
+        );
+        // 547a5b23 restored the guard schema contract: memory matches
+        // serialize camelCase keys through the redacting serializer.
+        assert_eq!(
+            details["matched_memories"][0]["provenanceUri"],
+            "cass-session://incident-rm-rf#L1-L3"
+        );
+        assert!(
+            !audits[0]
+                .details
+                .as_deref()
+                .expect("audit details")
+                .contains(&issued.token),
+            "raw bypass token must not be written to audit details"
+        );
+    }
 }

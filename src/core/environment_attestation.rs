@@ -892,25 +892,27 @@ fn ci_proof_lane_artifact_evidence_verified(snapshot: &Value) -> bool {
             if probes.len() != 2 {
                 return false;
             }
-            [("version_json", VERSION_ARGV_HASH), ("environment_attestation_help", HELP_ARGV_HASH)]
-                .iter()
-                .all(|(probe_id, argv_hash)| {
-                    probes.iter().any(|probe| {
-                        probe.get("probeId").and_then(Value::as_str) == Some(*probe_id)
-                            && probe.get("status").and_then(Value::as_str) == Some("passed")
-                            && probe.get("exitCode").and_then(Value::as_i64) == Some(0)
-                            && probe.get("argvHash").and_then(Value::as_str)
-                                == Some(*argv_hash)
-                            && probe
-                                .get("stdoutHash")
-                                .and_then(Value::as_str)
-                                .is_some_and(is_sha256_hash)
-                            && probe
-                                .get("stderrHash")
-                                .and_then(Value::as_str)
-                                .is_some_and(is_sha256_hash)
-                    })
+            [
+                ("version_json", VERSION_ARGV_HASH),
+                ("environment_attestation_help", HELP_ARGV_HASH),
+            ]
+            .iter()
+            .all(|(probe_id, argv_hash)| {
+                probes.iter().any(|probe| {
+                    probe.get("probeId").and_then(Value::as_str) == Some(*probe_id)
+                        && probe.get("status").and_then(Value::as_str) == Some("passed")
+                        && probe.get("exitCode").and_then(Value::as_i64) == Some(0)
+                        && probe.get("argvHash").and_then(Value::as_str) == Some(*argv_hash)
+                        && probe
+                            .get("stdoutHash")
+                            .and_then(Value::as_str)
+                            .is_some_and(is_sha256_hash)
+                        && probe
+                            .get("stderrHash")
+                            .and_then(Value::as_str)
+                            .is_some_and(is_sha256_hash)
                 })
+            })
         });
     let no_rejections = artifact
         .get("attestationRejections")
@@ -925,8 +927,7 @@ fn ci_proof_lane_artifact_evidence_verified(snapshot: &Value) -> bool {
             .is_some_and(is_positive_decimal_id)
         && artifact.get("attestedRunId").and_then(Value::as_str) == Some(recommended_run_id)
         && artifact.get("sourceSha").and_then(Value::as_str) == Some(requested_head)
-        && artifact.get("attestedSourceCommit").and_then(Value::as_str)
-            == Some(requested_head)
+        && artifact.get("attestedSourceCommit").and_then(Value::as_str) == Some(requested_head)
         && artifact
             .get("attestedGitTree")
             .and_then(Value::as_str)
@@ -971,14 +972,12 @@ fn is_full_git_object(value: &str) -> bool {
 }
 
 fn is_sha256_hash(value: &str) -> bool {
-    value
-        .strip_prefix("sha256:")
-        .is_some_and(|digest| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        })
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
 }
 
 fn ci_proof_lane_code_for_verdict(verdict: &str) -> EnvironmentAttestationDegradedCode {
@@ -1018,9 +1017,9 @@ fn ci_proof_lane_metrics(snapshot: &Value) -> Vec<EnvironmentAttestationMetric> 
         .and_then(|items| {
             recommended_run_id
                 .and_then(|run_id| {
-                    items.iter().find(|run| {
-                        run.get("runId").and_then(Value::as_str) == Some(run_id)
-                    })
+                    items
+                        .iter()
+                        .find(|run| run.get("runId").and_then(Value::as_str) == Some(run_id))
                 })
                 .or_else(|| items.first())
         });
@@ -2385,10 +2384,7 @@ mod tests {
                     ci_proof_lane_snapshot: Some(&snapshot),
                 },
             );
-            let proof_lane = entry(
-                &attestation,
-                EnvironmentAttestationSourceKind::CiProofLane,
-            );
+            let proof_lane = entry(&attestation, EnvironmentAttestationSourceKind::CiProofLane);
             assert_eq!(
                 proof_lane.authority,
                 EnvironmentAttestationAuthority::Degraded,
@@ -2401,9 +2397,7 @@ mod tests {
             );
             assert_eq!(
                 proof_lane.degraded_codes,
-                vec![
-                    EnvironmentAttestationDegradedCode::CiProofLaneArtifactAttestationInvalid
-                ],
+                vec![EnvironmentAttestationDegradedCode::CiProofLaneArtifactAttestationInvalid],
                 "pointer {pointer}"
             );
             assert_eq!(

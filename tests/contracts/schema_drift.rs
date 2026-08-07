@@ -2783,9 +2783,7 @@ mod tests {
         let exported: JsonValue = serde_json::from_str(&ee::output::render_schema_export_json(
             Some("ee.remote_build_artifact_manifest.v1"),
         ))
-        .map_err(|error| {
-            format!("schema export ee.remote_build_artifact_manifest.v1: {error}")
-        })?;
+        .map_err(|error| format!("schema export ee.remote_build_artifact_manifest.v1: {error}"))?;
 
         ensure_equal(
             &exported,
@@ -2817,20 +2815,19 @@ mod tests {
         )?;
         let schema_path =
             repo_path("docs/schemas/ee.remote_build_artifact_manifest.verification.v1.json");
-        let documented: JsonValue = serde_json::from_str(
-            &fs::read_to_string(&schema_path).map_err(|error| {
+        let documented: JsonValue =
+            serde_json::from_str(&fs::read_to_string(&schema_path).map_err(|error| {
                 format!(
                     "read remote artifact verification schema {}: {error}",
                     schema_path.display()
                 )
-            })?,
-        )
-        .map_err(|error| {
-            format!(
-                "parse remote artifact verification schema {}: {error}",
-                schema_path.display()
-            )
-        })?;
+            })?)
+            .map_err(|error| {
+                format!(
+                    "parse remote artifact verification schema {}: {error}",
+                    schema_path.display()
+                )
+            })?;
         let exported: JsonValue = serde_json::from_str(&ee::output::render_schema_export_json(
             Some("ee.remote_build_artifact_manifest.verification.v1"),
         ))
