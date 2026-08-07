@@ -15,6 +15,8 @@ jobs:
     name: build aarch64-apple-darwin debug ee
     runs-on: macos-14
     timeout-minutes: 60
+    env:
+      CARGO_HOME: ${{ github.workspace }}/.ci/cargo-home
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,13 +40,13 @@ jobs:
           targets: aarch64-apple-darwin
 
       - name: Build ee
-        run: cargo build --workspace --bin ee --target aarch64-apple-darwin
-
-      - name: Smoke command surface
-        run: |
-          set -euo pipefail
-          target/aarch64-apple-darwin/debug/ee --version
-          target/aarch64-apple-darwin/debug/ee diag environment-attestation --help
+        env:
+          VERGEN_GIT_SHA: ${{ github.sha }}
+          VERGEN_GIT_DESCRIBE: ci-${{ github.sha }}
+          # Cargo.toml contains the one declared, attested path rewrite.
+          VERGEN_GIT_DIRTY: "true"
+          EE_BUILD_TARGET: aarch64-apple-darwin
+        run: cargo build --locked --workspace --bin ee --target aarch64-apple-darwin
 
       - name: Package artifact
         shell: bash
@@ -53,8 +55,36 @@ jobs:
           mkdir -p dist
           cp target/aarch64-apple-darwin/debug/ee dist/ee
           chmod 755 dist/ee
-          tar -czf dist/ee-aarch64-apple-darwin-debug.tar.gz -C dist ee
+          COPYFILE_DISABLE=1 tar -czf dist/ee-aarch64-apple-darwin-debug.tar.gz -C dist ee
           shasum -a 256 dist/ee-aarch64-apple-darwin-debug.tar.gz > dist/ee-aarch64-apple-darwin-debug.tar.gz.sha256
+
+      - name: Attest packaged artifact and behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_command='["cargo","build","--locked","--workspace","--bin","ee","--target","aarch64-apple-darwin"]'
+          manifest=dist/ee-aarch64-apple-darwin-debug.manifest.json
+          python3 scripts/ci_artifact_attestation.py generate \
+            --workspace "$GITHUB_WORKSPACE" \
+            --binary dist/ee \
+            --archive dist/ee-aarch64-apple-darwin-debug.tar.gz \
+            --source-commit "$GITHUB_SHA" \
+            --build-command-json "$build_command" \
+            --rewrite-id franken_stack_path_rewrite_v1 \
+            --cargo-path-root "$GITHUB_WORKSPACE/.ci/franken-stack/projects" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --output "$manifest"
+          python3 scripts/ci_artifact_attestation.py verify \
+            --workspace "$GITHUB_WORKSPACE" \
+            --binary dist/ee \
+            --archive dist/ee-aarch64-apple-darwin-debug.tar.gz \
+            --checksum dist/ee-aarch64-apple-darwin-debug.tar.gz.sha256 \
+            --manifest "$manifest" \
+            --expected-commit "$GITHUB_SHA" \
+            --repository "$GITHUB_REPOSITORY" \
+            --expected-run-id "$GITHUB_RUN_ID"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -63,5 +93,6 @@ jobs:
           path: |
             dist/ee-aarch64-apple-darwin-debug.tar.gz
             dist/ee-aarch64-apple-darwin-debug.tar.gz.sha256
+            dist/ee-aarch64-apple-darwin-debug.manifest.json
           if-no-files-found: error
           retention-days: 3
