@@ -1612,8 +1612,12 @@ impl EffectManifest {
                 "Read a persisted preflight run from the workspace-local store",
             ),
             CommandEffect::read_only_db(
-                "preflight list-bypass-tokens",
-                "List hashed preflight bypass-token metadata",
+                "preflight check",
+                "Retrieve advisory command-risk memories without granting or revoking execution authority",
+            ),
+            CommandEffect::read_only_db(
+                "preflight guard",
+                "Alias for read-only advisory command-risk memory retrieval",
             ),
             CommandEffect::read_only("plan goal", "Recommends recipes for goals"),
             CommandEffect::read_only("plan explain", "Explains recipe selection"),
@@ -2423,34 +2427,6 @@ impl EffectManifest {
                 "note",
                 vec!["memories", "memory_tags", "audit_log"],
                 "Store a note as a memory with optional tags",
-            ),
-            CommandEffect::durable_state_write(
-                "preflight check",
-                vec!["preflight_bypass_tokens", "audit_log"],
-                "command hash plus matched rule ids plus override token hash",
-                "optional command-authorization evidence audit",
-                "Retrieve advisory command-risk memory and audit optional authorization evidence",
-            ),
-            CommandEffect::durable_state_write(
-                "preflight guard",
-                vec!["preflight_bypass_tokens", "audit_log"],
-                "command hash plus matched rule ids plus override token hash",
-                "optional command-authorization evidence audit",
-                "Alias for advisory preflight check; audits optional authorization evidence",
-            ),
-            CommandEffect::durable_state_write(
-                "preflight issue-bypass-token",
-                vec!["preflight_bypass_tokens", "audit_log"],
-                "approved command hash plus issued token hash",
-                "preflight bypass token store",
-                "Issue an audited one-shot preflight bypass token",
-            ),
-            CommandEffect::durable_state_write(
-                "preflight revoke-bypass-token",
-                vec!["preflight_bypass_tokens", "audit_log"],
-                "token hash plus revocation timestamp",
-                "preflight bypass token store",
-                "Revoke an audited preflight bypass token",
             ),
             CommandEffect::durable_write(
                 "reflect ingest",
@@ -3482,8 +3458,13 @@ mod tests {
         )?;
         ensure(
             preflight_guard.requires_audit,
+            false,
+            "preflight guard alias is read-only and needs no audit",
+        )?;
+        ensure(
+            preflight_guard.write_surfaces.is_empty(),
             true,
-            "preflight guard alias keeps override-token audit contract",
+            "preflight guard alias declares no write surfaces",
         )?;
 
         let backup = manifest.get("backup create");

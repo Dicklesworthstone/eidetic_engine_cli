@@ -849,18 +849,54 @@ fn publish_hook_temp_file(
     Ok(())
 }
 
-/// Install hooks according to options.
+/// Return a no-write retirement report for the legacy generic-hook API.
 ///
-/// # Security
-/// Embeds the absolute canonical path of the `ee` binary at install time to prevent
-/// PATH hijack attacks. The binary path is captured via `std::env::current_exe()`
-/// and canonicalized before being embedded in generated hook scripts.
-pub fn install_hooks(options: &HookInstallOptions) -> Result<HookInstallReport, DomainError> {
-    // Capture absolute binary path at install time to embed in hooks (security fix)
-    let ee_binary_path = get_ee_binary_path()?;
-    install_hooks_with_binary_path(options, &ee_binary_path)
+/// The old API generated executable `pre-task`, `pre-commit`, and similar
+/// files that invoked `ee hooks run`. That command surface no longer exists,
+/// and installing those files could turn an otherwise successful shell or Git
+/// operation into a failure. `ee` is a memory substrate, so executable harness
+/// integration is exposed only through [`generate_harness_hook_install`], whose
+/// snippets are memory-oriented and fail open.
+///
+/// This function deliberately succeeds without touching the filesystem. The
+/// retained report shape lets callers discover that every requested legacy
+/// hook was skipped without making hook installation a new command gate.
+#[must_use]
+pub fn install_hooks(options: &HookInstallOptions) -> HookInstallReport {
+    let plan = options
+        .hooks
+        .iter()
+        .map(|hook_type| HookInstallPlanItem {
+            hook_type: hook_type.as_str().to_owned(),
+            target_path: options
+                .hook_dir
+                .join(hook_type.filename())
+                .display()
+                .to_string(),
+            existing_status: "not_inspected".to_owned(),
+            action: HookAction::Skip.as_str().to_owned(),
+            reason: "Retired legacy generic hook installer; no executable hook was generated or written."
+                .to_owned(),
+        })
+        .collect::<Vec<_>>();
+    let skipped_count = u32::try_from(plan.len()).unwrap_or(u32::MAX);
+
+    HookInstallReport {
+        schema: HOOK_INSTALL_SCHEMA_V1.to_owned(),
+        hook_dir: options.hook_dir.display().to_string(),
+        dry_run: options.dry_run,
+        preserve_existing: options.preserve_existing,
+        plan,
+        installed_count: 0,
+        updated_count: 0,
+        skipped_count,
+        no_change_count: 0,
+        idempotent: true,
+        generated_at: Utc::now().to_rfc3339(),
+    }
 }
 
+#[allow(dead_code)]
 fn install_hooks_with_binary_path(
     options: &HookInstallOptions,
     ee_binary_path: &Path,
@@ -4992,6 +5028,36 @@ AGENT_NAME = os.environ.get("AGENT_NAME", "").strip()
 
         let hook_path = temp.path().join("pre-task");
         assert!(!hook_path.exists(), "dry-run should not create files");
+        Ok(())
+    }
+
+    #[test]
+    fn public_legacy_hook_installer_is_an_inert_no_write_surface() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let options = HookInstallOptions {
+            hook_dir: temp.path().join("hooks"),
+            hooks: vec![HookType::PreTask, HookType::PreCommit],
+            dry_run: false,
+            preserve_existing: false,
+            force: true,
+        };
+
+        let report = install_hooks(&options);
+        assert_eq!(report.installed_count, 0);
+        assert_eq!(report.updated_count, 0);
+        assert_eq!(report.skipped_count, 2);
+        assert!(report.idempotent);
+        assert!(
+            report.plan.iter().all(|item| {
+                item.action == HookAction::Skip.as_str()
+                    && item.reason.contains("no executable hook")
+            }),
+            "retired legacy API must explain that it generated nothing"
+        );
+        assert!(
+            !options.hook_dir.exists(),
+            "retired legacy API must not create a hook directory"
+        );
         Ok(())
     }
 

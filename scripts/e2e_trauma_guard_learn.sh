@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # bd-1n0np.18.4 — Advisory command-risk evidence loop end-to-end (real binary).
 #
-# Scenario: advisory preflight retrieves risk context for a command, optional
-# one-shot authorization evidence is audited for the exact command, without
-# ever changing shell execution authority.
+# Scenario: advisory preflight retrieves remembered risk context for a command
+# without ever changing shell execution authority.
 #   1. init workspace.
-#   2. `ee preflight check` a risky command -> advisory high-risk match, exit 0.
-#   3. issue + use one-shot authorization evidence for the exact command.
-#   4. assert exhausted evidence is advisory and no allowlist is created.
+#   2. remember a provenance-bearing risk.
+#   3. `ee preflight check` a risky command -> advisory match + memory, exit 0.
+#   4. assert retired bypass/override control-plane surfaces are absent.
 #
 # The script never executes the inspected command. It verifies only memory,
 # provenance, and stable machine-output behavior.
@@ -31,6 +30,13 @@ assert_jq "$init_out" '.success == true' "ee init succeeds"
 
 RISKY="rm -rf /important/data"
 
+step "remember provenance-bearing command risk"
+remembered="$(ee_json remember \
+    "Prior failure: rm -rf recursively removed important data." \
+    --kind risk --level procedural --source "cass-session://incident-rm-rf#L1-L3" \
+    --workspace "$WS" --json)"
+assert_jq "$remembered" '.success == true' "risk memory is stored"
+
 step "preflight check retrieves advisory risk context without command denial"
 advisory_out="$(ee_json preflight check --cmd "$RISKY" --workspace "$WS" --json)"
 assert_jq "$advisory_out" '.schema == "ee.preflight.guard.v1"' \
@@ -43,30 +49,21 @@ assert_jq "$advisory_out" \
 assert_jq "$advisory_out" \
     '([.matches[]? | select(.resolution == "matched")] | length) >= 1' \
     "matched rules use non-enforcement vocabulary"
+assert_jq "$advisory_out" \
+    '([.matchedMemories[]? | select(.kind == "risk")] | length) >= 1' \
+    "advisory check cites remembered risk with provenance"
 
-step "record and consume optional one-shot authorization evidence"
-tok="$(ee_json preflight issue-bypass-token --cmd "$RISKY" \
-    --reason "e2e historical authorization evidence" --workspace "$WS" --json)"
-assert_jq "$tok" '.success == true' "issue-bypass-token returns a success envelope"
-raw_token="$(printf '%s' "$tok" | jq -r '.data.report.token // empty')"
-assert_eq "$(test -n "$raw_token" && printf present || printf missing)" "present" \
-    "authorization evidence token is issued"
-
-used="$(ee_json preflight check --cmd "$RISKY" --override-token "$raw_token" \
-    --workspace "$WS" --json)"
-assert_jq "$used" '.schema == "ee.preflight.guard.v1" and .exitCode == 0' \
-    "authorization evidence does not change advisory exit behavior"
-assert_jq "$used" \
-    '([.matches[]? | select(.resolution == "bypassed_with_token")] | length) >= 1' \
-    "valid one-shot evidence is recorded in match provenance"
-
-exhausted="$(ee_json preflight check --cmd "$RISKY" --override-token "$raw_token" \
-    --workspace "$WS" --json)"
-assert_jq "$exhausted" '.schema == "ee.preflight.guard.v1" and .exitCode == 0' \
-    "exhausted evidence remains advisory"
-assert_jq "$exhausted" \
-    '([.degraded[]? | select(.code == "bypass_token_exhausted")] | length) == 1' \
-    "exhaustion is reported as degraded evidence, never command denial"
+step "assert bypass and override control-plane surfaces are absent"
+assert_exit 2 "issue-bypass-token is not a command" -- \
+    "$EE_BIN" preflight issue-bypass-token --workspace "$WS"
+assert_exit 2 "revoke-bypass-token is not a command" -- \
+    "$EE_BIN" preflight revoke-bypass-token --workspace "$WS"
+assert_exit 2 "list-bypass-tokens is not a command" -- \
+    "$EE_BIN" preflight list-bypass-tokens --workspace "$WS"
+assert_exit 2 "override-token is not accepted" -- \
+    "$EE_BIN" preflight check --cmd "$RISKY" --override-token retired --workspace "$WS"
+assert_exit 2 "bypass is not accepted" -- \
+    "$EE_BIN" preflight check --cmd "$RISKY" --bypass rule:retired --workspace "$WS"
 
 end_temp_workspace
 harness_summary

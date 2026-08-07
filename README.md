@@ -605,7 +605,7 @@ Common red flags:
 | `output_budget_unsatisfiable` | Raise `--max-output-tokens` or narrow the `--fields` preset; the page failed closed rather than lie |
 | `cursor_stale` | A write advanced the DB generation mid-pagination; re-run without `--cursor` for a fresh sequence |
 | `data.workspace.diagnostics[].severity = "warning"` | Workspace selection conflict; use `ee workspace list`, then pass an explicit workspace or alias |
-| exit `7` | Stop and get human approval before using any bypass-token path |
+| exit `7` | An `ee` operation refused its own requested mutation; inspect that command's error details. Advisory `ee preflight check` never emits this status and never has an approval or allowlist path. |
 | exit `8` | Run `ee migrate run --workspace . --json` |
 
 ### Context pack controls
@@ -1448,7 +1448,7 @@ Environment variable overrides:
 | `EE_PROFILE`       | `[pack].default_profile` |
 | `EE_MAX_TOKENS`    | `[pack].default_max_tokens` |
 | `EE_AGENT_NAME` | agent identity for outcome attribution and per-agent bias |
-| `EE_SECURITY_PROFILE` | preflight policy posture |
+| `EE_SECURITY_PROFILE` | workspace/import security posture; it does not govern shell commands |
 | `EE_JOURNAL_ENABLED` | `[journal].enabled` capture gate; false makes journal surfaces report `journal_disabled` |
 | `EE_JOURNAL_RETENTION_DAYS` | `[journal].retention_days` for the explicit journal-retention steward job |
 | `EE_HARMFUL_PER_SOURCE_PER_HOUR` | `[feedback].harmful_per_source_per_hour` |

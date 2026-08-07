@@ -65,12 +65,12 @@
           },
           "resolution": {
             "type": "string",
-            "enum": ["matched", "bypassed_with_token", "bypass_token_invalid", "bypass_secret_missing"],
-            "description": "Authorization-evidence status retained for audit compatibility. `matched` means the advisory rule applied to this report; it never means that ee blocks the command."
+            "const": "matched",
+            "description": "Confirms that the advisory rule matched. The public CLI has no bypass, override, approval, allowlist, or command-authorization surface."
           }
         }
       },
-      "description": "Advisory rule matches with explainable classifications and authorization-evidence status. Matches never change exitCode from 0."
+      "description": "Advisory rule matches with explainable classifications. Matches never change exitCode from 0."
     },
     "matchedMemories": {
       "type": "array",
@@ -128,7 +128,7 @@
           "repair": {"type": "string"}
         }
       },
-      "description": "Degraded-mode signals from advisory risk retrieval or optional authorization-evidence storage. These signals never change exitCode from 0."
+      "description": "Degraded-mode signals from advisory pattern or memory retrieval. These signals never change exitCode from 0."
     }
   }
 }

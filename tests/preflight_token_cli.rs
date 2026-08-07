@@ -27,6 +27,7 @@ fn ensure_success(output: &Output, context: &str) -> TestResult {
     }
 }
 
+#[cfg(any())]
 fn ensure_success_envelope(value: &serde_json::Value, context: &str) -> TestResult {
     if value["schema"] != "ee.response.v2" {
         return Err(format!(
@@ -50,7 +51,7 @@ fn ensure_success_envelope(value: &serde_json::Value, context: &str) -> TestResu
 }
 
 #[test]
-fn advisory_check_stays_successful_when_optional_token_storage_is_unavailable() -> TestResult {
+fn public_preflight_is_advisory_read_only_and_has_no_token_control_plane() -> TestResult {
     let workspace = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let workspace_path = workspace.path().to_string_lossy().into_owned();
 
@@ -62,35 +63,52 @@ fn advisory_check_stays_successful_when_optional_token_storage_is_unavailable() 
         "check",
         "--cmd",
         "rm -rf /",
-        "--override-token",
-        "optional-evidence-token",
     ])?;
-    ensure_success(
-        &checked,
-        "missing optional token database must not turn advisory inspection into a gate",
-    )?;
+    ensure_success(&checked, "advisory inspection without a memory database")?;
 
     let checked_json = parse_stdout(&checked)?;
     assert_eq!(checked_json["schema"], "ee.preflight.guard.v1");
     assert_eq!(checked_json["exitCode"], 0);
-    assert_eq!(
-        checked_json["matches"][0]["resolution"],
-        "bypass_token_invalid"
-    );
-    let degraded = checked_json["degraded"]
-        .as_array()
-        .ok_or_else(|| "preflight report should include degraded[]".to_owned())?;
-    if !degraded
-        .iter()
-        .any(|entry| entry["code"] == "bypass_token_storage_error")
-    {
-        return Err(format!(
-            "missing token storage degradation in advisory report: {checked_json}"
-        ));
+    assert_eq!(checked_json["matches"][0]["resolution"], "matched");
+    if workspace.path().join(".ee").exists() {
+        return Err("read-only advisory inspection created .ee state".to_owned());
+    }
+
+    for removed_args in [
+        vec!["preflight", "issue-bypass-token"],
+        vec!["preflight", "revoke-bypass-token"],
+        vec!["preflight", "list-bypass-tokens"],
+        vec![
+            "preflight",
+            "check",
+            "--cmd",
+            "rm -rf /",
+            "--override-token",
+            "retired",
+        ],
+        vec![
+            "preflight",
+            "check",
+            "--cmd",
+            "rm -rf /",
+            "--bypass",
+            "rule:retired",
+        ],
+    ] {
+        let output = ee(&removed_args)?;
+        if output.status.success() {
+            return Err(format!(
+                "retired preflight control-plane arguments unexpectedly succeeded: {removed_args:?}"
+            ));
+        }
     }
     Ok(())
 }
 
+// Historical lifecycle coverage remains source-visible while the legacy
+// storage module is retired separately. It is intentionally not compiled:
+// these commands and flags are no longer public CLI affordances.
+#[cfg(any())]
 #[test]
 fn legacy_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResult {
     let workspace = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
@@ -279,6 +297,7 @@ fn legacy_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResult {
     Ok(())
 }
 
+#[cfg(any())]
 #[test]
 fn override_token_records_optional_authorization_audit_with_risk_provenance() -> TestResult {
     let workspace = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;

@@ -207,17 +207,9 @@ use crate::core::preflight::{
     show_preflight,
 };
 use crate::core::preflight_guard::{
-    BypassTokenInput, GuardMatch, MatchResolution, PREFLIGHT_GUARD_SCHEMA_V1,
-    PreflightGuardDegradation, PreflightGuardOptions, PreflightGuardRegistry, PreflightGuardReport,
-    PreflightGuardRule, RuleSource, match_trauma_guard_memories, no_risk_memories_degradation,
-    run_preflight_guard,
-};
-use crate::core::preflight_token::{
-    BYPASS_TOKEN_INVALID, BYPASS_TOKEN_STORAGE_ERROR, IssueBypassTokenOptions,
-    PreflightBypassTokenError, RecordPreflightBypassAuditOptions, RevokeBypassTokenOptions,
-    VerifyBypassTokenOptions, issue_bypass_token as issue_preflight_bypass_token,
-    list_bypass_tokens, record_preflight_bypass_audit, revoke_bypass_token,
-    verify_bypass_token as verify_preflight_bypass_token,
+    PreflightGuardOptions, PreflightGuardRegistry, PreflightGuardReport, PreflightGuardRule,
+    RuleSource, match_trauma_guard_memories, no_risk_memories_degradation,
+    preflight_patterns_unavailable_degradation, run_preflight_guard,
 };
 use crate::core::profile::{
     HostProfileProbeOptions, HostResourceProbeReport, MemoryProbe, OperatingProfile,
@@ -7231,15 +7223,6 @@ pub enum PreflightCommand {
     Show(PreflightShowArgs),
     /// Close a preflight run (mark as completed or cancelled).
     Close(PreflightCloseArgs),
-    /// Record short-lived one-shot authorization evidence after human approval.
-    #[command(name = "issue-bypass-token")]
-    IssueBypassToken(PreflightIssueBypassTokenArgs),
-    /// Revoke a previously issued bypass token.
-    #[command(name = "revoke-bypass-token")]
-    RevokeBypassToken(PreflightRevokeBypassTokenArgs),
-    /// List hashed bypass-token metadata for this workspace.
-    #[command(name = "list-bypass-tokens")]
-    ListBypassTokens(PreflightListBypassTokensArgs),
     /// Retrieve advisory rule and risk-memory context for a command.
     Check(PreflightGuardArgs),
     /// Alias for advisory command-risk inspection.
@@ -7310,58 +7293,6 @@ pub struct PreflightCloseArgs {
     pub dry_run: bool,
 }
 
-/// Arguments for `ee preflight issue-bypass-token`.
-#[derive(Clone, Debug, Eq, Parser, PartialEq)]
-pub struct PreflightIssueBypassTokenArgs {
-    /// Exact command string approved for this bypass token.
-    #[arg(long = "cmd", value_name = "COMMAND")]
-    pub cmd: String,
-
-    /// Human approval reason for the bypass.
-    #[arg(long, value_name = "TEXT")]
-    pub reason: String,
-
-    /// Token lifetime in minutes (default: 10, max: 60).
-    #[arg(long, value_name = "MINUTES")]
-    pub ttl_minutes: Option<i64>,
-
-    /// Maximum successful uses before exhaustion.
-    #[arg(long, value_name = "COUNT")]
-    pub max_uses: Option<u32>,
-
-    /// Optional actor recorded in the audit row.
-    #[arg(long, value_name = "ACTOR")]
-    pub actor: Option<String>,
-
-    /// Database path. Defaults to <workspace>/.ee/ee.db.
-    #[arg(long, value_name = "PATH")]
-    pub database: Option<PathBuf>,
-}
-
-/// Arguments for `ee preflight revoke-bypass-token`.
-#[derive(Clone, Debug, Eq, Parser, PartialEq)]
-pub struct PreflightRevokeBypassTokenArgs {
-    /// Raw bypass token to revoke.
-    #[arg(long, value_name = "TOKEN")]
-    pub token: String,
-
-    /// Optional actor recorded in the audit row.
-    #[arg(long, value_name = "ACTOR")]
-    pub actor: Option<String>,
-
-    /// Database path. Defaults to <workspace>/.ee/ee.db.
-    #[arg(long, value_name = "PATH")]
-    pub database: Option<PathBuf>,
-}
-
-/// Arguments for `ee preflight list-bypass-tokens`.
-#[derive(Clone, Debug, Eq, Parser, PartialEq)]
-pub struct PreflightListBypassTokensArgs {
-    /// Database path. Defaults to <workspace>/.ee/ee.db.
-    #[arg(long, value_name = "PATH")]
-    pub database: Option<PathBuf>,
-}
-
 /// Arguments for advisory `ee preflight check` / `guard` inspection.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct PreflightGuardArgs {
@@ -7389,15 +7320,7 @@ pub struct PreflightGuardArgs {
     #[arg(long, value_name = "PATH")]
     pub workspace: Option<PathBuf>,
 
-    /// Optional authorization evidence for a specific rule (format: rule_id:token).
-    #[arg(long, value_name = "RULE_ID:TOKEN")]
-    pub bypass: Vec<String>,
-
-    /// DB-backed authorization token issued by `ee preflight issue-bypass-token`.
-    #[arg(long = "override-token", value_name = "TOKEN")]
-    pub override_token: Option<String>,
-
-    /// Database path for --override-token. Defaults to <workspace>/.ee/ee.db.
+    /// Read-only memory database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
 }
@@ -13687,15 +13610,6 @@ where
         }
         Some(Command::Preflight(PreflightCommand::Close(ref args))) => {
             handle_preflight_close(&cli, args, stdout, stderr)
-        }
-        Some(Command::Preflight(PreflightCommand::IssueBypassToken(ref args))) => {
-            handle_preflight_issue_bypass_token(&cli, args, stdout, stderr)
-        }
-        Some(Command::Preflight(PreflightCommand::RevokeBypassToken(ref args))) => {
-            handle_preflight_revoke_bypass_token(&cli, args, stdout, stderr)
-        }
-        Some(Command::Preflight(PreflightCommand::ListBypassTokens(ref args))) => {
-            handle_preflight_list_bypass_tokens(&cli, args, stdout, stderr)
         }
         Some(Command::Preflight(PreflightCommand::Check(ref args))) => {
             handle_preflight_guard(&cli, args, stdout, stderr)
@@ -22503,134 +22417,12 @@ fn parse_preflight_feedback_arg(
         })
 }
 
-fn handle_preflight_issue_bypass_token<W, E>(
-    cli: &Cli,
-    args: &PreflightIssueBypassTokenArgs,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    let (connection, workspace_id, workspace) =
-        match open_preflight_token_database(cli, args.database.as_deref()) {
-            Ok(opened) => opened,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        };
-    let registry = match PreflightGuardRegistry::load(&workspace) {
-        Ok(registry) => registry,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
-    };
-    let matches = registry.match_command(&args.cmd);
-    if matches.is_empty() {
-        let error = DomainError::Usage {
-            message: "preflight bypass token command did not match any guard rules".to_owned(),
-            repair: Some("Run `ee preflight check --cmd '<command>' --json` to inspect advisory risk context; authorization evidence is optional and never changes shell execution.".to_owned()),
-        };
-        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
-    }
-    let options = IssueBypassTokenOptions {
-        workspace_id,
-        issuer_workspace: workspace.to_string_lossy().into_owned(),
-        command: args.cmd.clone(),
-        rule_ids: preflight_rule_ids_from_matches(&matches),
-        reason: args.reason.clone(),
-        ttl_minutes: args.ttl_minutes,
-        max_uses: args.max_uses,
-        actor: args.actor.clone(),
-        now: None,
-    };
-
-    match issue_preflight_bypass_token(&connection, &options) {
-        Ok(report) => write_preflight_token_report(
-            cli,
-            "preflight issue-bypass-token",
-            &report,
-            render_preflight_issue_bypass_token_human(&report),
-            stdout,
-        ),
-        Err(error) => {
-            let domain_error = preflight_token_error_to_domain(error);
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
-        }
-    }
-}
-
-fn handle_preflight_revoke_bypass_token<W, E>(
-    cli: &Cli,
-    args: &PreflightRevokeBypassTokenArgs,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    let (connection, workspace_id, _) =
-        match open_preflight_token_database(cli, args.database.as_deref()) {
-            Ok(opened) => opened,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        };
-    let options = RevokeBypassTokenOptions {
-        workspace_id,
-        token: args.token.clone(),
-        actor: args.actor.clone(),
-        now: None,
-    };
-
-    match revoke_bypass_token(&connection, &options) {
-        Ok(report) => write_preflight_token_report(
-            cli,
-            "preflight revoke-bypass-token",
-            &report,
-            render_preflight_revoke_bypass_token_human(&report),
-            stdout,
-        ),
-        Err(error) => {
-            let domain_error = preflight_token_error_to_domain(error);
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
-        }
-    }
-}
-
-fn handle_preflight_list_bypass_tokens<W, E>(
-    cli: &Cli,
-    args: &PreflightListBypassTokensArgs,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    let (connection, workspace_id, _) =
-        match open_preflight_token_database(cli, args.database.as_deref()) {
-            Ok(opened) => opened,
-            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
-        };
-
-    match list_bypass_tokens(&connection, &workspace_id) {
-        Ok(report) => write_preflight_token_report(
-            cli,
-            "preflight list-bypass-tokens",
-            &report,
-            render_preflight_list_bypass_tokens_human(&report),
-            stdout,
-        ),
-        Err(error) => {
-            let domain_error = preflight_token_error_to_domain(error);
-            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
-        }
-    }
-}
-
-fn open_preflight_token_database(
+fn open_workspace_database_for_write(
     cli: &Cli,
     database: Option<&Path>,
 ) -> Result<(crate::db::DbConnection, String, PathBuf), DomainError> {
     let workspace = cli.resolve_workspace();
-    open_preflight_token_database_for_workspace(workspace, database)
+    open_workspace_database_for_write_at(workspace, database)
 }
 
 fn canonical_workspace_row(
@@ -22648,7 +22440,7 @@ fn canonical_workspace_row(
     Ok((canonical_workspace, existing_workspace))
 }
 
-fn open_preflight_token_database_for_workspace(
+fn open_workspace_database_for_write_at(
     workspace: PathBuf,
     database: Option<&Path>,
 ) -> Result<(crate::db::DbConnection, String, PathBuf), DomainError> {
@@ -22705,121 +22497,10 @@ fn open_preflight_token_database_for_workspace(
         }
     };
 
-    // Registry loading, issuer metadata, and symlink policy use the caller's
-    // original path spelling. Canonicalization above is only for database
-    // identity; do not silently change those observable path semantics.
+    // Preserve the caller's original path spelling for operations whose
+    // workspace-path semantics are observable. Canonicalization above is only
+    // for database identity.
     Ok((connection, workspace_id, workspace))
-}
-
-fn preflight_token_error_to_domain(error: PreflightBypassTokenError) -> DomainError {
-    if error.code == BYPASS_TOKEN_STORAGE_ERROR {
-        return DomainError::Storage {
-            message: error.message,
-            repair: Some(error.repair),
-        };
-    }
-    if error.code == BYPASS_TOKEN_INVALID && error.token_hash_prefix.is_none() {
-        return DomainError::UsageCodeWithDetails {
-            code: error.code,
-            message: error.message,
-            repair: Some(error.repair),
-            details_json: "{}".to_owned(),
-        };
-    }
-    DomainError::UnsatisfiedDegradedModeCode {
-        code: error.code,
-        message: error.message,
-        repair: Some(error.repair),
-    }
-}
-
-fn preflight_rule_ids_from_matches(matches: &[&PreflightGuardRule]) -> Vec<String> {
-    let mut rule_ids = matches
-        .iter()
-        .map(|rule| rule.id.clone())
-        .collect::<Vec<_>>();
-    rule_ids.sort();
-    rule_ids.dedup();
-    rule_ids
-}
-
-fn write_preflight_token_report<W, T>(
-    cli: &Cli,
-    command: &'static str,
-    report: &T,
-    human: String,
-    stdout: &mut W,
-) -> ProcessExitCode
-where
-    W: Write,
-    T: serde::Serialize,
-{
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => write_stdout(stdout, &human),
-        output::Renderer::Toon
-        | output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V2,
-                "success": true,
-                "data": {
-                    "command": command,
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "report": report,
-                },
-                "degraded": [],
-            });
-            write_stdout(stdout, &(json.to_string() + "\n"))
-        }
-    }
-}
-
-fn render_preflight_issue_bypass_token_human(
-    report: &crate::core::preflight_token::BypassTokenIssueReport,
-) -> String {
-    format!(
-        "preflight bypass token issued\n  token: {}\n  token hash prefix: {}\n  command hash: {}\n  rule ids: {}\n  expires at: {}\n  max uses: {}\n",
-        report.token,
-        report.token_hash_prefix,
-        report.command_hash,
-        report.rule_ids.join(", "),
-        report.expires_at,
-        report.max_uses
-    )
-}
-
-fn render_preflight_revoke_bypass_token_human(
-    report: &crate::core::preflight_token::BypassTokenRevokeReport,
-) -> String {
-    format!(
-        "preflight bypass token revoked\n  token hash prefix: {}\n  revoked at: {}\n",
-        report.token_hash_prefix, report.revoked_at
-    )
-}
-
-fn render_preflight_list_bypass_tokens_human(
-    report: &crate::core::preflight_token::BypassTokenListReport,
-) -> String {
-    let mut output = format!(
-        "preflight bypass tokens for {}: {}\n",
-        report.workspace_id,
-        report.tokens.len()
-    );
-    for token in &report.tokens {
-        output.push_str(&format!(
-            "  - {} used {}/{} expires {} revoked={} command_hash={} reason={}\n",
-            token.token_hash_prefix,
-            token.used_count,
-            token.max_uses,
-            token.expires_at,
-            token.revoked,
-            token.command_hash,
-            token.reason
-        ));
-    }
-    output
 }
 
 fn handle_preflight_guard<W, E>(
@@ -22846,111 +22527,20 @@ where
         Ok(registry) => (registry, None),
         Err(error) => (
             PreflightGuardRegistry::with_builtins(),
-            Some(preflight_advisory_storage_degradation(
-                &error,
-                "Workspace preflight rule loading",
-            )),
+            Some(preflight_patterns_unavailable_degradation(format!(
+                "Workspace advisory-pattern loading unavailable: {} Built-in advisory patterns remain available.",
+                error.message()
+            ))),
         ),
     };
-
-    if let Some(override_token) = args.override_token.as_deref() {
-        let matches = registry.match_command(&command);
-        if !matches.is_empty() {
-            let (connection, workspace_id, _) = match open_preflight_token_database_for_workspace(
-                workspace.clone(),
-                args.database.as_deref(),
-            ) {
-                Ok(opened) => opened,
-                Err(error) => {
-                    let mut report = preflight_guard_report_from_matches(
-                        command,
-                        &matches,
-                        MatchResolution::BypassTokenInvalid,
-                    );
-                    if let Some(degradation) = registry_load_degradation {
-                        report.degraded.push(degradation);
-                    }
-                    report.degraded.push(preflight_advisory_storage_degradation(
-                        &error,
-                        "Optional authorization-evidence lookup",
-                    ));
-                    attach_preflight_memory_matches(
-                        &workspace,
-                        args.database.as_deref(),
-                        &mut report,
-                    );
-                    return write_preflight_guard_report(cli, &report, stdout);
-                }
-            };
-            let options = VerifyBypassTokenOptions {
-                workspace_id: workspace_id.clone(),
-                token: override_token.to_owned(),
-                command: command.clone(),
-                rule_ids: preflight_rule_ids_from_matches(&matches),
-                actor: None,
-                now: None,
-            };
-            let verification_error = verify_preflight_bypass_token(&connection, &options).err();
-            let resolution = if verification_error.is_some() {
-                MatchResolution::BypassTokenInvalid
-            } else {
-                MatchResolution::BypassedWithToken
-            };
-            let mut report = preflight_guard_report_from_matches(command, &matches, resolution);
-            if let Some(error) = verification_error.as_ref() {
-                report.degraded.push(PreflightGuardDegradation {
-                    code: error.code,
-                    severity: error.severity,
-                    message: error.message.clone(),
-                    repair: format!(
-                        "{} Authorization evidence is optional; command execution remains outside ee.",
-                        error.repair
-                    ),
-                });
-            }
-            if let Some(degradation) = registry_load_degradation {
-                report.degraded.push(degradation);
-            }
-            attach_preflight_memory_matches(&workspace, args.database.as_deref(), &mut report);
-            if verification_error.is_some() {
-                return write_preflight_guard_report(cli, &report, stdout);
-            }
-            let audit_options = RecordPreflightBypassAuditOptions {
-                workspace_id,
-                token: override_token.to_owned(),
-                actor: None,
-                command: report.command.clone(),
-                matches: report.matches.clone(),
-                matched_memories: report.matched_memories.clone(),
-            };
-            if let Err(error) = record_preflight_bypass_audit(&connection, &audit_options) {
-                let domain_error = preflight_token_error_to_domain(error);
-                report.degraded.push(preflight_advisory_storage_degradation(
-                    &domain_error,
-                    "Optional authorization-evidence audit",
-                ));
-            }
-            return write_preflight_guard_report(cli, &report, stdout);
-        }
-    }
-
-    let bypass_tokens: Vec<BypassTokenInput> = args
-        .bypass
-        .iter()
-        .filter_map(|spec| {
-            let (rule_id, token) = spec.split_once(':')?;
-            Some(BypassTokenInput {
-                rule_id: rule_id.to_owned(),
-                token: token.to_owned(),
-            })
-        })
-        .collect();
 
     let options = PreflightGuardOptions {
         command,
         workspace: workspace.clone(),
-        bypass_tokens,
-        bypass_secret: read(EnvVar::PreflightBypassSecret).map(|s| s.into_bytes()),
+        // The core fields remain only for loading historical reports. The
+        // public CLI has no bypass or override control plane.
+        bypass_tokens: Vec::new(),
+        bypass_secret: None,
     };
 
     let mut report = run_preflight_guard(&registry, &options);
@@ -22961,45 +22551,37 @@ where
     write_preflight_guard_report(cli, &report, stdout)
 }
 
-fn preflight_guard_report_from_matches(
-    command: String,
-    matches: &[&PreflightGuardRule],
-    resolution: MatchResolution,
-) -> PreflightGuardReport {
-    PreflightGuardReport {
-        schema: PREFLIGHT_GUARD_SCHEMA_V1.to_owned(),
-        command,
-        matches: matches
-            .iter()
-            .map(|rule| GuardMatch {
-                rule_id: rule.id.clone(),
-                pattern: rule.pattern.clone(),
-                action: rule.action,
-                message: rule.message.clone(),
-                source: rule.source.clone(),
-                resolution,
-            })
-            .collect(),
-        matched_memories: Vec::new(),
-        degraded: Vec::new(),
-        exit_code: 0,
-        checked_at: chrono::Utc::now().to_rfc3339(),
+fn open_preflight_memory_database_for_read(
+    workspace: &Path,
+    database: Option<&Path>,
+) -> Result<(crate::db::DbConnection, String), DomainError> {
+    let database_path = database
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        return Err(DomainError::Storage {
+            message: format!("Database not found at {}", database_path.display()),
+            repair: Some("ee init --workspace . --json".to_owned()),
+        });
     }
-}
 
-fn preflight_advisory_storage_degradation(
-    error: &DomainError,
-    operation: &str,
-) -> PreflightGuardDegradation {
-    PreflightGuardDegradation {
-        code: BYPASS_TOKEN_STORAGE_ERROR,
-        severity: "critical",
-        message: format!(
-            "{operation} unavailable: {} This affects only ee's optional memory evidence; it cannot deny command execution.",
-            error.message()
-        ),
-        repair: "ee doctor --json".to_owned(),
-    }
+    let connection =
+        crate::db::DbConnection::open_file_read_only(&database_path).map_err(|error| {
+            DomainError::Storage {
+                message: format!("Failed to open memory database read-only: {error}"),
+                repair: Some("ee status --json".to_owned()),
+            }
+        })?;
+    let (canonical_workspace, existing_workspace) = canonical_workspace_row(&connection, workspace)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query workspace row read-only: {error}"),
+            repair: Some("ee migrate status --workspace . --json".to_owned()),
+        })?;
+    let workspace_id = existing_workspace.map_or_else(
+        || crate::core::workspace::stable_workspace_id(&canonical_workspace),
+        |stored| stored.id,
+    );
+    Ok((connection, workspace_id))
 }
 
 fn attach_preflight_memory_matches(
@@ -23010,8 +22592,8 @@ fn attach_preflight_memory_matches(
     if report.matches.is_empty() {
         return;
     }
-    let (connection, workspace_id, _) =
-        match open_preflight_token_database_for_workspace(workspace.to_path_buf(), database) {
+    let (connection, workspace_id) =
+        match open_preflight_memory_database_for_read(workspace, database) {
             Ok(opened) => opened,
             Err(error) => {
                 let mut degraded = no_risk_memories_degradation();
@@ -44784,7 +44366,7 @@ where
         }
     };
     let (connection, workspace_id, _) =
-        match open_preflight_token_database(cli, args.database.as_deref()) {
+        match open_workspace_database_for_write(cli, args.database.as_deref()) {
             Ok(opened) => opened,
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
@@ -60432,16 +60014,7 @@ const PERF_BUDGET_SUBCOMMANDS: &[&str] = &["check"];
 const PLAN_SUBCOMMANDS: &[&str] = &["goal", "recipe", "explain"];
 const PLAN_RECIPE_SUBCOMMANDS: &[&str] = &["list", "show"];
 const PLAYBOOK_SUBCOMMANDS: &[&str] = &["extract", "list", "export", "import"];
-const PREFLIGHT_SUBCOMMANDS: &[&str] = &[
-    "run",
-    "show",
-    "close",
-    "check",
-    "guard",
-    "issue-bypass-token",
-    "revoke-bypass-token",
-    "list-bypass-tokens",
-];
+const PREFLIGHT_SUBCOMMANDS: &[&str] = &["run", "show", "close", "check", "guard"];
 const PROOF_SUBCOMMANDS: &[&str] = &["admit", "status"];
 const PROFILE_SUBCOMMANDS: &[&str] = &["config"];
 const PROFILE_CONFIG_SUBCOMMANDS: &[&str] = &["plan", "apply"];
@@ -60904,15 +60477,6 @@ impl NormalizedInvocation {
                     PreflightCommand::Run(_) => "preflight run".to_string(),
                     PreflightCommand::Show(_) => "preflight show".to_string(),
                     PreflightCommand::Close(_) => "preflight close".to_string(),
-                    PreflightCommand::IssueBypassToken(_) => {
-                        "preflight issue-bypass-token".to_string()
-                    }
-                    PreflightCommand::RevokeBypassToken(_) => {
-                        "preflight revoke-bypass-token".to_string()
-                    }
-                    PreflightCommand::ListBypassTokens(_) => {
-                        "preflight list-bypass-tokens".to_string()
-                    }
                     PreflightCommand::Check(_) => "preflight check".to_string(),
                     PreflightCommand::Guard(_) => "preflight guard".to_string(),
                 },
@@ -68299,8 +67863,8 @@ mod tests {
             crate::core::workspace::stable_workspace_id(&canonical_workspace);
         let canonical_workspace_path = canonical_workspace.to_string_lossy().into_owned();
 
-        let (connection, workspace_id, resolved_workspace) =
-            super::open_preflight_token_database_for_workspace(lexical_workspace, None)
+        let (connection, workspace_id) =
+            super::open_preflight_memory_database_for_read(&lexical_workspace, None)
                 .map_err(|error| error.message())?;
 
         ensure_equal(
@@ -68309,7 +67873,7 @@ mod tests {
             "preflight canonical workspace id",
         )?;
         ensure_equal(
-            &resolved_workspace,
+            &lexical_workspace,
             &expected_resolved_workspace,
             "preflight preserves caller workspace path",
         )?;
@@ -68403,8 +67967,6 @@ mod tests {
             cmd_base64: None,
             stdin: false,
             workspace: None,
-            bypass: Vec::new(),
-            override_token: None,
             database: None,
         };
 

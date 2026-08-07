@@ -8,7 +8,7 @@ contracts:
   - preflight guard checks command against workspace rules from .ee/preflight_rules.toml
   - preflight guard returns exit code 0 for every successfully generated advisory report
   - destructive matches remain explainable but never deny or suppress command execution
-  - preflight guard preserves BLAKE3 keyed-hash authorization evidence per (rule_id, command)
+  - public preflight check/guard exposes no bypass, override, approval, or authorization control plane
   - action=high_risk and action=warn rules are both advisory
   - preflight guard citations include rule source (builtin, workspace_file, etc)
 evidence:
@@ -17,4 +17,3 @@ evidence:
   - GuardMatch.rule_id
   - GuardMatch.resolution
   - MatchResolution::Enforced (serialized as matched)
-  - MatchResolution::BypassedWithToken

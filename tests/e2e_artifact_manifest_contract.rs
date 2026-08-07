@@ -89,7 +89,14 @@ fn assert_hash(value: &str, key: &str) -> TestResult {
 fn sha256_file(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path)
         .map_err(|error| format!("failed to read `{}` for hashing: {error}", path.display()))?;
-    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity("sha256:".len() + (digest.len() * 2));
+    encoded.push_str("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(encoded, "{byte:02x}").map_err(|error| error.to_string())?;
+    }
+    Ok(encoded)
 }
 
 fn repeated_hash(byte: char) -> String {
