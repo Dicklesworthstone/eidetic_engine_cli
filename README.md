@@ -70,7 +70,7 @@ distilled memory.
 | **Explainable scores** | Every returned memory shows component scores, freshness, confidence, and which sources support it |
 | **Typed memory fields** | Registry-backed sidecars for failures, decisions, commands, rules, conventions, risks, and anti-patterns; search filters use stable field names instead of prose parsing |
 | **Procedural rules with decay** | Confidence ages out, harmful feedback demotes faster than helpful feedback promotes |
-| **Anti-patterns first-class** | Trauma-guard surfaces matching risk, anti-pattern, and failure memories before destructive actions |
+| **Anti-patterns first-class** | Explicit advisory queries surface matching risk, anti-pattern, and failure memories with provenance |
 | **Memory hygiene** | `ee curate doctor` ranks content debt, `ee learn gaps` turns missed demand into capture templates, and steward snapshots show whether hygiene is improving |
 | **Graph-aware** | PageRank, HITS, PPR, Gomory-Hu proximity, dominance, causal paths, structural health, Pack DNA, and skyline views |
 | **CASS session import** | Mines your existing `cass` corpus (Claude Code, Codex, Cursor, Gemini, ChatGPT) for evidence |
@@ -1537,7 +1537,7 @@ Additional runtime-adjacent modules:
 |---|---|
 | `mesh` | Optional peer exchange, Tailscale autodiscovery, hello responder, anti-entropy, policy, authenticated lane consent, and revocation |
 | `obs` | Flight recorder, structured tracing, posture helpers, and diagnostic evidence |
-| `hooks` | Agent harness hook helpers, including preflight shell snippets |
+| `hooks` | Memory-oriented agent harness helpers for recall, orientation, journaling, and capture |
 | `steward` | Bounded maintenance jobs, spec packs, and optional daemon work |
 | `shadow` | Read-only shadow/diagnostic support paths |
 

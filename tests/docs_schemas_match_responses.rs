@@ -2686,21 +2686,6 @@ fn preflight_guard_conformance_sample() -> Value {
         "command": "git status --short",
         "exitCode": 0,
         "checkedAt": "2026-05-22T00:00:00Z",
-        "repairCommandAssessment": {
-            "command": "git status --short",
-            "riskClass": "read_only_probe",
-            "preflightCommand": null,
-            "requiresHumanApproval": false,
-            "mutatesExternalState": false,
-            "mutatesTrackerState": false,
-            "privacyClass": "bounded_command_no_raw_state",
-            "nextAction": "run_directly",
-            "ruleId": "repair_safety:read_only_probe",
-            "source": "repair_action_safety",
-            "reasonCode": "read_only_probe_command",
-            "evidence": ["read_only_probe_command"],
-            "preconditions": []
-        },
         "matches": [],
         "matchedMemories": [],
         "degraded": []

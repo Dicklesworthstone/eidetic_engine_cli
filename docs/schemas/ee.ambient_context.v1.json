@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.ambient_context.v1.json",
   "title": "ee.ambient_context.v1",
-  "description": "Proactive ambient-context hook profile for bounded, provenance-tagged orient, recall, and preflight injection.",
+  "description": "Proactive ambient-context hook profile for bounded, provenance-tagged orientation, recall, and capture.",
   "type": "object",
   "required": [
     "schema",
@@ -39,7 +39,7 @@
             "enum": [
               "session_start_orient",
               "pre_edit_recall",
-              "pre_risky_preflight"
+              "session_end_capture_suggest"
             ]
           },
           "maxTokens": { "type": "integer", "minimum": 0 },
@@ -60,7 +60,8 @@
               "no_relevant_input",
               "empty_context",
               "duplicate_in_session",
-              "preflight_allows_command"
+              "declined_capture",
+              "existing_memory_covers"
             ]
           },
           "description": { "type": "string", "minLength": 1 }

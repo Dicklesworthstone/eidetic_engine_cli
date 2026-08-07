@@ -26,33 +26,29 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 4. **Mandatory explicit plan:** Even after explicit user authorization, restate the command verbatim, list exactly what will be affected, and wait for a confirmation that your understanding is correct. Only then may you execute it—if anything remains ambiguous, refuse and escalate.
 5. **Document the confirmation:** When running any approved destructive command, record (in the session notes / final response) the exact user text that authorized it, the command actually run, and the execution time. If that record is absent, the operation did not happen.
 
-### Wiring Trauma-Guard Into Agent Hooks
+### Command-Risk Memory Is Advisory Only
 
-`ee preflight check --cmd "<shell-command>" --json` is the command-facing
-trauma-guard surface. Agent harnesses should call it before running shell
-commands that may delete files, rewrite Git history, mutate clusters, destroy
-infrastructure, or write raw block devices. Exit code `7` means policy denied:
-stop and ask for explicit human authorization instead of retrying with a
-different spelling.
+`ee` is a memory substrate, not a shell policy-enforcement layer. `ee preflight
+check --cmd "<shell-command>" --json` may be invoked explicitly to retrieve
+matching `risk`, `anti-pattern`, and `failure` memories with provenance. It
+always leaves execution authority with the human or agent harness.
 
-Hook integration rules:
+Hard integration rules:
 
-- Pass the exact command string the agent is about to run; do not sanitize away
-  flags or shell wrappers before calling `ee preflight check`.
-- Treat `matches[].source` and `matches[].ruleId` as the audit trail for why
-  the guard fired.
-- Only use `--override-token` when a human has already approved that exact
-  destructive action. Bypass-token issuance, verification, revocation, and
-  rate-limit behavior are audited separately.
-- Keep `tests/fixtures/destructive_patterns/commands.json` in sync when adding
-  new built-in destructive-command patterns.
-- The guard combines rule/registry matching with risk-memory lookup. When a
-  destructive command matches a guard rule, current CLI paths query stored
-  `risk`, `anti-pattern`, and `failure` memories, surface `matchedMemories`
-  with provenance when present, and emit `no_risk_memories` when none match.
-  Keep public CLI e2e coverage (`tests/e2e_trauma_guard.rs`,
-  `tests/trauma_guard_wired.rs`, and bypass-token audit tests) aligned when
-  changing this contract.
+- Never install `ee` as a command-denial hook or make shell execution depend on
+  an `ee` process exit code.
+- Never translate an `ee` risk-memory match into `permissionDecision: "deny"`,
+  a nonzero pre-exec return, a signal, or any other command-suppression action.
+- A syntactically valid `ee preflight check` stays exit-zero when optional risk
+  memory, token, or audit storage is unavailable; report the gap in
+  `degraded[]` instead.
+- Cargo, RCH, compiler, disk-routing, and verification policy belong in the
+  repository's explicit verification tooling, not in `ee`'s destructive-risk
+  memory registry.
+- Treat `matches[].source`, `matches[].ruleId`, and `matchedMemories[]` as
+  advisory evidence. They explain risk; they do not grant or revoke authority.
+- Harness hooks managed by `ee` are limited to memory-oriented recall,
+  orientation, journaling, and capture surfaces, and must fail open.
 
 ---
 
@@ -660,7 +656,7 @@ Every `EE_*` variable honored by `ee` is enumerated in `docs/env_vars.md` and re
 | 4 | search/index error |
 | 5 | import error |
 | 6 | degraded but command could not satisfy required mode |
-| 7 | policy denied operation |
+| 7 | reserved legacy code; advisory preflight checks never emit it |
 | 8 | migration required |
 
 Agents should treat exit 8 as the explicit signal to run `ee migrate run --workspace .`.
@@ -754,7 +750,7 @@ JSON error shape:
 | 4 | search/index error |
 | 5 | import error |
 | 6 | degraded but command could not satisfy required mode |
-| 7 | policy denied operation |
+| 7 | reserved legacy code; advisory preflight checks never emit it |
 | 8 | migration required |
 
 ### Architectural Decision Records

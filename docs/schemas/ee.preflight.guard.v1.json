@@ -9,7 +9,6 @@
     "command",
     "exitCode",
     "checkedAt",
-    "repairCommandAssessment",
     "matches",
     "matchedMemories",
     "degraded"
@@ -32,81 +31,6 @@
       "type": "string",
       "format": "date-time",
       "description": "RFC 3339 timestamp at which the advisory risk evaluation ran."
-    },
-    "repairCommandAssessment": {
-      "type": "object",
-      "description": "Advisory repair-action safety assessment for the exact command string. This classifier never executes, authorizes, or denies the command; its nextAction is guidance for the caller only.",
-      "required": [
-        "command",
-        "riskClass",
-        "requiresHumanApproval",
-        "mutatesExternalState",
-        "mutatesTrackerState",
-        "privacyClass",
-        "nextAction",
-        "ruleId",
-        "source",
-        "reasonCode",
-        "evidence",
-        "preconditions"
-      ],
-      "properties": {
-        "command": {
-          "type": ["string", "null"],
-          "description": "The classified repair command, or null for manual-only repairs."
-        },
-        "riskClass": {
-          "type": "string",
-          "enum": [
-            "read_only_probe",
-            "idempotent_refresh",
-            "mutating_local_repair",
-            "mutating_external_coordination_repair",
-            "approval_required_repair",
-            "destructive_or_irreversible_repair",
-            "unavailable_or_manual_only"
-          ]
-        },
-        "preflightCommand": {
-          "type": ["string", "null"],
-          "description": "Concrete ee preflight check command that can retrieve advisory risk context for the repair command when present."
-        },
-        "requiresHumanApproval": {"type": "boolean"},
-        "mutatesExternalState": {"type": "boolean"},
-        "mutatesTrackerState": {"type": "boolean"},
-        "privacyClass": {"type": "string"},
-        "nextAction": {
-          "type": "string",
-          "enum": [
-            "run_directly",
-            "run_preflight_first",
-            "coordinate_first",
-            "ask_human",
-            "manual_only"
-          ],
-          "description": "Advisory recommendation from the repair-safety classifier. High-risk actions may recommend asking a human but never change exitCode or block shell execution."
-        },
-        "ruleId": {
-          "type": "string",
-          "description": "Stable repair-safety rule id that selected nextAction."
-        },
-        "source": {
-          "type": "string",
-          "description": "Classifier source. Currently repair_action_safety."
-        },
-        "reasonCode": {
-          "type": "string",
-          "description": "Bounded explanation code suitable for logs."
-        },
-        "evidence": {
-          "type": "array",
-          "items": {"type": "string"}
-        },
-        "preconditions": {
-          "type": "array",
-          "items": {"type": "string"}
-        }
-      }
     },
     "matches": {
       "type": "array",

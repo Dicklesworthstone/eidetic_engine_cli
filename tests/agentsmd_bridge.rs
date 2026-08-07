@@ -555,6 +555,43 @@ fn import_excludes_managed_block_content() -> TestResult {
 }
 
 #[test]
+fn repo_agents_snapshot_teaches_memory_only_advisory_preflight() -> TestResult {
+    let snapshot = include_str!("fixtures/agentsmd/repo_agents_snapshot.md");
+
+    for required in [
+        "### Command-Risk Memory Is Advisory Only",
+        "`ee` is a memory substrate, not a shell policy-enforcement layer.",
+        "Never install `ee` as a command-denial hook",
+        "Never translate an `ee` risk-memory match into `permissionDecision: \"deny\"`",
+        "A syntactically valid `ee preflight check` stays exit-zero",
+        "Harness hooks managed by `ee` are limited to memory-oriented recall",
+        "must fail open.",
+    ] {
+        if !snapshot.contains(required) {
+            return Err(format!(
+                "repo AGENTS snapshot is missing advisory command-risk contract: {required:?}"
+            ));
+        }
+    }
+
+    for forbidden in [
+        "### Wiring Trauma-Guard Into Agent Hooks",
+        "Exit code `7` means policy denied",
+        "| 7 | policy denied operation |",
+        "--override-token",
+        "Agent harnesses should call it before running shell commands",
+    ] {
+        if snapshot.contains(forbidden) {
+            return Err(format!(
+                "repo AGENTS snapshot still teaches command authority: {forbidden:?}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn import_parses_repo_agents_snapshot_with_precision() -> TestResult {
     let workspace = seed_bridge_workspace()?;
     let workspace_arg = workspace.path().to_str().unwrap().to_owned();
@@ -573,6 +610,8 @@ fn import_parses_repo_agents_snapshot_with_precision() -> TestResult {
     if proposals.is_empty() {
         return Err("the repo's own AGENTS.md must yield rule statements".to_owned());
     }
+    let mut imports_no_denial_hook_rule = false;
+    let mut imports_no_permission_denial_rule = false;
     // Precision spot checks: nothing structural leaks through the parser.
     for proposal in proposals {
         let text = proposal
@@ -588,6 +627,31 @@ fn import_parses_repo_agents_snapshot_with_precision() -> TestResult {
         if kind != Some("rule") && kind != Some("convention") {
             return Err(format!("unexpected kind {kind:?}"));
         }
+        let modality = proposal.pointer("/modality").and_then(Value::as_str);
+        if text.starts_with("Never install `ee` as a command-denial hook") {
+            imports_no_denial_hook_rule = modality == Some("Never");
+        }
+        if text.starts_with("Never translate an `ee` risk-memory match")
+            && text.contains("permissionDecision: \"deny\"")
+        {
+            imports_no_permission_denial_rule = modality == Some("Never");
+        }
+        for forbidden in [
+            "Exit code `7` means policy denied",
+            "policy denied operation",
+            "--override-token",
+        ] {
+            if text.contains(forbidden) {
+                return Err(format!(
+                    "AGENTS.md import proposed obsolete execution-authority teaching: {text}"
+                ));
+            }
+        }
+    }
+    if !imports_no_denial_hook_rule || !imports_no_permission_denial_rule {
+        return Err(format!(
+            "AGENTS.md import must preserve explicit negative command-authority rules; no_denial_hook={imports_no_denial_hook_rule}, no_permission_denial={imports_no_permission_denial_rule}"
+        ));
     }
     Ok(())
 }

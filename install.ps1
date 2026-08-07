@@ -840,31 +840,28 @@ function Show-AgentIntegration {
 
     if ($Agents -contains "Claude Code") {
         if ($Script:Color) { Write-Host "  -> Claude Code" -ForegroundColor Cyan } else { Write-Host "  -> Claude Code" }
-        Write-Host "      Before risky shell commands:"
-        Write-Host "        ee preflight check --cmd `"<shell command>`" --workspace . --json"
         Write-Host "      Before substantial work:"
         Write-Host "        ee pack `"<task>`" --workspace . --max-tokens 4000 --format markdown"
+        Write-Host "      Before editing a known path:"
+        Write-Host "        ee recall --path <path> --workspace . --budget-tokens 400 --format markdown"
         Write-Host ""
     }
     if ($Agents -contains "Codex CLI") {
         if ($Script:Color) { Write-Host "  -> Codex CLI" -ForegroundColor Cyan } else { Write-Host "  -> Codex CLI" }
         Write-Host "      Before substantial work:"
         Write-Host "        ee pack `"<task>`" --workspace . --json"
-        Write-Host "      Optional risk guard:"
-        Write-Host "        ee preflight check --cmd `"<command>`" --workspace . --json"
         Write-Host ""
     }
     if ($Agents -contains "Gemini CLI") {
         if ($Script:Color) { Write-Host "  -> Gemini CLI" -ForegroundColor Cyan } else { Write-Host "  -> Gemini CLI" }
-        Write-Host "      For BeforeTool integration, see docs/agent-ux/auto_enrollment_onboarding.md"
-        Write-Host "      For context packs:"
+        Write-Host "      Before substantial work:"
         Write-Host "        ee pack `"<task>`" --workspace . --json"
         Write-Host ""
     }
     if ($Agents -contains "Cursor IDE") {
         if ($Script:Color) { Write-Host "  -> Cursor IDE" -ForegroundColor Cyan } else { Write-Host "  -> Cursor IDE" }
-        Write-Host "      Cursor beforeShellExecution can call:"
-        Write-Host "        ee preflight check --cmd `"`$COMMAND`" --workspace . --json"
+        Write-Host "      Before substantial work:"
+        Write-Host "        ee pack `"<task>`" --workspace . --json"
         Write-Host ""
     }
     # Wrap in @() so a 0- or 1-match Where-Object result is always an array:
@@ -874,7 +871,7 @@ function Show-AgentIntegration {
     $other = @(@("Aider", "Continue", "GitHub Copilot CLI") | Where-Object { $Agents -contains $_ })
     if ($other.Count -gt 0) {
         if ($Script:Color) { Write-Host "  -> Aider / Continue / Copilot CLI" -ForegroundColor Cyan } else { Write-Host "  -> Aider / Continue / Copilot CLI" }
-        Write-Host "      No documented PreToolUse surface for ee yet. Call directly from your prompt setup:"
+        Write-Host "      Call ee directly from your prompt setup:"
         Write-Host "        ee pack `"<task>`" --workspace . --json"
         Write-Host ""
     }

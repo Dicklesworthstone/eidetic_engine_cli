@@ -85,6 +85,45 @@ fn assert_trauma_guard_golden(name: &str, actual: &serde_json::Value) {
     );
 }
 
+fn assert_no_execution_authority_fields(value: &serde_json::Value) {
+    fn visit(value: &serde_json::Value, path: &str) {
+        match value {
+            serde_json::Value::Object(object) => {
+                for (key, nested) in object {
+                    let normalized = key
+                        .chars()
+                        .filter(|character| character.is_ascii_alphanumeric())
+                        .map(|character| character.to_ascii_lowercase())
+                        .collect::<String>();
+                    let is_authority_field = matches!(
+                        normalized.as_str(),
+                        "permissiondecision"
+                            | "requireshumanapproval"
+                            | "nextaction"
+                            | "preflightcommand"
+                            | "shouldhalt"
+                            | "cleared"
+                    ) || normalized.starts_with("block")
+                        || normalized.starts_with("allow");
+                    assert!(
+                        !is_authority_field,
+                        "advisory preflight JSON exposed execution-authority field `{path}/{key}`: {value}"
+                    );
+                    visit(nested, &format!("{path}/{key}"));
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    visit(item, &format!("{path}/{index}"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    visit(value, "$");
+}
+
 #[test]
 fn trauma_guard_memory_match_surfaces_provenance_for_destructive_command() {
     let memories = vec![
@@ -231,6 +270,7 @@ fn trauma_guard_match_response_is_advisory_and_preserves_risk_context() {
     let json = report.to_json();
     assert_eq!(json["schema"], PREFLIGHT_GUARD_SCHEMA_V1);
     assert_eq!(json["exitCode"], 0);
+    assert_no_execution_authority_fields(&json);
     assert!(
         json["matches"]
             .as_array()
@@ -241,6 +281,7 @@ fn trauma_guard_match_response_is_advisory_and_preserves_risk_context() {
         json["matchedMemories"][0]["memoryId"],
         "mem_00000000000000000000000001"
     );
+    assert_trauma_guard_golden("trauma_guard_match", &json);
 }
 
 #[test]
@@ -249,7 +290,9 @@ fn trauma_guard_no_match_response_matches_golden_snapshot() {
     let mut report = run_preflight_guard(&registry, &opts("cargo fmt --check"));
     report.checked_at = "2026-05-15T00:00:00+00:00".to_owned();
 
-    assert_trauma_guard_golden("trauma_guard_no_match", &report.to_json());
+    let json = report.to_json();
+    assert_no_execution_authority_fields(&json);
+    assert_trauma_guard_golden("trauma_guard_no_match", &json);
 }
 
 #[test]
@@ -685,6 +728,8 @@ fn cargo_rch_and_rust_compilers_are_never_destructive_command_rules() {
 
     for command in [
         "cargo test --all-targets",
+        "cargo check --all-targets",
+        "cargo clippy --all-targets",
         "env CARGO_TARGET_DIR=/tmp/target cargo clippy --all-targets",
         "rch exec -- cargo test --lib foo",
         "rch --json exec -- cargo check --all-targets",
@@ -702,6 +747,9 @@ fn cargo_rch_and_rust_compilers_are_never_destructive_command_rules() {
     ] {
         let report = run_preflight_guard(&registry, &opts(command));
         assert_eq!(report.exit_code, 0, "command `{command}` must be advisory");
+        let json = report.to_json();
+        assert_eq!(json["exitCode"], 0, "command `{command}` JSON exitCode");
+        assert_no_execution_authority_fields(&json);
         assert!(
             report.matches.iter().all(|matched| !matches!(
                 matched.rule_id.as_str(),

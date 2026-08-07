@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.hook.harness_install.v1.json",
   "title": "ee.hook.harness_install.v1",
-  "description": "Agent-harness hook generation/install report for ambient context injection, preflight checks, and failure capture.",
+  "description": "Agent-harness hook generation/install report for memory recall, orientation, journaling, and capture.",
   "type": "object",
   "required": [
     "schema",

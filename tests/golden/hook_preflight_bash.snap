@@ -1,26 +1,12 @@
 ---
-source: src/hooks/installer.rs
-bead: bd-3usjw.7
-surface: trauma_guard_hook_helper
-assertion: ee hook preflight-shell --shell bash emits a deterministic, syntactically-valid advisory snippet that may surface ee preflight output but always allows the upcoming command
-schema:
-  envelope: ee.response.v2
-  payload: ee.hooks.preflight_shell.v1
+source: src/cli/mod.rs
+surface: memory_hook_boundary
+assertion: ee does not expose or generate a bash command-interception hook
 contracts:
-  - snippet body is byte-identical across runs for the same (shell, ee_binary_path) pair
-  - snippet embeds a single-quoted absolute ee binary path (no PATH lookup)
-  - snippet does not enable extdebug, prompt on /dev/tty, return nonzero, or otherwise suppress shell execution
-  - even `ee preflight check` exit code 7 is advisory and the hook returns success
-  - inherited `set -e` cannot turn a nonzero advisory lookup into command suppression
-  - candidate commands execute after advisory output is surfaced
-  - version field is the first 16 hex chars of blake3(snippet) for upgrade detection
-  - snippet does not embed a client-side severity blocklist
+  - ee hook preflight-shell --shell bash is rejected as an unknown command
+  - ee hook --help does not advertise preflight-shell
+  - no public library generator emits a bash DEBUG trap
+  - ee preflight check remains an explicit advisory memory query
 evidence:
-  - src/hooks/installer.rs::generate_preflight_shell_snippet
-  - src/hooks/installer.rs::bash_preflight_snippet
-  - tests/preflight_hook_bash.rs::bash_snippet_syntax_check_passes
-  - tests/preflight_hook_bash.rs::bash_snippet_source_defines_hook_function_and_activation_flag
-  - tests/preflight_hook_bash.rs::bash_snippet_treats_preflight_exit_7_as_advisory
-  - tests/preflight_hook_bash.rs::bash_debug_trap_allows_candidate_command_after_preflight_exit_7
-  - tests/preflight_hook_bash.rs::bash_snippet_is_byte_stable_across_runs_for_pinned_binary_path
-  - tests/preflight_hook_bash.rs::bash_snippet_carries_documented_contract_markers
+  - tests/preflight_hook_bash.rs::bash_preflight_shell_interceptor_is_not_a_public_command
+  - tests/preflight_hook_bash.rs::explicit_preflight_memory_query_remains_available

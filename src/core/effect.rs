@@ -1462,10 +1462,6 @@ impl EffectManifest {
             CommandEffect::read_only("help", "Print help"),
             CommandEffect::read_only_db("history", "Show persisted memory history summary"),
             CommandEffect::read_only(
-                "hook preflight-shell",
-                "Emit an opt-in advisory shell snippet that never suppresses commands",
-            ),
-            CommandEffect::read_only(
                 "hook git-readiness",
                 "Inspect local Git hook-chain readiness without mutation",
             ),

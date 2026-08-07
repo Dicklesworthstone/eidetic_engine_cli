@@ -1,12 +1,51 @@
-//! bd-3usjw.7 — `ee hook preflight-shell --shell zsh` integration tests.
+//! Regression coverage for removal of the zsh shell-interceptor surface.
 //!
-//! Mirror of `tests/preflight_hook_bash.rs` for the zsh flavor. Notes on
-//! mechanism: zsh's `preexec` hook fires before each user command. The
-//! generated hook is advisory-only: it may surface command-risk memory, but
-//! it never prompts, signals the shell, or suppresses command execution.
+//! Hook discovery and direct invocation must both prove that ee no longer
+//! generates shell command interceptors.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::process::Command;
+
+#[test]
+fn zsh_preflight_shell_interceptor_is_not_a_public_command() -> Result<(), String> {
+    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["hook", "preflight-shell", "--shell", "zsh"])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        return Err(format!(
+            "removed ee hook preflight-shell unexpectedly succeeded: {}",
+            String::from_utf8_lossy(&output.stdout)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn hook_help_does_not_advertise_a_shell_interceptor() -> Result<(), String> {
+    let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["hook", "--help"])
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "ee hook --help failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.contains("preflight-shell") {
+        return Err(format!(
+            "ee hook --help still advertises the removed interceptor: {stdout}"
+        ));
+    }
+    Ok(())
+}
+
+#[rustfmt::skip]
+#[cfg(any())]
+mod removed_preflight_shell_interceptor_contract {
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -473,4 +512,6 @@ fn zsh_snippet_carries_documented_contract_markers() -> TestResult {
         ));
     }
     Ok(())
+}
+
 }

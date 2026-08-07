@@ -72,6 +72,50 @@ fn assert_clean_stderr(output: &Output, context: &str) -> TestResult {
     )
 }
 
+fn assert_no_execution_authority_fields(value: &Value, context: &str) -> TestResult {
+    fn visit(value: &Value, path: &str, forbidden_paths: &mut Vec<String>) {
+        match value {
+            Value::Object(object) => {
+                for (key, nested) in object {
+                    let normalized = key
+                        .chars()
+                        .filter(|character| character.is_ascii_alphanumeric())
+                        .map(|character| character.to_ascii_lowercase())
+                        .collect::<String>();
+                    let is_authority_field = matches!(
+                        normalized.as_str(),
+                        "permissiondecision"
+                            | "requireshumanapproval"
+                            | "nextaction"
+                            | "preflightcommand"
+                            | "shouldhalt"
+                            | "cleared"
+                    ) || normalized.starts_with("block")
+                        || normalized.starts_with("allow");
+                    let nested_path = format!("{path}/{key}");
+                    if is_authority_field {
+                        forbidden_paths.push(nested_path.clone());
+                    }
+                    visit(nested, &nested_path, forbidden_paths);
+                }
+            }
+            Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    visit(item, &format!("{path}/{index}"), forbidden_paths);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut forbidden_paths = Vec::new();
+    visit(value, "$", &mut forbidden_paths);
+    ensure(
+        forbidden_paths.is_empty(),
+        format!("{context} exposed execution-authority fields {forbidden_paths:?}: {value}"),
+    )
+}
+
 #[test]
 fn destructive_command_surfaces_matching_risk_memory_provenance() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
@@ -244,8 +288,12 @@ fn cargo_rch_and_rustc_commands_are_never_denied_or_classified_as_destructive() 
 
     for command in [
         "cargo test --all-targets",
+        "cargo check --all-targets",
+        "cargo clippy --all-targets",
         "rch exec -- cargo check --all-targets",
         "rustc src/main.rs",
+        "rustdoc --test src/lib.rs",
+        "scripts/rch_verify.sh --bead-id bd-123 -- cargo test --lib foo",
     ] {
         let preflight = run_ee(&[
             "--workspace",
@@ -270,6 +318,7 @@ fn cargo_rch_and_rustc_commands_are_never_denied_or_classified_as_destructive() 
             Some(i64::from(EXIT_SUCCESS)),
             "preflight exitCode",
         )?;
+        assert_no_execution_authority_fields(&report, "Rust command preflight")?;
         ensure(
             report
                 .get("matches")

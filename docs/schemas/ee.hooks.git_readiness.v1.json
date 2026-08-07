@@ -156,7 +156,7 @@
               "git_dir_pointer_unreadable",
               "git_dir_unreadable",
               "hook_untrusted_or_unreadable",
-              "preflight_guard_not_in_git_hooks",
+              "ee_command_gate_hook_retired",
               "pre_push_ahead_risk",
               "rch_hook_mismatch"
             ]

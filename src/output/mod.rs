@@ -342,8 +342,7 @@ pub const ENVIRONMENT_ATTESTATION_SCHEMA_V1: &str = "ee.environment_attestation.
 pub const CI_PROOF_LANE_SNAPSHOT_SCHEMA_V1: &str = "ee.ci_proof_lane_snapshot.v1";
 
 /// Schema identifier for source-bound remote build artifact manifests.
-pub const REMOTE_BUILD_ARTIFACT_MANIFEST_SCHEMA_V1: &str =
-    "ee.remote_build_artifact_manifest.v1";
+pub const REMOTE_BUILD_ARTIFACT_MANIFEST_SCHEMA_V1: &str = "ee.remote_build_artifact_manifest.v1";
 
 /// Schema identifier for consumer verification of remote artifact manifests.
 pub const REMOTE_BUILD_ARTIFACT_VERIFICATION_SCHEMA_V1: &str =
@@ -10818,14 +10817,14 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
         SchemaEntry {
             id: "ee.hook.harness_install.v1",
             version: "1",
-            description: "Agent-harness hook generation/install plan for ambient context injection, preflight checks, and failure capture.",
+            description: "Agent-harness hook generation/install plan for memory recall, orientation, journaling, and capture.",
             category: "ops",
             definition: hook_harness_install_schema_definition,
         },
         SchemaEntry {
             id: crate::models::AMBIENT_CONTEXT_SCHEMA_V1,
             version: "1",
-            description: "On-by-default proactive ambient hook profile for session orient, pre-edit recall, and risky-command preflight.",
+            description: "On-by-default proactive ambient hook profile for session orientation and pre-edit memory recall.",
             category: "ops",
             definition: ambient_context_schema_definition,
         },
@@ -13785,7 +13784,7 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "hook",
-        description: "Generate agent-harness recall, journal, and advisory helpers",
+        description: "Generate agent-harness recall, orientation, journal, and capture helpers",
         available: true,
         subcommands: &[
             SubcommandEntry {
@@ -13801,12 +13800,8 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
                 description: "Report Gemini hook support posture",
             },
             SubcommandEntry {
-                name: "preflight-shell",
-                description: "Emit an opt-in advisory shell snippet; it never suppresses commands",
-            },
-            SubcommandEntry {
                 name: "git-readiness",
-                description: "Inspect local Git hooks for Agent Mail identity and preflight readiness",
+                description: "Inspect local Git hooks for Agent Mail identity and retired command gates",
             },
         ],
         args: &[],

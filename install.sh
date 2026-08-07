@@ -1678,49 +1678,38 @@ show_agent_integration() {
 
   if is_agent_detected "claude-code"; then
     print_integration_snippet "Claude Code (~/.claude/AGENTS.md or CLAUDE.md)" "\
-Before risky shell commands:
-  ee preflight check --cmd \"<shell command>\" --workspace . --json
-
 Before substantial work:
   ee pack \"<task>\" --workspace . --max-tokens 4000 --format markdown
 
-Or wire as a PreToolUse hook (writes a shell snippet to stdout):
-  $DEST/$BINARY hook preflight-shell --shell bash"
+Before editing a known path:
+  ee recall --path <path> --workspace . --budget-tokens 400 --format markdown"
     echo ""
   fi
 
   if is_agent_detected "codex-cli"; then
     print_integration_snippet "Codex CLI (~/.codex/AGENTS.md)" "\
 Before substantial work:
-  ee pack \"<task>\" --workspace . --json
-
-Optional risk guard (call from codex shell hooks):
-  ee preflight check --cmd \"<command>\" --workspace . --json"
+  ee pack \"<task>\" --workspace . --json"
     echo ""
   fi
 
   if is_agent_detected "gemini-cli"; then
     print_integration_snippet "Gemini CLI (~/.gemini/GEMINI.md or settings.json)" "\
-For BeforeTool integration, see the ee docs:
-  $DEST/$BINARY hook preflight-shell --shell bash
-For context packs:
+Before substantial work:
   ee pack \"<task>\" --workspace . --json"
     echo ""
   fi
 
   if is_agent_detected "cursor-ide"; then
     print_integration_snippet "Cursor IDE (~/.cursor/hooks.json)" "\
-Cursor's beforeShellExecution hook can call:
-  ee preflight check --cmd \"\$COMMAND\" --workspace . --json
-The exact wrapper script depends on Cursor's hook payload shape; see
-docs/agent-ux/auto_enrollment_onboarding.md for current guidance."
+Before substantial work:
+  ee pack \"<task>\" --workspace . --json"
     echo ""
   fi
 
   if is_agent_detected "aider" || is_agent_detected "continue" || is_agent_detected "github-copilot-cli"; then
     print_integration_snippet "Aider / Continue / Copilot CLI" "\
-These harnesses don't have a documented PreToolUse hook surface for ee yet.
-You can still call ee directly from your prompt setup:
+Call ee directly from your prompt setup:
   ee pack \"<task>\" --workspace . --json"
     echo ""
   fi

@@ -2539,7 +2539,6 @@ impl PreflightGuardReport {
             "command": self.command,
             "exitCode": self.exit_code,
             "checkedAt": self.checked_at,
-            "repairCommandAssessment": classify_repair_command_for_preflight(&self.command),
             "matches": self.matches.iter().map(|m| json!({
                 "ruleId": m.rule_id,
                 "pattern": m.pattern,
