@@ -3763,9 +3763,11 @@ fn broker_request_for_substrate<'a>(
         command_class,
         normalized_argv_hash,
         execution_substrate,
-        env_fingerprint_class: Some("class:external_cargo_target"),
+        env_fingerprint_class: (execution_substrate != "local_shell_static")
+            .then_some("class:external_cargo_target"),
         target_triple: (execution_substrate == "remote_artifact").then_some(SAMPLE_REMOTE_TARGET),
-        target_profile: Some(SAMPLE_REMOTE_PROFILE),
+        target_profile: (execution_substrate != "local_shell_static")
+            .then_some(SAMPLE_REMOTE_PROFILE),
         build_command_hash: (execution_substrate == "remote_artifact")
             .then_some(SAMPLE_REMOTE_BUILD_COMMAND_HASH),
         effective_input_hash: (execution_substrate == "remote_artifact")
