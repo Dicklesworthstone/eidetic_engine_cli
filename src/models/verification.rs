@@ -3994,7 +3994,14 @@ fn remote_artifact_verification_hash(report: &RemoteArtifactAttestation) -> Opti
 fn canonical_json_sha256(value: &JsonValue) -> Option<String> {
     let canonical = canonical_json_value(value);
     let bytes = serde_json::to_vec(&canonical).ok()?;
-    Some(format!("sha256:{:x}", Sha256::digest(bytes)))
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity("sha256:".len() + (digest.len() * 2));
+    encoded.push_str("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(encoded, "{byte:02x}").ok()?;
+    }
+    Some(encoded)
 }
 
 fn canonical_json_value(value: &JsonValue) -> JsonValue {
