@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use serde_json::{Value as JsonValue, json};
 
 use crate::config::{ConfigFile, MeshLane, MeshLaneDecision, MeshPeerGroupBinding};
+use crate::core::memory_scope::parse_mesh_lane;
 use crate::db::StoredMeshLaneGrantState;
 
 pub use crate::core::memory_scope::{
@@ -19,7 +20,6 @@ pub use crate::core::memory_scope::{
     MeshPeerLaneOverride, MeshPeerPolicy, MeshPeerPolicyDecision, MeshPeerPolicyDecisionInput,
     MeshPolicyFailureSurface, MeshRedactionDecision, MeshRedactionPolicy, MeshTrustLane,
     decide_mesh_import_with_lane_override, decide_mesh_outbound_policy, decide_mesh_peer_policy,
-    parse_mesh_lane,
 };
 
 /// Stable internal handoff between transport decoders and inbound policy.
