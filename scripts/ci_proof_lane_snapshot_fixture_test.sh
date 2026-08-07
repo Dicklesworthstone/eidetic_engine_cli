@@ -99,6 +99,44 @@ assert_fixture \
       and .degraded[0].severity == "high"
       and (.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[0].artifacts[0].surfaceProbes[0].status) == "failed"'
 
+"$SNAPSHOT_SCRIPT" \
+    --input "${FIXTURE_DIR}/attested_artifact.json" \
+    --json |
+    jq -e '.summary.verdict == "artifact_attestation_required"
+      and .summary.freshArtifactAvailable == false
+      and .summary.attestationRequiredCount == 1
+      and .activeRecommendation.nextAction == "download_and_verify_artifact"
+      and .degraded[0].code == "ci_proof_lane_unknown_source"
+      and (.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[0].artifacts[0].attestationStatus) == "not_checked"
+      and (.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[0].artifacts[0].checksumStatus) == "not_checked"
+      and (.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[0].artifacts[0].surfaceProbes[0].status) == "not_run"' >/dev/null
+
+"$SNAPSHOT_SCRIPT" \
+    --input "${FIXTURE_DIR}/attested_artifact.json" \
+    --artifact-verification "${FIXTURE_DIR}/verified_artifact_report.json" \
+    --json |
+    jq -e '.summary.verdict == "fresh_artifact_available"
+      and .summary.freshArtifactAvailable == true
+      and .summary.attestationRequiredCount == 0
+      and .summary.attestationInvalidCount == 0
+      and .activeRecommendation.nextAction == "reuse_verified_artifact"
+      and .degraded == []
+      and (.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[0].artifacts[0].attestationStatus) == "verified"
+      and (.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[0].artifacts[0].attestedSourceCommit) == .repository.headSha
+      and (.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[0].artifacts[0].surfaceProbes | all(.status == "passed"))' >/dev/null
+
+"$SNAPSHOT_SCRIPT" \
+    --input "${FIXTURE_DIR}/attested_artifact.json" \
+    --artifact-verification "${FIXTURE_DIR}/attestation_mismatch.json" \
+    --json |
+    jq -e '.summary.verdict == "artifact_attestation_invalid"
+      and .summary.freshArtifactAvailable == false
+      and .summary.attestationInvalidCount == 1
+      and .activeRecommendation.nextAction == "file_followup_bead"
+      and .degraded[0].code == "ci_proof_lane_artifact_attestation_invalid"
+      and (.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[0].artifacts[0].attestationStatus) == "rejected"
+      and (.workflows[] | select(.workflowName == "macOS EE Artifact") | .runs[0].artifacts[0].attestationRejections | index("attested_source_commit_mismatch")) != null' >/dev/null
+
 EE_CI_PROOF_LANE_GH_BIN=/definitely/not/gh \
     "$SNAPSHOT_SCRIPT" \
     --head-sha 7044bf29b7d11fa76ca4a7af0c4a1abe0ad93939 \

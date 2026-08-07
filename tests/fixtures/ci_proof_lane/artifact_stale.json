@@ -17,6 +17,8 @@
     "cancelledBeforeArtifactCount": 0,
     "staleArtifactCount": 1,
     "checksumMismatchCount": 0,
+    "attestationInvalidCount": 0,
+    "attestationRequiredCount": 1,
     "localCargoFallbackAllowed": false,
     "sourceTestVerdict": "artifact_authority_only"
   },
@@ -52,6 +54,12 @@
               "checksumStatus": "verified",
               "sourceSha": "6afe302491b7ff5d869c42eaf57a7c9675fd5ef7",
               "architecture": "aarch64-apple-darwin",
+              "attestationStatus": "not_checked",
+              "attestedSourceCommit": null,
+              "attestedGitTree": null,
+              "manifestHash": null,
+              "verificationHash": null,
+              "attestationRejections": [],
               "surfaceProbes": [
                 {
                   "commandTemplate": "ee diag environment-attestation --help",

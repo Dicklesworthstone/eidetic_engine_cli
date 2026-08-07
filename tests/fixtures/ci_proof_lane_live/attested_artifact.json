@@ -1,0 +1,41 @@
+{
+  "schema": "ee.ci_proof_lane_input.v1",
+  "repository": {
+    "owner": "Dicklesworthstone",
+    "name": "eidetic_engine_cli",
+    "defaultBranch": "main",
+    "headSha": "7d3bbeff83be35eb1357d15220b9c59952ea554b"
+  },
+  "generatedAt": "2026-08-07T04:40:00Z",
+  "runs": [
+    {
+      "databaseId": "28000000001",
+      "workflowName": "macOS EE Artifact",
+      "status": "completed",
+      "conclusion": "success",
+      "headSha": "7d3bbeff83be35eb1357d15220b9c59952ea554b",
+      "event": "workflow_dispatch",
+      "headBranch": "main",
+      "createdAt": "2026-08-07T04:20:00Z",
+      "updatedAt": "2026-08-07T04:35:00Z",
+      "completedAt": "2026-08-07T04:35:00Z",
+      "jobs": [
+        {
+          "databaseId": "80000000001",
+          "name": "build aarch64-apple-darwin debug ee",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ],
+      "artifacts": [
+        {
+          "name": "ee-aarch64-apple-darwin-debug",
+          "status": "available",
+          "retentionExpiresAt": "2026-08-10T04:35:00Z",
+          "sourceSha": "7d3bbeff83be35eb1357d15220b9c59952ea554b",
+          "architecture": "aarch64-apple-darwin"
+        }
+      ]
+    }
+  ]
+}

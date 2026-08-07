@@ -17,6 +17,8 @@
     "cancelledBeforeArtifactCount": 1,
     "staleArtifactCount": 0,
     "checksumMismatchCount": 0,
+    "attestationInvalidCount": 0,
+    "attestationRequiredCount": 0,
     "localCargoFallbackAllowed": false,
     "sourceTestVerdict": "not_evaluated"
   },

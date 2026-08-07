@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKSPACE="$REPO_ROOT"
 INPUT_FILE=""
+ARTIFACT_VERIFICATION_FILE=""
 HEAD_SHA=""
 LIMIT="20"
 JSON_MODE=false
@@ -18,6 +19,12 @@ Read-only GitHub Actions proof-lane snapshot producer.
 Usage:
   scripts/ci_proof_lane_snapshot.sh [--workspace <path>] [--head-sha <sha>] [--limit <n>] [--json]
   scripts/ci_proof_lane_snapshot.sh --input <fixture.json> [--head-sha <sha>] [--json]
+
+Optional downloaded-artifact evidence:
+  --artifact-verification <report.json>
+      Read a consumer-generated ee.remote_build_artifact_manifest.verification.v1
+      report. The snapshot never executes the artifact; generate this report by
+      running scripts/ci_artifact_attestation.py verify after download.
 
 The producer never dispatches workflows, cancels runs, downloads artifacts,
 reserves files, mutates Beads, acknowledges Agent Mail, runs Cargo, or builds.
@@ -43,6 +50,14 @@ while [ "$#" -gt 0 ]; do
                 exit 2
             fi
             INPUT_FILE="$2"
+            shift 2
+            ;;
+        --artifact-verification)
+            if [ "$#" -lt 2 ]; then
+                printf 'ci_proof_lane_snapshot: --artifact-verification requires a path\n' >&2
+                exit 2
+            fi
+            ARTIFACT_VERIFICATION_FILE="$2"
             shift 2
             ;;
         --head-sha)
@@ -106,7 +121,12 @@ if [ ! -d "$WORKSPACE" ]; then
     exit 2
 fi
 
-ruby - "$WORKSPACE" "$INPUT_FILE" "$HEAD_SHA" "$LIMIT" <<'RUBY'
+if [ -n "$ARTIFACT_VERIFICATION_FILE" ] && [ ! -f "$ARTIFACT_VERIFICATION_FILE" ]; then
+    printf 'ci_proof_lane_snapshot: artifact verification report not found: %s\n' "$ARTIFACT_VERIFICATION_FILE" >&2
+    exit 2
+fi
+
+ruby - "$WORKSPACE" "$INPUT_FILE" "$HEAD_SHA" "$LIMIT" "$ARTIFACT_VERIFICATION_FILE" <<'RUBY'
 require "digest"
 require "json"
 require "open3"
@@ -116,6 +136,7 @@ workspace = File.expand_path(ARGV.fetch(0))
 input_file = ARGV.fetch(1)
 head_sha_arg = ARGV.fetch(2)
 limit = ARGV.fetch(3).to_i
+artifact_verification_file = ARGV.fetch(4)
 gh_bin = ENV.fetch("EE_CI_PROOF_LANE_GH_BIN", "gh")
 
 EXPECTED_ARTIFACT = "ee-aarch64-apple-darwin-debug".freeze
@@ -149,6 +170,50 @@ def parse_json(text, context)
 rescue JSON::ParserError => error
   raise "#{context}: #{error.message}"
 end
+
+def canonical_json(value)
+  normalized =
+    case value
+    when Hash
+      value.keys.sort.each_with_object({}) do |key, output|
+        output[key] = canonical_json(value.fetch(key))
+      end
+    when Array
+      value.map { |item| canonical_json(item) }
+    else
+      value
+    end
+  normalized.is_a?(String) ? normalized : normalized
+end
+
+def canonical_hash(value)
+  "sha256:" + Digest::SHA256.hexdigest(JSON.generate(canonical_json(value)))
+end
+
+def load_artifact_verification(path)
+  return nil if path.empty?
+
+  report = parse_json(File.read(path), "parse artifact verification report")
+  unless report.is_a?(Hash)
+    raise "artifact verification report must be a JSON object"
+  end
+  claimed_hash = report["verificationHash"]
+  body = report.reject { |key, _value| key == "verificationHash" }
+  hash_matches = claimed_hash.is_a?(String) && claimed_hash == canonical_hash(body)
+  schema_matches =
+    report["schema"] == "ee.remote_build_artifact_manifest.verification.v1"
+  return report if hash_matches && schema_matches
+
+  rejected = report.dup
+  rejected["accepted"] = false
+  rejected["status"] = "rejected"
+  rejected["rejections"] = Array(report["rejections"]) + [
+    schema_matches ? "verification_hash_mismatch" : "verification_schema_unsupported"
+  ]
+  rejected
+end
+
+artifact_verification = load_artifact_verification(artifact_verification_file)
 
 def git_value(workspace, *args)
   stdout, _stderr, status = run_command(["git", *args], cwd: workspace)
@@ -265,7 +330,32 @@ def active_run_age_seconds(run, generated_at)
   [(generated - started_at).to_i, 0].max
 end
 
-def artifact_from_input(raw, run_head_sha)
+def verification_surface_probes(report)
+  Array(report["probes"]).each_with_object([]) do |probe, probes|
+    next unless probe.is_a?(Hash)
+
+    probe_id = probe["id"].to_s
+    command_template, expected_surface =
+      case probe_id
+      when "version"
+        ["ee --version", "ee version"]
+      when "environment_attestation_help"
+        ["ee diag environment-attestation --help", "diag environment-attestation"]
+      else
+        ["ee artifact behavior probe", "attested artifact behavior"]
+      end
+    status = probe["status"].to_s
+    status = "failed" unless %w[passed failed not_run].include?(status)
+    probes << {
+      "commandTemplate" => command_template,
+      "status" => status,
+      "expectedSurface" => expected_surface,
+      "firstFailureDiagnosis" => status == "passed" ? nil : "consumer behavior probe did not match the attested packaged binary"
+    }
+  end
+end
+
+def artifact_from_input(raw, run_head_sha, verification_report)
   return nil if raw.nil?
 
   name = raw["name"].to_s
@@ -281,21 +371,65 @@ def artifact_from_input(raw, run_head_sha)
       "available"
     end
 
+  report_matches_artifact =
+    verification_report.is_a?(Hash) &&
+    verification_report["artifactName"].to_s == name
+  report_source_matches =
+    report_matches_artifact && verification_report["sourceCommit"].to_s == run_head_sha
+  report_verified =
+    report_source_matches &&
+    verification_report["accepted"] == true &&
+    verification_report["status"] == "verified" &&
+    verification_report["checksumStatus"] == "verified" &&
+    verification_report["probeStatus"] == "passed"
+
+  checksum_status = raw["checksumStatus"] || "not_checked"
+  surface_probes = raw["surfaceProbes"] || [
+    {
+      "commandTemplate" => "ee diag environment-attestation --help",
+      "status" => "not_run",
+      "expectedSurface" => "diag environment-attestation",
+      "firstFailureDiagnosis" => nil
+    }
+  ]
+  attestation_status = raw["attestationStatus"] || "not_checked"
+  # GitHub's artifact-list API cannot establish manifest verification.  Only a
+  # separately supplied consumer-verification report may promote an artifact
+  # to verified; input metadata can preserve rejection/missing posture only.
+  attestation_status = "not_checked" if attestation_status == "verified"
+  attested_source_commit = raw["attestedSourceCommit"]
+  attested_git_tree = raw["attestedGitTree"]
+  manifest_hash = raw["manifestHash"]
+  verification_hash = raw["verificationHash"]
+  attestation_rejections = Array(raw["attestationRejections"])
+
+  if report_matches_artifact
+    checksum_status = verification_report["checksumStatus"] || "not_checked"
+    report_probes = verification_surface_probes(verification_report)
+    surface_probes = report_probes unless report_probes.empty?
+    attestation_status = report_verified ? "verified" : "rejected"
+    attested_source_commit = verification_report["sourceCommit"]
+    attested_git_tree = verification_report["gitTree"]
+    manifest_hash = verification_report["manifestHash"]
+    verification_hash = verification_report["verificationHash"]
+    attestation_rejections = Array(verification_report["rejections"])
+    attestation_rejections << "attested_source_commit_mismatch" unless report_source_matches
+  end
+
   {
     "name" => name,
     "status" => status,
     "retentionExpiresAt" => raw["retentionExpiresAt"] || raw["expires_at"] || raw["expiresAt"],
-    "checksumStatus" => raw["checksumStatus"] || "not_checked",
+    "checksumStatus" => checksum_status,
     "sourceSha" => raw["sourceSha"] || run_head_sha,
     "architecture" => raw["architecture"] || "aarch64-apple-darwin",
-    "surfaceProbes" => raw["surfaceProbes"] || [
-      {
-        "commandTemplate" => "ee diag environment-attestation --help",
-        "status" => "not_run",
-        "expectedSurface" => "diag environment-attestation",
-        "firstFailureDiagnosis" => nil
-      }
-    ]
+    "attestationStatus" => attestation_status,
+    "attestedSourceCommit" => attested_source_commit,
+    "attestedGitTree" => attested_git_tree,
+    "manifestHash" => manifest_hash,
+    "verificationHash" => verification_hash,
+    "attestationRejections" => attestation_rejections.map(&:to_s).reject(&:empty?).uniq.sort.first(32),
+    "surfaceProbes" => surface_probes
   }
 end
 
@@ -307,6 +441,12 @@ def missing_artifact(run_head_sha)
     "checksumStatus" => "missing",
     "sourceSha" => run_head_sha,
     "architecture" => "aarch64-apple-darwin",
+    "attestationStatus" => "missing",
+    "attestedSourceCommit" => nil,
+    "attestedGitTree" => nil,
+    "manifestHash" => nil,
+    "verificationHash" => nil,
+    "attestationRejections" => ["artifact_missing"],
     "surfaceProbes" => [
       {
         "commandTemplate" => "ee diag environment-attestation --help",
@@ -318,9 +458,11 @@ def missing_artifact(run_head_sha)
   }
 end
 
-def run_artifacts(raw_run, repository, artifact_index)
+def run_artifacts(raw_run, repository, artifact_index, verification_report)
   raw_artifacts = raw_run["artifacts"] || artifact_index.fetch(raw_run["databaseId"].to_s, [])
-  artifacts = raw_artifacts.map { |artifact| artifact_from_input(artifact, raw_run["headSha"].to_s) }.compact
+  artifacts = raw_artifacts.map do |artifact|
+    artifact_from_input(artifact, raw_run["headSha"].to_s, verification_report)
+  end.compact
 
   if completed_run?(raw_run) &&
      normalize_conclusion(raw_run["conclusion"]) == "success" &&
@@ -403,6 +545,23 @@ def run_job_labels(run)
   run.fetch("jobEvidence", []).flat_map { |job| job.fetch("labels", []) }.uniq.sort
 end
 
+def artifact_attestation_verified?(artifact)
+  probes = artifact.fetch("surfaceProbes", [])
+  artifact["checksumStatus"] == "verified" &&
+    artifact["attestationStatus"] == "verified" &&
+    artifact["sourceSha"] == artifact["attestedSourceCommit"] &&
+    artifact["manifestHash"].to_s.match?(/\Asha256:[a-f0-9]{64}\z/) &&
+    artifact["verificationHash"].to_s.match?(/\Asha256:[a-f0-9]{64}\z/) &&
+    !artifact["attestedGitTree"].to_s.empty? &&
+    !probes.empty? &&
+    probes.all? { |probe| probe["status"] == "passed" }
+end
+
+def artifact_attestation_rejected?(artifact)
+  artifact["attestationStatus"] == "rejected" ||
+    !artifact.fetch("attestationRejections", []).empty?
+end
+
 def runner_detail(run, key)
   run.fetch("jobEvidence", []).map { |job| job[key] }.find { |value| !value.nil? && !value.to_s.empty? }
 end
@@ -473,13 +632,13 @@ def attach_queue_diagnostics!(normalized_runs, raw_runs, generated_at)
   end
 end
 
-def normalize_run(raw_run, repository, artifact_index, generated_at)
+def normalize_run(raw_run, repository, artifact_index, generated_at, verification_report)
   run_id = (raw_run["databaseId"] || raw_run["runId"]).to_s
   jobs = normalize_jobs(raw_run, generated_at)
   job_ids = jobs.map { |job| job["jobId"] }.reject(&:empty?).uniq
   status = normalize_status(raw_run["status"])
   conclusion = normalize_conclusion(raw_run["conclusion"])
-  artifacts = run_artifacts(raw_run, repository, artifact_index)
+  artifacts = run_artifacts(raw_run, repository, artifact_index, verification_report)
   freshness = source_freshness(raw_run, repository.fetch("headSha"))
   artifact_freshness =
     if active_run?(raw_run)
@@ -507,6 +666,10 @@ def normalize_run(raw_run, repository, artifact_index, generated_at)
     elsif failed_surface_probe
       failed_surface_probe["firstFailureDiagnosis"] ||
         "artifact surface probe failed required command-surface validation"
+    elsif expected_artifact && artifact_attestation_rejected?(expected_artifact)
+      "artifact attestation was rejected; source, build inputs, command, packaged bytes, or probe evidence did not match"
+    elsif expected_artifact && !artifact_attestation_verified?(expected_artifact)
+      "artifact exists but checksum, source-bound manifest, or consumer behavior probe is not verified"
     elsif freshness == "stale" && artifacts.any? { |artifact| artifact["status"] == "available" }
       "artifact source SHA is older than the requested repository head SHA"
     else
@@ -559,7 +722,7 @@ end
 def recommendation(verdict, run_id)
   case verdict
   when "fresh_artifact_available"
-    ["macOS EE Artifact", run_id, "download_and_verify_artifact", "Current-head artifact metadata exists; download, verify checksum, and run the surface probe before using it as binary proof."]
+    ["macOS EE Artifact", run_id, "reuse_verified_artifact", "Current-head artifact manifest, checksum, packaged bytes, and consumer behavior probe are verified."]
   when "wait_for_active_run"
     ["macOS EE Artifact", run_id, "wait", "Active current-head proof run exists; wait rather than dispatching another run."]
   when "duplicate_dispatch_detected"
@@ -574,6 +737,10 @@ def recommendation(verdict, run_id)
     ["macOS EE Artifact", run_id, "file_followup_bead", "Artifact checksum mismatch rejects this binary proof; repair the proof lane before reuse."]
   when "surface_probe_failed"
     ["macOS EE Artifact", run_id, "file_followup_bead", "Artifact surface probe failed the required command surface; repair the artifact or probe before reuse."]
+  when "artifact_attestation_invalid"
+    ["macOS EE Artifact", run_id, "file_followup_bead", "Downloaded artifact attestation did not match its source, build inputs, command, packaged bytes, or behavior probe; reject it."]
+  when "artifact_attestation_required"
+    ["macOS EE Artifact", run_id, "download_and_verify_artifact", "Artifact metadata exists, but source-bound manifest verification and a consumer behavior probe are still required before reuse."]
   when "gh_unavailable"
     [nil, nil, "abstain_manual_review", "GitHub Actions state could not be read; preserve the first gh error and abstain."]
   when "local_only_head_unavailable"
@@ -597,6 +764,10 @@ def degraded_for(verdict)
     [["ci_proof_lane_checksum_mismatch", "high", "The proof-lane artifact checksum did not verify.", "Reject the artifact and repair checksum provenance before reuse."]]
   when "surface_probe_failed"
     [["ci_proof_lane_surface_probe_failed", "high", "The proof-lane artifact failed the required command-surface probe.", "Reject the artifact until the expected ee surface is proven."]]
+  when "artifact_attestation_invalid"
+    [["ci_proof_lane_artifact_attestation_invalid", "high", "The proof-lane artifact attestation did not match its source, build inputs, command, packaged bytes, or behavior probe.", "Reject the artifact and rerun the consumer verifier before relying on this lane."]]
+  when "artifact_attestation_required"
+    [["ci_proof_lane_unknown_source", "warning", "Artifact metadata alone cannot establish source authority without a verified manifest and consumer behavior probe.", "Download the artifact and run scripts/ci_artifact_attestation.py verify before reuse."]]
   when "gh_unavailable"
     [["ci_proof_lane_gh_unavailable", "warning", "The producer could not read GitHub Actions state.", "Check gh authentication/network state or rerun with --input fixture JSON."]]
   when "local_only_head_unavailable"
@@ -633,11 +804,13 @@ end
 def recovery_for(verdict, run_id)
   case verdict
   when "fresh_artifact_available"
-    [["download", "gh run download #{run_id} --name #{EXPECTED_ARTIFACT} --dir <external-temp>", false, "Download into external temp, verify checksum, then run the no-mock harness with EE_BINARY."]]
+    [["reuse", "cite verified artifact manifest and verification hashes", false, "Reuse only the artifact whose downloaded bytes produced this verification report."]]
   when "wait_for_active_run", "duplicate_dispatch_detected"
     [["wait", "gh run view #{run_id} --json status,conclusion,jobs", false, "Poll the active artifact run until it reaches a terminal conclusion."]]
-  when "run_cancelled_before_artifact", "artifact_missing", "artifact_stale", "checksum_mismatch", "surface_probe_failed", "gh_unavailable", "local_only_head_unavailable"
+  when "run_cancelled_before_artifact", "artifact_missing", "artifact_stale", "checksum_mismatch", "surface_probe_failed", "artifact_attestation_invalid", "gh_unavailable", "local_only_head_unavailable"
     [["manual_review", "preserve first-failure diagnosis", false, "Do not treat this proof-lane state as source/test evidence."]]
+  when "artifact_attestation_required"
+    [["download", "gh run download #{run_id} --name #{EXPECTED_ARTIFACT} --dir <external-temp>", false, "Download, extract, verify the manifest and checksum, and rerun the packaged-binary behavior probe."]]
   else
     [["coordinate", "send Agent Mail before workflow_dispatch", false, "Avoid duplicate dispatches before creating a new proof-lane run."]]
   end.each_with_index.map do |(kind, command, mutates, rationale), index|
@@ -670,6 +843,8 @@ def choose_verdict(raw_runs, normalized_runs, repository)
     if artifact && artifact["status"] == "available"
       return ["checksum_mismatch", run["runId"]] if artifact["checksumStatus"] == "mismatch"
       return ["surface_probe_failed", run["runId"]] if artifact.fetch("surfaceProbes", []).any? { |probe| probe["status"] == "failed" }
+      return ["artifact_attestation_invalid", run["runId"]] if artifact_attestation_rejected?(artifact)
+      return ["artifact_attestation_required", run["runId"]] unless artifact_attestation_verified?(artifact)
       return ["fresh_artifact_available", run["runId"]]
     elsif artifact && artifact["status"] == "missing"
       return ["artifact_missing", run["runId"]]
@@ -687,14 +862,16 @@ def choose_verdict(raw_runs, normalized_runs, repository)
   ["no_matching_run", nil]
 end
 
-def build_snapshot(repository:, generated_at:, raw_runs:, artifact_index: {}, gh_unavailable: false)
+def build_snapshot(repository:, generated_at:, raw_runs:, artifact_index: {}, verification_report: nil, gh_unavailable: false)
   repository = normalize_repository(repository)
   if gh_unavailable
     verdict = "gh_unavailable"
     verdict_run_id = nil
     normalized_runs = []
   else
-    normalized_runs = raw_runs.map { |run| normalize_run(run, repository, artifact_index, generated_at) }
+    normalized_runs = raw_runs.map do |run|
+      normalize_run(run, repository, artifact_index, generated_at, verification_report)
+    end
     attach_queue_diagnostics!(normalized_runs, raw_runs, generated_at)
     verdict, verdict_run_id = choose_verdict(raw_runs, normalized_runs, repository)
   end
@@ -715,7 +892,19 @@ def build_snapshot(repository:, generated_at:, raw_runs:, artifact_index: {}, gh
   cancelled_count = normalized_runs.count { |run| run["conclusion"] == "cancelled" && run["headSha"] == repository.fetch("headSha") }
   stale_count = normalized_runs.count { |run| run["sourceFreshness"] == "stale" && run["artifacts"].any? { |artifact| artifact["status"] == "available" } }
   checksum_mismatch_count = normalized_runs.sum { |run| run["artifacts"].count { |artifact| artifact["checksumStatus"] == "mismatch" } }
-  artifact_authority_verdicts = %w[fresh_artifact_available artifact_stale checksum_mismatch surface_probe_failed]
+  attestation_invalid_count = normalized_runs.sum do |run|
+    run["artifacts"].count do |artifact|
+      artifact["status"] == "available" && artifact_attestation_rejected?(artifact)
+    end
+  end
+  attestation_required_count = normalized_runs.sum do |run|
+    run["artifacts"].count do |artifact|
+      artifact["status"] == "available" &&
+        !artifact_attestation_rejected?(artifact) &&
+        !artifact_attestation_verified?(artifact)
+    end
+  end
+  artifact_authority_verdicts = %w[fresh_artifact_available artifact_stale checksum_mismatch surface_probe_failed artifact_attestation_invalid artifact_attestation_required]
 
   workflow_name, run_id, next_action, rationale = recommendation(verdict, verdict_run_id)
 
@@ -733,6 +922,8 @@ def build_snapshot(repository:, generated_at:, raw_runs:, artifact_index: {}, gh
       "cancelledBeforeArtifactCount" => cancelled_count,
       "staleArtifactCount" => stale_count,
       "checksumMismatchCount" => checksum_mismatch_count,
+      "attestationInvalidCount" => attestation_invalid_count,
+      "attestationRequiredCount" => attestation_required_count,
       "localCargoFallbackAllowed" => false,
       "sourceTestVerdict" => artifact_authority_verdicts.include?(verdict) ? "artifact_authority_only" : "not_evaluated"
     },
@@ -802,14 +993,15 @@ if !input_file.empty?
     repository: repository,
     generated_at: generated_at,
     raw_runs: fixture_runs(input),
-    artifact_index: input.fetch("artifactIndex", {})
+    artifact_index: input.fetch("artifactIndex", {}),
+    verification_report: artifact_verification
   )
   puts JSON.pretty_generate(snapshot)
 else
   repository = repository_from_git(workspace, head_sha_arg)
   generated_at = now_iso
   if !system("command", "-v", gh_bin, out: File::NULL, err: File::NULL)
-    snapshot = build_snapshot(repository: repository, generated_at: generated_at, raw_runs: [], gh_unavailable: true)
+    snapshot = build_snapshot(repository: repository, generated_at: generated_at, raw_runs: [], verification_report: artifact_verification, gh_unavailable: true)
     puts JSON.pretty_generate(snapshot)
     exit 0
   end
@@ -818,9 +1010,9 @@ else
   runs, artifact_index, error = live_runs(workspace, gh_bin, limit, repository)
   if error
     warn "ci_proof_lane_snapshot: #{error.lines.first.to_s.strip}"
-    snapshot = build_snapshot(repository: repository, generated_at: generated_at, raw_runs: [], gh_unavailable: true)
+    snapshot = build_snapshot(repository: repository, generated_at: generated_at, raw_runs: [], verification_report: artifact_verification, gh_unavailable: true)
   else
-    snapshot = build_snapshot(repository: repository, generated_at: generated_at, raw_runs: runs, artifact_index: artifact_index)
+    snapshot = build_snapshot(repository: repository, generated_at: generated_at, raw_runs: runs, artifact_index: artifact_index, verification_report: artifact_verification)
   end
   puts JSON.pretty_generate(snapshot)
 end

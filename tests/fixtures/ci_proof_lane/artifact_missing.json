@@ -17,6 +17,8 @@
     "cancelledBeforeArtifactCount": 0,
     "staleArtifactCount": 0,
     "checksumMismatchCount": 0,
+    "attestationInvalidCount": 0,
+    "attestationRequiredCount": 0,
     "localCargoFallbackAllowed": false,
     "sourceTestVerdict": "not_evaluated"
   },
@@ -52,6 +54,12 @@
               "checksumStatus": "missing",
               "sourceSha": "2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d",
               "architecture": "aarch64-apple-darwin",
+              "attestationStatus": "missing",
+              "attestedSourceCommit": null,
+              "attestedGitTree": null,
+              "manifestHash": null,
+              "verificationHash": null,
+              "attestationRejections": ["artifact_missing"],
               "surfaceProbes": [
                 {
                   "commandTemplate": "ee diag environment-attestation --help",

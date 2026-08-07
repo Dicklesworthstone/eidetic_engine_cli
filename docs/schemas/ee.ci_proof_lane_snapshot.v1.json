@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.ci_proof_lane_snapshot.v1.json",
   "title": "ee.ci_proof_lane_snapshot.v1",
-  "description": "Read-only, redaction-safe snapshot of GitHub Actions proof lanes, queued runs, artifact freshness, checksum posture, and source-surface probes. A fresh artifact establishes artifact source authority only; it is not a source compile/test verdict and must not justify local Cargo fallback.",
+  "description": "Read-only, redaction-safe snapshot of GitHub Actions proof lanes, queued runs, artifact freshness, source-bound manifest verification, checksum posture, and packaged-binary behavior probes. A fresh artifact establishes artifact source authority only; it is not a source compile/test verdict and must not justify local Cargo fallback.",
   "type": "object",
   "required": [
     "schema",
@@ -121,6 +121,8 @@
         "cancelledBeforeArtifactCount",
         "staleArtifactCount",
         "checksumMismatchCount",
+        "attestationInvalidCount",
+        "attestationRequiredCount",
         "localCargoFallbackAllowed",
         "sourceTestVerdict"
       ],
@@ -133,6 +135,8 @@
         "cancelledBeforeArtifactCount": {"type": "integer", "minimum": 0},
         "staleArtifactCount": {"type": "integer", "minimum": 0},
         "checksumMismatchCount": {"type": "integer", "minimum": 0},
+        "attestationInvalidCount": {"type": "integer", "minimum": 0},
+        "attestationRequiredCount": {"type": "integer", "minimum": 0},
         "localCargoFallbackAllowed": {
           "type": "boolean",
           "const": false
@@ -389,6 +393,12 @@
         "checksumStatus",
         "sourceSha",
         "architecture",
+        "attestationStatus",
+        "attestedSourceCommit",
+        "attestedGitTree",
+        "manifestHash",
+        "verificationHash",
+        "attestationRejections",
         "surfaceProbes"
       ],
       "additionalProperties": false,
@@ -405,6 +415,40 @@
         },
         "sourceSha": {"$ref": "#/$defs/sha"},
         "architecture": {"$ref": "#/$defs/safeString"},
+        "attestationStatus": {
+          "type": "string",
+          "enum": ["verified", "rejected", "missing", "not_checked"]
+        },
+        "attestedSourceCommit": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/sha"}
+          ]
+        },
+        "attestedGitTree": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/sha"}
+          ]
+        },
+        "manifestHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
+        "verificationHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
+        "attestationRejections": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/safeString"},
+          "maxItems": 32,
+          "uniqueItems": true
+        },
         "surfaceProbes": {
           "type": "array",
           "items": {"$ref": "#/$defs/surfaceProbe"},
@@ -453,6 +497,7 @@
           "type": "string",
           "enum": [
             "reuse_active_run",
+            "reuse_verified_artifact",
             "wait",
             "download_and_verify_artifact",
             "dispatch_new_run",
@@ -474,6 +519,8 @@
         "artifact_stale",
         "checksum_mismatch",
         "surface_probe_failed",
+        "artifact_attestation_invalid",
+        "artifact_attestation_required",
         "gh_unavailable",
         "abstain_manual_review",
         "local_only_head_unavailable",
@@ -492,7 +539,7 @@
         "priority": {"type": "integer", "minimum": 0},
         "kind": {
           "type": "string",
-          "enum": ["wait", "download", "dispatch", "coordinate", "file_bead", "manual_review"]
+          "enum": ["wait", "download", "reuse", "dispatch", "coordinate", "file_bead", "manual_review"]
         },
         "command": {"$ref": "#/$defs/safeString"},
         "mutatesState": {"type": "boolean"},
@@ -515,6 +562,8 @@
             "ci_proof_lane_artifact_stale",
             "ci_proof_lane_checksum_mismatch",
             "ci_proof_lane_surface_probe_failed",
+            "ci_proof_lane_artifact_attestation_invalid",
+            "ci_proof_lane_unknown_source",
             "ci_proof_lane_local_only_head_unavailable",
             "ci_proof_lane_active_run_stale"
           ]
@@ -548,6 +597,8 @@
         "cancelledBeforeArtifactCount": 0,
         "staleArtifactCount": 0,
         "checksumMismatchCount": 0,
+        "attestationInvalidCount": 0,
+        "attestationRequiredCount": 0,
         "localCargoFallbackAllowed": false,
         "sourceTestVerdict": "not_evaluated"
       },

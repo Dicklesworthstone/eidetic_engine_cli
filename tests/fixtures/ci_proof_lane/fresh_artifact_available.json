@@ -17,6 +17,8 @@
     "cancelledBeforeArtifactCount": 0,
     "staleArtifactCount": 0,
     "checksumMismatchCount": 0,
+    "attestationInvalidCount": 0,
+    "attestationRequiredCount": 0,
     "localCargoFallbackAllowed": false,
     "sourceTestVerdict": "artifact_authority_only"
   },
@@ -50,6 +52,12 @@
               "checksumStatus": "verified",
               "sourceSha": "e347c3f789abcdef0123456789abcdef01234567",
               "architecture": "aarch64-apple-darwin",
+              "attestationStatus": "verified",
+              "attestedSourceCommit": "e347c3f789abcdef0123456789abcdef01234567",
+              "attestedGitTree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "manifestHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "verificationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "attestationRejections": [],
               "surfaceProbes": [
                 {
                   "commandTemplate": "ee diag environment-attestation --help",
@@ -69,16 +77,16 @@
     "verdict": "fresh_artifact_available",
     "workflowName": "macOS EE Artifact",
     "runId": "27006448051",
-    "nextAction": "download_and_verify_artifact",
-    "rationale": "Current-head artifact is available with verified checksum and required surface probe."
+    "nextAction": "reuse_verified_artifact",
+    "rationale": "Current-head artifact manifest, checksum, packaged bytes, and consumer behavior probe are verified."
   },
   "recoveryActions": [
     {
       "priority": 0,
-      "kind": "download",
-      "command": "gh run download 27006448051 --name ee-aarch64-apple-darwin-debug --dir <external-temp>",
+      "kind": "reuse",
+      "command": "cite verified artifact manifest and verification hashes",
       "mutatesState": false,
-      "rationale": "Download into external temp, verify checksum, then run the no-mock harness with EE_BINARY."
+      "rationale": "Reuse only the artifact whose downloaded bytes produced this verification report."
     }
   ],
   "degraded": []

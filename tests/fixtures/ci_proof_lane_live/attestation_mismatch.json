@@ -1,0 +1,32 @@
+{
+  "accepted": true,
+  "artifactName": "ee-aarch64-apple-darwin-debug",
+  "checksumStatus": "verified",
+  "gitTree": "e0dd84ca3bb4088c255b3301052e926d40b7be68",
+  "manifestHash": "sha256:7ed543c00530f966cd93fb1b095db8581dc03e06f7f7323c9c9b5c681227f12d",
+  "probeStatus": "passed",
+  "probes": [
+    {
+      "argvHash": "sha256:55723a065fd16cd7fff9cba118d0c29ddd0cddacb13147bee679ead94ce3d555",
+      "exitCode": 0,
+      "id": "version",
+      "status": "passed",
+      "stderrHash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutHash": "sha256:f3b6f68fe0352662ed8fdeff60c55d534744e6ef7931f8f41bb7006424735d2a"
+    },
+    {
+      "argvHash": "sha256:37fa79e205cce2dafd8ac4da2075f73f74ed03beeca38cc6d741fcf54be21558",
+      "exitCode": 0,
+      "id": "environment_attestation_help",
+      "status": "passed",
+      "stderrHash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdoutHash": "sha256:5bb4c1760e62803fc763535e23cb166f61f6c95bd64d59aaa3ad5490c91458fa"
+    }
+  ],
+  "rawOutputIncluded": false,
+  "rejections": [],
+  "schema": "ee.remote_build_artifact_manifest.verification.v1",
+  "sourceCommit": "dddddddddddddddddddddddddddddddddddddddd",
+  "status": "verified",
+  "verificationHash": "sha256:e8cc9df54a6419427c53f86899f7159ed5b46ae16a2ac204fce1db8b66b9d2f9"
+}
