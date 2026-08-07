@@ -1,4 +1,4 @@
-//! bd-36bbk.1.4 — structural contract for the SRR6.46.4
+//! bd-tc-epic-qzk7o.2.3 — structural contract for the truthful
 //! auto-enrollment status block (`ee.mesh.auto_status.v2`).
 //!
 //! `ee mesh status --json` exposes the zero-touch posture under
