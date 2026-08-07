@@ -5294,19 +5294,18 @@ fn import_mesh_artifact_into_connection(
     let duplicate_peer_ids = artifact
         .peers
         .iter()
-        .filter_map(|peer| {
-            (!seen_peer_ids.insert(peer.peer_id.as_str())).then(|| peer.peer_id.clone())
-        })
+        .filter(|peer| !seen_peer_ids.insert(peer.peer_id.as_str()))
+        .map(|peer| peer.peer_id.clone())
         .collect::<BTreeSet<_>>();
     let mut seen_cursor_keys = BTreeSet::new();
     let duplicate_cursor_keys = artifact
         .cursors
         .iter()
-        .filter_map(|cursor| {
+        .filter(|cursor| {
             let key = (cursor.peer_id.as_str(), cursor.origin_workspace_id.as_str());
-            (!seen_cursor_keys.insert(key))
-                .then(|| (cursor.peer_id.clone(), cursor.origin_workspace_id.clone()))
+            !seen_cursor_keys.insert(key)
         })
+        .map(|cursor| (cursor.peer_id.clone(), cursor.origin_workspace_id.clone()))
         .collect::<BTreeSet<_>>();
 
     let mut outcome = MeshImportOutcome::default();
