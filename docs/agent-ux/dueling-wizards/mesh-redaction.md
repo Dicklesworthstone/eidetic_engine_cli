@@ -71,8 +71,11 @@ contract update. Until then, outbound callers must treat:
 
 Share previews are dry-run evidence, not export authorization. They must use
 `SHARE_PREVIEW_SCHEMA_V2`, `SharePreviewCandidate.redaction_class`,
-`build_share_preview`, `share_preview_hash`, `scan_mesh_export_subjects`, and
+`build_share_preview`, `scan_mesh_export_subjects`, and
 `MESH_EXPORT_POLICY_ATTESTATION_SCHEMA_V1` from `src/policy/mod.rs`.
+Ordinary share-preview reports expose no aggregate or per-example
+content-derived hashes; examples identify the memory plus its stored entity
+revision and carry only redaction placeholders.
 For `memory_anchors`, share previews stay `hash_only`, and any future policy
 change that would export raw values or move the asset into a payload lane must
 use `required_for_any_raw_value_or_payload_lane_change`.

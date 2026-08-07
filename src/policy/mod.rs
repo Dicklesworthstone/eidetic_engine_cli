@@ -130,6 +130,7 @@ pub const MESH_EXPORT_POLICY_ATTESTATION_SCHEMA_V1: &str = "ee.mesh.export_polic
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SharePreviewCandidate<'a> {
     pub memory_id: &'a str,
+    pub entity_revision: &'a str,
     pub level: &'a str,
     pub kind: &'a str,
     pub trust_class: &'a str,
@@ -184,13 +185,13 @@ pub struct SharePreviewReport {
 #[serde(rename_all = "camelCase")]
 pub struct SharePreviewExample {
     pub memory_id: String,
+    pub entity_revision: String,
     pub level: String,
     pub kind: String,
     pub trust_class: String,
     pub material_lane: String,
     pub redaction_class: String,
     pub policy_action: String,
-    pub preview_hash: String,
     pub redacted_preview: String,
     pub redaction_reasons: Vec<String>,
 }
@@ -619,14 +620,6 @@ pub fn build_share_preview(input: &SharePreviewInput<'_>) -> SharePreviewReport 
     report
 }
 
-#[must_use]
-pub fn share_preview_hash(report: &SharePreviewReport) -> String {
-    match serde_json::to_vec(report) {
-        Ok(bytes) => format!("blake3:{}", blake3::hash(&bytes).to_hex()),
-        Err(error) => format!("serialization_error:{error}"),
-    }
-}
-
 fn bump_share_preview_count(counts: &mut BTreeMap<String, u64>, key: &str) {
     *counts.entry(key.to_owned()).or_insert(0) += 1;
 }
@@ -635,13 +628,13 @@ fn share_preview_example(candidate: &SharePreviewCandidate<'_>) -> SharePreviewE
     let redaction = redact_secret_like_content(candidate.content_preview);
     SharePreviewExample {
         memory_id: candidate.memory_id.to_owned(),
+        entity_revision: candidate.entity_revision.to_owned(),
         level: candidate.level.to_owned(),
         kind: candidate.kind.to_owned(),
         trust_class: candidate.trust_class.to_owned(),
         material_lane: candidate.material_lane.to_owned(),
         redaction_class: candidate.redaction_class.to_owned(),
         policy_action: candidate.policy_action.to_owned(),
-        preview_hash: share_preview_content_hash(candidate.content_preview),
         redacted_preview: redaction_placeholder("share_preview_content"),
         redaction_reasons: redaction
             .redacted_reasons
@@ -649,12 +642,6 @@ fn share_preview_example(candidate: &SharePreviewCandidate<'_>) -> SharePreviewE
             .map(str::to_owned)
             .collect(),
     }
-}
-
-fn share_preview_content_hash(content: &str) -> String {
-    let digest = blake3::hash(content.as_bytes());
-    let hex = digest.to_hex();
-    format!("blake3:{}", &hex[..16])
 }
 
 const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
@@ -3563,6 +3550,7 @@ mod tests {
         let candidates = [
             SharePreviewCandidate {
                 memory_id: "mem_b",
+                entity_revision: "2026-08-07T20:00:00Z",
                 level: "procedural",
                 kind: "rule",
                 trust_class: "agent_validated",
@@ -3576,6 +3564,7 @@ mod tests {
             },
             SharePreviewCandidate {
                 memory_id: "mem_a",
+                entity_revision: "2026-08-07T20:01:00Z",
                 level: "episodic",
                 kind: "decision",
                 trust_class: "agent_assertion",
@@ -3615,6 +3604,12 @@ mod tests {
                 .contains(&"redaction_class:deny".to_owned())
         );
         assert_eq!(report.examples[0].memory_id, "mem_a");
+        assert_eq!(report.examples[0].entity_revision, "2026-08-07T20:01:00Z");
+        let serialized = serde_json::to_string(&report).expect("serialize share preview report");
+        assert!(!serialized.contains("previewHash"));
+        assert!(!serialized.contains("blake3:"));
+        assert!(!serialized.contains("Private project"));
+        assert!(!serialized.contains("sk-FAKE"));
         assert_eq!(
             report.examples[0].redacted_preview,
             redaction_placeholder("share_preview_content")

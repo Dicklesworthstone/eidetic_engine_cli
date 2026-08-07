@@ -48,8 +48,10 @@ unconfigured rather than showing a misleading allow.
 - The command is always a dry run: `dryRun=true` and `exportPerformed=false`.
 - The command is strictly read-only: it never records consent or writes an
   audit row (see [Consent](#consent)).
-- Representative examples are redacted and include content hashes, not raw
-  memory bodies.
+- Representative examples identify the memory and its stored entity revision,
+  but expose neither raw memory bodies nor content-derived hashes.
+- The report and its events contain no aggregate preview hash. A preview is
+  review evidence, not a stable bearer or content-equality oracle.
 - Counts are grouped by memory level, kind, trust class, material lane,
   redaction class, and policy action.
 - Exposure estimates split metadata, body, and embedding bytes and reflect the
@@ -83,12 +85,14 @@ For metadata-only sharing, verify:
 Before granting body sharing, verify:
 
 - `--include-body` was intentional.
-- `data.preview.examples[]` contain redaction placeholders only.
+- `data.preview.examples[]` contain `memoryId`, `entityRevision`, and redaction
+  placeholders only; they contain no content-derived hash.
 - `data.preview.deniedClasses[]` does not include
   `redaction_class:body_redacted`; if it does, the raw body lane remains
   denied and only metadata is exportable.
-- `data.previewHash` is stable for identical previews and can be quoted when
-  authorizing the exposure grant mutation.
+- Authorization is performed only by the separate token-consuming grant
+  mutation; no field from this ordinary preview is a reusable authorization
+  token.
 
 Embedding sharing is sensitive even without raw bodies. Keep
 `--include-embeddings` off unless the peer policy and operator review both allow

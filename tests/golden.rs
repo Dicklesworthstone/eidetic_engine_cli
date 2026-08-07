@@ -3572,6 +3572,7 @@ mod tests {
     fn share_preview_json_contracts_match_goldens() -> TestResult {
         let metadata_only = [SharePreviewCandidate {
             memory_id: "mem_sharepreview00000000000001",
+            entity_revision: "2026-08-07T20:00:00Z",
             level: "procedural",
             kind: "rule",
             trust_class: "agent_validated",
@@ -3587,6 +3588,7 @@ mod tests {
             metadata_only[0],
             SharePreviewCandidate {
                 memory_id: "mem_sharepreview00000000000001",
+                entity_revision: "2026-08-07T20:00:00Z",
                 level: "procedural",
                 kind: "rule",
                 trust_class: "agent_validated",
@@ -3603,6 +3605,7 @@ mod tests {
             metadata_only[0],
             SharePreviewCandidate {
                 memory_id: "mem_sharepreview00000000000001",
+                entity_revision: "2026-08-07T20:00:00Z",
                 level: "procedural",
                 kind: "rule",
                 trust_class: "agent_validated",

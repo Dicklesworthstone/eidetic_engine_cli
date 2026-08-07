@@ -37,9 +37,14 @@ const REQUIRED_SHARE_PREVIEW_SOURCE_ANCHORS: &[&str] = &[
     "SharePreviewCandidate",
     "redaction_class",
     "build_share_preview",
-    "share_preview_hash",
     "scan_mesh_export_subjects",
     "MESH_EXPORT_POLICY_ATTESTATION_SCHEMA_V1",
+];
+
+const FORBIDDEN_SHARE_PREVIEW_ORACLES: &[&str] = &[
+    "share_preview_hash",
+    "share_preview_content_hash",
+    "serialization_error:",
 ];
 
 const FORBIDDEN_MEMORY_ANCHOR_MESH_FIELDS: &[&str] = &[
@@ -622,6 +627,13 @@ fn peer_policy_and_share_preview_anchors_still_exist() -> TestResult {
         if !share_preview_source.contains(anchor) {
             return Err(format!(
                 "{SHARE_PREVIEW_SOURCE_REL}: missing anchor {anchor}"
+            ));
+        }
+    }
+    for forbidden in FORBIDDEN_SHARE_PREVIEW_ORACLES {
+        if share_preview_source.contains(forbidden) {
+            return Err(format!(
+                "{SHARE_PREVIEW_SOURCE_REL}: public share-preview oracle must remain absent: {forbidden}"
             ));
         }
     }

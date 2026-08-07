@@ -12,7 +12,7 @@ use crate::models::{DomainError, ProcessExitCode};
 use crate::output;
 use crate::policy::{
     SHARE_PREVIEW_PEER_UNKNOWN_CODE, SharePreviewCandidate, SharePreviewInput, SharePreviewReport,
-    build_share_preview, redact_secret_like_content, share_preview_hash,
+    build_share_preview, redact_secret_like_content,
 };
 
 use super::{Cli, write_domain_error, write_stdout};
@@ -133,15 +133,12 @@ where
         consent_required: true,
         max_examples: args.max_examples,
     });
-    let preview_hash = share_preview_hash(&report);
-
     let render_input = SharePreviewRenderInput {
         workspace_path: &workspace_path,
         database_path: &database_path,
         workspace_id: &workspace_id,
         args,
         report: &report,
-        preview_hash: &preview_hash,
         peer_unknown: candidate_set.peer_unknown,
     };
 
@@ -228,6 +225,7 @@ fn share_preview_candidates<'a>(
     for memory in memories {
         candidates.push(SharePreviewCandidate {
             memory_id: &memory.id,
+            entity_revision: &memory.updated_at,
             level: &memory.level,
             kind: &memory.kind,
             trust_class: &memory.trust_class,
@@ -248,6 +246,7 @@ fn share_preview_candidates<'a>(
         let body_exportable = body_policy_allows && !body_redaction.redacted;
         candidates.push(SharePreviewCandidate {
             memory_id: &memory.id,
+            entity_revision: &memory.updated_at,
             level: &memory.level,
             kind: &memory.kind,
             trust_class: &memory.trust_class,
@@ -278,6 +277,7 @@ fn share_preview_candidates<'a>(
 
         candidates.push(SharePreviewCandidate {
             memory_id: &memory.id,
+            entity_revision: &memory.updated_at,
             level: &memory.level,
             kind: &memory.kind,
             trust_class: &memory.trust_class,
@@ -330,7 +330,6 @@ struct SharePreviewRenderInput<'a> {
     workspace_id: &'a str,
     args: &'a SharePreviewArgs,
     report: &'a SharePreviewReport,
-    preview_hash: &'a str,
     peer_unknown: bool,
 }
 
@@ -345,7 +344,7 @@ where
     match cli.renderer() {
         output::Renderer::Human | output::Renderer::Markdown => write_stdout(
             stdout,
-            &render_share_preview_human(input.report, input.preview_hash, input.peer_unknown),
+            &render_share_preview_human(input.report, input.peer_unknown),
         ),
         output::Renderer::Toon => {
             let data = share_preview_data_json(input);
@@ -399,17 +398,15 @@ fn share_preview_data_json(input: &SharePreviewRenderInput<'_>) -> JsonValue {
         "exportPerformed": false,
         "includeBody": input.args.include_body,
         "includeEmbeddings": input.args.include_embeddings,
-        "previewHash": input.preview_hash,
         "preview": input.report,
-        "events": share_preview_events(input.preview_hash),
+        "events": share_preview_events(),
     })
 }
 
-fn share_preview_events(preview_hash: &str) -> Vec<JsonValue> {
+fn share_preview_events() -> Vec<JsonValue> {
     vec![
         json!({
             "event": SHARE_EVENT_PREVIEW_GENERATED,
-            "previewHash": preview_hash,
         }),
         json!({
             "event": SHARE_EVENT_EXPORT_NOT_PERFORMED,
@@ -418,13 +415,9 @@ fn share_preview_events(preview_hash: &str) -> Vec<JsonValue> {
     ]
 }
 
-fn render_share_preview_human(
-    report: &SharePreviewReport,
-    preview_hash: &str,
-    peer_unknown: bool,
-) -> String {
+fn render_share_preview_human(report: &SharePreviewReport, peer_unknown: bool) -> String {
     let mut output = format!(
-        "Share preview for {peer}\n  Dry run: yes\n  Export performed: no\n  Preview hash: {preview_hash}\n  Candidates: {total} total, {allowed} exportable, {denied} denied\n  Estimated exposure: {bytes} bytes ({body} body, {embedding} embedding)\n",
+        "Share preview for {peer}\n  Dry run: yes\n  Export performed: no\n  Candidates: {total} total, {allowed} exportable, {denied} denied\n  Estimated exposure: {bytes} bytes ({body} body, {embedding} embedding)\n",
         peer = report.target_peer_id,
         total = report.total_candidates,
         allowed = report.exportable_count,
@@ -731,7 +724,7 @@ max_bytes = 1048576
 
     #[test]
     fn share_preview_events_are_dry_run_only() {
-        let events = share_preview_events("blake3:preview");
+        let events = share_preview_events();
         let event_names = events
             .iter()
             .filter_map(|event| event.get("event").and_then(JsonValue::as_str))
@@ -769,14 +762,12 @@ max_bytes = 1048576
             consent_required: true,
             max_examples: 0,
         });
-        let preview_hash = share_preview_hash(&report);
         let input = SharePreviewRenderInput {
             workspace_path: Path::new("/tmp/share-preview-workspace"),
             database_path: Path::new("/tmp/share-preview-workspace/.ee/ee.db"),
             workspace_id: "wsp_sharepreview0000000000001",
             args: &args,
             report: &report,
-            preview_hash: &preview_hash,
             peer_unknown: false,
         };
         let mut stdout = Vec::new();
@@ -789,6 +780,8 @@ max_bytes = 1048576
         assert_eq!(envelope["schema"], crate::models::RESPONSE_SCHEMA_V2);
         assert_eq!(envelope["success"], true);
         assert_eq!(envelope["degraded"], serde_json::json!([]));
+        assert!(envelope["data"].get("previewHash").is_none());
+        assert!(envelope["data"]["events"][0].get("previewHash").is_none());
         assert_eq!(
             envelope["data"]["schema"],
             crate::policy::SHARE_PREVIEW_SCHEMA_V2
@@ -871,14 +864,12 @@ max_bytes = 1048576
             consent_required: true,
             max_examples: 0,
         });
-        let preview_hash = share_preview_hash(&report);
         let input = SharePreviewRenderInput {
             workspace_path: Path::new("/tmp/share-preview-workspace"),
             database_path: Path::new("/tmp/share-preview-workspace/.ee/ee.db"),
             workspace_id: TEST_WORKSPACE_ID,
             args: &args,
             report: &report,
-            preview_hash: &preview_hash,
             peer_unknown: set.peer_unknown,
         };
         let mut stdout = Vec::new();
