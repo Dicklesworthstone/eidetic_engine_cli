@@ -2508,12 +2508,22 @@ where
             Ok(registry) => registry,
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
-    let report = snapshot.status_report_with_autodiscovery(
+    let mut report = snapshot.status_report_with_autodiscovery(
         &autodiscovery,
         local.as_ref(),
         &policy_registry,
         &discovery_policy.lists.denylist,
     );
+    for degradation in discovery_policy.degraded {
+        if !report
+            .auto_enrollment
+            .degraded
+            .iter()
+            .any(|existing| existing.code == degradation.code)
+        {
+            report.auto_enrollment.degraded.push(degradation);
+        }
+    }
     if cli.wants_json() {
         return write_mesh_status_json_with_autodiscovery(stdout, &report, &autodiscovery);
     }
@@ -6338,7 +6348,7 @@ fn render_mesh_status_human(report: &MeshCliStatusReport) -> String {
             output.push_str(&format!("    - {command}\n"));
         }
     }
-    append_degradations(&mut output, &report.degraded);
+    append_degradations(&mut output, &report.auto_enrollment.degraded);
     output
 }
 
