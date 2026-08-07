@@ -432,7 +432,7 @@ mod tests {
                 for (index, actual_item) in actual.iter().enumerate() {
                     ensure_same_json_shape(
                         actual_item,
-                        expected_item,
+                        expected.get(index).unwrap_or(expected_item),
                         &format!("{pointer}/{index}"),
                     )?;
                 }
@@ -444,6 +444,16 @@ mod tests {
             | (serde_json::Value::String(_), serde_json::Value::String(_)) => Ok(()),
             _ => Err(format!("JSON value type drifted at {pointer}")),
         }
+    }
+
+    #[test]
+    fn json_shape_compares_corresponding_array_items() -> TestResult {
+        let value = serde_json::json!([
+            {"reason": null},
+            {"reason": "storage_not_initialized"}
+        ]);
+
+        ensure_same_json_shape(&value, &value, "/")
     }
 
     fn ensure_status_typed_subtrees(value: &serde_json::Value, context: &str) -> TestResult {
@@ -2385,7 +2395,7 @@ mod tests {
                 "--workspace",
                 DOCTOR_GOLDEN_WORKSPACE,
                 "--fields",
-                "standard",
+                "full",
                 "doctor",
                 "--full",
                 "--json",
