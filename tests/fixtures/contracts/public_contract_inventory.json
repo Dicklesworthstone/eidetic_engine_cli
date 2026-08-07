@@ -173,6 +173,40 @@
       "forbiddenCurrentClaims": []
     },
     {
+      "schemaId": "ee.remote_build_artifact_manifest.v1",
+      "status": "current",
+      "surface": "remote_build_artifact_manifest",
+      "owner": "src/output/mod.rs::public_schemas",
+      "schemaFile": "docs/schemas/ee.remote_build_artifact_manifest.v1.json",
+      "canonicalDocs": [
+        "docs/ci-proof-lane-snapshot.md",
+        "docs/schemas/ee.remote_build_artifact_manifest.v1.json"
+      ],
+      "currentFacingContexts": [
+        "docs/ci-proof-lane-snapshot.md",
+        "docs/schemas/ee.remote_build_artifact_manifest.v1.json"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.remote_build_artifact_manifest.verification.v1",
+      "status": "current",
+      "surface": "remote_build_artifact_verification",
+      "owner": "src/output/mod.rs::public_schemas",
+      "schemaFile": "docs/schemas/ee.remote_build_artifact_manifest.verification.v1.json",
+      "canonicalDocs": [
+        "docs/ci-proof-lane-snapshot.md",
+        "docs/schemas/ee.remote_build_artifact_manifest.verification.v1.json"
+      ],
+      "currentFacingContexts": [
+        "docs/ci-proof-lane-snapshot.md",
+        "docs/schemas/ee.remote_build_artifact_manifest.verification.v1.json"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
       "schemaId": "ee.resource_admission.v1",
       "status": "current",
       "surface": "resource_profile_budget_admission",
