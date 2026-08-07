@@ -837,11 +837,7 @@ fn ci_proof_lane_degraded_codes(snapshot: &Value) -> Vec<EnvironmentAttestationD
 }
 
 fn ci_proof_lane_artifact_evidence_verified(snapshot: &Value) -> bool {
-    let requested_head = ci_proof_lane_text(snapshot, "/repository/headSha");
-    let recommended_run_id = ci_proof_lane_text(snapshot, "/activeRecommendation/runId");
     if ci_proof_lane_text(snapshot, "/summary/verdict") != Some("fresh_artifact_available")
-        || requested_head.is_none()
-        || recommended_run_id.is_none()
         || ci_proof_lane_text(snapshot, "/activeRecommendation/workflowName")
             != Some("macOS EE Artifact")
         || ci_proof_lane_text(snapshot, "/activeRecommendation/nextAction")
@@ -849,8 +845,12 @@ fn ci_proof_lane_artifact_evidence_verified(snapshot: &Value) -> bool {
     {
         return false;
     }
-    let requested_head = requested_head.expect("checked above");
-    let recommended_run_id = recommended_run_id.expect("checked above");
+    let (Some(requested_head), Some(recommended_run_id)) = (
+        ci_proof_lane_text(snapshot, "/repository/headSha"),
+        ci_proof_lane_text(snapshot, "/activeRecommendation/runId"),
+    ) else {
+        return false;
+    };
     let Some(workflows) = snapshot.get("workflows").and_then(Value::as_array) else {
         return false;
     };

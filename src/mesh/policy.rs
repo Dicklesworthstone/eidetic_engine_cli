@@ -1098,8 +1098,10 @@ mod tests {
             legacy_file.to_json()["schema"],
             MESH_IMPORT_ADMISSION_REQUEST_SCHEMA_V1
         );
-        let legacy_decision = registry.decide_import_admission(&legacy_file, &[binding.clone()]);
-        let typed_decision = registry.decide_import_admission(&typed_signed_event, &[binding]);
+        let legacy_decision =
+            registry.decide_import_admission(&legacy_file, std::slice::from_ref(&binding));
+        let typed_decision =
+            registry.decide_import_admission(&typed_signed_event, std::slice::from_ref(&binding));
         assert_eq!(legacy_decision, typed_decision);
         assert_eq!(legacy_decision.import_decision(), "allow");
         assert!(legacy_decision.admits_local_truth());
@@ -1122,7 +1124,8 @@ mod tests {
             MeshEventValidity::Valid,
             None,
         );
-        let trust_outcome = registry.decide_import_admission(&excessive_trust, &[binding.clone()]);
+        let trust_outcome =
+            registry.decide_import_admission(&excessive_trust, std::slice::from_ref(&binding));
         assert_eq!(trust_outcome.import_decision(), "reject");
         assert!(!trust_outcome.admits_local_truth());
         assert_eq!(
@@ -1144,7 +1147,8 @@ mod tests {
             MeshEventValidity::Valid,
             Some(256),
         );
-        let body_outcome = registry.decide_import_admission(&arbitrary_metadata, &[binding]);
+        let body_outcome =
+            registry.decide_import_admission(&arbitrary_metadata, std::slice::from_ref(&binding));
         assert_eq!(body_outcome.import_decision(), "deny");
         assert!(!body_outcome.admits_local_truth());
         assert_eq!(
