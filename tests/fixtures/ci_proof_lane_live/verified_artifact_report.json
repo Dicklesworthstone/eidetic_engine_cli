@@ -1,15 +1,34 @@
 {
   "accepted": true,
+  "archiveHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "archiveSizeBytes": 123456,
+  "artifactId": "39000000001",
   "artifactName": "ee-aarch64-apple-darwin-debug",
+  "binaryHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "buildCommandHash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
   "checksumStatus": "verified",
+  "effectiveInputHash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
   "gitTree": "e0dd84ca3bb4088c255b3301052e926d40b7be68",
   "manifestHash": "sha256:7ed543c00530f966cd93fb1b095db8581dc03e06f7f7323c9c9b5c681227f12d",
+  "profile": "debug",
   "probeStatus": "passed",
   "probes": [
     {
-      "argvHash": "sha256:55723a065fd16cd7fff9cba118d0c29ddd0cddacb13147bee679ead94ce3d555",
+      "argvHash": "sha256:4af47b5e027e1686b124d8c7f986fe44a60b0b8a73c9cf1a32a8d8a592b39b48",
       "exitCode": 0,
-      "id": "version",
+      "id": "version_json",
+      "semanticAssertions": [
+        {"expected": "ee.response.v2", "matched": true, "observed": "ee.response.v2", "path": "/schema"},
+        {"expected": true, "matched": true, "observed": true, "path": "/success"},
+        {"expected": "version", "matched": true, "observed": "version", "path": "/data/command"},
+        {"expected": "ee.version.provenance.v1", "matched": true, "observed": "ee.version.provenance.v1", "path": "/data/schema"},
+        {"expected": "7d3bbeff83be35eb1357d15220b9c59952ea554b", "matched": true, "observed": "7d3bbeff83be35eb1357d15220b9c59952ea554b", "path": "/data/source/gitCommit"},
+        {"expected": true, "matched": true, "observed": true, "path": "/data/source/gitDirty"},
+        {"expected": "dirty", "matched": true, "observed": "dirty", "path": "/data/source/state"},
+        {"expected": "aarch64-apple-darwin", "matched": true, "observed": "aarch64-apple-darwin", "path": "/data/build/targetTriple"},
+        {"expected": "debug", "matched": true, "observed": "debug", "path": "/data/build/profile"},
+        {"expected": true, "matched": true, "observed": true, "path": "/data/provenance/available"}
+      ],
       "status": "passed",
       "stderrHash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "stdoutHash": "sha256:f3b6f68fe0352662ed8fdeff60c55d534744e6ef7931f8f41bb7006424735d2a"
@@ -18,6 +37,7 @@
       "argvHash": "sha256:37fa79e205cce2dafd8ac4da2075f73f74ed03beeca38cc6d741fcf54be21558",
       "exitCode": 0,
       "id": "environment_attestation_help",
+      "semanticAssertions": [],
       "status": "passed",
       "stderrHash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "stdoutHash": "sha256:5bb4c1760e62803fc763535e23cb166f61f6c95bd64d59aaa3ad5490c91458fa"
@@ -25,8 +45,14 @@
   ],
   "rawOutputIncluded": false,
   "rejections": [],
+  "repository": "Dicklesworthstone/eidetic_engine_cli",
+  "runAttempt": 1,
+  "runId": "28000000001",
   "schema": "ee.remote_build_artifact_manifest.verification.v1",
   "sourceCommit": "7d3bbeff83be35eb1357d15220b9c59952ea554b",
   "status": "verified",
-  "verificationHash": "sha256:45e4b326c07c2817d52449b2473c6244e5a9af6a0b0363ac0860e5838d280e75"
+  "target": "aarch64-apple-darwin",
+  "provenanceHash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+  "verificationHash": "sha256:PLACEHOLDER",
+  "workflow": "macOS EE Artifact"
 }
