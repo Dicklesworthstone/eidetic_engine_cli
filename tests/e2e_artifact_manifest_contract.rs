@@ -104,7 +104,7 @@ fn repeated_hash(byte: char) -> String {
     format!("sha256:{}", byte.to_string().repeat(64))
 }
 
-fn remote_artifact_verification_report(binary_hash: &str) -> Value {
+fn remote_artifact_verification_report(binary_hash: &str) -> Result<Value, String> {
     let source_commit = "1".repeat(40);
     let target = "aarch64-apple-darwin";
     let profile = "release";
@@ -180,17 +180,18 @@ fn remote_artifact_verification_report(binary_hash: &str) -> Value {
     let mut verification_body = report.clone();
     verification_body
         .as_object_mut()
-        .expect("verification report is an object")
+        .ok_or_else(|| "verification report fixture is not an object".to_owned())?
         .remove("verificationHash");
     let canonical = canonical_json_value(&verification_body);
-    let bytes = serde_json::to_vec(&canonical).expect("canonical report serializes");
+    let bytes = serde_json::to_vec(&canonical)
+        .map_err(|error| format!("failed to serialize canonical verification report: {error}"))?;
     let digest = Sha256::digest(bytes);
     let digest_hex = digest
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     report["verificationHash"] = json!(format!("sha256:{digest_hex}"));
-    report
+    Ok(report)
 }
 
 fn canonical_json_value(value: &Value) -> Value {
@@ -458,7 +459,7 @@ fn bash_harness_emits_verified_remote_artifact_manifest_v2() -> TestResult {
     let log_path = tmp.path().join("j1.jsonl");
     write_fake_binary(&fake_binary)?;
     let binary_hash = sha256_file(&fake_binary)?;
-    let report = remote_artifact_verification_report(&binary_hash);
+    let report = remote_artifact_verification_report(&binary_hash)?;
     fs::write(
         &verification_path,
         serde_json::to_vec_pretty(&report)
@@ -557,7 +558,7 @@ fn bash_harness_refuses_v2_when_exercised_binary_does_not_match_report() -> Test
     let verification_path = tmp.path().join("artifact-verification.json");
     let log_path = tmp.path().join("j1.jsonl");
     write_fake_binary(&fake_binary)?;
-    let report = remote_artifact_verification_report(&repeated_hash('f'));
+    let report = remote_artifact_verification_report(&repeated_hash('f'))?;
     fs::write(
         &verification_path,
         serde_json::to_vec_pretty(&report)
@@ -613,7 +614,7 @@ fn bash_harness_refuses_forged_remote_artifact_attestations() -> TestResult {
     let fake_binary = tmp.path().join("fake-ee");
     write_fake_binary(&fake_binary)?;
     let binary_hash = sha256_file(&fake_binary)?;
-    let valid = remote_artifact_verification_report(&binary_hash);
+    let valid = remote_artifact_verification_report(&binary_hash)?;
 
     let mut forged_self_hash = valid.clone();
     forged_self_hash["verificationHash"] = json!(repeated_hash('e'));
