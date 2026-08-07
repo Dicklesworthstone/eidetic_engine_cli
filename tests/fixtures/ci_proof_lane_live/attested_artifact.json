@@ -29,6 +29,7 @@
       ],
       "artifacts": [
         {
+          "id": "39000000001",
           "name": "ee-aarch64-apple-darwin-debug",
           "status": "available",
           "retentionExpiresAt": "2026-08-10T04:35:00Z",
