@@ -158,14 +158,14 @@ if printf '%s' "$CAPS_JSON" | jq . >/dev/null 2>&1; then
     e2e_log_assert_eq "$F5_HAS_CASS" "true" "f5_env_registry_describes_cass_binary"
 
     F5_SECRET_EXPOSED=$(printf '%s' "$CAPS_JSON" \
-        | jq -r 'any(.data.envOverrides[]?; .name == "EE_PREFLIGHT_BYPASS_SECRET" and has("currentValue"))' \
+        | jq -r 'any(.data.envOverrides[]?; .name == "EE_SERVE_TOKEN" and has("currentValue"))' \
             2>/dev/null || echo true)
     e2e_log_assert_eq "$F5_SECRET_EXPOSED" "false" "f5_env_registry_suppresses_secret_value"
 
     F5_ENV_JSON=$(
         unset EE_REMEMBER_CURATION_SYNC_BUDGET_MS
         EE_CASS_BINARY="/tmp/ee-f5-cass" \
-            EE_PREFLIGHT_BYPASS_SECRET="ee-f5-secret" \
+            EE_SERVE_TOKEN="ee-f5-secret" \
             ee_global capabilities --json 2>/dev/null || true
     )
     if printf '%s' "$F5_ENV_JSON" | jq . >/dev/null 2>&1; then
@@ -175,7 +175,7 @@ if printf '%s' "$CAPS_JSON" | jq . >/dev/null 2>&1; then
         e2e_log_assert_eq "$F5_CASS_SET" "true" "f5_env_registry_reports_set_cass_binary"
 
         F5_SECRET_SET_SAFE=$(printf '%s' "$F5_ENV_JSON" \
-            | jq -r 'any(.data.envOverrides[]?; .name == "EE_PREFLIGHT_BYPASS_SECRET" and .isSet == true and .source == "process_env" and (has("currentValue") | not))' \
+            | jq -r 'any(.data.envOverrides[]?; .name == "EE_SERVE_TOKEN" and .isSet == true and .source == "process_env" and (has("currentValue") | not))' \
                 2>/dev/null || echo false)
         e2e_log_assert_eq "$F5_SECRET_SET_SAFE" "true" "f5_env_registry_reports_secret_without_value"
 

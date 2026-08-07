@@ -27,7 +27,7 @@ WORKSPACE_SENTINEL="/tmp/ee-agent-docs-env-workspace-sentinel-17391"
 
 step "agent-docs env emits a response envelope"
 env_json="$(
-    EE_PREFLIGHT_BYPASS_SECRET="$SECRET_SENTINEL" \
+    EE_SERVE_TOKEN="$SECRET_SENTINEL" \
     EE_WORKSPACE="$WORKSPACE_SENTINEL" \
     ee_json agent-docs env --json
 )"
@@ -47,7 +47,7 @@ assert_jq "$env_json" '
     and (by_name("EE_DATABASE_PATH").category == "paths")
     and (by_name("EE_OUTPUT_FORMAT").category == "output")
     and (by_name("EE_JSON").category == "output")
-    and (by_name("EE_PREFLIGHT_BYPASS_SECRET").category == "policy")
+    and (by_name("EE_SERVE_TOKEN").category == "policy")
 ' "core env vars expose expected categories"
 # shellcheck disable=SC2016
 assert_jq "$env_json" '

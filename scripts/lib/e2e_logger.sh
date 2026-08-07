@@ -94,6 +94,7 @@ _e2e_remote_artifact_attestation_fields() {
     local report_path="$1"
     python3 - "$report_path" <<'PYEOF'
 import json
+import hashlib
 import re
 import sys
 
@@ -148,13 +149,22 @@ if unexpected_keys:
         "remote artifact verification report has unexpected fields: "
         + ",".join(unexpected_keys)
     )
+if report["status"] != "verified":
+    raise SystemExit("remote artifact verification report status is not verified")
+if report["accepted"] is not True:
+    raise SystemExit("remote artifact verification report is not accepted")
+if report["checksumStatus"] != "verified":
+    raise SystemExit("remote artifact verification report checksum is not verified")
+if report["probeStatus"] != "passed":
+    raise SystemExit("remote artifact verification report probes did not pass")
 if report["rawOutputIncluded"] is not False:
     raise SystemExit("remote artifact verification report must exclude raw output")
-if not isinstance(report["rejections"], list) or not all(
-    isinstance(value, str) for value in report["rejections"]
+if report["rejections"] != []:
+    raise SystemExit("remote artifact verification report contains rejections")
+if (
+    not isinstance(report["probes"], list)
+    or not 2 <= len(report["probes"]) <= 16
 ):
-    raise SystemExit("remote artifact verification report has invalid rejections")
-if not isinstance(report["probes"], list) or len(report["probes"]) > 16:
     raise SystemExit("remote artifact verification report has invalid probes")
 
 probe_keys = {
@@ -167,9 +177,18 @@ probe_keys = {
     "semanticAssertions",
 }
 assertion_keys = {"path", "expected", "observed", "matched"}
+probe_ids = set()
+probes_by_id = {}
 for probe in report["probes"]:
     if not isinstance(probe, dict) or set(probe) != probe_keys:
         raise SystemExit("remote artifact verification report has an invalid probe shape")
+    probe_id = probe["id"]
+    if not isinstance(probe_id, str) or not probe_id:
+        raise SystemExit("remote artifact verification report has an invalid probe id")
+    if probe_id in probe_ids:
+        raise SystemExit("remote artifact verification report has duplicate probe ids")
+    probe_ids.add(probe_id)
+    probes_by_id[probe_id] = probe
     assertions = probe["semanticAssertions"]
     if not isinstance(assertions, list):
         raise SystemExit("remote artifact verification report has invalid probe assertions")
@@ -178,9 +197,32 @@ for probe in report["probes"]:
         for assertion in assertions
     ):
         raise SystemExit("remote artifact verification report has an invalid assertion shape")
+    assertion_paths = set()
+    for assertion in assertions:
+        path = assertion["path"]
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise SystemExit("remote artifact verification report has an invalid assertion path")
+        if path in assertion_paths:
+            raise SystemExit("remote artifact verification report has duplicate assertion paths")
+        assertion_paths.add(path)
+        if assertion["matched"] is not True or assertion["expected"] != assertion["observed"]:
+            raise SystemExit("remote artifact verification report has unmatched probe evidence")
 
 git_object = re.compile(r"^[0-9a-f]{40}$")
 sha256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+positive_decimal = re.compile(r"^[1-9][0-9]*$")
+for key in ("artifactName", "repository", "workflow", "target", "profile"):
+    value = report[key]
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit(f"remote artifact verification report has invalid {key}")
+for key in ("artifactId", "runId"):
+    value = report[key]
+    if not isinstance(value, str) or positive_decimal.fullmatch(value) is None:
+        raise SystemExit(f"remote artifact verification report has invalid {key}")
+if type(report["runAttempt"]) is not int or report["runAttempt"] < 1:
+    raise SystemExit("remote artifact verification report has invalid runAttempt")
+if type(report["archiveSizeBytes"]) is not int or report["archiveSizeBytes"] < 1:
+    raise SystemExit("remote artifact verification report has invalid archiveSizeBytes")
 for key in ("sourceCommit", "gitTree"):
     value = report.get(key)
     if not isinstance(value, str) or git_object.fullmatch(value) is None:
@@ -197,6 +239,83 @@ for key in (
     value = report.get(key)
     if not isinstance(value, str) or sha256.fullmatch(value) is None:
         raise SystemExit(f"remote artifact verification report has invalid {key}")
+
+for probe in report["probes"]:
+    if (
+        type(probe["exitCode"]) is not int
+        or probe["exitCode"] != 0
+        or probe["status"] != "passed"
+    ):
+        raise SystemExit("remote artifact verification report contains a failed probe")
+    for key in ("argvHash", "stdoutHash", "stderrHash"):
+        value = probe[key]
+        if not isinstance(value, str) or sha256.fullmatch(value) is None:
+            raise SystemExit(
+                f"remote artifact verification report probe has invalid {key}"
+            )
+
+required_probes = {
+    "version_json": {
+        "argvHash": "sha256:4af47b5e027e1686b124d8c7f986fe44a60b0b8a73c9cf1a32a8d8a592b39b48",
+        "assertions": {
+            "/schema": "ee.response.v2",
+            "/success": True,
+            "/data/command": "version",
+            "/data/schema": "ee.version.provenance.v1",
+            "/data/source/gitCommit": report["sourceCommit"],
+            "/data/source/gitDirty": True,
+            "/data/source/state": "dirty",
+            "/data/build/targetTriple": report["target"],
+            "/data/build/profile": report["profile"],
+            "/data/provenance/available": True,
+        },
+    },
+    "environment_attestation_help": {
+        "argvHash": "sha256:37fa79e205cce2dafd8ac4da2075f73f74ed03beeca38cc6d741fcf54be21558",
+        "assertions": {},
+    },
+}
+for probe_id, expected in required_probes.items():
+    probe = probes_by_id.get(probe_id)
+    if probe is None:
+        raise SystemExit(
+            f"remote artifact verification report is missing required probe {probe_id}"
+        )
+    if probe["argvHash"] != expected["argvHash"]:
+        raise SystemExit(
+            f"remote artifact verification report has invalid argvHash for {probe_id}"
+        )
+    assertions = {
+        assertion["path"]: assertion
+        for assertion in probe["semanticAssertions"]
+    }
+    if probe_id == "environment_attestation_help" and assertions:
+        raise SystemExit(
+            "remote artifact verification report help probe has unexpected assertions"
+        )
+    for path, expected_value in expected["assertions"].items():
+        assertion = assertions.get(path)
+        if (
+            assertion is None
+            or assertion["expected"] != expected_value
+            or assertion["observed"] != expected_value
+            or assertion["matched"] is not True
+        ):
+            raise SystemExit(
+                f"remote artifact verification report lacks required assertion {path}"
+            )
+
+verification_body = dict(report)
+claimed_verification_hash = verification_body.pop("verificationHash")
+canonical_body = json.dumps(
+    verification_body,
+    ensure_ascii=False,
+    sort_keys=True,
+    separators=(",", ":"),
+).encode("utf-8")
+expected_verification_hash = "sha256:" + hashlib.sha256(canonical_body).hexdigest()
+if claimed_verification_hash != expected_verification_hash:
+    raise SystemExit("remote artifact verification report self-hash does not match")
 
 values = [
     json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
