@@ -190,6 +190,14 @@ def canonical_hash(value)
   "sha256:" + Digest::SHA256.hexdigest(JSON.generate(canonical_json(value)))
 end
 
+def sha256_hash?(value)
+  value.to_s.match?(/\Asha256:[a-f0-9]{64}\z/)
+end
+
+def full_git_object?(value)
+  value.to_s.match?(/\A[a-f0-9]{40}\z/)
+end
+
 def load_artifact_verification(path)
   return nil if path.empty?
 
@@ -330,6 +338,57 @@ def active_run_age_seconds(run, generated_at)
   [(generated - started_at).to_i, 0].max
 end
 
+def verification_report_evidence_valid?(report)
+  return false unless report.is_a?(Hash)
+  return false unless report["accepted"] == true && report["status"] == "verified"
+  return false unless report["checksumStatus"] == "verified" && report["probeStatus"] == "passed"
+  return false unless report["rawOutputIncluded"] == false && Array(report["rejections"]).empty?
+  return false unless full_git_object?(report["sourceCommit"]) && full_git_object?(report["gitTree"])
+  return false unless %w[manifestHash buildCommandHash effectiveInputHash provenanceHash binaryHash archiveHash verificationHash].all? do |field|
+    sha256_hash?(report[field])
+  end
+  return false unless report["target"] == "aarch64-apple-darwin" && report["profile"] == "debug"
+  return false unless report["archiveSizeBytes"].is_a?(Integer) && report["archiveSizeBytes"].positive?
+
+  probes = Array(report["probes"])
+  expected = {
+    "version_json" => canonical_hash(["ee", "version", "--json"]),
+    "environment_attestation_help" => canonical_hash(["ee", "diag", "environment-attestation", "--help"])
+  }
+  return false unless probes.length == expected.length
+  return false unless probes.map { |probe| probe.is_a?(Hash) ? probe["id"] : nil }.sort == expected.keys.sort
+
+  probes.all? do |probe|
+    next false unless probe["status"] == "passed" && probe["exitCode"] == 0
+    next false unless probe["argvHash"] == expected[probe["id"]]
+    next false unless sha256_hash?(probe["stdoutHash"]) && sha256_hash?(probe["stderrHash"])
+    assertions = Array(probe["semanticAssertions"])
+    if probe["id"] == "version_json"
+      required_paths = %w[
+        /schema
+        /success
+        /data/command
+        /data/schema
+        /data/source/gitCommit
+        /data/source/gitDirty
+        /data/source/state
+        /data/build/targetTriple
+        /data/build/profile
+        /data/provenance/available
+      ]
+      next false unless assertions.map { |assertion| assertion["path"] }.sort == required_paths.sort
+      next false unless assertions.all? do |assertion|
+        assertion["matched"] == true && assertion["observed"] == assertion["expected"]
+      end
+      commit_assertion = assertions.find { |assertion| assertion["path"] == "/data/source/gitCommit" }
+      next false unless commit_assertion && commit_assertion["observed"] == report["sourceCommit"]
+    else
+      next false unless assertions.empty?
+    end
+    true
+  end
+end
+
 def verification_surface_probes(report)
   Array(report["probes"]).each_with_object([]) do |probe, probes|
     next unless probe.is_a?(Hash)
@@ -337,8 +396,8 @@ def verification_surface_probes(report)
     probe_id = probe["id"].to_s
     command_template, expected_surface =
       case probe_id
-      when "version"
-        ["ee --version", "ee version"]
+      when "version_json"
+        ["ee version --json", "source-bound version provenance"]
       when "environment_attestation_help"
         ["ee diag environment-attestation --help", "diag environment-attestation"]
       else
@@ -347,19 +406,25 @@ def verification_surface_probes(report)
     status = probe["status"].to_s
     status = "failed" unless %w[passed failed not_run].include?(status)
     probes << {
+      "probeId" => probe_id,
       "commandTemplate" => command_template,
       "status" => status,
       "expectedSurface" => expected_surface,
+      "argvHash" => probe["argvHash"],
+      "exitCode" => probe["exitCode"],
+      "stdoutHash" => probe["stdoutHash"],
+      "stderrHash" => probe["stderrHash"],
       "firstFailureDiagnosis" => status == "passed" ? nil : "consumer behavior probe did not match the attested packaged binary"
     }
   end
 end
 
-def artifact_from_input(raw, run_head_sha, verification_report)
+def artifact_from_input(raw, run_id, run_head_sha, repository, verification_report)
   return nil if raw.nil?
 
   name = raw["name"].to_s
   return nil if name.empty?
+  artifact_id = (raw["id"] || raw["databaseId"] || raw["artifactId"]).to_s
 
   expired = raw["expired"] == true || raw["status"].to_s == "expired"
   status =
@@ -373,7 +438,12 @@ def artifact_from_input(raw, run_head_sha, verification_report)
 
   report_matches_artifact =
     verification_report.is_a?(Hash) &&
-    verification_report["artifactName"].to_s == name
+    verification_report["artifactName"].to_s == name &&
+    verification_report["runId"].to_s == run_id &&
+    !artifact_id.empty? &&
+    verification_report["artifactId"].to_s == artifact_id &&
+    verification_report["workflow"] == "macOS EE Artifact" &&
+    verification_report["repository"] == "#{repository.fetch("owner")}/#{repository.fetch("name")}"
   report_source_matches =
     report_matches_artifact && verification_report["sourceCommit"].to_s == run_head_sha
   report_verified =
@@ -381,7 +451,8 @@ def artifact_from_input(raw, run_head_sha, verification_report)
     verification_report["accepted"] == true &&
     verification_report["status"] == "verified" &&
     verification_report["checksumStatus"] == "verified" &&
-    verification_report["probeStatus"] == "passed"
+    verification_report["probeStatus"] == "passed" &&
+    verification_report_evidence_valid?(verification_report)
 
   checksum_status = raw["checksumStatus"] || "not_checked"
   surface_probes = raw["surfaceProbes"] || [
@@ -402,6 +473,12 @@ def artifact_from_input(raw, run_head_sha, verification_report)
   manifest_hash = raw["manifestHash"]
   verification_hash = raw["verificationHash"]
   attestation_rejections = Array(raw["attestationRejections"])
+  attested_run_id = raw["attestedRunId"]
+  binary_hash = raw["binaryHash"]
+  archive_hash = raw["archiveHash"]
+  build_command_hash = raw["buildCommandHash"]
+  effective_input_hash = raw["effectiveInputHash"]
+  provenance_hash = raw["provenanceHash"]
 
   if report_matches_artifact
     checksum_status = verification_report["checksumStatus"] || "not_checked"
@@ -414,10 +491,17 @@ def artifact_from_input(raw, run_head_sha, verification_report)
     verification_hash = verification_report["verificationHash"]
     attestation_rejections = Array(verification_report["rejections"])
     attestation_rejections << "attested_source_commit_mismatch" unless report_source_matches
+    attested_run_id = verification_report["runId"]
+    binary_hash = verification_report["binaryHash"]
+    archive_hash = verification_report["archiveHash"]
+    build_command_hash = verification_report["buildCommandHash"]
+    effective_input_hash = verification_report["effectiveInputHash"]
+    provenance_hash = verification_report["provenanceHash"]
   end
 
   {
     "name" => name,
+    "artifactId" => artifact_id.empty? ? nil : artifact_id,
     "status" => status,
     "retentionExpiresAt" => raw["retentionExpiresAt"] || raw["expires_at"] || raw["expiresAt"],
     "checksumStatus" => checksum_status,
@@ -428,6 +512,12 @@ def artifact_from_input(raw, run_head_sha, verification_report)
     "attestedGitTree" => attested_git_tree,
     "manifestHash" => manifest_hash,
     "verificationHash" => verification_hash,
+    "attestedRunId" => attested_run_id,
+    "binaryHash" => binary_hash,
+    "archiveHash" => archive_hash,
+    "buildCommandHash" => build_command_hash,
+    "effectiveInputHash" => effective_input_hash,
+    "provenanceHash" => provenance_hash,
     "attestationRejections" => attestation_rejections.map(&:to_s).reject(&:empty?).uniq.sort.first(32),
     "surfaceProbes" => surface_probes
   }
@@ -436,6 +526,7 @@ end
 def missing_artifact(run_head_sha)
   {
     "name" => EXPECTED_ARTIFACT,
+    "artifactId" => nil,
     "status" => "missing",
     "retentionExpiresAt" => nil,
     "checksumStatus" => "missing",
@@ -446,6 +537,12 @@ def missing_artifact(run_head_sha)
     "attestedGitTree" => nil,
     "manifestHash" => nil,
     "verificationHash" => nil,
+    "attestedRunId" => nil,
+    "binaryHash" => nil,
+    "archiveHash" => nil,
+    "buildCommandHash" => nil,
+    "effectiveInputHash" => nil,
+    "provenanceHash" => nil,
     "attestationRejections" => ["artifact_missing"],
     "surfaceProbes" => [
       {
@@ -459,9 +556,16 @@ def missing_artifact(run_head_sha)
 end
 
 def run_artifacts(raw_run, repository, artifact_index, verification_report)
+  run_id = (raw_run["databaseId"] || raw_run["runId"]).to_s
   raw_artifacts = raw_run["artifacts"] || artifact_index.fetch(raw_run["databaseId"].to_s, [])
   artifacts = raw_artifacts.map do |artifact|
-    artifact_from_input(artifact, raw_run["headSha"].to_s, verification_report)
+    artifact_from_input(
+      artifact,
+      run_id,
+      raw_run["headSha"].to_s,
+      repository,
+      verification_report
+    )
   end.compact
 
   if completed_run?(raw_run) &&
