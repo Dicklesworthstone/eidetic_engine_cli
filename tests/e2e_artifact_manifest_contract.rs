@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -104,7 +105,32 @@ fn repeated_hash(byte: char) -> String {
 }
 
 fn remote_artifact_verification_report(binary_hash: &str) -> Value {
-    json!({
+    let source_commit = "1".repeat(40);
+    let target = "aarch64-apple-darwin";
+    let profile = "release";
+    let assertions = [
+        ("/schema", json!("ee.response.v2")),
+        ("/success", json!(true)),
+        ("/data/command", json!("version")),
+        ("/data/schema", json!("ee.version.provenance.v1")),
+        ("/data/source/gitCommit", json!(source_commit.clone())),
+        ("/data/source/gitDirty", json!(true)),
+        ("/data/source/state", json!("dirty")),
+        ("/data/build/targetTriple", json!(target)),
+        ("/data/build/profile", json!(profile)),
+        ("/data/provenance/available", json!(true)),
+    ]
+    .into_iter()
+    .map(|(path, value)| {
+        json!({
+            "path": path,
+            "expected": value.clone(),
+            "observed": value,
+            "matched": true
+        })
+    })
+    .collect::<Vec<_>>();
+    let mut report = json!({
         "schema": "ee.remote_build_artifact_manifest.verification.v1",
         "status": "verified",
         "accepted": true,
@@ -114,14 +140,14 @@ fn remote_artifact_verification_report(binary_hash: &str) -> Value {
         "workflow": "macos-ee-artifact.yml",
         "runId": "8001",
         "runAttempt": 1,
-        "sourceCommit": "1".repeat(40),
+        "sourceCommit": source_commit,
         "gitTree": "2".repeat(40),
         "manifestHash": repeated_hash('3'),
         "buildCommandHash": repeated_hash('4'),
         "effectiveInputHash": repeated_hash('5'),
         "provenanceHash": repeated_hash('6'),
-        "target": "aarch64-apple-darwin",
-        "profile": "release",
+        "target": target,
+        "profile": profile,
         "binaryHash": binary_hash,
         "archiveHash": repeated_hash('7'),
         "archiveSizeBytes": 4096,
@@ -130,16 +156,16 @@ fn remote_artifact_verification_report(binary_hash: &str) -> Value {
         "probes": [
             {
                 "id": "version_json",
-                "argvHash": repeated_hash('8'),
+                "argvHash": "sha256:4af47b5e027e1686b124d8c7f986fe44a60b0b8a73c9cf1a32a8d8a592b39b48",
                 "exitCode": 0,
                 "stdoutHash": repeated_hash('9'),
                 "stderrHash": repeated_hash('a'),
                 "status": "passed",
-                "semanticAssertions": []
+                "semanticAssertions": assertions
             },
             {
                 "id": "environment_attestation_help",
-                "argvHash": repeated_hash('b'),
+                "argvHash": "sha256:37fa79e205cce2dafd8ac4da2075f73f74ed03beeca38cc6d741fcf54be21558",
                 "exitCode": 0,
                 "stdoutHash": repeated_hash('c'),
                 "stderrHash": repeated_hash('d'),
@@ -149,8 +175,32 @@ fn remote_artifact_verification_report(binary_hash: &str) -> Value {
         ],
         "rejections": [],
         "rawOutputIncluded": false,
-        "verificationHash": repeated_hash('e')
-    })
+        "verificationHash": ""
+    });
+    let mut verification_body = report.clone();
+    verification_body
+        .as_object_mut()
+        .expect("verification report is an object")
+        .remove("verificationHash");
+    let canonical = canonical_json_value(&verification_body);
+    let bytes = serde_json::to_vec(&canonical).expect("canonical report serializes");
+    let digest = Sha256::digest(bytes);
+    report["verificationHash"] = json!(format!("sha256:{digest:x}"));
+    report
+}
+
+fn canonical_json_value(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.iter().map(canonical_json_value).collect()),
+        Value::Object(values) => {
+            let sorted = values
+                .iter()
+                .map(|(key, value)| (key.clone(), canonical_json_value(value)))
+                .collect::<BTreeMap<_, _>>();
+            Value::Object(sorted.into_iter().collect())
+        }
+        _ => value.clone(),
+    }
 }
 
 #[test]
@@ -549,6 +599,82 @@ e2e_log_end
         .any(|event| event["kind"] == "artifact_manifest")
     {
         return Err("mismatched binary emitted an artifact_manifest event".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn bash_harness_refuses_forged_remote_artifact_attestations() -> TestResult {
+    let tmp = tempdir()?;
+    let fake_binary = tmp.path().join("fake-ee");
+    write_fake_binary(&fake_binary)?;
+    let binary_hash = sha256_file(&fake_binary)?;
+    let valid = remote_artifact_verification_report(&binary_hash);
+
+    let mut forged_self_hash = valid.clone();
+    forged_self_hash["verificationHash"] = json!(repeated_hash('e'));
+    let mut forged_probe = valid.clone();
+    forged_probe["probes"][0]["argvHash"] = json!(repeated_hash('8'));
+    let mut unmatched_assertion = valid;
+    unmatched_assertion["probes"][0]["semanticAssertions"][0]["matched"] = json!(false);
+
+    for (case, report, expected_diagnostic) in [
+        ("self_hash", forged_self_hash, "self-hash does not match"),
+        ("probe_argv", forged_probe, "invalid argvHash"),
+        (
+            "unmatched_assertion",
+            unmatched_assertion,
+            "unmatched probe evidence",
+        ),
+    ] {
+        let verification_path = tmp.path().join(format!("{case}-verification.json"));
+        let log_path = tmp.path().join(format!("{case}.jsonl"));
+        fs::write(
+            &verification_path,
+            serde_json::to_vec_pretty(&report)
+                .map_err(|error| format!("failed to encode {case} report: {error}"))?,
+        )
+        .map_err(|error| format!("failed to write {case} report: {error}"))?;
+        let script = format!(
+            r#"
+set -uo pipefail
+source "{}/scripts/lib/e2e_logger.sh"
+e2e_log_start "artifact_manifest_v2_{case}"
+if e2e_log_artifact_manifest "remote_probe" "{}" --version; then
+    exit 70
+fi
+e2e_log_end
+"#,
+            env!("CARGO_MANIFEST_DIR"),
+            fake_binary.display(),
+        );
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("EE_TEST_LOG_PATH", &log_path)
+            .env("EE_REMOTE_ARTIFACT_VERIFICATION_REPORT", &verification_path)
+            .output()
+            .map_err(|error| format!("failed to run {case} bash harness: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "{case} bash harness failed: status={:?} stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.contains(expected_diagnostic) {
+            return Err(format!(
+                "{case} missing diagnostic {expected_diagnostic:?}: {stderr}"
+            ));
+        }
+        let events = read_jsonl(&log_path)?;
+        if events
+            .iter()
+            .any(|event| event["kind"] == "artifact_manifest")
+        {
+            return Err(format!("{case} emitted an artifact_manifest event"));
+        }
     }
     Ok(())
 }
