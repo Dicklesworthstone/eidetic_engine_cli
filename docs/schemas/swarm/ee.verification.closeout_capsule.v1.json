@@ -17,6 +17,7 @@
     "passedCount",
     "failedCount",
     "artifactManifestHash",
+    "remoteArtifactAttestation",
     "retainedLogReference",
     "caveats",
     "reusableUntil",
@@ -43,6 +44,60 @@
     "passedCount": { "type": ["integer", "null"], "minimum": 0 },
     "failedCount": { "type": ["integer", "null"], "minimum": 0 },
     "artifactManifestHash": { "type": ["string", "null"] },
+    "remoteArtifactAttestation": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "verificationHash",
+            "artifactName",
+            "artifactId",
+            "repository",
+            "workflow",
+            "runId",
+            "runAttempt",
+            "sourceCommit",
+            "gitTree",
+            "manifestHash",
+            "buildCommandHash",
+            "effectiveInputHash",
+            "provenanceHash",
+            "target",
+            "profile",
+            "binaryHash",
+            "archiveHash",
+            "probeIds"
+          ],
+          "properties": {
+            "verificationHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "artifactName": { "type": "string", "minLength": 1 },
+            "artifactId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "repository": { "type": "string", "minLength": 1 },
+            "workflow": { "type": "string", "minLength": 1 },
+            "runId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "runAttempt": { "type": "integer", "minimum": 1 },
+            "sourceCommit": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+            "gitTree": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+            "manifestHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "buildCommandHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "effectiveInputHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "provenanceHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "target": { "type": "string", "minLength": 1 },
+            "profile": { "type": "string", "minLength": 1 },
+            "binaryHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "archiveHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "probeIds": {
+              "type": "array",
+              "minItems": 2,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ]
+    },
     "retainedLogReference": { "type": ["string", "null"] },
     "caveats": {
       "type": "array",
@@ -59,6 +114,7 @@
           "local_cargo_disallowed",
           "no_artifact_manifest",
           "remote_artifact_attestation_invalid",
+          "requested_source_hash_missing",
           "source_hash_mismatch"
         ]
       }
@@ -110,12 +166,32 @@
       "commandSummary": "rch command_hash=blake3:rch-command argv_hash=blake3:rch-command-argv",
       "sourceHash": "blake3:source",
       "commandHash": "blake3:rch-command",
-      "executionSubstrate": "rch",
+      "executionSubstrate": "remote_artifact",
       "workerHost": "css",
       "result": "passed",
       "passedCount": 1,
       "failedCount": 0,
       "artifactManifestHash": "blake3:artifact-manifest",
+      "remoteArtifactAttestation": {
+        "verificationHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "artifactName": "ee-aarch64-apple-darwin-debug",
+        "artifactId": "24680",
+        "repository": "Dicklesworthstone/eidetic_engine_cli",
+        "workflow": "macOS EE Artifact",
+        "runId": "13579",
+        "runAttempt": 1,
+        "sourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "gitTree": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "manifestHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "buildCommandHash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "effectiveInputHash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "provenanceHash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "target": "aarch64-apple-darwin",
+        "profile": "debug",
+        "binaryHash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "archiveHash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "probeIds": ["version_json", "environment_attestation_help"]
+      },
       "retainedLogReference": "retained_log_path_hash:blake3:retained-log-path",
       "caveats": [],
       "reusableUntil": "2026-05-15T07:00:42Z",

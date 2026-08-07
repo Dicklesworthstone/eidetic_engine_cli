@@ -39,10 +39,9 @@ use crate::db::{
     PROVENANCE_STATUS_VERIFIED, WorkspaceScopeFields, audit_actions, generate_audit_id,
 };
 use crate::models::{
-    CandidateId, DomainError, LineSpan, ProducerMetadata, ProvenanceUri, RESPONSE_SCHEMA_V2,
-    RCH_VERIFY_SCHEMA_V1, TrustClass, VERIFICATION_EVIDENCE_SCHEMA_V1,
-    VerificationClosureGuidance, VerificationEvidenceRecord, VerificationGateRequirement,
-    VerificationStatus,
+    CandidateId, DomainError, LineSpan, ProducerMetadata, ProvenanceUri, RCH_VERIFY_SCHEMA_V1,
+    RESPONSE_SCHEMA_V2, TrustClass, VERIFICATION_EVIDENCE_SCHEMA_V1, VerificationClosureGuidance,
+    VerificationEvidenceRecord, VerificationGateRequirement, VerificationStatus,
     rch_cargo_closure_requirements, verification_closure_guidance,
     verification_evidence_beads_summary,
 };
@@ -675,7 +674,7 @@ pub(crate) enum VerificationEvidenceAuthority {
 }
 
 impl VerificationEvidenceAuthority {
-    const fn can_authorize_pass(self) -> bool {
+    pub(crate) const fn can_authorize_pass(self) -> bool {
         !matches!(self, Self::CallerAuthored)
     }
 }
@@ -2127,12 +2126,11 @@ fn record_verification_evidence_with_authority(
     validate_verification_evidence_authority(&evidence, authority)?;
     normalize_validated_verification_evidence(&mut evidence, authority);
     validate_verification_record(&evidence)?;
-    let content_hash = verification_evidence_content_hash(&evidence).map_err(|message| {
-        DomainError::Storage {
+    let content_hash =
+        verification_evidence_content_hash(&evidence).map_err(|message| DomainError::Storage {
             message,
             repair: Some("inspect the verification evidence JSON and retry".to_owned()),
-        }
-    })?;
+        })?;
 
     let connection = open_verification_database(options.database_path)?;
     let workspace_id = ensure_verification_workspace(&connection, options.workspace_path)?;
@@ -2537,7 +2535,12 @@ fn parse_verification_audit_entries(
 ) -> Result<Vec<VerificationEvidenceRecord>, String> {
     Ok(parse_verification_audit_entries_with_metadata(entries)?
         .into_iter()
-        .map(|entry| entry.record)
+        .map(|mut entry| {
+            if !entry.authority.can_authorize_pass() && entry.record.is_authoritative_pass() {
+                entry.record.status = VerificationStatus::Unknown;
+            }
+            entry.record
+        })
         .collect())
 }
 
@@ -4359,6 +4362,56 @@ mod tests {
         ensure(
             report.guidance.rejected_reasons[0].contains("local fallback"),
             "rejection explains fallback",
+        )
+    }
+
+    #[test]
+    fn caller_authored_pass_cannot_close_a_verification_gate() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let evidence = crate::models::sample_verification_evidence_records()
+            .into_iter()
+            .find(|record| record.is_authoritative_pass())
+            .ok_or("sample pass evidence exists")?;
+        let gate_name = evidence.gate_name.clone();
+        let command = evidence.command.clone();
+
+        record_verification_evidence(VerificationRecordOptions {
+            database_path: &database_path,
+            workspace_path: temp.path(),
+            target_type: "memory",
+            target_id: "mem_caller_authored_pass",
+            actor: Some("codex:test"),
+            evidence,
+        })
+        .map_err(|error| error.to_string())?;
+
+        let report =
+            verification_closure_guidance_from_ledger(&VerificationClosureGuidanceOptions {
+                database_path: &database_path,
+                bead_id: None,
+                requirements: vec![VerificationGateRequirement::new(
+                    gate_name,
+                    Some(command),
+                    false,
+                )],
+            })
+            .map_err(|error| error.to_string())?;
+
+        ensure(
+            !report.guidance.can_close,
+            "caller-authored pass stays advisory",
+        )?;
+        ensure_equal(
+            &report.guidance.assessments[0].matched_status,
+            &Some(VerificationStatus::Unknown),
+            "caller-authored pass is authority-bounded on read",
         )
     }
 

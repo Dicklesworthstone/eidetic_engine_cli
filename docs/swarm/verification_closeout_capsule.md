@@ -5,6 +5,7 @@
 Required uses:
 
 - Summarize the command, source hash, execution substrate, result, pass/fail counts, artifact references, caveats, and support-bundle metadata.
+- When a downloaded build artifact has a valid consumer-side attestation, retain its compact source/build/provenance/hash identity and behavioral probe IDs in `remoteArtifactAttestation`. Invalid or absent attestations are never cited there.
 - Redact local paths and raw output by default.
 - Preserve failure-mode codes when evidence is incomplete, local execution is disallowed, or source hashes no longer match.
 

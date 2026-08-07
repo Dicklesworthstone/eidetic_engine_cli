@@ -276,10 +276,10 @@ use crate::core::tripwire::{
 use crate::core::trust_report::{TrustReportOptions, generate_trust_report};
 use crate::core::verify::{
     DEFAULT_VERIFY_PROVENANCE_LIMIT, DEFAULT_VERIFY_PROVENANCE_STALE_AFTER_DAYS,
-    VerificationClosureGuidanceOptions, VerificationRecordOptions, VerifyProvenanceOptions,
-    default_rch_cargo_closure_requirements, record_verification_evidence,
-    verification_closure_guidance_from_ledger, verification_response_json,
-    verify_bounded_provenance,
+    VerificationClosureGuidanceOptions, VerificationEvidenceAuthority, VerificationRecordOptions,
+    VerifyProvenanceOptions, default_rch_cargo_closure_requirements,
+    record_validated_verification_evidence, verification_closure_guidance_from_ledger,
+    verification_response_json, verify_bounded_provenance,
 };
 use crate::core::verify_ledger::{
     RchTopologyClosureAuditError, RchTopologyClosureAuditReport, RchVerifyBlockersReport,
@@ -44199,8 +44199,8 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
-    let evidence = match parse_verification_evidence_record_input(&input) {
-        Ok(evidence) => evidence,
+    let parsed = match parse_verification_evidence_record_input(&input) {
+        Ok(parsed) => parsed,
         Err(error) => {
             let domain_error = DomainError::Usage {
                 message: format!("Invalid verification evidence JSON: {error}"),
@@ -44218,10 +44218,10 @@ where
         target_type: &args.target_type,
         target_id: &args.target_id,
         actor: args.actor.as_deref(),
-        evidence,
+        evidence: parsed.evidence,
     };
 
-    match record_verification_evidence(options) {
+    match record_validated_verification_evidence(options, parsed.authority) {
         Ok(report) => match cli.renderer() {
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &report.human_summary())
@@ -44265,40 +44265,72 @@ fn read_verification_evidence_input(args: &VerifyIngestArgs) -> Result<String, S
     }
 }
 
+#[derive(Clone, Debug)]
+struct ParsedVerificationEvidenceInput {
+    evidence: crate::models::VerificationEvidenceRecord,
+    authority: VerificationEvidenceAuthority,
+}
+
+impl ParsedVerificationEvidenceInput {
+    fn into_authority_bounded_evidence(mut self) -> crate::models::VerificationEvidenceRecord {
+        if !self.authority.can_authorize_pass() && self.evidence.is_authoritative_pass() {
+            self.evidence.status = crate::models::VerificationStatus::Unknown;
+        }
+        self.evidence
+    }
+}
+
 fn parse_verification_evidence_record_input(
     input: &str,
-) -> Result<crate::models::VerificationEvidenceRecord, String> {
+) -> Result<ParsedVerificationEvidenceInput, String> {
     let value = serde_json::from_str::<serde_json::Value>(input)
         .map_err(|error| format!("input is not valid JSON: {error}"))?;
-    verification_evidence_record_from_json_value(value)
+    parsed_verification_evidence_from_json_value(value)
 }
 
 fn verification_evidence_record_from_json_value(
     value: serde_json::Value,
 ) -> Result<crate::models::VerificationEvidenceRecord, String> {
+    parsed_verification_evidence_from_json_value(value)
+        .map(ParsedVerificationEvidenceInput::into_authority_bounded_evidence)
+}
+
+fn parsed_verification_evidence_from_json_value(
+    value: serde_json::Value,
+) -> Result<ParsedVerificationEvidenceInput, String> {
     if value.get("schema").and_then(serde_json::Value::as_str)
         == Some(crate::models::VERIFICATION_RUN_SCHEMA_V1)
     {
         let record = serde_json::from_value::<crate::models::VerificationRunRecord>(value)
             .map_err(|error| format!("invalid ee.verification.run.v1 record: {error}"))?;
-        return Ok(crate::models::verification_evidence_record_from_run_record(
-            &record,
-        ));
+        return Ok(ParsedVerificationEvidenceInput {
+            evidence: crate::models::verification_evidence_record_from_run_record(&record),
+            authority: VerificationEvidenceAuthority::ValidatedRunRecord,
+        });
     }
 
     if value.get("schema").and_then(serde_json::Value::as_str)
         == Some(crate::models::RCH_VERIFY_SCHEMA_V1)
     {
-        return crate::models::verification_evidence_record_from_rch_verify(&value)
-            .map_err(|error| format!("invalid ee.rch.verify.v1 proof: {error}"));
+        let evidence = crate::models::verification_evidence_record_from_rch_verify(&value)
+            .map_err(|error| format!("invalid ee.rch.verify.v1 proof: {error}"))?;
+        return Ok(ParsedVerificationEvidenceInput {
+            evidence,
+            authority: VerificationEvidenceAuthority::ValidatedRchVerify,
+        });
     }
 
     if value.get("schema").and_then(serde_json::Value::as_str)
         == Some(crate::models::GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1)
         || github_actions_check_run_like(&value)
     {
-        return crate::models::verification_evidence_record_from_github_actions_check_run(&value)
-            .map_err(|error| format!("invalid GitHub Actions check-run proof: {error}"));
+        let evidence =
+            crate::models::verification_evidence_record_from_github_actions_check_run(&value)
+                .map_err(|error| format!("invalid GitHub Actions check-run proof: {error}"))?;
+        return Ok(ParsedVerificationEvidenceInput {
+            evidence,
+            authority: VerificationEvidenceAuthority::ValidatedGithubActions,
+        });
     }
 
     let record = serde_json::from_value::<crate::models::VerificationEvidenceRecord>(value)
@@ -44318,7 +44350,10 @@ fn verification_evidence_record_from_json_value(
             record.schema
         ));
     }
-    Ok(record)
+    Ok(ParsedVerificationEvidenceInput {
+        evidence: record,
+        authority: VerificationEvidenceAuthority::CallerAuthored,
+    })
 }
 
 fn github_actions_check_run_like(value: &serde_json::Value) -> bool {
@@ -66572,8 +66607,9 @@ mod tests {
         })
         .to_string();
 
-        let record = parse_verification_evidence_record_input(&input)
+        let parsed = parse_verification_evidence_record_input(&input)
             .map_err(|error| format!("parse rch proof: {error}"))?;
+        let record = parsed.evidence;
 
         ensure_equal(
             &record.schema,
@@ -66584,6 +66620,11 @@ mod tests {
             &record.command_hash,
             &"sha256:cli-rch-proof".to_owned(),
             "command hash",
+        )?;
+        ensure_equal(
+            &parsed.authority,
+            &VerificationEvidenceAuthority::ValidatedRchVerify,
+            "RCH parser authority",
         )?;
         ensure(record.is_authoritative_pass(), "RCH proof is authoritative")
     }
@@ -66866,8 +66907,9 @@ mod tests {
         let input =
             serde_json::to_string(&run).map_err(|error| format!("serialize run: {error}"))?;
 
-        let record = parse_verification_evidence_record_input(&input)
+        let parsed = parse_verification_evidence_record_input(&input)
             .map_err(|error| format!("parse run record: {error}"))?;
+        let record = parsed.evidence;
 
         ensure_equal(
             &record.schema,
@@ -66883,6 +66925,11 @@ mod tests {
             &record.gate_name,
             &"rch verification run".to_owned(),
             "gate name",
+        )?;
+        ensure_equal(
+            &parsed.authority,
+            &VerificationEvidenceAuthority::ValidatedRunRecord,
+            "run parser authority",
         )?;
         ensure(
             record.is_authoritative_pass(),
@@ -66905,8 +66952,9 @@ mod tests {
         })
         .to_string();
 
-        let record = parse_verification_evidence_record_input(&input)
+        let parsed = parse_verification_evidence_record_input(&input)
             .map_err(|error| format!("parse GitHub Actions proof: {error}"))?;
+        let record = parsed.evidence;
 
         ensure_equal(
             &record.schema,
@@ -66922,6 +66970,11 @@ mod tests {
             &record.offload.offload_tool,
             &Some("github_actions".to_owned()),
             "offload tool",
+        )?;
+        ensure_equal(
+            &parsed.authority,
+            &VerificationEvidenceAuthority::ValidatedGithubActions,
+            "GitHub Actions parser authority",
         )?;
         ensure(record.is_authoritative_pass(), "CI pass is authoritative")
     }

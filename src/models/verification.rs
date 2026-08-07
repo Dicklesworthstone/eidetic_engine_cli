@@ -790,6 +790,29 @@ pub struct VerificationCloseoutSupportBundleMetadata {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VerificationCloseoutArtifactAttestationReference {
+    pub verification_hash: String,
+    pub artifact_name: String,
+    pub artifact_id: String,
+    pub repository: String,
+    pub workflow: String,
+    pub run_id: String,
+    pub run_attempt: u64,
+    pub source_commit: String,
+    pub git_tree: String,
+    pub manifest_hash: String,
+    pub build_command_hash: String,
+    pub effective_input_hash: String,
+    pub provenance_hash: String,
+    pub target: String,
+    pub profile: String,
+    pub binary_hash: String,
+    pub archive_hash: String,
+    pub probe_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VerificationCloseoutCapsule {
     pub schema: String,
     pub requested_surface: String,
@@ -803,6 +826,7 @@ pub struct VerificationCloseoutCapsule {
     pub passed_count: Option<u32>,
     pub failed_count: Option<u32>,
     pub artifact_manifest_hash: Option<String>,
+    pub remote_artifact_attestation: Option<VerificationCloseoutArtifactAttestationReference>,
     pub retained_log_reference: Option<String>,
     pub caveats: Vec<String>,
     pub reusable_until: Option<String>,
@@ -2205,6 +2229,7 @@ pub fn verification_closeout_capsule(
         passed_count,
         failed_count,
         artifact_manifest_hash: record.artifact_manifest_hash.clone(),
+        remote_artifact_attestation: closeout_artifact_attestation_reference(record),
         retained_log_reference: record
             .retained_log_path_hash
             .as_ref()
@@ -2222,6 +2247,39 @@ pub fn verification_closeout_capsule(
             local_paths_redacted: true,
         },
     }
+}
+
+fn closeout_artifact_attestation_reference(
+    record: &VerificationRunRecord,
+) -> Option<VerificationCloseoutArtifactAttestationReference> {
+    if !verification_run_has_verified_remote_artifact(record) {
+        return None;
+    }
+    let report = record.remote_artifact_attestation.as_ref()?;
+    Some(VerificationCloseoutArtifactAttestationReference {
+        verification_hash: report.verification_hash.clone(),
+        artifact_name: report.artifact_name.clone()?,
+        artifact_id: report.artifact_id.clone()?,
+        repository: report.repository.clone()?,
+        workflow: report.workflow.clone()?,
+        run_id: report.run_id.clone()?,
+        run_attempt: report.run_attempt?,
+        source_commit: report.source_commit.clone()?,
+        git_tree: report.git_tree.clone()?,
+        manifest_hash: report.manifest_hash.clone()?,
+        build_command_hash: report.build_command_hash.clone()?,
+        effective_input_hash: report.effective_input_hash.clone()?,
+        provenance_hash: report.provenance_hash.clone()?,
+        target: report.target.clone()?,
+        profile: report.profile.clone()?,
+        binary_hash: report.binary_hash.clone()?,
+        archive_hash: report.archive_hash.clone()?,
+        probe_ids: report
+            .probes
+            .iter()
+            .filter_map(|probe| probe.id.clone())
+            .collect(),
+    })
 }
 
 #[must_use]
@@ -4172,10 +4230,8 @@ fn validate_v2_artifact_manifest_bindings(
     command: Option<&PendingJ1Command>,
     report: &RemoteArtifactAttestation,
 ) -> Result<(), VerificationRunImportError> {
-    let mismatch = |reason: String| VerificationRunImportError::MismatchedArtifactManifest {
-        line,
-        reason,
-    };
+    let mismatch =
+        |reason: String| VerificationRunImportError::MismatchedArtifactManifest { line, reason };
     let command = command.ok_or_else(|| {
         mismatch("v2 artifact manifest has no adjacent command_end event".to_owned())
     })?;
@@ -4225,7 +4281,10 @@ fn validate_v2_artifact_manifest_bindings(
         ("artifact_manifest_hash", report.manifest_hash.as_deref()),
         ("binary_hash", report.binary_hash.as_deref()),
         ("build_command_hash", report.build_command_hash.as_deref()),
-        ("effective_input_hash", report.effective_input_hash.as_deref()),
+        (
+            "effective_input_hash",
+            report.effective_input_hash.as_deref(),
+        ),
         ("provenance_hash", report.provenance_hash.as_deref()),
         ("archive_hash", report.archive_hash.as_deref()),
         ("verification_hash", Some(report.verification_hash.as_str())),
@@ -4236,7 +4295,10 @@ fn validate_v2_artifact_manifest_bindings(
             )));
         }
     }
-    let expected_source_hash = report.git_tree.as_deref().map(|tree| format!("git_tree:{tree}"));
+    let expected_source_hash = report
+        .git_tree
+        .as_deref()
+        .map(|tree| format!("git_tree:{tree}"));
     if field_str(fields, "source_hash") != expected_source_hash.as_deref() {
         return Err(mismatch(
             "source_hash does not match attested git_tree".to_owned(),
@@ -5000,12 +5062,9 @@ mod tests {
             "version".to_owned(),
             "--json".to_owned(),
         ];
-        let manifest_command_hash = e2e_artifact_command_hash(
-            "/tmp/ee",
-            &manifest_args,
-            "blake3:placeholder",
-        )
-        .ok_or_else(|| std::io::Error::other("supported manifest command hash"))?;
+        let manifest_command_hash =
+            e2e_artifact_command_hash("/tmp/ee", &manifest_args, "blake3:placeholder")
+                .ok_or_else(|| std::io::Error::other("supported manifest command hash"))?;
         let command = serde_json::json!({
             "schema": "ee.test_event.v1",
             "ts": "2026-08-06T12:00:00Z",

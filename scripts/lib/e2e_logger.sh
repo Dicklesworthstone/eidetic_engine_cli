@@ -514,6 +514,7 @@ e2e_log_artifact_manifest() {
         binary_hash_status="available"
         source_hash="git_tree:$report_git_tree"
         manifest_hash="$report_manifest_hash"
+        execution_substrate="remote_artifact"
         remote_attestation_fields=(
             "remote_artifact_attestation_json" "$remote_attestation_json"
             "source_commit" "$report_source_commit"

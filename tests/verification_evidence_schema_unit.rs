@@ -169,7 +169,7 @@ fn verification_run_golden_covers_rch_and_shell_static_shapes() -> TestResult {
     assert_eq!(expected, actual);
     assert!(actual.iter().any(|record| {
         record.schema == VERIFICATION_RUN_SCHEMA_V1
-            && record.execution_substrate == "rch"
+            && record.execution_substrate == "remote_artifact"
             && verification_run_has_verified_remote_artifact(record)
     }));
     assert!(
@@ -800,12 +800,14 @@ fn verification_closeout_capsule_golden_covers_rch_and_support_bundle_shapes() -
     assert!(actual.iter().any(|capsule| {
         capsule.schema == VERIFICATION_CLOSEOUT_CAPSULE_SCHEMA_V1
             && capsule.requested_surface == "beads_comment"
-            && capsule.execution_substrate == "rch"
+            && capsule.execution_substrate == "remote_artifact"
+            && capsule.remote_artifact_attestation.is_some()
             && capsule.failure_mode_codes.is_empty()
     }));
     assert!(actual.iter().any(|capsule| {
         capsule.requested_surface == "support_bundle"
-            && capsule.failure_mode_codes == ["no_artifact_manifest"]
+            && capsule.result == "unverified"
+            && capsule.failure_mode_codes == ["no_artifact_manifest", "source_hash_mismatch"]
     }));
     Ok(())
 }
