@@ -48,7 +48,7 @@
         "newPeersAvailable": [],
         "nextActionHint": "Mesh is disabled; set EE_MESH_ENABLED=1 or configure [mesh].enabled when this workspace should join a mesh.",
         "nodeKeyChanged": false,
-        "stalePeersInConfig": [],
+        "disabledPeersInConfig": [],
         "tailnetChanged": false,
         "transientUnreachable": []
       },
@@ -61,13 +61,14 @@
       },
       "materialized": null,
       "peerStateBreakdown": {
-        "active": 0,
+        "active": null,
         "denylisted": 0,
-        "hardStale": 0,
-        "softStale": 0
+        "hardStale": null,
+        "livenessStatus": "not_probed_in_this_mode",
+        "softStale": null
       },
       "readOnly": true,
-      "schema": "ee.mesh.auto_status.v1",
+      "schema": "ee.mesh.auto_status.v2",
       "stewardPosture": {
         "enabled": false,
         "lastReconciliationAt": null,

@@ -2410,7 +2410,7 @@ Per AGENTS.md contract-drift rules, every item below lands with its gate:
   lacks an exact schema mapping; sibling leaves may share `$defs` but never a
   top-level schema ID (ADR 0086 TC-D15). The
   reserved-never-published `ee.mesh.peer_status.v1` name is retired
-  (mechanism posture stays on `ee.mesh.auto_status.v1`/foreground status;
+  (mechanism posture stays on `ee.mesh.auto_status.v2`/foreground status;
   team posture is `ee.team.status.v1`); the `ee.mesh.import_ledger.v1`
   inspection surface is owned by T1.3 (which writes the ledger decision
   columns), shipped with it or explicitly deferred in its closeout.

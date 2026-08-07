@@ -698,7 +698,7 @@ Future v0.3.x point releases may register further `EE_MESH_*` and
 |---|---|---|
 | `ee.completion_audit.report.v2` | bd-3d6ko.6.1 | Completion-audit report with `localBuildPolicy` state for local Cargo bypass attempts, remote-required blockers, and remote RCH verification |
 | `ee.tailscale.local.v1` | bd-36bbk.1.1 | Local `tailscaled` probe report block on `ee status` |
-| `ee.mesh.auto_status.v1` | bd-36bbk.1.4 | Auto-enrollment readiness, materialized peer-group, discovery cache, and drift status block |
+| `ee.mesh.auto_status.v2` | bd-tc-epic-qzk7o.2.3 | Auto-enrollment readiness with explicit unprobed liveness, materialized peer-group, discovery cache, and drift status block |
 | `ee.mesh.auto_enrollment_summary.v1` | bd-36bbk.1.5 | Forensic audit-row payload before any peer-group write |
 | `ee.mesh.discovery_policy.v1` | bd-36bbk.1.7 | Service-tag, allowlist, denylist, and discovery consent policy |
 | `ee.mesh.hello.v1` | bd-36bbk.1.2 (SRR6.46.2) | Tiny bounded handshake request sent to candidate peers (read-only; payload ≤ 4096 bytes) |
@@ -713,6 +713,15 @@ Future v0.3.x point releases may register further `EE_MESH_*` and
 | `ee.mesh.policy_failure_surface.v1` | bd-29ulx | Structured redaction-safe policy failure surface |
 | `ee.mesh.event.v1` | bd-2gtjn (SRR6.3) | Mesh event envelope (append-only export/import) |
 | `ee.mesh.storage_status.v1` | bd-2cndm (SRR6.4) | Mesh peer/cursor/import-ledger storage posture |
+
+`ee.mesh.auto_status.v2` replaces v1 rather than preserving a compatibility
+shim. Consumers must read `peerStateBreakdown.livenessStatus`; `active`,
+`softStale`, and `hardStale` are null whenever that status is
+`not_probed_in_this_mode`, and are non-negative integers only when it is
+`observed`. The former `drift.stalePeersInConfig` field is now the factual
+`drift.disabledPeersInConfig`; disabled configuration rows are not evidence of
+peer liveness or staleness. The v1 schema file remains in the repository as a
+historical artifact but is no longer registered or emitted.
 
 Each schema has a JSON Schema file at `docs/schemas/<name>.json` and is
 covered by the J6 drift gate (`tests/contracts/swarm_schema_lifecycle.rs`

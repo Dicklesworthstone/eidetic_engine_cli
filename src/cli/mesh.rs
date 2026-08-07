@@ -6336,11 +6336,58 @@ fn render_mesh_status_human(report: &MeshCliStatusReport) -> String {
         ));
     }
     output.push_str(&format!(
-        "  Drift: newPeers={}, transientUnreachable={}, disabledConfigPeers={}, denylistedMaterializedPeers={}\n",
-        report.auto_enrollment.drift.new_peer_count,
-        report.auto_enrollment.drift.transient_unreachable.len(),
-        report.auto_enrollment.drift.stale_peers_in_config.len(),
-        report.auto_enrollment.peer_state_breakdown.denylisted,
+        "  Peer liveness: {liveness}; active={active}, softStale={soft_stale}, hardStale={hard_stale}\n  Drift: newPeers={new_peers}, transientUnreachable={transient}, disabledConfigPeers={disabled}, denylistedMaterializedPeers={denylisted}\n",
+        liveness = report.auto_enrollment.peer_state_breakdown.liveness_status,
+        active = report
+            .auto_enrollment
+            .peer_state_breakdown
+            .active
+            .map_or_else(
+                || {
+                    report
+                        .auto_enrollment
+                        .peer_state_breakdown
+                        .liveness_status
+                        .to_owned()
+                },
+                |value| value.to_string(),
+            ),
+        soft_stale = report
+            .auto_enrollment
+            .peer_state_breakdown
+            .soft_stale
+            .map_or_else(
+                || {
+                    report
+                        .auto_enrollment
+                        .peer_state_breakdown
+                        .liveness_status
+                        .to_owned()
+                },
+                |value| value.to_string(),
+            ),
+        hard_stale = report
+            .auto_enrollment
+            .peer_state_breakdown
+            .hard_stale
+            .map_or_else(
+                || {
+                    report
+                        .auto_enrollment
+                        .peer_state_breakdown
+                        .liveness_status
+                        .to_owned()
+                },
+                |value| value.to_string(),
+            ),
+        new_peers = report.auto_enrollment.drift.new_peer_count,
+        transient = report.auto_enrollment.drift.transient_unreachable.len(),
+        disabled = report
+            .auto_enrollment
+            .drift
+            .disabled_peers_in_config
+            .len(),
+        denylisted = report.auto_enrollment.peer_state_breakdown.denylisted,
     ));
     if !report.repair_commands.is_empty() {
         output.push_str("  Repair commands:\n");
@@ -7268,6 +7315,24 @@ mod tests {
             envelope["data"]["autoEnrollment"]["discovery"]["schema"],
             crate::mesh::tailscale_autodiscovery::TAILSCALE_AUTODISCOVERY_SCHEMA_V1
         );
+    }
+
+    #[test]
+    fn mesh_status_human_output_does_not_turn_unprobed_liveness_into_zeroes() {
+        let report = mesh_snapshot_with_peers(vec![mesh_peer_row(
+            "peer-configured",
+            "node-configured",
+            true,
+            None,
+        )])
+        .status_report();
+
+        let rendered = render_mesh_status_human(&report);
+
+        assert!(rendered.contains(
+            "Peer liveness: not_probed_in_this_mode; active=not_probed_in_this_mode, softStale=not_probed_in_this_mode, hardStale=not_probed_in_this_mode"
+        ));
+        assert!(!rendered.contains("Peer liveness: not_probed_in_this_mode; active=0"));
     }
 
     #[test]

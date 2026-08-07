@@ -32,7 +32,7 @@
     "embeddingLanesAllowed": false
   },
   "autoEnrollment": {
-    "schema": "ee.mesh.auto_status.v1",
+    "schema": "ee.mesh.auto_status.v2",
     "enabled": false,
     "readOnly": true,
     "tailscale": {
@@ -77,15 +77,16 @@
     },
     "materialized": null,
     "peerStateBreakdown": {
-      "active": 0,
-      "softStale": 0,
-      "hardStale": 0,
+      "livenessStatus": "not_probed_in_this_mode",
+      "active": null,
+      "softStale": null,
+      "hardStale": null,
       "denylisted": 0
     },
     "drift": {
       "newPeersAvailable": [],
       "newPeerCount": 0,
-      "stalePeersInConfig": [],
+      "disabledPeersInConfig": [],
       "transientUnreachable": [],
       "tailnetChanged": false,
       "nodeKeyChanged": false,

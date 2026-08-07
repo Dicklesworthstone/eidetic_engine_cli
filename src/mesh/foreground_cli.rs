@@ -47,7 +47,7 @@ pub const MESH_CLI_EXPORT_SCHEMA_V1: &str = "ee.mesh.cli.export.v1";
 pub const MESH_CLI_IMPORT_SCHEMA_V2: &str = "ee.mesh.cli.import.v2";
 pub const MESH_CLI_SYNC_SCHEMA_V1: &str = "ee.mesh.cli.sync.v1";
 pub const MESH_EXPORT_ARTIFACT_SCHEMA_V1: &str = "ee.mesh.foreground_export.v1";
-pub const MESH_AUTO_STATUS_SCHEMA_V1: &str = "ee.mesh.auto_status.v1";
+pub const MESH_AUTO_STATUS_SCHEMA_V2: &str = "ee.mesh.auto_status.v2";
 pub const MESH_IMPORT_LEDGER_SCHEMA_V1: &str = "ee.mesh.import_ledger.v1";
 
 pub const MESH_WORKSPACE_UNINITIALIZED_CODE: &str = "mesh_workspace_uninitialized";
@@ -1062,9 +1062,10 @@ impl MeshAutoLanePolicy {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshAutoPeerStateBreakdown {
-    pub active: u32,
-    pub soft_stale: u32,
-    pub hard_stale: u32,
+    pub liveness_status: &'static str,
+    pub active: Option<u32>,
+    pub soft_stale: Option<u32>,
+    pub hard_stale: Option<u32>,
     pub denylisted: u32,
 }
 
@@ -1073,7 +1074,7 @@ pub struct MeshAutoPeerStateBreakdown {
 pub struct MeshAutoDriftStatus {
     pub new_peers_available: Vec<String>,
     pub new_peer_count: u32,
-    pub stale_peers_in_config: Vec<String>,
+    pub disabled_peers_in_config: Vec<String>,
     pub transient_unreachable: Vec<String>,
     pub tailnet_changed: bool,
     pub node_key_changed: bool,
@@ -1951,8 +1952,7 @@ fn auto_enrollment_status_for_snapshot(
     snapshot: &MeshForegroundSnapshot,
     signals: MeshAutoStatusSignals,
 ) -> MeshAutoEnrollmentStatus {
-    let active_peer_count = active_peer_count(snapshot) as u32;
-    let stale_peers_in_config = stale_mesh_peer_ids(snapshot);
+    let disabled_peers_in_config = disabled_mesh_peer_ids(snapshot);
     let new_peer_count = u32::try_from(signals.new_peers_available.len()).unwrap_or(u32::MAX);
     let drift_severity = auto_drift_severity(snapshot, &signals, new_peer_count);
     let action_graph = auto_status_action_graph(snapshot, &signals);
@@ -1962,7 +1962,7 @@ fn auto_enrollment_status_for_snapshot(
     degraded.extend(signals.tailscale_degraded.clone());
 
     MeshAutoEnrollmentStatus {
-        schema: MESH_AUTO_STATUS_SCHEMA_V1,
+        schema: MESH_AUTO_STATUS_SCHEMA_V2,
         enabled: snapshot.mesh_enabled,
         read_only: true,
         tailscale: MeshAutoTailscaleStatus {
@@ -2003,15 +2003,16 @@ fn auto_enrollment_status_for_snapshot(
         },
         materialized: auto_materialized_status(snapshot, &signals.lane_policy),
         peer_state_breakdown: MeshAutoPeerStateBreakdown {
-            active: active_peer_count,
-            soft_stale: 0,
-            hard_stale: 0,
+            liveness_status: "not_probed_in_this_mode",
+            active: None,
+            soft_stale: None,
+            hard_stale: None,
             denylisted: signals.denylisted_peer_count,
         },
         drift: MeshAutoDriftStatus {
             new_peers_available: signals.new_peers_available.clone(),
             new_peer_count,
-            stale_peers_in_config,
+            disabled_peers_in_config,
             transient_unreachable: signals.transient_unreachable.clone(),
             tailnet_changed: signals.tailnet_changed,
             node_key_changed: signals.node_key_changed,
@@ -2195,7 +2196,7 @@ fn effective_auto_lane_policy(
     snapshot: &MeshForegroundSnapshot,
     registry: &MeshPeerPolicyRegistry,
 ) -> MeshAutoLanePolicy {
-    // The v1 status contract has one lane decision for the whole peer set.
+    // The v2 status contract has one lane decision for the whole peer set.
     // Report the broadest effective exposure across enabled peers so one
     // restrictive peer cannot hide that another peer may receive the lane.
     MeshAutoLanePolicy {
@@ -2313,7 +2314,7 @@ fn latest_peer_seen_at(snapshot: &MeshForegroundSnapshot) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn stale_mesh_peer_ids(snapshot: &MeshForegroundSnapshot) -> Vec<String> {
+fn disabled_mesh_peer_ids(snapshot: &MeshForegroundSnapshot) -> Vec<String> {
     let mut ids: Vec<String> = snapshot
         .peers
         .iter()
@@ -2337,11 +2338,10 @@ fn auto_drift_severity(
         return "medium";
     }
 
-    let stale_count = stale_mesh_peer_ids(snapshot).len() as u32;
-    if new_peer_count > 2 || stale_count > 2 {
+    if new_peer_count > 2 {
         return "warning";
     }
-    if new_peer_count > 0 || stale_count > 0 {
+    if new_peer_count > 0 {
         return "info";
     }
     if snapshot.initialized && snapshot.mesh_enabled && snapshot.storage.peer_count == 0 {
@@ -2945,7 +2945,7 @@ mod tests {
 
     use super::{
         AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE, AUTO_ENROLLMENT_TAILNET_CHANGED_CODE,
-        MESH_AUTO_STATUS_SCHEMA_V1, MESH_EXPORT_ARTIFACT_SCHEMA_V1, MESH_IMPORT_LEDGER_SCHEMA_V1,
+        MESH_AUTO_STATUS_SCHEMA_V2, MESH_EXPORT_ARTIFACT_SCHEMA_V1, MESH_IMPORT_LEDGER_SCHEMA_V1,
         MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE, MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE,
         MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE, MESH_WORKSPACE_UNINITIALIZED_CODE,
         MeshAutoStatusSignals, MeshCliDegradation, MeshCursorRow, MeshEventContractError,
@@ -3569,7 +3569,7 @@ max_bytes = 1048576
         let report = snapshot.status_report();
         assert_eq!(report.posture, "disabled_local_only");
         assert_eq!(report.degraded[0].code, "mesh_disabled");
-        assert_eq!(report.auto_enrollment.schema, MESH_AUTO_STATUS_SCHEMA_V1);
+        assert_eq!(report.auto_enrollment.schema, MESH_AUTO_STATUS_SCHEMA_V2);
         assert!(!report.auto_enrollment.enabled);
         assert!(report.auto_enrollment.read_only);
         assert_eq!(
@@ -3600,7 +3600,7 @@ max_bytes = 1048576
         let snapshot = sample_snapshot(Vec::new());
         let auto_status = snapshot.status_report().auto_enrollment;
 
-        assert_eq!(auto_status.schema, MESH_AUTO_STATUS_SCHEMA_V1);
+        assert_eq!(auto_status.schema, MESH_AUTO_STATUS_SCHEMA_V2);
         assert_eq!(
             auto_status.drift.action_graph.schema,
             REPAIR_ACTION_GRAPH_SCHEMA_V1
@@ -3799,13 +3799,40 @@ max_bytes = 1048576
             auto.drift.transient_unreachable,
             vec!["nodekey:timeout-peer"]
         );
-        assert_eq!(auto.peer_state_breakdown.active, 1);
-        assert_eq!(auto.peer_state_breakdown.soft_stale, 0);
-        assert_eq!(auto.peer_state_breakdown.hard_stale, 0);
+        assert_eq!(
+            auto.peer_state_breakdown.liveness_status,
+            "not_probed_in_this_mode"
+        );
+        assert_eq!(auto.peer_state_breakdown.active, None);
+        assert_eq!(auto.peer_state_breakdown.soft_stale, None);
+        assert_eq!(auto.peer_state_breakdown.hard_stale, None);
         assert_eq!(auto.peer_state_breakdown.denylisted, 1);
         assert_eq!(auto.discovery, autodiscovery);
         assert_eq!(auto.discovery_cache.status, "not_probed_in_this_mode");
         assert_eq!(auto.steward_posture.status, "not_probed_in_this_mode");
+    }
+
+    #[test]
+    fn auto_status_does_not_infer_liveness_or_drift_from_configured_peer_rows() {
+        let snapshot = sample_snapshot(vec![
+            sample_peer("peer-enabled", true),
+            sample_peer("peer-disabled", false),
+        ]);
+
+        let auto = auto_enrollment_status_for_snapshot(&snapshot, MeshAutoStatusSignals::default());
+
+        assert_eq!(
+            auto.peer_state_breakdown.liveness_status,
+            "not_probed_in_this_mode"
+        );
+        assert_eq!(auto.peer_state_breakdown.active, None);
+        assert_eq!(auto.peer_state_breakdown.soft_stale, None);
+        assert_eq!(auto.peer_state_breakdown.hard_stale, None);
+        assert_eq!(auto.drift.disabled_peers_in_config, vec!["peer-disabled"]);
+        assert_eq!(
+            auto.drift.drift_severity, "none",
+            "disabled configuration is inventory, not a liveness observation"
+        );
     }
 
     #[test]

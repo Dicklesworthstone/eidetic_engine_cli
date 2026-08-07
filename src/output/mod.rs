@@ -10947,9 +10947,9 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: mesh_auto_enrollment_summary_schema_definition,
         },
         SchemaEntry {
-            id: "ee.mesh.auto_status.v1",
-            version: "1",
-            description: "Read-only auto-enrollment posture block emitted by `ee mesh status --json`.",
+            id: "ee.mesh.auto_status.v2",
+            version: "2",
+            description: "Read-only auto-enrollment posture with explicit liveness observation state, emitted by `ee mesh status --json`.",
             category: "mesh",
             definition: mesh_auto_status_schema_definition,
         },
@@ -12425,7 +12425,7 @@ fn mesh_auto_enrollment_summary_schema_definition() -> String {
 }
 
 fn mesh_auto_status_schema_definition() -> String {
-    include_str!("../../docs/schemas/ee.mesh.auto_status.v1.json").to_string()
+    include_str!("../../docs/schemas/ee.mesh.auto_status.v2.json").to_string()
 }
 
 fn mesh_disable_result_schema_definition() -> String {

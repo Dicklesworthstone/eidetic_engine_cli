@@ -1,5 +1,5 @@
 //! bd-36bbk.1.4 — structural contract for the SRR6.46.4
-//! auto-enrollment status block (`ee.mesh.auto_status.v1`).
+//! auto-enrollment status block (`ee.mesh.auto_status.v2`).
 //!
 //! `ee mesh status --json` exposes the zero-touch posture under
 //! `data.autoEnrollment`. The implements-surface bead names the v4
@@ -16,7 +16,7 @@
 //!
 //! 1. Schema file exists at canonical path and parses.
 //! 2. `$id`, `title`, and `properties.schema.const` agree on
-//!    `ee.mesh.auto_status.v1`.
+//!    `ee.mesh.auto_status.v2`.
 //! 3. Required top-level fields cover the 12-block v4 envelope.
 //! 4. `additionalProperties: false` at top level — closed envelope.
 //! 5. `readOnly` is `const true` — pins the bead's load-bearing
@@ -34,9 +34,9 @@
 //!    peer-set identity without leaking node-keys.
 //! 10. `lanePolicy.laneDecision` enum is `{allow, quarantine,
 //!     deny}` matching the canonical SRR6.5 lane vocabulary.
-//! 11. `peerStateBreakdown` requires the four-field breakdown
-//!     (`active`, `softStale`, `hardStale`, `denylisted`) the bead
-//!     spec names.
+//! 11. `peerStateBreakdown` requires explicit liveness observation
+//!     state and nullable active/soft-stale/hard-stale counts, while
+//!     the locally observed denylist count remains an integer.
 //! 12. `drift.driftSeverity` enum is `{none, info, warning,
 //!     medium}` — no `error` path; the read-only computation never
 //!     escalates to error severity.
@@ -54,9 +54,9 @@ use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
-const SCHEMA_PATH: &str = "docs/schemas/ee.mesh.auto_status.v1.json";
-const SCHEMA_ID: &str = "https://eidetic-engine/schemas/ee.mesh.auto_status.v1.json";
-const SCHEMA_NAME: &str = "ee.mesh.auto_status.v1";
+const SCHEMA_PATH: &str = "docs/schemas/ee.mesh.auto_status.v2.json";
+const SCHEMA_ID: &str = "https://eidetic-engine/schemas/ee.mesh.auto_status.v2.json";
+const SCHEMA_NAME: &str = "ee.mesh.auto_status.v2";
 
 const REQUIRED_TOP_LEVEL: &[&str] = &[
     "schema",
@@ -81,13 +81,21 @@ const DISCOVERY_CACHE_STATUSES: &[&str] = &["not_loaded", "not_probed_in_this_mo
 
 const STEWARD_POSTURE_STATUSES: &[&str] = &["not_inspected", "not_probed_in_this_mode"];
 
+const PEER_LIVENESS_STATUSES: &[&str] = &["observed", "not_probed_in_this_mode"];
+
 const ENROLLMENT_SOURCES: &[&str] = &["auto", "manual", "auto_replaced_manual"];
 
 const LANE_DECISIONS: &[&str] = &["allow", "quarantine", "deny"];
 
 const DRIFT_SEVERITIES: &[&str] = &["none", "info", "warning", "medium"];
 
-const PEER_STATE_BREAKDOWN_FIELDS: &[&str] = &["active", "softStale", "hardStale", "denylisted"];
+const PEER_STATE_BREAKDOWN_FIELDS: &[&str] = &[
+    "livenessStatus",
+    "active",
+    "softStale",
+    "hardStale",
+    "denylisted",
+];
 
 const TAILSCALE_AUTODISCOVERY_FIELDS: &[&str] = &[
     "schema",
@@ -104,7 +112,7 @@ const TAILSCALE_AUTODISCOVERY_FIELDS: &[&str] = &[
 const DRIFT_REQUIRED_FIELDS: &[&str] = &[
     "newPeersAvailable",
     "newPeerCount",
-    "stalePeersInConfig",
+    "disabledPeersInConfig",
     "transientUnreachable",
     "tailnetChanged",
     "nodeKeyChanged",
@@ -194,7 +202,7 @@ fn auto_status_schema_identity_is_consistent() -> TestResult {
     )?;
     ensure(
         schema["properties"]["schema"]["const"] == SCHEMA_NAME,
-        "properties.schema.const must equal ee.mesh.auto_status.v1",
+        "properties.schema.const must equal ee.mesh.auto_status.v2",
     )
 }
 
@@ -373,7 +381,7 @@ fn auto_status_lane_decision_enum_matches_srr6_5_vocabulary() -> TestResult {
 }
 
 #[test]
-fn auto_status_peer_state_breakdown_has_four_buckets() -> TestResult {
+fn auto_status_peer_state_breakdown_requires_observation_and_count_fields() -> TestResult {
     let schema = load_schema()?;
     require_closed_set(
         &schema,
@@ -381,6 +389,55 @@ fn auto_status_peer_state_breakdown_has_four_buckets() -> TestResult {
         PEER_STATE_BREAKDOWN_FIELDS,
         "peerStateBreakdown.required",
     )
+}
+
+#[test]
+fn auto_status_peer_liveness_requires_explicit_observation_state() -> TestResult {
+    let schema = load_schema()?;
+    require_closed_set(
+        &schema,
+        "/$defs/peerStateBreakdown/properties/livenessStatus/enum",
+        PEER_LIVENESS_STATUSES,
+        "peerStateBreakdown.livenessStatus enum",
+    )?;
+
+    for field in ["active", "softStale", "hardStale"] {
+        require_closed_set(
+            &schema,
+            &format!("/$defs/peerStateBreakdown/properties/{field}/type"),
+            &["integer", "null"],
+            &format!("peerStateBreakdown.{field} type"),
+        )?;
+    }
+
+    ensure(
+        schema
+            .pointer("/$defs/peerStateBreakdown/allOf/0/if/properties/livenessStatus/const")
+            .and_then(Value::as_str)
+            == Some("not_probed_in_this_mode"),
+        "peerStateBreakdown must condition null liveness counts on not_probed_in_this_mode",
+    )?;
+    for field in ["active", "softStale", "hardStale"] {
+        ensure(
+            schema
+                .pointer(&format!(
+                    "/$defs/peerStateBreakdown/allOf/0/then/properties/{field}/type"
+                ))
+                .and_then(Value::as_str)
+                == Some("null"),
+            format!("peerStateBreakdown.{field} must be null when liveness is not probed"),
+        )?;
+        ensure(
+            schema
+                .pointer(&format!(
+                    "/$defs/peerStateBreakdown/allOf/0/else/properties/{field}/type"
+                ))
+                .and_then(Value::as_str)
+                == Some("integer"),
+            format!("peerStateBreakdown.{field} must be an integer when liveness is observed"),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]

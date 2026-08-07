@@ -170,9 +170,11 @@ SRR6.46.13 (`bd-36bbk.1.13`) introduces two related but distinct concepts:
 - A **per-peer state machine** (`active → soft_stale → hard_stale → denylisted`)
   with two-threshold escalation: `soft_stale` after 1 consecutive missed probe
   plus 5 minutes since last success; `hard_stale` after 3 consecutive misses
-  plus 1 hour since last success. Only `hard_stale` peers surface in
-  `drift.stalePeersInConfig`; `soft_stale` peers surface in
-  `drift.transientUnreachable` without triggering removal-class drift.
+  plus 1 hour since last success. This state machine remains pure model logic
+  until a production probe-history adapter is wired. Accordingly,
+  `ee.mesh.auto_status.v2` emits `livenessStatus=not_probed_in_this_mode` and
+  null liveness counts today; it does not translate configured or disabled
+  peer rows into invented live/stale observations.
 
 **Why**: A single wall-clock TTL hammers tailnets when agent harnesses poll
 `ee mesh status` between operations. A single-miss "stale" classification
@@ -281,7 +283,7 @@ SRR6.46 reserves the following schemas (each tracked by its owning sub-bead):
 | `ee.mesh.hello.response.v1` | bd-36bbk.1.6 | hello-handshake response |
 | `ee.mesh.hello.error.v1` | bd-36bbk.1.6 | hello-handshake decline |
 | `ee.mesh.discovery_policy.v1` | bd-36bbk.1.7 | service-tag / allowlist / denylist config |
-| `ee.mesh.auto_status.v1` | bd-36bbk.1.4 | enriched `ee mesh status` block |
+| `ee.mesh.auto_status.v2` | bd-tc-epic-qzk7o.2.3 | enriched `ee mesh status` block with explicit liveness observation state |
 | `ee.mesh.disable_result.v1` | bd-36bbk.1.9 | rollback envelope |
 | `ee.mesh.revoke_result.v1` | bd-36bbk.1.9 | per-peer revocation envelope |
 | `ee.mesh.hello_responder.status.v1` | bd-36bbk.1.12 | daemon-side responder posture |

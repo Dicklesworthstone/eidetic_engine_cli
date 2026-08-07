@@ -1552,7 +1552,7 @@ preview alone was consent.
 The reserved-never-published
 `ee.mesh.peer_status.v1`
 name is **retired**: mechanism-level posture stays on the existing
-`ee.mesh.auto_status.v1` / foreground status surfaces; team-level posture is
+`ee.mesh.auto_status.v2` / foreground status surfaces; team-level posture is
 `ee.team.status.v1`. The `ee.mesh.import_ledger.v1` inspection surface is
 owned by the import-policy bead (bd-tc-epic-qzk7o.2.1) — shipped with it or
 explicitly deferred in its closeout, never silent. Mechanism contracts also

@@ -173,7 +173,7 @@ tailscale shields-up).
 ```jsonc
 {
   "autoEnrollment": {
-    "schema": "ee.mesh.auto_status.v1",
+    "schema": "ee.mesh.auto_status.v2",
     "tailscale": { /* ee.tailscale.local.v1: authenticated, tailnetId, ... */ },
     "helloResponder": { "running": true, "listenAddress": "100.64.0.5:41888", ... },
     "discovery": {
@@ -200,10 +200,16 @@ tailscale shields-up).
       "materializedOnNodeKey": "nodekey:...",
       "enrollmentSource": "auto"
     },
-    "peerStateBreakdown": { "active": 3, "softStale": 0, "hardStale": 0, "denylisted": 0 },
+    "peerStateBreakdown": {
+      "livenessStatus": "not_probed_in_this_mode",
+      "active": null,
+      "softStale": null,
+      "hardStale": null,
+      "denylisted": 0
+    },
     "drift": {
       "newPeersAvailable": [],
-      "stalePeersInConfig": [],
+      "disabledPeersInConfig": [],
       "transientUnreachable": [],
       "tailnetChanged": false,
       "nodeKeyChanged": false,
@@ -224,15 +230,17 @@ Drift severity classification (locked by tests):
 
 | Severity | Trigger | Agent action |
 |---|---|---|
-| `none` | Discovery matches materialized exactly; no soft-stale peers | No-op |
-| `info` | ≤2 new peers OR `transientUnreachable[]` non-empty (soft-stale) | Surface to user; consider re-checking on next idle tick |
-| `warning` | >2 new/stale peers OR `hard_stale` peers OR tailnet display name changed | Surface to user with `actionGraph` repair |
+| `none` | No identity/config/discovery drift observed by this read-only path | No-op |
+| `info` | ≤2 newly discovered peers, or mesh is enabled without materialized peers | Surface to user; consider re-checking on next idle tick |
+| `warning` | >2 newly discovered peers | Surface to user with `actionGraph` repair |
 | `medium` | `tailnetChanged=true` OR `nodeKeyChanged=true` OR `manualConflictPresent=true` OR `helloResponder.running=false` | Block further auto-enroll; surface refusal + repair |
 
-`transientUnreachable[]` peers have missed 1 probe but are within the
-1-hour grace window. **Do not** treat them as removed. They will heal
-automatically if they come back, and will escalate to `stalePeersInConfig`
-only if the misses persist beyond the hard threshold.
+`transientUnreachable[]` is limited to concrete timeouts observed during the
+current autodiscovery pass. It is not the persistent soft-stale state machine.
+Until production probe history is wired, `peerStateBreakdown.livenessStatus`
+is `not_probed_in_this_mode` and all three liveness counts are null.
+`disabledPeersInConfig[]` is factual local configuration inventory and does
+not by itself raise drift severity.
 
 ### Reading the actionGraph
 
