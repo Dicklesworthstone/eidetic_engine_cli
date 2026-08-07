@@ -124,7 +124,7 @@
     "commandHash": "blake3:new-shell-command",
     "normalizedArgvHash": "blake3:broker-argv",
     "sourceTreeFingerprintClass": "blake3:source",
-    "envFingerprintClass": null,
+    "envFingerprintClass": "class:unknown_env",
     "targetTriple": null,
     "targetProfile": null,
     "buildCommandHash": null,
