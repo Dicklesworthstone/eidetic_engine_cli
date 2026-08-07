@@ -71,11 +71,10 @@ pub const CURSOR_INVALID_CODE: &str = "cursor_invalid";
 /// per-workspace cursor MAC key.
 ///
 /// Decision (bd-7lvbg.2): no workspace-scoped secret exists in the DB or
-/// config today — the only registered secrets (`EE_PREFLIGHT_BYPASS_SECRET`,
-/// `EE_REFLECTION_HMAC_KEY_PATH`, `EE_SERVE_TOKEN`) are env-scoped and owned
-/// by other surfaces — so the key is derived deterministically from the
-/// canonical workspace scope string plus this constant context, mirroring
-/// the `ee preflight bypass v1` derive-key pattern. Cursors are
+/// config today — the registered secrets (`EE_REFLECTION_HMAC_KEY_PATH` and
+/// `EE_SERVE_TOKEN`) are env-scoped and owned by other surfaces — so the key
+/// is derived deterministically from the canonical workspace scope string plus
+/// this constant context. Cursors are
 /// workspace-scoped and short-lived by design (ADR 0063 appendix); the MAC
 /// guards against accidental tampering and cross-workspace replay, not
 /// against an attacker who can already read the workspace.

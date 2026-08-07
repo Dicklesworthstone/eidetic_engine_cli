@@ -100,7 +100,6 @@ pub mod perf_live;
 pub mod plan;
 pub mod preflight;
 pub mod preflight_guard;
-pub mod preflight_token;
 pub mod primer;
 pub mod procedure;
 pub mod profile;
@@ -350,10 +349,6 @@ pub fn supported_schemas() -> Vec<SupportedSchema> {
         SupportedSchema::new("singleflight_key", SINGLEFLIGHT_KEY_SCHEMA_V1),
         SupportedSchema::new("singleflight_posture", SINGLEFLIGHT_POSTURE_SCHEMA_V1),
         SupportedSchema::new("proof_check", proof_verify::PROOF_CHECK_SCHEMA_V1),
-        SupportedSchema::new(
-            "preflight_bypass_token",
-            preflight_token::PREFLIGHT_BYPASS_TOKEN_SCHEMA_V1,
-        ),
         SupportedSchema::new(
             "disk_pressure_diagnostics",
             disk_pressure::DISK_PRESSURE_DIAGNOSTICS_SCHEMA_V1,
@@ -755,7 +750,6 @@ mod tests {
                 "singleflight_key",
                 "singleflight_posture",
                 "proof_check",
-                "preflight_bypass_token",
                 "disk_pressure_diagnostics",
                 "agent_harness_log_classifier",
                 "artifact_retention_diagnostics",

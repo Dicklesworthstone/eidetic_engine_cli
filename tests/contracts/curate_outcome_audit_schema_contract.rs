@@ -21,9 +21,8 @@
 //!      `*_AUDIT_SCHEMA_V1` constant that downstream consumers
 //!      treat as the canonical audit envelope wire form. Includes
 //!      ee.audit.memory_level_transition.v1, ee.procedure.
-//!      promotion_audit.v1, ee.preflight.bypass.v1,
-//!      ee.preflight.halt.v1, ee.mesh.hello_responder.lifecycle_
-//!      audit.v1, ee.shard_fanout.migration_audit.v1, ee.export.
+//!      promotion_audit.v1, ee.mesh.hello_responder.lifecycle_audit.v1,
+//!      ee.shard_fanout.migration_audit.v1, ee.export.
 //!      audit.v1, ee.cass.redaction_audit.v1, and ee.mesh.share_
 //!      consent_audit.v1.
 //!   4. `CurateApplyReport` field surface — pins the required-field
@@ -51,7 +50,6 @@ use ee::core::curate::{
 };
 use ee::core::memory_lifecycle::MEMORY_LEVEL_TRANSITION_AUDIT_SCHEMA_V1;
 use ee::core::outcome::{OUTCOME_QUARANTINE_LIST_SCHEMA_V1, OUTCOME_QUARANTINE_REVIEW_SCHEMA_V1};
-use ee::core::preflight_token::{PREFLIGHT_BYPASS_AUDIT_SCHEMA_V1, PREFLIGHT_HALT_AUDIT_SCHEMA_V1};
 use ee::core::procedure::PROCEDURE_PROMOTION_AUDIT_SCHEMA_V1;
 use ee::mesh::hello_responder::HELLO_RESPONDER_LIFECYCLE_AUDIT_SCHEMA_V1;
 
@@ -155,7 +153,7 @@ fn outcome_quarantine_schema_pinned_to_documented_wire_forms() -> TestResult {
 ///
 /// The bead text says "ee.audit.v1 entries". Reality has a *family*
 /// of audit-shaped schemas — one per emitting subsystem (memory
-/// lifecycle, procedure promotion, preflight bypass/halt, mesh
+/// lifecycle, procedure promotion, and mesh
 /// hello-responder lifecycle). Pinning each here gives downstream
 /// consumers (the J6 catalog, ee why, ee swarm brief audit
 /// surfaces) a single chokepoint to grep against. If a future
@@ -175,16 +173,6 @@ fn audit_schema_family_pinned_to_documented_wire_forms() -> TestResult {
             "PROCEDURE_PROMOTION_AUDIT_SCHEMA_V1",
             PROCEDURE_PROMOTION_AUDIT_SCHEMA_V1,
             "ee.procedure.promotion_audit.v1",
-        ),
-        (
-            "PREFLIGHT_BYPASS_AUDIT_SCHEMA_V1",
-            PREFLIGHT_BYPASS_AUDIT_SCHEMA_V1,
-            "ee.preflight.bypass.v1",
-        ),
-        (
-            "PREFLIGHT_HALT_AUDIT_SCHEMA_V1",
-            PREFLIGHT_HALT_AUDIT_SCHEMA_V1,
-            "ee.preflight.halt.v1",
         ),
         (
             "HELLO_RESPONDER_LIFECYCLE_AUDIT_SCHEMA_V1",
@@ -246,8 +234,6 @@ fn every_pinned_schema_follows_ee_dot_v1_shape() -> TestResult {
         OUTCOME_QUARANTINE_REVIEW_SCHEMA_V1,
         MEMORY_LEVEL_TRANSITION_AUDIT_SCHEMA_V1,
         PROCEDURE_PROMOTION_AUDIT_SCHEMA_V1,
-        PREFLIGHT_BYPASS_AUDIT_SCHEMA_V1,
-        PREFLIGHT_HALT_AUDIT_SCHEMA_V1,
         HELLO_RESPONDER_LIFECYCLE_AUDIT_SCHEMA_V1,
     ] {
         if !schema.starts_with("ee.") {

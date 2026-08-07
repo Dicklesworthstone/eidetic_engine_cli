@@ -1,4 +1,4 @@
-pub mod installer;
+mod installer;
 
 pub use installer::{
     GIT_HOOK_AHEAD_RISK_SCHEMA_V1, GIT_HOOK_READINESS_SCHEMA_V1, GitHookAheadRiskSummary,
@@ -11,9 +11,8 @@ pub use installer::{
     HarnessHookCapabilityGap, HarnessHookInstallAuditDocLink, HarnessHookInstallAuditFinding,
     HarnessHookInstallAuditRepair, HarnessHookInstallAuditReport, HarnessHookInstallOptions,
     HarnessHookInstallReport, HarnessHookMarkers, HarnessHookPlanItem, HarnessHookSnippet,
-    HarnessHookTarget, HookInstallOptions, HookInstallReport, HookStatusOptions, HookStatusReport,
-    HookType, check_git_hook_readiness, check_hook_status, generate_harness_hook_install,
-    install_hooks, simulate_harness_conformance,
+    HarnessHookTarget, check_git_hook_readiness, generate_harness_hook_install,
+    simulate_harness_conformance,
 };
 
 pub const SUBSYSTEM: &str = "hooks";

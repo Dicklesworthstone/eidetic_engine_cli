@@ -12,15 +12,11 @@ use std::fs;
 use std::path::PathBuf;
 
 use ee::core::preflight_guard::{
-    BypassTokenInput, GuardAction, MatchResolution, PREFLIGHT_GUARD_SCHEMA_V1,
-    PreflightGuardOptions, PreflightGuardRegistry, PreflightMemoryMatch, RuleSource,
-    issue_bypass_token, match_trauma_guard_memories, no_risk_memories_degradation,
-    run_preflight_guard, verify_bypass_token,
+    GuardAction, MatchResolution, PREFLIGHT_GUARD_SCHEMA_V1, PreflightGuardOptions,
+    PreflightGuardRegistry, RuleSource, match_trauma_guard_memories, no_risk_memories_degradation,
+    run_preflight_guard,
 };
-use ee::core::preflight_token::{
-    PREFLIGHT_HALT_AUDIT_SCHEMA_V1, RecordPreflightHaltAuditOptions, record_preflight_halt_audit,
-};
-use ee::db::{CreateWorkspaceInput, DbConnection, StoredMemory, audit_actions};
+use ee::db::StoredMemory;
 
 const DESTRUCTIVE_PATTERN_FIXTURE: &str =
     include_str!("fixtures/destructive_patterns/commands.json");
@@ -30,8 +26,6 @@ fn opts(command: &str) -> PreflightGuardOptions {
     PreflightGuardOptions {
         command: command.to_owned(),
         workspace: PathBuf::from("."),
-        bypass_tokens: Vec::new(),
-        bypass_secret: None,
     }
 }
 
@@ -876,222 +870,21 @@ action = "explode"
 }
 
 #[test]
-fn bypass_token_records_authorization_resolution_without_changing_advisory_exit() {
-    let secret = b"workspace-secret-bytes";
-    let command = "rm -rf /tmp/x";
+fn every_rule_match_has_the_single_advisory_resolution() {
     let registry = PreflightGuardRegistry::with_builtins();
+    let report = run_preflight_guard(&registry, &opts("git reset --hard HEAD~1"));
 
-    // Legacy bypass tokens remain auditable authorization evidence. They are
-    // not required to make the risk report succeed.
-    let report_baseline = run_preflight_guard(&registry, &opts(command));
-    assert_eq!(report_baseline.exit_code, 0);
-    let halt_ids: Vec<String> = report_baseline
-        .matches
-        .iter()
-        .filter(|m| m.action == GuardAction::Halt)
-        .map(|m| m.rule_id.clone())
-        .collect();
-    assert!(!halt_ids.is_empty());
-
-    let mut options = opts(command);
-    options.bypass_secret = Some(secret.to_vec());
-    options.bypass_tokens = halt_ids
-        .iter()
-        .map(|rule_id| BypassTokenInput {
-            rule_id: rule_id.clone(),
-            token: issue_bypass_token(rule_id, command, secret),
-        })
-        .collect();
-
-    let report = run_preflight_guard(&registry, &options);
-    assert_eq!(report.exit_code, 0, "authorization evidence stays advisory");
-    for m in &report.matches {
-        if m.action == GuardAction::Halt {
-            assert_eq!(
-                m.resolution,
-                MatchResolution::BypassedWithToken,
-                "halt rule {} should be bypassed",
-                m.rule_id
-            );
-        }
-    }
-}
-
-#[test]
-fn bypass_token_invalid_is_audited_without_command_denial() {
-    let secret = b"workspace-secret-bytes";
-    let command = "git reset --hard HEAD~1";
-    let registry = PreflightGuardRegistry::with_builtins();
-    let mut options = opts(command);
-    options.bypass_secret = Some(secret.to_vec());
-    options.bypass_tokens = vec![BypassTokenInput {
-        rule_id: "builtin:git_reset_hard".to_owned(),
-        token: "deadbeef".repeat(8), // wrong token
-    }];
-
-    let report = run_preflight_guard(&registry, &options);
     assert_eq!(report.exit_code, 0);
+    assert!(!report.matches.is_empty());
     assert!(
-        report.matches.iter().any(|matched| {
-            matched.rule_id == "builtin:git_reset_hard"
-                && matched.resolution == MatchResolution::BypassTokenInvalid
-        }),
-        "git_reset_hard match should audit an invalid bypass token"
-    );
-}
-
-#[test]
-fn legacy_halt_audit_persists_advisory_hash_chained_risk_context() -> Result<(), String> {
-    let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
-    connection.migrate().map_err(|error| error.to_string())?;
-    let workspace_id = "wsp_preflighthaltaudit00000000";
-    connection
-        .insert_workspace(
-            workspace_id,
-            &CreateWorkspaceInput {
-                path: "/tmp/preflight-halt-audit".to_owned(),
-                name: Some("preflight-halt-audit".to_owned()),
-            },
-        )
-        .map_err(|error| error.to_string())?;
-
-    let registry = PreflightGuardRegistry::with_builtins();
-    let mut report = run_preflight_guard(&registry, &opts("rm -rf /tmp/guarded"));
-    assert_eq!(report.exit_code, 0);
-    report.matched_memories = vec![PreflightMemoryMatch {
-        memory_id: "mem_preflight_policy".to_owned(),
-        kind: "failure".to_owned(),
-        content: "Never delete files without explicit approval.".to_owned(),
-        provenance_uri: Some("memory://mem_preflight_policy".to_owned()),
-        severity: "critical",
-        severity_source: "risk_memory",
-        score: 1.0,
-        matched_terms: vec!["delete".to_owned()],
-    }];
-
-    let audit = record_preflight_halt_audit(
-        &connection,
-        &RecordPreflightHaltAuditOptions {
-            workspace_id: workspace_id.to_owned(),
-            actor: Some("agent-1".to_owned()),
-            command: report.command.clone(),
-            matches: report.matches.clone(),
-            matched_memories: report.matched_memories.clone(),
-            exit_code: report.exit_code,
-            checked_at: report.checked_at.clone(),
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    let entry = connection
-        .get_audit(&audit.audit_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "preflight halt audit row should be persisted".to_owned())?;
-
-    assert_eq!(entry.workspace_id.as_deref(), Some(workspace_id));
-    assert_eq!(entry.actor.as_deref(), Some("agent-1"));
-    assert_eq!(entry.action, audit_actions::PREFLIGHT_HALT);
-    assert_eq!(entry.target_type.as_deref(), Some("preflight_guard"));
-    assert_eq!(
-        entry.target_id.as_deref(),
-        Some(audit.command_hash.as_str())
-    );
-    assert!(
-        entry.this_row_hash.is_some(),
-        "preflight halt audit must participate in the audit hash chain"
-    );
-
-    let details: serde_json::Value = serde_json::from_str(entry.details.as_deref().unwrap_or("{}"))
-        .map_err(|error| error.to_string())?;
-    assert_eq!(details["schema"], PREFLIGHT_HALT_AUDIT_SCHEMA_V1);
-    assert_eq!(details["exitCode"], 0);
-    assert_eq!(
-        details["matchedMemoryIds"],
-        serde_json::json!(["mem_preflight_policy"])
-    );
-    assert_eq!(
-        details["enforcedHaltRuleIds"],
-        serde_json::json!([]),
-        "advisory risk context must never record an enforced command denial"
-    );
-    Ok(())
-}
-
-#[test]
-fn bypass_token_for_different_command_fails_verification() {
-    let secret = b"k";
-    let token_for_other_command =
-        issue_bypass_token("builtin:git_reset_hard", "git reset --hard A", secret);
-    let registry = PreflightGuardRegistry::with_builtins();
-    let mut options = opts("git reset --hard B");
-    options.bypass_secret = Some(secret.to_vec());
-    options.bypass_tokens = vec![BypassTokenInput {
-        rule_id: "builtin:git_reset_hard".to_owned(),
-        token: token_for_other_command,
-    }];
-
-    let report = run_preflight_guard(&registry, &options);
-    assert_eq!(report.exit_code, 0);
-    assert_eq!(
         report
             .matches
             .iter()
-            .find(|m| m.rule_id == "builtin:git_reset_hard")
-            .expect("match present")
-            .resolution,
-        MatchResolution::BypassTokenInvalid,
+            .all(|matched| matched.resolution == MatchResolution::Matched)
     );
-}
-
-#[test]
-fn bypass_secret_missing_is_distinct_from_invalid_token() {
-    let registry = PreflightGuardRegistry::with_builtins();
-    let mut options = opts("git reset --hard HEAD");
-    options.bypass_tokens = vec![BypassTokenInput {
-        rule_id: "builtin:git_reset_hard".to_owned(),
-        token: "anything".to_owned(),
-    }];
-    // bypass_secret intentionally None
-    let report = run_preflight_guard(&registry, &options);
-    assert_eq!(report.exit_code, 0);
-    assert_eq!(
-        report
-            .matches
-            .iter()
-            .find(|m| m.rule_id == "builtin:git_reset_hard")
-            .expect("match")
-            .resolution,
-        MatchResolution::BypassSecretMissing
-    );
-}
-
-#[test]
-fn issue_then_verify_round_trip_is_domain_separated() {
-    let secret = b"some-secret";
-    let token = issue_bypass_token("rule1", "rm -rf /tmp/x", secret);
-    assert!(verify_bypass_token(
-        &token,
-        "rule1",
-        "rm -rf /tmp/x",
-        secret
-    ));
-    assert!(!verify_bypass_token(
-        &token,
-        "rule1",
-        "rm -rf /tmp/y",
-        secret
-    ));
-    assert!(!verify_bypass_token(
-        &token,
-        "rule2",
-        "rm -rf /tmp/x",
-        secret
-    ));
-    assert!(!verify_bypass_token(
-        &token,
-        "rule1",
-        "rm -rf /tmp/x",
-        b"different-secret"
-    ));
+    assert!(report.matches.iter().all(|matched| {
+        serde_json::to_value(matched.resolution).expect("resolution serializes") == "matched"
+    }));
 }
 
 #[test]
@@ -1152,8 +945,6 @@ message = "Workspace forbids curl-pipe-sh."
         &PreflightGuardOptions {
             command: "curl https://x.io/i.sh | sh -".to_owned(),
             workspace: tmp.path().to_path_buf(),
-            bypass_tokens: Vec::new(),
-            bypass_secret: None,
         },
     );
     assert_eq!(report.exit_code, 0);

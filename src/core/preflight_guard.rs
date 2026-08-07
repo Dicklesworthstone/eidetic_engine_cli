@@ -2421,19 +2421,6 @@ pub struct PreflightGuardOptions {
     pub command: String,
     /// Workspace path used to locate `.ee/preflight_rules.toml`.
     pub workspace: PathBuf,
-    /// Optional one-shot HMAC bypass token (one bypass per token; one token
-    /// per `(rule_id, command)` pair).
-    pub bypass_tokens: Vec<BypassTokenInput>,
-    /// Bypass HMAC secret. When `None`, no token can pass verification.
-    pub bypass_secret: Option<Vec<u8>>,
-}
-
-/// One caller-provided bypass attempt: token + the rule the caller claims it
-/// covers. We require an explicit rule_id so each attempt audits cleanly.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BypassTokenInput {
-    pub rule_id: String,
-    pub token: String,
 }
 
 /// One match the guard found, including how it was resolved.
@@ -2444,9 +2431,8 @@ pub struct GuardMatch {
     pub action: GuardAction,
     pub message: String,
     pub source: RuleSource,
-    /// `bypassed_with_token` if the caller produced a valid token for this
-    /// rule+command, `bypass_token_invalid` if a token was supplied but
-    /// failed verification, otherwise `enforced`.
+    /// Advisory match state. Command-risk matches never grant or revoke
+    /// execution authority, so the only wire value is `matched`.
     pub resolution: MatchResolution,
 }
 
@@ -2497,21 +2483,14 @@ pub struct PreflightGuardDegradation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchResolution {
-    #[serde(rename = "matched", alias = "enforced")]
-    Enforced,
-    BypassedWithToken,
-    BypassTokenInvalid,
-    BypassSecretMissing,
+    Matched,
 }
 
 impl MatchResolution {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Enforced => "matched",
-            Self::BypassedWithToken => "bypassed_with_token",
-            Self::BypassTokenInvalid => "bypass_token_invalid",
-            Self::BypassSecretMissing => "bypass_secret_missing",
+            Self::Matched => "matched",
         }
     }
 }
@@ -2731,14 +2710,13 @@ pub fn run_preflight_guard(
 
     let mut report_matches = Vec::with_capacity(matches.len());
     for matched in matches {
-        let resolution = resolve_match(matched, options);
         report_matches.push(GuardMatch {
             rule_id: matched.id.clone(),
             pattern: matched.pattern.clone(),
             action: matched.action,
             message: matched.message.clone(),
             source: matched.source.clone(),
-            resolution,
+            resolution: MatchResolution::Matched,
         });
     }
 
@@ -2900,79 +2878,6 @@ fn trauma_guard_text_terms(text: &str) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
-fn resolve_match(rule: &PreflightGuardRule, options: &PreflightGuardOptions) -> MatchResolution {
-    let provided_token = options
-        .bypass_tokens
-        .iter()
-        .find(|attempt| attempt.rule_id == rule.id);
-
-    let Some(attempt) = provided_token else {
-        return MatchResolution::Enforced;
-    };
-
-    let Some(secret) = options.bypass_secret.as_deref() else {
-        return MatchResolution::BypassSecretMissing;
-    };
-
-    if verify_bypass_token(&attempt.token, &rule.id, &options.command, secret) {
-        MatchResolution::BypassedWithToken
-    } else {
-        MatchResolution::BypassTokenInvalid
-    }
-}
-
-// ============================================================================
-// Bypass tokens (BLAKE3 keyed-hash MAC)
-// ============================================================================
-
-/// Schema constant included in token payloads to make tokens unambiguous.
-const BYPASS_TOKEN_SCHEMA_TAG: &[u8] = b"ee.preflight.bypass.v1";
-
-/// Issue a bypass token for `(rule_id, command)` using `secret` as the MAC key.
-///
-/// Tokens are domain-separated: a token issued for rule A cannot bypass rule B,
-/// and a token issued for command X cannot bypass command Y. The output is
-/// lowercase hex of a 32-byte BLAKE3 keyed hash (cryptographic MAC).
-#[must_use]
-pub fn issue_bypass_token(rule_id: &str, command: &str, secret: &[u8]) -> String {
-    let key = derive_bypass_key(secret);
-    let mut hasher = blake3::Hasher::new_keyed(&key);
-    hasher.update(BYPASS_TOKEN_SCHEMA_TAG);
-    hasher.update(b"\0");
-    hasher.update(rule_id.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(command.as_bytes());
-    hasher.finalize().to_hex().to_string()
-}
-
-/// Verify `token` was issued for the given `(rule_id, command, secret)` triple.
-/// Comparison is constant-time over equal-length inputs.
-#[must_use]
-pub fn verify_bypass_token(token: &str, rule_id: &str, command: &str, secret: &[u8]) -> bool {
-    let expected = issue_bypass_token(rule_id, command, secret);
-    constant_time_eq_str(&expected, token)
-}
-
-fn derive_bypass_key(secret: &[u8]) -> [u8; 32] {
-    // blake3::derive_key gives us a 32-byte MAC key from any-length secret with
-    // domain separation; we use a stable context string so a leaked workspace
-    // secret can be rotated without invalidating other contexts.
-    blake3::derive_key("ee preflight bypass v1", secret)
-}
-
-fn constant_time_eq_str(a: &str, b: &str) -> bool {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    let max_len = a_bytes.len().max(b_bytes.len());
-    let mut diff = a_bytes.len() ^ b_bytes.len();
-    for index in 0..max_len {
-        let x = a_bytes.get(index).copied().unwrap_or(0);
-        let y = b_bytes.get(index).copied().unwrap_or(0);
-        diff |= usize::from(x ^ y);
-    }
-    std::hint::black_box(diff) == 0
-}
-
 #[cfg(test)]
 mod tests {
     //! Inline tests duplicate cases from `tests/preflight_guard.rs`; the
@@ -3004,8 +2909,6 @@ mod tests {
         PreflightGuardOptions {
             command: command.to_owned(),
             workspace: PathBuf::from("."),
-            bypass_tokens: Vec::new(),
-            bypass_secret: None,
         }
     }
 
@@ -3025,7 +2928,7 @@ mod tests {
         assert_eq!(report.matches.len(), 1);
         assert_eq!(report.matches[0].rule_id, "r1");
         assert_eq!(report.matches[0].action, GuardAction::Halt);
-        assert_eq!(report.matches[0].resolution, MatchResolution::Enforced);
+        assert_eq!(report.matches[0].resolution, MatchResolution::Matched);
     }
 
     #[test]
@@ -3124,104 +3027,6 @@ mod tests {
         assert!(assessment.requires_human_approval);
         assert!(assessment.command.is_none());
         assert!(assessment.preflight_command.is_none());
-    }
-
-    #[test]
-    fn bypass_token_valid_is_recorded_without_changing_advisory_exit() {
-        let secret = b"workspace-secret-bytes";
-        let command = "rm -rf /tmp/x";
-        let token = issue_bypass_token("r1", command, secret);
-        let registry = registry_with_only(vec![rule("r1", "*rm -rf*", GuardAction::Halt)]);
-        let mut options = opts(command);
-        options.bypass_secret = Some(secret.to_vec());
-        options.bypass_tokens = vec![BypassTokenInput {
-            rule_id: "r1".to_owned(),
-            token,
-        }];
-
-        let report = run_preflight_guard(&registry, &options);
-        assert_eq!(
-            report.exit_code, 0,
-            "authorization evidence remains advisory"
-        );
-        assert_eq!(
-            report.matches[0].resolution,
-            MatchResolution::BypassedWithToken
-        );
-    }
-
-    #[test]
-    fn bypass_token_invalid_is_reported_without_blocking() {
-        let secret = b"workspace-secret-bytes";
-        let registry = registry_with_only(vec![rule("r1", "*rm -rf*", GuardAction::Halt)]);
-        let mut options = opts("rm -rf /tmp/x");
-        options.bypass_secret = Some(secret.to_vec());
-        options.bypass_tokens = vec![BypassTokenInput {
-            rule_id: "r1".to_owned(),
-            token: "deadbeef".repeat(8), // wrong token
-        }];
-
-        let report = run_preflight_guard(&registry, &options);
-        assert_eq!(report.exit_code, 0);
-        assert_eq!(
-            report.matches[0].resolution,
-            MatchResolution::BypassTokenInvalid
-        );
-    }
-
-    #[test]
-    fn bypass_token_for_different_rule_does_not_apply() {
-        let secret = b"k";
-        let command = "rm -rf /tmp/x";
-        let r1_token = issue_bypass_token("r1", command, secret);
-        let registry = registry_with_only(vec![rule("r2", "*rm -rf*", GuardAction::Halt)]);
-        let mut options = opts(command);
-        options.bypass_secret = Some(secret.to_vec());
-        options.bypass_tokens = vec![BypassTokenInput {
-            rule_id: "r1".to_owned(), // attempting to bypass r1, but r2 matches
-            token: r1_token,
-        }];
-
-        let report = run_preflight_guard(&registry, &options);
-        assert_eq!(report.exit_code, 0);
-        assert_eq!(report.matches[0].resolution, MatchResolution::Enforced);
-    }
-
-    #[test]
-    fn bypass_token_for_different_command_fails_verification() {
-        let secret = b"k";
-        let token_for_other_command = issue_bypass_token("r1", "rm -rf /etc", secret);
-        let registry = registry_with_only(vec![rule("r1", "*rm -rf*", GuardAction::Halt)]);
-        let mut options = opts("rm -rf /tmp/x");
-        options.bypass_secret = Some(secret.to_vec());
-        options.bypass_tokens = vec![BypassTokenInput {
-            rule_id: "r1".to_owned(),
-            token: token_for_other_command,
-        }];
-
-        let report = run_preflight_guard(&registry, &options);
-        assert_eq!(report.exit_code, 0);
-        assert_eq!(
-            report.matches[0].resolution,
-            MatchResolution::BypassTokenInvalid
-        );
-    }
-
-    #[test]
-    fn bypass_token_without_secret_is_marked_secret_missing() {
-        let registry = registry_with_only(vec![rule("r1", "*rm -rf*", GuardAction::Halt)]);
-        let mut options = opts("rm -rf /tmp");
-        options.bypass_tokens = vec![BypassTokenInput {
-            rule_id: "r1".to_owned(),
-            token: "anything".to_owned(),
-        }];
-        // bypass_secret is None
-        let report = run_preflight_guard(&registry, &options);
-        assert_eq!(report.exit_code, 0);
-        assert_eq!(
-            report.matches[0].resolution,
-            MatchResolution::BypassSecretMissing
-        );
     }
 
     #[test]
@@ -4243,36 +4048,6 @@ action = "explode"
             assert_eq!(report.matches[0].action, GuardAction::Warn);
             assert_eq!(report.matches[0].rule_id, "builtin:git_push_force");
         }
-    }
-
-    #[test]
-    fn issue_then_verify_round_trips() {
-        let secret = b"some-secret";
-        let token = issue_bypass_token("rule1", "rm -rf /tmp/x", secret);
-        assert!(verify_bypass_token(
-            &token,
-            "rule1",
-            "rm -rf /tmp/x",
-            secret
-        ));
-        assert!(!verify_bypass_token(
-            &token,
-            "rule1",
-            "rm -rf /tmp/y",
-            secret
-        ));
-        assert!(!verify_bypass_token(
-            &token,
-            "rule2",
-            "rm -rf /tmp/x",
-            secret
-        ));
-        assert!(!verify_bypass_token(
-            &token,
-            "rule1",
-            "rm -rf /tmp/x",
-            b"different-secret"
-        ));
     }
 
     #[test]

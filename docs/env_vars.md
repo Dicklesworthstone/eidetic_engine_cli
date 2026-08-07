@@ -98,7 +98,6 @@ retrieval.
 | `EE_MESH_MODE` | mesh | enum | `off` | Select the default mesh command mode. | Accepted values are `off`, `cache`, `revisable`, and `blocking`; explicit `--mesh` command flags take precedence. |
 | `EE_NO_COLOR` | output | boolean flag | none | Disable colored diagnostics. | Mirrors the behavior of `NO_COLOR` for ee-specific control. |
 | `EE_OUTPUT_FORMAT` | output | output format | none | Select the default output renderer. | Highest-priority environment output format selector. |
-| `EE_PREFLIGHT_BYPASS_SECRET` | policy | secret string | none | Supply preflight bypass secret material. | Capabilities must never expose this current value. |
 | `EE_PROFILE` | tuning | profile name | none | Override the default context pack profile. | Applies when pack/context profile is not specified explicitly. |
 | `EE_PPR_CACHE_ENTRIES` | tuning | integer count | `4096` | Override the in-process PPR prefetch cache entry cap. | Set to `0` to disable prefetch entries while keeping the algorithm result cache intact. |
 | `EE_QUERY_PLAN_CACHE_ENTRIES` | tuning | integer count | `1024` | Override the in-process EQL query plan cache entry cap. | Set to `0` to disable plan caching. Plan-cache hits skip parse + bind + index-selection cost; see [`docs/search/plan-cache.md`](search/plan-cache.md). Tracks bead `bd-2mey5`. |

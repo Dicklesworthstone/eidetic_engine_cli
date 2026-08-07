@@ -211,8 +211,6 @@ pub enum EnvVar {
     NoColor,
     /// `EE_OUTPUT_FORMAT`
     OutputFormat,
-    /// `EE_PREFLIGHT_BYPASS_SECRET`
-    PreflightBypassSecret,
     /// `EE_PROFILE`
     Profile,
     /// `EE_PPR_CACHE_ENTRIES`
@@ -385,7 +383,6 @@ impl EnvVar {
             Self::MeshMode,
             Self::NoColor,
             Self::OutputFormat,
-            Self::PreflightBypassSecret,
             Self::Profile,
             Self::PprCacheEntries,
             Self::QueryPlanCacheEntries,
@@ -514,7 +511,6 @@ impl EnvVar {
             Self::MeshMode => "EE_MESH_MODE",
             Self::NoColor => "EE_NO_COLOR",
             Self::OutputFormat => "EE_OUTPUT_FORMAT",
-            Self::PreflightBypassSecret => "EE_PREFLIGHT_BYPASS_SECRET",
             Self::Profile => "EE_PROFILE",
             Self::PprCacheEntries => "EE_PPR_CACHE_ENTRIES",
             Self::QueryPlanCacheEntries => "EE_QUERY_PLAN_CACHE_ENTRIES",
@@ -750,7 +746,6 @@ impl EnvVar {
             Self::MeshMode => "Select the default mesh command mode.",
             Self::NoColor => "Disable colored diagnostics.",
             Self::OutputFormat => "Select the default output renderer.",
-            Self::PreflightBypassSecret => "Supply preflight bypass secret material.",
             Self::Profile => "Override the default context pack profile.",
             Self::PprCacheEntries => "Override the in-process PPR prefetch cache entry cap.",
             Self::QueryPlanCacheEntries => {
@@ -932,10 +927,7 @@ impl EnvVar {
     /// Whether capabilities output may include this variable's current value.
     #[must_use]
     pub const fn exposes_value(self) -> bool {
-        !matches!(
-            self,
-            Self::PreflightBypassSecret | Self::ReflectionHmacKeyPath | Self::ServeToken
-        )
+        !matches!(self, Self::ReflectionHmacKeyPath | Self::ServeToken)
     }
 
     /// Broad documentation category for agent docs and env-var catalogs.
@@ -1053,8 +1045,7 @@ impl EnvVar {
             Self::JournalRetentionDays => "tuning",
             Self::ScienceBackendPath => "integration",
             Self::ShardFanoutEnabled => "storage",
-            Self::PreflightBypassSecret
-            | Self::SecurityProfile
+            Self::SecurityProfile
             | Self::ServeToken
             | Self::WorkspaceHygieneAlwaysReviewPatterns
             | Self::WorkspaceHygieneGeneratedPatterns
@@ -1621,9 +1612,6 @@ mod tests {
 
     #[test]
     fn sensitive_env_vars_do_not_expose_values() -> TestResult {
-        if EnvVar::PreflightBypassSecret.exposes_value() {
-            return Err("EE_PREFLIGHT_BYPASS_SECRET must not expose currentValue".to_owned());
-        }
         if EnvVar::ServeToken.exposes_value() {
             return Err("EE_SERVE_TOKEN must not expose currentValue".to_owned());
         }

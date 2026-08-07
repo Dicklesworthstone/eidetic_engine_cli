@@ -35,6 +35,18 @@ fn registry_includes_recent_runtime_ee_env_surface() -> TestResult {
 }
 
 #[test]
+fn registry_does_not_advertise_retired_command_authorization_secrets() -> TestResult {
+    if EnvVar::all()
+        .iter()
+        .any(|var| var.name() == "EE_PREFLIGHT_BYPASS_SECRET")
+    {
+        Err("retired preflight bypass secret remains in the runtime registry".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+#[test]
 fn registry_entries_are_documentable_and_unique() -> TestResult {
     let mut names = BTreeSet::new();
     for var in EnvVar::all() {
@@ -70,8 +82,8 @@ fn registry_exposes_known_defaults_and_sensitive_markers() -> TestResult {
             "unexpected workspace close drain timeout default: {drain_default}"
         ));
     }
-    if EnvVar::PreflightBypassSecret.exposes_value() {
-        return Err("preflight bypass secret must not expose values".to_string());
+    if EnvVar::ServeToken.exposes_value() {
+        return Err("serve token must not expose values".to_string());
     }
     Ok(())
 }

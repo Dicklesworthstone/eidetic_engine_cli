@@ -527,12 +527,6 @@ data:
       defaultValue: null
       isSet: false
       source: unset
-    - name: EE_PREFLIGHT_BYPASS_SECRET
-      category: policy
-      controls: Supply preflight bypass secret material.
-      defaultValue: null
-      isSet: false
-      source: unset
     - name: EE_PROFILE
       category: tuning
       controls: Override the default context pack profile.

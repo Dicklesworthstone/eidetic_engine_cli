@@ -6592,9 +6592,21 @@ pub struct VerifyBrokerLookupArgs {
     /// Environment fingerprint class for compatibility checks.
     #[arg(long = "env-fingerprint-class", value_name = "CLASS")]
     pub env_fingerprint_class: Option<String>,
+    /// Exact target triple required for a reusable downloaded artifact.
+    #[arg(long = "target-triple", value_name = "TRIPLE")]
+    pub target_triple: Option<String>,
     /// Target profile, such as debug or release.
     #[arg(long = "target-profile", value_name = "PROFILE")]
     pub target_profile: Option<String>,
+    /// Attested remote build-command hash required for artifact reuse.
+    #[arg(long = "build-command-hash", value_name = "SHA256")]
+    pub build_command_hash: Option<String>,
+    /// Attested effective build-input hash required for artifact reuse.
+    #[arg(long = "effective-input-hash", value_name = "SHA256")]
+    pub effective_input_hash: Option<String>,
+    /// Attested Cargo/config provenance hash required for artifact reuse.
+    #[arg(long = "provenance-hash", value_name = "SHA256")]
+    pub provenance_hash: Option<String>,
     /// JSON array of retained `ee.verification.run.v1` records.
     #[arg(
         long = "records-json",
@@ -22537,10 +22549,6 @@ where
     let options = PreflightGuardOptions {
         command,
         workspace: workspace.clone(),
-        // The core fields remain only for loading historical reports. The
-        // public CLI has no bypass or override control plane.
-        bypass_tokens: Vec::new(),
-        bypass_secret: None,
     };
 
     let mut report = run_preflight_guard(&registry, &options);
@@ -45668,7 +45676,11 @@ where
         normalized_argv_hash,
         execution_substrate: args.execution_substrate.as_str(),
         env_fingerprint_class: args.env_fingerprint_class.as_deref(),
+        target_triple: args.target_triple.as_deref(),
         target_profile: args.target_profile.as_deref(),
+        build_command_hash: args.build_command_hash.as_deref(),
+        effective_input_hash: args.effective_input_hash.as_deref(),
+        provenance_hash: args.provenance_hash.as_deref(),
     };
     let broker = crate::models::verification_broker_view(request, &records);
     let data = serde_json::json!({

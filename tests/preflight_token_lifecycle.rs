@@ -1,4 +1,52 @@
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+//! Regression contract for the retired preflight bypass-token authority.
+//!
+//! Historical database migrations and repository methods remain readable for
+//! old databases, but no compiled core module or advertised schema may expose
+//! token issuance, verification, revocation, or command authorization.
+
+use ee::core::supported_schemas;
+
+const CORE_MODULE_SOURCE: &str = include_str!("../src/core/mod.rs");
+const PREFLIGHT_GUARD_SOURCE: &str = include_str!("../src/core/preflight_guard.rs");
+
+#[test]
+fn bypass_token_authority_is_absent_from_the_compiled_core_surface() {
+    assert!(
+        !CORE_MODULE_SOURCE
+            .lines()
+            .any(|line| line.trim() == "pub mod preflight_token;"),
+        "preflight_token must not be exported by the compiled core"
+    );
+    assert!(
+        supported_schemas().iter().all(|schema| {
+            schema.name != "preflight_bypass_token"
+                && schema.schema != "ee.preflight.bypass_token.v1"
+        }),
+        "the retired bypass-token schema must not be advertised"
+    );
+
+    for retired_symbol in [
+        "BypassTokenInput",
+        "bypass_tokens",
+        "bypass_secret",
+        "issue_bypass_token",
+        "verify_bypass_token",
+        "BypassedWithToken",
+        "BypassTokenInvalid",
+        "BypassSecretMissing",
+    ] {
+        assert!(
+            !PREFLIGHT_GUARD_SOURCE.contains(retired_symbol),
+            "preflight_guard still contains retired authority symbol {retired_symbol}"
+        );
+    }
+}
+
+// Historical lifecycle tests remain source-visible as migration evidence while
+// the database schema is readable. The authority implementation is not part of
+// the compiled product.
+#[cfg(any())]
+mod historical {
 // These contract-style tests fail fast on setup drift so assertion failures keep the token lifecycle signal readable.
 
 use std::collections::HashSet;
@@ -402,4 +450,5 @@ fn bypass_audit_records_token_hash_matches_and_blocking_memories() {
             .contains(&issued.token),
         "raw bypass token must not be written to audit details"
     );
+}
 }

@@ -1,7 +1,8 @@
-//! Hook installer with dry-run, idempotency, and preserve-existing-hook behavior (EE-321).
+//! Memory-oriented harness hooks and read-only hook diagnostics.
 //!
-//! Provides safe installation of ee hooks into agent harness hook directories.
-//! Supports dry-run mode, idempotent re-installation, and preservation of existing hooks.
+//! The public crate surface only exposes fail-open recall, orientation, journal,
+//! and capture hooks. Legacy generic executable-hook machinery remains available
+//! solely to in-module retirement regression tests and is never exported.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -367,6 +368,7 @@ fn check_existing_hook(path: &Path) -> ExistingHookStatus {
 }
 
 /// Determine the action to take for a hook.
+#[cfg(test)]
 fn determine_action(
     path: &Path,
     existing: ExistingHookStatus,
@@ -420,6 +422,7 @@ fn determine_action(
 /// The hook script embeds the canonical absolute path of the `ee` binary captured
 /// at install time. This prevents attackers from placing a malicious `ee` binary
 /// earlier in PATH to gain arbitrary code execution when hooks fire.
+#[cfg(test)]
 fn generate_hook_content(hook_type: HookType, ee_binary_path: &Path) -> String {
     // Quote the path to handle spaces and special characters safely
     let quoted_path = shell_quote(ee_binary_path);
@@ -480,6 +483,7 @@ fn get_ee_binary_path() -> Result<PathBuf, DomainError> {
     })
 }
 
+#[cfg(test)]
 fn ensure_hook_dir_is_not_symlink(hook_dir: &Path) -> Result<(), DomainError> {
     if let Some(symlink_path) = first_existing_symlink_component(hook_dir)? {
         let message = if symlink_path == hook_dir {
@@ -537,17 +541,20 @@ fn first_existing_symlink_component(path: &Path) -> Result<Option<PathBuf>, Doma
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 struct PlannedHookWrite {
     target_path: PathBuf,
     content: String,
 }
 
+#[cfg(test)]
 fn hook_temp_path(target_path: &Path) -> PathBuf {
     let mut temp_path = target_path.to_owned();
     temp_path.set_extension("tmp");
     temp_path
 }
 
+#[cfg(test)]
 fn preflight_hook_target(target_path: &Path) -> Result<(), DomainError> {
     match std::fs::symlink_metadata(target_path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::PolicyDenied {
@@ -594,6 +601,7 @@ fn preflight_hook_target(target_path: &Path) -> Result<(), DomainError> {
     }
 }
 
+#[cfg(test)]
 fn preflight_hook_temp_target(temp_path: &Path) -> Result<(), DomainError> {
     match std::fs::symlink_metadata(temp_path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::PolicyDenied {
@@ -626,6 +634,7 @@ fn preflight_hook_temp_target(temp_path: &Path) -> Result<(), DomainError> {
     }
 }
 
+#[cfg(test)]
 fn preflight_created_hook_temp_target(temp_path: &Path) -> Result<(), DomainError> {
     match std::fs::symlink_metadata(temp_path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(DomainError::PolicyDenied {
@@ -659,6 +668,7 @@ fn preflight_created_hook_temp_target(temp_path: &Path) -> Result<(), DomainErro
     }
 }
 
+#[cfg(test)]
 fn preflight_hook_writes(hook_dir: &Path, writes: &[PlannedHookWrite]) -> Result<(), DomainError> {
     ensure_hook_dir_is_not_symlink(hook_dir)?;
     std::fs::create_dir_all(hook_dir).map_err(|error| DomainError::Storage {
@@ -708,11 +718,13 @@ fn preflight_hook_writes(hook_dir: &Path, writes: &[PlannedHookWrite]) -> Result
 /// already returning Err to the caller, the most common cleanup
 /// failure (the rename moved the file) is benign, and panicking from
 /// drop is illegal.
+#[cfg(test)]
 struct TempHookFileGuard<'a> {
     path: &'a Path,
     armed: bool,
 }
 
+#[cfg(test)]
 impl<'a> TempHookFileGuard<'a> {
     fn disarmed(path: &'a Path) -> Self {
         Self { path, armed: false }
@@ -727,6 +739,7 @@ impl<'a> TempHookFileGuard<'a> {
     }
 }
 
+#[cfg(test)]
 impl Drop for TempHookFileGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
@@ -735,6 +748,7 @@ impl Drop for TempHookFileGuard<'_> {
     }
 }
 
+#[cfg(test)]
 fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result<(), DomainError> {
     ensure_hook_dir_is_not_symlink(hook_dir)?;
 
@@ -825,6 +839,7 @@ fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result
     Ok(())
 }
 
+#[cfg(test)]
 fn publish_hook_temp_file(
     hook_dir: &Path,
     temp_path: &Path,
@@ -896,7 +911,7 @@ pub fn install_hooks(options: &HookInstallOptions) -> HookInstallReport {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn install_hooks_with_binary_path(
     options: &HookInstallOptions,
     ee_binary_path: &Path,
