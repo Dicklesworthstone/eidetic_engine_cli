@@ -384,7 +384,8 @@ pub use verification::{
     verification_closure_guidance, verification_evidence_beads_summary,
     verification_evidence_record_from_github_actions_check_run,
     verification_evidence_record_from_rch_verify, verification_evidence_record_from_run_record,
-    verification_reuse_advisory, verification_run_records_from_j1_jsonl,
+    verification_reuse_advisory, verification_run_has_verified_remote_artifact,
+    verification_run_records_from_j1_jsonl,
 };
 pub use why_tag::{ParseWhyTagError, WhyTag};
 
