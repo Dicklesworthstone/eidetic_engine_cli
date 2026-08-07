@@ -2330,6 +2330,81 @@ fn pregrant_bearer_is_stale_after_same_node_reenrollment() -> TestResult {
 }
 
 #[test]
+fn mesh_import_rejects_unconsented_control_rows_and_surfaces_stable_counts() -> TestResult {
+    let fixture = set_up_fixture("control-row-consent")?;
+    let (artifact_path, event_id, candidate_peer_id) =
+        write_disabled_import_effect_artifact(&fixture, "control-row-consent", 1)?;
+    let mut artifact: MeshExportArtifact = serde_json::from_slice(
+        &fs::read(&artifact_path).map_err(|error| format!("read control-row artifact: {error}"))?,
+    )
+    .map_err(|error| format!("parse control-row artifact: {error}"))?;
+    artifact.cursors[0].peer_id = candidate_peer_id.clone();
+    artifact.cursors[0].origin_node_id = "node_disabled_import_candidate".to_owned();
+    let rendered = serde_json::to_string_pretty(&artifact)
+        .map_err(|error| format!("serialize control-row artifact: {error}"))?;
+    fs::write(&artifact_path, format!("{rendered}\n"))
+        .map_err(|error| format!("rewrite control-row artifact: {error}"))?;
+
+    let imported = run_ee(
+        &fixture.workspace,
+        &["mesh", "import", "--file", artifact_path.as_str(), "--json"],
+    )?;
+    let response = success_json(&imported, "control-row ee mesh import")?;
+    ensure_equal(
+        &response.pointer("/data/schema").and_then(Value::as_str),
+        &Some("ee.mesh.cli.import.v2"),
+        "control-row import schema",
+    )?;
+    for (pointer, expected, label) in [
+        ("/data/importedPeerCount", 0, "imported peer count"),
+        ("/data/importedCursorCount", 0, "imported cursor count"),
+        ("/data/importedEventCount", 1, "imported event count"),
+        ("/data/rejectedPeerCount", 1, "rejected peer count"),
+        ("/data/rejectedCursorCount", 1, "rejected cursor count"),
+    ] {
+        ensure_equal(
+            &json_u64(&response, pointer, "control-row import report")?,
+            &expected,
+            label,
+        )?;
+    }
+    for pointer in ["/degraded", "/data/degraded"] {
+        let codes = response
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("control-row response omitted {pointer}: {response}"))?
+            .iter()
+            .filter_map(|item| item.pointer("/code").and_then(Value::as_str))
+            .collect::<std::collections::BTreeSet<_>>();
+        ensure(
+            codes.contains("mesh_import_peer_not_consented")
+                && codes.contains("mesh_import_cursor_unverified"),
+            format!("control-row response {pointer} omitted rejection codes: {codes:?}"),
+        )?;
+    }
+
+    let durable = mesh_import_durable_snapshot(&fixture)?;
+    ensure(
+        durable
+            .peers
+            .iter()
+            .all(|peer| peer.peer_id != candidate_peer_id),
+        "artifact must not create an unconsented peer",
+    )?;
+    ensure(
+        durable.cursors.is_empty(),
+        "artifact must not create a cursor for an unconsented peer",
+    )?;
+    ensure(
+        durable
+            .ledger_events
+            .iter()
+            .any(|event| event.event_id == event_id),
+        "event replay remains independently ledgered",
+    )
+}
+
+#[test]
 fn disabled_mesh_import_is_policy_denied_with_zero_durable_effects() -> TestResult {
     let fixture = set_up_fixture("disabled-import")?;
     let (artifact_path, event_id, candidate_peer_id) =
@@ -2808,7 +2883,7 @@ fn committed_grant_controls_production_inbound_and_outbound_paths() -> TestResul
         &pregrant_import_json
             .pointer("/data/schema")
             .and_then(Value::as_str),
-        &Some("ee.mesh.cli.import.v1"),
+        &Some("ee.mesh.cli.import.v2"),
         "pre-grant import report schema",
     )?;
     ensure_equal(

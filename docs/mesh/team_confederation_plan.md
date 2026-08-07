@@ -156,7 +156,7 @@ map, design docs/ADRs, trust/identity surfaces, beads inventory).
 |---|---|---|
 | DB schema: `mesh_peers`, `mesh_peer_cursors`, hash-chained `mesh_import_ledger`, `mesh_memory_mappings`, `mesh_body_cache_metadata` | `src/db/mod.rs:4999–5258` (V052–V057) | Real, migrated, CHECK-constrained. The last two tables have no production writers yet. |
 | Peer records with fail-closed enrollment gates (consent, handshake, node-key match, capability match), rotate/revoke | `src/mesh/peer.rs:441–631`; CLI `src/cli/mesh.rs:1571–1791` | Real, but the "handshake" is synthesized locally from CLI flags — no live exchange. |
-| Anti-entropy protocol math: tips, cursors, bounded range planner, retry/backoff (1s→60s, max 5), digests, redaction-safe sync summary | `src/mesh/anti_entropy_protocol.rs` | Complete + tested. `MeshRangePlanner` has no production caller; cursors only advance via `ee mesh import`. |
+| Anti-entropy protocol math: tips, cursors, bounded range planner, retry/backoff (1s→60s, max 5), digests, redaction-safe sync summary | `src/mesh/anti_entropy_protocol.rs` | Complete + tested. `MeshRangePlanner` has no production caller; file import advances cursors only after destination-local contiguous accepted replay proves the claimed tip. |
 | Anti-entropy executable model + 13 pinned scenarios | `src/mesh/anti_entropy_model.rs`, ADR 0041 | The contract to satisfy, not code to run. |
 | Signed bounded frame-codec scaffold: blake3-keyed signatures, capability allowlist (`hello`/`summary`/`event_fetch`/`body_fetch`), 64 KiB frame / 32 KiB payload budgets, constant-time compare | `src/mesh/tailscale_transport.rs` (794 LOC) | **Entirely dead — zero callers.** Budgets/enums are reusable; v1's rotating `sourceNodeKey`/`targetNodeKey` identity and long-term-key MAC are not production-safe and are superseded by T2.1 frame v2. |
 | Hello wire protocol (`ee.mesh.hello.v1` / `.response.v1` / `.error.v1`), ≤4096-byte payloads, version negotiation, privacy-preserving decline | `src/mesh/hello.rs`; `decide_hello_response` at `:405` | Complete; **zero non-test callers**. |
@@ -165,7 +165,7 @@ map, design docs/ADRs, trust/identity surfaces, beads inventory).
 | Mesh policy engine: per-peer per-lane per-origin-workspace inbound/outbound decisions, trust-lane ceilings, side-effect booleans | `src/core/memory_scope.rs`; facade `src/mesh/policy.rs`; production callers in `src/mesh/foreground_cli.rs` and `src/cli/mesh.rs` | Complete, tested, and load-bearing for file export/import plus consent previews; live network transport remains deferred. |
 | Authenticated lane-grant consent (DB-backed counts, revision-pinned candidates, redacted samples, cautions, grant/revoke) | `src/mesh/lane_grant_preview.rs`, `src/mesh/lane_grant.rs`; CLI wiring in `src/cli/mesh.rs` | T1.4 is wired: ordinary previews are deterministic and token-free; explicit robot issuance binds the complete eligible memory and mesh-ledger candidate set, and grant/revoke mutate generation plus audit atomically. |
 | Pre-export secret scan (hard-denies `ee mesh export` with `mesh_secret_export_denied`) | `src/policy/mod.rs` | Real and enforced. The pure detector remains deterministic and value-free; the command boundary decorates findings with fresh opaque CSPRNG-backed `findingId` values before error/audit projection. |
-| `ee mesh export` / `ee mesh import`: bounded, schema-gated, idempotent, ledger-writing, index-job-enqueuing file exchange | `src/cli/mesh.rs:1793–1872, 1988–2028, 3056–3262` | Real. **This is the only working peer data path today.** |
+| `ee mesh export` / `ee mesh import`: bounded, schema-gated, idempotent, ledger-writing, index-job-enqueuing file exchange | `src/cli/mesh.rs` | Real. Import artifacts cannot enroll or re-enable peers, overwrite local peer policy, or advance cursors without durable contiguous accepted replay. **This is the only working peer data path today.** |
 | `ee share preview`: DB-backed counts and redacted examples | `src/cli/share.rs`, `src/policy/mod.rs` | Real, read-only, and policy-backed. Public content/aggregate hashes and `--record-consent` are removed; unknown peers fail closed with an explicit degraded signal. |
 | Emergency disable/reenable, workspace-scoped, honest `PeerScopeNotDurable` for `--peer` | `src/mesh/emergency_disable.rs`; CLI `src/cli/mesh.rs:923–1012` | Real (peer-scoped containment owed under bd-3mw86, in progress by another agent). |
 | Read-side visibility filter for mesh-derived hits | `src/core/search.rs:9816–9830`, `src/core/context.rs:6484` | Real and wired. |
@@ -607,6 +607,12 @@ module-only result already has a response-surface catalog entry.
 `ee mesh export` consults `decide_mesh_outbound_policy` per record and lane;
 `ee mesh import` consults `decide_mesh_import` per event, recording the policy
 decision JSON in the ledger columns that already exist for it (V053/V055).
+Artifact control rows remain non-authoritative: an imported peer row may only
+refresh cosmetic metadata for an exact enabled local enrollment, while unknown,
+disabled, rotated, and duplicate peers are audited rejections. Cursor claims are
+evaluated after event replay and advance only across destination-local `allow`
+rows whose producer, sequence, previous-hash chain, and final tip all match;
+sender status, timestamps, and audit-tip claims are discarded.
 `ee mesh export` requires `--peer <peer-id>` naming an enrolled, enabled peer
 and always applies that peer's outbound policy; it has no peer-less self-export
 bypass. Ordinary local backup remains the responsibility of `ee export` and

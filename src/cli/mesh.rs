@@ -17,8 +17,8 @@ use crate::core::tailscale_probe::{
 };
 use crate::db::{
     CreateAuditInput, CreateSearchIndexJobInput, DbConnection, DbError,
-    InsertMeshImportLedgerEventInput, SearchIndexJobType, StoredMeshPeerCursor,
-    UpsertMeshPeerCursorInput, UpsertMeshPeerInput, audit_actions, generate_audit_id,
+    InsertMeshImportLedgerEventInput, SearchIndexJobType, UpsertMeshPeerCursorInput,
+    UpsertMeshPeerInput, audit_actions, generate_audit_id,
 };
 use crate::mesh::audit::{
     MeshAuditDetails, MeshAuditEventInput, MeshAuditEventKind, MeshAuditLedgerError,
@@ -44,7 +44,7 @@ use crate::mesh::emergency_disable::{
     plan_emergency_disable, plan_emergency_reenable,
 };
 use crate::mesh::foreground_cli::{
-    MESH_CLI_EXPORT_SCHEMA_V1, MESH_CLI_IMPORT_SCHEMA_V1, MESH_CLI_SYNC_SCHEMA_V1,
+    MESH_CLI_EXPORT_SCHEMA_V1, MESH_CLI_IMPORT_SCHEMA_V2, MESH_CLI_SYNC_SCHEMA_V1,
     MESH_EXPORT_ARTIFACT_SCHEMA_V1, MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE, MeshCliDegradation,
     MeshCliExportReport, MeshCliImportReport, MeshCliPeersReport, MeshCliStatusReport,
     MeshCliSyncReport, MeshExportArtifact, MeshForegroundSnapshot, MeshImportLedgerReport,
@@ -3955,28 +3955,52 @@ where
         Ok(snapshot) => snapshot,
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
-    let (imported_peer_count, imported_cursor_count, imported_event_count) = if args.dry_run {
-        (0, 0, 0)
+    let outcome = if args.dry_run {
+        MeshImportOutcome::default()
     } else {
         match import_mesh_artifact(args.database.as_deref(), cli, &artifact) {
-            Ok(counts) => counts,
+            Ok(outcome) => outcome,
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         }
     };
+    let mut degraded = snapshot.degraded.clone();
+    if outcome.rejected_peer_count > 0 {
+        degraded.push(MeshCliDegradation::import_peer_not_consented(
+            outcome.rejected_peer_count,
+        ));
+    }
+    if outcome.rejected_cursor_count > 0 {
+        degraded.push(MeshCliDegradation::import_cursor_unverified(
+            outcome.rejected_cursor_count,
+        ));
+    }
     let report = MeshCliImportReport {
-        schema: MESH_CLI_IMPORT_SCHEMA_V1,
+        schema: MESH_CLI_IMPORT_SCHEMA_V2,
         command: "mesh import",
         source_path: args.file.display().to_string(),
         dry_run: args.dry_run,
         peer_count: artifact.peers.len(),
         cursor_count: artifact.cursors.len(),
         event_count: artifact.events.len(),
-        imported_peer_count,
-        imported_cursor_count,
-        imported_event_count,
-        degraded: snapshot.degraded.clone(),
+        imported_peer_count: outcome.imported_peer_count,
+        imported_cursor_count: outcome.imported_cursor_count,
+        imported_event_count: outcome.imported_event_count,
+        rejected_peer_count: outcome.rejected_peer_count,
+        rejected_cursor_count: outcome.rejected_cursor_count,
+        degraded,
     };
-    write_mesh_report(cli, &report, &render_mesh_import_human(&report), stdout)
+    let envelope_degraded = report
+        .degraded
+        .iter()
+        .map(|item| json!(item))
+        .collect::<Vec<_>>();
+    write_mesh_report_with_degraded(
+        cli,
+        &report,
+        &render_mesh_import_human(&report),
+        &envelope_degraded,
+        stdout,
+    )
 }
 
 fn handle_mesh_sync<W, E>(
@@ -5117,7 +5141,7 @@ fn import_mesh_artifact(
     database_override: Option<&Path>,
     cli: &Cli,
     artifact: &MeshExportArtifact,
-) -> Result<(usize, usize, usize), DomainError> {
+) -> Result<MeshImportOutcome, DomainError> {
     import_mesh_artifact_with_final_config_check_hook(database_override, cli, artifact, |_| {})
 }
 
@@ -5126,7 +5150,7 @@ fn import_mesh_artifact_with_final_config_check_hook<H>(
     cli: &Cli,
     artifact: &MeshExportArtifact,
     before_final_config_check: H,
-) -> Result<(usize, usize, usize), DomainError>
+) -> Result<MeshImportOutcome, DomainError>
 where
     H: FnOnce(&DbConnection),
 {
@@ -5227,13 +5251,22 @@ impl MeshImportTransactionError {
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct MeshImportOutcome {
+    imported_peer_count: usize,
+    imported_cursor_count: usize,
+    imported_event_count: usize,
+    rejected_peer_count: usize,
+    rejected_cursor_count: usize,
+}
+
 fn import_mesh_artifact_into_connection(
     connection: &DbConnection,
     workspace_id: &str,
     artifact: &MeshExportArtifact,
     bindings: &[crate::config::MeshPeerGroupBinding],
     registry: &crate::mesh::policy::MeshPeerPolicyRegistry,
-) -> Result<(usize, usize, usize), DomainError> {
+) -> Result<MeshImportOutcome, DomainError> {
     validate_mesh_export_artifact_for_replay(artifact)?;
     // Validate and canonicalize every untrusted event before any peer, cursor,
     // ledger, or index mutation. The outer production transaction still
@@ -5257,78 +5290,89 @@ fn import_mesh_artifact_into_connection(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let mut seen_peer_ids = BTreeSet::new();
+    let duplicate_peer_ids = artifact
+        .peers
+        .iter()
+        .filter_map(|peer| {
+            (!seen_peer_ids.insert(peer.peer_id.as_str())).then(|| peer.peer_id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let mut seen_cursor_keys = BTreeSet::new();
+    let duplicate_cursor_keys = artifact
+        .cursors
+        .iter()
+        .filter_map(|cursor| {
+            let key = (cursor.peer_id.as_str(), cursor.origin_workspace_id.as_str());
+            (!seen_cursor_keys.insert(key))
+                .then(|| (cursor.peer_id.clone(), cursor.origin_workspace_id.clone()))
+        })
+        .collect::<BTreeSet<_>>();
 
-    let mut imported_peer_count = 0;
+    let mut outcome = MeshImportOutcome::default();
     for peer in &artifact.peers {
-        // Enrollment identity and enabled state are local authority. A replay
-        // artifact may cache a previously unseen peer only as a disabled,
-        // non-authoritative candidate; it must never enroll, rotate, re-enable,
-        // or roll back a peer. Explicit enrollment must authenticate and
-        // overwrite this candidate before any cursor/event can be admitted.
-        let inserted = connection
-            .insert_mesh_peer_if_absent_in_current_transaction(&UpsertMeshPeerInput {
-                workspace_id: workspace_id.to_owned(),
-                peer_id: peer.peer_id.clone(),
-                origin_node_id: peer.origin_node_id.clone(),
-                // Display/policy/timestamp fields are untrusted replay
-                // metadata. Keep only the minimum identity needed for an
-                // operator to inspect and explicitly enroll this candidate.
-                display_name: None,
-                policy_summary_json: None,
-                enabled: false,
-                last_seen_at: None,
-            })
-            .map_err(|error| storage_error("Failed to import mesh peer", error))?;
-        if inserted {
-            imported_peer_count += 1;
-        }
-    }
-
-    let mut imported_cursor_count = 0;
-    for cursor in &artifact.cursors {
-        let enrolled_peer = connection
-            .get_mesh_peer(workspace_id, &cursor.peer_id)
-            .map_err(|error| {
-                storage_error("Failed to verify mesh cursor producer identity", error)
-            })?;
-        if !enrolled_peer
-            .as_ref()
-            .is_some_and(|peer| peer.enabled && peer.origin_node_id == cursor.origin_node_id)
-        {
+        if duplicate_peer_ids.contains(&peer.peer_id) {
+            append_mesh_import_control_rejection(
+                connection,
+                workspace_id,
+                "peer",
+                &peer.peer_id,
+                None,
+                None,
+                "duplicate_peer_row",
+            )?;
+            outcome.rejected_peer_count += 1;
             continue;
         }
-        let existing = connection
-            .get_mesh_peer_cursor(workspace_id, &cursor.peer_id, &cursor.origin_workspace_id)
-            .map_err(|error| storage_error("Failed to inspect existing mesh peer cursor", error))?;
-        let changed = existing
-            .as_ref()
-            .is_none_or(|stored| !mesh_cursor_matches_row(stored, workspace_id, cursor));
-        connection
-            .upsert_mesh_peer_cursor(&UpsertMeshPeerCursorInput {
-                workspace_id: workspace_id.to_owned(),
-                peer_id: cursor.peer_id.clone(),
-                origin_node_id: cursor.origin_node_id.clone(),
-                origin_workspace_id: cursor.origin_workspace_id.clone(),
-                last_seq: cursor.last_seq,
-                tip_event_hash: cursor.tip_event_hash.clone(),
-                tip_audit_hash: cursor.tip_audit_hash.clone(),
-                status: cursor.status.clone(),
-                updated_at: Some(cursor.updated_at.clone()),
-            })
-            .map_err(|error| storage_error("Failed to import mesh peer cursor", error))?;
+        // Enrollment identity, enabled state, and policy are local authority.
+        // A replay artifact may refresh cosmetic metadata only for an exact,
+        // already-enabled local enrollment; it can never create, rotate,
+        // re-enable, or rewrite policy for a peer.
+        let enrolled = connection
+            .get_mesh_peer(workspace_id, &peer.peer_id)
+            .map_err(|error| storage_error("Failed to verify mesh peer enrollment", error))?;
+        let Some(enrolled) = enrolled
+            .filter(|stored| stored.enabled && stored.origin_node_id == peer.origin_node_id)
+        else {
+            append_mesh_import_control_rejection(
+                connection,
+                workspace_id,
+                "peer",
+                &peer.peer_id,
+                None,
+                None,
+                "peer_not_consented",
+            )?;
+            outcome.rejected_peer_count += 1;
+            continue;
+        };
+        let refreshed_last_seen_at =
+            later_mesh_peer_last_seen(&enrolled.last_seen_at, &peer.last_seen_at);
+        let changed = enrolled.display_name != peer.display_name
+            || enrolled.last_seen_at != refreshed_last_seen_at;
         if changed {
-            imported_cursor_count += 1;
+            let refreshed = connection
+                .refresh_mesh_peer_metadata_in_current_transaction(
+                    workspace_id,
+                    &enrolled.peer_id,
+                    &enrolled.origin_node_id,
+                    peer.display_name.as_deref(),
+                    &refreshed_last_seen_at,
+                )
+                .map_err(|error| storage_error("Failed to refresh mesh peer metadata", error))?;
+            if refreshed {
+                outcome.imported_peer_count += 1;
+            }
         }
     }
 
-    // Refresh after admitting any previously unknown peer so the import
-    // decision sees the current locally authoritative enrollment and grant.
+    // Refresh after cosmetic peer updates so event decisions see the current
+    // locally authoritative enrollment and grant state.
     let refreshed_states = connection
         .list_mesh_lane_grant_states(workspace_id)
         .map_err(|error| storage_error("Failed to refresh mesh lane-grant policy state", error))?;
     let refreshed_registry = registry.clone().with_lane_grant_states(refreshed_states);
 
-    let mut imported_event_count = 0;
     for projection in &projected_events {
         let requires_unredacted_body_lane = projection.requires_unredacted_body_lane;
         let event = &projection.event;
@@ -5417,14 +5461,110 @@ fn import_mesh_artifact_into_connection(
             if decision.admits {
                 enqueue_mesh_import_index_job(connection, workspace_id, event)?;
             }
-            imported_event_count += 1;
+            outcome.imported_event_count += 1;
         }
     }
-    Ok((
-        imported_peer_count,
-        imported_cursor_count,
-        imported_event_count,
-    ))
+
+    // Cursor rows are evaluated only after the event ledger writes above are
+    // durable within this transaction. Sender cursor metadata is a claim, not
+    // authority: only an exact enrolled peer plus a destination-local,
+    // contiguous, accepted hash chain may advance the durable cursor.
+    for cursor in &artifact.cursors {
+        if duplicate_cursor_keys
+            .contains(&(cursor.peer_id.clone(), cursor.origin_workspace_id.clone()))
+        {
+            append_mesh_import_control_rejection(
+                connection,
+                workspace_id,
+                "cursor",
+                &cursor.peer_id,
+                Some(&cursor.origin_workspace_id),
+                Some(cursor.last_seq),
+                "duplicate_cursor_row",
+            )?;
+            outcome.rejected_cursor_count += 1;
+            continue;
+        }
+        let enrolled_peer = connection
+            .get_mesh_peer(workspace_id, &cursor.peer_id)
+            .map_err(|error| {
+                storage_error("Failed to verify mesh cursor producer identity", error)
+            })?;
+        if !enrolled_peer
+            .as_ref()
+            .is_some_and(|peer| peer.enabled && peer.origin_node_id == cursor.origin_node_id)
+        {
+            append_mesh_import_control_rejection(
+                connection,
+                workspace_id,
+                "cursor",
+                &cursor.peer_id,
+                Some(&cursor.origin_workspace_id),
+                Some(cursor.last_seq),
+                "cursor_peer_not_consented",
+            )?;
+            outcome.rejected_cursor_count += 1;
+            continue;
+        }
+        let existing = connection
+            .get_mesh_peer_cursor(workspace_id, &cursor.peer_id, &cursor.origin_workspace_id)
+            .map_err(|error| storage_error("Failed to inspect existing mesh peer cursor", error))?;
+        if existing.as_ref().is_some_and(|stored| {
+            stored.origin_node_id == cursor.origin_node_id
+                && stored.last_seq == cursor.last_seq
+                && stored.tip_event_hash == cursor.tip_event_hash
+        }) {
+            continue;
+        }
+        let previous_seq = existing.as_ref().map_or(0, |stored| stored.last_seq);
+        let previous_hash = existing
+            .as_ref()
+            .and_then(|stored| stored.tip_event_hash.clone());
+        let durable_events = connection
+            .list_mesh_import_ledger_events(
+                workspace_id,
+                &cursor.origin_node_id,
+                &cursor.origin_workspace_id,
+            )
+            .map_err(|error| storage_error("Failed to verify durable mesh cursor replay", error))?;
+        let verified_tip = verified_mesh_cursor_tip(
+            previous_seq,
+            previous_hash.as_deref(),
+            cursor,
+            &durable_events,
+        );
+        let Some(verified_tip) = verified_tip else {
+            append_mesh_import_control_rejection(
+                connection,
+                workspace_id,
+                "cursor",
+                &cursor.peer_id,
+                Some(&cursor.origin_workspace_id),
+                Some(cursor.last_seq),
+                "cursor_not_durable_contiguous_replay",
+            )?;
+            outcome.rejected_cursor_count += 1;
+            continue;
+        };
+        connection
+            .upsert_mesh_peer_cursor(&UpsertMeshPeerCursorInput {
+                workspace_id: workspace_id.to_owned(),
+                peer_id: cursor.peer_id.clone(),
+                origin_node_id: cursor.origin_node_id.clone(),
+                origin_workspace_id: cursor.origin_workspace_id.clone(),
+                last_seq: cursor.last_seq,
+                tip_event_hash: Some(verified_tip),
+                // The event import ledger has no audit-chain proof for this
+                // sender claim. Preserve only an existing local audit tip.
+                tip_audit_hash: None,
+                status: "current".to_owned(),
+                updated_at: None,
+            })
+            .map_err(|error| storage_error("Failed to advance mesh peer cursor", error))?;
+        outcome.imported_cursor_count += 1;
+    }
+
+    Ok(outcome)
 }
 
 /// The effective inbound decision for one replayed mesh event, ready to write
@@ -5623,20 +5763,138 @@ fn stable_mesh_import_index_job_id(
     format!("sidx_{}", &hash[..26])
 }
 
-fn mesh_cursor_matches_row(
-    stored: &StoredMeshPeerCursor,
+fn later_mesh_peer_last_seen(current: &str, candidate: &str) -> String {
+    let Ok(current_time) = chrono::DateTime::parse_from_rfc3339(current) else {
+        return current.to_owned();
+    };
+    let Ok(candidate_time) = chrono::DateTime::parse_from_rfc3339(candidate) else {
+        return current.to_owned();
+    };
+    if candidate_time > current_time && candidate_time <= chrono::Utc::now() {
+        candidate.to_owned()
+    } else {
+        current.to_owned()
+    }
+}
+
+fn verified_mesh_cursor_tip(
+    previous_seq: u64,
+    previous_hash: Option<&str>,
+    cursor: &crate::mesh::foreground_cli::MeshCursorRow,
+    durable_events: &[crate::db::StoredMeshImportLedgerEvent],
+) -> Option<String> {
+    if cursor.last_seq <= previous_seq
+        || cursor.last_seq > i64::MAX as u64
+        || (previous_seq > 0 && previous_hash.is_none())
+    {
+        return None;
+    }
+    let claimed_tip = cursor.tip_event_hash.as_deref()?;
+    let mut expected_seq = previous_seq.checked_add(1)?;
+    let mut expected_previous_hash = previous_hash.map(str::to_owned);
+    let mut accepted_seqs = Vec::new();
+
+    for event in durable_events {
+        if event.seq < expected_seq {
+            continue;
+        }
+        if event.seq > cursor.last_seq {
+            break;
+        }
+        if event.seq != expected_seq
+            || event.origin_node_id != cursor.origin_node_id
+            || event.origin_workspace_id != cursor.origin_workspace_id
+            || event.producer_peer_id.as_deref() != Some(cursor.peer_id.as_str())
+            || event.import_decision != "allow"
+            || event.prev_event_hash.as_deref() != expected_previous_hash.as_deref()
+        {
+            return None;
+        }
+        expected_previous_hash = Some(event.event_hash.clone());
+        accepted_seqs.push(event.seq);
+        if event.seq == cursor.last_seq {
+            break;
+        }
+        expected_seq = expected_seq.checked_add(1)?;
+    }
+
+    let advanced = crate::mesh::anti_entropy_protocol::cursor_after_durable_replay(
+        previous_seq,
+        accepted_seqs,
+    );
+    (advanced == cursor.last_seq && expected_previous_hash.as_deref() == Some(claimed_tip))
+        .then(|| claimed_tip.to_owned())
+}
+
+fn append_mesh_import_control_rejection(
+    connection: &DbConnection,
     workspace_id: &str,
-    row: &crate::mesh::foreground_cli::MeshCursorRow,
-) -> bool {
-    stored.workspace_id == workspace_id
-        && stored.peer_id == row.peer_id
-        && stored.origin_node_id == row.origin_node_id
-        && stored.origin_workspace_id == row.origin_workspace_id
-        && stored.last_seq == row.last_seq
-        && stored.tip_event_hash == row.tip_event_hash
-        && stored.tip_audit_hash == row.tip_audit_hash
-        && stored.status == row.status
-        && stored.updated_at == row.updated_at
+    row_kind: &str,
+    peer_id: &str,
+    origin_workspace_id: Option<&str>,
+    claimed_seq: Option<u64>,
+    reason: &str,
+) -> Result<(), DomainError> {
+    let mut details = MeshAuditDetails::default();
+    details
+        .insert_reference("row_kind", row_kind)
+        .map_err(mesh_import_control_audit_error)?;
+    details
+        .insert_reference("decision", "reject")
+        .map_err(mesh_import_control_audit_error)?;
+    details
+        .insert_reference("reason", reason)
+        .map_err(mesh_import_control_audit_error)?;
+    details
+        .insert_digest(
+            "peer_id_hash",
+            &format!("blake3:{}", blake3::hash(peer_id.as_bytes()).to_hex()),
+        )
+        .map_err(mesh_import_control_audit_error)?;
+    if let Some(origin_workspace_id) = origin_workspace_id {
+        details
+            .insert_digest(
+                "origin_workspace_id_hash",
+                &format!(
+                    "blake3:{}",
+                    blake3::hash(origin_workspace_id.as_bytes()).to_hex()
+                ),
+            )
+            .map_err(mesh_import_control_audit_error)?;
+    }
+    if let Some(claimed_seq) = claimed_seq {
+        details
+            .insert_count("claimed_seq", claimed_seq)
+            .map_err(mesh_import_control_audit_error)?;
+    }
+    let event_kind = MeshAuditEventKind::Import;
+    let event = compute_mesh_audit_event(&MeshAuditEventInput {
+        workspace_id: workspace_id.to_owned(),
+        event_kind,
+        peer_id: None,
+        origin_workspace_id: None,
+        target_workspace_id: None,
+        workspace_scope: Some("artifact_control_row".to_owned()),
+        policy_decision_id: None,
+        local_row_refs: Vec::new(),
+        cached_body_refs: Vec::new(),
+        details,
+        previous_event_hash: None,
+    })
+    .map_err(mesh_import_control_audit_error)?;
+    append_mesh_audit_event(connection, &event, Some(event_kind.audit_action()))
+        .map_err(mesh_import_control_audit_error)?;
+    Ok(())
+}
+
+fn mesh_import_control_audit_error(error: MeshAuditLedgerError) -> DomainError {
+    DomainError::Storage {
+        message: format!("mesh import control-row audit failed: {error}"),
+        repair: Some(
+            "Run `ee audit verify --json`; the control-row import was rolled back with its audit."
+                .to_owned(),
+        ),
+    }
 }
 
 fn open_mesh_connection(path: &Path) -> Result<DbConnection, DomainError> {
@@ -6197,7 +6455,7 @@ fn render_mesh_export_human(report: &MeshCliExportReport) -> String {
 
 fn render_mesh_import_human(report: &MeshCliImportReport) -> String {
     let mut output = format!(
-        "Mesh import\n  Source: {source}\n  Dry run: {dry_run}\n  Artifact rows: {peers} peers, {cursors} cursors, {events} events\n  Imported: {imported_peers} peers, {imported_cursors} cursors, {imported_events} events\n",
+        "Mesh import\n  Source: {source}\n  Dry run: {dry_run}\n  Artifact rows: {peers} peers, {cursors} cursors, {events} events\n  Imported: {imported_peers} peers, {imported_cursors} cursors, {imported_events} events\n  Rejected control rows: {rejected_peers} peers, {rejected_cursors} cursors\n",
         source = report.source_path,
         dry_run = if report.dry_run { "yes" } else { "no" },
         peers = report.peer_count,
@@ -6206,6 +6464,8 @@ fn render_mesh_import_human(report: &MeshCliImportReport) -> String {
         imported_peers = report.imported_peer_count,
         imported_cursors = report.imported_cursor_count,
         imported_events = report.imported_event_count,
+        rejected_peers = report.rejected_peer_count,
+        rejected_cursors = report.rejected_cursor_count,
     );
     append_degradations(&mut output, &report.degraded);
     output
@@ -7452,8 +7712,8 @@ max_bytes = 0
                         .list_mesh_peers(REPLAY_WORKSPACE_ID)
                         .expect("inspect transaction peers")
                         .len(),
-                    2,
-                    "the transaction must prepare the disabled candidate peer before the check"
+                    1,
+                    "the transaction must reject the unknown peer instead of caching a candidate"
                 );
                 assert_eq!(
                     transaction_connection
@@ -7489,7 +7749,11 @@ max_bytes = 0
         let peers = connection
             .list_mesh_peers(REPLAY_WORKSPACE_ID)
             .expect("list peers after rolled-back import");
-        assert_eq!(peers.len(), 1, "candidate peer insertion must roll back");
+        assert_eq!(
+            peers.len(),
+            1,
+            "unknown artifact peer must never be inserted"
+        );
         assert_eq!(peers[0].peer_id, "peer_mesh_replay_counts");
         assert!(
             connection
@@ -7669,7 +7933,10 @@ max_bytes = 0
             .expect("insert workspace");
         enroll_replay_test_peer(&connection, workspace_id);
 
-        let artifact = mesh_export_artifact_for_import_counts();
+        let mut artifact = mesh_export_artifact_for_import_counts();
+        artifact.cursors[0].tip_audit_hash = Some(hash_for_test('b'));
+        artifact.cursors[0].status = "sender_claimed_status".to_owned();
+        artifact.cursors[0].updated_at = "2099-05-21T19:50:01Z".to_owned();
         let config = admitting_replay_config();
         let bindings = config.mesh.peer_group_bindings.clone().unwrap_or_default();
         let registry = crate::mesh::policy::MeshPeerPolicyRegistry::from_config(&config);
@@ -7681,7 +7948,38 @@ max_bytes = 0
             &registry,
         )
         .expect("first import");
-        assert_eq!(first, (0, 1, 1));
+        assert_eq!(
+            first,
+            MeshImportOutcome {
+                imported_peer_count: 1,
+                imported_cursor_count: 1,
+                imported_event_count: 1,
+                rejected_peer_count: 0,
+                rejected_cursor_count: 0,
+            }
+        );
+        let peer = connection
+            .get_mesh_peer(workspace_id, "peer_mesh_replay_counts")
+            .expect("reload refreshed peer")
+            .expect("enrolled peer remains present");
+        assert_eq!(peer.origin_node_id, "node_mesh_replay_counts");
+        assert!(peer.enabled);
+        assert_eq!(peer.policy_summary_json, None);
+        assert_eq!(peer.display_name.as_deref(), Some("replay-counts"));
+        assert_eq!(peer.last_seen_at, "2026-05-21T19:50:00Z");
+        let cursor = connection
+            .get_mesh_peer_cursor(
+                workspace_id,
+                "peer_mesh_replay_counts",
+                "wsp_remote00000000000000000001",
+            )
+            .expect("reload verified cursor")
+            .expect("verified cursor is durable");
+        assert_eq!(cursor.last_seq, 1);
+        assert_eq!(cursor.tip_event_hash, artifact.cursors[0].tip_event_hash);
+        assert_eq!(cursor.tip_audit_hash, None);
+        assert_eq!(cursor.status, "current");
+        assert_ne!(cursor.updated_at, artifact.cursors[0].updated_at);
 
         let duplicate = import_mesh_artifact_into_connection(
             &connection,
@@ -7693,7 +7991,7 @@ max_bytes = 0
         .expect("duplicate import");
         assert_eq!(
             duplicate,
-            (0, 0, 0),
+            MeshImportOutcome::default(),
             "duplicate replay should be idempotent and report no effective changes"
         );
 
@@ -7714,6 +8012,278 @@ max_bytes = 0
         assert_eq!(
             index_jobs[0].document_id.as_deref(),
             Some(artifact.events[0].event_id.as_str())
+        );
+    }
+
+    #[test]
+    fn mesh_import_cursor_requires_destination_local_contiguous_replay_proof() {
+        for case in [
+            "gap",
+            "denied",
+            "wrong_producer",
+            "broken_chain",
+            "forged_tip",
+        ] {
+            let connection = DbConnection::open_memory().expect("open memory db");
+            connection.migrate().expect("migrate db");
+            connection
+                .insert_workspace(
+                    REPLAY_WORKSPACE_ID,
+                    &crate::db::CreateWorkspaceInput {
+                        path: format!("/tmp/ee-mesh-cursor-proof-{case}"),
+                        name: Some(format!("mesh cursor proof {case}")),
+                    },
+                )
+                .expect("insert workspace");
+            enroll_replay_test_peer(&connection, REPLAY_WORKSPACE_ID);
+            let mut artifact = mesh_export_artifact_for_import_counts();
+            match case {
+                "gap" => {
+                    artifact.cursors[0].last_seq = 2;
+                }
+                "denied" => {
+                    reseal_mesh_test_event(&mut artifact.events[0], |object| {
+                        object.insert("materialLane".to_owned(), json!("body"));
+                        object.insert("redactionClass".to_owned(), json!("body"));
+                    });
+                    artifact.cursors[0].tip_event_hash =
+                        Some(artifact.events[0].event_hash.clone());
+                }
+                "wrong_producer" => {
+                    reseal_mesh_test_event(&mut artifact.events[0], |object| {
+                        object.insert(
+                            "producerPeerId".to_owned(),
+                            json!("peer_unenrolled_producer"),
+                        );
+                    });
+                    artifact.cursors[0].tip_event_hash =
+                        Some(artifact.events[0].event_hash.clone());
+                }
+                "broken_chain" => {
+                    reseal_mesh_test_event(&mut artifact.events[0], |object| {
+                        object.insert("prevEventHash".to_owned(), json!(hash_for_test('f')));
+                    });
+                    artifact.cursors[0].tip_event_hash =
+                        Some(artifact.events[0].event_hash.clone());
+                }
+                "forged_tip" => {
+                    artifact.cursors[0].tip_event_hash = Some(hash_for_test('f'));
+                }
+                _ => unreachable!("closed cursor-proof case set"),
+            }
+            let (bindings, registry) = admitting_replay_authority();
+            let outcome = import_mesh_artifact_into_connection(
+                &connection,
+                REPLAY_WORKSPACE_ID,
+                &artifact,
+                &bindings,
+                &registry,
+            )
+            .expect("rejected cursor remains a successful event-ledger import");
+            assert_eq!(outcome.imported_cursor_count, 0, "{case}");
+            assert_eq!(outcome.rejected_cursor_count, 1, "{case}");
+            assert!(
+                connection
+                    .list_mesh_peer_cursors(REPLAY_WORKSPACE_ID)
+                    .expect("list cursor rows")
+                    .is_empty(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn mesh_import_cursor_rejects_regression_and_same_sequence_fork() {
+        let connection = DbConnection::open_memory().expect("open memory db");
+        connection.migrate().expect("migrate db");
+        connection
+            .insert_workspace(
+                REPLAY_WORKSPACE_ID,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-mesh-cursor-regression".to_owned(),
+                    name: Some("mesh cursor regression".to_owned()),
+                },
+            )
+            .expect("insert workspace");
+        enroll_replay_test_peer(&connection, REPLAY_WORKSPACE_ID);
+        let artifact = mesh_export_artifact_for_import_counts();
+        let (bindings, registry) = admitting_replay_authority();
+        import_mesh_artifact_into_connection(
+            &connection,
+            REPLAY_WORKSPACE_ID,
+            &artifact,
+            &bindings,
+            &registry,
+        )
+        .expect("seed verified cursor");
+        let mut second_event = mesh_import_test_event();
+        let first_hash = artifact.events[0].event_hash.clone();
+        reseal_mesh_test_event(&mut second_event, |object| {
+            object.insert("seq".to_owned(), json!(2));
+            object.insert("prevEventHash".to_owned(), json!(first_hash));
+            object.insert(
+                "logicalMemoryId".to_owned(),
+                json!("mem_mesh_replay_counts_second"),
+            );
+            object.insert("contentHash".to_owned(), json!(hash_for_test('e')));
+        });
+        let mut forward = artifact.clone();
+        forward.events = vec![second_event];
+        forward.cursors[0].last_seq = 2;
+        forward.cursors[0].tip_event_hash = Some(forward.events[0].event_hash.clone());
+        let advanced = import_mesh_artifact_into_connection(
+            &connection,
+            REPLAY_WORKSPACE_ID,
+            &forward,
+            &bindings,
+            &registry,
+        )
+        .expect("advance through the second durable contiguous event");
+        assert_eq!(advanced.imported_event_count, 1);
+        assert_eq!(advanced.imported_cursor_count, 1);
+        assert_eq!(advanced.rejected_cursor_count, 0);
+        let original = connection
+            .get_mesh_peer_cursor(
+                REPLAY_WORKSPACE_ID,
+                "peer_mesh_replay_counts",
+                "wsp_remote00000000000000000001",
+            )
+            .expect("load cursor")
+            .expect("seeded cursor");
+        assert_eq!(original.last_seq, 2);
+
+        for (case, seq, tip) in [
+            ("regression", 1, artifact.cursors[0].tip_event_hash.clone()),
+            ("same_sequence_fork", 2, Some(hash_for_test('f'))),
+        ] {
+            let mut forged = forward.clone();
+            forged.cursors[0].last_seq = seq;
+            forged.cursors[0].tip_event_hash = tip;
+            let outcome = import_mesh_artifact_into_connection(
+                &connection,
+                REPLAY_WORKSPACE_ID,
+                &forged,
+                &bindings,
+                &registry,
+            )
+            .expect("cursor rejection is reported without failing event replay");
+            assert_eq!(outcome.imported_cursor_count, 0, "{case}");
+            assert_eq!(outcome.rejected_cursor_count, 1, "{case}");
+            let after = connection
+                .get_mesh_peer_cursor(
+                    REPLAY_WORKSPACE_ID,
+                    "peer_mesh_replay_counts",
+                    "wsp_remote00000000000000000001",
+                )
+                .expect("reload cursor")
+                .expect("cursor remains present");
+            assert_eq!(after, original, "{case}");
+        }
+    }
+
+    #[test]
+    fn mesh_import_rejects_disabled_and_identity_mismatched_peer_rows() {
+        for (case, enabled, local_origin) in [
+            ("disabled", false, "node_mesh_replay_counts"),
+            ("identity_mismatch", true, "node_locally_rotated"),
+        ] {
+            let connection = DbConnection::open_memory().expect("open memory db");
+            connection.migrate().expect("migrate db");
+            connection
+                .insert_workspace(
+                    REPLAY_WORKSPACE_ID,
+                    &crate::db::CreateWorkspaceInput {
+                        path: format!("/tmp/ee-mesh-peer-consent-{case}"),
+                        name: Some(format!("mesh peer consent {case}")),
+                    },
+                )
+                .expect("insert workspace");
+            connection
+                .upsert_mesh_peer(&UpsertMeshPeerInput {
+                    workspace_id: REPLAY_WORKSPACE_ID.to_owned(),
+                    peer_id: "peer_mesh_replay_counts".to_owned(),
+                    origin_node_id: local_origin.to_owned(),
+                    display_name: Some("local display".to_owned()),
+                    policy_summary_json: Some("{\"localPolicy\":true}".to_owned()),
+                    enabled,
+                    last_seen_at: Some("2026-05-21T19:49:00Z".to_owned()),
+                })
+                .expect("insert local peer posture");
+            let before = connection
+                .get_mesh_peer(REPLAY_WORKSPACE_ID, "peer_mesh_replay_counts")
+                .expect("load peer before import")
+                .expect("local peer exists");
+            let artifact = mesh_export_artifact_for_import_counts();
+            let (bindings, registry) = admitting_replay_authority();
+            let outcome = import_mesh_artifact_into_connection(
+                &connection,
+                REPLAY_WORKSPACE_ID,
+                &artifact,
+                &bindings,
+                &registry,
+            )
+            .expect("reject peer control row");
+            assert_eq!(outcome.imported_peer_count, 0, "{case}");
+            assert_eq!(outcome.rejected_peer_count, 1, "{case}");
+            let after = connection
+                .get_mesh_peer(REPLAY_WORKSPACE_ID, "peer_mesh_replay_counts")
+                .expect("load peer after import")
+                .expect("local peer remains");
+            assert_eq!(after, before, "{case}");
+        }
+    }
+
+    #[test]
+    fn mesh_import_rejects_duplicate_control_keys_without_order_dependent_mutation() {
+        let connection = DbConnection::open_memory().expect("open memory db");
+        connection.migrate().expect("migrate db");
+        connection
+            .insert_workspace(
+                REPLAY_WORKSPACE_ID,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-mesh-duplicate-control-keys".to_owned(),
+                    name: Some("mesh duplicate control keys".to_owned()),
+                },
+            )
+            .expect("insert workspace");
+        enroll_replay_test_peer(&connection, REPLAY_WORKSPACE_ID);
+        let before = connection
+            .get_mesh_peer(REPLAY_WORKSPACE_ID, "peer_mesh_replay_counts")
+            .expect("load peer before duplicate import")
+            .expect("peer exists");
+        let mut artifact = mesh_export_artifact_for_import_counts();
+        let mut conflicting_peer = artifact.peers[0].clone();
+        conflicting_peer.display_name = Some("last writer must not win".to_owned());
+        artifact.peers.push(conflicting_peer);
+        let mut conflicting_cursor = artifact.cursors[0].clone();
+        conflicting_cursor.last_seq = 99;
+        conflicting_cursor.tip_event_hash = Some(hash_for_test('f'));
+        artifact.cursors.push(conflicting_cursor);
+        let (bindings, registry) = admitting_replay_authority();
+        let outcome = import_mesh_artifact_into_connection(
+            &connection,
+            REPLAY_WORKSPACE_ID,
+            &artifact,
+            &bindings,
+            &registry,
+        )
+        .expect("duplicate control rows are audited rejections");
+        assert_eq!(outcome.rejected_peer_count, 2);
+        assert_eq!(outcome.rejected_cursor_count, 2);
+        assert_eq!(outcome.imported_peer_count, 0);
+        assert_eq!(outcome.imported_cursor_count, 0);
+        assert_eq!(
+            connection
+                .get_mesh_peer(REPLAY_WORKSPACE_ID, "peer_mesh_replay_counts")
+                .expect("load peer after duplicate import")
+                .expect("peer remains present"),
+            before
+        );
+        assert!(
+            connection
+                .list_mesh_peer_cursors(REPLAY_WORKSPACE_ID)
+                .expect("list cursor rows")
+                .is_empty()
         );
     }
 
@@ -7971,7 +8541,12 @@ max_bytes = 0
         .expect("import rotating peer and event");
         assert_eq!(
             imported,
-            (0, 0, 1),
+            MeshImportOutcome {
+                imported_event_count: 1,
+                rejected_peer_count: 1,
+                rejected_cursor_count: 1,
+                ..MeshImportOutcome::default()
+            },
             "the artifact may record its denied event but cannot roll back peer or cursor identity"
         );
 
@@ -8048,24 +8623,38 @@ max_bytes = 0
         .expect("import");
         assert_eq!(
             counts,
-            (1, 0, 1),
-            "the unknown peer is cached disabled, its cursor is not trusted, and the denied event is recorded"
+            MeshImportOutcome {
+                imported_event_count: 1,
+                rejected_peer_count: 1,
+                rejected_cursor_count: 1,
+                ..MeshImportOutcome::default()
+            },
+            "the unknown peer and cursor are rejected while the denied event is recorded"
         );
-        let cached_peer = connection
-            .get_mesh_peer(workspace_id, "peer_mesh_replay_counts")
-            .expect("reload cached peer")
-            .expect("unknown peer is retained as a disabled candidate");
         assert!(
-            !cached_peer.enabled,
-            "an import artifact cannot enroll or enable its own producer"
+            connection
+                .get_mesh_peer(workspace_id, "peer_mesh_replay_counts")
+                .expect("inspect unknown peer")
+                .is_none(),
+            "an import artifact cannot create even a disabled peer candidate"
         );
         assert!(
             connection
                 .list_mesh_peer_cursors(workspace_id)
                 .expect("list cursors")
                 .is_empty(),
-            "a disabled replay candidate cannot advance an authoritative cursor"
+            "an unconsented replay peer cannot advance an authoritative cursor"
         );
+        let rejection_audits = connection
+            .list_audit_by_action(MeshAuditEventKind::Import.audit_action(), None)
+            .expect("list control-row rejection audits");
+        assert_eq!(rejection_audits.len(), 2);
+        assert!(rejection_audits.iter().all(|audit| {
+            audit.details.as_deref().is_some_and(|details| {
+                details.contains("artifact_control_row")
+                    && !details.contains("peer_mesh_replay_counts")
+            })
+        }));
 
         let events = connection
             .list_mesh_import_ledger_events_for_workspace(workspace_id)
@@ -8121,7 +8710,15 @@ max_bytes = 0
             &registry,
         )
         .expect("persist rejected authority claim");
-        assert_eq!(counts, (0, 1, 1));
+        assert_eq!(
+            counts,
+            MeshImportOutcome {
+                imported_peer_count: 1,
+                imported_event_count: 1,
+                rejected_cursor_count: 1,
+                ..MeshImportOutcome::default()
+            }
+        );
 
         let events = connection
             .list_mesh_import_ledger_events_for_workspace(workspace_id)
@@ -8185,7 +8782,15 @@ max_bytes = 0
             &registry,
         )
         .expect("import");
-        assert_eq!(counts, (0, 1, 1));
+        assert_eq!(
+            counts,
+            MeshImportOutcome {
+                imported_peer_count: 1,
+                imported_event_count: 1,
+                rejected_cursor_count: 1,
+                ..MeshImportOutcome::default()
+            }
+        );
 
         let events = connection
             .list_mesh_import_ledger_events_for_workspace(workspace_id)
@@ -8295,6 +8900,7 @@ max_bytes = 1048576
 
         let mut artifact = mesh_export_artifact_for_import_counts();
         artifact.events = exported.events;
+        artifact.cursors[0].tip_event_hash = Some(artifact.events[0].event_hash.clone());
         let (bindings, registry) = admitting_replay_authority();
         let counts = import_mesh_artifact_into_connection(
             &connection,
@@ -8304,7 +8910,15 @@ max_bytes = 1048576
             &registry,
         )
         .expect("import full exported lane matrix");
-        assert_eq!(counts, (0, 1, lanes.len()));
+        assert_eq!(
+            counts,
+            MeshImportOutcome {
+                imported_peer_count: 1,
+                imported_cursor_count: 1,
+                imported_event_count: lanes.len(),
+                ..MeshImportOutcome::default()
+            }
+        );
 
         let ledger = connection
             .list_mesh_import_ledger_events_for_workspace(REPLAY_WORKSPACE_ID)
@@ -8425,6 +9039,7 @@ max_bytes = 1048576
     }
 
     fn mesh_export_artifact_for_import_counts() -> MeshExportArtifact {
+        let event = mesh_import_test_event();
         MeshExportArtifact {
             schema: MESH_EXPORT_ARTIFACT_SCHEMA_V1.to_string(),
             workspace_id: "wsp_remote00000000000000000001".to_string(),
@@ -8452,12 +9067,12 @@ max_bytes = 1048576
                 origin_node_id: "node_mesh_replay_counts".to_string(),
                 origin_workspace_id: "wsp_remote00000000000000000001".to_string(),
                 last_seq: 1,
-                tip_event_hash: Some(hash_for_test('a')),
+                tip_event_hash: Some(event.event_hash.clone()),
                 tip_audit_hash: Some(hash_for_test('b')),
                 status: "current".to_string(),
                 updated_at: "2026-05-21T19:50:01Z".to_string(),
             }],
-            events: vec![mesh_import_test_event()],
+            events: vec![event],
         }
     }
 

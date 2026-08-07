@@ -43,7 +43,7 @@ use crate::policy::{
 pub const MESH_CLI_STATUS_SCHEMA_V1: &str = "ee.mesh.cli.status.v1";
 pub const MESH_CLI_PEERS_SCHEMA_V1: &str = "ee.mesh.cli.peers.v1";
 pub const MESH_CLI_EXPORT_SCHEMA_V1: &str = "ee.mesh.cli.export.v1";
-pub const MESH_CLI_IMPORT_SCHEMA_V1: &str = "ee.mesh.cli.import.v1";
+pub const MESH_CLI_IMPORT_SCHEMA_V2: &str = "ee.mesh.cli.import.v2";
 pub const MESH_CLI_SYNC_SCHEMA_V1: &str = "ee.mesh.cli.sync.v1";
 pub const MESH_EXPORT_ARTIFACT_SCHEMA_V1: &str = "ee.mesh.foreground_export.v1";
 pub const MESH_AUTO_STATUS_SCHEMA_V1: &str = "ee.mesh.auto_status.v1";
@@ -56,6 +56,8 @@ pub const MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE: &str =
     "mesh_sync_supervisor_budget_exhausted";
 pub const MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE: &str = "mesh_sync_supervisor_backpressure";
 pub const MESH_SYNC_SUPERVISOR_RUNTIME_ERROR_CODE: &str = "mesh_sync_supervisor_runtime_error";
+pub const MESH_IMPORT_PEER_NOT_CONSENTED_CODE: &str = "mesh_import_peer_not_consented";
+pub const MESH_IMPORT_CURSOR_UNVERIFIED_CODE: &str = "mesh_import_cursor_unverified";
 
 const MESH_SYNC_SUPERVISOR_SCHEMA_V1: &str = "ee.mesh.sync_supervisor.v1";
 const MAX_MESH_SYNC_SUPERVISOR_TICKS: u32 = 64;
@@ -143,6 +145,32 @@ impl MeshCliDegradation {
             severity: "warning",
             message: format!("Mesh sync supervisor did not start: {message}"),
             repair: "Retry after the Asupersync runtime is healthy; foreground export/import remains available."
+                .to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn import_peer_not_consented(rejected_peer_count: usize) -> Self {
+        Self {
+            code: MESH_IMPORT_PEER_NOT_CONSENTED_CODE,
+            severity: "warning",
+            message: format!(
+                "Mesh import rejected {rejected_peer_count} peer row(s) without an exact enabled local enrollment."
+            ),
+            repair: "Enroll the peer explicitly with `ee mesh peer add`, then obtain a fresh artifact whose peer identity matches the local enrollment."
+                .to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub fn import_cursor_unverified(rejected_cursor_count: usize) -> Self {
+        Self {
+            code: MESH_IMPORT_CURSOR_UNVERIFIED_CODE,
+            severity: "warning",
+            message: format!(
+                "Mesh import rejected {rejected_cursor_count} cursor row(s) that were not backed by locally durable contiguous accepted replay."
+            ),
+            repair: "Obtain a fresh artifact containing the complete contiguous event range; use the explicit mesh cursor repair workflow for intentional regressions."
                 .to_owned(),
         }
     }
@@ -1182,6 +1210,8 @@ pub struct MeshCliImportReport {
     pub imported_peer_count: usize,
     pub imported_cursor_count: usize,
     pub imported_event_count: usize,
+    pub rejected_peer_count: usize,
+    pub rejected_cursor_count: usize,
     pub degraded: Vec<MeshCliDegradation>,
 }
 

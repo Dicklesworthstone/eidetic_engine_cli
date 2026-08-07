@@ -686,6 +686,8 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `auto_enrollment_invalid_override_node_key` | warning | bd-36bbk.1 |
 | `auto_enrollment_node_key_changed` | medium | bd-36bbk.1 (SRR6.46.3/.4/.14) |
 | `mesh_peer_policy_denied` | high | (TBD) |
+| `mesh_import_peer_not_consented` | warning | bd-q8m4s (team-confed) |
+| `mesh_import_cursor_unverified` | warning | bd-q8m4s (team-confed) |
 | `mesh_body_fetch_denied_by_policy` | medium | bd-nw0v3.1 (SRR6.16) |
 | `mesh_remote_body_unavailable` | medium | bd-nw0v3.2 (SRR6.16) |
 | `mesh_cached_body_hash_mismatch` | high | bd-nw0v3.3 (SRR6.16) |

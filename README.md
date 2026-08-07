@@ -1096,7 +1096,7 @@ tailnet or local file-exchange path is part of the agent workflow.
 | `ee mesh grant <peer-id> --lane <lane> --preview-token-stdin --json` | Verify a bearer from bounded stdin, advance the target generation, grant the lane, and audit atomically |
 | `ee mesh revoke-lane <peer-id> --lane <lane> --json` | Deny one lane, always advance its generation, invalidate prior previews, and audit atomically |
 | `ee mesh export --peer <peer-id> --out <file> --json` | Write a redaction-safe artifact for an enrolled, enabled peer; use `ee export` or `ee backup` for local backups |
-| `ee mesh import --file <file> --json` | Import a foreground mesh artifact from a local file |
+| `ee mesh import --file <file> --json` | Import a foreground artifact; peer rows require exact prior local consent, and cursors advance only through locally durable contiguous accepted replay |
 | `ee mesh sync --once --json` | Run one foreground sync cycle |
 
 Mesh command mode can be selected per command or through `EE_MESH_MODE`:

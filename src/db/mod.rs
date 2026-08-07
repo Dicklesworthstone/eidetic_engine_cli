@@ -13735,6 +13735,44 @@ impl DbConnection {
         Ok(true)
     }
 
+    /// Refresh non-authoritative display metadata for one exact, enabled local
+    /// enrollment without exposing any path to alter identity, policy, enabled
+    /// state, or durable lane grants.
+    pub(crate) fn refresh_mesh_peer_metadata_in_current_transaction(
+        &self,
+        workspace_id: &str,
+        peer_id: &str,
+        origin_node_id: &str,
+        display_name: Option<&str>,
+        last_seen_at: &str,
+    ) -> Result<bool> {
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE mesh_peers
+                SET display_name = ?4,
+                    last_seen_at = ?5
+              WHERE workspace_id = ?1
+                AND peer_id = ?2
+                AND origin_node_id = ?3
+                AND enabled = 1",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(peer_id.to_owned()),
+                Value::Text(origin_node_id.to_owned()),
+                display_name.map_or(Value::Null, |value| Value::Text(value.to_owned())),
+                Value::Text(last_seen_at.to_owned()),
+            ],
+        )?;
+        match affected {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: "mesh peer metadata refresh affected multiple enrollments".to_owned(),
+            }),
+        }
+    }
+
     fn invalidate_mesh_lane_grants_in_transaction(
         &self,
         workspace_id: &str,

@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_import_peer_not_consented",
+  "introduced_by": {
+    "bead": "bd-q8m4s",
+    "epic_letter": "team-confed"
+  },
+  "surfaces": [
+    "mesh import"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A mesh artifact contains a peer row that has no exact enabled local enrollment, so the row is rejected without creating, rotating, or re-enabling a peer.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "prepare an ee.mesh.foreground_export.v1 artifact whose peer is unknown, disabled, or identity-mismatched locally"
+    ],
+    "invocation": "ee mesh import --workspace . --file unconsented-peer.json --json"
+  },
+  "expected_emission": {
+    "code": "mesh_import_peer_not_consented",
+    "severity": "warning",
+    "message_contains": [
+      "peer row(s)",
+      "exact enabled local enrollment"
+    ],
+    "repair_contains": "ee mesh peer add"
+  }
+}

@@ -149,6 +149,8 @@ in the same commit, keeping the catalog complete by construction.
 | `proof_violation_detected` | verify proofs | high | bd-nnfq4 (SRR2) |
 | `ci_proof_lane_artifact_attestation_invalid` | diag environment-attestation | high | bd-fbeo2 (J) |
 | `mesh_peer_policy_denied` | mesh import, mesh export, status, doctor, support bundle | high | bd-3i5q7 (SRR6.19) |
+| `mesh_import_peer_not_consented` | mesh import | warning | bd-q8m4s (team-confed) |
+| `mesh_import_cursor_unverified` | mesh import | warning | bd-q8m4s (team-confed) |
 | `mesh_body_fetch_denied_by_policy` | mesh cache, context, mesh status, doctor | medium | bd-nw0v3.1 (SRR6.16) |
 | `mesh_remote_body_unavailable` | mesh cache, context, mesh status, doctor | medium | bd-nw0v3.2 (SRR6.16) |
 | `mesh_cached_body_hash_mismatch` | mesh cache, context, mesh status, doctor | high | bd-nw0v3.3 (SRR6.16) |

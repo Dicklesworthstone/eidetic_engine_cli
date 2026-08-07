@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_import_cursor_unverified",
+  "introduced_by": {
+    "bead": "bd-q8m4s",
+    "epic_letter": "team-confed"
+  },
+  "surfaces": [
+    "mesh import"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A mesh artifact cursor is not backed by an exact consented peer and locally durable contiguous accepted replay through its claimed tip.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "prepare an ee.mesh.foreground_export.v1 artifact with a regressed, gapped, denied, producer-mismatched, or hash-mismatched cursor claim"
+    ],
+    "invocation": "ee mesh import --workspace . --file unverified-cursor.json --json"
+  },
+  "expected_emission": {
+    "code": "mesh_import_cursor_unverified",
+    "severity": "warning",
+    "message_contains": [
+      "cursor row(s)",
+      "locally durable contiguous accepted replay"
+    ],
+    "repair_contains": "complete contiguous event range"
+  }
+}
