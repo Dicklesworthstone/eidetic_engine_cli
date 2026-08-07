@@ -4905,7 +4905,7 @@ mod tests {
     }
 
     #[test]
-    fn unattested_rch_run_is_not_authoritative_evidence() -> TestResult {
+    fn ordinary_rch_run_remains_authoritative_without_artifact_attestation() -> TestResult {
         let run = VerificationRunRecord::from_input(VerificationRunInput {
             run_id: Some("vrun_rch_bridge"),
             bead_id: Some("bd-1nxz4.5"),
@@ -4938,8 +4938,8 @@ mod tests {
         assert_eq!(record.gate_name, "rch verification run");
         assert_eq!(record.command_hash, "sha256:j1-command");
         assert!(record.command.contains("command_hash=sha256:j1-command"));
-        assert_eq!(record.status, VerificationStatus::Unknown);
-        assert!(!record.is_authoritative_pass());
+        assert_eq!(record.status, VerificationStatus::Passed);
+        assert!(record.is_authoritative_pass());
         assert!(record.offload.required_remote);
         assert_eq!(record.offload.worker.as_deref(), Some("vmi123"));
         assert_eq!(
@@ -4955,6 +4955,11 @@ mod tests {
         let encoded = serde_json::to_string(&record)?;
         assert!(!encoded.contains("remote worker passed"));
         assert!(!encoded.contains("/tmp/verify-log.jsonl"));
+        let mut failed_run = run;
+        failed_run.exit_code = Some(101);
+        let failed_record = verification_evidence_record_from_run_record(&failed_run);
+        assert_eq!(failed_record.status, VerificationStatus::Failed);
+        assert!(!failed_record.is_authoritative_pass());
         Ok(())
     }
 
@@ -4987,6 +4992,7 @@ mod tests {
         run.exercised_binary_hash = Some(
             "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned(),
         );
+        run.exit_code = Some(101);
 
         let rejection_codes = verification_run_remote_artifact_rejections(&run);
         assert!(rejection_codes.contains(&"remote_artifact_binary_hash_mismatch".to_owned()));
@@ -5033,6 +5039,34 @@ mod tests {
             broker
                 .stale_reason_codes
                 .contains(&"remote_artifact_attestation_invalid".to_owned())
+        );
+
+        let valid_run = sample_verification_run_records()
+            .into_iter()
+            .next()
+            .ok_or_else(|| std::io::Error::other("remote sample exists"))?;
+        let wrong_profile = verification_broker_view(
+            VerificationBrokerViewRequest {
+                bead_id: Some("bd-example"),
+                source_hash: Some(SAMPLE_REMOTE_SOURCE_HASH),
+                command_hash: "blake3:rch-command",
+                command_class: "cargo_test",
+                normalized_argv_hash: "blake3:rch-command-argv",
+                execution_substrate: "remote_artifact",
+                env_fingerprint_class: Some("class:external_cargo_target"),
+                target_triple: Some(SAMPLE_REMOTE_TARGET),
+                target_profile: Some("release"),
+                build_command_hash: Some(SAMPLE_REMOTE_BUILD_COMMAND_HASH),
+                effective_input_hash: Some(SAMPLE_REMOTE_EFFECTIVE_INPUT_HASH),
+                provenance_hash: Some(SAMPLE_REMOTE_PROVENANCE_HASH),
+            },
+            &[valid_run],
+        );
+        assert_eq!(wrong_profile.status, VerificationBrokerStatus::Incompatible);
+        assert!(
+            wrong_profile
+                .stale_reason_codes
+                .contains(&"remote_artifact_profile_mismatch".to_owned())
         );
 
         let capsule = verification_closeout_capsule(
@@ -5121,7 +5155,7 @@ mod tests {
             VerificationStatus::Passed
         );
 
-        let mut mismatched = manifest;
+        let mut mismatched = manifest.clone();
         mismatched["fields"]["binary_hash"] = serde_json::json!(
             "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
         );
@@ -5137,6 +5171,46 @@ mod tests {
             VerificationRunImportError::MismatchedArtifactManifest { reason, .. }
                 if reason.contains("binary_hash")
         ));
+
+        for (field, value, expected_reason) in [
+            (
+                "binary_path",
+                serde_json::json!("/tmp/other-ee"),
+                "binary_path",
+            ),
+            (
+                "command_arg_count",
+                serde_json::json!("2"),
+                "command_arg_count",
+            ),
+            (
+                "command_hash",
+                serde_json::json!(
+                    "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                ),
+                "command_hash",
+            ),
+            (
+                "source_commit",
+                serde_json::json!("cccccccccccccccccccccccccccccccccccccccc"),
+                "source_commit",
+            ),
+        ] {
+            let mut mismatched = manifest.clone();
+            mismatched["fields"][field] = value;
+            let mismatched_jsonl = format!(
+                "{}\n{}",
+                serde_json::to_string(&command)?,
+                serde_json::to_string(&mismatched)?
+            );
+            let error = verification_run_records_from_j1_jsonl(&mismatched_jsonl)
+                .expect_err("v2 binding mismatch must be rejected");
+            assert!(matches!(
+                error,
+                VerificationRunImportError::MismatchedArtifactManifest { reason, .. }
+                    if reason.contains(expected_reason)
+            ));
+        }
         Ok(())
     }
 

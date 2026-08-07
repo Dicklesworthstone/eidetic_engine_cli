@@ -1054,6 +1054,10 @@ fn reuse_advisory_reports_all_statuses() -> TestResult {
             reuse_request(Some("blake3:other-source"), "blake3:other-command", "rch"),
             VerificationReuseStatus::RerunRequired,
         ),
+        (
+            reuse_request(None, "blake3:rch-command", "remote_artifact"),
+            VerificationReuseStatus::RerunRequired,
+        ),
     ] {
         let advisory = verification_reuse_advisory(request, &extended);
         assert_eq!(advisory.status, expected_status);
@@ -1070,6 +1074,16 @@ fn reuse_advisory_reports_all_statuses() -> TestResult {
     );
     assert_eq!(missing.status, VerificationReuseStatus::MissingEvidence);
     assert_eq!(missing.repair_actions[0].kind, "import_retained_j1_log");
+
+    let mut wrong_profile = reuse_request(
+        Some(REMOTE_SOURCE_HASH),
+        "blake3:rch-command",
+        "remote_artifact",
+    );
+    wrong_profile.target_profile = Some("release");
+    let mismatched = verification_reuse_advisory(wrong_profile, &records);
+    assert_eq!(mismatched.status, VerificationReuseStatus::RerunRequired);
+    assert!(mismatched.reason.contains("build identity"));
     Ok(())
 }
 

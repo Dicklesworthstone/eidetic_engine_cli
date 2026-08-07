@@ -4416,6 +4416,65 @@ mod tests {
     }
 
     #[test]
+    fn validated_rch_pass_can_close_a_verification_gate() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or("database path should have parent")?,
+        )
+        .map_err(|error| error.to_string())?;
+        let proof = serde_json::json!({
+            "schema": RCH_VERIFY_SCHEMA_V1,
+            "command_text": "cargo test --lib verification",
+            "command_hash": "sha256:validated-rch-pass",
+            "command_kind": "cargo_test",
+            "status": "remote_pass",
+            "exit_code": 0,
+            "worker_id": "vmi123",
+            "remote_required": true
+        });
+        let evidence = crate::models::verification_evidence_record_from_rch_verify(&proof)
+            .map_err(std::io::Error::other)?;
+
+        record_validated_verification_evidence(
+            VerificationRecordOptions {
+                database_path: &database_path,
+                workspace_path: temp.path(),
+                target_type: "memory",
+                target_id: "mem_validated_rch_pass",
+                actor: Some("codex:test"),
+                evidence,
+            },
+            VerificationEvidenceAuthority::ValidatedRchVerify,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report =
+            verification_closure_guidance_from_ledger(&VerificationClosureGuidanceOptions {
+                database_path: &database_path,
+                bead_id: None,
+                requirements: vec![VerificationGateRequirement::new(
+                    "cargo_test",
+                    Some("cargo test --lib verification"),
+                    true,
+                )],
+            })
+            .map_err(|error| error.to_string())?;
+
+        ensure(
+            report.guidance.can_close,
+            "validated RCH pass retains closure authority",
+        )?;
+        ensure_equal(
+            &report.guidance.assessments[0].matched_status,
+            &Some(VerificationStatus::Passed),
+            "validated RCH pass status",
+        )
+    }
+
+    #[test]
     fn provenance_reverify_action_enforces_no_silent_mutation() {
         use ProvenanceReverifyAction as Action;
         use VerifyProvenanceReferentStatus as Status;
