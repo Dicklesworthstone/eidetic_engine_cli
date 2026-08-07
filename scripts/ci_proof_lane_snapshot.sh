@@ -356,7 +356,8 @@ def verification_report_evidence_valid?(report)
     "environment_attestation_help" => canonical_hash(["ee", "diag", "environment-attestation", "--help"])
   }
   return false unless probes.length == expected.length
-  return false unless probes.map { |probe| probe.is_a?(Hash) ? probe["id"] : nil }.sort == expected.keys.sort
+  return false unless probes.all? { |probe| probe.is_a?(Hash) }
+  return false unless probes.map { |probe| probe["id"] }.sort == expected.keys.sort
 
   probes.all? do |probe|
     next false unless probe["status"] == "passed" && probe["exitCode"] == 0
@@ -463,6 +464,27 @@ def artifact_from_input(raw, run_id, run_head_sha, repository, verification_repo
       "firstFailureDiagnosis" => nil
     }
   ]
+  surface_probes = Array(surface_probes).map do |probe|
+    probe = probe.is_a?(Hash) ? probe : {}
+    command_template = probe["commandTemplate"].to_s
+    inferred_id =
+      if command_template == "ee version --json"
+        "version_json"
+      elsif command_template == "ee diag environment-attestation --help"
+        "environment_attestation_help"
+      end
+    {
+      "probeId" => probe["probeId"] || inferred_id,
+      "commandTemplate" => command_template.empty? ? "ee artifact behavior probe" : command_template,
+      "status" => probe["status"] || "not_run",
+      "expectedSurface" => probe["expectedSurface"] || "attested artifact behavior",
+      "argvHash" => probe["argvHash"],
+      "exitCode" => probe["exitCode"],
+      "stdoutHash" => probe["stdoutHash"],
+      "stderrHash" => probe["stderrHash"],
+      "firstFailureDiagnosis" => probe["firstFailureDiagnosis"]
+    }
+  end
   attestation_status = raw["attestationStatus"] || "not_checked"
   # GitHub's artifact-list API cannot establish manifest verification.  Only a
   # separately supplied consumer-verification report may promote an artifact
@@ -546,9 +568,14 @@ def missing_artifact(run_head_sha)
     "attestationRejections" => ["artifact_missing"],
     "surfaceProbes" => [
       {
+        "probeId" => "environment_attestation_help",
         "commandTemplate" => "ee diag environment-attestation --help",
         "status" => "not_run",
         "expectedSurface" => "diag environment-attestation",
+        "argvHash" => nil,
+        "exitCode" => nil,
+        "stdoutHash" => nil,
+        "stderrHash" => nil,
         "firstFailureDiagnosis" => "expected artifact was missing after successful proof-lane completion"
       }
     ]
@@ -649,16 +676,31 @@ def run_job_labels(run)
   run.fetch("jobEvidence", []).flat_map { |job| job.fetch("labels", []) }.uniq.sort
 end
 
-def artifact_attestation_verified?(artifact)
+def artifact_attestation_verified?(artifact, run_id = nil)
   probes = artifact.fetch("surfaceProbes", [])
+  expected_probe_hashes = {
+    "version_json" => canonical_hash(["ee", "version", "--json"]),
+    "environment_attestation_help" => canonical_hash(["ee", "diag", "environment-attestation", "--help"])
+  }
   artifact["checksumStatus"] == "verified" &&
     artifact["attestationStatus"] == "verified" &&
     artifact["sourceSha"] == artifact["attestedSourceCommit"] &&
-    artifact["manifestHash"].to_s.match?(/\Asha256:[a-f0-9]{64}\z/) &&
-    artifact["verificationHash"].to_s.match?(/\Asha256:[a-f0-9]{64}\z/) &&
-    !artifact["attestedGitTree"].to_s.empty? &&
-    !probes.empty? &&
-    probes.all? { |probe| probe["status"] == "passed" }
+    (run_id.nil? || artifact["attestedRunId"] == run_id) &&
+    !artifact["artifactId"].to_s.empty? &&
+    full_git_object?(artifact["attestedGitTree"]) &&
+    %w[manifestHash verificationHash binaryHash archiveHash buildCommandHash effectiveInputHash provenanceHash].all? do |field|
+      sha256_hash?(artifact[field])
+    end &&
+    artifact.fetch("attestationRejections", []).empty? &&
+    probes.length == expected_probe_hashes.length &&
+    probes.map { |probe| probe["probeId"] }.sort == expected_probe_hashes.keys.sort &&
+    probes.all? do |probe|
+      probe["status"] == "passed" &&
+        probe["exitCode"] == 0 &&
+        probe["argvHash"] == expected_probe_hashes[probe["probeId"]] &&
+        sha256_hash?(probe["stdoutHash"]) &&
+        sha256_hash?(probe["stderrHash"])
+    end
 end
 
 def artifact_attestation_rejected?(artifact)
@@ -772,7 +814,7 @@ def normalize_run(raw_run, repository, artifact_index, generated_at, verificatio
         "artifact surface probe failed required command-surface validation"
     elsif expected_artifact && artifact_attestation_rejected?(expected_artifact)
       "artifact attestation was rejected; source, build inputs, command, packaged bytes, or probe evidence did not match"
-    elsif expected_artifact && !artifact_attestation_verified?(expected_artifact)
+    elsif expected_artifact && !artifact_attestation_verified?(expected_artifact, run_id)
       "artifact exists but checksum, source-bound manifest, or consumer behavior probe is not verified"
     elsif freshness == "stale" && artifacts.any? { |artifact| artifact["status"] == "available" }
       "artifact source SHA is older than the requested repository head SHA"
@@ -933,13 +975,16 @@ def choose_verdict(raw_runs, normalized_runs, repository)
   return ["local_only_head_unavailable", nil] if repository["headShaReachability"] == "github_unreachable"
 
   dedicated = raw_runs.select { |run| run["workflowName"].to_s == "macOS EE Artifact" }
+  dedicated_run_ids = dedicated.map { |run| (run["databaseId"] || run["runId"]).to_s }
   current = dedicated.select { |run| run["headSha"].to_s == head_sha }
   active_current = current.select { |run| active_run?(run) }
   return ["duplicate_dispatch_detected", (active_current.first["databaseId"] || active_current.first["runId"]).to_s] if active_current.length > 1
   return ["wait_for_active_run", (active_current.first["databaseId"] || active_current.first["runId"]).to_s] if active_current.length == 1
 
   current_completed = normalized_runs.select do |run|
-    run["headSha"] == head_sha && run["status"] == "completed"
+    dedicated_run_ids.include?(run["runId"]) &&
+      run["headSha"] == head_sha &&
+      run["status"] == "completed"
   end
   current_success = current_completed.select { |run| run["conclusion"] == "success" }
   current_success.each do |run|
@@ -948,7 +993,7 @@ def choose_verdict(raw_runs, normalized_runs, repository)
       return ["checksum_mismatch", run["runId"]] if artifact["checksumStatus"] == "mismatch"
       return ["surface_probe_failed", run["runId"]] if artifact.fetch("surfaceProbes", []).any? { |probe| probe["status"] == "failed" }
       return ["artifact_attestation_invalid", run["runId"]] if artifact_attestation_rejected?(artifact)
-      return ["artifact_attestation_required", run["runId"]] unless artifact_attestation_verified?(artifact)
+      return ["artifact_attestation_required", run["runId"]] unless artifact_attestation_verified?(artifact, run["runId"])
       return ["fresh_artifact_available", run["runId"]]
     elsif artifact && artifact["status"] == "missing"
       return ["artifact_missing", run["runId"]]
@@ -959,7 +1004,9 @@ def choose_verdict(raw_runs, normalized_runs, repository)
   return ["run_cancelled_before_artifact", cancelled["runId"]] if cancelled
 
   stale = normalized_runs.find do |run|
-    run["sourceFreshness"] == "stale" && run["artifacts"].any? { |artifact| artifact["status"] == "available" }
+    dedicated_run_ids.include?(run["runId"]) &&
+      run["sourceFreshness"] == "stale" &&
+      run["artifacts"].any? { |artifact| artifact["status"] == "available" }
   end
   return ["artifact_stale", stale["runId"]] if stale
 
@@ -1005,7 +1052,7 @@ def build_snapshot(repository:, generated_at:, raw_runs:, artifact_index: {}, ve
     run["artifacts"].count do |artifact|
       artifact["status"] == "available" &&
         !artifact_attestation_rejected?(artifact) &&
-        !artifact_attestation_verified?(artifact)
+        !artifact_attestation_verified?(artifact, run["runId"])
     end
   end
   artifact_authority_verdicts = %w[fresh_artifact_available artifact_stale checksum_mismatch surface_probe_failed artifact_attestation_invalid artifact_attestation_required]

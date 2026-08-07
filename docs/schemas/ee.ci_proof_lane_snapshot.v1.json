@@ -388,6 +388,7 @@
       "type": "object",
       "required": [
         "name",
+        "artifactId",
         "status",
         "retentionExpiresAt",
         "checksumStatus",
@@ -398,12 +399,24 @@
         "attestedGitTree",
         "manifestHash",
         "verificationHash",
+        "attestedRunId",
+        "binaryHash",
+        "archiveHash",
+        "buildCommandHash",
+        "effectiveInputHash",
+        "provenanceHash",
         "attestationRejections",
         "surfaceProbes"
       ],
       "additionalProperties": false,
       "properties": {
         "name": {"$ref": "#/$defs/safeString"},
+        "artifactId": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^[1-9][0-9]*$"}
+          ]
+        },
         "status": {
           "type": "string",
           "enum": ["available", "missing", "expired", "not_checked"]
@@ -443,6 +456,42 @@
             {"$ref": "#/$defs/hash"}
           ]
         },
+        "attestedRunId": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string", "pattern": "^[1-9][0-9]*$"}
+          ]
+        },
+        "binaryHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
+        "archiveHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
+        "buildCommandHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
+        "effectiveInputHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
+        "provenanceHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
         "attestationRejections": {
           "type": "array",
           "items": {"$ref": "#/$defs/safeString"},
@@ -458,15 +507,45 @@
     },
     "surfaceProbe": {
       "type": "object",
-      "required": ["commandTemplate", "status", "expectedSurface", "firstFailureDiagnosis"],
+      "required": [
+        "probeId",
+        "commandTemplate",
+        "status",
+        "expectedSurface",
+        "argvHash",
+        "exitCode",
+        "stdoutHash",
+        "stderrHash",
+        "firstFailureDiagnosis"
+      ],
       "additionalProperties": false,
       "properties": {
+        "probeId": {"type": ["string", "null"]},
         "commandTemplate": {"$ref": "#/$defs/safeString"},
         "status": {
           "type": "string",
           "enum": ["passed", "failed", "not_run"]
         },
         "expectedSurface": {"$ref": "#/$defs/safeString"},
+        "argvHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
+        "exitCode": {"type": ["integer", "null"]},
+        "stdoutHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
+        "stderrHash": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/hash"}
+          ]
+        },
         "firstFailureDiagnosis": {
           "oneOf": [
             {"type": "null"},
