@@ -16,6 +16,7 @@ const EXIT_SUCCESS: i32 = 0;
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
         .args(args)
+        .env("EE_EMBED_DOWNLOAD", "off")
         .env_remove("EE_WORKSPACE")
         .env_remove("EE_WORKSPACE_REGISTRY")
         .output()
