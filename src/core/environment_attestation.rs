@@ -838,12 +838,19 @@ fn ci_proof_lane_degraded_codes(snapshot: &Value) -> Vec<EnvironmentAttestationD
 
 fn ci_proof_lane_artifact_evidence_verified(snapshot: &Value) -> bool {
     let requested_head = ci_proof_lane_text(snapshot, "/repository/headSha");
+    let recommended_run_id = ci_proof_lane_text(snapshot, "/activeRecommendation/runId");
     if ci_proof_lane_text(snapshot, "/summary/verdict") != Some("fresh_artifact_available")
         || requested_head.is_none()
+        || recommended_run_id.is_none()
+        || ci_proof_lane_text(snapshot, "/activeRecommendation/workflowName")
+            != Some("macOS EE Artifact")
+        || ci_proof_lane_text(snapshot, "/activeRecommendation/nextAction")
+            != Some("reuse_verified_artifact")
     {
         return false;
     }
     let requested_head = requested_head.expect("checked above");
+    let recommended_run_id = recommended_run_id.expect("checked above");
     let Some(workflows) = snapshot.get("workflows").and_then(Value::as_array) else {
         return false;
     };
@@ -855,7 +862,8 @@ fn ci_proof_lane_artifact_evidence_verified(snapshot: &Value) -> bool {
         .filter_map(|workflow| workflow.get("runs").and_then(Value::as_array))
         .flatten()
         .find(|run| {
-            run.get("headSha").and_then(Value::as_str) == Some(requested_head)
+            run.get("runId").and_then(Value::as_str) == Some(recommended_run_id)
+                && run.get("headSha").and_then(Value::as_str) == Some(requested_head)
                 && run.get("status").and_then(Value::as_str) == Some("completed")
                 && run.get("conclusion").and_then(Value::as_str) == Some("success")
                 && run.get("sourceFreshness").and_then(Value::as_str) == Some("current")
@@ -877,9 +885,31 @@ fn ci_proof_lane_artifact_evidence_verified(snapshot: &Value) -> bool {
         .get("surfaceProbes")
         .and_then(Value::as_array)
         .is_some_and(|probes| {
-            !probes.is_empty()
-                && probes.iter().all(|probe| {
-                    probe.get("status").and_then(Value::as_str) == Some("passed")
+            const VERSION_ARGV_HASH: &str =
+                "sha256:4af47b5e027e1686b124d8c7f986fe44a60b0b8a73c9cf1a32a8d8a592b39b48";
+            const HELP_ARGV_HASH: &str =
+                "sha256:37fa79e205cce2dafd8ac4da2075f73f74ed03beeca38cc6d741fcf54be21558";
+            if probes.len() != 2 {
+                return false;
+            }
+            [("version_json", VERSION_ARGV_HASH), ("environment_attestation_help", HELP_ARGV_HASH)]
+                .iter()
+                .all(|(probe_id, argv_hash)| {
+                    probes.iter().any(|probe| {
+                        probe.get("probeId").and_then(Value::as_str) == Some(*probe_id)
+                            && probe.get("status").and_then(Value::as_str) == Some("passed")
+                            && probe.get("exitCode").and_then(Value::as_i64) == Some(0)
+                            && probe.get("argvHash").and_then(Value::as_str)
+                                == Some(*argv_hash)
+                            && probe
+                                .get("stdoutHash")
+                                .and_then(Value::as_str)
+                                .is_some_and(is_sha256_hash)
+                            && probe
+                                .get("stderrHash")
+                                .and_then(Value::as_str)
+                                .is_some_and(is_sha256_hash)
+                    })
                 })
         });
     let no_rejections = artifact
@@ -889,6 +919,11 @@ fn ci_proof_lane_artifact_evidence_verified(snapshot: &Value) -> bool {
     artifact.get("status").and_then(Value::as_str) == Some("available")
         && artifact.get("checksumStatus").and_then(Value::as_str) == Some("verified")
         && artifact.get("attestationStatus").and_then(Value::as_str) == Some("verified")
+        && artifact
+            .get("artifactId")
+            .and_then(Value::as_str)
+            .is_some_and(is_positive_decimal_id)
+        && artifact.get("attestedRunId").and_then(Value::as_str) == Some(recommended_run_id)
         && artifact.get("sourceSha").and_then(Value::as_str) == Some(requested_head)
         && artifact.get("attestedSourceCommit").and_then(Value::as_str)
             == Some(requested_head)
@@ -904,8 +939,28 @@ fn ci_proof_lane_artifact_evidence_verified(snapshot: &Value) -> bool {
             .get("verificationHash")
             .and_then(Value::as_str)
             .is_some_and(is_sha256_hash)
+        && [
+            "binaryHash",
+            "archiveHash",
+            "buildCommandHash",
+            "effectiveInputHash",
+            "provenanceHash",
+        ]
+        .iter()
+        .all(|field| {
+            artifact
+                .get(*field)
+                .and_then(Value::as_str)
+                .is_some_and(is_sha256_hash)
+        })
         && probes_passed
         && no_rejections
+}
+
+fn is_positive_decimal_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.as_bytes()[0] != b'0'
+        && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn is_full_git_object(value: &str) -> bool {
@@ -946,14 +1001,29 @@ fn ci_proof_lane_code_for_verdict(verdict: &str) -> EnvironmentAttestationDegrad
 }
 
 fn ci_proof_lane_metrics(snapshot: &Value) -> Vec<EnvironmentAttestationMetric> {
+    let recommended_workflow = ci_proof_lane_text(snapshot, "/activeRecommendation/workflowName");
+    let recommended_run_id = ci_proof_lane_text(snapshot, "/activeRecommendation/runId");
     let workflow = snapshot
         .get("workflows")
         .and_then(Value::as_array)
-        .and_then(|items| items.first());
+        .and_then(|items| {
+            items.iter().find(|workflow| {
+                workflow.get("workflowName").and_then(Value::as_str)
+                    == recommended_workflow.or(Some("macOS EE Artifact"))
+            })
+        });
     let run = workflow
         .and_then(|value| value.get("runs"))
         .and_then(Value::as_array)
-        .and_then(|items| items.first());
+        .and_then(|items| {
+            recommended_run_id
+                .and_then(|run_id| {
+                    items.iter().find(|run| {
+                        run.get("runId").and_then(Value::as_str) == Some(run_id)
+                    })
+                })
+                .or_else(|| items.first())
+        });
     let artifact = run
         .and_then(|value| value.get("artifacts"))
         .and_then(Value::as_array)
@@ -1033,6 +1103,11 @@ fn ci_proof_lane_metrics(snapshot: &Value) -> Vec<EnvironmentAttestationMetric> 
         );
         push_ci_metric(
             &mut metrics,
+            "artifact_id",
+            artifact.get("artifactId").and_then(Value::as_str),
+        );
+        push_ci_metric(
+            &mut metrics,
             "checksum_status",
             artifact.get("checksumStatus").and_then(Value::as_str),
         );
@@ -1066,6 +1141,20 @@ fn ci_proof_lane_metrics(snapshot: &Value) -> Vec<EnvironmentAttestationMetric> 
             "artifact_verification_hash",
             artifact.get("verificationHash").and_then(Value::as_str),
         );
+        for (name, field) in [
+            ("attested_run_id", "attestedRunId"),
+            ("artifact_binary_hash", "binaryHash"),
+            ("artifact_archive_hash", "archiveHash"),
+            ("artifact_build_command_hash", "buildCommandHash"),
+            ("artifact_effective_input_hash", "effectiveInputHash"),
+            ("artifact_provenance_hash", "provenanceHash"),
+        ] {
+            push_ci_metric(
+                &mut metrics,
+                name,
+                artifact.get(field).and_then(Value::as_str),
+            );
+        }
     }
     if let Some(surface_probe) = surface_probe {
         push_ci_metric(
@@ -2264,6 +2353,22 @@ mod tests {
             (
                 "/workflows/0/runs/0/artifacts/0/surfaceProbes/0/status",
                 serde_json::json!("not_run"),
+            ),
+            (
+                "/activeRecommendation/runId",
+                serde_json::json!("99999999999"),
+            ),
+            (
+                "/workflows/0/runs/0/artifacts/0/attestedRunId",
+                serde_json::json!("99999999999"),
+            ),
+            (
+                "/workflows/0/runs/0/artifacts/0/binaryHash",
+                serde_json::json!("sha256:not-a-digest"),
+            ),
+            (
+                "/workflows/0/runs/0/artifacts/0/surfaceProbes/1/probeId",
+                serde_json::json!("unexpected_probe"),
             ),
         ] {
             let mut snapshot = ci_proof_lane_fixture("fresh_artifact_available");

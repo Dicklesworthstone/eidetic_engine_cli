@@ -187,6 +187,7 @@
         "ci_proof_lane_cancelled_before_artifact",
         "ci_proof_lane_checksum_mismatch",
         "ci_proof_lane_surface_probe_failed",
+        "ci_proof_lane_artifact_attestation_invalid",
         "ci_proof_lane_unknown_source",
         "ci_proof_lane_duplicate_dispatch"
       ]
