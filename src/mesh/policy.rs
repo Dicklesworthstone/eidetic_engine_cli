@@ -10,16 +10,149 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value as JsonValue, json};
 
-use crate::config::{ConfigFile, MeshLane, MeshLaneDecision};
+use crate::config::{ConfigFile, MeshLane, MeshLaneDecision, MeshPeerGroupBinding};
 use crate::db::StoredMeshLaneGrantState;
 
 pub use crate::core::memory_scope::{
-    MeshBodyFetchPolicy, MeshEventValidity, MeshImportDecisionInput, MeshImportDecisionKind,
-    MeshOutboundPolicyDecision, MeshOutboundPolicyDecisionInput, MeshPeerLaneOverride,
-    MeshPeerPolicy, MeshPeerPolicyDecision, MeshPeerPolicyDecisionInput, MeshPolicyFailureSurface,
-    MeshRedactionDecision, MeshRedactionPolicy, MeshTrustLane,
+    MeshBodyFetchPolicy, MeshEventValidity, MeshImportDecision, MeshImportDecisionInput,
+    MeshImportDecisionKind, MeshOutboundPolicyDecision, MeshOutboundPolicyDecisionInput,
+    MeshPeerLaneOverride, MeshPeerPolicy, MeshPeerPolicyDecision, MeshPeerPolicyDecisionInput,
+    MeshPolicyFailureSurface, MeshRedactionDecision, MeshRedactionPolicy, MeshTrustLane,
     decide_mesh_import_with_lane_override, decide_mesh_outbound_policy, decide_mesh_peer_policy,
+    parse_mesh_lane,
 };
+
+/// Stable internal handoff between transport decoders and inbound policy.
+///
+/// Legacy file replay and signed live transport both construct this request
+/// directly from already-validated fields. Neither path reserializes or
+/// upgrades the source event to gain authority.
+pub const MESH_IMPORT_ADMISSION_REQUEST_SCHEMA_V1: &str = "ee.mesh.import_admission_request.v1";
+
+const REJECTED_MESH_IMPORT_TRUST_CLAIMS: [&str; 5] = [
+    "localHuman",
+    "human_explicit",
+    "peer_human_attested",
+    "cass_evidence",
+    "legacy_import",
+];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshImportAdmissionRequestV1<'a> {
+    local_workspace_id: &'a str,
+    origin_workspace_id: &'a str,
+    producer_peer_id: &'a str,
+    material_lane: &'a str,
+    claimed_trust_lane: &'a str,
+    event_validity: MeshEventValidity,
+    requested_unredacted_body_bytes: Option<usize>,
+}
+
+impl<'a> MeshImportAdmissionRequestV1<'a> {
+    #[must_use]
+    pub const fn new(
+        local_workspace_id: &'a str,
+        origin_workspace_id: &'a str,
+        producer_peer_id: &'a str,
+        material_lane: &'a str,
+        claimed_trust_lane: &'a str,
+        event_validity: MeshEventValidity,
+        requested_unredacted_body_bytes: Option<usize>,
+    ) -> Self {
+        Self {
+            local_workspace_id,
+            origin_workspace_id,
+            producer_peer_id,
+            material_lane,
+            claimed_trust_lane,
+            event_validity,
+            requested_unredacted_body_bytes,
+        }
+    }
+
+    #[must_use]
+    pub const fn schema(&self) -> &'static str {
+        MESH_IMPORT_ADMISSION_REQUEST_SCHEMA_V1
+    }
+
+    #[must_use]
+    pub fn to_json(&self) -> JsonValue {
+        json!({
+            "schema": self.schema(),
+            "localWorkspaceId": self.local_workspace_id,
+            "originWorkspaceId": self.origin_workspace_id,
+            "producerPeerId": self.producer_peer_id,
+            "materialLane": self.material_lane,
+            "claimedTrustLane": self.claimed_trust_lane,
+            "eventValidity": mesh_event_validity_name(self.event_validity),
+            "requestedUnredactedBodyBytes": self.requested_unredacted_body_bytes,
+        })
+    }
+}
+
+/// Receiver-local result of applying both inbound authority layers.
+///
+/// `decision` is absent only when a raw legacy lane cannot be parsed into the
+/// closed policy vocabulary. Such input is denied and records no fabricated
+/// policy projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeshImportAdmissionOutcome {
+    decision: Option<MeshPeerPolicyDecision>,
+    layer: Option<&'static str>,
+    detail: Option<(&'static str, JsonValue)>,
+}
+
+impl MeshImportAdmissionOutcome {
+    #[must_use]
+    pub fn import_decision(&self) -> &'static str {
+        self.decision.as_ref().map_or("deny", |decision| {
+            decision.import.workspace_scope_decision.as_str()
+        })
+    }
+
+    #[must_use]
+    pub fn admits_local_truth(&self) -> bool {
+        self.decision
+            .as_ref()
+            .is_some_and(|decision| decision.import.permits_local_truth_side_effects())
+    }
+
+    #[must_use]
+    pub fn policy_decision_json(&self) -> Option<String> {
+        let mut value = self.decision.as_ref()?.to_json();
+        if let Some(object) = value.as_object_mut() {
+            if let Some(layer) = self.layer {
+                object.insert("layer".to_owned(), json!(layer));
+            }
+            if let Some((key, detail)) = &self.detail {
+                object.insert((*key).to_owned(), detail.clone());
+            }
+        }
+        Some(value.to_string())
+    }
+
+    #[must_use]
+    pub fn policy_failure_surface_json(&self) -> Option<String> {
+        self.decision
+            .as_ref()
+            .and_then(MeshPeerPolicyDecision::failure_surface)
+            .map(|surface| surface.to_json().to_string())
+    }
+}
+
+#[must_use]
+pub fn mesh_import_claimed_trust_lane_is_rejected(claim: &str) -> bool {
+    REJECTED_MESH_IMPORT_TRUST_CLAIMS.contains(&claim)
+}
+
+const fn mesh_event_validity_name(validity: MeshEventValidity) -> &'static str {
+    match validity {
+        MeshEventValidity::Valid => "valid",
+        MeshEventValidity::PolicyQuarantine => "policy_quarantine",
+        MeshEventValidity::Malformed => "malformed",
+        MeshEventValidity::Unsafe => "unsafe",
+    }
+}
 
 /// Pure in-memory registry for configured mesh peer policies.
 ///
@@ -251,6 +384,144 @@ impl MeshPeerPolicyRegistry {
         }
     }
 
+    /// Apply the complete receiver-local inbound authority contract.
+    ///
+    /// Ordering is security-sensitive: reject unknown lanes and excessive
+    /// trust claims, establish exact peer-group membership, apply the current
+    /// peer policy, then require a separately authorized unredacted body lane
+    /// when the decoded event carries arbitrary caller-controlled bytes.
+    #[must_use]
+    pub fn decide_import_admission(
+        &self,
+        request: &MeshImportAdmissionRequestV1<'_>,
+        bindings: &[MeshPeerGroupBinding],
+    ) -> MeshImportAdmissionOutcome {
+        let Some(material_lane) = parse_mesh_lane(request.material_lane) else {
+            return MeshImportAdmissionOutcome {
+                decision: None,
+                layer: Some("event_contract"),
+                detail: None,
+            };
+        };
+
+        if mesh_import_claimed_trust_lane_is_rejected(request.claimed_trust_lane) {
+            return denied_import_admission(
+                request,
+                material_lane,
+                MeshImportDecisionKind::Reject,
+                "peer_trust_claim_exceeds_ceiling",
+                "trust_ceiling",
+                Some(("claimedTrustLane", json!(request.claimed_trust_lane))),
+            );
+        }
+
+        let membership_input = MeshImportDecisionInput {
+            local_workspace_id: request.local_workspace_id,
+            origin_workspace_id: request.origin_workspace_id,
+            producer_peer_id: request.producer_peer_id,
+            material_lane,
+            event_validity: request.event_validity,
+        };
+        let membership_override = self.inbound_membership_override(&membership_input);
+        let membership = decide_mesh_import_with_lane_override(
+            &membership_input,
+            bindings,
+            membership_override.as_ref(),
+        );
+        if !membership.permits_local_truth_side_effects() {
+            let membership_log = membership.to_log_fields();
+            return MeshImportAdmissionOutcome {
+                decision: Some(MeshPeerPolicyDecision {
+                    import: membership,
+                    policy_id: None,
+                    trust_lane: None,
+                    import_trust_class: None,
+                    redaction: MeshRedactionDecision::Deny,
+                    body_fetch_allowed: false,
+                }),
+                layer: Some("peer_group_membership"),
+                detail: Some(("membership", membership_log)),
+            };
+        }
+
+        let policy = self.decide_inbound(&MeshPeerPolicyDecisionInput {
+            local_workspace_id: request.local_workspace_id,
+            origin_workspace_id: request.origin_workspace_id,
+            producer_peer_id: request.producer_peer_id,
+            material_lane,
+            event_validity: request.event_validity,
+            requested_body_bytes: None,
+            body_fetch_consent: false,
+        });
+        if !policy.import.permits_local_truth_side_effects() {
+            return MeshImportAdmissionOutcome {
+                decision: Some(policy),
+                layer: None,
+                detail: None,
+            };
+        }
+
+        if let Some(requested_body_bytes) = request.requested_unredacted_body_bytes
+            && !self.unredacted_body_lane_permits(request, bindings, requested_body_bytes)
+        {
+            return denied_import_admission(
+                request,
+                material_lane,
+                MeshImportDecisionKind::Deny,
+                "event_metadata_requires_unredacted_body_lane",
+                "event_contract",
+                None,
+            );
+        }
+
+        MeshImportAdmissionOutcome {
+            decision: Some(policy),
+            layer: None,
+            detail: None,
+        }
+    }
+
+    fn unredacted_body_lane_permits(
+        &self,
+        request: &MeshImportAdmissionRequestV1<'_>,
+        bindings: &[MeshPeerGroupBinding],
+        requested_body_bytes: usize,
+    ) -> bool {
+        let membership_input = MeshImportDecisionInput {
+            local_workspace_id: request.local_workspace_id,
+            origin_workspace_id: request.origin_workspace_id,
+            producer_peer_id: request.producer_peer_id,
+            material_lane: MeshLane::Body,
+            event_validity: request.event_validity,
+        };
+        let membership_override = self.inbound_membership_override(&membership_input);
+        let membership = decide_mesh_import_with_lane_override(
+            &membership_input,
+            bindings,
+            membership_override.as_ref(),
+        );
+        if !membership.permits_local_truth_side_effects() {
+            return false;
+        }
+
+        let body_fetch_consent = self.lane_override_for(
+            request.local_workspace_id,
+            request.producer_peer_id,
+            MeshLane::Body,
+        ) == Some(MeshLaneDecision::Allow);
+        let policy = self.decide_inbound(&MeshPeerPolicyDecisionInput {
+            local_workspace_id: request.local_workspace_id,
+            origin_workspace_id: request.origin_workspace_id,
+            producer_peer_id: request.producer_peer_id,
+            material_lane: MeshLane::Body,
+            event_validity: request.event_validity,
+            requested_body_bytes: Some(requested_body_bytes),
+            body_fetch_consent,
+        });
+        policy.import.permits_local_truth_side_effects()
+            && policy.redaction == MeshRedactionDecision::Share
+    }
+
     /// Inbound authorization with a structured lookup error for diagnostics.
     pub fn decide_inbound_checked(
         &self,
@@ -330,6 +601,37 @@ impl MeshPeerPolicyRegistry {
 impl From<&ConfigFile> for MeshPeerPolicyRegistry {
     fn from(config: &ConfigFile) -> Self {
         Self::from_config(config)
+    }
+}
+
+fn denied_import_admission(
+    request: &MeshImportAdmissionRequestV1<'_>,
+    material_lane: MeshLane,
+    kind: MeshImportDecisionKind,
+    reason: &'static str,
+    layer: &'static str,
+    detail: Option<(&'static str, JsonValue)>,
+) -> MeshImportAdmissionOutcome {
+    MeshImportAdmissionOutcome {
+        decision: Some(MeshPeerPolicyDecision {
+            import: MeshImportDecision {
+                workspace_scope_decision: kind,
+                workspace_id: request.local_workspace_id.to_owned(),
+                origin_workspace_id: request.origin_workspace_id.to_owned(),
+                peer_group_id: None,
+                producer_peer_id: request.producer_peer_id.to_owned(),
+                material_lane,
+                allowed: false,
+                reason,
+            },
+            policy_id: None,
+            trust_lane: None,
+            import_trust_class: None,
+            redaction: MeshRedactionDecision::Deny,
+            body_fetch_allowed: false,
+        }),
+        layer: Some(layer),
+        detail,
     }
 }
 
@@ -735,6 +1037,125 @@ mod tests {
             requested_body_bytes: None,
             body_fetch_consent: false,
         }
+    }
+
+    fn inbound_binding() -> MeshPeerGroupBinding {
+        MeshPeerGroupBinding {
+            workspace_id: Some("wsp_local_alpha".to_owned()),
+            workspace_alias: None,
+            peer_group_id: Some("grp_builders".to_owned()),
+            peer_group_label: None,
+            peer_ids: Some(vec!["peer_builder_one".to_owned()]),
+            origin_workspace_ids: Some(vec!["wsp_remote_beta".to_owned()]),
+            lanes: MeshLaneGrants {
+                metadata: Some(MeshLaneDecision::Allow),
+                body: Some(MeshLaneDecision::Deny),
+                embedding: Some(MeshLaneDecision::Deny),
+                graph_link: Some(MeshLaneDecision::Deny),
+                revision_notice: Some(MeshLaneDecision::Allow),
+                curation_signal: Some(MeshLaneDecision::Quarantine),
+            },
+            default_action: Some(MeshLaneDecision::Deny),
+        }
+    }
+
+    #[test]
+    fn normalized_import_request_is_versioned_and_transport_neutral() {
+        let registry = MeshPeerPolicyRegistry::new([policy(
+            "pol_builder",
+            "peer_builder_one",
+            "wsp_remote_beta",
+        )]);
+        let binding = inbound_binding();
+
+        // The first request models fields projected from ee.mesh.event.v1;
+        // the second models the same fields projected from a verified typed
+        // origin event. Neither path passes source bytes or authority labels.
+        let legacy_file = MeshImportAdmissionRequestV1::new(
+            "wsp_local_alpha",
+            "wsp_remote_beta",
+            "peer_builder_one",
+            "metadata",
+            "peerAgent",
+            MeshEventValidity::Valid,
+            None,
+        );
+        let typed_signed_event = MeshImportAdmissionRequestV1::new(
+            "wsp_local_alpha",
+            "wsp_remote_beta",
+            "peer_builder_one",
+            "metadata",
+            "peerAgent",
+            MeshEventValidity::Valid,
+            None,
+        );
+
+        assert_eq!(
+            legacy_file.schema(),
+            MESH_IMPORT_ADMISSION_REQUEST_SCHEMA_V1
+        );
+        assert_eq!(
+            legacy_file.to_json()["schema"],
+            MESH_IMPORT_ADMISSION_REQUEST_SCHEMA_V1
+        );
+        let legacy_decision = registry.decide_import_admission(&legacy_file, &[binding.clone()]);
+        let typed_decision = registry.decide_import_admission(&typed_signed_event, &[binding]);
+        assert_eq!(legacy_decision, typed_decision);
+        assert_eq!(legacy_decision.import_decision(), "allow");
+        assert!(legacy_decision.admits_local_truth());
+    }
+
+    #[test]
+    fn normalized_import_request_enforces_trust_ceiling_and_body_lane() {
+        let registry = MeshPeerPolicyRegistry::new([policy(
+            "pol_builder",
+            "peer_builder_one",
+            "wsp_remote_beta",
+        )]);
+        let binding = inbound_binding();
+        let excessive_trust = MeshImportAdmissionRequestV1::new(
+            "wsp_local_alpha",
+            "wsp_remote_beta",
+            "peer_builder_one",
+            "metadata",
+            "human_explicit",
+            MeshEventValidity::Valid,
+            None,
+        );
+        let trust_outcome = registry.decide_import_admission(&excessive_trust, &[binding.clone()]);
+        assert_eq!(trust_outcome.import_decision(), "reject");
+        assert!(!trust_outcome.admits_local_truth());
+        assert_eq!(
+            trust_outcome
+                .decision
+                .as_ref()
+                .expect("trust rejection has a policy projection")
+                .import
+                .reason,
+            "peer_trust_claim_exceeds_ceiling"
+        );
+
+        let arbitrary_metadata = MeshImportAdmissionRequestV1::new(
+            "wsp_local_alpha",
+            "wsp_remote_beta",
+            "peer_builder_one",
+            "metadata",
+            "peerAgent",
+            MeshEventValidity::Valid,
+            Some(256),
+        );
+        let body_outcome = registry.decide_import_admission(&arbitrary_metadata, &[binding]);
+        assert_eq!(body_outcome.import_decision(), "deny");
+        assert!(!body_outcome.admits_local_truth());
+        assert_eq!(
+            body_outcome
+                .decision
+                .as_ref()
+                .expect("body-lane denial has a policy projection")
+                .import
+                .reason,
+            "event_metadata_requires_unredacted_body_lane"
+        );
     }
 
     fn outbound_input(peer_id: &'static str) -> MeshOutboundPolicyDecisionInput<'static> {

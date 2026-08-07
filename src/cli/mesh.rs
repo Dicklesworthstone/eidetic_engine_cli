@@ -5302,7 +5302,7 @@ fn import_mesh_artifact_into_connection(
             )
             .map_err(|error| storage_error("Failed to inspect existing mesh event", error))?;
         let changed = existing.is_none();
-        let mut decision = if let Some(producer_peer_id) = event.producer_peer_id.as_deref() {
+        let decision = if let Some(producer_peer_id) = event.producer_peer_id.as_deref() {
             let enrolled_peer = connection
                 .get_mesh_peer(workspace_id, producer_peer_id)
                 .map_err(|error| {
@@ -5310,7 +5310,13 @@ fn import_mesh_artifact_into_connection(
                 })?;
             match enrolled_peer {
                 Some(peer) if peer.enabled && peer.origin_node_id == event.origin_node_id => {
-                    decide_import_event(workspace_id, event, bindings, &refreshed_registry)
+                    decide_import_event_with_unredacted_body(
+                        workspace_id,
+                        event,
+                        bindings,
+                        &refreshed_registry,
+                        requires_unredacted_body_lane.then_some(event.event_json.len()),
+                    )
                 }
                 _ => match crate::core::memory_scope::parse_mesh_lane(&event.material_lane) {
                     Some(lane) => denied_import_event(
@@ -5324,36 +5330,14 @@ fn import_mesh_artifact_into_connection(
                 },
             }
         } else {
-            decide_import_event(workspace_id, event, bindings, &refreshed_registry)
-        };
-        if decision.admits
-            && requires_unredacted_body_lane
-            && !mesh_import_unredacted_body_lane_allowed(
+            decide_import_event_with_unredacted_body(
                 workspace_id,
                 event,
                 bindings,
                 &refreshed_registry,
+                requires_unredacted_body_lane.then_some(event.event_json.len()),
             )
-        {
-            let Some(lane) = crate::core::memory_scope::parse_mesh_lane(&event.material_lane)
-            else {
-                return Err(DomainError::Import {
-                    message: "Canonical mesh event projection returned an unknown material lane"
-                        .to_owned(),
-                    repair: Some(
-                        "Reject the artifact and obtain a fresh export from a compatible ee peer."
-                            .to_owned(),
-                    ),
-                });
-            };
-            decision = denied_import_event(
-                workspace_id,
-                event,
-                lane,
-                "event_metadata_requires_unredacted_body_lane",
-                "event_contract",
-            );
-        }
+        };
         connection
             .insert_mesh_import_ledger_event(&InsertMeshImportLedgerEventInput {
                 workspace_id: workspace_id.to_owned(),
@@ -5400,52 +5384,6 @@ fn import_mesh_artifact_into_connection(
     ))
 }
 
-fn mesh_import_unredacted_body_lane_allowed(
-    workspace_id: &str,
-    event: &crate::mesh::foreground_cli::MeshEventRow,
-    bindings: &[crate::config::MeshPeerGroupBinding],
-    registry: &crate::mesh::policy::MeshPeerPolicyRegistry,
-) -> bool {
-    use crate::config::{MeshLane, MeshLaneDecision};
-    use crate::core::memory_scope::{
-        MeshEventValidity, MeshImportDecisionInput, MeshPeerPolicyDecisionInput,
-        MeshRedactionDecision, decide_mesh_import_with_lane_override,
-    };
-
-    let producer_peer_id = event.producer_peer_id.as_deref().unwrap_or("");
-    let membership_input = MeshImportDecisionInput {
-        local_workspace_id: workspace_id,
-        origin_workspace_id: &event.origin_workspace_id,
-        producer_peer_id,
-        material_lane: MeshLane::Body,
-        event_validity: MeshEventValidity::Valid,
-    };
-    let membership_override = registry.inbound_membership_override(&membership_input);
-    let membership = decide_mesh_import_with_lane_override(
-        &membership_input,
-        bindings,
-        membership_override.as_ref(),
-    );
-    if !membership.permits_local_truth_side_effects() {
-        return false;
-    }
-
-    let body_fetch_consent =
-        registry.lane_override_for(workspace_id, producer_peer_id, MeshLane::Body)
-            == Some(MeshLaneDecision::Allow);
-    let policy = registry.decide_inbound(&MeshPeerPolicyDecisionInput {
-        local_workspace_id: workspace_id,
-        origin_workspace_id: &event.origin_workspace_id,
-        producer_peer_id,
-        material_lane: MeshLane::Body,
-        event_validity: MeshEventValidity::Valid,
-        requested_body_bytes: Some(event.event_json.len()),
-        body_fetch_consent,
-    });
-    policy.import.permits_local_truth_side_effects()
-        && policy.redaction == MeshRedactionDecision::Share
-}
-
 /// The effective inbound decision for one replayed mesh event, ready to write
 /// into the import ledger. `admits` gates every local-truth side effect
 /// (search/index enqueue and any memory-side upsert).
@@ -5472,7 +5410,7 @@ fn canonical_import_material_lane(lane: &str) -> Option<&'static str> {
 fn canonical_import_trust_lane(claim: &str) -> Option<&'static str> {
     use crate::core::memory_scope::MeshTrustLane;
 
-    if MESH_IMPORT_REJECTED_TRUST_CLAIMS.contains(&claim) {
+    if crate::mesh::policy::mesh_import_claimed_trust_lane_is_rejected(claim) {
         // The ledger stores the local effective classification. The rejected
         // transported claim remains available only in claimedTrustLane on the
         // canonical policy decision, never as locally granted authority.
@@ -5558,114 +5496,44 @@ fn unparseable_import_event() -> ImportEventDecision {
     }
 }
 
-/// Generic peer-supplied events may not claim trust classes above the
-/// `agent_validated` ceiling. `peer_human_attested` requires the dedicated
-/// signed active-member admission path; operator, CASS, and legacy authority
-/// claims are likewise rejected to prevent trust laundering (ADR 0086 TC-D3,
-/// TC-D7).
-const MESH_IMPORT_REJECTED_TRUST_CLAIMS: [&str; 5] = [
-    "localHuman",
-    "human_explicit",
-    "peer_human_attested",
-    "cass_evidence",
-    "legacy_import",
-];
-
-/// Compose the two-layer inbound authority for one replayed event: the
-/// peer-group membership gate (`[[mesh.peer_group_bindings]]` via
-/// `decide_mesh_import`) followed by the authoritative peer policy
-/// (`[[mesh.peer_policies]]` via `decide_inbound`), under an outer trust-claim
-/// ceiling. Only a bound peer-group member whose policy admits the lane admits
-/// to local truth; everything else records a ledger denial/rejection and
-/// admits nothing. The recorded decision is always computed locally — the
-/// transported `import_decision`/`policy_decision_json` on the event are never
-/// trusted (ADR 0086 TC-D3, plan P0.2/T1.3).
+/// Project one legacy replay row into the transport-neutral inbound-admission
+/// request. The shared mesh policy registry owns both authority layers, so a
+/// future typed signed event with equivalent verified fields receives the same
+/// decision without reserializing or upgrading this legacy file row. The
+/// transported `import_decision` and policy JSON are never trusted (ADR 0086
+/// TC-D3, plan P0.2/T1.3).
 fn decide_import_event(
     workspace_id: &str,
     event: &crate::mesh::foreground_cli::MeshEventRow,
     bindings: &[crate::config::MeshPeerGroupBinding],
     registry: &crate::mesh::policy::MeshPeerPolicyRegistry,
 ) -> ImportEventDecision {
-    use crate::core::memory_scope::{
-        MeshEventValidity, MeshImportDecision, MeshImportDecisionInput, MeshImportDecisionKind,
-        MeshPeerPolicyDecision, MeshPeerPolicyDecisionInput, MeshRedactionDecision,
-        decide_mesh_import_with_lane_override, parse_mesh_lane,
-    };
+    decide_import_event_with_unredacted_body(workspace_id, event, bindings, registry, None)
+}
 
-    // Fail closed on an unparseable lane (mirrors the outbound export filter).
-    let Some(lane) = parse_mesh_lane(&event.material_lane) else {
-        return unparseable_import_event();
-    };
-
-    let origin = event.origin_workspace_id.as_str();
-    let producer = event.producer_peer_id.as_deref().unwrap_or("");
-
-    // Outer ceiling: reject an over-claimed trust lane before any policy work.
-    if MESH_IMPORT_REJECTED_TRUST_CLAIMS.contains(&event.trust_lane.as_str()) {
-        return import_event_decision_from_policy(
-            MeshPeerPolicyDecision {
-                import: MeshImportDecision {
-                    workspace_scope_decision: MeshImportDecisionKind::Reject,
-                    workspace_id: workspace_id.to_owned(),
-                    origin_workspace_id: origin.to_owned(),
-                    peer_group_id: None,
-                    producer_peer_id: producer.to_owned(),
-                    material_lane: lane,
-                    allowed: false,
-                    reason: "peer_trust_claim_exceeds_ceiling",
-                },
-                policy_id: None,
-                trust_lane: None,
-                import_trust_class: None,
-                redaction: MeshRedactionDecision::Deny,
-                body_fetch_allowed: false,
-            },
-            Some("trust_ceiling"),
-            Some(("claimedTrustLane", json!(event.trust_lane))),
-        );
-    }
-
-    // Layer 1 — peer-group membership gate.
-    let membership_input = MeshImportDecisionInput {
-        local_workspace_id: workspace_id,
-        origin_workspace_id: origin,
-        producer_peer_id: producer,
-        material_lane: lane,
-        event_validity: MeshEventValidity::Valid,
-    };
-    let membership_override = registry.inbound_membership_override(&membership_input);
-    let membership = decide_mesh_import_with_lane_override(
-        &membership_input,
-        bindings,
-        membership_override.as_ref(),
+fn decide_import_event_with_unredacted_body(
+    workspace_id: &str,
+    event: &crate::mesh::foreground_cli::MeshEventRow,
+    bindings: &[crate::config::MeshPeerGroupBinding],
+    registry: &crate::mesh::policy::MeshPeerPolicyRegistry,
+    requested_unredacted_body_bytes: Option<usize>,
+) -> ImportEventDecision {
+    let request = crate::mesh::policy::MeshImportAdmissionRequestV1::new(
+        workspace_id,
+        &event.origin_workspace_id,
+        event.producer_peer_id.as_deref().unwrap_or(""),
+        &event.material_lane,
+        &event.trust_lane,
+        crate::core::memory_scope::MeshEventValidity::Valid,
+        requested_unredacted_body_bytes,
     );
-    if !membership.permits_local_truth_side_effects() {
-        let membership_log = membership.to_log_fields();
-        return import_event_decision_from_policy(
-            MeshPeerPolicyDecision {
-                import: membership,
-                policy_id: None,
-                trust_lane: None,
-                import_trust_class: None,
-                redaction: MeshRedactionDecision::Deny,
-                body_fetch_allowed: false,
-            },
-            Some("peer_group_membership"),
-            Some(("membership", membership_log)),
-        );
+    let outcome = registry.decide_import_admission(&request, bindings);
+    ImportEventDecision {
+        import_decision: outcome.import_decision().to_owned(),
+        policy_decision_json: outcome.policy_decision_json(),
+        policy_failure_surface_json: outcome.policy_failure_surface_json(),
+        admits: outcome.admits_local_truth(),
     }
-
-    // Layer 2 — authoritative peer policy (lane / redaction / trust cap).
-    let policy = registry.decide_inbound(&MeshPeerPolicyDecisionInput {
-        local_workspace_id: workspace_id,
-        origin_workspace_id: origin,
-        producer_peer_id: producer,
-        material_lane: lane,
-        event_validity: MeshEventValidity::Valid,
-        requested_body_bytes: None,
-        body_fetch_consent: false,
-    });
-    import_event_decision_from_policy(policy, None, None)
 }
 
 fn enqueue_mesh_import_index_job(
@@ -7572,6 +7440,38 @@ max_bytes = 0
         assert!(decision.admits, "configured member metadata must admit");
         assert_eq!(decision.import_decision, "allow");
         assert!(decision.policy_failure_surface_json.is_none());
+    }
+
+    #[test]
+    fn legacy_file_and_normalized_typed_inputs_share_one_admission_decision() {
+        let (bindings, registry) = admitting_replay_authority();
+        let event = replay_event("metadata", "peerAgent");
+        let legacy_file = decide_import_event(REPLAY_WORKSPACE_ID, &event, &bindings, &registry);
+        let typed_request = crate::mesh::policy::MeshImportAdmissionRequestV1::new(
+            REPLAY_WORKSPACE_ID,
+            &event.origin_workspace_id,
+            event.producer_peer_id.as_deref().unwrap_or(""),
+            &event.material_lane,
+            &event.trust_lane,
+            crate::core::memory_scope::MeshEventValidity::Valid,
+            None,
+        );
+        let typed = registry.decide_import_admission(&typed_request, &bindings);
+
+        assert_eq!(legacy_file.import_decision, typed.import_decision());
+        assert_eq!(legacy_file.admits, typed.admits_local_truth());
+        assert_eq!(
+            legacy_file.policy_decision_json,
+            typed.policy_decision_json()
+        );
+        assert_eq!(
+            legacy_file.policy_failure_surface_json,
+            typed.policy_failure_surface_json()
+        );
+        assert_eq!(
+            typed_request.schema(),
+            crate::mesh::policy::MESH_IMPORT_ADMISSION_REQUEST_SCHEMA_V1
+        );
     }
 
     #[test]
