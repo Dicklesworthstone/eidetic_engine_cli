@@ -677,6 +677,15 @@ impl VerificationEvidenceAuthority {
     pub(crate) const fn can_authorize_pass(self) -> bool {
         !matches!(self, Self::CallerAuthored)
     }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::CallerAuthored => "caller_authored",
+            Self::ValidatedRunRecord => "validated_run_record",
+            Self::ValidatedRchVerify => "validated_rch_verify",
+            Self::ValidatedGithubActions => "validated_github_actions",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -691,6 +700,8 @@ pub struct VerificationRecordReport {
     pub target_id: String,
     pub persisted: bool,
     pub replayed: bool,
+    pub authority: &'static str,
+    pub pass_authority_validated: bool,
     pub degradations: Vec<String>,
     pub evidence: VerificationEvidenceRecord,
 }
@@ -704,13 +715,15 @@ impl VerificationRecordReport {
             "verification evidence recorded"
         };
         format!(
-            "{verb}\n  ID: {}\n  Audit: {}\n  Content hash: {}\n  Target: {}:{}\n  Status: {}\n  Beads summary: {}\n",
+            "{verb}\n  ID: {}\n  Audit: {}\n  Content hash: {}\n  Target: {}:{}\n  Status: {}\n  Authority: {}\n  Pass authority validated: {}\n  Beads summary: {}\n",
             self.evidence.verification_id,
             self.audit_id,
             self.content_hash,
             self.target_type,
             self.target_id,
             self.evidence.status.as_str(),
+            self.authority,
+            self.pass_authority_validated,
             verification_evidence_beads_summary(&self.evidence)
         )
     }
@@ -728,6 +741,8 @@ impl VerificationRecordReport {
             "targetId": self.target_id,
             "persisted": self.persisted,
             "replayed": self.replayed,
+            "authority": self.authority,
+            "passAuthorityValidated": self.pass_authority_validated,
             "degradations": self.degradations,
             "beadsSummary": verification_evidence_beads_summary(&self.evidence),
             "verificationEvidence": self.evidence,
@@ -2152,6 +2167,8 @@ fn record_verification_evidence_with_authority(
             target_id: options.target_id.trim().to_owned(),
             persisted: false,
             replayed: true,
+            authority: authority.as_str(),
+            pass_authority_validated: authority.can_authorize_pass(),
             degradations: vec!["degraded.verification_idempotent_replay".to_owned()],
             evidence: existing.record,
         });
@@ -2196,6 +2213,8 @@ fn record_verification_evidence_with_authority(
         target_id: options.target_id.trim().to_owned(),
         persisted: true,
         replayed: false,
+        authority: authority.as_str(),
+        pass_authority_validated: authority.can_authorize_pass(),
         degradations: Vec::new(),
         evidence,
     })
@@ -4274,6 +4293,15 @@ mod tests {
             &report.content_hash.as_str(),
             "ledger detail content hash",
         )?;
+        ensure_equal(
+            &report.authority,
+            &"caller_authored",
+            "public report authority",
+        )?;
+        ensure(
+            !report.pass_authority_validated,
+            "caller-authored report does not claim validated pass authority",
+        )?;
         let records = verification_records_for_target(
             &connection,
             "memory",
@@ -4332,7 +4360,7 @@ mod tests {
             .into_iter()
             .find(|record| record.status == crate::models::VerificationStatus::FallbackDetected)
             .ok_or("sample fallback evidence exists")?;
-        record_verification_evidence(VerificationRecordOptions {
+        let ingest = record_verification_evidence(VerificationRecordOptions {
             database_path: &database_path,
             workspace_path: temp.path(),
             target_type: "memory",
@@ -4341,6 +4369,15 @@ mod tests {
             evidence,
         })
         .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &ingest.authority,
+            &"caller_authored",
+            "caller-authored ingest authority",
+        )?;
+        ensure(
+            !ingest.pass_authority_validated,
+            "caller-authored ingest remains advisory",
+        )?;
 
         let report =
             verification_closure_guidance_from_ledger(&VerificationClosureGuidanceOptions {
@@ -4438,7 +4475,7 @@ mod tests {
         let evidence = crate::models::verification_evidence_record_from_rch_verify(&proof)
             .map_err(std::io::Error::other)?;
 
-        record_validated_verification_evidence(
+        let ingest = record_validated_verification_evidence(
             VerificationRecordOptions {
                 database_path: &database_path,
                 workspace_path: temp.path(),
@@ -4450,6 +4487,15 @@ mod tests {
             VerificationEvidenceAuthority::ValidatedRchVerify,
         )
         .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &ingest.authority,
+            &"validated_rch_verify",
+            "validated RCH ingest authority",
+        )?;
+        ensure(
+            ingest.pass_authority_validated,
+            "validated RCH ingest advertises pass authority",
+        )?;
 
         let report =
             verification_closure_guidance_from_ledger(&VerificationClosureGuidanceOptions {
