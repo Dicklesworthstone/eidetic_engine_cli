@@ -5545,6 +5545,7 @@ fn unparseable_import_event() -> ImportEventDecision {
 /// decision without reserializing or upgrading this legacy file row. The
 /// transported `import_decision` and policy JSON are never trusted (ADR 0086
 /// TC-D3, plan P0.2/T1.3).
+#[cfg(test)]
 fn decide_import_event(
     workspace_id: &str,
     event: &crate::mesh::foreground_cli::MeshEventRow,

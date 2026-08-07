@@ -4,6 +4,7 @@
 //! and capture hooks. Legacy generic executable-hook machinery remains available
 //! solely to in-module retirement regression tests and is never exported.
 
+#[cfg(test)]
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
@@ -21,9 +22,11 @@ use crate::core::git_ahead::{
 use crate::models::DomainError;
 
 /// Schema for hook install report.
+#[cfg(test)]
 pub const HOOK_INSTALL_SCHEMA_V1: &str = "ee.hooks.install.v1";
 
 /// Schema for hook status report.
+#[cfg(test)]
 pub const HOOK_STATUS_SCHEMA_V1: &str = "ee.hooks.status.v1";
 
 /// Schema for local Git hook-chain readiness diagnostics.
@@ -41,6 +44,7 @@ pub const AMBIENT_CONTEXT_SCHEMA_V1: &str = crate::models::AMBIENT_CONTEXT_SCHEM
 /// Schema for harness conformance simulation cases and reports.
 pub const HARNESS_CONFORMANCE_SCHEMA_V1: &str = "ee.harness_conformance.v1";
 
+#[cfg(test)]
 const HOOK_INSTALLER_SURFACE: &str = "hook_installer";
 const HARNESS_HOOK_MARKER: &str = "ee-managed-harness-hook:bd-u875s.4";
 const HARNESS_BACKUP_SUFFIX: &str = ".ee-backup";
@@ -54,12 +58,14 @@ fn elapsed_ms_since(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+#[cfg(test)]
 fn hook_trace_workspace_id(hook_dir: &Path) -> String {
     let path = hook_dir.to_string_lossy();
     let digest = blake3::hash(path.as_bytes()).to_hex().to_string();
     format!("hook_{}", &digest[..16])
 }
 
+#[cfg(test)]
 fn trace_hook_installer(
     hook_dir: &Path,
     phase: &'static str,
@@ -83,6 +89,7 @@ fn trace_hook_installer(
 // ============================================================================
 
 /// Type of hook being installed.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookType {
@@ -94,6 +101,7 @@ pub enum HookType {
     OnSuccess,
 }
 
+#[cfg(test)]
 impl HookType {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -150,6 +158,7 @@ impl ExistingHookStatus {
 }
 
 /// Action to take for a hook.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookAction {
@@ -163,6 +172,7 @@ pub enum HookAction {
     NoChange,
 }
 
+#[cfg(test)]
 impl HookAction {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -185,6 +195,7 @@ impl HookAction {
 // ============================================================================
 
 /// Options for installing hooks.
+#[cfg(test)]
 #[derive(Clone, Debug, Default)]
 pub struct HookInstallOptions {
     pub hook_dir: PathBuf,
@@ -195,6 +206,7 @@ pub struct HookInstallOptions {
 }
 
 /// A single hook installation plan item.
+#[cfg(test)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HookInstallPlanItem {
     pub hook_type: String,
@@ -205,6 +217,7 @@ pub struct HookInstallPlanItem {
 }
 
 /// Report from hook installation.
+#[cfg(test)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HookInstallReport {
     pub schema: String,
@@ -220,6 +233,7 @@ pub struct HookInstallReport {
     pub generated_at: String,
 }
 
+#[cfg(test)]
 impl HookInstallReport {
     #[must_use]
     pub fn to_json(&self) -> String {
@@ -877,6 +891,7 @@ fn publish_hook_temp_file(
 /// retained report shape lets callers discover that every requested legacy
 /// hook was skipped without making hook installation a new command gate.
 #[must_use]
+#[cfg(test)]
 pub fn install_hooks(options: &HookInstallOptions) -> HookInstallReport {
     let plan = options
         .hooks
@@ -1010,6 +1025,7 @@ fn install_hooks_with_binary_path(
 // ============================================================================
 
 /// Options for checking hook status.
+#[cfg(test)]
 #[derive(Clone, Debug, Default)]
 pub struct HookStatusOptions {
     pub hook_dir: PathBuf,
@@ -1017,6 +1033,7 @@ pub struct HookStatusOptions {
 }
 
 /// Status of a single hook.
+#[cfg(test)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HookStatusItem {
     pub hook_type: String,
@@ -1027,6 +1044,7 @@ pub struct HookStatusItem {
 }
 
 /// Report from checking hook status.
+#[cfg(test)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HookStatusReport {
     pub schema: String,
@@ -1038,6 +1056,7 @@ pub struct HookStatusReport {
     pub generated_at: String,
 }
 
+#[cfg(test)]
 impl HookStatusReport {
     #[must_use]
     pub fn to_json(&self) -> String {
@@ -1045,6 +1064,7 @@ impl HookStatusReport {
     }
 }
 
+#[cfg(test)]
 fn hook_path_is_executable(path: &Path, existing: ExistingHookStatus) -> bool {
     if !matches!(
         existing,
@@ -1072,6 +1092,7 @@ fn hook_path_is_executable(path: &Path, existing: ExistingHookStatus) -> bool {
 }
 
 /// Check status of hooks.
+#[cfg(test)]
 pub fn check_hook_status(options: &HookStatusOptions) -> Result<HookStatusReport, DomainError> {
     let now = Utc::now().to_rfc3339();
     let mut hooks = Vec::new();
@@ -1214,6 +1235,7 @@ pub struct AmbientContextReport {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(test)]
 pub enum AmbientContextNoiseDecision {
     Inject {
         text: String,
@@ -1226,10 +1248,12 @@ pub enum AmbientContextNoiseDecision {
 }
 
 #[derive(Clone, Debug, Default)]
+#[cfg(test)]
 pub struct AmbientContextNoiseGovernor {
     seen: BTreeSet<String>,
 }
 
+#[cfg(test)]
 impl AmbientContextNoiseGovernor {
     #[must_use]
     pub fn new() -> Self {
