@@ -2049,6 +2049,7 @@ impl KeygenReport {
     pub fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
             "schema": CERTIFICATE_KEYGEN_SCHEMA_V1,
+            "success": true,
             "keyPath": self.key_path.display().to_string(),
             "fingerprint": self.fingerprint,
             "signer": self.signer,
@@ -2088,6 +2089,21 @@ pub struct SignOptions {
     pub workspace_path: Option<PathBuf>,
 }
 
+/// Typed failure classification for [`SignReport`] so the CLI can map each
+/// failure onto its exit class: an unknown certificate id is a not-found
+/// (usage-class) condition, while key problems are storage-class.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SignErrorKind {
+    /// The signing key path could not be resolved.
+    KeyResolution,
+    /// The signing key file could not be read.
+    KeyUnavailable,
+    /// The signing key file exists but is not a valid ed25519 key.
+    KeyInvalid,
+    /// The certificate id does not exist in the manifest or store.
+    CertificateNotFound,
+}
+
 /// Report from signing a certificate.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignReport {
@@ -2099,6 +2115,7 @@ pub struct SignReport {
     pub signed_at: String,
     pub success: bool,
     pub message: String,
+    pub error_kind: Option<SignErrorKind>,
 }
 
 impl SignReport {
@@ -2135,7 +2152,11 @@ impl SignReport {
         }
     }
 
-    fn error(certificate_id: impl Into<String>, message: impl Into<String>) -> Self {
+    fn error(
+        certificate_id: impl Into<String>,
+        message: impl Into<String>,
+        kind: SignErrorKind,
+    ) -> Self {
         Self {
             certificate_id: certificate_id.into(),
             signature: String::new(),
@@ -2145,6 +2166,7 @@ impl SignReport {
             signed_at: current_sign_timestamp(),
             success: false,
             message: message.into(),
+            error_kind: Some(kind),
         }
     }
 }
@@ -2544,6 +2566,7 @@ pub fn sign_certificate(options: &SignOptions) -> SignReport {
             return SignReport::error(
                 &options.certificate_id,
                 format!("failed to resolve key path: {err}"),
+                SignErrorKind::KeyResolution,
             );
         }
     };
@@ -2555,6 +2578,7 @@ pub fn sign_certificate(options: &SignOptions) -> SignReport {
             return SignReport::error(
                 &options.certificate_id,
                 format!("failed to read key at {}: {err}", key_path.display()),
+                SignErrorKind::KeyUnavailable,
             );
         }
     };
@@ -2565,6 +2589,7 @@ pub fn sign_certificate(options: &SignOptions) -> SignReport {
             return SignReport::error(
                 &options.certificate_id,
                 format!("invalid key format: {err}"),
+                SignErrorKind::KeyInvalid,
             );
         }
     };
@@ -2577,7 +2602,11 @@ pub fn sign_certificate(options: &SignOptions) -> SignReport {
     let show_report = show_certificate_with_options(&lookup_options);
 
     if show_report.verification_status == VerificationResult::NotFound {
-        return SignReport::error(&options.certificate_id, "certificate not found");
+        return SignReport::error(
+            &options.certificate_id,
+            "certificate not found",
+            SignErrorKind::CertificateNotFound,
+        );
     }
     let certificate = &show_report.certificate;
 
@@ -2597,6 +2626,7 @@ pub fn sign_certificate(options: &SignOptions) -> SignReport {
         signed_at: current_sign_timestamp(),
         success: true,
         message: "Certificate signed successfully".to_owned(),
+        error_kind: None,
     }
 }
 
@@ -2848,8 +2878,9 @@ mod tests {
     #[test]
     fn sign_clock_override_pins_signed_at_for_error_and_success() -> TestResult {
         const FIXED: &str = "2026-02-01T00:00:00+00:00";
-        let error =
-            with_sign_clock_override(FIXED, || SignReport::error("cert_sign_error", "boom"));
+        let error = with_sign_clock_override(FIXED, || {
+            SignReport::error("cert_sign_error", "boom", SignErrorKind::KeyResolution)
+        });
         ensure_equal(&error.signed_at, &FIXED.to_owned(), "error signed_at")?;
 
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -2903,7 +2934,8 @@ mod tests {
         const INNER: &str = "2026-02-02T00:00:00+00:00";
 
         with_sign_clock_override(OUTER, || -> TestResult {
-            let outer_before = SignReport::error("cert_outer_before", "outer");
+            let outer_before =
+                SignReport::error("cert_outer_before", "outer", SignErrorKind::KeyResolution);
             ensure_equal(
                 &outer_before.signed_at,
                 &OUTER.to_owned(),
@@ -2911,11 +2943,12 @@ mod tests {
             )?;
 
             with_sign_clock_override(INNER, || -> TestResult {
-                let inner = SignReport::error("cert_inner", "inner");
+                let inner = SignReport::error("cert_inner", "inner", SignErrorKind::KeyResolution);
                 ensure_equal(&inner.signed_at, &INNER.to_owned(), "inner scope")
             })?;
 
-            let outer_after = SignReport::error("cert_outer_after", "outer");
+            let outer_after =
+                SignReport::error("cert_outer_after", "outer", SignErrorKind::KeyResolution);
             ensure_equal(
                 &outer_after.signed_at,
                 &OUTER.to_owned(),
@@ -2923,7 +2956,7 @@ mod tests {
             )
         })?;
 
-        let after = SignReport::error("cert_after", "after");
+        let after = SignReport::error("cert_after", "after", SignErrorKind::KeyResolution);
         ensure(
             after.signed_at != OUTER && after.signed_at != INNER,
             "override must be cleared after scope",

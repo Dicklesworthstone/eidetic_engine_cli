@@ -707,6 +707,98 @@ fn toon_default_format_does_not_override_mcp_mode_machine_contract() -> TestResu
 }
 
 // ============================================================================
+// bd-awm6r finding 1: EE_JSON / EE_OUTPUT_FORMAT / EE_FORMAT are wired into
+// renderer selection (previously dead — only flags were consulted).
+// ============================================================================
+
+#[test]
+fn ee_output_format_env_selects_json_renderer() -> TestResult {
+    let output = run_ee_with_env(&["status"], &[("EE_OUTPUT_FORMAT", "json")])?;
+    ensure(
+        output.status.success(),
+        "ee status should succeed with EE_OUTPUT_FORMAT=json",
+    )?;
+    let schema = parse_response_schema(&output.stdout, "ee status with EE_OUTPUT_FORMAT=json")?;
+    ensure(
+        schema == "ee.response.v2",
+        format!("EE_OUTPUT_FORMAT=json must select the JSON renderer, got schema {schema}"),
+    )
+}
+
+#[test]
+fn ee_json_env_selects_json_renderer() -> TestResult {
+    let output = run_ee_with_env(&["status"], &[("EE_JSON", "1")])?;
+    ensure(
+        output.status.success(),
+        "ee status should succeed with EE_JSON=1",
+    )?;
+    let schema = parse_response_schema(&output.stdout, "ee status with EE_JSON=1")?;
+    ensure(
+        schema == "ee.response.v2",
+        format!("EE_JSON=1 must select the JSON renderer, got schema {schema}"),
+    )
+}
+
+#[test]
+fn ee_format_env_selects_toon_renderer() -> TestResult {
+    let output = run_ee_with_env(&["status"], &[("EE_FORMAT", "toon")])?;
+    ensure(
+        output.status.success(),
+        "ee status should succeed with EE_FORMAT=toon",
+    )?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    ensure_contains(&stdout, "schema:", "EE_FORMAT=toon output is TOON format")?;
+    ensure_not_contains(
+        &stdout,
+        "\"schema\"",
+        "EE_FORMAT=toon output must not be JSON",
+    )
+}
+
+#[test]
+fn ee_output_format_env_outranks_ee_format_env() -> TestResult {
+    let output = run_ee_with_env(
+        &["status"],
+        &[("EE_OUTPUT_FORMAT", "json"), ("EE_FORMAT", "toon")],
+    )?;
+    ensure(
+        output.status.success(),
+        "ee status should succeed with both output env vars set",
+    )?;
+    let schema = parse_response_schema(
+        &output.stdout,
+        "ee status with EE_OUTPUT_FORMAT=json and EE_FORMAT=toon",
+    )?;
+    ensure(
+        schema == "ee.response.v2",
+        format!("EE_OUTPUT_FORMAT must outrank EE_FORMAT, got schema {schema}"),
+    )
+}
+
+#[test]
+fn explicit_format_flag_outranks_output_env_vars() -> TestResult {
+    let output = run_ee_with_env(
+        &["status", "--format", "toon"],
+        &[("EE_OUTPUT_FORMAT", "json")],
+    )?;
+    ensure(
+        output.status.success(),
+        "ee status --format toon should succeed with EE_OUTPUT_FORMAT=json",
+    )?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    ensure_contains(
+        &stdout,
+        "schema:",
+        "explicit --format toon must outrank EE_OUTPUT_FORMAT",
+    )?;
+    ensure_not_contains(
+        &stdout,
+        "\"schema\"",
+        "explicit --format toon must not emit JSON when EE_OUTPUT_FORMAT=json",
+    )
+}
+
+// ============================================================================
 // Error Response TOON Format
 // ============================================================================
 

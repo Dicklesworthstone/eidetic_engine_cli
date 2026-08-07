@@ -68,26 +68,24 @@ fn is_known_output_format(value: &str) -> bool {
     )
 }
 
-fn injected_output_flag_for_modes(
+fn injected_output_flag_for_env(
     args: &[OsString],
-    agent_mode: bool,
-    hook_mode: bool,
+    requested: Option<ee::output::Renderer>,
 ) -> Option<OsString> {
     if has_explicit_machine_output_flag(args) {
-        None
-    } else if agent_mode {
-        Some(OsString::from("--json"))
-    } else if hook_mode {
-        Some(OsString::from("--format=hook"))
-    } else {
-        None
+        return None;
     }
+    // `--json` (rather than `--format=json`) preserves `wants_json` semantics
+    // for EE_JSON / EE_AGENT_MODE, matching the historical agent-mode
+    // injection. Every other renderer maps onto its canonical --format value.
+    requested.map(|renderer| match renderer {
+        ee::output::Renderer::Json => OsString::from("--json"),
+        other => OsString::from(format!("--format={}", other.as_str())),
+    })
 }
 
 fn injected_output_flag(args: &[OsString]) -> Option<OsString> {
-    let agent_mode = env_flag_truthy(read(EnvVar::AgentMode));
-    let hook_mode = env_flag_truthy(read(EnvVar::HookMode));
-    injected_output_flag_for_modes(args, agent_mode, hook_mode)
+    injected_output_flag_for_env(args, ee::output::renderer_requested_by_env())
 }
 
 fn env_value_is_json(value: Option<String>) -> bool {
@@ -310,17 +308,17 @@ mod tests {
     }
 
     #[test]
-    fn agent_mode_injects_json_when_no_output_flag_is_explicit() {
+    fn env_requested_json_injects_json_when_no_output_flag_is_explicit() {
         let args = [OsString::from("ee"), OsString::from("status")];
 
         assert_eq!(
-            injected_output_flag_for_modes(&args, true, false),
+            injected_output_flag_for_env(&args, Some(ee::output::Renderer::Json)),
             Some(OsString::from("--json"))
         );
     }
 
     #[test]
-    fn hook_mode_injects_hook_renderer_when_no_output_flag_is_explicit() {
+    fn env_requested_hook_injects_hook_renderer_when_no_output_flag_is_explicit() {
         let args = [
             OsString::from("ee"),
             OsString::from("pack"),
@@ -328,13 +326,36 @@ mod tests {
         ];
 
         assert_eq!(
-            injected_output_flag_for_modes(&args, false, true),
+            injected_output_flag_for_env(&args, Some(ee::output::Renderer::Hook)),
             Some(OsString::from("--format=hook"))
         );
     }
 
     #[test]
-    fn output_mode_injection_preserves_explicit_renderer_and_agent_precedence() {
+    fn env_requested_renderers_map_to_canonical_format_flags() {
+        let args = [OsString::from("ee"), OsString::from("status")];
+        for (renderer, expected) in [
+            (ee::output::Renderer::Human, "--format=human"),
+            (ee::output::Renderer::Toon, "--format=toon"),
+            (ee::output::Renderer::Jsonl, "--format=jsonl"),
+            (ee::output::Renderer::Compact, "--format=compact"),
+            (ee::output::Renderer::Markdown, "--format=markdown"),
+        ] {
+            assert_eq!(
+                injected_output_flag_for_env(&args, Some(renderer)),
+                Some(OsString::from(expected)),
+                "renderer {renderer:?} must inject its canonical --format value"
+            );
+        }
+        assert_eq!(
+            injected_output_flag_for_env(&args, None),
+            None,
+            "no env-requested renderer means no injection"
+        );
+    }
+
+    #[test]
+    fn env_output_injection_preserves_explicit_renderer_precedence() {
         let explicit = [
             OsString::from("ee"),
             OsString::from("--format"),
@@ -343,35 +364,35 @@ mod tests {
             OsString::from("task"),
         ];
         assert_eq!(
-            injected_output_flag_for_modes(&explicit, true, true),
+            injected_output_flag_for_env(&explicit, Some(ee::output::Renderer::Json)),
             None,
             "explicit renderer must not be overridden"
         );
 
         let implicit = [OsString::from("ee"), OsString::from("status")];
         assert_eq!(
-            injected_output_flag_for_modes(&implicit, true, true),
+            injected_output_flag_for_env(&implicit, Some(ee::output::Renderer::Json)),
             Some(OsString::from("--json")),
-            "agent mode keeps the same precedence as OutputContext"
+            "env-requested JSON keeps the same precedence as OutputContext"
         );
     }
 
     #[test]
-    fn bare_format_flag_does_not_suppress_mode_injection() {
+    fn bare_format_flag_does_not_suppress_env_injection() {
         let missing_format_value = [
             OsString::from("ee"),
             OsString::from("status"),
             OsString::from("--format"),
         ];
         assert_eq!(
-            injected_output_flag_for_modes(&missing_format_value, true, false),
+            injected_output_flag_for_env(&missing_format_value, Some(ee::output::Renderer::Json)),
             Some(OsString::from("--json")),
-            "agent mode should still force JSON parse errors"
+            "env JSON should still force JSON parse errors"
         );
         assert_eq!(
-            injected_output_flag_for_modes(&missing_format_value, false, true),
+            injected_output_flag_for_env(&missing_format_value, Some(ee::output::Renderer::Hook)),
             Some(OsString::from("--format=hook")),
-            "hook mode should still force hook parse errors"
+            "env hook should still force hook parse errors"
         );
 
         let separator_after_format = [
@@ -381,7 +402,7 @@ mod tests {
             OsString::from("--"),
         ];
         assert_eq!(
-            injected_output_flag_for_modes(&separator_after_format, true, false),
+            injected_output_flag_for_env(&separator_after_format, Some(ee::output::Renderer::Json)),
             Some(OsString::from("--json")),
             "a separator is not a renderer value"
         );
@@ -392,7 +413,7 @@ mod tests {
             OsString::from("--format="),
         ];
         assert_eq!(
-            injected_output_flag_for_modes(&empty_format_value, true, false),
+            injected_output_flag_for_env(&empty_format_value, Some(ee::output::Renderer::Json)),
             Some(OsString::from("--json")),
             "an empty --format= value is not a renderer"
         );
@@ -405,28 +426,28 @@ mod tests {
             OsString::from("."),
         ];
         assert_eq!(
-            injected_output_flag_for_modes(&next_flag_after_format, false, true),
+            injected_output_flag_for_env(&next_flag_after_format, Some(ee::output::Renderer::Hook)),
             Some(OsString::from("--format=hook")),
             "another flag is not a renderer value"
         );
     }
 
     #[test]
-    fn malformed_format_value_does_not_suppress_mode_injection() {
+    fn malformed_format_value_does_not_suppress_env_injection() {
         let invalid_split_format = [
             OsString::from("ee"),
             OsString::from("--format"),
             OsString::from("status"),
         ];
         assert_eq!(
-            injected_output_flag_for_modes(&invalid_split_format, true, false),
+            injected_output_flag_for_env(&invalid_split_format, Some(ee::output::Renderer::Json)),
             Some(OsString::from("--json")),
-            "agent mode should still force JSON for invalid split --format values"
+            "env JSON should still force JSON for invalid split --format values"
         );
         assert_eq!(
-            injected_output_flag_for_modes(&invalid_split_format, false, true),
+            injected_output_flag_for_env(&invalid_split_format, Some(ee::output::Renderer::Hook)),
             Some(OsString::from("--format=hook")),
-            "hook mode should still force hook output for invalid split --format values"
+            "env hook should still force hook output for invalid split --format values"
         );
 
         let invalid_equals_format = [
@@ -435,14 +456,14 @@ mod tests {
             OsString::from("--format=bogus"),
         ];
         assert_eq!(
-            injected_output_flag_for_modes(&invalid_equals_format, true, false),
+            injected_output_flag_for_env(&invalid_equals_format, Some(ee::output::Renderer::Json)),
             Some(OsString::from("--json")),
-            "agent mode should still force JSON for invalid --format=value values"
+            "env JSON should still force JSON for invalid --format=value values"
         );
         assert_eq!(
-            injected_output_flag_for_modes(&invalid_equals_format, false, true),
+            injected_output_flag_for_env(&invalid_equals_format, Some(ee::output::Renderer::Hook)),
             Some(OsString::from("--format=hook")),
-            "hook mode should still force hook output for invalid --format=value values"
+            "env hook should still force hook output for invalid --format=value values"
         );
     }
 

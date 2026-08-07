@@ -77,10 +77,6 @@
       "purpose": "Override default blast radius (colon-separated abs paths)"
     },
     {
-      "name": "EE_DOCTOR_LOCK_STALE_AFTER_SECS",
-      "purpose": "Treat lock files older than this as stale (default: never)"
-    },
-    {
       "name": "EE_NO_COLOR",
       "purpose": "Disables ANSI styling on stderr (inherited from ee)"
     }

@@ -568,6 +568,18 @@ fn expand_workspace_path_for_cli(raw: &Path) -> PathBuf {
     expand_workspace_path_for_cli_with_expander(raw, &expander)
 }
 
+/// Resolve a subcommand-local `--workspace` override through the same
+/// alias resolution and flag → `EE_WORKSPACE` → walk-up → cwd chain as the
+/// global flag (bd-awm6r finding 5). The local flag outranks the global
+/// one; a handler that resolves `args.workspace`/`cli.workspace` directly
+/// silently ignores `EE_WORKSPACE` and workspace aliases.
+fn resolve_local_workspace_for_cli(cli: &Cli, local: Option<&Path>) -> (PathBuf, WorkspaceSource) {
+    let aliased = local.map(|raw| {
+        workspace_core::resolve_workspace_alias_for_cli(raw).unwrap_or_else(|| raw.to_path_buf())
+    });
+    resolve_workspace_for_cli(aliased.as_deref().or(cli.workspace.as_deref()))
+}
+
 fn expand_workspace_path_for_cli_with_expander(raw: &Path, expander: &PathExpander) -> PathBuf {
     let Some(raw_str) = raw.to_str() else {
         return raw.to_path_buf();
@@ -8127,9 +8139,10 @@ pub struct RecorderEventsListArgs {
     #[arg(long, default_value_t = 100)]
     pub limit: u32,
 
-    /// Workspace path.
-    #[arg(long, short = 'w', default_value = ".")]
-    pub workspace: PathBuf,
+    /// Workspace path. Defaults to the standard resolution chain
+    /// (global --workspace, EE_WORKSPACE, walk-up, cwd).
+    #[arg(long, short = 'w', value_name = "PATH")]
+    pub workspace: Option<PathBuf>,
 
     /// Optional explicit database path.
     #[arg(long)]
@@ -19028,18 +19041,43 @@ where
     }
 }
 
-fn write_output_bytes<W>(
+/// Storage-class error for a failed `--output <path>` write. Emitting the
+/// envelope (instead of exiting silently with a usage code) is the
+/// bd-awm6r finding-4 contract: `ee pack --output /nonexistent/x.json`
+/// must exit 3 with an `ee.error.v2` envelope, not exit 1 with zero bytes.
+fn output_write_failure_error(output_path: &Path, error: &io::Error) -> DomainError {
+    DomainError::Storage {
+        message: format!(
+            "Failed to write --output file {}: {error}",
+            output_path.display()
+        ),
+        repair: Some(
+            "Ensure the parent directory exists and is writable, or omit --output to write to stdout."
+                .to_owned(),
+        ),
+    }
+}
+
+fn write_output_bytes<W, E>(
+    renderer: output::Renderer,
     stdout: &mut W,
+    stderr: &mut E,
     output_path: Option<&Path>,
     bytes: &[u8],
 ) -> ProcessExitCode
 where
     W: Write,
+    E: Write,
 {
     if let Some(output_path) = output_path {
         return match fs::write(output_path, bytes) {
             Ok(()) => ProcessExitCode::Success,
-            Err(_) => ProcessExitCode::Usage,
+            Err(error) => write_domain_error(
+                &output_write_failure_error(output_path, &error),
+                renderer,
+                stdout,
+                stderr,
+            ),
         };
     }
     match stdout.write_all(bytes) {
@@ -19048,18 +19086,26 @@ where
     }
 }
 
-fn write_context_text<W>(
+fn write_context_text<W, E>(
+    renderer: output::Renderer,
     stdout: &mut W,
+    stderr: &mut E,
     output_path: Option<&Path>,
     rendered: &str,
 ) -> ProcessExitCode
 where
     W: Write,
+    E: Write,
 {
     if let Some(output_path) = output_path {
         return match fs::write(output_path, rendered.as_bytes()) {
             Ok(()) => ProcessExitCode::Success,
-            Err(_) => ProcessExitCode::Usage,
+            Err(error) => write_domain_error(
+                &output_write_failure_error(output_path, &error),
+                renderer,
+                stdout,
+                stderr,
+            ),
         };
     }
     write_stdout(stdout, rendered)
@@ -19843,10 +19889,36 @@ fn doctor_fix_dispatches(
     dispatches: Vec<crate::core::doctor_fixers::FixerDispatch>,
 ) -> DoctorFixCommandResult {
     use crate::core::doctor_runtime::{
-        DoctorRuntimeError, RunContext, RunStatus, default_blast_radius_roots, mutate,
+        DoctorRuntimeError, RunContext, RunStatus, blast_radius_roots_from_env, mutate,
     };
 
-    let blast_radius = default_blast_radius_roots(workspace);
+    let blast_radius = match blast_radius_roots_from_env(workspace) {
+        Ok(roots) => roots,
+        Err(reason) => {
+            return DoctorFixCommandResult {
+                json: serde_json::json!({
+                    "schema": crate::models::ERROR_SCHEMA_V2,
+                    "error": {
+                        "code": "doctor_blast_radius_env_invalid",
+                        "message": reason,
+                        "severity": "high",
+                        "repair": "Set EE_DOCTOR_BLAST_RADIUS to colon-separated absolute paths, or unset it to use the default doctor roots.",
+                        "details": {
+                            "phase": "start",
+                            "recovery": [{
+                                "priority": 0,
+                                "kind": "env",
+                                "rationale": "Doctor refuses to fix rather than guess which write roots the operator intended.",
+                                "command": "unset EE_DOCTOR_BLAST_RADIUS",
+                            }],
+                        },
+                    },
+                })
+                .to_string(),
+                exit_code: ProcessExitCode::Configuration,
+            };
+        }
+    };
     let target_sha = format!("doctor-fix-{}", chrono::Utc::now().timestamp_micros());
 
     match RunContext::start(workspace, target_sha.as_str(), blast_radius, false) {
@@ -22525,14 +22597,10 @@ where
     W: Write,
     E: Write,
 {
-    let workspace = args
-        .workspace
-        .clone()
-        .or_else(|| cli.workspace.clone())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let (workspace, _) = resolve_local_workspace_for_cli(cli, args.workspace.as_deref());
     let command = match preflight_guard_command(args) {
         Ok(command) => command,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        Err(error) => return write_domain_error(&error, cli.renderer(), stdout, stderr),
     };
 
     let (registry, registry_load_degradation) = match PreflightGuardRegistry::load(&workspace) {
@@ -22934,11 +23002,7 @@ where
 {
     use crate::core::plan::{PlanRecommendOptions, recommend_recipes};
 
-    let workspace_path = args
-        .workspace
-        .clone()
-        .or_else(|| cli.workspace.clone())
-        .unwrap_or_else(|| PathBuf::from("."));
+    let (workspace_path, _) = resolve_local_workspace_for_cli(cli, args.workspace.as_deref());
     let options = PlanRecommendOptions {
         task: args.task.clone(),
         limit: args.limit,
@@ -25820,7 +25884,7 @@ where
                 "dryRun": false,
             })),
         };
-        return write_recorder_import_error(cli.wants_json(), stdout, stderr, &error);
+        return write_recorder_import_error(cli.renderer(), stdout, stderr, &error);
     }
 
     let source_type = match args.source_type.parse::<crate::models::ImportSourceType>() {
@@ -25837,7 +25901,7 @@ where
                     "sourceType": args.source_type
                 })),
             };
-            return write_recorder_import_error(cli.wants_json(), stdout, stderr, &error);
+            return write_recorder_import_error(cli.renderer(), stdout, stderr, &error);
         }
     };
 
@@ -25857,12 +25921,7 @@ where
                         "inputPath": path.to_string_lossy()
                     })),
                 };
-                return write_recorder_import_error(
-                    cli.wants_json(),
-                    stdout,
-                    stderr,
-                    &import_error,
-                );
+                return write_recorder_import_error(cli.renderer(), stdout, stderr, &import_error);
             }
         },
         None => None,
@@ -25888,7 +25947,7 @@ where
     let report = match crate::core::recorder::plan_recorder_import(&options) {
         Ok(report) => report,
         Err(error) => {
-            return write_recorder_import_error(cli.wants_json(), stdout, stderr, &error);
+            return write_recorder_import_error(cli.renderer(), stdout, stderr, &error);
         }
     };
 
@@ -25914,7 +25973,7 @@ where
 }
 
 fn write_recorder_import_error<W, E>(
-    wants_json: bool,
+    mode: impl Into<ErrorRenderMode>,
     stdout: &mut W,
     stderr: &mut E,
     error: &crate::core::recorder::RecorderImportError,
@@ -25923,21 +25982,30 @@ where
     W: Write,
     E: Write,
 {
-    if wants_json {
-        let json = serde_json::json!({
-            "schema": crate::models::ERROR_SCHEMA_V2,
-            "error": error.data_json(),
-        });
-        let rendered = output::redact_mesh_approval_bearers(&(json.to_string() + "\n"));
-        let _ = stdout.write_all(rendered.as_bytes());
-    } else {
-        let rendered = output::redact_mesh_approval_bearers(&format!(
-            "error: {}\n\nNext:\n  {}\n",
-            error.message, error.repair
-        ));
-        let _ = stderr.write_all(rendered.as_bytes());
+    let mode = mode.into();
+    match mode {
+        ErrorRenderMode::Json | ErrorRenderMode::Toon => {
+            let json = serde_json::json!({
+                "schema": crate::models::ERROR_SCHEMA_V2,
+                "error": error.data_json(),
+            });
+            let rendered = if mode == ErrorRenderMode::Toon {
+                output::render_toon_from_json(&json.to_string()) + "\n"
+            } else {
+                json.to_string() + "\n"
+            };
+            let rendered = output::redact_mesh_approval_bearers(&rendered);
+            let _ = stdout.write_all(rendered.as_bytes());
+        }
+        ErrorRenderMode::Human => {
+            let rendered = output::redact_mesh_approval_bearers(&format!(
+                "error: {}\n\nNext:\n  {}\n",
+                error.message, error.repair
+            ));
+            let _ = stderr.write_all(rendered.as_bytes());
+        }
     }
-    ProcessExitCode::Usage
+    error.code.exit_code()
 }
 
 // ============================================================================
@@ -25959,10 +26027,7 @@ where
     };
     use crate::db::DbConnection;
 
-    let workspace_path = cli
-        .workspace
-        .clone()
-        .unwrap_or_else(|| args.workspace.clone());
+    let (workspace_path, _) = resolve_local_workspace_for_cli(cli, args.workspace.as_deref());
     let database_path = args
         .database
         .clone()
@@ -25973,7 +26038,7 @@ where
             message: format!("Database not found at {}", database_path.display()),
             repair: Some("ee init --workspace .".to_string()),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let conn = match DbConnection::open_file(&database_path) {
@@ -25983,7 +26048,7 @@ where
                 message: format!("Failed to open database: {e}"),
                 repair: Some("ee status --json".to_string()),
             };
-            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -25994,7 +26059,7 @@ where
                 "Pass --limit with a positive integer (default: 100), or omit it.".to_owned(),
             ),
         };
-        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
     }
 
     let options = RecorderEventsListOptions {
@@ -26007,7 +26072,7 @@ where
     let events = match crate::core::recorder::list_recorder_events(&conn, &options) {
         Ok(e) => e,
         Err(e) => {
-            return write_domain_error(&e, cli.wants_json(), stdout, stderr);
+            return write_domain_error(&e, cli.renderer(), stdout, stderr);
         }
     };
 
@@ -34913,7 +34978,7 @@ fn parse_rfc3339_arg(value: &str) -> Result<chrono::DateTime<chrono::Utc>, Strin
         .map_err(|error| format!("Expected RFC3339 timestamp, got {value:?}: {error}"))
 }
 
-fn write_context_response<W>(
+fn write_context_response<W, E>(
     renderer: output::Renderer,
     requested_format: OutputFormat,
     response: &ContextResponse,
@@ -34922,9 +34987,11 @@ fn write_context_response<W>(
     result_path_hint: Option<&'static str>,
     output_path: Option<&Path>,
     stdout: &mut W,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
+    E: Write,
 {
     if requested_format == OutputFormat::Binary {
         let rendered =
@@ -34937,7 +35004,7 @@ where
             hash = response.data.pack.hash.as_deref().unwrap_or("absent"),
             fields_omitted_count = 0_u32,
         );
-        return write_output_bytes(stdout, output_path, &rendered);
+        return write_output_bytes(renderer, stdout, stderr, output_path, &rendered);
     }
 
     let rendered = match renderer {
@@ -34993,7 +35060,7 @@ where
         hash = response.data.pack.hash.as_deref().unwrap_or("absent"),
         fields_omitted_count = context_format_fields_omitted_count(renderer, requested_format, render_options),
     );
-    write_context_text(stdout, output_path, &rendered)
+    write_context_text(renderer, stdout, stderr, output_path, &rendered)
 }
 
 fn validate_context_stream_request(cli: &Cli, args: &ContextArgs) -> Result<(), DomainError> {
@@ -36184,6 +36251,7 @@ where
         attach_revisable_pack_metadata(&mut response, args.mesh_mode, command);
         let render_options = output::ContextJsonRenderOptions::from(output_options);
         let mut delta_sink = io::sink();
+        let mut delta_err_sink = io::sink();
         let _ = maybe_write_context_delta(
             cli.context_renderer(),
             cli.format,
@@ -36192,6 +36260,7 @@ where
             &mut response,
             render_options,
             &mut delta_sink,
+            &mut delta_err_sink,
         );
         frame_options.completed_at = chrono::Utc::now().to_rfc3339();
         return match write_context_stream_tail(&response, frame_options.clone(), &mut writer) {
@@ -36246,6 +36315,7 @@ where
                     args.output.as_deref(),
                     &report,
                     stdout,
+                    stderr,
                 );
             }
             if args.explain && !args.no_pack_dna {
@@ -36261,6 +36331,7 @@ where
                 &mut response,
                 render_options,
                 stdout,
+                stderr,
             ) {
                 return exit;
             }
@@ -36273,6 +36344,7 @@ where
                 args.explain.then_some("data.pack.items"),
                 args.output.as_deref(),
                 stdout,
+                stderr,
             )
         }
         Err(error) => write_context_pack_error(&error, cli.wants_json(), stdout, stderr),
@@ -36281,7 +36353,7 @@ where
 
 const CONTEXT_DELTA_PRIOR_LOOKUP_LIMIT: u32 = 16;
 
-fn maybe_write_context_delta<W>(
+fn maybe_write_context_delta<W, E>(
     renderer: output::Renderer,
     requested_format: OutputFormat,
     args: &ContextArgs,
@@ -36289,9 +36361,11 @@ fn maybe_write_context_delta<W>(
     response: &mut ContextResponse,
     render_options: output::ContextJsonRenderOptions,
     stdout: &mut W,
+    stderr: &mut E,
 ) -> Option<ProcessExitCode>
 where
     W: Write,
+    E: Write,
 {
     let prior_pack_hash = args.since.as_deref()?.trim();
     if prior_pack_hash.is_empty() {
@@ -36541,7 +36615,9 @@ where
         })
     };
     Some(write_context_text(
+        renderer,
         stdout,
+        stderr,
         args.output.as_deref(),
         &(rendered + "\n"),
     ))
@@ -39659,6 +39735,7 @@ where
                     args.output.as_deref(),
                     &report,
                     stdout,
+                    stderr,
                 );
             }
             if args.explain {
@@ -39678,6 +39755,7 @@ where
                 args.explain.then_some("data.pack.items"),
                 args.output.as_deref(),
                 stdout,
+                stderr,
             )
         }
         Err(error) => write_context_pack_error(
@@ -46819,7 +46897,14 @@ where
                 return write_context_pack_error(&error, cli.wants_json(), stdout, stderr);
             }
         };
-        return write_coverage_gap_report(cli.renderer(), cli.format, None, &report, stdout);
+        return write_coverage_gap_report(
+            cli.renderer(),
+            cli.format,
+            None,
+            &report,
+            stdout,
+            stderr,
+        );
     }
 
     let Some(memory_id_raw) = args.memory_id.as_deref() else {
@@ -46949,15 +47034,17 @@ fn format_why_not_human(report: &crate::pack::WhyNotSelectedReport) -> String {
     out
 }
 
-fn write_coverage_gap_report<W>(
+fn write_coverage_gap_report<W, E>(
     renderer: output::Renderer,
     requested_format: OutputFormat,
     output_path: Option<&Path>,
     report: &crate::pack::CoverageGapReport,
     stdout: &mut W,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
+    E: Write,
 {
     let rendered = match renderer {
         output::Renderer::Human => format_coverage_gap_human(report),
@@ -46979,7 +47066,7 @@ where
         nearest_insufficient = report.nearest_insufficient.len(),
         task_hash = %report.task_hash,
     );
-    write_output_bytes(stdout, output_path, rendered.as_bytes())
+    write_output_bytes(renderer, stdout, stderr, output_path, rendered.as_bytes())
 }
 
 fn format_coverage_gap_json(report: &crate::pack::CoverageGapReport) -> String {
@@ -48293,9 +48380,43 @@ where
     write_domain_error(&domain_error, wants_json, stdout, stderr)
 }
 
+/// How a command failure should be rendered.
+///
+/// Historically error paths only knew `wants_json: bool`, which routed
+/// `--format toon` failures to human prose on stderr while toon successes
+/// went to stdout (bd-awm6r finding 7). Converting from the renderer keeps
+/// the error stream symmetric with the success stream; `From<bool>` keeps
+/// the many existing `cli.wants_json()` call sites compiling with their
+/// historical behavior.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ErrorRenderMode {
+    Human,
+    Json,
+    Toon,
+}
+
+impl From<bool> for ErrorRenderMode {
+    fn from(wants_json: bool) -> Self {
+        if wants_json { Self::Json } else { Self::Human }
+    }
+}
+
+impl From<output::Renderer> for ErrorRenderMode {
+    fn from(renderer: output::Renderer) -> Self {
+        match renderer {
+            output::Renderer::Toon => Self::Toon,
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => Self::Json,
+            output::Renderer::Human | output::Renderer::Markdown => Self::Human,
+        }
+    }
+}
+
 fn write_domain_error<W, E>(
     error: &DomainError,
-    wants_json: bool,
+    mode: impl Into<ErrorRenderMode>,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -48303,16 +48424,23 @@ where
     W: Write,
     E: Write,
 {
-    if wants_json {
-        let _ = stdout.write_all(output::error_response_json(error).as_bytes());
-        let _ = stdout.write_all(b"\n");
-    } else {
-        let mut rendered = format!("error: {}\n", error.message());
-        if let Some(repair) = error.repair() {
-            rendered.push_str(&format!("\nNext:\n  {repair}\n"));
+    match mode.into() {
+        ErrorRenderMode::Json => {
+            let _ = stdout.write_all(output::error_response_json(error).as_bytes());
+            let _ = stdout.write_all(b"\n");
         }
-        let rendered = output::redact_mesh_approval_bearers(&rendered);
-        let _ = stderr.write_all(rendered.as_bytes());
+        ErrorRenderMode::Toon => {
+            let _ = stdout.write_all(output::error_response_toon(error).as_bytes());
+            let _ = stdout.write_all(b"\n");
+        }
+        ErrorRenderMode::Human => {
+            let mut rendered = format!("error: {}\n", error.message());
+            if let Some(repair) = error.repair() {
+                rendered.push_str(&format!("\nNext:\n  {repair}\n"));
+            }
+            let rendered = output::redact_mesh_approval_bearers(&rendered);
+            let _ = stderr.write_all(rendered.as_bytes());
+        }
     }
     error.exit_code()
 }
@@ -52432,21 +52560,37 @@ where
     write_certificate_verify_report(cli, &report, stdout)
 }
 
+fn certificate_sign_response_json(report: &crate::core::certificate::SignReport) -> String {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": report.data_json(),
+        "degraded": [],
+    })
+    .to_string()
+}
+
+fn certificate_keygen_response_json(report: &crate::core::certificate::KeygenReport) -> String {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": report.data_json(),
+        "degraded": [],
+    })
+    .to_string()
+}
+
 fn handle_certificate_sign<W, E>(
     cli: &Cli,
     args: &CertificateSignArgs,
     stdout: &mut W,
-    _stderr: &mut E,
+    stderr: &mut E,
 ) -> ProcessExitCode
 where
     W: Write,
     E: Write,
 {
-    let workspace_path = args
-        .workspace
-        .clone()
-        .or_else(|| cli.workspace.clone())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let (workspace_path, _) = resolve_local_workspace_for_cli(cli, args.workspace.as_deref());
     let resolved_workspace_path = resolve_cli_workspace_path(&workspace_path);
     let manifest_path = args.manifest.clone().or_else(|| {
         let default_manifest_path = resolved_workspace_path.join(CERTIFICATE_DEFAULT_MANIFEST_FILE);
@@ -52461,17 +52605,35 @@ where
         workspace_path: Some(resolved_workspace_path),
     };
     let report = crate::core::certificate::sign_certificate(&options);
+    if !report.success {
+        use crate::core::certificate::SignErrorKind;
+        let domain_error = match report.error_kind {
+            Some(SignErrorKind::CertificateNotFound) => DomainError::NotFound {
+                resource: "certificate".to_owned(),
+                id: report.certificate_id.clone(),
+                repair: Some("ee certificate list --json".to_owned()),
+            },
+            _ => DomainError::Storage {
+                message: format!("certificate sign failed: {}", report.message),
+                repair: Some("ee certificate keygen --json".to_owned()),
+            },
+        };
+        return write_domain_error(&domain_error, cli.renderer(), stdout, stderr);
+    }
     match cli.renderer() {
-        output::Renderer::Json => write_stdout(
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &(report.human_summary() + "\n"))
+        }
+        output::Renderer::Toon => write_stdout(
             stdout,
-            &(crate::core::serialize_pretty_or_error(&report.data_json()) + "\n"),
+            &(output::render_toon_from_json(&certificate_sign_response_json(&report)) + "\n"),
         ),
-        _ => write_stdout(stdout, &(report.human_summary() + "\n")),
-    };
-    if report.success {
-        ProcessExitCode::Success
-    } else {
-        ProcessExitCode::Storage
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(certificate_sign_response_json(&report) + "\n"))
+        }
     }
 }
 
@@ -52485,26 +52647,43 @@ where
     W: Write,
     E: Write,
 {
-    let workspace_path = args.workspace.clone().or_else(|| cli.workspace.clone());
+    let (workspace_path, _) = resolve_local_workspace_for_cli(cli, args.workspace.as_deref());
     let options = crate::core::certificate::KeygenOptions {
-        workspace_path,
+        workspace_path: Some(resolve_cli_workspace_path(&workspace_path)),
         force: args.force,
         show_only: args.show,
     };
     match crate::core::certificate::keygen(&options) {
-        Ok(report) => {
-            match cli.renderer() {
-                output::Renderer::Json => write_stdout(
-                    stdout,
-                    &(crate::core::serialize_pretty_or_error(&report.data_json()) + "\n"),
-                ),
-                _ => write_stdout(stdout, &(report.human_summary() + "\n")),
-            };
-            ProcessExitCode::Success
-        }
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &(report.human_summary() + "\n"))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&certificate_keygen_response_json(&report)) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                write_stdout(stdout, &(certificate_keygen_response_json(&report) + "\n"))
+            }
+        },
         Err(err) => {
-            let _ = writeln!(stderr, "error: {err}");
-            ProcessExitCode::Storage
+            let repair = match err.kind() {
+                std::io::ErrorKind::AlreadyExists => {
+                    "Re-run with --force to overwrite the existing key, or pass --show to display it."
+                }
+                std::io::ErrorKind::NotFound => {
+                    "Run ee certificate keygen without --show to generate a keypair first."
+                }
+                _ => "Check that the key directory is writable and retry.",
+            };
+            let domain_error = DomainError::Storage {
+                message: format!("certificate keygen failed: {err}"),
+                repair: Some(repair.to_owned()),
+            };
+            write_domain_error(&domain_error, cli.renderer(), stdout, stderr)
         }
     }
 }
@@ -52518,7 +52697,7 @@ fn resolve_certificate_store_source(
     }
 
     let workspace_path =
-        resolve_cli_workspace_path(cli.workspace.as_deref().unwrap_or_else(|| Path::new(".")));
+        resolve_cli_workspace_path(&resolve_workspace_for_cli(cli.workspace.as_deref()).0);
     let manifest_path = workspace_path.join(CERTIFICATE_DEFAULT_MANIFEST_FILE);
     if manifest_path.exists() {
         CertificateStoreSource::Manifest(manifest_path)
@@ -71396,7 +71575,13 @@ mod tests {
             );
             let rendered = String::from_utf8([stdout, stderr].concat())
                 .map_err(|error| format!("recorder import error output must be UTF-8: {error}"))?;
-            ensure_equal(&exit, &ProcessExitCode::Usage, "recorder import error exit")?;
+            // bd-awm6r finding 6: malformed import payloads share the
+            // `ee import` family's import exit class, not usage.
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Import,
+                "recorder import error exit",
+            )?;
             ensure(
                 !rendered.contains(&bearer),
                 "recorder import error must not expose the approval bearer",
@@ -71780,6 +71965,316 @@ mod tests {
             .finish(crate::core::doctor_runtime::RunStatus::Failed)
             .map_err(|error| error.to_string())?;
         ensure_persistent_doctor_lock_released(workspace)
+    }
+
+    // ---- bd-awm6r: certificate sign/keygen machine contracts ----
+
+    #[cfg(unix)]
+    fn write_bd_awm6r_test_key(path: &Path) -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
+            .map_err(|error| error.to_string())?;
+        fs::write(path, pkcs8.as_ref()).map_err(|error| error.to_string())?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn write_bd_awm6r_manifest(path: &Path, certificates: serde_json::Value) -> TestResult {
+        let manifest = serde_json::json!({
+            "schema": crate::core::certificate::CERTIFICATE_MANIFEST_SCHEMA_V1,
+            "certificates": certificates,
+        });
+        let rendered =
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
+        fs::write(path, rendered).map_err(|error| error.to_string())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn certificate_sign_unknown_id_is_not_found_envelope_with_usage_exit() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let key_path = dir.path().join("signing.ed25519");
+        write_bd_awm6r_test_key(&key_path)?;
+        let manifest_path = dir.path().join("certificates.json");
+        write_bd_awm6r_manifest(&manifest_path, serde_json::json!([]))?;
+        let key_arg = key_path.to_string_lossy().into_owned();
+        let manifest_arg = manifest_path.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "certificate",
+            "sign",
+            "cert_missing_bd_awm6r",
+            "--manifest",
+            &manifest_arg,
+            "--key",
+            &key_arg,
+            "--json",
+        ]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "unknown cert id exit class")?;
+        ensure(stderr.is_empty(), "JSON error must not write stderr")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "unknown cert id error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("not_found"),
+            "unknown cert id error code",
+        )?;
+
+        // --format toon failures must emit the TOON error envelope on stdout
+        // (bd-awm6r finding 7), matching where toon successes go.
+        let (toon_exit, toon_stdout, toon_stderr) = invoke(&[
+            "ee",
+            "certificate",
+            "sign",
+            "cert_missing_bd_awm6r",
+            "--manifest",
+            &manifest_arg,
+            "--key",
+            &key_arg,
+            "--format",
+            "toon",
+        ]);
+        ensure_equal(&toon_exit, &ProcessExitCode::Usage, "toon error exit class")?;
+        ensure(toon_stderr.is_empty(), "toon error must not write stderr")?;
+        ensure_contains(
+            &toon_stdout,
+            "schema: ee.error.v2",
+            "toon error envelope on stdout",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn certificate_sign_success_wraps_machine_output_in_response_envelope() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let key_path = dir.path().join("signing.ed25519");
+        write_bd_awm6r_test_key(&key_path)?;
+        let payload_hash = blake3::hash(b"bd-awm6r signed payload")
+            .to_hex()
+            .to_string();
+        let manifest_path = dir.path().join("certificates.json");
+        write_bd_awm6r_manifest(
+            &manifest_path,
+            serde_json::json!([
+                {
+                    "id": "cert_bd_awm6r",
+                    "kind": "pack",
+                    "status": "valid",
+                    "workspaceId": "workspace_main",
+                    "issuedAt": "2026-05-01T00:00:00Z",
+                    "expiresAt": "2999-01-01T00:00:00Z",
+                    "payloadHash": payload_hash,
+                    "payloadSchema": crate::core::certificate::CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                    "assumptions": [{"valid": true}]
+                }
+            ]),
+        )?;
+        let key_arg = key_path.to_string_lossy().into_owned();
+        let manifest_arg = manifest_path.to_string_lossy().into_owned();
+
+        for format_value in ["json", "jsonl"] {
+            let (exit, stdout, stderr) = invoke(&[
+                "ee",
+                "certificate",
+                "sign",
+                "cert_bd_awm6r",
+                "--manifest",
+                &manifest_arg,
+                "--key",
+                &key_arg,
+                "--format",
+                format_value,
+            ]);
+            ensure_equal(&exit, &ProcessExitCode::Success, "sign success exit")?;
+            ensure(stderr.is_empty(), "sign success stderr clean")?;
+            let value: serde_json::Value = serde_json::from_str(&stdout)
+                .map_err(|error| format!("sign {format_value} output must be JSON: {error}"))?;
+            ensure_equal(
+                &value["schema"],
+                &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+                "sign machine output wraps in the v2 response envelope",
+            )?;
+            ensure_equal(
+                &value["success"],
+                &serde_json::json!(true),
+                "sign success flag",
+            )?;
+            ensure_equal(
+                &value["data"]["schema"],
+                &serde_json::json!("ee.certificate.sign.v1"),
+                "sign data schema",
+            )?;
+            ensure_equal(
+                &value["data"]["success"],
+                &serde_json::json!(true),
+                "sign data success field",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn certificate_keygen_show_without_key_emits_error_envelope() -> TestResult {
+        let workspace = unique_temp_workspace("bd-awm6r-keygen")?;
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "certificate",
+            "keygen",
+            "--workspace",
+            &workspace,
+            "--show",
+            "--json",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Storage,
+            "keygen --show missing key exit",
+        )?;
+        ensure(stderr.is_empty(), "keygen JSON error must not write stderr")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "keygen error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("storage"),
+            "keygen error code",
+        )
+    }
+
+    // ---- bd-awm6r: --output write failures emit storage envelopes ----
+
+    #[test]
+    fn pack_output_write_failure_emits_storage_envelope() -> TestResult {
+        let workspace = init_cli_workspace("bd-awm6r-output")?;
+        let missing_parent = PathBuf::from(&workspace)
+            .join("no-such-dir")
+            .join("pack.json");
+        let output_arg = missing_parent.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            &workspace,
+            "pack",
+            "bd-awm6r output failure task",
+            "--output",
+            &output_arg,
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Storage,
+            "--output write failure exit",
+        )?;
+        ensure(stderr.is_empty(), "--output failure JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "--output failure error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("storage"),
+            "--output failure error code",
+        )?;
+        ensure_contains(
+            &stdout,
+            "Failed to write --output file",
+            "--output failure message names the file write",
+        )
+    }
+
+    // ---- bd-awm6r: recorder import exit classes ----
+
+    #[test]
+    fn recorder_import_unreadable_input_uses_import_exit_class() -> TestResult {
+        let workspace = unique_temp_workspace("bd-awm6r-recorder")?;
+        let missing_input = format!("{workspace}-missing-input.json");
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "recorder",
+            "import",
+            "--source-id",
+            "bd-awm6r-source",
+            "--dry-run",
+            "--input",
+            &missing_input,
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Import,
+            "unreadable --input exit class",
+        )?;
+        ensure(stderr.is_empty(), "recorder import JSON stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::ERROR_SCHEMA_V2),
+            "recorder import error schema",
+        )?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("recorder_import_invalid_json"),
+            "recorder import error code",
+        )
+    }
+
+    // ---- bd-awm6r: local --workspace flags join the resolution chain ----
+
+    #[test]
+    fn recorder_events_list_local_workspace_flag_outranks_global() -> TestResult {
+        let initialized = init_cli_workspace("bd-awm6r-events-global")?;
+        let empty = unique_temp_workspace("bd-awm6r-events-local")?;
+        fs::create_dir_all(&empty).map_err(|error| error.to_string())?;
+
+        let (exit, stdout, _stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            &initialized,
+            "recorder",
+            "events",
+            "list",
+            "-w",
+            &empty,
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Storage,
+            "local -w must outrank the global --workspace flag",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["error"]["code"],
+            &serde_json::json!("storage"),
+            "local empty workspace has no database",
+        )?;
+        ensure_contains(
+            &stdout,
+            "Database not found",
+            "storage error names the miss",
+        )
     }
 
     #[test]

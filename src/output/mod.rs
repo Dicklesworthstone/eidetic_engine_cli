@@ -1049,6 +1049,57 @@ fn renderer_from_env_value(value: &str) -> Option<Renderer> {
     }
 }
 
+/// Renderer requested purely by environment variables, or `None` when no
+/// output-selecting variable is set.
+///
+/// Precedence matches [`OutputContext::detect`]: `EE_JSON` / `EE_AGENT_MODE`
+/// force JSON, then `EE_HOOK_MODE` forces hook, then `EE_OUTPUT_FORMAT`,
+/// `EE_FORMAT`, and `TOON_DEFAULT_FORMAT` are consulted in that order. A
+/// TOON selection degrades to JSON when `EE_DISABLE_TOON` is truthy.
+///
+/// Explicit CLI flags always outrank this: the argv-injection layer in
+/// `main.rs` only consults it when no `--json` / `--robot` / `--format`
+/// flag is present.
+#[must_use]
+pub fn renderer_requested_by_env() -> Option<Renderer> {
+    renderer_requested_by_environment(&OutputEnvironment::from_process_env())
+}
+
+fn renderer_requested_by_environment(environment: &OutputEnvironment) -> Option<Renderer> {
+    let renderer = if env_flag_truthy(environment.ee_json.as_deref())
+        || env_flag_truthy(environment.ee_agent_mode.as_deref())
+    {
+        Renderer::Json
+    } else if env_flag_truthy(environment.ee_hook_mode.as_deref()) {
+        Renderer::Hook
+    } else if let Some(renderer) = environment
+        .ee_output_format
+        .as_deref()
+        .and_then(renderer_from_env_value)
+    {
+        renderer
+    } else if let Some(renderer) = environment
+        .ee_format
+        .as_deref()
+        .and_then(renderer_from_env_value)
+    {
+        renderer
+    } else if let Some(renderer) = environment
+        .toon_default_format
+        .as_deref()
+        .and_then(renderer_from_env_value)
+    {
+        renderer
+    } else {
+        return None;
+    };
+    if matches!(renderer, Renderer::Toon) && env_flag_truthy(environment.ee_disable_toon.as_deref())
+    {
+        return Some(Renderer::Json);
+    }
+    Some(renderer)
+}
+
 impl OutputContext {
     #[must_use]
     pub fn detect() -> Self {
@@ -1082,34 +1133,10 @@ impl OutputContext {
         let force_color = env_flag_truthy(environment.force_color.as_deref());
         let renderer = if let Some(r) = format_override {
             r
-        } else if json_flag
-            || robot_flag
-            || env_flag_truthy(environment.ee_json.as_deref())
-            || env_flag_truthy(environment.ee_agent_mode.as_deref())
-        {
+        } else if json_flag || robot_flag {
             Renderer::Json
-        } else if env_flag_truthy(environment.ee_hook_mode.as_deref()) {
-            Renderer::Hook
-        } else if let Some(renderer) = environment
-            .ee_output_format
-            .as_deref()
-            .and_then(renderer_from_env_value)
-        {
-            renderer
-        } else if let Some(renderer) = environment
-            .ee_format
-            .as_deref()
-            .and_then(renderer_from_env_value)
-        {
-            renderer
-        } else if let Some(renderer) = environment
-            .toon_default_format
-            .as_deref()
-            .and_then(renderer_from_env_value)
-        {
-            renderer
         } else {
-            Renderer::Human
+            renderer_requested_by_environment(environment).unwrap_or(Renderer::Human)
         };
         let renderer = if matches!(renderer, Renderer::Toon)
             && env_flag_truthy(environment.ee_disable_toon.as_deref())
@@ -21007,6 +21034,54 @@ mod tests {
             &ctx.renderer,
             &Renderer::Json,
             "EE_DISABLE_TOON fallback renderer",
+        )
+    }
+
+    #[test]
+    fn renderer_requested_by_environment_is_none_without_output_vars() -> TestResult {
+        ensure_equal(
+            &super::renderer_requested_by_environment(&OutputEnvironment::default()),
+            &None,
+            "no output env vars set",
+        )
+    }
+
+    #[test]
+    fn renderer_requested_by_environment_prefers_output_format_over_format() -> TestResult {
+        ensure_equal(
+            &super::renderer_requested_by_environment(&OutputEnvironment {
+                ee_output_format: Some("jsonl".to_string()),
+                ee_format: Some("compact".to_string()),
+                ..OutputEnvironment::default()
+            }),
+            &Some(Renderer::Jsonl),
+            "EE_OUTPUT_FORMAT outranks EE_FORMAT",
+        )
+    }
+
+    #[test]
+    fn renderer_requested_by_environment_skips_invalid_values() -> TestResult {
+        ensure_equal(
+            &super::renderer_requested_by_environment(&OutputEnvironment {
+                ee_output_format: Some("bogus".to_string()),
+                ee_format: Some("markdown".to_string()),
+                ..OutputEnvironment::default()
+            }),
+            &Some(Renderer::Markdown),
+            "invalid EE_OUTPUT_FORMAT falls through to EE_FORMAT",
+        )
+    }
+
+    #[test]
+    fn renderer_requested_by_environment_degrades_toon_when_disabled() -> TestResult {
+        ensure_equal(
+            &super::renderer_requested_by_environment(&OutputEnvironment {
+                ee_format: Some("toon".to_string()),
+                ee_disable_toon: Some("1".to_string()),
+                ..OutputEnvironment::default()
+            }),
+            &Some(Renderer::Json),
+            "EE_DISABLE_TOON degrades an env TOON selection to JSON",
         )
     }
 

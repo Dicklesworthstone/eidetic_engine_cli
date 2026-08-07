@@ -715,6 +715,21 @@ impl RecorderImportErrorCode {
             Self::DatabaseError => "recorder_import_database_error",
         }
     }
+
+    /// Exit class for this failure (bd-awm6r finding 6). Only malformed
+    /// invocations are usage errors; unreadable or malformed import payloads
+    /// share the import class (5) with the rest of the `ee import` family,
+    /// and store failures are storage class (3).
+    #[must_use]
+    pub const fn exit_code(self) -> crate::models::ProcessExitCode {
+        match self {
+            Self::DryRunRequired | Self::InvalidSourceType => crate::models::ProcessExitCode::Usage,
+            Self::InvalidInputJson | Self::InvalidSourceShape | Self::PayloadTooLarge => {
+                crate::models::ProcessExitCode::Import
+            }
+            Self::DatabaseError => crate::models::ProcessExitCode::Storage,
+        }
+    }
 }
 
 /// Stable recorder import planning error.

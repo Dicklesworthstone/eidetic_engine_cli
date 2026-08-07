@@ -227,6 +227,12 @@ data:
       defaultValue: null
       isSet: false
       source: unset
+    - name: EE_DOCTOR_BLAST_RADIUS
+      category: paths
+      controls: Override the doctor fix blast-radius roots with colon-separated absolute paths.
+      defaultValue: null
+      isSet: false
+      source: unset
     - name: EE_E2E_RETENTION_MANIFEST
       category: paths
       controls: Override the retained-artifact manifest path used by diagnostics.

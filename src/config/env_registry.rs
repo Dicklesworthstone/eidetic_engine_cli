@@ -111,6 +111,8 @@ pub enum EnvVar {
     DisableToon,
     /// `EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS`
     DisableRememberSearchNeighbors,
+    /// `EE_DOCTOR_BLAST_RADIUS`
+    DoctorBlastRadius,
     /// `EE_E2E_RETENTION_MANIFEST`
     E2eRetentionManifest,
     /// `EE_EMBED_DEDUP_COSINE_FLOOR`
@@ -333,6 +335,7 @@ impl EnvVar {
             Self::DisableAdaptive,
             Self::DisableToon,
             Self::DisableRememberSearchNeighbors,
+            Self::DoctorBlastRadius,
             Self::E2eRetentionManifest,
             Self::EmbedDedupCosineFloor,
             Self::EmbedDedupEnabled,
@@ -459,6 +462,7 @@ impl EnvVar {
             Self::DisableAdaptive => "EE_DISABLE_ADAPTIVE",
             Self::DisableToon => "EE_DISABLE_TOON",
             Self::DisableRememberSearchNeighbors => "EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS",
+            Self::DoctorBlastRadius => "EE_DOCTOR_BLAST_RADIUS",
             Self::E2eRetentionManifest => "EE_E2E_RETENTION_MANIFEST",
             Self::EmbedDedupCosineFloor => "EE_EMBED_DEDUP_COSINE_FLOOR",
             Self::EmbedDedupEnabled => "EE_EMBED_DEDUP_ENABLED",
@@ -631,6 +635,9 @@ impl EnvVar {
             }
             Self::DisableRememberSearchNeighbors => {
                 "Disable Frankensearch neighbors during remember-time proposal."
+            }
+            Self::DoctorBlastRadius => {
+                "Override the doctor fix blast-radius roots with colon-separated absolute paths."
             }
             Self::E2eRetentionManifest => {
                 "Override the retained-artifact manifest path used by diagnostics."
@@ -944,6 +951,7 @@ impl EnvVar {
             | Self::RememberCurationSyncBudgetMs => "curation",
             Self::DatabasePath
             | Self::DemoEvidenceRoot
+            | Self::DoctorBlastRadius
             | Self::E2eRetentionManifest
             | Self::FlightRecorderDir
             | Self::IndexDir

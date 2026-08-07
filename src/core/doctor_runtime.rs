@@ -1620,14 +1620,16 @@ impl CapabilitiesReport {
                     meaning: "doctor refuses because `ee migrate run` is needed first",
                 },
             ],
+            // Every variable listed here must be registered in
+            // `config::env_registry` and actually read by the runtime.
+            // `EE_DOCTOR_LOCK_STALE_AFTER_SECS` was removed (bd-awm6r): the
+            // doctor lock is an OS advisory lock that releases when its holder
+            // exits, so "stale after N seconds" has no meaning here and the
+            // advertised control was a silent no-op.
             env_vars: vec![
                 EnvVarEntry {
                     name: "EE_DOCTOR_BLAST_RADIUS",
                     purpose: "Override default blast radius (colon-separated abs paths)",
-                },
-                EnvVarEntry {
-                    name: "EE_DOCTOR_LOCK_STALE_AFTER_SECS",
-                    purpose: "Treat lock files older than this as stale (default: never)",
                 },
                 EnvVarEntry {
                     name: "EE_NO_COLOR",
@@ -1649,6 +1651,45 @@ pub fn default_blast_radius_roots(workspace: &Path) -> Vec<PathBuf> {
         roots.push(home.join(".local").join("share").join("ee"));
     }
     roots
+}
+
+/// Blast-radius roots for `ee doctor --fix`, honoring the
+/// `EE_DOCTOR_BLAST_RADIUS` override advertised by `--capabilities`
+/// (colon-separated absolute paths). Unset or blank falls back to
+/// [`default_blast_radius_roots`].
+///
+/// # Errors
+///
+/// Returns a human-readable reason when the override is set but invalid
+/// (empty segment or relative entry). Doctor must refuse rather than fall
+/// back: a typo that silently restored the default roots could widen the
+/// write surface past what the operator constrained it to.
+pub fn blast_radius_roots_from_env(workspace: &Path) -> Result<Vec<PathBuf>, String> {
+    use crate::config::env_registry::{EnvVar, read};
+    match read(EnvVar::DoctorBlastRadius) {
+        Some(raw) if !raw.trim().is_empty() => parse_blast_radius_override(&raw),
+        _ => Ok(default_blast_radius_roots(workspace)),
+    }
+}
+
+fn parse_blast_radius_override(raw: &str) -> Result<Vec<PathBuf>, String> {
+    let mut roots = Vec::new();
+    for entry in raw.split(':') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return Err(format!(
+                "EE_DOCTOR_BLAST_RADIUS contains an empty path segment: {raw:?}"
+            ));
+        }
+        let path = PathBuf::from(entry);
+        if !path.is_absolute() {
+            return Err(format!(
+                "EE_DOCTOR_BLAST_RADIUS entries must be absolute paths; got {entry:?}"
+            ));
+        }
+        roots.push(path);
+    }
+    Ok(roots)
 }
 
 // ---------- private helpers ----------
@@ -3436,6 +3477,31 @@ mod tests {
             "persistent doctor advisory lock should be released"
         );
         Fs4FileExt::unlock(&lock).expect("unlock test doctor lock");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blast_radius_override_parses_absolute_colon_separated_paths() {
+        let roots = parse_blast_radius_override("/a/b:/c/d").expect("valid override");
+        assert_eq!(roots, vec![PathBuf::from("/a/b"), PathBuf::from("/c/d")]);
+    }
+
+    #[test]
+    fn blast_radius_override_rejects_relative_and_empty_segments() {
+        assert!(parse_blast_radius_override("relative/path").is_err());
+        assert!(parse_blast_radius_override("/abs::/tail").is_err());
+        assert!(parse_blast_radius_override(":/lead").is_err());
+    }
+
+    #[test]
+    fn capabilities_report_only_advertises_wired_env_vars() {
+        let report = CapabilitiesReport::build("0.0.0-test", Path::new("/ws"));
+        let names: Vec<&str> = report.env_vars.iter().map(|entry| entry.name).collect();
+        assert_eq!(
+            names,
+            vec!["EE_DOCTOR_BLAST_RADIUS", "EE_NO_COLOR"],
+            "capabilities must only advertise env vars the runtime actually reads"
+        );
     }
 
     #[test]
