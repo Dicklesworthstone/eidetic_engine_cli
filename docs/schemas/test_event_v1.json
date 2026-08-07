@@ -204,6 +204,15 @@
         "properties": {
           "fields": {
             "type": "object",
+            "properties": {
+              "manifest_schema": {
+                "type": "string",
+                "enum": [
+                  "ee.test_artifact_manifest.v1",
+                  "ee.test_artifact_manifest.v2"
+                ]
+              }
+            },
             "required": [
               "manifest_schema",
               "phase",
@@ -222,6 +231,87 @@
               "retention_manifest_path",
               "artifact_manifest_hash"
             ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["kind", "fields"],
+        "properties": {
+          "kind": {"const": "artifact_manifest"},
+          "fields": {
+            "type": "object",
+            "required": ["manifest_schema"],
+            "properties": {
+              "manifest_schema": {"const": "ee.test_artifact_manifest.v2"}
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "fields": {
+            "type": "object",
+            "required": [
+              "remote_artifact_attestation",
+              "source_commit",
+              "git_tree",
+              "build_command_hash",
+              "effective_input_hash",
+              "provenance_hash",
+              "archive_hash",
+              "verification_hash"
+            ],
+            "properties": {
+              "binary_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+              "binary_hash_status": {"const": "available"},
+              "source_hash": {"type": "string", "pattern": "^git_tree:[0-9a-f]{40}$"},
+              "artifact_manifest_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+              "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+              "git_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+              "build_command_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+              "effective_input_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+              "provenance_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+              "archive_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+              "verification_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+              "remote_artifact_attestation": {
+                "type": "object",
+                "required": [
+                  "schema",
+                  "status",
+                  "accepted",
+                  "artifactName",
+                  "artifactId",
+                  "repository",
+                  "workflow",
+                  "runId",
+                  "runAttempt",
+                  "sourceCommit",
+                  "gitTree",
+                  "manifestHash",
+                  "buildCommandHash",
+                  "effectiveInputHash",
+                  "provenanceHash",
+                  "target",
+                  "profile",
+                  "binaryHash",
+                  "archiveHash",
+                  "archiveSizeBytes",
+                  "checksumStatus",
+                  "probeStatus",
+                  "probes",
+                  "rejections",
+                  "rawOutputIncluded",
+                  "verificationHash"
+                ],
+                "properties": {
+                  "schema": {
+                    "const": "ee.remote_build_artifact_manifest.verification.v1"
+                  }
+                }
+              }
+            }
           }
         }
       }

@@ -294,7 +294,9 @@ whether to reuse an active run, wait, verify an artifact, dispatch exactly one
 new run after Agent Mail coordination, abstain, or file a follow-up Bead.
 
 Artifact source authority and RCH source/test proof are separate. A verified CI
-artifact can prove workflow/run/head-SHA provenance and a surface probe. It does
+artifact can prove exact workflow/run/artifact identity, source commit/tree,
+effective build inputs, packaged bytes, checksum, and canonical probes. GitHub
+artifact metadata or a commit label alone proves none of those. It does
 not prove Rust tests passed unless a separate RCH or CI source-test artifact says
 so. If the snapshot reports `wait_for_active_run`,
 `duplicate_dispatch_detected`, `artifact_stale`, `surface_probe_failed`, or

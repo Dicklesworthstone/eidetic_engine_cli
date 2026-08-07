@@ -38,7 +38,7 @@
     "workerHost": { "type": ["string", "null"] },
     "result": {
       "type": "string",
-      "enum": ["passed", "failed", "in_flight"]
+      "enum": ["passed", "failed", "in_flight", "unverified"]
     },
     "passedCount": { "type": ["integer", "null"], "minimum": 0 },
     "failedCount": { "type": ["integer", "null"], "minimum": 0 },
@@ -58,6 +58,7 @@
           "evidence_incomplete",
           "local_cargo_disallowed",
           "no_artifact_manifest",
+          "remote_artifact_attestation_invalid",
           "source_hash_mismatch"
         ]
       }

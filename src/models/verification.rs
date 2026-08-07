@@ -9,6 +9,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 
 use crate::models::{ProducerMetadata, ProducerSourceSystem};
 
@@ -26,6 +27,8 @@ pub const VERIFICATION_COMPILE_BLOCKER_LOOKUP_SCHEMA_V1: &str =
 pub const RCH_VERIFY_SCHEMA_V1: &str = "ee.rch.verify.v1";
 pub const RCH_SELECTOR_ADMISSION_PROBE_SCHEMA_V1: &str = "ee.rch.selector_admission_probe.v1";
 pub const GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1: &str = "ee.github_actions.check_run.v1";
+pub const REMOTE_BUILD_ARTIFACT_VERIFICATION_SCHEMA_V1: &str =
+    "ee.remote_build_artifact_manifest.verification.v1";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -301,6 +304,58 @@ pub struct VerificationRunProvenance {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoteArtifactSemanticAssertion {
+    pub path: String,
+    pub expected: JsonValue,
+    pub observed: JsonValue,
+    pub matched: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoteArtifactBehaviorProbe {
+    pub id: Option<String>,
+    pub argv_hash: Option<String>,
+    pub exit_code: Option<i32>,
+    pub stdout_hash: Option<String>,
+    pub stderr_hash: Option<String>,
+    pub status: Option<String>,
+    pub semantic_assertions: Vec<RemoteArtifactSemanticAssertion>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoteArtifactAttestation {
+    pub schema: String,
+    pub status: String,
+    pub accepted: bool,
+    pub artifact_name: Option<String>,
+    pub artifact_id: Option<String>,
+    pub repository: Option<String>,
+    pub workflow: Option<String>,
+    pub run_id: Option<String>,
+    pub run_attempt: Option<u64>,
+    pub source_commit: Option<String>,
+    pub git_tree: Option<String>,
+    pub manifest_hash: Option<String>,
+    pub build_command_hash: Option<String>,
+    pub effective_input_hash: Option<String>,
+    pub provenance_hash: Option<String>,
+    pub target: Option<String>,
+    pub profile: Option<String>,
+    pub binary_hash: Option<String>,
+    pub archive_hash: Option<String>,
+    pub archive_size_bytes: Option<u64>,
+    pub checksum_status: String,
+    pub probe_status: String,
+    pub probes: Vec<RemoteArtifactBehaviorProbe>,
+    pub rejections: Vec<String>,
+    pub raw_output_included: bool,
+    pub verification_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationRunRecord {
     pub schema: String,
@@ -319,6 +374,10 @@ pub struct VerificationRunRecord {
     pub stdout_hash: Option<String>,
     pub stderr_excerpt_hash: Option<String>,
     pub artifact_manifest_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exercised_binary_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_artifact_attestation: Option<RemoteArtifactAttestation>,
     pub retained_log_path_hash: Option<String>,
     pub provenance: Vec<VerificationRunProvenance>,
 }
@@ -763,9 +822,25 @@ pub struct VerificationRunInput<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VerificationRunImportError {
-    InvalidJsonLine { line: usize, message: String },
-    MissingArtifactManifest { line: usize },
-    RawOutputRejected { line: usize, field: String },
+    InvalidJsonLine {
+        line: usize,
+        message: String,
+    },
+    MissingArtifactManifest {
+        line: usize,
+    },
+    MismatchedArtifactManifest {
+        line: usize,
+        reason: String,
+    },
+    InvalidArtifactAttestation {
+        line: usize,
+        rejection_codes: Vec<String>,
+    },
+    RawOutputRejected {
+        line: usize,
+        field: String,
+    },
 }
 
 impl fmt::Display for VerificationRunImportError {
@@ -780,6 +855,20 @@ impl fmt::Display for VerificationRunImportError {
                     "command_end at line {line} has no following artifact_manifest"
                 )
             }
+            Self::MismatchedArtifactManifest { line, reason } => {
+                write!(
+                    f,
+                    "artifact_manifest at line {line} is mismatched: {reason}"
+                )
+            }
+            Self::InvalidArtifactAttestation {
+                line,
+                rejection_codes,
+            } => write!(
+                f,
+                "remote artifact attestation at line {line} is invalid: {}",
+                rejection_codes.join(",")
+            ),
             Self::RawOutputRejected { line, field } => {
                 write!(f, "raw output field {field} is not allowed at line {line}")
             }
@@ -1243,10 +1332,199 @@ impl VerificationRunRecord {
             stdout_hash: normalized_non_empty(input.stdout_hash),
             stderr_excerpt_hash,
             artifact_manifest_hash: normalized_non_empty(input.artifact_manifest_hash),
+            exercised_binary_hash: None,
+            remote_artifact_attestation: None,
             retained_log_path_hash: input.retained_log_path.map(hash_str),
             provenance: input.provenance,
         }
     }
+}
+
+/// Return deterministic rejection codes for a remote artifact attestation.
+///
+/// A zero exit code from a remote worker is not, by itself, proof that the
+/// downloaded binary came from the requested source tree or that the packaged
+/// bytes passed the required behavior probes.  This validator is the common
+/// trust boundary used by import, reuse, broker, and closeout projections.
+#[must_use]
+pub fn verification_run_remote_artifact_rejections(record: &VerificationRunRecord) -> Vec<String> {
+    let mut rejections = Vec::new();
+    if !run_record_requires_remote_artifact_attestation(record) {
+        rejections.push("execution_substrate_not_remote".to_owned());
+    }
+
+    let Some(report) = record.remote_artifact_attestation.as_ref() else {
+        rejections.push("remote_artifact_attestation_missing".to_owned());
+        return rejections;
+    };
+
+    reject_unless(
+        &mut rejections,
+        report.schema == REMOTE_BUILD_ARTIFACT_VERIFICATION_SCHEMA_V1,
+        "remote_artifact_attestation_schema_mismatch",
+    );
+    reject_unless(
+        &mut rejections,
+        report.status == "verified" && report.accepted,
+        "remote_artifact_attestation_not_accepted",
+    );
+    reject_unless(
+        &mut rejections,
+        report.checksum_status == "verified",
+        "remote_artifact_checksum_not_verified",
+    );
+    reject_unless(
+        &mut rejections,
+        report.probe_status == "passed",
+        "remote_artifact_probe_status_not_passed",
+    );
+    reject_unless(
+        &mut rejections,
+        report.rejections.is_empty(),
+        "remote_artifact_report_has_rejections",
+    );
+    reject_unless(
+        &mut rejections,
+        !report.raw_output_included,
+        "remote_artifact_report_contains_raw_output",
+    );
+
+    for (value, code) in [
+        (
+            report.manifest_hash.as_deref(),
+            "remote_artifact_manifest_hash_invalid",
+        ),
+        (
+            report.build_command_hash.as_deref(),
+            "remote_artifact_build_command_hash_invalid",
+        ),
+        (
+            report.effective_input_hash.as_deref(),
+            "remote_artifact_effective_input_hash_invalid",
+        ),
+        (
+            report.provenance_hash.as_deref(),
+            "remote_artifact_provenance_hash_invalid",
+        ),
+        (
+            report.binary_hash.as_deref(),
+            "remote_artifact_binary_hash_invalid",
+        ),
+        (
+            report.archive_hash.as_deref(),
+            "remote_artifact_archive_hash_invalid",
+        ),
+    ] {
+        reject_unless(&mut rejections, value.is_some_and(is_sha256_hash), code);
+    }
+    reject_unless(
+        &mut rejections,
+        is_sha256_hash(&report.verification_hash),
+        "remote_artifact_verification_hash_invalid",
+    );
+    reject_unless(
+        &mut rejections,
+        report.source_commit.as_deref().is_some_and(is_git_object),
+        "remote_artifact_source_commit_invalid",
+    );
+    reject_unless(
+        &mut rejections,
+        report.git_tree.as_deref().is_some_and(is_git_object),
+        "remote_artifact_git_tree_invalid",
+    );
+    reject_unless(
+        &mut rejections,
+        report
+            .artifact_id
+            .as_deref()
+            .is_some_and(is_positive_decimal),
+        "remote_artifact_id_invalid",
+    );
+    reject_unless(
+        &mut rejections,
+        report.run_id.as_deref().is_some_and(is_positive_decimal),
+        "remote_artifact_run_id_invalid",
+    );
+    reject_unless(
+        &mut rejections,
+        report.run_attempt.is_some_and(|attempt| attempt > 0),
+        "remote_artifact_run_attempt_invalid",
+    );
+    reject_unless(
+        &mut rejections,
+        report.archive_size_bytes.is_some_and(|size| size > 0),
+        "remote_artifact_archive_size_invalid",
+    );
+    for (value, code) in [
+        (
+            report.artifact_name.as_deref(),
+            "remote_artifact_name_missing",
+        ),
+        (
+            report.repository.as_deref(),
+            "remote_artifact_repository_missing",
+        ),
+        (
+            report.workflow.as_deref(),
+            "remote_artifact_workflow_missing",
+        ),
+        (report.target.as_deref(), "remote_artifact_target_missing"),
+        (report.profile.as_deref(), "remote_artifact_profile_missing"),
+    ] {
+        reject_unless(
+            &mut rejections,
+            value.is_some_and(|value| !value.trim().is_empty()),
+            code,
+        );
+    }
+
+    match remote_artifact_verification_hash(report) {
+        Some(expected) => reject_unless(
+            &mut rejections,
+            report.verification_hash == expected,
+            "remote_artifact_verification_hash_mismatch",
+        ),
+        None => rejections.push("remote_artifact_verification_hash_uncomputable".to_owned()),
+    }
+
+    validate_remote_artifact_probes(report, &mut rejections);
+
+    let expected_source_hash = report
+        .git_tree
+        .as_deref()
+        .map(|tree| format!("git_tree:{tree}"));
+    reject_unless(
+        &mut rejections,
+        expected_source_hash.as_ref() == record.source_hash.as_ref(),
+        "remote_artifact_source_hash_mismatch",
+    );
+    reject_unless(
+        &mut rejections,
+        report.manifest_hash.as_ref() == record.artifact_manifest_hash.as_ref(),
+        "remote_artifact_manifest_hash_mismatch",
+    );
+    reject_unless(
+        &mut rejections,
+        report.binary_hash.as_ref() == record.exercised_binary_hash.as_ref(),
+        "remote_artifact_binary_hash_mismatch",
+    );
+    reject_unless(
+        &mut rejections,
+        record.provenance.iter().any(|provenance| {
+            provenance.event_kind == "remote_artifact_attestation_verified"
+                && provenance.source == format!("artifact_attestation:{}", report.verification_hash)
+        }),
+        "remote_artifact_attestation_provenance_missing",
+    );
+
+    rejections.sort();
+    rejections.dedup();
+    rejections
+}
+
+#[must_use]
+pub fn verification_run_has_verified_remote_artifact(record: &VerificationRunRecord) -> bool {
+    verification_run_remote_artifact_rejections(record).is_empty()
 }
 
 #[must_use]
@@ -1477,6 +1755,16 @@ pub fn verification_reuse_advisory(
 
     let (status, matched, reason) = if let Some(record) = exact {
         match record.exit_code {
+            Some(0)
+                if run_record_requires_remote_artifact_attestation(record)
+                    && !verification_run_has_verified_remote_artifact(record) =>
+            {
+                (
+                    VerificationReuseStatus::RerunRequired,
+                    Some(record),
+                    "matching remote run lacks a valid source-bound artifact attestation",
+                )
+            }
             Some(0) => (
                 VerificationReuseStatus::ReusablePass,
                 Some(record),
@@ -1569,6 +1857,23 @@ pub fn verification_broker_view(
     let (status, matched, compatibility_reason_codes, stale_reason_codes, suggested_action) =
         if let Some(record) = exact {
             match record.exit_code {
+                Some(0)
+                    if run_record_requires_remote_artifact_attestation(record)
+                        && !verification_run_has_verified_remote_artifact(record) =>
+                {
+                    (
+                        VerificationBrokerStatus::Incompatible,
+                        Some(record),
+                        vec![
+                            "source_match",
+                            "command_match",
+                            "substrate_match",
+                            "artifact_attestation_invalid",
+                        ],
+                        vec!["remote_artifact_attestation_invalid"],
+                        "verify_downloaded_artifact",
+                    )
+                }
                 Some(0) => (
                     VerificationBrokerStatus::Reusable,
                     Some(record),
@@ -1762,6 +2067,16 @@ pub fn verification_closeout_capsule(
             "artifact manifest hash is unavailable; cite as advisory evidence only".to_owned(),
         );
     }
+    let remote_artifact_attestation_invalid =
+        run_record_requires_remote_artifact_attestation(record)
+            && !verification_run_has_verified_remote_artifact(record);
+    if remote_artifact_attestation_invalid {
+        failure_mode_codes.push("remote_artifact_attestation_invalid".to_owned());
+        caveats.push(
+            "remote artifact evidence is not source-bound and behaviorally verified; do not cite it as passing closure proof"
+                .to_owned(),
+        );
+    }
     if record.execution_substrate == "local_cargo" {
         failure_mode_codes.push("local_cargo_disallowed".to_owned());
         caveats
@@ -1787,6 +2102,7 @@ pub fn verification_closeout_capsule(
     caveats.dedup();
 
     let (result, passed_count, failed_count) = match record.exit_code {
+        Some(0) if remote_artifact_attestation_invalid => ("unverified", Some(0), Some(0)),
         Some(0) => ("passed", Some(1), Some(0)),
         Some(_) => ("failed", Some(0), Some(1)),
         None => ("in_flight", None, None),
@@ -1939,33 +2255,167 @@ pub fn sample_verification_evidence_records() -> Vec<VerificationEvidenceRecord>
     ]
 }
 
+const SAMPLE_REMOTE_SOURCE_COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const SAMPLE_REMOTE_GIT_TREE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const SAMPLE_REMOTE_SOURCE_HASH: &str = "git_tree:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const SAMPLE_REMOTE_MANIFEST_HASH: &str =
+    "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+const SAMPLE_REMOTE_BINARY_HASH: &str =
+    "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+
+fn sample_remote_artifact_attestation() -> RemoteArtifactAttestation {
+    let source_commit = SAMPLE_REMOTE_SOURCE_COMMIT.to_owned();
+    let target = "aarch64-apple-darwin".to_owned();
+    let profile = "debug".to_owned();
+    let version_assertions = vec![
+        sample_remote_assertion("/schema", serde_json::json!("ee.response.v2")),
+        sample_remote_assertion("/success", serde_json::json!(true)),
+        sample_remote_assertion("/data/command", serde_json::json!("version")),
+        sample_remote_assertion(
+            "/data/schema",
+            serde_json::json!("ee.version.provenance.v1"),
+        ),
+        sample_remote_assertion(
+            "/data/source/gitCommit",
+            serde_json::json!(source_commit.clone()),
+        ),
+        sample_remote_assertion("/data/source/gitDirty", serde_json::json!(true)),
+        sample_remote_assertion("/data/source/state", serde_json::json!("dirty")),
+        sample_remote_assertion(
+            "/data/build/targetTriple",
+            serde_json::json!(target.clone()),
+        ),
+        sample_remote_assertion("/data/build/profile", serde_json::json!(profile.clone())),
+        sample_remote_assertion("/data/provenance/available", serde_json::json!(true)),
+    ];
+    let mut report = RemoteArtifactAttestation {
+        schema: REMOTE_BUILD_ARTIFACT_VERIFICATION_SCHEMA_V1.to_owned(),
+        status: "verified".to_owned(),
+        accepted: true,
+        artifact_name: Some("ee-aarch64-apple-darwin-debug".to_owned()),
+        artifact_id: Some("24680".to_owned()),
+        repository: Some("Dicklesworthstone/eidetic_engine_cli".to_owned()),
+        workflow: Some("macOS EE Artifact".to_owned()),
+        run_id: Some("13579".to_owned()),
+        run_attempt: Some(1),
+        source_commit: Some(source_commit),
+        git_tree: Some(SAMPLE_REMOTE_GIT_TREE.to_owned()),
+        manifest_hash: Some(SAMPLE_REMOTE_MANIFEST_HASH.to_owned()),
+        build_command_hash: Some(
+            "sha256:4444444444444444444444444444444444444444444444444444444444444444".to_owned(),
+        ),
+        effective_input_hash: Some(
+            "sha256:5555555555555555555555555555555555555555555555555555555555555555".to_owned(),
+        ),
+        provenance_hash: Some(
+            "sha256:6666666666666666666666666666666666666666666666666666666666666666".to_owned(),
+        ),
+        target: Some(target),
+        profile: Some(profile),
+        binary_hash: Some(SAMPLE_REMOTE_BINARY_HASH.to_owned()),
+        archive_hash: Some(
+            "sha256:7777777777777777777777777777777777777777777777777777777777777777".to_owned(),
+        ),
+        archive_size_bytes: Some(42),
+        checksum_status: "verified".to_owned(),
+        probe_status: "passed".to_owned(),
+        probes: vec![
+            RemoteArtifactBehaviorProbe {
+                id: Some("version_json".to_owned()),
+                argv_hash: canonical_json_sha256(&serde_json::json!(["ee", "version", "--json"])),
+                exit_code: Some(0),
+                stdout_hash: Some(
+                    "sha256:8888888888888888888888888888888888888888888888888888888888888888"
+                        .to_owned(),
+                ),
+                stderr_hash: Some(
+                    "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+                        .to_owned(),
+                ),
+                status: Some("passed".to_owned()),
+                semantic_assertions: version_assertions,
+            },
+            RemoteArtifactBehaviorProbe {
+                id: Some("environment_attestation_help".to_owned()),
+                argv_hash: canonical_json_sha256(&serde_json::json!([
+                    "ee",
+                    "diag",
+                    "environment-attestation",
+                    "--help"
+                ])),
+                exit_code: Some(0),
+                stdout_hash: Some(
+                    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .to_owned(),
+                ),
+                stderr_hash: Some(
+                    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                        .to_owned(),
+                ),
+                status: Some("passed".to_owned()),
+                semantic_assertions: Vec::new(),
+            },
+        ],
+        rejections: Vec::new(),
+        raw_output_included: false,
+        verification_hash: String::new(),
+    };
+    if let Some(hash) = remote_artifact_verification_hash(&report) {
+        report.verification_hash = hash;
+    }
+    report
+}
+
+fn sample_remote_assertion(path: &str, value: JsonValue) -> RemoteArtifactSemanticAssertion {
+    RemoteArtifactSemanticAssertion {
+        path: path.to_owned(),
+        expected: value.clone(),
+        observed: value,
+        matched: true,
+    }
+}
+
 #[must_use]
 pub fn sample_verification_run_records() -> Vec<VerificationRunRecord> {
-    vec![
-        VerificationRunRecord {
-            schema: VERIFICATION_RUN_SCHEMA_V1.to_owned(),
-            run_id: "vrun_rch_00000000000000000001".to_owned(),
-            bead_id: Some("bd-example".to_owned()),
-            agent_name: Some("RubyWolf".to_owned()),
-            source_hash: Some("blake3:source".to_owned()),
-            command_hash: "blake3:rch-command".to_owned(),
-            command_argv_hash: "blake3:rch-command-argv".to_owned(),
-            cargo_target_dir_hash_or_class: Some("class:external_cargo_target".to_owned()),
-            execution_substrate: "rch".to_owned(),
-            worker_host: Some("css".to_owned()),
-            started_at: Some("2026-05-15T05:00:00Z".to_owned()),
-            finished_at: Some("2026-05-15T05:00:42Z".to_owned()),
-            exit_code: Some(0),
-            stdout_hash: Some("blake3:stdout".to_owned()),
-            stderr_excerpt_hash: Some("blake3:stderr-excerpt".to_owned()),
-            artifact_manifest_hash: Some("blake3:artifact-manifest".to_owned()),
-            retained_log_path_hash: Some("blake3:retained-log-path".to_owned()),
-            provenance: vec![VerificationRunProvenance {
-                source: "j1_jsonl".to_owned(),
-                event_kind: "artifact_manifest".to_owned(),
-                line: Some(2),
-            }],
+    let mut remote = VerificationRunRecord {
+        schema: VERIFICATION_RUN_SCHEMA_V1.to_owned(),
+        run_id: "vrun_rch_00000000000000000001".to_owned(),
+        bead_id: Some("bd-example".to_owned()),
+        agent_name: Some("RubyWolf".to_owned()),
+        source_hash: Some(SAMPLE_REMOTE_SOURCE_HASH.to_owned()),
+        command_hash: "blake3:rch-command".to_owned(),
+        command_argv_hash: "blake3:rch-command-argv".to_owned(),
+        cargo_target_dir_hash_or_class: Some("class:external_cargo_target".to_owned()),
+        execution_substrate: "rch".to_owned(),
+        worker_host: Some("css".to_owned()),
+        started_at: Some("2026-05-15T05:00:00Z".to_owned()),
+        finished_at: Some("2026-05-15T05:00:42Z".to_owned()),
+        exit_code: Some(0),
+        stdout_hash: Some("blake3:stdout".to_owned()),
+        stderr_excerpt_hash: Some("blake3:stderr-excerpt".to_owned()),
+        artifact_manifest_hash: Some(SAMPLE_REMOTE_MANIFEST_HASH.to_owned()),
+        exercised_binary_hash: Some(SAMPLE_REMOTE_BINARY_HASH.to_owned()),
+        remote_artifact_attestation: None,
+        retained_log_path_hash: Some("blake3:retained-log-path".to_owned()),
+        provenance: Vec::new(),
+    };
+    let attestation = sample_remote_artifact_attestation();
+    remote.provenance = vec![
+        VerificationRunProvenance {
+            source: "j1_jsonl".to_owned(),
+            event_kind: "artifact_manifest".to_owned(),
+            line: Some(2),
         },
+        VerificationRunProvenance {
+            source: format!("artifact_attestation:{}", attestation.verification_hash),
+            event_kind: "remote_artifact_attestation_verified".to_owned(),
+            line: Some(2),
+        },
+    ];
+    remote.remote_artifact_attestation = Some(attestation);
+
+    vec![
+        remote,
         VerificationRunRecord {
             schema: VERIFICATION_RUN_SCHEMA_V1.to_owned(),
             run_id: "vrun_shell_0000000000000000001".to_owned(),
@@ -1983,6 +2433,8 @@ pub fn sample_verification_run_records() -> Vec<VerificationRunRecord> {
             stdout_hash: None,
             stderr_excerpt_hash: None,
             artifact_manifest_hash: None,
+            exercised_binary_hash: None,
+            remote_artifact_attestation: None,
             retained_log_path_hash: None,
             provenance: vec![VerificationRunProvenance {
                 source: "closeout_snippet".to_owned(),
@@ -2000,7 +2452,7 @@ pub fn sample_verification_reuse_advisories() -> Vec<VerificationReuseAdvisory> 
         verification_reuse_advisory(
             VerificationReuseRequest {
                 bead_id: Some("bd-example"),
-                source_hash: Some("blake3:source"),
+                source_hash: Some(SAMPLE_REMOTE_SOURCE_HASH),
                 command_hash: "blake3:rch-command",
                 execution_substrate: "rch",
                 feature_profile_hash: Some("blake3:profile"),
@@ -2029,15 +2481,15 @@ pub fn sample_verification_broker_views() -> Vec<VerificationBrokerView> {
     let records = sample_verification_broker_records();
     vec![
         verification_broker_view(
-            broker_request(Some("blake3:source"), "blake3:rch-command"),
+            broker_request(Some(SAMPLE_REMOTE_SOURCE_HASH), "blake3:rch-command"),
             &records,
         ),
         verification_broker_view(
-            broker_request(Some("blake3:source"), "blake3:failed-command"),
+            broker_request(Some(SAMPLE_REMOTE_SOURCE_HASH), "blake3:failed-command"),
             &records,
         ),
         verification_broker_view(
-            broker_request(Some("blake3:source"), "blake3:in-flight-command"),
+            broker_request(Some(SAMPLE_REMOTE_SOURCE_HASH), "blake3:in-flight-command"),
             &records,
         ),
         verification_broker_view(
@@ -2287,7 +2739,7 @@ pub fn sample_verification_closeout_capsules() -> Vec<VerificationCloseoutCapsul
             VerificationCloseoutCapsuleRequest {
                 requested_surface: "beads_comment",
                 bead_id: Some("bd-example"),
-                source_hash: Some("blake3:source"),
+                source_hash: Some(SAMPLE_REMOTE_SOURCE_HASH),
                 reusable_until: Some("2026-05-15T07:00:42Z"),
                 source_must_match: true,
             },
@@ -2297,7 +2749,7 @@ pub fn sample_verification_closeout_capsules() -> Vec<VerificationCloseoutCapsul
             VerificationCloseoutCapsuleRequest {
                 requested_surface: "support_bundle",
                 bead_id: Some("bd-example"),
-                source_hash: Some("blake3:source"),
+                source_hash: Some(SAMPLE_REMOTE_SOURCE_HASH),
                 reusable_until: None,
                 source_must_match: true,
             },
@@ -2906,6 +3358,7 @@ fn broker_command_match(
     request: &VerificationBrokerViewRequest<'_>,
 ) -> bool {
     record.command_hash == request.command_hash
+        && record.command_argv_hash == request.normalized_argv_hash
         && record.execution_substrate == request.execution_substrate
 }
 
@@ -3022,12 +3475,18 @@ fn broker_request_for_substrate<'a>(
     command_class: &'a str,
     execution_substrate: &'a str,
 ) -> VerificationBrokerViewRequest<'a> {
+    let normalized_argv_hash = match command_hash {
+        "blake3:rch-command" => "blake3:rch-command-argv",
+        "blake3:failed-command" => "blake3:failed-command-argv",
+        "blake3:in-flight-command" => "blake3:in-flight-command-argv",
+        _ => "blake3:broker-argv",
+    };
     VerificationBrokerViewRequest {
         bead_id: Some("bd-example"),
         source_hash,
         command_hash,
         command_class,
-        normalized_argv_hash: "blake3:broker-argv",
+        normalized_argv_hash,
         execution_substrate,
         env_fingerprint_class: Some("class:external_cargo_target"),
         target_profile: Some("debug"),
@@ -3062,11 +3521,11 @@ fn sample_proof_broker_fingerprint(
 
 fn sample_verification_broker_records() -> Vec<VerificationRunRecord> {
     let mut records = sample_verification_run_records();
-    records.push(VerificationRunRecord::from_input(VerificationRunInput {
+    let mut failed = VerificationRunRecord::from_input(VerificationRunInput {
         run_id: Some("vrun_failed_000000000000000001"),
         bead_id: Some("bd-example"),
         agent_name: Some("RubyWolf"),
-        source_hash: Some("blake3:source"),
+        source_hash: Some(SAMPLE_REMOTE_SOURCE_HASH),
         command_hash: Some("blake3:failed-command"),
         command_argv: &["cargo", "test", "failed"],
         cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/rch-target-failed"),
@@ -3084,12 +3543,14 @@ fn sample_verification_broker_records() -> Vec<VerificationRunRecord> {
             event_kind: "artifact_manifest".to_owned(),
             line: Some(4),
         }],
-    }));
-    records.push(VerificationRunRecord::from_input(VerificationRunInput {
+    });
+    failed.command_argv_hash = "blake3:failed-command-argv".to_owned();
+    records.push(failed);
+    let mut in_flight = VerificationRunRecord::from_input(VerificationRunInput {
         run_id: Some("vrun_in_flight_00000000000001"),
         bead_id: Some("bd-example"),
         agent_name: Some("NobleStork"),
-        source_hash: Some("blake3:source"),
+        source_hash: Some(SAMPLE_REMOTE_SOURCE_HASH),
         command_hash: Some("blake3:in-flight-command"),
         command_argv: &["cargo", "test", "in-flight"],
         cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/rch-target-in-flight"),
@@ -3107,7 +3568,9 @@ fn sample_verification_broker_records() -> Vec<VerificationRunRecord> {
             event_kind: "artifact_manifest".to_owned(),
             line: Some(6),
         }],
-    }));
+    });
+    in_flight.command_argv_hash = "blake3:in-flight-command-argv".to_owned();
+    records.push(in_flight);
     records
 }
 
@@ -3207,6 +3670,12 @@ fn run_record_status(record: &VerificationRunRecord) -> VerificationStatus {
     }
 
     match record.exit_code {
+        Some(0)
+            if run_record_requires_remote_artifact_attestation(record)
+                && !verification_run_has_verified_remote_artifact(record) =>
+        {
+            VerificationStatus::Unknown
+        }
         Some(0) => VerificationStatus::Passed,
         Some(_) => VerificationStatus::Failed,
         None if record.finished_at.is_none() => VerificationStatus::Interrupted,
@@ -3254,6 +3723,15 @@ fn run_record_artifacts(record: &VerificationRunRecord) -> Vec<VerificationArtif
             Some(hash),
         ));
     }
+    if verification_run_has_verified_remote_artifact(record) {
+        if let Some(report) = record.remote_artifact_attestation.as_ref() {
+            artifacts.push(VerificationArtifactRef::new(
+                "remote_artifact_verification_hash",
+                "remote_artifact_attestation",
+                Some(&report.verification_hash),
+            ));
+        }
+    }
     if let Some(hash) = record.retained_log_path_hash.as_deref() {
         artifacts.push(VerificationArtifactRef::new(
             "retained_log_path_hash",
@@ -3271,6 +3749,14 @@ fn run_record_uses_rch(record: &VerificationRunRecord) -> bool {
     )
 }
 
+fn run_record_requires_remote_artifact_attestation(record: &VerificationRunRecord) -> bool {
+    run_record_uses_rch(record)
+        || matches!(
+            record.execution_substrate.as_str(),
+            "remote_artifact" | "github_actions_artifact" | "remote_build_artifact"
+        )
+}
+
 fn run_record_is_local_cargo(record: &VerificationRunRecord) -> bool {
     matches!(
         record.execution_substrate.as_str(),
@@ -3281,6 +3767,7 @@ fn run_record_is_local_cargo(record: &VerificationRunRecord) -> bool {
 #[derive(Clone, Debug)]
 struct PendingJ1Command {
     line: usize,
+    test_id: Option<String>,
     command_argv: Vec<String>,
     finished_at: Option<String>,
     exit_code: Option<i32>,
@@ -3301,6 +3788,10 @@ impl PendingJ1Command {
         }
         Self {
             line,
+            test_id: event
+                .get("test_id")
+                .and_then(JsonValue::as_str)
+                .map(str::to_owned),
             command_argv,
             finished_at: event
                 .get("ts")
@@ -3327,14 +3818,46 @@ fn run_record_from_artifact_manifest_event(
     event: &JsonValue,
     command: Option<&PendingJ1Command>,
 ) -> Result<VerificationRunRecord, VerificationRunImportError> {
+    if let Some(command) = command {
+        let manifest_test_id = event.get("test_id").and_then(JsonValue::as_str);
+        if command.test_id.as_deref() != manifest_test_id {
+            return Err(VerificationRunImportError::MismatchedArtifactManifest {
+                line,
+                reason: "test_id does not match the preceding command_end".to_owned(),
+            });
+        }
+    }
+
     let fields = event
         .get("fields")
         .and_then(JsonValue::as_object)
         .ok_or(VerificationRunImportError::MissingArtifactManifest { line })?;
     let manifest_schema = field_str(fields, "manifest_schema");
-    if manifest_schema != Some("ee.test_artifact_manifest.v1") {
+    if !matches!(
+        manifest_schema,
+        Some("ee.test_artifact_manifest.v1") | Some("ee.test_artifact_manifest.v2")
+    ) {
         return Err(VerificationRunImportError::MissingArtifactManifest { line });
     }
+    let remote_artifact_attestation = if manifest_schema == Some("ee.test_artifact_manifest.v2") {
+        let value = fields
+            .get("remote_artifact_attestation")
+            .cloned()
+            .ok_or_else(|| VerificationRunImportError::InvalidArtifactAttestation {
+                line,
+                rejection_codes: vec!["remote_artifact_attestation_missing".to_owned()],
+            })?;
+        Some(
+            serde_json::from_value::<RemoteArtifactAttestation>(value).map_err(|error| {
+                VerificationRunImportError::InvalidArtifactAttestation {
+                    line,
+                    rejection_codes: vec![format!("remote_artifact_attestation_shape:{error}")],
+                }
+            })?,
+        )
+    } else {
+        None
+    };
     let artifact_manifest_hash = field_str(fields, "artifact_manifest_hash")
         .ok_or(VerificationRunImportError::MissingArtifactManifest { line })?;
     let command_argv = command
@@ -3348,7 +3871,27 @@ fn run_record_from_artifact_manifest_event(
     let command_argv_refs = command_argv.iter().map(String::as_str).collect::<Vec<_>>();
     let provenance_line = command.map_or(line, |command| command.line);
 
-    Ok(VerificationRunRecord::from_input(VerificationRunInput {
+    let mut provenance = vec![
+        VerificationRunProvenance {
+            source: "j1_jsonl".to_owned(),
+            event_kind: "command_end".to_owned(),
+            line: command.map(|command| command.line),
+        },
+        VerificationRunProvenance {
+            source: "j1_jsonl".to_owned(),
+            event_kind: "artifact_manifest".to_owned(),
+            line: Some(provenance_line.max(line)),
+        },
+    ];
+    if let Some(report) = remote_artifact_attestation.as_ref() {
+        provenance.push(VerificationRunProvenance {
+            source: format!("artifact_attestation:{}", report.verification_hash),
+            event_kind: "remote_artifact_attestation_verified".to_owned(),
+            line: Some(line),
+        });
+    }
+
+    let mut record = VerificationRunRecord::from_input(VerificationRunInput {
         run_id: None,
         bead_id: field_str(fields, "bead_id"),
         agent_name: field_str(fields, "agent_name"),
@@ -3367,19 +3910,21 @@ fn run_record_from_artifact_manifest_event(
         stderr_excerpt: command.and_then(|command| command.stderr_excerpt.as_deref()),
         artifact_manifest_hash: Some(artifact_manifest_hash),
         retained_log_path: field_str(fields, "log_path"),
-        provenance: vec![
-            VerificationRunProvenance {
-                source: "j1_jsonl".to_owned(),
-                event_kind: "command_end".to_owned(),
-                line: command.map(|command| command.line),
-            },
-            VerificationRunProvenance {
-                source: "j1_jsonl".to_owned(),
-                event_kind: "artifact_manifest".to_owned(),
-                line: Some(provenance_line.max(line)),
-            },
-        ],
-    }))
+        provenance,
+    });
+    record.exercised_binary_hash = field_str(fields, "binary_hash").map(str::to_owned);
+    record.remote_artifact_attestation = remote_artifact_attestation;
+
+    if manifest_schema == Some("ee.test_artifact_manifest.v2") {
+        let rejection_codes = verification_run_remote_artifact_rejections(&record);
+        if !rejection_codes.is_empty() {
+            return Err(VerificationRunImportError::InvalidArtifactAttestation {
+                line,
+                rejection_codes,
+            });
+        }
+    }
+    Ok(record)
 }
 
 fn reject_raw_output_fields(
@@ -3409,6 +3954,192 @@ fn reject_raw_output_fields(
 
 fn field_str<'a>(fields: &'a serde_json::Map<String, JsonValue>, key: &str) -> Option<&'a str> {
     fields.get(key).and_then(JsonValue::as_str)
+}
+
+fn reject_unless(rejections: &mut Vec<String>, accepted: bool, code: &str) {
+    if !accepted {
+        rejections.push(code.to_owned());
+    }
+}
+
+fn is_sha256_hash(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
+fn is_git_object(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn is_positive_decimal(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value != "0"
+        && !value.starts_with('0')
+}
+
+fn remote_artifact_verification_hash(report: &RemoteArtifactAttestation) -> Option<String> {
+    let mut value = serde_json::to_value(report).ok()?;
+    value.as_object_mut()?.remove("verificationHash")?;
+    canonical_json_sha256(&value)
+}
+
+fn canonical_json_sha256(value: &JsonValue) -> Option<String> {
+    let canonical = canonical_json_value(value);
+    let bytes = serde_json::to_vec(&canonical).ok()?;
+    Some(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+fn canonical_json_value(value: &JsonValue) -> JsonValue {
+    match value {
+        JsonValue::Array(values) => {
+            JsonValue::Array(values.iter().map(canonical_json_value).collect())
+        }
+        JsonValue::Object(values) => {
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort();
+            let mut canonical = serde_json::Map::new();
+            for key in keys {
+                if let Some(value) = values.get(key) {
+                    canonical.insert(key.clone(), canonical_json_value(value));
+                }
+            }
+            JsonValue::Object(canonical)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn validate_remote_artifact_probes(
+    report: &RemoteArtifactAttestation,
+    rejections: &mut Vec<String>,
+) {
+    let expected = [
+        (
+            "version_json",
+            serde_json::json!(["ee", "version", "--json"]),
+        ),
+        (
+            "environment_attestation_help",
+            serde_json::json!(["ee", "diag", "environment-attestation", "--help"]),
+        ),
+    ];
+    reject_unless(
+        rejections,
+        report.probes.len() == expected.len(),
+        "remote_artifact_probe_set_mismatch",
+    );
+
+    for (index, (expected_id, expected_argv)) in expected.iter().enumerate() {
+        let Some(probe) = report.probes.get(index) else {
+            continue;
+        };
+        reject_unless(
+            rejections,
+            probe.id.as_deref() == Some(*expected_id),
+            "remote_artifact_probe_id_mismatch",
+        );
+        reject_unless(
+            rejections,
+            canonical_json_sha256(expected_argv).as_ref() == probe.argv_hash.as_ref(),
+            "remote_artifact_probe_argv_hash_mismatch",
+        );
+        reject_unless(
+            rejections,
+            probe.exit_code == Some(0) && probe.status.as_deref() == Some("passed"),
+            "remote_artifact_probe_failed",
+        );
+        reject_unless(
+            rejections,
+            probe.stdout_hash.as_deref().is_some_and(is_sha256_hash)
+                && probe.stderr_hash.as_deref().is_some_and(is_sha256_hash),
+            "remote_artifact_probe_output_hash_invalid",
+        );
+
+        if *expected_id == "version_json" {
+            validate_version_probe_assertions(report, probe, rejections);
+        } else {
+            reject_unless(
+                rejections,
+                probe.semantic_assertions.is_empty(),
+                "remote_artifact_help_probe_assertions_unexpected",
+            );
+        }
+    }
+}
+
+fn validate_version_probe_assertions(
+    report: &RemoteArtifactAttestation,
+    probe: &RemoteArtifactBehaviorProbe,
+    rejections: &mut Vec<String>,
+) {
+    let expected = [
+        ("/schema", serde_json::json!("ee.response.v2")),
+        ("/success", serde_json::json!(true)),
+        ("/data/command", serde_json::json!("version")),
+        (
+            "/data/schema",
+            serde_json::json!("ee.version.provenance.v1"),
+        ),
+        (
+            "/data/source/gitCommit",
+            report
+                .source_commit
+                .as_ref()
+                .map_or(JsonValue::Null, |value| serde_json::json!(value)),
+        ),
+        ("/data/source/gitDirty", serde_json::json!(true)),
+        ("/data/source/state", serde_json::json!("dirty")),
+        (
+            "/data/build/targetTriple",
+            report
+                .target
+                .as_ref()
+                .map_or(JsonValue::Null, |value| serde_json::json!(value)),
+        ),
+        (
+            "/data/build/profile",
+            report
+                .profile
+                .as_ref()
+                .map_or(JsonValue::Null, |value| serde_json::json!(value)),
+        ),
+        ("/data/provenance/available", serde_json::json!(true)),
+    ];
+    reject_unless(
+        rejections,
+        probe.semantic_assertions.len() == expected.len(),
+        "remote_artifact_version_assertion_set_mismatch",
+    );
+
+    for (path, expected_value) in expected {
+        let matching = probe
+            .semantic_assertions
+            .iter()
+            .filter(|assertion| assertion.path == path)
+            .collect::<Vec<_>>();
+        reject_unless(
+            rejections,
+            matching.len() == 1,
+            "remote_artifact_version_assertion_path_mismatch",
+        );
+        if let Some(assertion) = matching.first() {
+            reject_unless(
+                rejections,
+                assertion.matched
+                    && assertion.expected == expected_value
+                    && assertion.observed == expected_value,
+                "remote_artifact_version_assertion_failed",
+            );
+        }
+    }
 }
 
 fn hash_str(value: &str) -> String {
@@ -3754,7 +4485,7 @@ mod tests {
     }
 
     #[test]
-    fn verification_run_record_maps_to_canonical_rch_evidence() -> TestResult {
+    fn unattested_rch_run_is_not_authoritative_evidence() -> TestResult {
         let run = VerificationRunRecord::from_input(VerificationRunInput {
             run_id: Some("vrun_rch_bridge"),
             bead_id: Some("bd-1nxz4.5"),
@@ -3787,8 +4518,8 @@ mod tests {
         assert_eq!(record.gate_name, "rch verification run");
         assert_eq!(record.command_hash, "sha256:j1-command");
         assert!(record.command.contains("command_hash=sha256:j1-command"));
-        assert_eq!(record.status, VerificationStatus::Passed);
-        assert!(record.is_authoritative_pass());
+        assert_eq!(record.status, VerificationStatus::Unknown);
+        assert!(!record.is_authoritative_pass());
         assert!(record.offload.required_remote);
         assert_eq!(record.offload.worker.as_deref(), Some("vmi123"));
         assert_eq!(
@@ -3804,6 +4535,159 @@ mod tests {
         let encoded = serde_json::to_string(&record)?;
         assert!(!encoded.contains("remote worker passed"));
         assert!(!encoded.contains("/tmp/verify-log.jsonl"));
+        Ok(())
+    }
+
+    #[test]
+    fn source_bound_remote_artifact_maps_to_authoritative_evidence() -> TestResult {
+        let run = sample_verification_run_records()
+            .into_iter()
+            .next()
+            .ok_or_else(|| std::io::Error::other("remote sample exists"))?;
+
+        assert!(verification_run_has_verified_remote_artifact(&run));
+        assert!(verification_run_remote_artifact_rejections(&run).is_empty());
+
+        let record = verification_evidence_record_from_run_record(&run);
+        assert_eq!(record.status, VerificationStatus::Passed);
+        assert!(record.is_authoritative_pass());
+        assert!(record.artifacts.iter().any(|artifact| {
+            artifact.kind == "remote_artifact_attestation"
+                && artifact.path == "remote_artifact_verification_hash"
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn remote_artifact_mismatch_is_rejected_across_consumers() -> TestResult {
+        let mut run = sample_verification_run_records()
+            .into_iter()
+            .next()
+            .ok_or_else(|| std::io::Error::other("remote sample exists"))?;
+        run.exercised_binary_hash = Some(
+            "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned(),
+        );
+
+        let rejection_codes = verification_run_remote_artifact_rejections(&run);
+        assert!(rejection_codes.contains(&"remote_artifact_binary_hash_mismatch".to_owned()));
+        assert_eq!(
+            verification_evidence_record_from_run_record(&run).status,
+            VerificationStatus::Unknown
+        );
+
+        let advisory = verification_reuse_advisory(
+            VerificationReuseRequest {
+                bead_id: Some("bd-example"),
+                source_hash: Some(SAMPLE_REMOTE_SOURCE_HASH),
+                command_hash: "blake3:rch-command",
+                execution_substrate: "rch",
+                feature_profile_hash: None,
+                workspace_generation: None,
+                strictness_flags: Vec::new(),
+            },
+            &[run.clone()],
+        );
+        assert_eq!(advisory.status, VerificationReuseStatus::RerunRequired);
+
+        let broker = verification_broker_view(
+            VerificationBrokerViewRequest {
+                bead_id: Some("bd-example"),
+                source_hash: Some(SAMPLE_REMOTE_SOURCE_HASH),
+                command_hash: "blake3:rch-command",
+                command_class: "cargo_test",
+                normalized_argv_hash: "blake3:rch-command-argv",
+                execution_substrate: "rch",
+                env_fingerprint_class: Some("class:external_cargo_target"),
+                target_profile: Some("debug"),
+            },
+            &[run.clone()],
+        );
+        assert_eq!(broker.status, VerificationBrokerStatus::Incompatible);
+        assert!(
+            broker
+                .stale_reason_codes
+                .contains(&"remote_artifact_attestation_invalid".to_owned())
+        );
+
+        let capsule = verification_closeout_capsule(
+            VerificationCloseoutCapsuleRequest {
+                requested_surface: "beads_comment",
+                bead_id: Some("bd-example"),
+                source_hash: Some(SAMPLE_REMOTE_SOURCE_HASH),
+                reusable_until: None,
+                source_must_match: true,
+            },
+            &run,
+        );
+        assert_eq!(capsule.result, "unverified");
+        assert!(
+            capsule
+                .failure_mode_codes
+                .contains(&"remote_artifact_attestation_invalid".to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn j1_v2_import_requires_exact_attestation_mirrors_and_probe_evidence() -> TestResult {
+        let report = sample_remote_artifact_attestation();
+        let command = serde_json::json!({
+            "schema": "ee.test_event.v1",
+            "ts": "2026-08-06T12:00:00Z",
+            "test_id": "downloaded_artifact",
+            "kind": "command_end",
+            "command": "/tmp/ee",
+            "args": ["version", "--json"],
+            "stdout_hash": "blake3:stdout",
+            "exit_code": 0
+        });
+        let manifest = serde_json::json!({
+            "schema": "ee.test_event.v1",
+            "ts": "2026-08-06T12:00:01Z",
+            "test_id": "downloaded_artifact",
+            "kind": "artifact_manifest",
+            "fields": {
+                "manifest_schema": "ee.test_artifact_manifest.v2",
+                "binary_hash": SAMPLE_REMOTE_BINARY_HASH,
+                "source_hash": SAMPLE_REMOTE_SOURCE_HASH,
+                "command_hash": "blake3:artifact-command",
+                "execution_substrate": "remote_artifact",
+                "artifact_manifest_hash": SAMPLE_REMOTE_MANIFEST_HASH,
+                "remote_artifact_attestation": report
+            }
+        });
+        let jsonl = format!(
+            "{}\n{}",
+            serde_json::to_string(&command)?,
+            serde_json::to_string(&manifest)?
+        );
+
+        let records = verification_run_records_from_j1_jsonl(&jsonl)?;
+        assert_eq!(records.len(), 1);
+        assert!(verification_run_has_verified_remote_artifact(&records[0]));
+        assert_eq!(
+            verification_evidence_record_from_run_record(&records[0]).status,
+            VerificationStatus::Passed
+        );
+
+        let mut mismatched = manifest;
+        mismatched["fields"]["binary_hash"] = serde_json::json!(
+            "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        );
+        let mismatched_jsonl = format!(
+            "{}\n{}",
+            serde_json::to_string(&command)?,
+            serde_json::to_string(&mismatched)?
+        );
+        let error = verification_run_records_from_j1_jsonl(&mismatched_jsonl)
+            .expect_err("binary mirror mismatch must be rejected");
+        assert!(matches!(
+            error,
+            VerificationRunImportError::InvalidArtifactAttestation {
+                rejection_codes,
+                ..
+            } if rejection_codes.contains(&"remote_artifact_binary_hash_mismatch".to_owned())
+        ));
         Ok(())
     }
 

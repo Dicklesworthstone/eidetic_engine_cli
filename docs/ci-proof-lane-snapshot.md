@@ -6,7 +6,11 @@ The snapshot is not a scheduler. It must not dispatch workflows, cancel runs, do
 
 ## Contract
 
-Canonical schema: [`docs/schemas/ee.ci_proof_lane_snapshot.v1.json`](schemas/ee.ci_proof_lane_snapshot.v1.json)
+Canonical schemas:
+
+- [`ee.ci_proof_lane_snapshot.v1`](schemas/ee.ci_proof_lane_snapshot.v1.json)
+- [`ee.remote_build_artifact_manifest.v1`](schemas/ee.remote_build_artifact_manifest.v1.json)
+- [`ee.remote_build_artifact_manifest.verification.v1`](schemas/ee.remote_build_artifact_manifest.verification.v1.json)
 
 Producer:
 
@@ -43,16 +47,20 @@ The snapshot records:
 - workflow name/path/proof-lane kind/concurrency group/dispatch policy
 - run ids, job ids, event, ref, head SHA, run status, conclusion, and timestamps
 - bounded job labels, runner assignment state, runner name/group when GitHub exposes them, and queue age
-- artifact names, source SHA, retention/freshness, checksum status, architecture, and surface probes
+- artifact id/name, producing run id, source commit/tree, retention/freshness, archive and binary hashes, build-input/command/provenance hashes, checksum status, architecture, and the exact canonical probe set
 - a single `activeRecommendation` telling the agent to reuse, wait, download and verify, dispatch, abstain, or file a bead
 - per-run `queueDiagnosis` for active runs, which explains ordinary waits versus stale unassigned runner capacity without changing the top-level safe action
 - degraded codes for unavailable GitHub state, duplicate dispatch, cancelled-before-artifact runs, missing/stale artifacts, checksum mismatch, and surface probe failures
 
-The contract deliberately separates artifact authority from source compile/test evidence. A fresh artifact with a verified checksum can prove that a binary came from a particular workflow run and head SHA. It does not prove the source passed tests unless another evidence source says so.
+The contract deliberately separates artifact authority from source compile/test evidence. GitHub metadata alone never establishes artifact authority. A consumer must download the named artifact, independently verify its source-bound manifest, checksum, packaged bytes, and canonical probes, then pass the self-hashed verification report back to the snapshot producer. The report is accepted only for the exact repository, dedicated workflow, run id, artifact id, source commit, and artifact name. It does not prove the source passed tests unless another evidence source says so.
 
 ## Verdicts
 
-`fresh_artifact_available`: a current-head artifact exists, checksum posture is acceptable, and required surface probes passed.
+`fresh_artifact_available`: the dedicated macOS lane produced the recommended current-head artifact, and a consumer report bound to that exact run/artifact id independently verified its manifest, checksum, archive/binary hashes, build inputs, command, and both canonical probes (`ee version --json` source provenance and `ee diag environment-attestation --help`).
+
+`artifact_attestation_required`: artifact metadata exists, but no exact consumer verification report has established authority yet. Download and verify; do not reuse.
+
+`artifact_attestation_invalid`: the supplied report matched the run/artifact identity but source, build-input, byte, checksum, or probe evidence was rejected. Preserve the rejection and do not reuse.
 
 `wait_for_active_run`: a queued or in-progress run for the current head SHA exists. Agents should poll that run instead of dispatching a duplicate workflow.
 
@@ -119,11 +127,35 @@ or treating a CI-built binary as source-authority evidence.
 7. Record the snapshot verdict in Agent Mail before mutating Beads or invoking a
    no-mock harness.
 
+For a downloaded artifact, obtain its numeric artifact id from the run metadata,
+extract the uploaded files into an external temporary directory, and create the
+consumer report against the exact run:
+
+```bash
+python3 scripts/ci_artifact_attestation.py verify \
+  --workspace . \
+  --binary <download-dir>/ee \
+  --archive <download-dir>/ee-aarch64-apple-darwin-debug.tar.gz \
+  --checksum <download-dir>/ee-aarch64-apple-darwin-debug.tar.gz.sha256 \
+  --manifest <download-dir>/ee-aarch64-apple-darwin-debug.manifest.json \
+  --expected-commit <40-char-sha> \
+  --repository Dicklesworthstone/eidetic_engine_cli \
+  --expected-run-id <run-id> \
+  --artifact-id <artifact-id> \
+  --output <external-temp>/artifact-verification.json
+
+scripts/ci_proof_lane_snapshot.sh \
+  --head-sha <40-char-sha> \
+  --artifact-verification <external-temp>/artifact-verification.json \
+  --json
+```
+
 | Recommendation | Agent action |
 | --- | --- |
 | `reuse_active_run` | Poll the named run id and tell the swarm which run is authoritative. Do not dispatch another run for the same workflow and SHA. |
 | `wait` | Poll the named queued or in-progress run. If it stays queued, hand off the run id rather than starting a duplicate. |
 | `download_and_verify_artifact` | Download only the named artifact, verify the checksum, run the listed surface probe, then invoke the no-mock harness with the verified binary path. |
+| `reuse_verified_artifact` | Reuse only the artifact whose repository, workflow, run id, artifact id, source identities, byte hashes, and canonical probes appear in the accepted consumer report. |
 | `dispatch_new_run` | Send Agent Mail first with workflow path and head SHA. Dispatch exactly one run only after confirming no other agent has an active run for that lane. |
 | `abstain_manual_review` | Stop at evidence collection. Preserve the first-failure diagnosis and file or update a Bead if source work is needed. |
 | `file_followup_bead` | Create a follow-up Bead with the snapshot verdict, degraded codes, and next safe command. Do not claim source/test proof. |
@@ -235,8 +267,12 @@ source/test proof.
 - job_id: <job id or none>
 - head_sha: <40-char source SHA>
 - artifact: <artifact name or none>
+- artifact_id: <numeric id or none>
+- attested_run_id: <run id from consumer report or none>
+- manifest/archive/binary hashes: <sha256 values or none>
+- build/effective-input/provenance hashes: <sha256 values or none>
 - checksum: <verified | mismatch | missing | not_checked>
-- surface_probe: <command> => <passed | failed | not_run>
+- surface_probes: <version_json and environment_attestation_help> => <passed | failed | not_run>
 - queue_diagnosis: <status or none> next=<nextAction or none> comparable_prior_run=<run id or none>
 - local_cargo_tripwire: <ok count=0 | bypass_detected count=N | not_checked>
 - snapshot_verdict: <summary.verdict>
@@ -249,8 +285,9 @@ source/test proof.
 
 Acceptable closeout language:
 
-- `Artifact source authority established`: the artifact SHA, checksum, and
-  surface probe match the requested source. This still does not mean source
+- `Artifact source authority established`: the exact run/artifact identity,
+  source commit/tree, build inputs, packaged bytes, checksum, and canonical
+  probes match the consumer report. This still does not mean source
   tests passed.
 - `Source tests passed through RCH`: separate RCH proof reached remote Cargo and
   passed. Include the `ee.rch.verify.v1` status and command hash.

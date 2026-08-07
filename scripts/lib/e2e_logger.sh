@@ -49,6 +49,17 @@ _e2e_hash_file() {
     fi
 }
 
+_e2e_sha256_file() {
+    local file="$1"
+    if command -v shasum >/dev/null 2>&1; then
+        printf 'sha256:%s' "$(shasum -a 256 "$file" | awk '{print $1}')"
+    elif command -v sha256sum >/dev/null 2>&1; then
+        printf 'sha256:%s' "$(sha256sum "$file" | awk '{print $1}')"
+    else
+        python3 -c "import hashlib,sys; print('sha256:'+hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$file"
+    fi
+}
+
 _e2e_hash_string() {
     local str="$1"
     if command -v b3sum >/dev/null 2>&1; then
@@ -74,6 +85,133 @@ _e2e_source_hash() {
     else
         _e2e_hash_string "$payload"
     fi
+}
+
+# Read the consumer-side verification report for a packaged remote artifact.
+# Output uses ASCII record separators because JSON string escaping guarantees
+# that the delimiter cannot occur literally inside the compact report value.
+_e2e_remote_artifact_attestation_fields() {
+    local report_path="$1"
+    python3 - "$report_path" <<'PYEOF'
+import json
+import re
+import sys
+
+report_path = sys.argv[1]
+try:
+    with open(report_path, "r", encoding="utf-8") as handle:
+        report = json.load(handle)
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"remote artifact verification report is unreadable: {error}")
+
+if not isinstance(report, dict):
+    raise SystemExit("remote artifact verification report must be a JSON object")
+if report.get("schema") != "ee.remote_build_artifact_manifest.verification.v1":
+    raise SystemExit("remote artifact verification report has an unsupported schema")
+
+required_keys = (
+    "schema",
+    "status",
+    "accepted",
+    "artifactName",
+    "artifactId",
+    "repository",
+    "workflow",
+    "runId",
+    "runAttempt",
+    "sourceCommit",
+    "gitTree",
+    "manifestHash",
+    "buildCommandHash",
+    "effectiveInputHash",
+    "provenanceHash",
+    "target",
+    "profile",
+    "binaryHash",
+    "archiveHash",
+    "archiveSizeBytes",
+    "checksumStatus",
+    "probeStatus",
+    "probes",
+    "rejections",
+    "rawOutputIncluded",
+    "verificationHash",
+)
+missing_keys = [key for key in required_keys if key not in report]
+if missing_keys:
+    raise SystemExit(
+        "remote artifact verification report is incomplete: " + ",".join(missing_keys)
+    )
+unexpected_keys = sorted(set(report) - set(required_keys))
+if unexpected_keys:
+    raise SystemExit(
+        "remote artifact verification report has unexpected fields: "
+        + ",".join(unexpected_keys)
+    )
+if report["rawOutputIncluded"] is not False:
+    raise SystemExit("remote artifact verification report must exclude raw output")
+if not isinstance(report["rejections"], list) or not all(
+    isinstance(value, str) for value in report["rejections"]
+):
+    raise SystemExit("remote artifact verification report has invalid rejections")
+if not isinstance(report["probes"], list) or len(report["probes"]) > 16:
+    raise SystemExit("remote artifact verification report has invalid probes")
+
+probe_keys = {
+    "id",
+    "argvHash",
+    "exitCode",
+    "stdoutHash",
+    "stderrHash",
+    "status",
+    "semanticAssertions",
+}
+assertion_keys = {"path", "expected", "observed", "matched"}
+for probe in report["probes"]:
+    if not isinstance(probe, dict) or set(probe) != probe_keys:
+        raise SystemExit("remote artifact verification report has an invalid probe shape")
+    assertions = probe["semanticAssertions"]
+    if not isinstance(assertions, list):
+        raise SystemExit("remote artifact verification report has invalid probe assertions")
+    if any(
+        not isinstance(assertion, dict) or set(assertion) != assertion_keys
+        for assertion in assertions
+    ):
+        raise SystemExit("remote artifact verification report has an invalid assertion shape")
+
+git_object = re.compile(r"^[0-9a-f]{40}$")
+sha256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+for key in ("sourceCommit", "gitTree"):
+    value = report.get(key)
+    if not isinstance(value, str) or git_object.fullmatch(value) is None:
+        raise SystemExit(f"remote artifact verification report has invalid {key}")
+for key in (
+    "manifestHash",
+    "buildCommandHash",
+    "effectiveInputHash",
+    "provenanceHash",
+    "binaryHash",
+    "archiveHash",
+    "verificationHash",
+):
+    value = report.get(key)
+    if not isinstance(value, str) or sha256.fullmatch(value) is None:
+        raise SystemExit(f"remote artifact verification report has invalid {key}")
+
+values = [
+    json.dumps(report, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    report["binaryHash"],
+    report["gitTree"],
+    report["sourceCommit"],
+    report["manifestHash"],
+    report["buildCommandHash"],
+    report["effectiveInputHash"],
+    report["provenanceHash"],
+    report["archiveHash"],
+    report["verificationHash"],
+]
+sys.stdout.write("\x1e".join(values))
+PYEOF
 }
 
 # Emit a single JSON-line event. Uses python3 for JSON encoding so embedded
@@ -121,6 +259,14 @@ while i + 1 < len(sys.argv):
     elif k == "args":
         # Comma-separated arg list -> JSON array
         event[k] = [s for s in v.split("") if s != ""]
+    elif k == "remote_artifact_attestation_json":
+        try:
+            attestation = json.loads(v)
+        except json.JSONDecodeError as error:
+            raise SystemExit(f"remote artifact attestation is invalid JSON: {error}")
+        if not isinstance(attestation, dict):
+            raise SystemExit("remote artifact attestation must be a JSON object")
+        fields["remote_artifact_attestation"] = attestation
     else:
         fields[k] = v
     i += 2
@@ -171,6 +317,9 @@ e2e_log_note() {
 # Emit a deterministic manifest for the artifact exercised by a verification
 # command. Raw output stays out of the log; paths and hashes are enough for
 # closeout tooling to locate retained evidence and detect binary confusion.
+# Set EE_REMOTE_ARTIFACT_VERIFICATION_REPORT to the path of a complete
+# ee.remote_build_artifact_manifest.verification.v1 report to emit the
+# attested ee.test_artifact_manifest.v2 contract instead of the legacy v1.
 # Usage: e2e_log_artifact_manifest <phase> <binary_path> [argv...]
 e2e_log_artifact_manifest() {
     local phase="${1:-manual}"
@@ -193,6 +342,8 @@ e2e_log_artifact_manifest() {
     fi
 
     local command_hash source_hash manifest_hash execution_substrate host_name
+    local manifest_schema="ee.test_artifact_manifest.v1"
+    local remote_attestation_fields=()
     command_hash="$(_e2e_hash_string "$binary_path"$'\n'"$args_str")"
     source_hash="$(_e2e_source_hash)"
     execution_substrate="${EE_TEST_EXECUTION_SUBSTRATE:-local}"
@@ -202,8 +353,62 @@ e2e_log_artifact_manifest() {
     host_name="$(hostname 2>/dev/null || printf 'unknown')"
     manifest_hash="$(_e2e_hash_string "$phase"$'\n'"$binary_path"$'\n'"$binary_hash"$'\n'"$command_hash"$'\n'"${CARGO_TARGET_DIR:-}"$'\n'"${EE_E2E_FIXTURE_FILTER:-${EE_TEST_FILTER:-}}"$'\n'"${EPIC_RETENTION_MANIFEST:-${EE_E2E_RETENTION_MANIFEST:-}}")"
 
+    # A full consumer-side verification report upgrades this event to v2. The
+    # report, rather than the ambient checkout, becomes the source of build
+    # provenance. The binary hash is independently recomputed here so a report
+    # for different bytes can never be attached to the exercised command.
+    if [ -n "${EE_REMOTE_ARTIFACT_VERIFICATION_REPORT:-}" ]; then
+        local attestation_payload remote_attestation_json report_binary_hash
+        local report_git_tree report_source_commit report_manifest_hash
+        local report_build_command_hash report_effective_input_hash
+        local report_provenance_hash report_archive_hash report_verification_hash
+        if ! attestation_payload="$(_e2e_remote_artifact_attestation_fields "$EE_REMOTE_ARTIFACT_VERIFICATION_REPORT")"; then
+            printf 'e2e artifact manifest: invalid EE_REMOTE_ARTIFACT_VERIFICATION_REPORT=%s\n' \
+                "$EE_REMOTE_ARTIFACT_VERIFICATION_REPORT" >&2
+            return 2
+        fi
+        IFS=$'\x1e' read -r \
+            remote_attestation_json \
+            report_binary_hash \
+            report_git_tree \
+            report_source_commit \
+            report_manifest_hash \
+            report_build_command_hash \
+            report_effective_input_hash \
+            report_provenance_hash \
+            report_archive_hash \
+            report_verification_hash <<<"$attestation_payload"
+        if [ -z "$binary_path" ] || [ ! -f "$binary_path" ]; then
+            printf 'e2e artifact manifest: verified remote artifact binary is not a file: %s\n' \
+                "$binary_path" >&2
+            return 2
+        fi
+        local observed_binary_hash
+        observed_binary_hash="$(_e2e_sha256_file "$binary_path")"
+        if [ "$observed_binary_hash" != "$report_binary_hash" ]; then
+            printf 'e2e artifact manifest: exercised binary hash does not match remote artifact verification report\n' >&2
+            return 2
+        fi
+
+        manifest_schema="ee.test_artifact_manifest.v2"
+        binary_hash="$report_binary_hash"
+        binary_hash_status="available"
+        source_hash="git_tree:$report_git_tree"
+        manifest_hash="$report_manifest_hash"
+        remote_attestation_fields=(
+            "remote_artifact_attestation_json" "$remote_attestation_json"
+            "source_commit" "$report_source_commit"
+            "git_tree" "$report_git_tree"
+            "build_command_hash" "$report_build_command_hash"
+            "effective_input_hash" "$report_effective_input_hash"
+            "provenance_hash" "$report_provenance_hash"
+            "archive_hash" "$report_archive_hash"
+            "verification_hash" "$report_verification_hash"
+        )
+    fi
+
     _e2e_emit_event "artifact_manifest" \
-        "manifest_schema" "ee.test_artifact_manifest.v1" \
+        "manifest_schema" "$manifest_schema" \
         "phase" "$phase" \
         "binary_path" "$binary_path" \
         "binary_hash" "$binary_hash" \
@@ -218,7 +423,8 @@ e2e_log_artifact_manifest() {
         "fixture_filter" "${EE_E2E_FIXTURE_FILTER:-${EE_TEST_FILTER:-}}" \
         "log_path" "${EE_TEST_LOG_PATH:-}" \
         "retention_manifest_path" "${EPIC_RETENTION_MANIFEST:-${EE_E2E_RETENTION_MANIFEST:-}}" \
-        "artifact_manifest_hash" "$manifest_hash"
+        "artifact_manifest_hash" "$manifest_hash" \
+        "${remote_attestation_fields[@]}"
 }
 
 # Wrap a command: capture stdout/stderr/exit, emit start+end events, AND

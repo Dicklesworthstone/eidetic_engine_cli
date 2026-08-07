@@ -2,7 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde_json::Value;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 type TestResult = Result<(), String>;
 
@@ -85,6 +86,66 @@ fn assert_hash(value: &str, key: &str) -> TestResult {
     }
 }
 
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path)
+        .map_err(|error| format!("failed to read `{}` for hashing: {error}", path.display()))?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+fn repeated_hash(byte: char) -> String {
+    format!("sha256:{}", byte.to_string().repeat(64))
+}
+
+fn remote_artifact_verification_report(binary_hash: &str) -> Value {
+    json!({
+        "schema": "ee.remote_build_artifact_manifest.verification.v1",
+        "status": "verified",
+        "accepted": true,
+        "artifactName": "ee-macos-arm64",
+        "artifactId": "9001",
+        "repository": "Dicklesworthstone/eidetic_engine_cli",
+        "workflow": "macos-ee-artifact.yml",
+        "runId": "8001",
+        "runAttempt": 1,
+        "sourceCommit": "1".repeat(40),
+        "gitTree": "2".repeat(40),
+        "manifestHash": repeated_hash('3'),
+        "buildCommandHash": repeated_hash('4'),
+        "effectiveInputHash": repeated_hash('5'),
+        "provenanceHash": repeated_hash('6'),
+        "target": "aarch64-apple-darwin",
+        "profile": "release",
+        "binaryHash": binary_hash,
+        "archiveHash": repeated_hash('7'),
+        "archiveSizeBytes": 4096,
+        "checksumStatus": "verified",
+        "probeStatus": "passed",
+        "probes": [
+            {
+                "id": "version_json",
+                "argvHash": repeated_hash('8'),
+                "exitCode": 0,
+                "stdoutHash": repeated_hash('9'),
+                "stderrHash": repeated_hash('a'),
+                "status": "passed",
+                "semanticAssertions": []
+            },
+            {
+                "id": "environment_attestation_help",
+                "argvHash": repeated_hash('b'),
+                "exitCode": 0,
+                "stdoutHash": repeated_hash('c'),
+                "stderrHash": repeated_hash('d'),
+                "status": "passed",
+                "semanticAssertions": []
+            }
+        ],
+        "rejections": [],
+        "rawOutputIncluded": false,
+        "verificationHash": repeated_hash('e')
+    })
+}
+
 #[test]
 fn schema_registers_artifact_manifest_event_kind() -> TestResult {
     let schema_text = read_repo_file("docs/schemas/test_event_v1.json")?;
@@ -128,6 +189,44 @@ fn schema_registers_artifact_manifest_event_kind() -> TestResult {
             ));
         }
     }
+
+    let v2_contract = schema
+        .pointer("/allOf")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "schema missing allOf".to_owned())?
+        .iter()
+        .find(|entry| {
+            entry.pointer("/if/properties/fields/properties/manifest_schema/const")
+                == Some(&Value::String("ee.test_artifact_manifest.v2".to_owned()))
+        })
+        .ok_or_else(|| "schema missing artifact_manifest v2 conditional".to_owned())?;
+    let v2_required = v2_contract
+        .pointer("/then/properties/fields/required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "schema missing artifact_manifest v2 required fields".to_owned())?;
+    for key in [
+        "remote_artifact_attestation",
+        "source_commit",
+        "git_tree",
+        "build_command_hash",
+        "effective_input_hash",
+        "provenance_hash",
+        "archive_hash",
+        "verification_hash",
+    ] {
+        if !v2_required.iter().any(|value| value == key) {
+            return Err(format!(
+                "artifact_manifest v2 schema missing required field {key}"
+            ));
+        }
+    }
+    if v2_contract.pointer(
+        "/then/properties/fields/properties/remote_artifact_attestation/properties/schema/const",
+    ) != Some(&Value::String(
+        "ee.remote_build_artifact_manifest.verification.v1".to_owned(),
+    )) {
+        return Err("artifact_manifest v2 schema does not bind the attestation schema".to_owned());
+    }
     Ok(())
 }
 
@@ -159,6 +258,7 @@ e2e_log_end
         .env("EE_E2E_KEEP_ARTIFACTS", "1")
         .env("CARGO_TARGET_DIR", &target_dir)
         .env("EPIC_RETENTION_MANIFEST", &retention_manifest)
+        .env_remove("EE_REMOTE_ARTIFACT_VERIFICATION_REPORT")
         .output()
         .map_err(|error| format!("failed to run bash harness: {error}"))?;
     if !output.status.success() {
@@ -253,6 +353,7 @@ e2e_log_end
         .arg(script)
         .env("EE_TEST_LOG_PATH", &log_path)
         .env("EE_E2E_KEEP_ARTIFACTS", "1")
+        .env_remove("EE_REMOTE_ARTIFACT_VERIFICATION_REPORT")
         .output()
         .map_err(|error| format!("failed to run bash harness: {error}"))?;
     if !output.status.success() {
@@ -285,6 +386,163 @@ e2e_log_end
         field(manifest, "artifact_manifest_hash")?,
         "artifact_manifest_hash",
     )?;
+    Ok(())
+}
+
+#[test]
+fn bash_harness_emits_verified_remote_artifact_manifest_v2() -> TestResult {
+    let tmp = tempdir()?;
+    let fake_binary = tmp.path().join("fake-ee");
+    let verification_path = tmp.path().join("artifact-verification.json");
+    let log_path = tmp.path().join("j1.jsonl");
+    write_fake_binary(&fake_binary)?;
+    let binary_hash = sha256_file(&fake_binary)?;
+    let report = remote_artifact_verification_report(&binary_hash);
+    fs::write(
+        &verification_path,
+        serde_json::to_vec_pretty(&report)
+            .map_err(|error| format!("failed to encode verification report: {error}"))?,
+    )
+    .map_err(|error| format!("failed to write verification report: {error}"))?;
+
+    let script = format!(
+        r#"
+set -uo pipefail
+source "{}/scripts/lib/e2e_logger.sh"
+e2e_log_start "artifact_manifest_v2"
+e2e_log_artifact_manifest "remote_probe" "{}" --version
+e2e_log_end
+"#,
+        env!("CARGO_MANIFEST_DIR"),
+        fake_binary.display(),
+    );
+
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .env("EE_TEST_LOG_PATH", &log_path)
+        .env("EE_REMOTE_ARTIFACT_VERIFICATION_REPORT", &verification_path)
+        .env("EE_TEST_EXECUTION_SUBSTRATE", "remote_artifact")
+        .output()
+        .map_err(|error| format!("failed to run bash harness: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "bash harness failed: status={:?} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let events = read_jsonl(&log_path)?;
+    let manifest = events
+        .iter()
+        .find(|event| event["kind"] == "artifact_manifest")
+        .ok_or_else(|| format!("no artifact_manifest event in {events:?}"))?;
+    if field(manifest, "manifest_schema")? != "ee.test_artifact_manifest.v2" {
+        return Err("manifest_schema mismatch".to_owned());
+    }
+    if field(manifest, "binary_hash")? != binary_hash {
+        return Err(format!(
+            "binary_hash did not come from the verified report: {}",
+            field(manifest, "binary_hash")?
+        ));
+    }
+    let git_tree = report["gitTree"]
+        .as_str()
+        .ok_or_else(|| "test report missing gitTree".to_owned())?;
+    if field(manifest, "source_hash")? != format!("git_tree:{git_tree}") {
+        return Err(format!(
+            "source_hash did not bind the verified tree: {}",
+            field(manifest, "source_hash")?
+        ));
+    }
+    let manifest_hash = report["manifestHash"]
+        .as_str()
+        .ok_or_else(|| "test report missing manifestHash".to_owned())?;
+    if field(manifest, "artifact_manifest_hash")? != manifest_hash {
+        return Err(format!(
+            "artifact_manifest_hash did not come from the verified report: {}",
+            field(manifest, "artifact_manifest_hash")?
+        ));
+    }
+    for (event_key, report_key) in [
+        ("source_commit", "sourceCommit"),
+        ("git_tree", "gitTree"),
+        ("build_command_hash", "buildCommandHash"),
+        ("effective_input_hash", "effectiveInputHash"),
+        ("provenance_hash", "provenanceHash"),
+        ("archive_hash", "archiveHash"),
+        ("verification_hash", "verificationHash"),
+    ] {
+        let expected = report[report_key]
+            .as_str()
+            .ok_or_else(|| format!("test report missing {report_key}"))?;
+        if field(manifest, event_key)? != expected {
+            return Err(format!(
+                "fields.{event_key} did not mirror report.{report_key}"
+            ));
+        }
+    }
+    if manifest.pointer("/fields/remote_artifact_attestation") != Some(&report) {
+        return Err("nested remote artifact attestation was not preserved".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn bash_harness_refuses_v2_when_exercised_binary_does_not_match_report() -> TestResult {
+    let tmp = tempdir()?;
+    let fake_binary = tmp.path().join("fake-ee");
+    let verification_path = tmp.path().join("artifact-verification.json");
+    let log_path = tmp.path().join("j1.jsonl");
+    write_fake_binary(&fake_binary)?;
+    let report = remote_artifact_verification_report(&repeated_hash('f'));
+    fs::write(
+        &verification_path,
+        serde_json::to_vec_pretty(&report)
+            .map_err(|error| format!("failed to encode verification report: {error}"))?,
+    )
+    .map_err(|error| format!("failed to write verification report: {error}"))?;
+
+    let script = format!(
+        r#"
+set -uo pipefail
+source "{}/scripts/lib/e2e_logger.sh"
+e2e_log_start "artifact_manifest_v2_mismatch"
+if e2e_log_artifact_manifest "remote_probe" "{}" --version; then
+    exit 70
+fi
+e2e_log_end
+"#,
+        env!("CARGO_MANIFEST_DIR"),
+        fake_binary.display(),
+    );
+
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .env("EE_TEST_LOG_PATH", &log_path)
+        .env("EE_REMOTE_ARTIFACT_VERIFICATION_REPORT", &verification_path)
+        .output()
+        .map_err(|error| format!("failed to run bash harness: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "bash harness failed: status={:?} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.contains("exercised binary hash does not match") {
+        return Err(format!("missing binary mismatch diagnostic: {stderr}"));
+    }
+    let events = read_jsonl(&log_path)?;
+    if events
+        .iter()
+        .any(|event| event["kind"] == "artifact_manifest")
+    {
+        return Err("mismatched binary emitted an artifact_manifest event".to_owned());
+    }
     Ok(())
 }
 

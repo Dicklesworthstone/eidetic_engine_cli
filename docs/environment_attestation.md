@@ -83,8 +83,11 @@ materialization failures, and remote-required local fallback refusal are
 environment/readiness blockers. They must be reported as
 `environment_blocked_before_source`, not as `source_failed`. CI proof-lane
 artifact evidence is artifact source authority: stale, missing, cancelled,
-checksum-mismatched, or surface-probe-failed artifacts fail closed as source
-authority blockers instead of becoming source test failures.
+checksum-mismatched, unverified/mismatched attestation, or surface-probe-failed
+artifacts fail closed as source-authority blockers instead of becoming source
+test failures. The reader independently selects the exact recommended macOS run
+and requires its run/artifact ids, hashes, and both canonical probes; a top-level
+`freshArtifactAvailable=true` boolean is never sufficient by itself.
 
 | Verdict | Meaning | Agent action |
 | --- | --- | --- |
@@ -129,6 +132,7 @@ coordination step, or `null` when the next action requires human judgment.
 | `ci_proof_lane_cancelled_before_artifact` | warning | The CI run was cancelled before artifact upload completed. | Treat as proof-lane abstention and use a non-cancelling artifact lane or follow-up bead. |
 | `ci_proof_lane_checksum_mismatch` | high | The artifact checksum did not verify. | Reject the artifact and repair the proof lane before using binary evidence. |
 | `ci_proof_lane_surface_probe_failed` | high | The artifact failed the required command-surface probe. | Reject the artifact until the expected `ee` surface is proven by the lane. |
+| `ci_proof_lane_artifact_attestation_invalid` | high | The claimed fresh artifact lacks or contradicts exact run identity, source, build-input, packaged-byte, or canonical-probe evidence. | Reject the artifact; rerun the consumer verifier for the exact downloaded run/artifact id. |
 | `ci_proof_lane_unknown_source` | warning | GitHub Actions or matching-run evidence was unavailable or unknown. | Coordinate before dispatching a new lane; missing source authority is not permission to reuse stale binaries. |
 | `ci_proof_lane_duplicate_dispatch` | warning | Multiple active proof-lane dispatches target the same source authority. | Reuse or wait for one active run; do not dispatch another lane blindly. |
 
@@ -164,9 +168,10 @@ do not override Agent Mail reservations or the live claim gate.
 
 CI proof-lane evidence appears in support bundles as a compact
 `ci_proof_lane` source-authority entry. The retained fields are workflow
-path/name, run id, job id, requested head SHA, run head SHA, artifact name,
-checksum status, source/artifact freshness, surface probe status, and first
-failure diagnosis. The bundle stores evidence-reference hashes and redacted
+path/name, run id, job id, requested head SHA, run head SHA, artifact id/name,
+attested run id, source tree, manifest/verification/archive/binary/build-input
+hashes, checksum status, source/artifact freshness, canonical probe status, and
+first-failure diagnosis. The bundle stores evidence-reference hashes and redacted
 metric values only; it does not copy artifacts, raw logs, local paths, mail
 bodies, or shell output.
 

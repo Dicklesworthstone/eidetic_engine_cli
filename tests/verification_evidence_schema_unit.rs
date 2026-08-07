@@ -17,12 +17,14 @@ use ee::models::{
     compile_blocker_lookup, proof_broker_fingerprint, sample_proof_broker_ledger_records,
     sample_verification_broker_views, sample_verification_closeout_capsules,
     sample_verification_evidence_records, sample_verification_reuse_advisories,
-    sample_verification_run_records, verification_closeout_capsule, verification_reuse_advisory,
-    verification_run_records_from_j1_jsonl,
+    sample_verification_run_records, verification_closeout_capsule,
+    verification_evidence_record_from_run_record, verification_reuse_advisory,
+    verification_run_has_verified_remote_artifact, verification_run_records_from_j1_jsonl,
 };
 use serde::Serialize;
 
 type TestResult = Result<(), String>;
+const REMOTE_SOURCE_HASH: &str = "git_tree:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -158,7 +160,9 @@ fn verification_run_golden_covers_rch_and_shell_static_shapes() -> TestResult {
     let actual = sample_verification_run_records();
     assert_eq!(expected, actual);
     assert!(actual.iter().any(|record| {
-        record.schema == VERIFICATION_RUN_SCHEMA_V1 && record.execution_substrate == "rch"
+        record.schema == VERIFICATION_RUN_SCHEMA_V1
+            && record.execution_substrate == "rch"
+            && verification_run_has_verified_remote_artifact(record)
     }));
     assert!(
         actual
@@ -919,6 +923,11 @@ fn j1_artifact_manifest_import_builds_redacted_run_record() -> TestResult {
             })
     );
     assert_eq!(record.provenance.len(), 2);
+    assert!(!verification_run_has_verified_remote_artifact(record));
+    assert_eq!(
+        verification_evidence_record_from_run_record(record).status,
+        VerificationStatus::Unknown
+    );
     let encoded = serde_json::to_string(record).map_err(|error| error.to_string())?;
     assert!(!encoded.contains("remote worker css passed"));
     assert!(!encoded.contains("/Volumes/USBNVME16TB"));
@@ -963,7 +972,7 @@ fn reuse_advisory_reports_all_statuses() -> TestResult {
             run_id: Some("vrun_failed"),
             bead_id: Some("bd-example"),
             agent_name: Some("RubyWolf"),
-            source_hash: Some("blake3:source"),
+            source_hash: Some(REMOTE_SOURCE_HASH),
             command_hash: Some("blake3:failed-command"),
             command_argv: &["cargo", "test", "failed"],
             cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/rch-target-failed"),
@@ -983,7 +992,7 @@ fn reuse_advisory_reports_all_statuses() -> TestResult {
             run_id: Some("vrun_in_flight"),
             bead_id: Some("bd-example"),
             agent_name: Some("RubyWolf"),
-            source_hash: Some("blake3:source"),
+            source_hash: Some(REMOTE_SOURCE_HASH),
             command_hash: Some("blake3:in-flight-command"),
             command_argv: &["cargo", "test", "in-flight"],
             cargo_target_dir: Some("/Volumes/USBNVME16TB/temp_agent_space/rch-target-in-flight"),
@@ -1004,15 +1013,15 @@ fn reuse_advisory_reports_all_statuses() -> TestResult {
 
     for (request, expected_status) in [
         (
-            reuse_request(Some("blake3:source"), "blake3:rch-command", "rch"),
+            reuse_request(Some(REMOTE_SOURCE_HASH), "blake3:rch-command", "rch"),
             VerificationReuseStatus::ReusablePass,
         ),
         (
-            reuse_request(Some("blake3:source"), "blake3:failed-command", "rch"),
+            reuse_request(Some(REMOTE_SOURCE_HASH), "blake3:failed-command", "rch"),
             VerificationReuseStatus::ReusableFail,
         ),
         (
-            reuse_request(Some("blake3:source"), "blake3:in-flight-command", "rch"),
+            reuse_request(Some(REMOTE_SOURCE_HASH), "blake3:in-flight-command", "rch"),
             VerificationReuseStatus::InFlight,
         ),
         (
@@ -1020,7 +1029,7 @@ fn reuse_advisory_reports_all_statuses() -> TestResult {
             VerificationReuseStatus::StaleSource,
         ),
         (
-            reuse_request(Some("blake3:source"), "blake3:new-command", "rch"),
+            reuse_request(Some(REMOTE_SOURCE_HASH), "blake3:new-command", "rch"),
             VerificationReuseStatus::MismatchedCommand,
         ),
         (
@@ -1034,7 +1043,7 @@ fn reuse_advisory_reports_all_statuses() -> TestResult {
     }
 
     let missing = verification_reuse_advisory(
-        reuse_request(Some("blake3:source"), "blake3:rch-command", "rch"),
+        reuse_request(Some(REMOTE_SOURCE_HASH), "blake3:rch-command", "rch"),
         &[],
     );
     assert_eq!(missing.status, VerificationReuseStatus::MissingEvidence);

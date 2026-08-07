@@ -41,6 +41,13 @@
     "stdoutHash": { "type": ["string", "null"] },
     "stderrExcerptHash": { "type": ["string", "null"] },
     "artifactManifestHash": { "type": ["string", "null"] },
+    "exercisedBinaryHash": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "remoteArtifactAttestation": {
+      "$ref": "../ee.remote_build_artifact_manifest.verification.v1.json"
+    },
     "retainedLogPathHash": { "type": ["string", "null"] },
     "provenance": {
       "type": "array",

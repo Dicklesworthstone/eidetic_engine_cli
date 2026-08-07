@@ -2561,7 +2561,7 @@ fn verification_record_has_artifact_manifest(record: &VerificationEvidenceRecord
     record
         .artifacts
         .iter()
-        .any(|artifact| artifact.kind.contains("manifest") || artifact.path.contains("manifest"))
+        .any(|artifact| artifact.kind == "remote_artifact_attestation")
 }
 
 fn verification_record_mentions_rch_topology(record: &VerificationEvidenceRecord) -> bool {
@@ -4023,9 +4023,9 @@ mod tests {
         reusable.finished_at = Some("2026-05-13T00:10:42Z".to_owned());
         reusable.output_summary = crate::models::VerificationOutputSummary::empty();
         reusable.artifacts = vec![crate::models::VerificationArtifactRef::new(
-            "target/verify/artifact_manifest.json",
-            "artifact_manifest",
-            Some("blake3:manifest"),
+            "remote_artifact_verification_hash",
+            "remote_artifact_attestation",
+            Some("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
         )];
         records.push(reusable);
 
