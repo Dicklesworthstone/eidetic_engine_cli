@@ -288,11 +288,13 @@ mod tests {
             return Ok(());
         }
         let expected = test.load_golden()?;
-        let expected = serde_json::from_str::<serde_json::Value>(&expected)
+        let mut expected = serde_json::from_str::<serde_json::Value>(&expected)
             .map_err(|error| format!("parse deterministic doctor golden: {error}"))?;
         let mut actual = serde_json::from_str::<serde_json::Value>(actual)
             .map_err(|error| format!("parse live doctor JSON: {error}"))?;
+        normalize_doctor_platform_variants(&mut expected);
         scrub_environment_paths(&mut actual);
+        normalize_doctor_platform_variants(&mut actual);
         ensure_doctor_typed_subtrees(&expected, "deterministic doctor golden")?;
         ensure_doctor_typed_subtrees(&actual, "live doctor response")?;
         ensure_same_json_shape(&actual, &expected, "/")?;
@@ -306,6 +308,87 @@ mod tests {
             ensure_equal_pointer(&actual, &expected, pointer, "doctor")?;
         }
         Ok(())
+    }
+
+    /// Keep the Linux doctor contract exact while making the same golden
+    /// portable to targets whose public doctor output intentionally reports
+    /// different NUMA and daemon-socket capabilities.
+    fn normalize_doctor_platform_variants(value: &mut serde_json::Value) {
+        normalize_doctor_platform_variants_for_target(
+            value,
+            cfg!(target_os = "linux"),
+            cfg!(target_os = "windows"),
+        );
+    }
+
+    fn normalize_doctor_platform_variants_for_target(
+        value: &mut serde_json::Value,
+        preserve_linux_exact: bool,
+        windows_paths: bool,
+    ) {
+        if preserve_linux_exact {
+            return;
+        }
+
+        if windows_paths {
+            normalize_windows_doctor_strings(value);
+        }
+
+        if let Some(checks) = value
+            .pointer_mut("/data/checks")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for check in checks {
+                let Some(name) = check
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|name| is_platform_specific_doctor_check(name))
+                    .map(str::to_owned)
+                else {
+                    continue;
+                };
+                *check = serde_json::json!({
+                    "name": name,
+                    "platformVariant": "<normalized:platform-specific-doctor-check>",
+                });
+            }
+        }
+
+        if let Some(advisories) = value
+            .pointer_mut("/data/advisories")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            advisories.retain(|advisory| {
+                !advisory
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(is_platform_specific_doctor_check)
+            });
+        }
+    }
+
+    fn is_platform_specific_doctor_check(name: &str) -> bool {
+        matches!(name, "graph_numa_pin" | "daemon_socket_reachable")
+    }
+
+    fn normalize_windows_doctor_strings(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                for child in fields.values_mut() {
+                    normalize_windows_doctor_strings(child);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    normalize_windows_doctor_strings(child);
+                }
+            }
+            serde_json::Value::String(text) => {
+                *text = text.replace('\\', "/").replace("ee.exe", "ee");
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
+        }
     }
 
     fn ensure_equal_pointer(
@@ -459,6 +542,95 @@ mod tests {
         ]);
 
         ensure_same_json_shape(&value, &value, "/")
+    }
+
+    #[test]
+    fn doctor_platform_normalization_preserves_linux_and_canonicalizes_windows() -> TestResult {
+        let original = serde_json::json!({
+            "data": {
+                "checks": [
+                    {
+                        "name": "graph_numa_pin",
+                        "tier": "advisory",
+                        "severity": "warning",
+                        "message": "Graph NUMA pinning is unavailable on this platform."
+                    },
+                    {
+                        "name": "daemon_socket_reachable",
+                        "tier": "advisory",
+                        "severity": "ok",
+                        "message": "Unix-domain daemon sockets are not supported on this platform."
+                    },
+                    {
+                        "name": "workspace",
+                        "tier": "core",
+                        "severity": "ok",
+                        "message": "C:\\repo\\target\\debug\\ee.exe checked C:\\repo"
+                    }
+                ],
+                "advisories": [
+                    {
+                        "name": "graph_numa_pin",
+                        "severity": "warning",
+                        "message": "Platform-specific optimization warning."
+                    },
+                    {
+                        "name": "cass",
+                        "severity": "warning",
+                        "message": "Keep this advisory exact."
+                    }
+                ]
+            }
+        });
+
+        let mut linux = original.clone();
+        normalize_doctor_platform_variants_for_target(&mut linux, true, true);
+        ensure_equal(
+            &linux,
+            &original,
+            "Linux doctor normalization must preserve the full public contract",
+        )?;
+
+        let mut windows = original;
+        normalize_doctor_platform_variants_for_target(&mut windows, false, true);
+        let platform_sentinel = serde_json::json!({
+            "name": "graph_numa_pin",
+            "platformVariant": "<normalized:platform-specific-doctor-check>",
+        });
+        ensure_equal(
+            &windows.pointer("/data/checks/0"),
+            &Some(&platform_sentinel),
+            "non-Linux NUMA details are canonicalized",
+        )?;
+        ensure_equal(
+            &windows
+                .pointer("/data/checks/1/platformVariant")
+                .and_then(serde_json::Value::as_str),
+            &Some("<normalized:platform-specific-doctor-check>"),
+            "non-Unix daemon details are canonicalized",
+        )?;
+        ensure_equal(
+            &windows
+                .pointer("/data/checks/2/message")
+                .and_then(serde_json::Value::as_str),
+            &Some("C:/repo/target/debug/ee checked C:/repo"),
+            "Windows separators and executable suffix are representation-only",
+        )?;
+        ensure_equal(
+            &windows
+                .pointer("/data/advisories/0/name")
+                .and_then(serde_json::Value::as_str),
+            &Some("cass"),
+            "unrelated advisories remain exact after platform filtering",
+        )?;
+        ensure_equal(
+            &windows
+                .pointer("/data/advisories")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            &Some(1),
+            "platform-specific advisory duplicates are removed",
+        )
     }
 
     fn ensure_status_typed_subtrees(value: &serde_json::Value, context: &str) -> TestResult {
