@@ -200,8 +200,13 @@ mod tests {
     fn run_ee_with_deterministic_external_probes(args: &[&str]) -> Result<Output, String> {
         let isolated_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/missing-ee-workspace/no-bin");
+        let isolated_runtime_dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/.runtime");
         let mut command = Command::new(ee_binary_path()?);
-        command.args(args).env("PATH", isolated_path);
+        command
+            .args(args)
+            .env("PATH", isolated_path)
+            .env("XDG_RUNTIME_DIR", isolated_runtime_dir);
         for (name, _) in env::vars_os() {
             if name.to_string_lossy().starts_with("EE_") {
                 command.env_remove(name);
