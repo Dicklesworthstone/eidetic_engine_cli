@@ -312,7 +312,9 @@ completions, repairs writable zsh/bash startup files (creating the active
 shell's file for a fresh home), and runs `ee --version` plus `ee doctor --json`.
 The informational agent scan prints setup guidance without changing agent settings. Open a new shell (or source its rc file) afterward.
 Re-running the command repairs `PATH` and completions and re-verifies a matching version without downloading or rebuilding it.
-Pass `--require-provenance` to require its signature and SLSA attestation; otherwise a missing bundle is reported and the checksum-verified install continues.
+Pass `--require-provenance` to require both a verified release signature and a
+verified SLSA provenance attestation; otherwise a missing bundle is reported
+and the checksum-verified install continues.
 
 [Release binaries](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest)
 cover macOS (`aarch64`, `x86_64`), Linux (`aarch64` and `x86_64` GNU,
