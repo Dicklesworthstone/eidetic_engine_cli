@@ -135,6 +135,15 @@ fn verification_ingest_is_idempotent_and_attaches_to_why() -> TestResult {
     );
     assert!(json_bool(&ingest, "/data/persisted", "ingest")?);
     assert!(!json_bool(&ingest, "/data/replayed", "ingest")?);
+    assert_eq!(
+        json_str(&ingest, "/data/authority", "ingest")?,
+        "caller_authored"
+    );
+    assert!(!json_bool(
+        &ingest,
+        "/data/passAuthorityValidated",
+        "ingest"
+    )?);
     assert!(
         json_str(&ingest, "/data/contentHash", "ingest")?.starts_with("blake3:"),
         "ingest should expose a stable content hash"
