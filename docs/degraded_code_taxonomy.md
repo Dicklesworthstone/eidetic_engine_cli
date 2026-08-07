@@ -885,7 +885,7 @@ the closed daemon hot-mode surface.
 | `quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 | `trust_quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 
-#### Coordination / external tools (32)
+#### Coordination / external tools (35)
 | Code | Severity | Bead |
 |------|----------|------|
 | `agent_mail_unavailable` | warning | bd-2nkbn (Agent Mail resilience) |
@@ -900,6 +900,7 @@ the closed daemon hot-mode surface.
 | `bv_command_timeout` | warning | bd-2z5ly.10 (S) |
 | `bv_no_output` | warning | bd-2z5ly.10 (S) |
 | `bv_unavailable` | medium | bd-1zb7k.4 (S3) |
+| `ci_proof_lane_artifact_attestation_invalid` | high | bd-fbeo2 — downloaded artifact identity, source, hashes, or canonical probes contradicted the claimed fresh proof lane |
 | `git_unavailable` | warning | bd-1zb7k.4 (S3), bd-1eq3l.11 |
 | `git_not_repository` | medium | bd-1eq3l.11 |
 | `rch_remote_required_fallback_prevented` | warning | bd-1zb7k.13.4 (C4) |
