@@ -37,9 +37,10 @@ use crate::core::memory_debt::{MemoryDebtSnapshotOptions, run_memory_debt_snapsh
 use crate::curate::{CandidateSource, CandidateType};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, ApplyMemoryDecayDemotionInput, ApplyMemoryScoreUpdateInput,
-    CreateCurationCandidateInput, DbConnection, FeedbackCounts, GraphSnapshotPruneCandidate,
-    GraphSnapshotType, StoredAuditEntry, StoredFeedbackEvent, StoredMemory, StoredMemoryLink,
-    WalCheckpointMode, audit_actions, feedback_scoring,
+    CreateAuditInput, CreateCurationCandidateInput, DbConnection, FeedbackCounts,
+    GraphSnapshotPruneCandidate, GraphSnapshotType, StoredAuditEntry, StoredFeedbackEvent,
+    StoredMemory, StoredMemoryLink, WalCheckpointMode, audit_actions, feedback_scoring,
+    generate_audit_id,
 };
 use crate::graph::decay::{StructuralDecayMultiplier, compute_structural_decay_adjustment};
 use crate::models::RedactionLevel;
@@ -51,7 +52,8 @@ use crate::policy::{
 
 mod consolidate;
 use consolidate::{
-    CONSOLIDATION_SIEVE_ALGORITHM, ConsolidationCandidateSelection, plan_consolidation_candidates,
+    CONSOLIDATION_SIEVE_ALGORITHM, ConsolidationCandidatePlan, ConsolidationCandidateSelection,
+    plan_consolidation_candidates,
 };
 
 pub const SUBSYSTEM: &str = "steward";
@@ -4631,6 +4633,18 @@ impl ManualRunner {
                 continue;
             }
 
+            if let Some(message) =
+                maybe_inject_consolidation_pass_failure("before_candidate_insert", candidate)
+            {
+                return steward_job_failure(
+                    "ee.steward.consolidation_pass.error.v1",
+                    "consolidation_pass_candidate_insert_failed",
+                    message,
+                    false,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
             let input = CreateCurationCandidateInput {
                 workspace_id: opened.workspace_id.clone(),
                 candidate_type: candidate_type.to_owned(),
@@ -4648,14 +4662,44 @@ impl ManualRunner {
                 derivation_source_refs_json: None,
                 derivation_metadata_json: None,
             };
-            if let Err(error) = opened
-                .connection
-                .insert_curation_candidate(&candidate.candidate_id, &input)
-            {
+            let audit_id = generate_audit_id();
+            let audit_details = consolidation_candidate_create_audit_details(
+                &opened.workspace_id,
+                candidate,
+                source_type,
+            );
+            if let Err(error) = opened.connection.with_transaction(|| {
+                opened
+                    .connection
+                    .insert_curation_candidate(&candidate.candidate_id, &input)?;
+                opened.connection.insert_audit(
+                    &audit_id,
+                    &CreateAuditInput {
+                        workspace_id: Some(opened.workspace_id.clone()),
+                        actor: Some("ee-steward".to_owned()),
+                        action: audit_actions::CURATION_CANDIDATE_CREATE.to_owned(),
+                        target_type: Some("curation_candidate".to_owned()),
+                        target_id: Some(candidate.candidate_id.clone()),
+                        details: Some(audit_details),
+                    },
+                )
+            }) {
                 let message = format!(
                     "Failed to insert consolidation candidate {}: {error}",
                     candidate.candidate_id
                 );
+                return steward_job_failure(
+                    "ee.steward.consolidation_pass.error.v1",
+                    "consolidation_pass_candidate_insert_failed",
+                    message,
+                    false,
+                    Some(&opened.database_path),
+                    "ee doctor --json",
+                );
+            }
+            if let Some(message) =
+                maybe_inject_consolidation_pass_failure("after_candidate_insert", candidate)
+            {
                 return steward_job_failure(
                     "ee.steward.consolidation_pass.error.v1",
                     "consolidation_pass_candidate_insert_failed",
@@ -6829,6 +6873,65 @@ fn index_coalesce_job_details(
         "dryRun": dry_run,
         "durableMutation": durable_mutation,
     })
+}
+
+/// Append-only creation-audit payload for a steward consolidation candidate,
+/// mirroring the `ee.audit.curation_candidate_create.v1` shape every other
+/// candidate producer writes, plus the selector provenance fields.
+fn consolidation_candidate_create_audit_details(
+    workspace_id: &str,
+    candidate: &ConsolidationCandidatePlan,
+    source_type: &str,
+) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.curation_candidate_create.v1",
+        "candidateId": candidate.candidate_id.as_str(),
+        "candidateType": "consolidate",
+        "proposalSource": "steward.consolidation_pass",
+        "workspaceId": workspace_id,
+        "targetMemoryId": candidate.target_memory_id.as_str(),
+        "sourceType": source_type,
+        "sourceId": candidate.source_memory_id.as_str(),
+        "confidence": 0.82,
+        "reason": candidate.reason.as_str(),
+        "algorithm": CONSOLIDATION_SIEVE_ALGORITHM,
+        "objectiveScore": candidate.objective_score,
+    })
+    .to_string()
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONSOLIDATION_PASS_FAIL_PHASE: std::cell::RefCell<Option<&'static str>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_consolidation_pass_fail_phase(phase: Option<&'static str>) {
+    CONSOLIDATION_PASS_FAIL_PHASE.with(|slot| *slot.borrow_mut() = phase);
+}
+
+/// Failure injection around the durable consolidation-candidate insert.
+/// Returns the synthetic failure message when the armed phase matches;
+/// a no-op outside `cfg(test)`.
+fn maybe_inject_consolidation_pass_failure(
+    phase: &'static str,
+    candidate: &ConsolidationCandidatePlan,
+) -> Option<String> {
+    #[cfg(not(test))]
+    let _ = (phase, candidate);
+    #[cfg(test)]
+    {
+        let armed = CONSOLIDATION_PASS_FAIL_PHASE
+            .with(|slot| (*slot.borrow()).filter(|armed_phase| *armed_phase == phase));
+        if armed.is_some() {
+            return Some(format!(
+                "Injected consolidation_pass failure at phase {phase} for candidate {}.",
+                candidate.candidate_id
+            ));
+        }
+    }
+    None
 }
 
 fn consolidation_pass_details(
@@ -10332,6 +10435,262 @@ mod tests {
             Some(1),
             "second pending candidates",
         )
+    }
+
+    fn seed_consolidation_pass_database(
+        temp_path: &std::path::Path,
+    ) -> Result<std::path::PathBuf, String> {
+        let database_path = temp_path.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                SCORE_WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: temp_path.to_string_lossy().into_owned(),
+                    name: Some("consolidation-pass-runner".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        insert_consolidation_memory(
+            &connection,
+            "mem_consolpass0000000000000001",
+            "Run rustfmt before commit.",
+            0.92,
+            0.80,
+            0.70,
+        )?;
+        insert_consolidation_memory(
+            &connection,
+            "mem_consolpass0000000000000002",
+            " run   rustfmt   before   commit. ",
+            0.41,
+            0.20,
+            0.10,
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(database_path)
+    }
+
+    fn consolidation_pass_durable_counts(
+        database_path: &std::path::Path,
+    ) -> Result<(usize, usize), String> {
+        let connection =
+            DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+        let candidates = connection
+            .list_curation_candidates(
+                SCORE_WORKSPACE_ID,
+                Some(CandidateType::Consolidate.as_str()),
+                None,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        let create_audits = connection
+            .list_audit_by_action(audit_actions::CURATION_CANDIDATE_CREATE, None)
+            .map_err(|error| error.to_string())?;
+        Ok((candidates.len(), create_audits.len()))
+    }
+
+    #[test]
+    fn manual_runner_consolidation_pass_dry_run_plans_without_mutation() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = seed_consolidation_pass_database(temp.path())?;
+
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_as_of("2026-08-01T00:00:00Z")
+            .with_dry_run(true);
+        let mut runner = ManualRunner::new(opts);
+        let result = runner.run_job_type(
+            JobType::ConsolidationPass,
+            Some("dry-run must not mutate".to_owned()),
+        );
+
+        ensure(result.outcome, RunOutcome::Success, "dry-run outcome")?;
+        let details = result
+            .details
+            .as_ref()
+            .ok_or_else(|| "dry-run details missing".to_owned())?;
+        ensure(details["dryRun"].as_bool(), Some(true), "dry-run flag")?;
+        ensure(
+            details["insertedCandidates"].as_u64(),
+            Some(0),
+            "dry-run inserted candidates",
+        )?;
+        ensure(
+            details["plannedCandidates"].as_u64(),
+            Some(1),
+            "dry-run planned candidates",
+        )?;
+        ensure(
+            details["durableMutation"].as_bool(),
+            Some(false),
+            "dry-run durable mutation",
+        )?;
+
+        let (candidates, create_audits) = consolidation_pass_durable_counts(&database_path)?;
+        ensure(candidates, 0, "dry-run must insert no candidates")?;
+        ensure(create_audits, 0, "dry-run must write no creation audits")
+    }
+
+    #[test]
+    fn manual_runner_consolidation_pass_writes_creation_audit_once() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = seed_consolidation_pass_database(temp.path())?;
+
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_as_of("2026-08-01T00:00:00Z");
+        let mut runner = ManualRunner::new(opts);
+        let first = runner.run_job_type(
+            JobType::ConsolidationPass,
+            Some("creation audit".to_owned()),
+        );
+        ensure(first.outcome, RunOutcome::Success, "first outcome")?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let create_audits = connection
+            .list_audit_by_action(audit_actions::CURATION_CANDIDATE_CREATE, None)
+            .map_err(|error| error.to_string())?;
+        ensure(create_audits.len(), 1, "one creation audit row")?;
+        let audit = create_audits
+            .first()
+            .ok_or_else(|| "creation audit missing".to_owned())?;
+        let details = audit
+            .details
+            .as_deref()
+            .ok_or_else(|| "creation audit details missing".to_owned())?;
+        if !details.contains("steward.consolidation_pass")
+            || !details.contains(CONSOLIDATION_SIEVE_ALGORITHM)
+            || !details.contains("mem_consolpass0000000000000001")
+            || !details.contains("mem_consolpass0000000000000002")
+        {
+            return Err(format!(
+                "creation audit details must carry steward provenance: {details}"
+            ));
+        }
+        drop(connection);
+
+        // Idempotent re-run dedupes the candidate and writes no second audit.
+        let second = runner.run_job_type(
+            JobType::ConsolidationPass,
+            Some("creation audit dedupe".to_owned()),
+        );
+        ensure(second.outcome, RunOutcome::Success, "second outcome")?;
+        let (candidates, create_audits) = consolidation_pass_durable_counts(&database_path)?;
+        ensure(candidates, 1, "still exactly one candidate")?;
+        ensure(create_audits, 1, "still exactly one creation audit")
+    }
+
+    #[test]
+    fn manual_runner_consolidation_pass_failure_injection_converges_on_retry() -> TestResult {
+        // Phase 1: failure BEFORE the durable insert leaves no state behind.
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = seed_consolidation_pass_database(temp.path())?;
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_as_of("2026-08-01T00:00:00Z");
+        let mut runner = ManualRunner::new(opts);
+
+        set_consolidation_pass_fail_phase(Some("before_candidate_insert"));
+        let failed = runner.run_job_type(
+            JobType::ConsolidationPass,
+            Some("injected pre-insert failure".to_owned()),
+        );
+        set_consolidation_pass_fail_phase(None);
+        ensure(failed.outcome, RunOutcome::Failed, "pre-insert outcome")?;
+        let (candidates, create_audits) = consolidation_pass_durable_counts(&database_path)?;
+        ensure(candidates, 0, "pre-insert failure leaves no candidate")?;
+        ensure(create_audits, 0, "pre-insert failure leaves no audit")?;
+
+        // Retry converges to exactly one durable candidate + audit.
+        let retried = runner.run_job_type(
+            JobType::ConsolidationPass,
+            Some("retry after pre-insert failure".to_owned()),
+        );
+        ensure(retried.outcome, RunOutcome::Success, "pre-insert retry")?;
+        let (candidates, create_audits) = consolidation_pass_durable_counts(&database_path)?;
+        ensure(candidates, 1, "retry inserts exactly one candidate")?;
+        ensure(create_audits, 1, "retry writes exactly one audit")?;
+
+        // Phase 2: failure AFTER the durable insert reports Failed but the
+        // candidate is durable; retry dedupes instead of duplicating.
+        let temp_after = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path_after = seed_consolidation_pass_database(temp_after.path())?;
+        let opts_after = RunnerOptions::new()
+            .with_database_path(database_path_after.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_as_of("2026-08-01T00:00:00Z");
+        let mut runner_after = ManualRunner::new(opts_after);
+
+        set_consolidation_pass_fail_phase(Some("after_candidate_insert"));
+        let failed_after = runner_after.run_job_type(
+            JobType::ConsolidationPass,
+            Some("injected post-insert failure".to_owned()),
+        );
+        set_consolidation_pass_fail_phase(None);
+        ensure(
+            failed_after.outcome,
+            RunOutcome::Failed,
+            "post-insert outcome",
+        )?;
+        let (candidates, create_audits) = consolidation_pass_durable_counts(&database_path_after)?;
+        ensure(candidates, 1, "post-insert failure keeps durable candidate")?;
+        ensure(create_audits, 1, "post-insert failure keeps durable audit")?;
+
+        let retried_after = runner_after.run_job_type(
+            JobType::ConsolidationPass,
+            Some("retry after post-insert failure".to_owned()),
+        );
+        ensure(
+            retried_after.outcome,
+            RunOutcome::Success,
+            "post-insert retry",
+        )?;
+        let retry_details = retried_after
+            .details
+            .as_ref()
+            .ok_or_else(|| "post-insert retry details missing".to_owned())?;
+        ensure(
+            retry_details["insertedCandidates"].as_u64(),
+            Some(0),
+            "post-insert retry inserts nothing new",
+        )?;
+        ensure(
+            retry_details["alreadyPendingCandidates"].as_u64(),
+            Some(1),
+            "post-insert retry dedupes the pending candidate",
+        )?;
+        let (candidates, create_audits) = consolidation_pass_durable_counts(&database_path_after)?;
+        ensure(candidates, 1, "no duplicate candidate after retry")?;
+        ensure(create_audits, 1, "no duplicate audit after retry")
+    }
+
+    #[test]
+    fn manual_runner_consolidation_pass_zero_item_budget_cancels_before_mutation() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = seed_consolidation_pass_database(temp.path())?;
+
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_as_of("2026-08-01T00:00:00Z")
+            .with_item_limit(0);
+        let mut runner = ManualRunner::new(opts);
+        let result = runner.run_job_type(
+            JobType::ConsolidationPass,
+            Some("zero item budget".to_owned()),
+        );
+
+        ensure(result.outcome, RunOutcome::Cancelled, "cancel outcome")?;
+        let (candidates, create_audits) = consolidation_pass_durable_counts(&database_path)?;
+        ensure(candidates, 0, "cancel before mutation leaves no candidate")?;
+        ensure(create_audits, 0, "cancel before mutation leaves no audit")
     }
 
     #[test]

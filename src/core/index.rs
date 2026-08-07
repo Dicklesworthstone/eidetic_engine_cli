@@ -10079,6 +10079,226 @@ mod tests {
         connection.close().map_err(|error| error.to_string())
     }
 
+    /// bd-1oep7: a consolidation-apply index job cancelled immediately before
+    /// index publication must leave the active generation untouched, report
+    /// honest staleness (no false Ready), and converge exactly once when the
+    /// next workflow-emitted job is processed.
+    #[test]
+    fn consolidation_index_job_cancel_before_publish_stays_truthful_and_retry_converges()
+    -> TestResult {
+        const WORKSPACE_ID: &str = "wsp_consolidx00000000000000001";
+        const SURVIVOR_ID: &str = "mem_consolidx00000000000000001";
+        const DUPLICATE_ID: &str = "mem_consolidx00000000000000002";
+        const BASELINE_JOB_ID: &str = "sidx_consolbase0000000000000001";
+        const CANCELLED_JOB_ID: &str = "sidx_consolcancel00000000000002";
+        const RETRY_JOB_ID: &str = "sidx_consolretry000000000000003";
+
+        let root = unique_test_dir("consolidation-cancel-before-publish");
+        let workspace = root.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        let index_dir = workspace.join(".ee").join("index");
+        std::fs::create_dir_all(workspace.join(".ee")).map_err(|error| error.to_string())?;
+
+        let insert_memory = |connection: &DbConnection,
+                             memory_id: &str,
+                             content: &str,
+                             confidence: f32|
+         -> TestResult {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &crate::db::CreateMemoryInput {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: Some("test://consolidation-index-cancel".to_owned()),
+                        trust_class: "agent_validated".to_owned(),
+                        trust_subclass: None,
+                        tags: vec!["consolidation".to_owned()],
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        };
+        let consolidation_job_input = || crate::db::CreateSearchIndexJobInput {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            job_type: SearchIndexJobType::SingleDocument,
+            document_source: Some("memory".to_owned()),
+            document_id: Some(DUPLICATE_ID.to_owned()),
+            documents_total: 1,
+        };
+        let processing_options = || IndexProcessingOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+            dry_run: false,
+            job_limit: None,
+        };
+        let status_options = || IndexStatusOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(database.clone()),
+            index_dir: Some(index_dir.clone()),
+        };
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &crate::db::CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("consolidation-index-cancel".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        insert_memory(
+            &connection,
+            SURVIVOR_ID,
+            "Zephyr quill consolidation survivor stays in the index.",
+            0.92,
+        )?;
+        insert_memory(
+            &connection,
+            DUPLICATE_ID,
+            " zephyr   quill consolidation survivor stays in the index. ",
+            0.41,
+        )?;
+        connection
+            .insert_search_index_job(
+                BASELINE_JOB_ID,
+                &crate::db::CreateSearchIndexJobInput {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    job_type: SearchIndexJobType::FullRebuild,
+                    document_source: None,
+                    document_id: None,
+                    documents_total: 0,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let baseline =
+            process_index_jobs(&processing_options()).map_err(|error| error.to_string())?;
+        ensure(
+            baseline.completed_jobs == 1,
+            format!("baseline rebuild must complete: {baseline:?}"),
+        )?;
+        let baseline_status =
+            get_index_status(&status_options()).map_err(|error| error.to_string())?;
+        ensure(
+            baseline_status
+                .index_document_counts
+                .as_ref()
+                .map(|counts| counts.memories)
+                == Some(2),
+            format!(
+                "baseline index must hold both duplicates: {:?}",
+                baseline_status.index_document_counts
+            ),
+        )?;
+        ensure(
+            baseline_status.db_generation == baseline_status.index_generation,
+            "baseline generation must be truthful before consolidation",
+        )?;
+
+        // Consolidation-apply effect: duplicate tombstoned, workflow-emitted
+        // single-document job pending.
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        ensure(
+            connection
+                .tombstone_memory(DUPLICATE_ID)
+                .map_err(|error| error.to_string())?,
+            "duplicate must tombstone for the consolidation scenario",
+        )?;
+        connection
+            .insert_search_index_job(CANCELLED_JOB_ID, &consolidation_job_input())
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        install_before_index_publish_hook(move |cx| {
+            cx.set_cancel_reason(asupersync::CancelReason::user(
+                "cancel consolidation index publication",
+            ));
+        });
+        let cancel_options = processing_options();
+        let cancelled_run = crate::core::run_cli_future(async move {
+            let cx = asupersync::Cx::for_testing();
+            process_index_jobs_with_cx(&cx, &cancel_options).await
+        })
+        .map_err(|error| error.to_string())?;
+        ensure(
+            matches!(cancelled_run, Err(IndexRebuildError::Cancelled(_))),
+            format!("cancel-before-publish must stay typed: {cancelled_run:?}"),
+        )?;
+
+        let stale_status =
+            get_index_status(&status_options()).map_err(|error| error.to_string())?;
+        ensure(
+            stale_status
+                .index_document_counts
+                .as_ref()
+                .map(|counts| counts.memories)
+                == Some(2),
+            format!(
+                "cancelled publication must preserve the active generation: {:?}",
+                stale_status.index_document_counts
+            ),
+        )?;
+        ensure(
+            stale_status.db_generation > stale_status.index_generation,
+            format!(
+                "cancelled publication must report honest staleness (no false Ready): db={:?} index={:?}",
+                stale_status.db_generation, stale_status.index_generation
+            ),
+        )?;
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let cancelled_job = connection
+            .get_search_index_job(CANCELLED_JOB_ID)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "cancelled consolidation job row missing".to_owned())?;
+        ensure(
+            cancelled_job.status_enum() == Some(SearchIndexJobStatus::Cancelled),
+            format!("cancelled consolidation job must not report done: {cancelled_job:?}"),
+        )?;
+
+        // Retry: the next workflow-emitted job converges exactly once.
+        connection
+            .insert_search_index_job(RETRY_JOB_ID, &consolidation_job_input())
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+        let retry = process_index_jobs(&processing_options()).map_err(|error| error.to_string())?;
+        ensure(
+            retry.completed_jobs == 1,
+            format!("retry must process the pending consolidation job: {retry:?}"),
+        )?;
+        let converged = get_index_status(&status_options()).map_err(|error| error.to_string())?;
+        ensure(
+            converged
+                .index_document_counts
+                .as_ref()
+                .map(|counts| counts.memories)
+                == Some(1),
+            format!(
+                "retry must drop the absorbed duplicate exactly once: {:?}",
+                converged.index_document_counts
+            ),
+        )?;
+        ensure(
+            converged.db_generation == converged.index_generation,
+            format!(
+                "retry must restore truthful generation: db={:?} index={:?}",
+                converged.db_generation, converged.index_generation
+            ),
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn backend_originated_cancellation_marks_live_cx_job_cancelled() -> TestResult {
         let root = unique_test_dir("backend-cancelled-job-finalizer");

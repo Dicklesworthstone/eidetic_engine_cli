@@ -86,6 +86,7 @@ set -euo pipefail
 #   6.12 Ask E2E               - scripts/e2e_ask.sh
 #   6.1265 Capture Track E2E   - scripts/e2e_capture.sh
 #   6.127 Ergonomics E2E       - scripts/e2e_ergonomics.sh
+#   6.1293 Consolidation E2E   - scripts/e2e_consolidation.sh
 #   6.1295 Embedding Native E2E - scripts/e2e_embedding_native.sh
 #   6.1296 Bundled Embeddings E2E - scripts/e2e_bundled_embeddings.sh
 #   6.1297 Native Reranker E2E - scripts/e2e_native_reranker.sh
@@ -1175,6 +1176,13 @@ run_stage "Doctor Health E2E (bd-1et0v.21)" "EE_E2E_TMPDIR=/private/tmp ./script
 # No-Cargo: proves scorecard schema, debt snapshot trend reads, duplicate/
 # provenance debt scoring, top repair actions, and read-only determinism.
 run_stage "Health Scorecard E2E (bd-2vq2z.14)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_health_scorecard.sh"
+
+# Gate 6.1293: consolidation Maintain-loop real-binary E2E (bd-1oep7).
+# No-Cargo: proves steward consolidation_pass dry-run non-mutation, budget
+# cancellation, deterministic dedupe, consolidate-absorb apply (lineage,
+# tombstone, audit chain), workflow-emitted index refresh truthfulness,
+# deduplicated search, and idempotent re-runs.
+run_stage "Consolidation E2E (bd-1oep7)" "EE_E2E_TMPDIR=/private/tmp ./scripts/e2e_consolidation.sh"
 
 # Gate 6.1295: embedding-native retrieval real-binary E2E (bd-2vq2z.19).
 # No-Cargo and no-download: uses EE_EMBED_MODEL_FIXTURE_DIR when a

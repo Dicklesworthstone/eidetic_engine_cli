@@ -1,0 +1,21 @@
+{
+  "schema": "ee.steward.consolidation_pass.v1",
+  "jobType": "consolidation_pass",
+  "workspaceId": "wsp_00000000000000000000001101",
+  "databasePath": "<workspace>/.ee/ee.db",
+  "plannedCandidates": 1,
+  "selector": {
+    "algorithm": "sieve_streaming_greedy_v1",
+    "consideredCandidates": 1,
+    "selectedCandidates": 1,
+    "maxCandidates": 64,
+    "objectiveValue": "<objective>"
+  },
+  "insertedCandidates": 1,
+  "alreadyPendingCandidates": 0,
+  "candidateIds": [
+    "<candidate>"
+  ],
+  "dryRun": false,
+  "durableMutation": true
+}

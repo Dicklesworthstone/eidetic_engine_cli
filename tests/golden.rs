@@ -4198,6 +4198,169 @@ mod tests {
         assert_json_golden("steward", "manual_runner_garbage_collection", &pretty)
     }
 
+    /// bd-1oep7: the `ee.steward.consolidation_pass.v1` details contract.
+    /// Two exact duplicates yield one deduplicated pending Consolidate
+    /// candidate; near-but-not-eligible controls (different wording, different
+    /// kind) never enter the plan. Volatile leaves (database path, run-local
+    /// candidate id, float objective) are scrubbed after being cross-checked
+    /// against the persisted rows.
+    #[test]
+    fn steward_consolidation_pass_output_matches_golden() -> TestResult {
+        const WORKSPACE_ID: &str = "wsp_00000000000000000000001101";
+        const SURVIVOR: &str = "mem_00000000000000000000001101";
+        const DUPLICATE: &str = "mem_00000000000000000000001102";
+        const NEAR_MISS_CONTROL: &str = "mem_00000000000000000000001103";
+        const KIND_CONTROL: &str = "mem_00000000000000000000001104";
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let ee_dir = workspace_path.join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let database_path = ee_dir.join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                WORKSPACE_ID,
+                &CreateWorkspaceInput {
+                    path: workspace_path.to_string_lossy().into_owned(),
+                    name: Some("steward-consolidation-golden".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let seed_memory = |memory_id: &str,
+                           kind: &str,
+                           content: &str,
+                           confidence: f32,
+                           utility: f32,
+                           importance: f32|
+         -> TestResult {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        level: "semantic".to_owned(),
+                        kind: kind.to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence,
+                        utility,
+                        importance,
+                        provenance_uri: Some("test://steward-consolidation-golden".to_owned()),
+                        trust_class: "agent_validated".to_owned(),
+                        trust_subclass: None,
+                        tags: vec!["consolidation-golden".to_owned()],
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        };
+        seed_memory(
+            SURVIVOR,
+            "fact",
+            "Zephyr quill consolidation golden survivor rule.",
+            0.75,
+            0.5,
+            0.5,
+        )?;
+        seed_memory(
+            DUPLICATE,
+            "fact",
+            "  zephyr   QUILL consolidation golden survivor rule. ",
+            0.5,
+            0.25,
+            0.25,
+        )?;
+        seed_memory(
+            NEAR_MISS_CONTROL,
+            "fact",
+            "Zephyr quill consolidation golden survivor guideline.",
+            0.5,
+            0.25,
+            0.25,
+        )?;
+        seed_memory(
+            KIND_CONTROL,
+            "decision",
+            "Zephyr quill consolidation golden survivor rule.",
+            0.5,
+            0.25,
+            0.25,
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let mut runner = ManualRunner::new(
+            RunnerOptions::new()
+                .with_workspace_path(workspace_path.to_path_buf())
+                .with_database_path(database_path.clone())
+                .with_workspace_id(WORKSPACE_ID)
+                .with_as_of("2026-08-01T00:00:00Z"),
+        );
+        let result = runner.run_job_type(
+            JobType::ConsolidationPass,
+            Some("golden steward consolidation pass".to_owned()),
+        );
+        ensure(
+            result.outcome == RunOutcome::Success,
+            "consolidation pass should succeed",
+        )?;
+        let mut details = result
+            .details
+            .ok_or_else(|| "consolidation pass details missing".to_owned())?;
+
+        // Cross-check the scrubbed leaves against the persisted row before
+        // replacing them with placeholders.
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let candidates = connection
+            .list_curation_candidates(WORKSPACE_ID, Some("consolidate"), Some("pending"), None)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            candidates.len() == 1,
+            "exactly one deduplicated pending consolidate candidate",
+        )?;
+        let candidate_id = candidates
+            .first()
+            .map(|candidate| candidate.id.clone())
+            .ok_or_else(|| "candidate row missing".to_owned())?;
+        ensure(
+            details["candidateIds"] == serde_json::json!([candidate_id]),
+            "details candidateIds must match the persisted candidate row",
+        )?;
+        ensure(
+            candidates
+                .first()
+                .and_then(|candidate| candidate.source_id.as_deref())
+                == Some(SURVIVOR),
+            "survivor must win the consolidation preference ordering",
+        )?;
+        ensure(
+            candidates
+                .first()
+                .and_then(|candidate| candidate.target_memory_id.as_deref())
+                == Some(DUPLICATE),
+            "duplicate must be the absorb target",
+        )?;
+        let objective = details["selector"]["objectiveValue"]
+            .as_f64()
+            .ok_or_else(|| "selector objectiveValue missing".to_owned())?;
+        ensure(
+            objective.is_finite() && objective > 1.0,
+            "selector objective must be a finite positive score",
+        )?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        details["databasePath"] = serde_json::json!("<workspace>/.ee/ee.db");
+        details["candidateIds"] = serde_json::json!(["<candidate>"]);
+        details["selector"]["objectiveValue"] = serde_json::json!("<objective>");
+        let pretty =
+            serde_json::to_string_pretty(&details).map_err(|error| error.to_string())? + "\n";
+        assert_json_golden("steward", "manual_runner_consolidation_pass", &pretty)
+    }
+
     fn normalize_context_pack_json(json: &str) -> String {
         let mut value: serde_json::Value = match serde_json::from_str(json) {
             Ok(v) => v,
