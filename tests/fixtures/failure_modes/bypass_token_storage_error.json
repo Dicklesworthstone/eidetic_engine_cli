@@ -1,0 +1,51 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "bypass_token_storage_error",
+  "introduced_by": {
+    "bead": "bd-ldmdc",
+    "epic_letter": "P0"
+  },
+  "surfaces": [
+    "preflight check"
+  ],
+  "severity": "critical",
+  "repair_present": true,
+  "trigger": {
+    "description": "Optional preflight authorization evidence cannot be read or audited because local memory storage is unavailable. The advisory check still exits successfully and cannot deny the inspected command.",
+    "setup_commands": [
+      "test ! -e <workspace>/.ee/ee.db"
+    ],
+    "invocation": "ee preflight check --cmd 'rm -rf build-output' --override-token optional-evidence-token --workspace <workspace> --json"
+  },
+  "expected_emission": {
+    "code": "bypass_token_storage_error",
+    "severity": "critical",
+    "message_contains": [
+      "optional memory evidence",
+      "cannot deny command execution"
+    ],
+    "repair_contains": "ee doctor",
+    "repair_string": "ee doctor --json",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)",
+    "repair_safety": [
+      {
+        "appliesTo": "ee doctor --json",
+        "command": "ee doctor --json",
+        "riskClass": "read_only_probe",
+        "preflightCommand": null,
+        "requiresHumanApproval": false,
+        "mutatesExternalState": false,
+        "mutatesTrackerState": false,
+        "privacyClass": "bounded_command_no_raw_state",
+        "nextAction": "run_directly",
+        "ruleId": "repair_safety:read_only_probe",
+        "source": "repair_action_safety",
+        "reasonCode": "read_only_probe_command",
+        "evidence": [
+          "read_only_probe_command"
+        ],
+        "preconditions": []
+      }
+    ]
+  }
+}

@@ -509,7 +509,7 @@ pub const CONTRACTS: &[ContractEntry] = &[
     ContractEntry {
         name: "preflight_guard",
         schema: crate::core::preflight_guard::PREFLIGHT_GUARD_SCHEMA_V1,
-        description: "Direct hook-safe guard response for ee preflight check/guard; intentionally not wrapped in ee.response.v2 so command hooks can branch on allowed/exitCode without envelope traversal",
+        description: "Direct advisory command-risk memory response for ee preflight check/guard; intentionally not wrapped in ee.response.v2, always exits successfully when the report is generated, and never grants or denies shell execution",
         stability: "stable",
     },
     ContractEntry {
@@ -704,8 +704,8 @@ pub const EXAMPLES: &[ExampleEntry] = &[
         category: "diagnostics",
     },
     ExampleEntry {
-        title: "Preflight a shell command",
-        description: "Check a command against destructive-action guard rules; this example encodes `git status`, and --cmd-base64 or --stdin keeps intercepted literals off argv",
+        title: "Inspect command-risk memory",
+        description: "Retrieve advisory risk patterns and memories for a command; this example encodes `git status`, and --cmd-base64 or --stdin keeps inspected literals off argv",
         command: "ee preflight check --cmd-base64 Z2l0IHN0YXR1cw== --json",
         category: "safety",
     },

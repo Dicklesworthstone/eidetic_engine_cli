@@ -11188,7 +11188,7 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
         SchemaEntry {
             id: crate::core::preflight_guard::PREFLIGHT_GUARD_SCHEMA_V1,
             version: "1",
-            description: "Trauma-guard surface returned by `ee preflight check --cmd \"<shell-command>\" --json`. Exit code 7 = policy denied.",
+            description: "Advisory command-risk memory returned by `ee preflight check --cmd \"<shell-command>\" --json`; it never blocks execution.",
             category: "ops",
             definition: preflight_guard_schema_definition,
         },
@@ -13754,7 +13754,7 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "hook",
-        description: "Generate agent-harness hook helpers (preflight shell snippets, etc.)",
+        description: "Generate agent-harness recall, journal, and advisory helpers",
         available: true,
         subcommands: &[
             SubcommandEntry {
@@ -13771,7 +13771,7 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
             },
             SubcommandEntry {
                 name: "preflight-shell",
-                description: "Emit a shell snippet that wires `ee preflight check` into bash or zsh",
+                description: "Emit an opt-in advisory shell snippet; it never suppresses commands",
             },
             SubcommandEntry {
                 name: "git-readiness",

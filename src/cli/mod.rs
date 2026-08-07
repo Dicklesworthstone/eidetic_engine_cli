@@ -208,15 +208,15 @@ use crate::core::preflight::{
 };
 use crate::core::preflight_guard::{
     BypassTokenInput, GuardMatch, MatchResolution, PREFLIGHT_GUARD_SCHEMA_V1,
-    PreflightGuardOptions, PreflightGuardRegistry, PreflightGuardReport, PreflightGuardRule,
-    RuleSource, match_trauma_guard_memories, no_risk_memories_degradation, run_preflight_guard,
+    PreflightGuardDegradation, PreflightGuardOptions, PreflightGuardRegistry, PreflightGuardReport,
+    PreflightGuardRule, RuleSource, match_trauma_guard_memories, no_risk_memories_degradation,
+    run_preflight_guard,
 };
 use crate::core::preflight_token::{
     BYPASS_TOKEN_INVALID, BYPASS_TOKEN_STORAGE_ERROR, IssueBypassTokenOptions,
-    PreflightBypassTokenError, RecordPreflightBypassAuditOptions, RecordPreflightHaltAuditOptions,
-    RevokeBypassTokenOptions, VerifyBypassTokenOptions,
-    issue_bypass_token as issue_preflight_bypass_token, list_bypass_tokens,
-    record_preflight_bypass_audit, record_preflight_halt_audit, revoke_bypass_token,
+    PreflightBypassTokenError, RecordPreflightBypassAuditOptions, RevokeBypassTokenOptions,
+    VerifyBypassTokenOptions, issue_bypass_token as issue_preflight_bypass_token,
+    list_bypass_tokens, record_preflight_bypass_audit, revoke_bypass_token,
     verify_bypass_token as verify_preflight_bypass_token,
 };
 use crate::core::profile::{
@@ -921,7 +921,7 @@ pub enum Command {
     /// Print command help. `ee help <subcommand>` shows that subcommand's help
     /// (e.g. `ee help memory show`); `ee help` alone shows the top-level help.
     Help(HelpArgs),
-    /// Generate agent-harness hook helpers (preflight shell snippets, etc.).
+    /// Generate agent-harness memory-context and advisory helpers.
     #[command(subcommand)]
     Hook(HookCommand),
     /// Graph analytics, snapshots, and export artifacts.
@@ -7231,7 +7231,7 @@ pub enum PreflightCommand {
     Show(PreflightShowArgs),
     /// Close a preflight run (mark as completed or cancelled).
     Close(PreflightCloseArgs),
-    /// Issue a short-lived one-shot bypass token after human approval.
+    /// Record short-lived one-shot authorization evidence after human approval.
     #[command(name = "issue-bypass-token")]
     IssueBypassToken(PreflightIssueBypassTokenArgs),
     /// Revoke a previously issued bypass token.
@@ -7240,9 +7240,9 @@ pub enum PreflightCommand {
     /// List hashed bypass-token metadata for this workspace.
     #[command(name = "list-bypass-tokens")]
     ListBypassTokens(PreflightListBypassTokensArgs),
-    /// Check a command against preflight guard rules.
+    /// Retrieve advisory rule and risk-memory context for a command.
     Check(PreflightGuardArgs),
-    /// Check a command against preflight guard rules.
+    /// Alias for advisory command-risk inspection.
     Guard(PreflightGuardArgs),
 }
 
@@ -7362,14 +7362,14 @@ pub struct PreflightListBypassTokensArgs {
     pub database: Option<PathBuf>,
 }
 
-/// Arguments for `ee preflight guard`.
+/// Arguments for advisory `ee preflight check` / `guard` inspection.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct PreflightGuardArgs {
-    /// Command string to check against guard rules. Use --cmd with `preflight check`.
+    /// Command string whose relevant risk context should be retrieved.
     #[arg(value_name = "COMMAND")]
     pub command: Option<String>,
 
-    /// Command string to check against guard rules.
+    /// Command string whose relevant risk context should be retrieved.
     #[arg(long = "cmd", value_name = "COMMAND")]
     pub cmd: Option<String>,
 
@@ -7389,11 +7389,11 @@ pub struct PreflightGuardArgs {
     #[arg(long, value_name = "PATH")]
     pub workspace: Option<PathBuf>,
 
-    /// Bypass token for a specific rule (format: rule_id:token).
+    /// Optional authorization evidence for a specific rule (format: rule_id:token).
     #[arg(long, value_name = "RULE_ID:TOKEN")]
     pub bypass: Vec<String>,
 
-    /// DB-backed one-shot override token issued by `ee preflight issue-bypass-token`.
+    /// DB-backed authorization token issued by `ee preflight issue-bypass-token`.
     #[arg(long = "override-token", value_name = "TOKEN")]
     pub override_token: Option<String>,
 
@@ -11181,11 +11181,11 @@ pub enum HookCommand {
     Codex(HarnessHookArgs),
     /// Report Gemini hook support posture.
     Gemini(HarnessHookArgs),
-    /// Emit a shell snippet that wires `ee preflight check` into bash or zsh
-    /// as a pre-execution hook.
+    /// Emit an opt-in advisory command-risk lookup snippet for bash or zsh.
+    /// The snippet never suppresses command execution.
     #[command(name = "preflight-shell")]
     PreflightShell(PreflightShellArgs),
-    /// Inspect local Git hooks for Agent Mail identity and preflight readiness.
+    /// Inspect local Git hooks for Agent Mail identity and retired command gates.
     #[command(name = "git-readiness")]
     GitReadiness(GitHookReadinessArgs),
     /// Report installed ambient harness hook posture without writing settings.
@@ -22624,7 +22624,7 @@ where
     if matches.is_empty() {
         let error = DomainError::Usage {
             message: "preflight bypass token command did not match any guard rules".to_owned(),
-            repair: Some("Run `ee preflight check --cmd '<command>' --json` and issue override tokens only for commands that the guard would block or warn about.".to_owned()),
+            repair: Some("Run `ee preflight check --cmd '<command>' --json` to inspect advisory risk context; authorization evidence is optional and never changes shell execution.".to_owned()),
         };
         return write_domain_error(&error, cli.wants_json(), stdout, stderr);
     }
@@ -22940,9 +22940,15 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
-    let registry = match PreflightGuardRegistry::load(&workspace) {
-        Ok(r) => r,
-        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    let (registry, registry_load_degradation) = match PreflightGuardRegistry::load(&workspace) {
+        Ok(registry) => (registry, None),
+        Err(error) => (
+            PreflightGuardRegistry::with_builtins(),
+            Some(preflight_advisory_storage_degradation(
+                &error,
+                "Workspace preflight rule loading",
+            )),
+        ),
     };
 
     if let Some(override_token) = args.override_token.as_deref() {
@@ -22954,7 +22960,24 @@ where
             ) {
                 Ok(opened) => opened,
                 Err(error) => {
-                    return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                    let mut report = preflight_guard_report_from_matches(
+                        command,
+                        &matches,
+                        MatchResolution::BypassTokenInvalid,
+                    );
+                    if let Some(degradation) = registry_load_degradation {
+                        report.degraded.push(degradation);
+                    }
+                    report.degraded.push(preflight_advisory_storage_degradation(
+                        &error,
+                        "Optional authorization-evidence lookup",
+                    ));
+                    attach_preflight_memory_matches(
+                        &workspace,
+                        args.database.as_deref(),
+                        &mut report,
+                    );
+                    return write_preflight_guard_report(cli, &report, stdout);
                 }
             };
             let options = VerifyBypassTokenOptions {
@@ -22965,30 +22988,31 @@ where
                 actor: None,
                 now: None,
             };
-            if let Err(error) = verify_preflight_bypass_token(&connection, &options) {
-                let domain_error = preflight_token_error_to_domain(error);
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-            }
-            let mut report = PreflightGuardReport {
-                schema: PREFLIGHT_GUARD_SCHEMA_V1.to_owned(),
-                command,
-                matches: matches
-                    .into_iter()
-                    .map(|rule| GuardMatch {
-                        rule_id: rule.id.clone(),
-                        pattern: rule.pattern.clone(),
-                        action: rule.action,
-                        message: rule.message.clone(),
-                        source: rule.source.clone(),
-                        resolution: MatchResolution::BypassedWithToken,
-                    })
-                    .collect(),
-                matched_memories: Vec::new(),
-                degraded: Vec::new(),
-                exit_code: 0,
-                checked_at: chrono::Utc::now().to_rfc3339(),
+            let verification_error = verify_preflight_bypass_token(&connection, &options).err();
+            let resolution = if verification_error.is_some() {
+                MatchResolution::BypassTokenInvalid
+            } else {
+                MatchResolution::BypassedWithToken
             };
+            let mut report = preflight_guard_report_from_matches(command, &matches, resolution);
+            if let Some(error) = verification_error.as_ref() {
+                report.degraded.push(PreflightGuardDegradation {
+                    code: error.code,
+                    severity: error.severity,
+                    message: error.message.clone(),
+                    repair: format!(
+                        "{} Authorization evidence is optional; command execution remains outside ee.",
+                        error.repair
+                    ),
+                });
+            }
+            if let Some(degradation) = registry_load_degradation {
+                report.degraded.push(degradation);
+            }
             attach_preflight_memory_matches(&workspace, args.database.as_deref(), &mut report);
+            if verification_error.is_some() {
+                return write_preflight_guard_report(cli, &report, stdout);
+            }
             let audit_options = RecordPreflightBypassAuditOptions {
                 workspace_id,
                 token: override_token.to_owned(),
@@ -22999,7 +23023,10 @@ where
             };
             if let Err(error) = record_preflight_bypass_audit(&connection, &audit_options) {
                 let domain_error = preflight_token_error_to_domain(error);
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                report.degraded.push(preflight_advisory_storage_degradation(
+                    &domain_error,
+                    "Optional authorization-evidence audit",
+                ));
             }
             return write_preflight_guard_report(cli, &report, stdout);
         }
@@ -23025,9 +23052,52 @@ where
     };
 
     let mut report = run_preflight_guard(&registry, &options);
+    if let Some(degradation) = registry_load_degradation {
+        report.degraded.push(degradation);
+    }
     attach_preflight_memory_matches(&workspace, args.database.as_deref(), &mut report);
-    record_preflight_halt_audit_if_available(&workspace, args.database.as_deref(), &report);
     write_preflight_guard_report(cli, &report, stdout)
+}
+
+fn preflight_guard_report_from_matches(
+    command: String,
+    matches: &[&PreflightGuardRule],
+    resolution: MatchResolution,
+) -> PreflightGuardReport {
+    PreflightGuardReport {
+        schema: PREFLIGHT_GUARD_SCHEMA_V1.to_owned(),
+        command,
+        matches: matches
+            .iter()
+            .map(|rule| GuardMatch {
+                rule_id: rule.id.clone(),
+                pattern: rule.pattern.clone(),
+                action: rule.action,
+                message: rule.message.clone(),
+                source: rule.source.clone(),
+                resolution,
+            })
+            .collect(),
+        matched_memories: Vec::new(),
+        degraded: Vec::new(),
+        exit_code: 0,
+        checked_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+fn preflight_advisory_storage_degradation(
+    error: &DomainError,
+    operation: &str,
+) -> PreflightGuardDegradation {
+    PreflightGuardDegradation {
+        code: BYPASS_TOKEN_STORAGE_ERROR,
+        severity: "critical",
+        message: format!(
+            "{operation} unavailable: {} This affects only ee's optional memory evidence; it cannot deny command execution.",
+            error.message()
+        ),
+        repair: "ee doctor --json".to_owned(),
+    }
 }
 
 fn attach_preflight_memory_matches(
@@ -23063,39 +23133,6 @@ fn attach_preflight_memory_matches(
     report.matched_memories = match_trauma_guard_memories(&report.command, &memories);
     if report.matched_memories.is_empty() {
         report.degraded.push(no_risk_memories_degradation());
-    }
-}
-
-fn record_preflight_halt_audit_if_available(
-    workspace: &Path,
-    database: Option<&Path>,
-    report: &PreflightGuardReport,
-) {
-    if report.exit_code != 7 {
-        return;
-    }
-    let (connection, workspace_id, _) =
-        match open_preflight_token_database_for_workspace(workspace.to_path_buf(), database) {
-            Ok(opened) => opened,
-            Err(error) => {
-                tracing::error!(
-                    error = %error.message(),
-                    "failed to open database for preflight halt audit"
-                );
-                return;
-            }
-        };
-    let options = RecordPreflightHaltAuditOptions {
-        workspace_id,
-        actor: None,
-        command: report.command.clone(),
-        matches: report.matches.clone(),
-        matched_memories: report.matched_memories.clone(),
-        exit_code: report.exit_code,
-        checked_at: report.checked_at.clone(),
-    };
-    if let Err(error) = record_preflight_halt_audit(&connection, &options) {
-        tracing::error!(%error, "failed to record preflight halt audit");
     }
 }
 
@@ -23146,13 +23183,13 @@ fn preflight_guard_command(args: &PreflightGuardArgs) -> Result<String, DomainEr
         command.clone()
     } else {
         return Err(usage(
-            "preflight guard requires a command string".to_owned(),
+            "preflight advisory requires a command string".to_owned(),
         ));
     };
 
     if command.trim().is_empty() {
         return Err(usage(
-            "preflight guard requires a non-empty command string".to_owned(),
+            "preflight advisory requires a non-empty command string".to_owned(),
         ));
     }
     Ok(command)
@@ -23174,11 +23211,10 @@ where
         let _ = stdout.write_all(report.human_summary().as_bytes());
     }
 
-    if report.exit_code == 7 {
-        ProcessExitCode::PolicyDenied
-    } else {
-        ProcessExitCode::Success
-    }
+    // `ee` reports command-risk memory; it never acts as the shell's policy
+    // gate. Keep this fail-open even if a legacy or externally constructed
+    // report still carries the historical policy-denied code.
+    ProcessExitCode::Success
 }
 
 // ============================================================================
@@ -54473,77 +54509,7 @@ struct DemoCommandContext<'a> {
     cwd_override: Option<&'a PathBuf>,
 }
 
-fn attach_demo_preflight_memory_matches(
-    ctx: &DemoCommandContext<'_>,
-    report: &mut PreflightGuardReport,
-) {
-    if report.matches.is_empty() {
-        return;
-    }
-    match ctx.conn.list_memories(ctx.workspace_id, None, false) {
-        Ok(memories) => {
-            report.matched_memories = match_trauma_guard_memories(&report.command, &memories);
-            if report.matched_memories.is_empty() {
-                report.degraded.push(no_risk_memories_degradation());
-            }
-        }
-        Err(error) => {
-            let mut degraded = no_risk_memories_degradation();
-            degraded.message = format!("Failed to query preflight risk memories: {error}");
-            report.degraded.push(degraded);
-        }
-    }
-}
-
-fn preflight_demo_command(ctx: &DemoCommandContext<'_>) -> Result<(), DomainError> {
-    let registry = PreflightGuardRegistry::load(ctx.workspace)?;
-    let options = PreflightGuardOptions {
-        command: ctx.command.command.clone(),
-        workspace: ctx.workspace.to_path_buf(),
-        bypass_tokens: Vec::new(),
-        bypass_secret: None,
-    };
-    let mut report = run_preflight_guard(&registry, &options);
-    attach_demo_preflight_memory_matches(ctx, &mut report);
-    if report.exit_code != ProcessExitCode::PolicyDenied as u32 {
-        return Ok(());
-    }
-
-    let audit_options = RecordPreflightHaltAuditOptions {
-        workspace_id: ctx.workspace_id.to_owned(),
-        actor: Some("ee demo run".to_owned()),
-        command: report.command.clone(),
-        matches: report.matches.clone(),
-        matched_memories: report.matched_memories.clone(),
-        exit_code: report.exit_code,
-        checked_at: report.checked_at.clone(),
-    };
-    if let Err(error) = record_preflight_halt_audit(ctx.conn, &audit_options) {
-        tracing::error!(%error, "failed to record demo preflight halt audit");
-    }
-
-    let match_summary = report
-        .matches
-        .first()
-        .map(|matched| format!("{}: {}", matched.rule_id, matched.message))
-        .unwrap_or_else(|| "policy denied by preflight guard".to_owned());
-    Err(DomainError::PolicyDeniedWithDetails {
-        message: format!(
-            "demo command rejected by trauma guard preflight before shell execution: {match_summary}"
-        ),
-        repair: Some(
-            "Run `ee preflight check --cmd <command> --json` and request explicit human authorization before bypassing."
-                .to_owned(),
-        ),
-        details_json: serde_json::json!({
-            "preflight": report.to_json(),
-        })
-        .to_string(),
-    })
-}
-
 fn execute_demo_command(ctx: DemoCommandContext<'_>) -> Result<DemoCommandExecution, DomainError> {
-    preflight_demo_command(&ctx)?;
     validate_demo_command_safe(&ctx.command.command)?;
     let effective_cwd = effective_demo_cwd(ctx.workspace, ctx.command, ctx.cwd_override);
     let step_dir = ctx
@@ -68476,7 +68442,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_check_subcommand_workspace_controls_database_and_audit() -> TestResult {
+    fn preflight_check_is_advisory_and_creates_no_halt_audit() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let default_workspace = tempdir.path().join("default-workspace");
         let explicit_workspace = tempdir.path().join("explicit-workspace");
@@ -68500,24 +68466,24 @@ mod tests {
 
         ensure_equal(
             &exit,
-            &ProcessExitCode::PolicyDenied,
-            "preflight check policy-denied exit",
+            &ProcessExitCode::Success,
+            "preflight check advisory exit",
         )?;
         ensure(stderr.is_empty(), "preflight check JSON stderr clean")?;
         let value: serde_json::Value =
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["exitCode"],
-            &serde_json::json!(7),
-            "preflight guard exit code",
+            &serde_json::json!(0),
+            "preflight advisory exit code",
         )?;
 
         let explicit_count = preflight_halt_audit_count(Path::new(&explicit_workspace))?;
         let default_count = preflight_halt_audit_count(Path::new(&default_workspace))?;
         ensure_equal(
             &explicit_count,
-            &1usize,
-            "explicit workspace receives preflight halt audit",
+            &0usize,
+            "explicit workspace receives no preflight halt audit",
         )?;
         ensure_equal(
             &default_count,

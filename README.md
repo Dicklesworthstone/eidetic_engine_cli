@@ -95,7 +95,7 @@ ee recall --path <path> --workspace . --budget-tokens 400 --format markdown
 ee search "<specific question>" --workspace . --limit 20 --explain --json
 ee ask "<direct question>" --workspace . --json
 ee why <memory-id> --workspace . --json
-ee preflight check --cmd "<risky shell command>" --workspace . --json
+ee preflight check --cmd "<risky shell command>" --workspace . --json  # advisory memory lookup; never blocks
 ee journal append "<observation>" --workspace . --source manual --json
 ee journal distill --workspace . --dry-run --json
 ee remember "<durable lesson>" --workspace . --level procedural --kind rule --json
@@ -125,7 +125,7 @@ ee outcome trace <memory-id> --workspace . --json
 | Need a direct cited answer | `ee ask "<question>" --workspace . --json` |
 | A high-ranked memory looks suspicious | `ee why <id> --workspace . --json` |
 | A context pack looks odd | `ee pack "<task>" --workspace . --explain --json` |
-| About to run a destructive command | `ee preflight check --cmd "<exact command>" --workspace . --json` |
+| Want risk history before a destructive command | `ee preflight check --cmd "<exact command>" --workspace . --json` (advisory only) |
 | You need a safe handoff | `ee handoff create --workspace . --out <capsule.json> --json` |
 | You need a support artifact | `ee support bundle --out <dir> --workspace . --json` |
 
@@ -507,7 +507,7 @@ Current top-level groups:
 | `ee pack replay <pack-id> --json` | Inspect the persisted, redaction-safe selection ledger for a historical pack |
 | `ee pack diff <old-pack-id> <new-pack-id> --json` | Compare two persisted pack ledgers and explain selection, freshness, redaction, or derived-asset changes |
 | `ee support bundle --out <dir> --json` | Create a redacted diagnostic bundle, including pack replay and swarm-brief summaries without raw query, mail body, memory, or full file-listing content |
-| `ee preflight check --cmd "<shell command>" --json` | Check shell commands against the policy/trauma guard before risky operations |
+| `ee preflight check --cmd "<shell command>" --json` | Retrieve advisory risk, failure, and anti-pattern memory for a command; never block execution |
 | `ee verify proofs --json` | Check committed Lean4 and TLA+ proof artifacts |
 
 ### Agent integration
@@ -1289,7 +1289,7 @@ base retrieval signal dominant.
 | `ee health scorecard [--record-snapshot] --json` | Trend-aware memory-health scorecard with coverage, freshness, trust, redundancy, graph, and top-action signals |
 | `ee curate doctor --trend --json` / `ee learn gaps --json` | Content-health diagnostics: memory-debt queue, steward trend snapshots, and demand-driven gap templates |
 | `ee preflight run "<task>"` / `show` / `close` | Task risk assessment, tripwire context, and post-run feedback |
-| `ee preflight check --cmd "<command>" --json` | Command-facing policy guard for shell hooks; use `--stdin` or `--cmd-base64` when an outer harness may block risky argv text before `ee` can inspect it |
+| `ee preflight check --cmd "<command>" --json` | Advisory command-risk memory lookup; use `--stdin` or `--cmd-base64` to keep command text off argv when needed. `ee` never denies execution |
 | `ee tripwire list` / `check` | Inspect and check preflight tripwires |
 | `ee diag plan-cache` | EQL query plan-cache counters and integration posture |
 | `ee diag contention [--use-daemon] [--json]` | Read-only swarm hot-path contention posture: write-lock, read-pool, single-flight (plus group-commit / incremental-index / L2 when present), with a severity-ranked `topContention` list (see [`docs/agent-ux/contention-observability.md`](docs/agent-ux/contention-observability.md)) |
@@ -1835,7 +1835,7 @@ Before editing known files or a diff:
 When you discover a durable project convention:
   ee remember --workspace . --level procedural --kind rule "<rule>"
 
-Before risky shell commands:
+To retrieve relevant risk memory before a shell command:
   ee preflight check --cmd "<shell-command>" --workspace . --json
   printf '%s' "$cmd" | ee preflight check --stdin --workspace . --json
 
@@ -1844,8 +1844,9 @@ After a remembered rule helps or harms:
   ee outcome <id> --signal harmful
 ```
 
-You can also wire it into a PreToolUse hook that injects context before risky
-commands. Preview the managed recall hook before installation:
+Managed hooks inject recall, orientation, journal, and capture context only.
+They never intercept or deny shell commands. Preview the managed memory hooks
+before installation:
 
 ```bash
 ee hook claude-code --print --workspace . --json
@@ -2184,18 +2185,21 @@ ee mesh discovery-policy --explain --json
 For fake-tailnet and operator workflows, see
 [`docs/mesh/operator_onboarding.md`](docs/mesh/operator_onboarding.md).
 
-### Preflight blocks a shell command
+### Inspect command-risk memory
 
-Inspect the policy result and follow the repair text:
+Ask `ee` for relevant risk history and provenance without changing whether the
+command runs:
 
 ```bash
 ee preflight check --cmd 'cargo test --all-targets' --json
 printf '%s' "$cmd" | ee preflight check --stdin --json
-ee preflight issue-bypass-token --reason "human approved exact command" --json
 ```
 
-Bypass tokens are one-shot recorded artifacts. They are for explicit human
-approval, not automated retries.
+The response is advisory. `ee` does not install a command-denial hook, return a
+policy-denied process status, or require a workspace allowlist for Cargo/RCH.
+For a syntactically valid check, missing or unhealthy optional memory/token
+storage is reported in `degraded[]` while both `exitCode` and the process status
+remain `0`.
 
 ### A crowded checkout has unknown dirty files
 

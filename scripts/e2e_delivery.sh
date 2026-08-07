@@ -204,23 +204,21 @@ assert_jq "ambient_profile_is_on_by_default_and_read_only" "$ROOT/hook_plan.json
   '.data.harnessInstall.ambientContext.schema == "ee.ambient_context.v1" and .data.harnessInstall.ambientContext.enabledByDefault == true and .data.harnessInstall.ambientContext.readOnly == true and .data.harnessInstall.ambientContext.provenanceTag == "ee:ee.ambient_context.v1"' \
   "$AMBIENT_BEAD"
 assert_jq "ambient_profile_budgets_registered" "$ROOT/hook_plan.json" \
-  '([.data.harnessInstall.ambientContext.budgets[]? | .surface] | sort) == ["pre_edit_recall","pre_risky_preflight","session_end_capture_suggest","session_start_orient"]' \
+  '([.data.harnessInstall.ambientContext.budgets[]? | .surface] | sort) == ["pre_edit_recall","session_end_capture_suggest","session_start_orient"]' \
   "$AMBIENT_BEAD"
 assert_jq "ambient_profile_suppression_rules_registered" "$ROOT/hook_plan.json" \
-  '([.data.harnessInstall.ambientContext.suppressionRules[]? | .code] | index("duplicate_in_session") != null) and ([.data.harnessInstall.ambientContext.suppressionRules[]? | .code] | index("empty_context") != null) and ([.data.harnessInstall.ambientContext.suppressionRules[]? | .code] | index("preflight_allows_command") != null)' \
+  '([.data.harnessInstall.ambientContext.suppressionRules[]? | .code] | index("duplicate_in_session") != null) and ([.data.harnessInstall.ambientContext.suppressionRules[]? | .code] | index("empty_context") != null) and ([.data.harnessInstall.ambientContext.suppressionRules[]? | .code] | index("preflight_allows_command") == null)' \
   "$AMBIENT_BEAD"
 # shellcheck disable=SC2016
 assert_jq "ambient_snippets_include_delivery_hooks" "$ROOT/hook_plan.json" \
-  '(. as $root | ["ee-ambient-session-orient","ee-ambient-pre-edit-recall","ee-ambient-pre-risky-preflight","ee-ambient-session-capture-suggest"] as $required | all($required[]; . as $id | any($root.data.harnessInstall.snippets[]?; .id == $id and .installable == true and (.command | contains("ee.ambient_context.v1")))))' \
+  '(. as $root | ["ee-ambient-session-orient","ee-ambient-pre-edit-recall","ee-ambient-session-capture-suggest"] as $required | all($required[]; . as $id | any($root.data.harnessInstall.snippets[]?; .id == $id and .installable == true and (.command | contains("ee.ambient_context.v1"))))) and all(.data.harnessInstall.snippets[]?; .id != "ee-ambient-pre-risky-preflight" and ((.command | contains("permissionDecision")) | not))' \
   "$AMBIENT_BEAD"
 
 SESSION_ORIENT_CMD="$(hook_command_for "ee-ambient-session-orient")"
 PRE_EDIT_CMD="$(hook_command_for "ee-ambient-pre-edit-recall")"
-PRE_RISKY_CMD="$(hook_command_for "ee-ambient-pre-risky-preflight")"
 CAPTURE_SUGGEST_CMD="$(hook_command_for "ee-ambient-session-capture-suggest")"
 assert_equal "ambient_session_orient_command_present" "$SESSION_ORIENT_CMD" "$SESSION_ORIENT_CMD" "$AMBIENT_BEAD"
 assert_equal "ambient_pre_edit_command_present" "$PRE_EDIT_CMD" "$PRE_EDIT_CMD" "$AMBIENT_BEAD"
-assert_equal "ambient_pre_risky_command_present" "$PRE_RISKY_CMD" "$PRE_RISKY_CMD" "$AMBIENT_BEAD"
 assert_equal "ambient_capture_suggest_command_present" "$CAPTURE_SUGGEST_CMD" "$CAPTURE_SUGGEST_CMD" "$AMBIENT_BEAD"
 
 SESSION_PAYLOAD="$(jq -cn \
@@ -268,17 +266,6 @@ assert_empty_file "ambient_pre_edit_duplicate_suppressed" "$ROOT/pre_edit_duplic
 NO_PATH_PAYLOAD="$(jq -cn --arg cwd "$WORKSPACE" '{hook_event_name:"PreToolUse",tool_name:"Edit",cwd:$cwd,tool_input:{}}')"
 run_hook "ambient_pre_edit_no_path" "$PRE_EDIT_CMD" "$NO_PATH_PAYLOAD" "$ROOT/pre_edit_no_path.json" "$ROOT/pre_edit_no_path.stderr" "$AMBIENT_BEAD"
 assert_empty_file "ambient_pre_edit_no_path_suppressed" "$ROOT/pre_edit_no_path.json" "$AMBIENT_BEAD"
-
-RISKY_PAYLOAD="$(jq -cn \
-  --arg cwd "$WORKSPACE" \
-  '{hook_event_name:"PreToolUse",tool_name:"Bash",cwd:$cwd,tool_input:{command:"git reset --hard HEAD"}}')"
-run_hook "ambient_pre_risky_preflight_denies" "$PRE_RISKY_CMD" "$RISKY_PAYLOAD" "$ROOT/pre_risky_deny.json" "$ROOT/pre_risky_deny.stderr" "$AMBIENT_BEAD"
-assert_jq "ambient_pre_risky_preflight_denial_shape" "$ROOT/pre_risky_deny.json" \
-  '.hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "deny" and (.hookSpecificOutput.permissionDecisionReason | contains("explicit human authorization")) and (.hookSpecificOutput.additionalContext | contains("surface=pre_risky_preflight") and contains("provenance=ee:ee.ambient_context.v1"))' \
-  "$AMBIENT_BEAD"
-SAFE_BASH_PAYLOAD="$(jq -cn --arg cwd "$WORKSPACE" '{hook_event_name:"PreToolUse",tool_name:"Bash",cwd:$cwd,tool_input:{command:"printf safe"}}')"
-run_hook "ambient_pre_risky_preflight_all_clear" "$PRE_RISKY_CMD" "$SAFE_BASH_PAYLOAD" "$ROOT/pre_risky_allow.json" "$ROOT/pre_risky_allow.stderr" "$AMBIENT_BEAD"
-assert_empty_file "ambient_pre_risky_all_clear_suppressed" "$ROOT/pre_risky_allow.json" "$AMBIENT_BEAD"
 
 CAPTURE_PAYLOAD="$(jq -cn --arg cwd "$WORKSPACE" '{hook_event_name:"SessionEnd",cwd:$cwd,session_id:"bd-2vq2z-21-session"}')"
 run_hook "ambient_session_capture_empty" "$CAPTURE_SUGGEST_CMD" "$CAPTURE_PAYLOAD" "$ROOT/session_capture_empty.json" "$ROOT/session_capture_empty.stderr" "$AMBIENT_BEAD"

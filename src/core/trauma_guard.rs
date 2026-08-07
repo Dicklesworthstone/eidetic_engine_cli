@@ -1,13 +1,9 @@
 //! bd-1n0np.18.1 — trauma-guard bypass-evidence collector.
 //!
-//! The trauma guard (`core::preflight_guard`) already looks up risk / anti-pattern
-//! / failure memories for risky commands, but it never *learns* from how a human
-//! actually resolved a halt. This collector adds the **high-precision** signal
-//! only: when the guard policy-DENIED a preflight (`preflight.halt`) and a human
-//! then issued a one-shot bypass for the **exact same command** (`preflight.bypass`)
-//! shortly after, that correlation is audited evidence — so the guard's next
-//! prompt for that command class can be calmer + cited (reducing guard fatigue
-//! without weakening safety).
+//! Current command-risk lookup is advisory-only. This module mines historical
+//! audit rows written by older releases: when a `preflight.halt` row was followed
+//! by one-shot human authorization evidence for the **exact same command**
+//! (`preflight.bypass`), that correlation can become cited memory context.
 //!
 //! This is the pure, deterministic correlator over explicit time windows; the
 //! caller loads the two audit-event streams (via
@@ -16,7 +12,8 @@
 //!
 //! EXPLICITLY OUT OF SCOPE (per the duel): the confound-prone
 //! "allowed-then-damaging" auto-detector. This module never infers harm from an
-//! allowed command — it only records the human-confirmed bypass of a denied one.
+//! allowed command. It only records explicitly correlated historical evidence,
+//! and that evidence never grants or denies shell execution.
 
 use std::collections::BTreeMap;
 
@@ -29,11 +26,11 @@ pub const TRAUMA_GUARD_BYPASS_EVIDENCE_SCHEMA_V1: &str = "ee.trauma_guard.bypass
 /// distinguish trauma-guard-driven calibrations.
 pub const TRAUMA_GUARD_CALIBRATION_SOURCE_TYPE: &str = "trauma_guard_bypass_evidence";
 
-/// Default window: a bypass counts as resolving a halt only if it lands within
-/// this many seconds AFTER the halt (a human acting on the same denied command).
+/// Default window for correlating historical authorization evidence after a
+/// historical halt row.
 pub const BYPASS_EVIDENCE_CORRELATION_WINDOW_SECONDS: i64 = 3_600;
 
-/// A policy-denied preflight (`preflight.halt` audit event).
+/// A historical `preflight.halt` audit event from an older release.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreflightHaltEvent {
     pub command_hash: String,
@@ -47,9 +44,7 @@ pub struct PreflightBypassEvent {
     pub occurred_at_epoch: i64,
 }
 
-/// Correlated bypass evidence for one exact command hash: how many policy-denied
-/// halts the human subsequently bypassed (within the window), and when the most
-/// recent such bypass occurred. The guard cites this to calm repeat prompts.
+/// Correlated historical evidence for one exact command hash.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandBypassEvidence {
     pub command_hash: String,
@@ -59,8 +54,8 @@ pub struct CommandBypassEvidence {
     pub last_bypass_at_epoch: i64,
 }
 
-/// Correlate policy-denied halts with subsequent one-shot human bypasses for the
-/// EXACT same command hash (bd-1n0np.18.1).
+/// Correlate historical halt rows with subsequent one-shot human authorization
+/// evidence for the EXACT same command hash (bd-1n0np.18.1).
 ///
 /// Deterministic: events are grouped by `command_hash`; within each group, halts
 /// and bypasses are sorted by time and greedily matched — each halt consumes the
@@ -146,22 +141,21 @@ pub fn correlate_bypass_evidence(
 }
 
 /// Propose a PENDING curate calibration candidate from bypass evidence
-/// (bd-1n0np.18.2 core). It records that this EXACT command was policy-denied then
-/// human-bypassed, as a derived context memory the guard can cite to calm the
-/// next prompt — `ee preflight learn`'s propose stage. NEVER auto-applied (status
-/// `pending`, applied only via an explicit `ee curate accept`); the bypass
-/// override itself stays one-shot (this never creates an auto-permanent allowlist).
+/// (bd-1n0np.18.2 core). It records that this EXACT command had correlated
+/// historical halt and authorization rows as derived context memory. It is
+/// never auto-applied (`pending`, accepted only through curation), and it never
+/// creates a shell allowlist.
 #[must_use]
 pub fn propose_calibration_candidate(
     evidence: &CommandBypassEvidence,
     workspace_id: &str,
 ) -> CreateCurationCandidateInput {
     let reason = format!(
-        "Trauma-guard calibration: command {} was policy-denied then human-bypassed {} time(s) within the evidence window (last at epoch {}). Cite this so the next preflight prompt for this exact command is calmer; the override stays one-shot.",
+        "Historical command-risk calibration: command {} had {} correlated halt/authorization evidence pair(s) within the evidence window (last at epoch {}). Preserve this as cited context only; it grants no shell authority.",
         evidence.command_hash, evidence.correlated_bypass_count, evidence.last_bypass_at_epoch,
     );
     let proposed_content = format!(
-        "Preflight calibration context for command {}: {} human bypass(es) recorded after a policy-deny. Treat repeat prompts for this exact command as informed, not novel.",
+        "Command-risk context for command {}: {} historical halt/authorization evidence pair(s) were recorded. Treat this as provenance-bearing memory, never as execution permission.",
         evidence.command_hash, evidence.correlated_bypass_count,
     );
     CreateCurationCandidateInput {

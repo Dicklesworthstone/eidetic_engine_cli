@@ -1,23 +1,16 @@
 #!/usr/bin/env bash
-# bd-1n0np.18.4 — Trauma-Guard bypass-evidence learn loop end-to-end (real binary).
+# bd-1n0np.18.4 — Advisory command-risk evidence loop end-to-end (real binary).
 #
-# Scenario: the guard policy-denies a risky command, a human issues a one-shot
-# bypass for the EXACT command, and `ee preflight learn` correlates that into an
-# audited, pending calibration candidate (calmer cited next prompt) WITHOUT ever
-# creating an auto-permanent allowlist.
+# Scenario: advisory preflight retrieves risk context for a command, optional
+# one-shot authorization evidence is audited for the exact command, without
+# ever changing shell execution authority.
 #   1. init workspace.
-#   2. `ee preflight check` a risky command -> policy-denied halt (bd-1n0np.18 base).
-#   3. issue + use a one-shot bypass token for the exact command -> bypass event.
-#   4. `ee preflight learn --dry-run` -> proposes a pending calibration candidate
-#      citing the bypass evidence (bd-1n0np.18.1/18.2); `--apply` routes it
-#      through curate (propose->validate->apply).
-#   5. assert the override stays one-shot (no auto-permanent allowlist).
+#   2. `ee preflight check` a risky command -> advisory high-risk match, exit 0.
+#   3. issue + use one-shot authorization evidence for the exact command.
+#   4. assert exhausted evidence is advisory and no allowlist is created.
 #
-# The preflight guard / bypass-token / `ee preflight learn` surfaces are
-# CAPABILITY-GUARDED: where a surface is absent in the binary under test, the step
-# records a visible log_drop (the no-silent-cap rule) instead of a false pass, and
-# its assertions activate automatically once the binary provides it. init runs for
-# real on any binary.
+# The script never executes the inspected command. It verifies only memory,
+# provenance, and stable machine-output behavior.
 #
 # NOTE: no `set -e` — the harness assert_* helpers accumulate pass/fail and
 # `harness_summary` decides the exit code.
@@ -30,12 +23,6 @@ source "$E2E_DIR/lib/e2e_harness.sh"
 harness_init "trauma_guard_learn"
 
 ee_json() { "$EE_BIN" "$@" 2>/dev/null || true; }
-ee_supports() { "$EE_BIN" "$@" --help >/dev/null 2>&1; }
-# True only when `ee preflight --help` actually lists <subcommand>.
-ee_preflight_has() {
-    "$EE_BIN" preflight --help 2>&1 | grep -qw "$1"
-}
-
 with_temp_workspace WS
 
 step "init workspace"
@@ -44,52 +31,42 @@ assert_jq "$init_out" '.success == true' "ee init succeeds"
 
 RISKY="rm -rf /important/data"
 
-step "preflight check the risky command -> policy-denied halt (bd-1n0np.18 base)"
-# The exact preflight-check invocation (flag vs positional) is binary-dependent;
-# probe for a JSON envelope before asserting.
-halt_out="$(ee_json preflight check --command "$RISKY" --workspace "$WS" --json)"
-if printf '%s' "$halt_out" | jq -e '.success != null' >/dev/null 2>&1; then
-    assert_jq "$halt_out" '(.success != null)' "preflight check returns an envelope"
-    action="$(printf '%s' "$halt_out" | jq -r 'first(.. | objects | (.action // .guardAction // empty)) // "unknown"')"
-    e2e_log_note "preflight action=$action"
-else
-    log_drop 1 "ee preflight check invocation/surface pending: halt assertions skipped"
-fi
+step "preflight check retrieves advisory risk context without command denial"
+advisory_out="$(ee_json preflight check --cmd "$RISKY" --workspace "$WS" --json)"
+assert_jq "$advisory_out" '.schema == "ee.preflight.guard.v1"' \
+    "preflight check returns the advisory risk-memory schema"
+assert_jq "$advisory_out" '.exitCode == 0' \
+    "high-risk matches never become a policy-denied process status"
+assert_jq "$advisory_out" \
+    '([.matches[]? | select(.action == "high_risk")] | length) >= 1' \
+    "destructive pattern remains explainable as advisory high-risk context"
+assert_jq "$advisory_out" \
+    '([.matches[]? | select(.resolution == "matched")] | length) >= 1' \
+    "matched rules use non-enforcement vocabulary"
 
-step "issue + use a one-shot bypass token for the exact command (bypass event)"
-tok="$(ee_json preflight issue-bypass-token --command "$RISKY" --workspace "$WS" --json)"
-if printf '%s' "$tok" | jq -e '.success != null' >/dev/null 2>&1; then
-    assert_jq "$tok" '(.success != null)' "issue-bypass-token returns an envelope"
-else
-    log_drop 1 "preflight issue-bypass-token invocation/surface pending: bypass event skipped"
-fi
+step "record and consume optional one-shot authorization evidence"
+tok="$(ee_json preflight issue-bypass-token --cmd "$RISKY" \
+    --reason "e2e historical authorization evidence" --workspace "$WS" --json)"
+assert_jq "$tok" '.success == true' "issue-bypass-token returns a success envelope"
+raw_token="$(printf '%s' "$tok" | jq -r '.data.report.token // empty')"
+assert_eq "$(test -n "$raw_token" && printf present || printf missing)" "present" \
+    "authorization evidence token is issued"
 
-step "ee preflight learn proposes a pending calibration from bypass evidence (18.1/18.2)"
-if ee_preflight_has "learn"; then
-    dry="$(ee_json preflight learn --dry-run --workspace "$WS" --json)"
-    assert_jq "$dry" '.success == true' "preflight learn --dry-run succeeds"
-    assert_jq "$dry" \
-        '[.. | objects | (.candidates // .proposals // .bypassEvidence // empty)] | length >= 0' \
-        "learn emits a (possibly empty) calibration-candidate set"
-    # The proposed calibration must be PENDING (never an auto-applied allowlist).
-    if printf '%s' "$dry" | jq -e '.. | objects | (.status? == "pending")' >/dev/null 2>&1; then
-        assert_jq "$dry" \
-            '[.. | objects | select(.status? == "pending")] | length >= 1' \
-            "calibration candidates are pending (no auto-permanent allowlist)"
-    else
-        log_drop 1 "learn calibration-candidate status surface pending (bd-1n0np.18.2)"
-    fi
-else
-    log_drop 1 "ee preflight learn surface pending (bd-1n0np.18.2): correlation/proposal assertions skipped"
-fi
+used="$(ee_json preflight check --cmd "$RISKY" --override-token "$raw_token" \
+    --workspace "$WS" --json)"
+assert_jq "$used" '.schema == "ee.preflight.guard.v1" and .exitCode == 0' \
+    "authorization evidence does not change advisory exit behavior"
+assert_jq "$used" \
+    '([.matches[]? | select(.resolution == "bypassed_with_token")] | length) >= 1' \
+    "valid one-shot evidence is recorded in match provenance"
 
-step "learn --apply routes calibration through curate (propose->validate->apply)"
-if ee_preflight_has "learn"; then
-    applied="$(ee_json preflight learn --apply --workspace "$WS" --json)"
-    assert_jq "$applied" '.success == true' "preflight learn --apply succeeds"
-else
-    log_drop 1 "ee preflight learn --apply pending (bd-1n0np.18.2): curate-apply assertions skipped"
-fi
+exhausted="$(ee_json preflight check --cmd "$RISKY" --override-token "$raw_token" \
+    --workspace "$WS" --json)"
+assert_jq "$exhausted" '.schema == "ee.preflight.guard.v1" and .exitCode == 0' \
+    "exhausted evidence remains advisory"
+assert_jq "$exhausted" \
+    '([.degraded[]? | select(.code == "bypass_token_exhausted")] | length) == 1' \
+    "exhaustion is reported as degraded evidence, never command denial"
 
 end_temp_workspace
 harness_summary

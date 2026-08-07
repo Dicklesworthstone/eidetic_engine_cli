@@ -1463,7 +1463,7 @@ impl EffectManifest {
             CommandEffect::read_only_db("history", "Show persisted memory history summary"),
             CommandEffect::read_only(
                 "hook preflight-shell",
-                "Emit a shell snippet wiring ee preflight check into bash or zsh",
+                "Emit an opt-in advisory shell snippet that never suppresses commands",
             ),
             CommandEffect::read_only(
                 "hook git-readiness",
@@ -2432,15 +2432,15 @@ impl EffectManifest {
                 "preflight check",
                 vec!["preflight_bypass_tokens", "audit_log"],
                 "command hash plus matched rule ids plus override token hash",
-                "preflight bypass token audit",
-                "Check a shell command and audit override-token use when present",
+                "optional command-authorization evidence audit",
+                "Retrieve advisory command-risk memory and audit optional authorization evidence",
             ),
             CommandEffect::durable_state_write(
                 "preflight guard",
                 vec!["preflight_bypass_tokens", "audit_log"],
                 "command hash plus matched rule ids plus override token hash",
-                "preflight bypass token audit",
-                "Alias for preflight check; audits override-token use when present",
+                "optional command-authorization evidence audit",
+                "Alias for advisory preflight check; audits optional authorization evidence",
             ),
             CommandEffect::durable_state_write(
                 "preflight issue-bypass-token",

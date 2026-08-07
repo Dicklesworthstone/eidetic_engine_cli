@@ -430,33 +430,26 @@ fn verification_record_summary(record: &VerificationEvidenceRecord) -> String {
 }
 
 fn local_cargo_policy_workspace_evidence(workspace: &Path) -> Vec<EvidenceRecord> {
-    let direct_status = local_cargo_preflight_policy_status(
-        workspace,
-        "cargo test --lib completion_audit_tripwire_probe",
-    );
-    let wrapped_status = local_cargo_preflight_policy_status(
-        workspace,
-        "scripts/rch_verify.sh -- cargo test --lib completion_audit_tripwire_probe",
-    );
     let mut records = Vec::new();
+    let tripwire_path = workspace.join("scripts/check-local-cargo-tripwire.sh");
 
-    if direct_status == "local_cargo_disallowed" && wrapped_status == "remote_wrapper_required" {
+    if tripwire_path.is_file() {
         records.push(evidence_record(
             "local_cargo_tripwire",
             "cargo/build/test command",
-            "preflight guard planned-command probe",
+            "scripts/check-local-cargo-tripwire.sh",
             EvidenceRecordStatus::Pass,
             "supporting",
-            "local_cargo_policy_state=remote_required_ready; direct local Cargo verification is denied and the approved RCH wrapper is allowed",
+            "local_cargo_policy_state=remote_required_ready; repository verification tooling owns Cargo/RCH enforcement; ee command-risk memory is advisory only",
         ));
     } else {
         records.push(evidence_record(
             "local_cargo_tripwire",
             "cargo/build/test command",
-            "preflight guard planned-command probe",
+            "scripts/check-local-cargo-tripwire.sh",
             EvidenceRecordStatus::Inconclusive,
             "supporting",
-            "local_cargo_policy_state=unknown; planned-command guard did not prove local Cargo denial plus RCH wrapper allowance",
+            "local_cargo_policy_state=unknown; repository-local Cargo tripwire is unavailable; ee does not substitute as a command gate",
         ));
     }
 
@@ -530,37 +523,6 @@ fn local_cargo_process_scan_evidence(process_scan: &Value) -> Vec<EvidenceRecord
                 "local_cargo_policy_state=unknown; active process scan unavailable ({status})"
             ),
         )],
-    }
-}
-
-fn local_cargo_preflight_policy_status(workspace: &Path, command: &str) -> String {
-    let registry = super::preflight_guard::PreflightGuardRegistry::with_builtins();
-    let report = super::preflight_guard::run_preflight_guard(
-        &registry,
-        &super::preflight_guard::PreflightGuardOptions {
-            command: command.to_owned(),
-            workspace: workspace.to_path_buf(),
-            bypass_tokens: Vec::new(),
-            bypass_secret: None,
-        },
-    );
-    let local_cargo_denied = report.matches.iter().any(|matched| {
-        matches!(
-            matched.rule_id.as_str(),
-            "builtin:local_cargo_heavy_verification"
-                | "builtin:local_cargo_target_dir_override"
-                | "builtin:local_rust_compiler_verification"
-        )
-    });
-
-    if local_cargo_denied {
-        "local_cargo_disallowed".to_owned()
-    } else if report.exit_code == 0 && command.contains("scripts/rch_verify.sh") {
-        "remote_wrapper_required".to_owned()
-    } else if report.exit_code == 0 {
-        "allowed".to_owned()
-    } else {
-        "blocked_by_other_policy".to_owned()
     }
 }
 
@@ -2430,13 +2392,14 @@ mod tests {
     }
 
     #[test]
-    fn local_build_policy_probe_treats_direct_rustdoc_as_local_attempt() {
-        let status = local_cargo_preflight_policy_status(
-            Path::new(env!("CARGO_MANIFEST_DIR")),
-            "rustdoc --test src/lib.rs",
-        );
-
-        assert_eq!(status, "local_cargo_disallowed");
+    fn local_build_policy_uses_repository_tripwire_not_ee_preflight() {
+        let records = local_cargo_policy_workspace_evidence(Path::new(env!("CARGO_MANIFEST_DIR")));
+        assert!(records.iter().any(|record| {
+            record.source == "scripts/check-local-cargo-tripwire.sh"
+                && record
+                    .summary
+                    .contains("ee command-risk memory is advisory only")
+        }));
     }
 
     #[test]

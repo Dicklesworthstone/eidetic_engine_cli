@@ -1,10 +1,10 @@
-//! Preflight evidence-matched command guard (eidetic_engine_cli-5arc).
+//! Preflight evidence-matched command risk advisor (eidetic_engine_cli-5arc).
 //!
 //! `ee preflight <command-string>` walks a per-workspace + bundled-default rule
-//! registry and emits structured warnings citing the rule that matched. A
-//! workspace-side HMAC bypass token (BLAKE3 keyed-hash) can suppress a single
-//! match for a single command. Unbypassed matches halt the caller with exit
-//! code 7 (PolicyDenied per `AGENTS.md`).
+//! registry and emits structured warnings citing the rule that matched. It is
+//! deliberately advisory-only: matches can retrieve relevant risk, failure,
+//! and anti-pattern memories, but they never halt the caller or suppress a
+//! shell command.
 //!
 //! This module intentionally has no dependency on the `core::preflight`
 //! per-task risk-brief surface; it operates on raw command strings and reuses
@@ -35,14 +35,11 @@ pub const PREFLIGHT_RULES_RELATIVE_PATH: &str = ".ee/preflight_rules.toml";
 
 /// Maximum size for `<workspace>/.ee/preflight_rules.toml`.
 ///
-/// The trauma-guard preflight is a hot path: every protected shell command an
-/// agent issues triggers `PreflightGuardRegistry::load(...)`, which reads this
-/// file before matching against the command string (see callers in
-/// `src/cli/mod.rs:17653,17897,18190,40768`). Without a ceiling, a workspace
+/// Explicit command-risk inspection loads this file before matching against a
+/// command string. Without a ceiling, a workspace
 /// file accidentally or maliciously inflated to multi-GB would (a) cause
 /// `fs::read_to_string`'s pre-sized buffer allocation to OOM the CLI and (b)
-/// stall every guarded shell command in a tight allocation/copy loop instead
-/// of returning a clean policy decision.
+/// stall advisory inspection in a tight allocation/copy loop.
 ///
 /// Realistic rule files are kilobytes to low tens of kilobytes. 4 MiB is a
 /// very generous ceiling that still bounds the worst case to a single
@@ -87,7 +84,12 @@ fn trace_trauma_guard_preflight(
 pub enum GuardAction {
     /// Emit a structured warning but allow execution.
     Warn,
-    /// Halt with policy-denied exit code unless an authoritative bypass is supplied.
+    /// Legacy high-risk classification retained for stored rules.
+    ///
+    /// `ee` is a memory substrate, not a shell policy-enforcement layer. A
+    /// rule classified as `Halt` is therefore reported as risk context but
+    /// never stops command execution.
+    #[serde(rename = "high_risk", alias = "halt")]
     Halt,
 }
 
@@ -105,8 +107,6 @@ pub enum RepairCommandNextAction {
     AskHuman,
     /// No command is safely runnable by an agent.
     ManualOnly,
-    /// Policy-denied without the explicit destructive-command approval flow.
-    PolicyDenied,
 }
 
 impl RepairCommandNextAction {
@@ -118,7 +118,6 @@ impl RepairCommandNextAction {
             Self::CoordinateFirst => "coordinate_first",
             Self::AskHuman => "ask_human",
             Self::ManualOnly => "manual_only",
-            Self::PolicyDenied => "policy_denied",
         }
     }
 }
@@ -152,14 +151,18 @@ impl GuardAction {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Warn => "warn",
-            Self::Halt => "halt",
+            Self::Halt => "high_risk",
         }
     }
 
-    /// Whether this action stops execution by default.
+    /// Whether this action stops execution.
+    ///
+    /// Command inspection is advisory-only. This deliberately returns false
+    /// for legacy `Halt` rules so neither current callers nor previously
+    /// installed hooks can turn an ee risk-memory match into a shell gate.
     #[must_use]
     pub const fn stops_execution(self) -> bool {
-        matches!(self, Self::Halt)
+        false
     }
 }
 
@@ -342,7 +345,7 @@ fn read_preflight_rules_file_no_follow(path: &Path) -> std::io::Result<String> {
     // read closes the window — if the file has grown to CAP + 1 bytes
     // by the time we hit it, bail with InvalidData and the registry
     // load path falls back to the bundled builtins instead of OOMing
-    // the trauma-guard hot path on every protected shell command.
+    // explicit advisory command-risk inspection.
     let file = open_preflight_rules_file_for_read(path)?;
     let limit = PREFLIGHT_RULES_MAX_BYTES.saturating_add(1);
     let mut bytes = Vec::new();
@@ -431,12 +434,10 @@ fn validate_preflight_rules_path(path: &Path) -> Result<(), DomainError> {
     }
     // Size cap before the unbounded `read_to_string` in
     // `read_preflight_rules_file_no_follow`. The hot path is
-    // `PreflightGuardRegistry::load(...)`, which agents hit on every
-    // protected shell command via the install-time hook integration —
-    // an inflated rule file (accidentally `cat /dev/urandom > .ee/preflight_rules.toml`,
-    // or maliciously planted by a peer agent) would otherwise stall the
-    // entire trauma-guard surface and starve the agent of shell-command
-    // policy decisions. Reject early with a structured configuration
+    // `PreflightGuardRegistry::load(...)`, which explicit advisory inspection
+    // calls before matching. An inflated rule file (accidentally planted or
+    // maliciously supplied by a peer agent) would otherwise stall the
+    // command-risk memory surface. Reject early with a structured configuration
     // error and a repair hint pointing the operator at the offending
     // path; `Registry::load` converts that into a degradation while keeping
     // the bundled built-ins active.
@@ -507,18 +508,6 @@ fn rule_matches_command(rule: &PreflightGuardRule, command: &str) -> bool {
             "rm_rf_root" => return matches_rm_rf_target(command, RmTargetClass::Absolute),
             "rm_rf_home" => return matches_rm_rf_target(command, RmTargetClass::Home),
             "file_deletion" => return matches_file_deletion(command),
-            "local_cargo_heavy_verification" => {
-                return matches_local_cargo_heavy_verification(command);
-            }
-            "local_cargo_target_dir_override" => {
-                return matches_local_cargo_target_dir_override(command);
-            }
-            "local_rust_compiler_verification" => {
-                return matches_local_rust_compiler_verification(command);
-            }
-            "rust_verifier_command_substitution" => {
-                return matches_rust_verifier_command_substitution(command);
-            }
             "git_reset_hard" => return matches_git_reset_hard(command),
             "git_worktree_add" => return matches_git_worktree_add(command),
             "git_stash" => return matches_git_subcommand(command, "stash"),
@@ -879,42 +868,6 @@ fn env_short_flag_group(word: &str) -> bool {
         && word.chars().skip(1).all(|ch| matches!(ch, 'i' | '0' | 'v'))
 }
 
-fn matches_local_cargo_heavy_verification(command: &str) -> bool {
-    shell_command_segments(command)
-        .iter()
-        .any(|segment| local_cargo_heavy_segment_matches(segment))
-}
-
-fn matches_local_cargo_target_dir_override(command: &str) -> bool {
-    shell_command_segments(command)
-        .iter()
-        .any(|segment| local_cargo_target_dir_override_segment_matches(segment))
-}
-
-fn matches_local_rust_compiler_verification(command: &str) -> bool {
-    shell_command_segments(command)
-        .iter()
-        .any(|segment| local_rust_compiler_segment_matches(segment))
-}
-
-fn matches_rust_verifier_command_substitution(command: &str) -> bool {
-    command_contains_active_rust_verifier_command_substitution(command)
-        || shell_command_segments(command).iter().any(|segment| {
-            let Some(command_index) = shell_segment_command_index(segment) else {
-                return false;
-            };
-            shell_c_argument(segment, command_index)
-                .is_some_and(matches_rust_verifier_command_substitution)
-        })
-}
-
-fn command_contains_active_rust_verifier_command_substitution(command: &str) -> bool {
-    command_contains_active_command_substitution(
-        command,
-        command_substitution_mentions_rust_verifier,
-    )
-}
-
 fn command_contains_active_command_substitution(
     command: &str,
     mut body_matches: impl FnMut(&str) -> bool,
@@ -1082,178 +1035,6 @@ fn dollar_paren_command_substitution_body(chars: &[char], start: usize) -> Optio
     None
 }
 
-fn command_substitution_mentions_rust_verifier(body: &str) -> bool {
-    shell_command_segments(body)
-        .iter()
-        .any(|segment| segment.iter().any(|word| rust_verifier_command_token(word)))
-}
-
-fn rust_verifier_command_token(word: &str) -> bool {
-    matches!(
-        command_basename(word),
-        "cargo" | "cargo-clippy" | "rustc" | "rustdoc"
-    )
-}
-
-fn local_cargo_heavy_segment_matches(segment: &[String]) -> bool {
-    let Some(command_index) = shell_segment_command_index(segment) else {
-        return false;
-    };
-    if trusted_rust_verifier_wrapper_segment(segment, command_index) {
-        return false;
-    }
-    if let Some(payload) = untrusted_rch_verify_payload_segment(segment, command_index) {
-        return local_cargo_heavy_segment_matches(payload);
-    }
-    if let Some(payload) = untrusted_rch_exec_payload_segment(segment, command_index) {
-        return local_cargo_heavy_segment_matches(payload);
-    }
-    if let Some(shell_body) = shell_c_argument(segment, command_index) {
-        return matches_local_cargo_heavy_verification(shell_body);
-    }
-    cargo_heavy_subcommand(segment, command_index).is_some()
-}
-
-fn local_cargo_target_dir_override_segment_matches(segment: &[String]) -> bool {
-    let Some(command_index) = shell_segment_command_index(segment) else {
-        return false;
-    };
-    if trusted_rust_verifier_wrapper_segment(segment, command_index) {
-        return false;
-    }
-    if let Some(payload) = untrusted_rch_verify_payload_segment(segment, command_index) {
-        return local_cargo_target_dir_override_segment_matches(payload);
-    }
-    if let Some(payload) = untrusted_rch_exec_payload_segment(segment, command_index) {
-        return local_cargo_target_dir_override_segment_matches(payload);
-    }
-    if let Some(shell_body) = shell_c_argument(segment, command_index) {
-        return matches_local_cargo_target_dir_override(shell_body);
-    }
-    if cargo_heavy_subcommand(segment, command_index).is_none() {
-        return false;
-    }
-    segment[..command_index].iter().any(|word| {
-        word.strip_prefix("CARGO_TARGET_DIR=")
-            .is_some_and(local_cargo_target_dir_is_non_external)
-    }) || cargo_target_dir_arg_is_non_external(segment, command_index)
-}
-
-fn local_rust_compiler_segment_matches(segment: &[String]) -> bool {
-    let Some(command_index) = shell_segment_command_index(segment) else {
-        return false;
-    };
-    let Some(command_name) = segment.get(command_index) else {
-        return false;
-    };
-    if trusted_rust_verifier_wrapper_segment(segment, command_index) {
-        return false;
-    }
-    if let Some(payload) = untrusted_rch_verify_payload_segment(segment, command_index) {
-        return local_rust_compiler_segment_matches(payload);
-    }
-    if let Some(payload) = untrusted_rch_exec_payload_segment(segment, command_index) {
-        return local_rust_compiler_segment_matches(payload);
-    }
-    if let Some(shell_body) = shell_c_argument(segment, command_index) {
-        return matches_local_rust_compiler_verification(shell_body);
-    }
-    matches!(command_basename(command_name), "rustc" | "rustdoc")
-}
-
-fn cargo_heavy_subcommand(segment: &[String], command_index: usize) -> Option<&str> {
-    let command_name = segment.get(command_index)?;
-    let command_base = command_basename(command_name);
-    if command_base == "cargo-clippy" {
-        return Some("clippy");
-    }
-    if command_base != "cargo" {
-        return None;
-    }
-
-    let mut index = command_index + 1;
-    while index < segment.len() {
-        let word = segment[index].as_str();
-        if word.starts_with('+') {
-            index += 1;
-            continue;
-        }
-        if cargo_global_option_takes_value(word) {
-            index += 2;
-            continue;
-        }
-        if word.starts_with('-') {
-            index += 1;
-            continue;
-        }
-        return cargo_subcommand_is_heavy(word).then_some(word);
-    }
-    None
-}
-
-fn cargo_subcommand_is_heavy(word: &str) -> bool {
-    matches!(
-        word,
-        "bench"
-            | "build"
-            | "check"
-            | "clippy"
-            | "doc"
-            | "fix"
-            | "install"
-            | "run"
-            | "rustc"
-            | "test"
-    )
-}
-
-fn cargo_global_option_takes_value(word: &str) -> bool {
-    matches!(
-        word,
-        "-Z" | "--color" | "--config" | "--lockfile-path" | "--manifest-path" | "--target-dir"
-    )
-}
-
-fn cargo_target_dir_arg_is_non_external(segment: &[String], command_index: usize) -> bool {
-    let Some(command_name) = segment.get(command_index) else {
-        return false;
-    };
-    if command_basename(command_name) != "cargo" {
-        return false;
-    }
-
-    let mut index = command_index + 1;
-    while index < segment.len() {
-        let word = segment[index].as_str();
-        if word.starts_with('+') {
-            index += 1;
-            continue;
-        }
-        if word == "--target-dir" {
-            return segment
-                .get(index + 1)
-                .is_some_and(|value| local_cargo_target_dir_is_non_external(value));
-        }
-        if let Some(value) = word.strip_prefix("--target-dir=") {
-            return local_cargo_target_dir_is_non_external(value);
-        }
-        if cargo_global_option_takes_value(word) {
-            index += 2;
-            continue;
-        }
-        if word.starts_with('-') {
-            index += 1;
-            continue;
-        }
-        return false;
-    }
-    false
-}
-
-fn local_cargo_target_dir_is_non_external(value: &str) -> bool {
-    !value.starts_with("/Volumes/USBNVME16TB/temp_agent_space/")
-}
-
 fn shell_c_argument(segment: &[String], command_index: usize) -> Option<&str> {
     let command = segment.get(command_index)?;
     if command_basename(command) == "eval" {
@@ -1291,168 +1072,6 @@ fn is_shell_command(word: &str) -> bool {
             | "xonsh"
             | "zsh"
     )
-}
-
-fn trusted_rust_verifier_wrapper_segment(segment: &[String], command_index: usize) -> bool {
-    trusted_rch_verify_segment(segment, command_index)
-        || remote_required_rch_exec_segment(segment, command_index)
-}
-
-fn trusted_rch_verify_segment(segment: &[String], command_index: usize) -> bool {
-    let Some(command_name) = segment.get(command_index) else {
-        return false;
-    };
-    if is_trusted_rch_verify_command(command_name) {
-        return true;
-    }
-    if !is_shell_command(command_name) {
-        return false;
-    }
-    shell_script_argument(segment, command_index).is_some_and(is_trusted_rch_verify_command)
-}
-
-fn shell_script_argument(segment: &[String], command_index: usize) -> Option<&str> {
-    shell_script_argument_index(segment, command_index)
-        .and_then(|index| segment.get(index).map(String::as_str))
-}
-
-fn shell_script_argument_index(segment: &[String], command_index: usize) -> Option<usize> {
-    let mut index = command_index + 1;
-    while index < segment.len() {
-        let word = segment[index].as_str();
-        if word == "-c" || (word.starts_with('-') && !word.starts_with("--") && word.contains('c'))
-        {
-            return None;
-        }
-        if word.starts_with('-') {
-            index += 1;
-            continue;
-        }
-        return Some(index);
-    }
-    None
-}
-
-fn untrusted_rch_verify_payload_segment(
-    segment: &[String],
-    command_index: usize,
-) -> Option<&[String]> {
-    let wrapper_index = untrusted_rch_verify_wrapper_index(segment, command_index)?;
-    rch_verify_payload_segment(segment, wrapper_index)
-}
-
-fn untrusted_rch_verify_wrapper_index(segment: &[String], command_index: usize) -> Option<usize> {
-    let command_name = segment.get(command_index)?;
-    if looks_like_rch_verify_command(command_name) {
-        return (!is_trusted_rch_verify_command(command_name)).then_some(command_index);
-    }
-    if !is_shell_command(command_name) {
-        return None;
-    }
-    let script_index = shell_script_argument_index(segment, command_index)?;
-    let script = segment.get(script_index)?;
-    (looks_like_rch_verify_command(script) && !is_trusted_rch_verify_command(script))
-        .then_some(script_index)
-}
-
-fn rch_verify_payload_segment(segment: &[String], wrapper_index: usize) -> Option<&[String]> {
-    let mut index = wrapper_index + 1;
-    while index < segment.len() {
-        if segment[index] == "--" {
-            index += 1;
-            return (index < segment.len()).then_some(&segment[index..]);
-        }
-        index += 1;
-    }
-    None
-}
-
-fn remote_required_rch_exec_segment(segment: &[String], command_index: usize) -> bool {
-    segment
-        .get(command_index)
-        .is_some_and(|word| command_basename(word) == "rch")
-        && rch_exec_subcommand_index(segment, command_index).is_some()
-        && rch_require_remote_is_set_before_command(segment, command_index)
-}
-
-fn untrusted_rch_exec_payload_segment(
-    segment: &[String],
-    command_index: usize,
-) -> Option<&[String]> {
-    if remote_required_rch_exec_segment(segment, command_index) {
-        return None;
-    }
-    if segment
-        .get(command_index)
-        .is_none_or(|word| command_basename(word) != "rch")
-    {
-        return None;
-    }
-    let exec_index = rch_exec_subcommand_index(segment, command_index)?;
-    rch_exec_payload_segment(segment, exec_index)
-}
-
-fn rch_exec_subcommand_index(segment: &[String], command_index: usize) -> Option<usize> {
-    let mut index = command_index + 1;
-    while index < segment.len() {
-        let word = segment[index].as_str();
-        if word == "--" {
-            return None;
-        }
-        if rch_global_option_takes_value(word) {
-            index += 2;
-            continue;
-        }
-        if word.starts_with('-') {
-            index += 1;
-            continue;
-        }
-        return (word == "exec").then_some(index);
-    }
-    None
-}
-
-fn rch_exec_payload_segment(segment: &[String], exec_index: usize) -> Option<&[String]> {
-    let mut index = exec_index + 1;
-    while index < segment.len() {
-        let word = segment[index].as_str();
-        if word == "--" {
-            index += 1;
-            break;
-        }
-        if rch_exec_option_takes_value(word) {
-            index += 2;
-            continue;
-        }
-        if word.starts_with('-') {
-            index += 1;
-            continue;
-        }
-        break;
-    }
-    (index < segment.len()).then_some(&segment[index..])
-}
-
-fn rch_global_option_takes_value(word: &str) -> bool {
-    matches!(word, "--config" | "--profile" | "--socket")
-}
-
-fn rch_exec_option_takes_value(word: &str) -> bool {
-    matches!(word, "--cwd" | "--workdir")
-}
-
-fn rch_require_remote_is_set_before_command(segment: &[String], command_index: usize) -> bool {
-    segment[..command_index]
-        .iter()
-        .any(|word| word == "RCH_REQUIRE_REMOTE=1")
-}
-
-fn looks_like_rch_verify_command(word: &str) -> bool {
-    command_basename(word) == "rch_verify.sh"
-}
-
-fn is_trusted_rch_verify_command(word: &str) -> bool {
-    matches!(word, "scripts/rch_verify.sh" | "./scripts/rch_verify.sh")
 }
 
 fn command_basename(word: &str) -> &str {
@@ -2729,34 +2348,6 @@ fn builtin_rules() -> Vec<PreflightGuardRule> {
             source: RuleSource::Builtin { name: "git_checkout_off_main".to_owned() },
         },
         PreflightGuardRule {
-            id: "builtin:local_cargo_heavy_verification".to_owned(),
-            pattern: "*cargo *".to_owned(),
-            action: GuardAction::Halt,
-            message: "Local heavy Cargo verification is forbidden in this repository; route cargo check/test/clippy/build/bench/run/doc through RCH.".to_owned(),
-            source: RuleSource::Builtin { name: "local_cargo_heavy_verification".to_owned() },
-        },
-        PreflightGuardRule {
-            id: "builtin:local_cargo_target_dir_override".to_owned(),
-            pattern: "*CARGO_TARGET_DIR=*cargo *".to_owned(),
-            action: GuardAction::Halt,
-            message: "Local Cargo with a non-external CARGO_TARGET_DIR violates this Mac's external USB-NVMe build routing policy.".to_owned(),
-            source: RuleSource::Builtin { name: "local_cargo_target_dir_override".to_owned() },
-        },
-        PreflightGuardRule {
-            id: "builtin:local_rust_compiler_verification".to_owned(),
-            pattern: "*".to_owned(),
-            action: GuardAction::Halt,
-            message: "Direct local rustc or rustdoc verification is forbidden in this repository; route Rust verification through RCH.".to_owned(),
-            source: RuleSource::Builtin { name: "local_rust_compiler_verification".to_owned() },
-        },
-        PreflightGuardRule {
-            id: "builtin:rust_verifier_command_substitution".to_owned(),
-            pattern: "*".to_owned(),
-            action: GuardAction::Halt,
-            message: "Shell command substitution containing Cargo, rustc, or rustdoc can execute Rust verification before the outer tracker or mail command receives the evidence.".to_owned(),
-            source: RuleSource::Builtin { name: "rust_verifier_command_substitution".to_owned() },
-        },
-        PreflightGuardRule {
             id: "builtin:script_code_rewrite".to_owned(),
             pattern: "*".to_owned(),
             action: GuardAction::Halt,
@@ -2898,6 +2489,7 @@ pub struct PreflightGuardDegradation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchResolution {
+    #[serde(rename = "matched", alias = "enforced")]
     Enforced,
     BypassedWithToken,
     BypassTokenInvalid,
@@ -2908,7 +2500,7 @@ impl MatchResolution {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Enforced => "enforced",
+            Self::Enforced => "matched",
             Self::BypassedWithToken => "bypassed_with_token",
             Self::BypassTokenInvalid => "bypass_token_invalid",
             Self::BypassSecretMissing => "bypass_secret_missing",
@@ -2924,8 +2516,8 @@ pub struct PreflightGuardReport {
     pub matches: Vec<GuardMatch>,
     pub matched_memories: Vec<PreflightMemoryMatch>,
     pub degraded: Vec<PreflightGuardDegradation>,
-    /// Process exit code: 0 if no enforced match, 7 (PolicyDenied per AGENTS.md
-    /// exit-code table) if any match remained enforced after bypass attempts.
+    /// Process exit code. Command-risk inspection is advisory-only, so this is
+    /// always 0 even when high-risk rules or memories match.
     pub exit_code: u32,
     pub checked_at: String,
 }
@@ -2958,11 +2550,7 @@ impl PreflightGuardReport {
     #[must_use]
     pub fn human_summary(&self) -> String {
         let mut out = String::with_capacity(256);
-        if self.exit_code == 0 {
-            out.push_str("preflight: command passed all guard rules.\n");
-        } else {
-            out.push_str("preflight: command halted by guard rules (exit 7).\n");
-        }
+        out.push_str("preflight: advisory command-risk context (execution is never blocked).\n");
         out.push_str(&format!("  command: {}\n", self.command));
         for m in &self.matches {
             out.push_str(&format!(
@@ -2994,14 +2582,6 @@ impl PreflightGuardReport {
 
 fn recovery_guidance_for_match(matched: &GuardMatch) -> &'static str {
     match matched.rule_id.as_str() {
-        "builtin:local_cargo_heavy_verification"
-        | "builtin:local_cargo_target_dir_override"
-        | "builtin:local_rust_compiler_verification" => {
-            "Route Rust verification through RCH, for example scripts/rch_verify.sh or rch exec; do not run local Cargo, rustc, or rustdoc."
-        }
-        "builtin:rust_verifier_command_substitution" => {
-            "Do not pass command-bearing evidence through shell substitution; use a file/stdin payload, a direct MCP Agent Mail call, or literal prose that the shell will not execute."
-        }
         "builtin:script_code_rewrite" => {
             "Make source edits manually in the affected files; do not use script-based rewrites."
         }
@@ -3113,7 +2693,7 @@ fn repair_command_preflight_policy(
             "approval_required_repair_command",
         ),
         RepairActionRiskClass::DestructiveOrIrreversibleRepair => (
-            RepairCommandNextAction::PolicyDenied,
+            RepairCommandNextAction::AskHuman,
             "repair_safety:destructive_or_irreversible_repair",
             "destructive_or_irreversible_repair_command",
         ),
@@ -3125,9 +2705,12 @@ fn repair_command_preflight_policy(
     }
 }
 
-/// Evaluate the guard for `options.command`, applying any caller-supplied
-/// bypass tokens. Returns a stable report; the caller maps `exit_code` onto
-/// the process exit value.
+/// Evaluate advisory risk context for `options.command`.
+///
+/// Matches remain explainable and may include linked risk memories, but this
+/// function never denies execution. The invariant is intentional: `ee`
+/// remembers and explains operational risk; the invoking human or harness
+/// retains authority over command execution.
 #[must_use]
 pub fn run_preflight_guard(
     registry: &PreflightGuardRegistry,
@@ -3140,17 +2723,8 @@ pub fn run_preflight_guard(
     let matches = registry.match_command(&options.command);
 
     let mut report_matches = Vec::with_capacity(matches.len());
-    let mut any_enforced_halt = false;
     for matched in matches {
         let resolution = resolve_match(matched, options);
-        // A halt rule continues to halt unless the bypass actually succeeded.
-        // An invalid token, missing secret, or no token at all all leave the
-        // policy denial in force.
-        if matched.action.stops_execution()
-            && !matches!(resolution, MatchResolution::BypassedWithToken)
-        {
-            any_enforced_halt = true;
-        }
         report_matches.push(GuardMatch {
             rule_id: matched.id.clone(),
             pattern: matched.pattern.clone(),
@@ -3164,7 +2738,7 @@ pub fn run_preflight_guard(
     let report = PreflightGuardReport {
         schema: PREFLIGHT_GUARD_SCHEMA_V1.to_owned(),
         command: options.command.clone(),
-        exit_code: if any_enforced_halt { 7 } else { 0 },
+        exit_code: 0,
         checked_at,
         matches: report_matches,
         matched_memories: Vec::new(),
@@ -3437,10 +3011,10 @@ mod tests {
     }
 
     #[test]
-    fn single_halt_match_exits_seven() {
+    fn legacy_halt_match_is_advisory() {
         let registry = registry_with_only(vec![rule("r1", "*rm -rf /*", GuardAction::Halt)]);
         let report = run_preflight_guard(&registry, &opts("rm -rf /tmp/foo"));
-        assert_eq!(report.exit_code, 7);
+        assert_eq!(report.exit_code, 0);
         assert_eq!(report.matches.len(), 1);
         assert_eq!(report.matches[0].rule_id, "r1");
         assert_eq!(report.matches[0].action, GuardAction::Halt);
@@ -3448,7 +3022,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_rules_all_cited_and_halts_dominate() {
+    fn multiple_rules_are_all_cited_without_blocking() {
         let registry = registry_with_only(vec![
             rule("r1", "*rm -rf*", GuardAction::Halt),
             rule("r2", "*--no-verify*", GuardAction::Warn),
@@ -3457,7 +3031,7 @@ mod tests {
             run_preflight_guard(&registry, &opts("git commit --no-verify -m 'rm -rf old'"));
         let ids: Vec<_> = report.matches.iter().map(|m| m.rule_id.as_str()).collect();
         assert_eq!(ids, vec!["r1", "r2"]);
-        assert_eq!(report.exit_code, 7); // halt overrides warn
+        assert_eq!(report.exit_code, 0);
     }
 
     #[test]
@@ -3518,14 +3092,11 @@ mod tests {
     }
 
     #[test]
-    fn repair_preflight_classifier_denies_destructive_repairs() {
+    fn repair_preflight_classifier_advises_human_review_for_destructive_repairs() {
         let removal_command = format!("{} {}", "rm", "-rf target");
         let assessment = classify_repair_command_for_preflight(&removal_command);
         assert_eq!(assessment.risk_class, "destructive_or_irreversible_repair");
-        assert_eq!(
-            assessment.next_action,
-            RepairCommandNextAction::PolicyDenied
-        );
+        assert_eq!(assessment.next_action, RepairCommandNextAction::AskHuman);
         assert_eq!(
             assessment.rule_id,
             "repair_safety:destructive_or_irreversible_repair"
@@ -3549,7 +3120,7 @@ mod tests {
     }
 
     #[test]
-    fn bypass_token_valid_lifts_halt_to_exit_zero() {
+    fn bypass_token_valid_is_recorded_without_changing_advisory_exit() {
         let secret = b"workspace-secret-bytes";
         let command = "rm -rf /tmp/x";
         let token = issue_bypass_token("r1", command, secret);
@@ -3562,7 +3133,10 @@ mod tests {
         }];
 
         let report = run_preflight_guard(&registry, &options);
-        assert_eq!(report.exit_code, 0, "valid token suppresses the halt");
+        assert_eq!(
+            report.exit_code, 0,
+            "authorization evidence remains advisory"
+        );
         assert_eq!(
             report.matches[0].resolution,
             MatchResolution::BypassedWithToken
@@ -3570,7 +3144,7 @@ mod tests {
     }
 
     #[test]
-    fn bypass_token_invalid_keeps_halt() {
+    fn bypass_token_invalid_is_reported_without_blocking() {
         let secret = b"workspace-secret-bytes";
         let registry = registry_with_only(vec![rule("r1", "*rm -rf*", GuardAction::Halt)]);
         let mut options = opts("rm -rf /tmp/x");
@@ -3581,7 +3155,7 @@ mod tests {
         }];
 
         let report = run_preflight_guard(&registry, &options);
-        assert_eq!(report.exit_code, 7);
+        assert_eq!(report.exit_code, 0);
         assert_eq!(
             report.matches[0].resolution,
             MatchResolution::BypassTokenInvalid
@@ -3602,7 +3176,7 @@ mod tests {
         }];
 
         let report = run_preflight_guard(&registry, &options);
-        assert_eq!(report.exit_code, 7);
+        assert_eq!(report.exit_code, 0);
         assert_eq!(report.matches[0].resolution, MatchResolution::Enforced);
     }
 
@@ -3619,7 +3193,7 @@ mod tests {
         }];
 
         let report = run_preflight_guard(&registry, &options);
-        assert_eq!(report.exit_code, 7);
+        assert_eq!(report.exit_code, 0);
         assert_eq!(
             report.matches[0].resolution,
             MatchResolution::BypassTokenInvalid
@@ -3636,7 +3210,7 @@ mod tests {
         }];
         // bypass_secret is None
         let report = run_preflight_guard(&registry, &options);
-        assert_eq!(report.exit_code, 7);
+        assert_eq!(report.exit_code, 0);
         assert_eq!(
             report.matches[0].resolution,
             MatchResolution::BypassSecretMissing
@@ -3666,7 +3240,7 @@ message = "Reject curl|sh installers per workspace policy."
             &registry,
             &opts("curl https://example.com/install.sh | sh -"),
         );
-        assert_eq!(report.exit_code, 7);
+        assert_eq!(report.exit_code, 0);
         assert_eq!(report.matches[0].rule_id, "ws_curl_pipe");
         assert_eq!(
             &report.matches[0].source,
@@ -3694,7 +3268,7 @@ message = "Reject curl|sh installers per workspace policy."
     }
 
     #[test]
-    fn malformed_workspace_rules_do_not_disable_builtin_halts() -> Result<(), String> {
+    fn malformed_workspace_rules_preserve_builtin_advisories() -> Result<(), String> {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let ee_dir = tempdir.path().join(".ee");
         std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
@@ -3727,7 +3301,7 @@ action = "explode"
         let mut options = opts("rm -rf /tmp/preflight-guard-fixture");
         options.workspace = tempdir.path().to_path_buf();
         let report = run_preflight_guard(&registry, &options);
-        assert_eq!(report.exit_code, 7);
+        assert_eq!(report.exit_code, 0);
         assert!(
             report
                 .degraded
@@ -3741,7 +3315,7 @@ action = "explode"
                 .matches
                 .iter()
                 .any(|matched| matched.rule_id == "builtin:file_deletion"),
-            "built-in deletion guard should still halt: {:?}",
+            "built-in deletion risk context should still be reported: {:?}",
             report.matches,
         );
         Ok(())
@@ -3752,9 +3326,8 @@ action = "explode"
     /// Without `PREFLIGHT_RULES_MAX_BYTES`, a workspace
     /// `.ee/preflight_rules.toml` inflated past memory limits would let
     /// `fs::read_to_string` pre-size a single allocation matching the
-    /// file's metadata length — turning every protected shell command
-    /// (every agent-hook-driven `ee preflight check`) into an OOM
-    /// risk. This test writes a sentinel rules file one byte past the
+    /// file's metadata length — turning explicit `ee preflight check`
+    /// inspection into an OOM risk. This test writes a sentinel rules file one byte past the
     /// cap and asserts `Registry::load` falls back to built-ins while
     /// reporting a structured degradation that names the ceiling.
     #[test]
@@ -3804,7 +3377,7 @@ action = "explode"
         let mut options = opts("rm -rf /tmp/preflight-guard-fixture");
         options.workspace = tempdir.path().to_path_buf();
         let report = run_preflight_guard(&registry, &options);
-        assert_eq!(report.exit_code, 7);
+        assert_eq!(report.exit_code, 0);
         assert!(
             report
                 .matches
@@ -3923,7 +3496,7 @@ action = "explode"
     }
 
     #[test]
-    fn builtins_block_agents_md_forbidden_actions() {
+    fn builtins_report_agents_md_forbidden_actions_without_blocking() {
         let registry = PreflightGuardRegistry::with_builtins();
 
         for command in [
@@ -3952,8 +3525,8 @@ action = "explode"
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
             assert_eq!(
-                report.exit_code, 7,
-                "command `{command}` should be halted by builtins",
+                report.exit_code, 0,
+                "command `{command}` must remain advisory",
             );
             assert!(
                 !report.matches.is_empty(),
@@ -4058,7 +3631,10 @@ action = "explode"
             "git -C . switch --detach main",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
-            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert_eq!(
+                report.exit_code, 0,
+                "command `{command}` must remain advisory"
+            );
             assert!(
                 report
                     .matches
@@ -4069,7 +3645,7 @@ action = "explode"
     }
 
     #[test]
-    fn builtin_script_rewrite_and_cleanup_rules_halt_known_risky_shapes() {
+    fn builtin_script_rewrite_and_cleanup_rules_report_known_risky_shapes() {
         let registry = PreflightGuardRegistry::with_builtins();
 
         for (command, rule_id) in [
@@ -4113,7 +3689,10 @@ action = "explode"
             ),
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
-            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert_eq!(
+                report.exit_code, 0,
+                "command `{command}` must remain advisory"
+            );
             assert!(
                 report
                     .matches
@@ -4126,7 +3705,7 @@ action = "explode"
     }
 
     #[test]
-    fn builtin_file_deletion_rule_halts_inline_interpreter_delete_apis() {
+    fn builtin_file_deletion_rule_reports_inline_interpreter_delete_apis() {
         let registry = PreflightGuardRegistry::with_builtins();
 
         for command in [
@@ -4139,7 +3718,10 @@ action = "explode"
             "perl -e 'unlink \"src/lib.rs\"'",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
-            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert_eq!(
+                report.exit_code, 0,
+                "command `{command}` must remain advisory"
+            );
             assert!(
                 report
                     .matches
@@ -4198,7 +3780,10 @@ action = "explode"
             ),
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
-            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert_eq!(
+                report.exit_code, 0,
+                "command `{command}` must remain advisory"
+            );
             assert!(
                 report
                     .matches
@@ -4240,7 +3825,10 @@ action = "explode"
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
             if command.starts_with("rm ") {
-                assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+                assert_eq!(
+                    report.exit_code, 0,
+                    "command `{command}` must remain advisory"
+                );
                 assert!(
                     report
                         .matches
@@ -4279,7 +3867,10 @@ action = "explode"
             "sudo /usr/bin/env -i rm -rf /var/cache",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
-            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert_eq!(
+                report.exit_code, 0,
+                "command `{command}` must remain advisory"
+            );
             assert!(report.matches.iter().any(|matched| {
                 matched.rule_id == "builtin:rm_rf_root" || matched.rule_id == "builtin:rm_rf_home"
             }));
@@ -4310,7 +3901,10 @@ action = "explode"
             "eval 'rm -rf /'",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
-            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert_eq!(
+                report.exit_code, 0,
+                "command `{command}` must remain advisory"
+            );
             assert!(
                 report
                     .matches
@@ -4331,7 +3925,7 @@ action = "explode"
     }
 
     #[test]
-    fn builtins_block_local_heavy_cargo_verification() {
+    fn builtins_do_not_classify_cargo_as_destructive() {
         let registry = PreflightGuardRegistry::with_builtins();
 
         for command in [
@@ -4351,23 +3945,20 @@ action = "explode"
             "bash -lc 'cargo check --lib --message-format=short 2>&1 | tail -20'",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
-            assert_eq!(
-                report.exit_code, 7,
-                "command `{command}` should be halted by local Cargo guard",
-            );
+            assert_eq!(report.exit_code, 0, "command `{command}` must be advisory");
             assert!(
                 report
                     .matches
                     .iter()
-                    .any(|matched| matched.rule_id == "builtin:local_cargo_heavy_verification"),
-                "command `{command}` did not cite local Cargo guard: {:?}",
+                    .all(|matched| matched.rule_id != "builtin:local_cargo_heavy_verification"),
+                "command `{command}` was incorrectly classified as destructive: {:?}",
                 report.matches,
             );
         }
     }
 
     #[test]
-    fn local_cargo_guard_blocks_env_split_string_wrappers() {
+    fn builtins_do_not_classify_env_wrapped_cargo_as_destructive() {
         let registry = PreflightGuardRegistry::with_builtins();
 
         for command in [
@@ -4379,23 +3970,20 @@ action = "explode"
             "sudo /usr/bin/env -SCARGO_TARGET_DIR=/tmp/cargo_target cargo test --workspace --no-run",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
-            assert_eq!(
-                report.exit_code, 7,
-                "command `{command}` should be halted by local Cargo guard",
-            );
+            assert_eq!(report.exit_code, 0, "command `{command}` must be advisory");
             assert!(
                 report
                     .matches
                     .iter()
-                    .any(|matched| matched.rule_id == "builtin:local_cargo_heavy_verification"),
-                "command `{command}` did not cite local Cargo guard: {:?}",
+                    .all(|matched| matched.rule_id != "builtin:local_cargo_heavy_verification"),
+                "command `{command}` was incorrectly classified as destructive: {:?}",
                 report.matches,
             );
         }
     }
 
     #[test]
-    fn builtins_block_direct_local_rustc_and_rustdoc_verification() {
+    fn builtins_do_not_classify_rust_compilers_as_destructive() {
         let registry = PreflightGuardRegistry::with_builtins();
 
         for command in [
@@ -4406,13 +3994,13 @@ action = "explode"
             "bash -lc 'rustdoc --test src/lib.rs'",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
-            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert_eq!(report.exit_code, 0, "command `{command}` must be advisory");
             assert!(
                 report
                     .matches
                     .iter()
-                    .any(|matched| matched.rule_id == "builtin:local_rust_compiler_verification"),
-                "command `{command}` did not cite local rustc/rustdoc guard: {:?}",
+                    .all(|matched| matched.rule_id != "builtin:local_rust_compiler_verification"),
+                "command `{command}` was incorrectly classified as destructive: {:?}",
                 report.matches,
             );
         }
@@ -4450,7 +4038,7 @@ action = "explode"
     }
 
     #[test]
-    fn local_cargo_guard_blocks_untrusted_rch_verify_wrapper_payloads() {
+    fn builtins_do_not_gate_rch_verify_wrapper_payloads() {
         let registry = PreflightGuardRegistry::with_builtins();
 
         for (command, rule_id) in [
@@ -4476,13 +4064,13 @@ action = "explode"
             ),
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
-            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert_eq!(report.exit_code, 0, "command `{command}` must be advisory");
             assert!(
                 report
                     .matches
                     .iter()
-                    .any(|matched| matched.rule_id == rule_id),
-                "command `{command}` did not cite {rule_id}: {:?}",
+                    .all(|matched| matched.rule_id != rule_id),
+                "command `{command}` was incorrectly gated by {rule_id}: {:?}",
                 report.matches,
             );
         }
@@ -4498,14 +4086,11 @@ action = "explode"
             .iter()
             .map(|matched| matched.rule_id.as_str())
             .collect::<Vec<_>>();
-        assert!(
-            ids.contains(&"builtin:local_cargo_target_dir_override"),
-            "untrusted rch_verify.sh payload should still report non-external target dir: {ids:?}",
-        );
+        assert!(!ids.contains(&"builtin:local_cargo_target_dir_override"));
     }
 
     #[test]
-    fn local_cargo_guard_blocks_bare_rch_exec_rust_verifier_payloads() {
+    fn builtins_do_not_gate_bare_rch_exec_payloads() {
         let registry = PreflightGuardRegistry::with_builtins();
 
         for (command, rule_id) in [
@@ -4531,20 +4116,20 @@ action = "explode"
             ),
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
-            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert_eq!(report.exit_code, 0, "command `{command}` must be advisory");
             assert!(
                 report
                     .matches
                     .iter()
-                    .any(|matched| matched.rule_id == rule_id),
-                "command `{command}` did not cite {rule_id}: {:?}",
+                    .all(|matched| matched.rule_id != rule_id),
+                "command `{command}` was incorrectly gated by {rule_id}: {:?}",
                 report.matches,
             );
         }
     }
 
     #[test]
-    fn local_cargo_target_dir_override_is_reported_separately() {
+    fn cargo_target_dir_is_not_a_destructive_command_rule() {
         let registry = PreflightGuardRegistry::with_builtins();
         for command in [
             "env -i CARGO_TARGET_DIR=/tmp/cargo_target cargo test --workspace --no-run",
@@ -4557,20 +4142,14 @@ action = "explode"
                 .iter()
                 .map(|matched| matched.rule_id.as_str())
                 .collect::<Vec<_>>();
-            assert!(
-                ids.contains(&"builtin:local_cargo_heavy_verification"),
-                "expected local Cargo rule for `{command}` in {ids:?}",
-            );
-            assert!(
-                ids.contains(&"builtin:local_cargo_target_dir_override"),
-                "expected target-dir override rule for `{command}` in {ids:?}",
-            );
-            assert_eq!(report.exit_code, 7);
+            assert!(!ids.contains(&"builtin:local_cargo_heavy_verification"));
+            assert!(!ids.contains(&"builtin:local_cargo_target_dir_override"));
+            assert_eq!(report.exit_code, 0);
         }
     }
 
     #[test]
-    fn rust_verifier_command_substitution_halts_tracker_and_mail_evidence() {
+    fn rust_verifier_command_substitution_is_not_a_destructive_rule() {
         let registry = PreflightGuardRegistry::with_builtins();
 
         for command in [
@@ -4580,12 +4159,12 @@ action = "explode"
             "bash -lc 'br comment bd-123 --message \"$(rustdoc src/lib.rs)\"'",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
-            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert_eq!(report.exit_code, 0, "command `{command}` must be advisory");
             assert!(
-                report.matches.iter().any(|matched| {
-                    matched.rule_id == "builtin:rust_verifier_command_substitution"
+                report.matches.iter().all(|matched| {
+                    matched.rule_id != "builtin:rust_verifier_command_substitution"
                 }),
-                "command `{command}` did not cite command-substitution guard: {:?}",
+                "command `{command}` was incorrectly gated: {:?}",
                 report.matches,
             );
         }
@@ -4660,11 +4239,11 @@ action = "explode"
         let report = run_preflight_guard(&registry, &opts("rm -rf /tmp"));
         let json = report.to_json();
         assert_eq!(json["schema"].as_str(), Some(PREFLIGHT_GUARD_SCHEMA_V1));
-        assert_eq!(json["exitCode"].as_i64(), Some(7));
+        assert_eq!(json["exitCode"].as_i64(), Some(0));
         let m0 = &json["matches"][0];
         assert_eq!(m0["ruleId"].as_str(), Some("r1"));
-        assert_eq!(m0["action"].as_str(), Some("halt"));
-        assert_eq!(m0["resolution"].as_str(), Some("enforced"));
+        assert_eq!(m0["action"].as_str(), Some("high_risk"));
+        assert_eq!(m0["resolution"].as_str(), Some("matched"));
         assert_eq!(
             m0["recovery"].as_str(),
             Some(

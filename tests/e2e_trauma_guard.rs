@@ -1,8 +1,8 @@
-//! E2E coverage for trauma-guard preflight behavior.
+//! E2E coverage for advisory preflight risk context.
 //!
 //! This exercises the public CLI rather than calling `core::preflight_guard`
 //! directly: a risk memory with provenance is stored through `ee remember`,
-//! then `ee preflight check` must surface it before a destructive command.
+//! then `ee preflight check` must surface it without denying the command.
 
 use std::fmt::Debug;
 use std::process::{Command, Output};
@@ -12,7 +12,6 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const EXIT_SUCCESS: i32 = 0;
-const EXIT_POLICY_DENIED: i32 = 7;
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
@@ -117,7 +116,7 @@ fn destructive_command_surfaces_matching_risk_memory_provenance() -> TestResult 
         "--cmd",
         "rm -rf /tmp/work",
     ])?;
-    ensure_exit(&preflight, EXIT_POLICY_DENIED, "destructive preflight exit")?;
+    ensure_exit(&preflight, EXIT_SUCCESS, "destructive preflight exit")?;
     assert_clean_stderr(&preflight, "destructive preflight")?;
     let report = stdout_json(&preflight, "destructive preflight")?;
 
@@ -128,7 +127,7 @@ fn destructive_command_surfaces_matching_risk_memory_provenance() -> TestResult 
     )?;
     ensure_equal(
         report.get("exitCode").and_then(Value::as_i64),
-        Some(i64::from(EXIT_POLICY_DENIED)),
+        Some(i64::from(EXIT_SUCCESS)),
         "preflight exitCode",
     )?;
     ensure(
@@ -170,7 +169,7 @@ fn destructive_command_surfaces_matching_risk_memory_provenance() -> TestResult 
 }
 
 #[test]
-fn malformed_workspace_rules_still_halt_destructive_command() -> TestResult {
+fn malformed_workspace_rules_still_surface_advisory_builtin_context() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let workspace = tempdir.path().to_string_lossy().into_owned();
 
@@ -199,11 +198,7 @@ action = "explode"
         "--cmd",
         "rm -rf /tmp/work",
     ])?;
-    ensure_exit(
-        &preflight,
-        EXIT_POLICY_DENIED,
-        "malformed-rule destructive preflight exit",
-    )?;
+    ensure_exit(&preflight, EXIT_SUCCESS, "malformed-rule preflight exit")?;
     assert_clean_stderr(&preflight, "malformed-rule destructive preflight")?;
     let report = stdout_json(&preflight, "malformed-rule destructive preflight")?;
 
@@ -238,7 +233,7 @@ action = "explode"
 }
 
 #[test]
-fn non_destructive_command_returns_success_without_matches() -> TestResult {
+fn cargo_rch_and_rustc_commands_are_never_denied_or_classified_as_destructive() -> TestResult {
     let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let workspace = tempdir.path().to_string_lossy().into_owned();
 
@@ -246,41 +241,48 @@ fn non_destructive_command_returns_success_without_matches() -> TestResult {
     ensure_exit(&init, EXIT_SUCCESS, "ee init exit")?;
     assert_clean_stderr(&init, "ee init")?;
 
-    let preflight = run_ee(&[
-        "--workspace",
-        &workspace,
-        "--json",
-        "preflight",
-        "check",
-        "--cmd",
-        "cargo fmt --check",
-    ])?;
-    ensure_exit(&preflight, EXIT_SUCCESS, "non-destructive preflight exit")?;
-    assert_clean_stderr(&preflight, "non-destructive preflight")?;
-    let report = stdout_json(&preflight, "non-destructive preflight")?;
+    for command in [
+        "cargo test --all-targets",
+        "rch exec -- cargo check --all-targets",
+        "rustc src/main.rs",
+    ] {
+        let preflight = run_ee(&[
+            "--workspace",
+            &workspace,
+            "--json",
+            "preflight",
+            "check",
+            "--cmd",
+            command,
+        ])?;
+        ensure_exit(&preflight, EXIT_SUCCESS, "Rust command preflight exit")?;
+        assert_clean_stderr(&preflight, "Rust command preflight")?;
+        let report = stdout_json(&preflight, "Rust command preflight")?;
 
-    ensure_equal(
-        report.get("schema").and_then(Value::as_str),
-        Some("ee.preflight.guard.v1"),
-        "preflight schema",
-    )?;
-    ensure_equal(
-        report.get("exitCode").and_then(Value::as_i64),
-        Some(i64::from(EXIT_SUCCESS)),
-        "preflight exitCode",
-    )?;
-    ensure(
-        report
-            .get("matches")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty),
-        format!("non-destructive command should not match guard rules: {report}"),
-    )?;
-    ensure(
-        report
-            .get("matchedMemories")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty),
-        format!("non-destructive command should not match memories: {report}"),
-    )
+        ensure_equal(
+            report.get("schema").and_then(Value::as_str),
+            Some("ee.preflight.guard.v1"),
+            "preflight schema",
+        )?;
+        ensure_equal(
+            report.get("exitCode").and_then(Value::as_i64),
+            Some(i64::from(EXIT_SUCCESS)),
+            "preflight exitCode",
+        )?;
+        ensure(
+            report
+                .get("matches")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty),
+            format!("Rust command must not match destructive rules: {report}"),
+        )?;
+        ensure(
+            report
+                .get("matchedMemories")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty),
+            format!("Rust command should not query destructive risk memories: {report}"),
+        )?;
+    }
+    Ok(())
 }

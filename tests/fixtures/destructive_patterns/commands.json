@@ -8,8 +8,8 @@
       "id": "recursive_delete_absolute",
       "category": "recursive_delete_force",
       "command": "rm -rf /tmp/work",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:rm_rf_root"
       ]
@@ -18,8 +18,8 @@
       "id": "recursive_delete_home",
       "category": "recursive_delete_force",
       "command": "rm -rf ~/projects",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:rm_rf_home"
       ]
@@ -28,8 +28,8 @@
       "id": "git_hard_reset",
       "category": "hard_reset",
       "command": "git reset --hard HEAD~1",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:git_reset_hard"
       ]
@@ -38,8 +38,8 @@
       "id": "git_hard_reset_with_global_option",
       "category": "hard_reset",
       "command": "git -C . reset --hard HEAD~1",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:git_reset_hard"
       ]
@@ -48,8 +48,8 @@
       "id": "git_recursive_clean",
       "category": "recursive_clean",
       "command": "git clean -fd",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:git_clean_fd"
       ]
@@ -58,8 +58,8 @@
       "id": "git_worktree_add",
       "category": "worktree_add",
       "command": "git worktree add ../parallel main",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:git_worktree_add"
       ]
@@ -68,8 +68,8 @@
       "id": "git_worktree_add_with_global_option",
       "category": "worktree_add",
       "command": "git -C . worktree add ../parallel main",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:git_worktree_add"
       ]
@@ -78,8 +78,8 @@
       "id": "git_checkout_main_pathspec_overwrite",
       "category": "git_checkout_overwrite",
       "command": "git checkout main -- src/lib.rs",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:git_checkout_off_main"
       ]
@@ -88,8 +88,8 @@
       "id": "git_checkout_branch_creation_named_main",
       "category": "git_checkout_overwrite",
       "command": "git checkout -b main",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:git_checkout_off_main"
       ]
@@ -98,8 +98,8 @@
       "id": "git_switch_force_main",
       "category": "git_checkout_overwrite",
       "command": "git switch --force main",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:git_checkout_off_main"
       ]
@@ -138,8 +138,8 @@
       "id": "kubectl_mass_delete",
       "category": "kubectl_mass_delete",
       "command": "kubectl delete pods --all --all-namespaces",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:kubectl_mass_delete"
       ]
@@ -148,8 +148,8 @@
       "id": "drop_table_sql",
       "category": "drop_table_sql",
       "command": "psql -c 'DROP TABLE memories;'",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:drop_table_sql"
       ]
@@ -158,8 +158,8 @@
       "id": "drop_table_sql_block_comment",
       "category": "drop_table_sql",
       "command": "psql -c 'DROP/**/TABLE memories;'",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:drop_table_sql"
       ]
@@ -168,8 +168,8 @@
       "id": "terraform_destroy",
       "category": "terraform_destroy",
       "command": "terraform destroy -auto-approve",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:terraform_destroy"
       ]
@@ -178,8 +178,8 @@
       "id": "raw_block_device_write",
       "category": "raw_block_device_write",
       "command": "dd if=/dev/zero of=/dev/sda bs=1M",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:raw_block_device_write"
       ]
@@ -188,8 +188,8 @@
       "id": "filesystem_create",
       "category": "filesystem_create",
       "command": "mkfs.ext4 /dev/sdb",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:filesystem_create"
       ]
@@ -198,8 +198,8 @@
       "id": "find_exec_shell_delete",
       "category": "unsafe_cleanup",
       "command": "find . -name '*.tmp' -exec sh -c 'rm -f \"$1\"' sh {} \\;",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:unsafe_cleanup"
       ]
@@ -208,8 +208,8 @@
       "id": "xargs_shell_delete",
       "category": "unsafe_cleanup",
       "command": "rg TODO src | xargs sh -c 'rm -f \"$@\"' sh",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:unsafe_cleanup"
       ]
@@ -218,8 +218,8 @@
       "id": "find_exec_nested_find_delete",
       "category": "unsafe_cleanup",
       "command": "find . -type d -exec sh -c 'find \"$1\" -name stale -delete' sh {} \\;",
-      "expectedAction": "halt",
-      "expectedExitCode": 7,
+      "expectedAction": "high_risk",
+      "expectedExitCode": 0,
       "expectedRuleIds": [
         "builtin:unsafe_cleanup"
       ]

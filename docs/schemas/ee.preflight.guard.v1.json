@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.preflight.guard.v1.json",
   "title": "ee.preflight.guard.v1",
-  "description": "Structured response emitted by `ee preflight check --cmd \"<shell-command>\" --json`. This is the agent-facing trauma-guard surface called by hook integrations BEFORE running shell commands that may delete files, rewrite Git history, mutate clusters, destroy infrastructure, or write raw block devices. Exit code 7 means policy denied: the harness should stop and ask the user for explicit authorization instead of retrying. Exit code 0 means no enforced match. The schema is intentionally NOT wrapped in the ee.response.v1 envelope — this is a hook-targeted surface; callers consume the structured guard result directly.",
+  "description": "Structured advisory risk-memory response emitted by `ee preflight check --cmd \"<shell-command>\" --json`. The report explains matching high-risk patterns and relevant memories with provenance, but ee never authorizes, denies, suppresses, or executes the inspected shell command. Process exit and exitCode are always 0 for a successfully generated report, including when destructive patterns match. This surface is intentionally not wrapped in the ee.response.v2 envelope; callers consume the structured advisory result directly.",
   "type": "object",
   "required": [
     "schema",
@@ -25,17 +25,17 @@
     },
     "exitCode": {
       "type": "integer",
-      "enum": [0, 7],
-      "description": "Process exit code. 0 = no enforced match (the shell command may proceed). 7 = policy denied per AGENTS.md exit-code table; the harness MUST NOT retry."
+      "const": 0,
+      "description": "Process exit code for a successfully generated advisory report. Always 0; risk matches never become command denials."
     },
     "checkedAt": {
       "type": "string",
       "format": "date-time",
-      "description": "RFC 3339 timestamp at which the guard ran."
+      "description": "RFC 3339 timestamp at which the advisory risk evaluation ran."
     },
     "repairCommandAssessment": {
       "type": "object",
-      "description": "Repair-action safety assessment for the exact command string. This classifier never executes the command; agents use it to decide whether to run directly, preflight first, coordinate, ask a human, or stop.",
+      "description": "Advisory repair-action safety assessment for the exact command string. This classifier never executes, authorizes, or denies the command; its nextAction is guidance for the caller only.",
       "required": [
         "command",
         "riskClass",
@@ -69,7 +69,7 @@
         },
         "preflightCommand": {
           "type": ["string", "null"],
-          "description": "Concrete ee preflight check command to run before the repair command when present."
+          "description": "Concrete ee preflight check command that can retrieve advisory risk context for the repair command when present."
         },
         "requiresHumanApproval": {"type": "boolean"},
         "mutatesExternalState": {"type": "boolean"},
@@ -82,9 +82,9 @@
             "run_preflight_first",
             "coordinate_first",
             "ask_human",
-            "manual_only",
-            "policy_denied"
-          ]
+            "manual_only"
+          ],
+          "description": "Advisory recommendation from the repair-safety classifier. High-risk actions may recommend asking a human but never change exitCode or block shell execution."
         },
         "ruleId": {
           "type": "string",
@@ -124,8 +124,8 @@
           },
           "action": {
             "type": "string",
-            "enum": ["halt", "warn"],
-            "description": "How the rule classifies this match."
+            "enum": ["high_risk", "warn"],
+            "description": "Advisory risk classification. Neither value suppresses command execution."
           },
           "message": {
             "type": "string",
@@ -137,16 +137,16 @@
           },
           "source": {
             "type": "object",
-            "description": "Where this rule came from (built-in registry vs. user/workspace policy)."
+            "description": "Where this advisory rule came from (built-in registry vs. user/workspace rules)."
           },
           "resolution": {
             "type": "string",
-            "enum": ["enforced", "bypassed_with_token", "bypass_token_invalid", "bypass_secret_missing"],
-            "description": "Final outcome for this rule. `enforced` means the rule will block the command."
+            "enum": ["matched", "bypassed_with_token", "bypass_token_invalid", "bypass_secret_missing"],
+            "description": "Authorization-evidence status retained for audit compatibility. `matched` means the advisory rule applied to this report; it never means that ee blocks the command."
           }
         }
       },
-      "description": "Rule matches with their resolution. Non-empty matches plus any resolution == 'enforced' results in exitCode 7."
+      "description": "Advisory rule matches with explainable classifications and authorization-evidence status. Matches never change exitCode from 0."
     },
     "matchedMemories": {
       "type": "array",
@@ -190,7 +190,7 @@
           }
         }
       },
-      "description": "Risk, failure, and anti-pattern memories that matched the command. CLI guard paths query workspace memories when a destructive rule matches; this array is empty for non-destructive commands or when no matching risk memories are available, in which case no_risk_memories appears in degraded[]."
+      "description": "Risk, failure, and anti-pattern memories that matched the command. Advisory CLI paths query workspace memories when a destructive pattern matches; this array is empty for ordinary commands or when no matching risk memories are available, in which case no_risk_memories appears in degraded[]."
     },
     "degraded": {
       "type": "array",
@@ -204,7 +204,7 @@
           "repair": {"type": "string"}
         }
       },
-      "description": "Degraded-mode signals from the guard run (e.g. memory-query backend unavailable)."
+      "description": "Degraded-mode signals from advisory risk retrieval or optional authorization-evidence storage. These signals never change exitCode from 0."
     }
   }
 }

@@ -1,17 +1,22 @@
-# Trauma-Guard Bypass-Evidence Loop (the high-precision half)
+# Historical Trauma-Guard Evidence Loop
 
-> Epic `bd-1n0np.18`. The trauma guard already **looks up** risk / anti-pattern /
-> failure memories for risky commands (`ee preflight check|guard`), but it never
-> **learned** from how a human actually resolved a halt. This adds only the
-> high-precision, human-confirmed signal — and **explicitly drops** the
-> confound-prone "allowed-then-damaging" auto-detector.
+> Epic `bd-1n0np.18`. `ee preflight check|guard` looks up risk, anti-pattern,
+> and failure memories for an inspected command. It is advisory-only: `ee`
+> never authorizes, denies, suppresses, interrupts, or executes that command.
+> Optional token, memory, or audit storage failures are degraded evidence and
+> do not change a valid check's exit-zero contract.
+
+Older releases recorded policy-denied halt and bypass events. The correlation
+pipeline below remains useful for learning from those historical audit rows,
+but current preflight checks do not create new halt events and never require a
+bypass token.
 
 ## The loop
 
-1. **Halt** — the guard policy-denies a risky command (`preflight.halt` audit
-   event, carrying the `command_hash`).
-2. **Human bypass** — a human issues a one-shot bypass token for the **exact same
-   command** and runs it (`preflight.bypass` audit event, same `command_hash`).
+1. **Historical halt evidence** — an older release recorded a
+   `preflight.halt` audit event carrying a `command_hash`.
+2. **Historical authorization evidence** — a human recorded a one-shot token
+   for the **exact same command** (`preflight.bypass`, same `command_hash`).
 3. **Correlate** (`bd-1n0np.18.1`, `core::trauma_guard::correlate_bypass_evidence`)
    — read the two audit streams and match a halt with a subsequent bypass for the
    **exact** `command_hash` within an explicit window
@@ -21,25 +26,28 @@
    last_bypass_at_epoch }`. Pure + deterministic.
 4. **Propose** (`bd-1n0np.18.2`, `propose_calibration_candidate`) — turn evidence
    into a **pending** curate candidate (`CreateDerivedMemory`, source-type
-   `trauma_guard_bypass_evidence`) recording that this exact command was
-   policy-denied then human-bypassed N times. `ee preflight learn --dry-run`
+   `trauma_guard_bypass_evidence`) recording that this exact command
+   historically had a halt followed by human authorization N times.
+   `ee preflight learn --dry-run`
    previews it; `--apply` routes it through curate's existing
    propose → validate → apply (ADR-0014).
-5. **Calmer cited prompt** — once accepted, the guard cites the audited bypass
-   evidence so the next prompt for that command class is calmer + cited, reducing
-   guard fatigue **without weakening safety**.
+5. **Better cited context** — once accepted, advisory risk lookup can cite the
+   audited evidence when the same command class is inspected again.
 
 ## Safety invariants
 
 - **Exact-command only.** Correlation keys on `command_hash`; a bypass for a
   different command never calibrates another.
-- **Human-confirmed only.** Evidence requires a real `preflight.bypass`. The
-  guard never infers calibration from an *allowed* command, and the
+- **No command authority.** Neither historical halt/bypass rows nor a current
+  lookup changes whether a shell command runs. That decision belongs to the
+  human or harness invoking the shell.
+- **Human-confirmed only.** Historical evidence requires a real
+  `preflight.bypass`. The correlator never infers calibration from an *allowed* command, and the
   allowed-then-damaging auto-detector is **out of scope** (dropped in the duel as
   confound-prone).
-- **Never auto-permanent.** Calibration candidates are `pending` until an explicit
-  `ee curate accept`; the bypass override itself stays **one-shot** — there is no
-  auto-generated permanent allowlist.
+- **Never an allowlist.** Calibration candidates are `pending` until an
+  explicit `ee curate accept`; accepted memory changes retrieval context, not
+  shell permissions.
 - **Deterministic over explicit windows.** No wall-clock heuristics in the
   correlator; same inputs → same evidence.
 

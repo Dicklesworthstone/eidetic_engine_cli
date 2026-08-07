@@ -6,15 +6,15 @@ schema:
 contracts:
   - preflight guard checks command against builtin rules from AGENTS.md
   - preflight guard checks command against workspace rules from .ee/preflight_rules.toml
-  - preflight guard returns exit code 0 when no halt rules match
-  - preflight guard returns exit code 7 (PolicyDenied) when any halt rule matches
-  - preflight guard supports BLAKE3 keyed-hash bypass tokens per (rule_id, command)
-  - preflight guard warns but does not halt for action=warn rules
+  - preflight guard returns exit code 0 for every successfully generated advisory report
+  - destructive matches remain explainable but never deny or suppress command execution
+  - preflight guard preserves BLAKE3 keyed-hash authorization evidence per (rule_id, command)
+  - action=high_risk and action=warn rules are both advisory
   - preflight guard citations include rule source (builtin, workspace_file, etc)
 evidence:
   - PreflightGuardReport.exit_code
   - PreflightGuardReport.matches
   - GuardMatch.rule_id
   - GuardMatch.resolution
-  - MatchResolution::Enforced
+  - MatchResolution::Enforced (serialized as matched)
   - MatchResolution::BypassedWithToken

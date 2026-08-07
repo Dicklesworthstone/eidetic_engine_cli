@@ -4662,7 +4662,7 @@ version: 1
 demos:
   - id: demo_00000000000000000000000011
     title: unsafe command
-    description: destructive commands are rejected by trauma guard before execution
+    description: destructive commands are rejected by the demo runner before execution
     commands:
       - command: \"rm -rf /tmp/test_target\"
         expected_exit_code: 0
@@ -4694,32 +4694,19 @@ demos:
             .parsed
             .pointer("/error/message")
             .and_then(Value::as_str)
-            .is_some_and(|message| message.contains("trauma guard preflight")),
+            .is_some_and(|message| message.contains("demo command rejected by safety policy")),
         format!(
-            "unsafe demo error message must name trauma guard preflight: {}",
+            "unsafe demo error message must name the demo runner's own safety policy: {}",
             unsafe_run.parsed
         ),
-    )?;
-    ensure_json_pointer(
-        &unsafe_run.parsed,
-        "/error/details/preflight/command",
-        json!("rm -rf /tmp/test_target"),
-        "unsafe demo preflight command",
-    )?;
-    ensure_json_pointer(
-        &unsafe_run.parsed,
-        "/error/details/preflight/exitCode",
-        json!(7),
-        "unsafe demo preflight exit code",
     )?;
     ensure(
         unsafe_run
             .parsed
-            .pointer("/error/details/preflight/matches")
-            .and_then(Value::as_array)
-            .is_some_and(|matches| !matches.is_empty()),
+            .pointer("/error/details/preflight")
+            .is_none(),
         format!(
-            "unsafe demo must include preflight guard matches: {}",
+            "demo safety policy must not masquerade as a shell preflight gate: {}",
             unsafe_run.parsed
         ),
     )

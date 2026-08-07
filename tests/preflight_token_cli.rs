@@ -50,12 +50,69 @@ fn ensure_success_envelope(value: &serde_json::Value, context: &str) -> TestResu
 }
 
 #[test]
-fn preflight_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResult {
+fn advisory_check_stays_successful_when_optional_token_storage_is_unavailable() -> TestResult {
+    let workspace = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace_path = workspace.path().to_string_lossy().into_owned();
+
+    let checked = ee(&[
+        "--workspace",
+        &workspace_path,
+        "--json",
+        "preflight",
+        "check",
+        "--cmd",
+        "rm -rf /",
+        "--override-token",
+        "optional-evidence-token",
+    ])?;
+    ensure_success(
+        &checked,
+        "missing optional token database must not turn advisory inspection into a gate",
+    )?;
+
+    let checked_json = parse_stdout(&checked)?;
+    assert_eq!(checked_json["schema"], "ee.preflight.guard.v1");
+    assert_eq!(checked_json["exitCode"], 0);
+    assert_eq!(
+        checked_json["matches"][0]["resolution"],
+        "bypass_token_invalid"
+    );
+    let degraded = checked_json["degraded"]
+        .as_array()
+        .ok_or_else(|| "preflight report should include degraded[]".to_owned())?;
+    if !degraded
+        .iter()
+        .any(|entry| entry["code"] == "bypass_token_storage_error")
+    {
+        return Err(format!(
+            "missing token storage degradation in advisory report: {checked_json}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResult {
     let workspace = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let workspace_path = workspace.path().to_string_lossy().into_owned();
 
     let init = ee(&["--workspace", &workspace_path, "--json", "init"])?;
     ensure_success(&init, "init")?;
+
+    let advisory = ee(&[
+        "--workspace",
+        &workspace_path,
+        "--json",
+        "preflight",
+        "check",
+        "--cmd",
+        "rm -rf /",
+    ])?;
+    ensure_success(&advisory, "advisory preflight without token")?;
+    let advisory_json = parse_stdout(&advisory)?;
+    assert_eq!(advisory_json["schema"], "ee.preflight.guard.v1");
+    assert_eq!(advisory_json["exitCode"], 0);
+    assert_eq!(advisory_json["matches"][0]["resolution"], "matched");
 
     let issued = ee(&[
         "--workspace",
@@ -66,7 +123,7 @@ fn preflight_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResul
         "--cmd",
         "rm -rf /",
         "--reason",
-        "approve one destructive test command",
+        "record explicit authorization evidence",
     ])?;
     ensure_success(&issued, "issue token")?;
     let issued_json = parse_stdout(&issued)?;
@@ -96,13 +153,24 @@ fn preflight_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResul
         "--override-token",
         &token,
     ])?;
-    assert_eq!(wrong_use.status.code(), Some(6));
+    ensure_success(
+        &wrong_use,
+        "wrong-scope authorization evidence stays advisory",
+    )?;
     let wrong_use_json = parse_stdout(&wrong_use)?;
-    assert_eq!(wrong_use_json["schema"], "ee.error.v2");
-    assert_eq!(wrong_use_json["error"]["code"], "bypass_token_invalid");
-    let wrong_message = wrong_use_json["error"]["message"]
+    assert_eq!(wrong_use_json["schema"], "ee.preflight.guard.v1");
+    assert_eq!(wrong_use_json["exitCode"], 0);
+    assert_eq!(
+        wrong_use_json["matches"][0]["resolution"],
+        "bypass_token_invalid"
+    );
+    assert_eq!(
+        wrong_use_json["degraded"][0]["code"],
+        "bypass_token_invalid"
+    );
+    let wrong_message = wrong_use_json["degraded"][0]["message"]
         .as_str()
-        .ok_or_else(|| "wrong-scope error should include message".to_owned())?;
+        .ok_or_else(|| "wrong-scope advisory should include message".to_owned())?;
     if !wrong_message.contains("not valid for this command") {
         return Err(format!("unexpected wrong-scope message: {wrong_message}"));
     }
@@ -138,10 +206,21 @@ fn preflight_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResul
         "--override-token",
         &token,
     ])?;
-    assert_eq!(second_use.status.code(), Some(6));
+    ensure_success(
+        &second_use,
+        "exhausted authorization evidence stays advisory",
+    )?;
     let second_use_json = parse_stdout(&second_use)?;
-    assert_eq!(second_use_json["schema"], "ee.error.v2");
-    assert_eq!(second_use_json["error"]["code"], "bypass_token_exhausted");
+    assert_eq!(second_use_json["schema"], "ee.preflight.guard.v1");
+    assert_eq!(second_use_json["exitCode"], 0);
+    assert_eq!(
+        second_use_json["matches"][0]["resolution"],
+        "bypass_token_invalid"
+    );
+    assert_eq!(
+        second_use_json["degraded"][0]["code"],
+        "bypass_token_exhausted"
+    );
 
     let listed = ee(&[
         "--workspace",
@@ -201,7 +280,7 @@ fn preflight_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResul
 }
 
 #[test]
-fn override_token_records_bypass_audit_with_blocking_memory_provenance() -> TestResult {
+fn override_token_records_optional_authorization_audit_with_risk_provenance() -> TestResult {
     let workspace = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let workspace_path = workspace.path().to_string_lossy().into_owned();
     let risk_content =
@@ -232,6 +311,21 @@ fn override_token_records_bypass_audit_with_blocking_memory_provenance() -> Test
         .ok_or_else(|| "remember response should include memory_id".to_owned())?
         .to_owned();
 
+    let advisory = ee(&[
+        "--workspace",
+        &workspace_path,
+        "--json",
+        "preflight",
+        "check",
+        "--cmd",
+        "rm -rf /tmp/work",
+    ])?;
+    ensure_success(&advisory, "advisory preflight without token")?;
+    let advisory_json = parse_stdout(&advisory)?;
+    assert_eq!(advisory_json["schema"], "ee.preflight.guard.v1");
+    assert_eq!(advisory_json["exitCode"], 0);
+    assert_eq!(advisory_json["matchedMemories"][0]["memoryId"], memory_id);
+
     let issued = ee(&[
         "--workspace",
         &workspace_path,
@@ -241,7 +335,7 @@ fn override_token_records_bypass_audit_with_blocking_memory_provenance() -> Test
         "--cmd",
         "rm -rf /tmp/work",
         "--reason",
-        "approve one destructive test command",
+        "record explicit authorization evidence",
     ])?;
     ensure_success(&issued, "issue token")?;
     let issued_json = parse_stdout(&issued)?;
@@ -292,6 +386,14 @@ fn override_token_records_bypass_audit_with_blocking_memory_provenance() -> Test
     let entries = audit_json["entries"]
         .as_array()
         .ok_or_else(|| "audit timeline should include entries".to_owned())?;
+    if entries
+        .iter()
+        .any(|entry| entry["mutation_kind"] == "preflight.halt")
+    {
+        return Err(format!(
+            "advisory preflight must not record a command-denial audit: {audit_json}"
+        ));
+    }
     let bypass_audit = entries
         .iter()
         .find(|entry| entry["mutation_kind"] == "preflight.bypass")

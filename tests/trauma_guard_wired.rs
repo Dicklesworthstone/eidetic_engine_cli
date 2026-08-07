@@ -1,8 +1,8 @@
-//! Invariant gate for the README trauma-guard promise (bd-3usjw.21).
+//! Invariant gate for advisory preflight risk-memory wiring.
 //!
 //! The destructive command comes from the shared fixture catalog so this
-//! test tracks the evolving guard pattern set instead of freezing one
-//! ad hoc command in test code.
+//! test tracks the evolving risk-pattern set while pinning the invariant that
+//! `ee` never blocks shell execution.
 
 use std::fmt::Debug;
 use std::path::Path;
@@ -14,7 +14,6 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const EXIT_SUCCESS: i32 = 0;
-const EXIT_POLICY_DENIED: i32 = 7;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,7 +27,6 @@ struct DestructivePatternCase {
     id: String,
     command: String,
     expected_action: String,
-    expected_exit_code: i32,
     expected_rule_ids: Vec<String>,
 }
 
@@ -102,10 +100,8 @@ fn fixture_case() -> Result<DestructivePatternCase, String> {
     fixture
         .implemented_cases
         .into_iter()
-        .find(|case| {
-            case.expected_action == "halt" && case.expected_exit_code == EXIT_POLICY_DENIED
-        })
-        .ok_or_else(|| "fixture must contain at least one halt case with exit 7".to_owned())
+        .find(|case| case.expected_action == "high_risk")
+        .ok_or_else(|| "fixture must contain at least one high-risk case".to_owned())
 }
 
 #[test]
@@ -120,7 +116,7 @@ fn preflight_check_surface_is_registered() -> TestResult {
 }
 
 #[test]
-fn destructive_fixture_command_blocks_with_risk_memory_provenance() -> TestResult {
+fn destructive_fixture_command_reports_risk_memory_without_blocking() -> TestResult {
     let case = fixture_case()?;
     let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let workspace = tempdir.path().to_string_lossy().into_owned();
@@ -167,11 +163,7 @@ fn destructive_fixture_command_blocks_with_risk_memory_provenance() -> TestResul
         "--cmd",
         &case.command,
     ])?;
-    ensure_exit_code(
-        &preflight,
-        case.expected_exit_code,
-        "destructive preflight exit",
-    )?;
+    ensure_exit_code(&preflight, EXIT_SUCCESS, "destructive preflight exit")?;
     assert_clean_stderr(&preflight, "destructive preflight")?;
     let report = stdout_json(&preflight, "destructive preflight")?;
 
@@ -182,7 +174,7 @@ fn destructive_fixture_command_blocks_with_risk_memory_provenance() -> TestResul
     )?;
     ensure_equal(
         report.get("exitCode").and_then(Value::as_i64),
-        Some(i64::from(case.expected_exit_code)),
+        Some(i64::from(EXIT_SUCCESS)),
         "preflight exitCode",
     )?;
 

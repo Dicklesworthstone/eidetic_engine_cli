@@ -2185,11 +2185,6 @@ fn ambient_context_report(snippets: &[HarnessHookSnippet]) -> AmbientContextRepo
                 max_paths: Some(12),
             },
             AmbientContextBudget {
-                surface: "pre_risky_preflight".to_owned(),
-                max_tokens: 0,
-                max_paths: None,
-            },
-            AmbientContextBudget {
                 surface: "session_end_capture_suggest".to_owned(),
                 max_tokens: 0,
                 max_paths: None,
@@ -2207,10 +2202,6 @@ fn ambient_context_report(snippets: &[HarnessHookSnippet]) -> AmbientContextRepo
             AmbientContextSuppressionRule {
                 code: "duplicate_in_session".to_owned(),
                 description: "Suppress repeated injections whose content hash was already emitted for this workspace session.".to_owned(),
-            },
-            AmbientContextSuppressionRule {
-                code: "preflight_allows_command".to_owned(),
-                description: "Suppress preflight output for commands that are not policy-denied.".to_owned(),
             },
             AmbientContextSuppressionRule {
                 code: "declined_capture".to_owned(),
@@ -2312,16 +2303,6 @@ fn harness_hook_snippets(target: HarnessHookTarget, ee_binary: &Path) -> Vec<Har
             async_hook: false,
             installable: true,
             purpose: "Inject provenance-tagged, de-duped `ee recall --path ... --budget-tokens <ambient-budget> --format markdown` context for edited files; suppress empty output and fail open on recall errors.".to_owned(),
-        },
-        HarnessHookSnippet {
-            id: "ee-ambient-pre-risky-preflight".to_owned(),
-            event: "PreToolUse".to_owned(),
-            matcher: Some("Bash".to_owned()),
-            command: python_hook_command(pre_bash_preflight_python(), ee_binary),
-            timeout_seconds: 10,
-            async_hook: false,
-            installable: true,
-            purpose: "Run `ee preflight check --cmd ... --json` before Bash commands and block only policy-denied risky commands; suppress all-clear checks.".to_owned(),
         },
         HarnessHookSnippet {
             id: "ee-journal-bash-failure".to_owned(),
@@ -2618,43 +2599,6 @@ event = data.get("hook_event_name") or data.get("hookEventName") or "SessionEnd"
 payload = {"hookSpecificOutput": {"hookEventName": event, "additionalContext": header + "\n" + text}}
 print(json.dumps(payload, separators=(",", ":")))
 "####
-}
-
-fn pre_bash_preflight_python() -> &'static str {
-    r#"import json, os, subprocess, sys
-ee = sys.argv[1]
-SCHEMA = "ee.ambient_context.v1"
-SURFACE = "pre_risky_preflight"
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-def ambient_enabled():
-    value = os.environ.get("EE_AMBIENT_CONTEXT", "true").strip().lower()
-    return value not in ("0", "false", "off", "no", "disable", "disabled")
-if not ambient_enabled():
-    sys.exit(0)
-if (data.get("tool_name") or "") != "Bash":
-    sys.exit(0)
-tool_input = data.get("tool_input") or {}
-if not isinstance(tool_input, dict):
-    sys.exit(0)
-command = str(tool_input.get("command") or "")
-if not command.strip():
-    sys.exit(0)
-cmd = [ee, "preflight", "check", "--cmd", command, "--json"]
-try:
-    result = subprocess.run(cmd, cwd=data.get("cwd") or None, text=True, capture_output=True, timeout=10)
-except Exception:
-    sys.exit(0)
-if result.returncode != 7:
-    sys.exit(0)
-text = result.stdout.strip() or result.stderr.strip() or "ee preflight denied this command."
-reason = "ee preflight denied this command; get explicit human authorization before bypassing."
-header = f"<!-- ee ambient_context schema={SCHEMA} surface={SURFACE} provenance=ee:{SCHEMA} -->"
-payload = {"hookSpecificOutput": {"hookEventName": data.get("hook_event_name") or "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason, "additionalContext": header + "\n" + text}}
-print(json.dumps(payload, separators=(",", ":")))
-"#
 }
 
 fn post_bash_failure_python() -> &'static str {
@@ -3993,6 +3937,19 @@ fn git_hook_readiness_findings(
                 repair: "Route Rust verification through scripts/rch_verify.sh or rch exec; do not let shared-checkout Git hooks run local Cargo.".to_owned(),
             });
         }
+        if hook.invokes_preflight_guard {
+            findings.push(GitHookReadinessFinding {
+                code: "ee_command_gate_hook_retired".to_owned(),
+                severity: "warning".to_owned(),
+                hook: Some(hook.name.clone()),
+                message: format!(
+                    "Git hook `{}` invokes ee command preflight; ee command gates are retired because ee is a memory substrate.",
+                    hook.name
+                ),
+                repair: "Remove the ee preflight invocation from the Git hook. Keep command policy in the harness or repository verification tooling."
+                    .to_owned(),
+            });
+        }
     }
 
     if ahead_risk.blocking {
@@ -4006,21 +3963,6 @@ fn git_hook_readiness_findings(
             ),
             repair: "Inspect `git log origin/main..HEAD --oneline --decorate` and coordinate with peers before pushing."
                 .to_owned(),
-        });
-    }
-
-    if hooks
-        .iter()
-        .filter(|hook| hook.exists)
-        .all(|hook| !hook.invokes_preflight_guard)
-    {
-        findings.push(GitHookReadinessFinding {
-            code: "preflight_guard_not_in_git_hooks".to_owned(),
-            severity: "low".to_owned(),
-            hook: None,
-            message: "No inspected Git hook invokes `ee preflight check` or an ee preflight guard."
-                .to_owned(),
-            repair: "Use `ee hook preflight-shell --shell zsh --json` to generate a shell preflight snippet, or document why Git-hook preflight is intentionally absent.".to_owned(),
         });
     }
 
@@ -4101,13 +4043,13 @@ fn git_hook_readiness_recommendations(
     }
     if findings
         .iter()
-        .any(|finding| finding.code == "preflight_guard_not_in_git_hooks")
+        .any(|finding| finding.code == "ee_command_gate_hook_retired")
     {
         recommendations.push(GitHookReadinessRecommendation {
-            id: "generate_preflight_shell_hook".to_owned(),
+            id: "remove_retired_ee_command_gate".to_owned(),
             priority: 5,
-            action: "ee hook preflight-shell --shell zsh --json".to_owned(),
-            rationale: "The destructive-command guard is most reliable when the shell pre-exec hook is active before commands run.".to_owned(),
+            action: "Remove `ee preflight check` from the reported hook".to_owned(),
+            rationale: "ee may report risk memory when explicitly queried, but it must not participate in command execution authority.".to_owned(),
         });
     }
     recommendations.sort_by_key(|recommendation| recommendation.priority);
@@ -4155,11 +4097,9 @@ fn git_hook_readiness_summary(
 /// Schema for the `ee hook preflight-shell` JSON envelope.
 pub const PREFLIGHT_HOOK_SHELL_SCHEMA_V1: &str = "ee.hooks.preflight_shell.v1";
 
-/// Informational severities historically surfaced in the JSON report for
-/// callers that want to describe the default policy-denied posture. Generated
-/// shell snippets must not use this as a client-side allowlist: exit code 7
-/// from `ee preflight check` is the live policy authority.
-const PREFLIGHT_HOOK_BLOCK_SEVERITIES: &str = " high critical ";
+/// Blocking severities are intentionally empty. Generated shell snippets are
+/// advisory-only and never suppress command execution.
+const PREFLIGHT_HOOK_BLOCK_SEVERITIES: &str = "";
 
 /// Length of the version hash slice surfaced in the JSON envelope. The full
 /// blake3 digest covers the entire snippet body; the prefix is enough to
@@ -4313,20 +4253,15 @@ fn render_preflight_shell_snippet(shell: PreflightHookShell, ee_binary: &Path) -
 }
 
 fn bash_preflight_snippet(ee_path_quoted: &str) -> String {
-    // The DEBUG trap is the only bash mechanism that runs reliably before
-    // every interactive command. Real blocking requires `shopt -s extdebug`
-    // (per bash(1)): when extdebug is enabled and the trap returns non-zero,
-    // the command is skipped.
     format!(
         r#"#!/usr/bin/env bash
-# ee preflight hook (bash) — surface=trauma_guard_hook_helper
+# ee advisory preflight hook (bash) — surface=trauma_guard_hook_helper
 #
-# Installs a DEBUG trap that calls `ee preflight check --json` before each
-# interactive command. When the check exits 7, the user is prompted on
-# /dev/tty; declining the prompt blocks the command via `shopt -s extdebug`.
+# This opt-in hook may inspect command-risk memory before interactive commands.
+# It never prompts, changes shell execution state, or suppresses a command.
 #
 # Install:   source <install_path>   (see install_path in the JSON envelope)
-# Disable:   trap - DEBUG; shopt -u extdebug; unset EE_PREFLIGHT_HOOK_ACTIVE
+# Disable:   trap - DEBUG; unset EE_PREFLIGHT_HOOK_ACTIVE
 
 if [ -n "${{BASH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
     EE_PREFLIGHT_HOOK_BINARY={ee_path}
@@ -4337,34 +4272,24 @@ if [ -n "${{BASH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; the
         case "${{BASH_COMMAND:-}}" in
             __ee_preflight_*|*__ee_preflight_hook_check*|'') return 0 ;;
         esac
-        # Only intercept in interactive shells. The /dev/tty read below
-        # defaults to N (block) when no controlling tty is available.
+        # Only inspect interactive commands.
         [ -z "${{PS1:-}}" ] && return 0
 
-        local _ee_out _ee_exit _ee_sev _ee_msg _ee_reply
-        _ee_out=$("$EE_PREFLIGHT_HOOK_BINARY" preflight check \
-            --cmd "$BASH_COMMAND" --json 2>/dev/null)
-        _ee_exit=$?
-        # Exit 7 means policy denied per the AGENTS.md trauma-guard contract.
-        [ "$_ee_exit" != 7 ] && return 0
-
-        _ee_sev=$(printf '%s' "$_ee_out" | awk -F'"severity":"' \
-            'NF>1{{split($2,a,"\""); print a[1]; exit}}')
-        _ee_msg=$(printf '%s' "$_ee_out" | awk -F'"message":"' \
-            'NF>1{{split($2,a,"\""); print a[1]; exit}}')
-        printf '\n[ee preflight] %s (severity=%s)\n' "$_ee_msg" "$_ee_sev" >&2
-        printf 'Proceed anyway? [y/N] ' >&2
-        if ! IFS= read -r _ee_reply </dev/tty; then
-            _ee_reply=N
+        local _ee_out _ee_exit
+        if _ee_out=$("$EE_PREFLIGHT_HOOK_BINARY" preflight check \
+            --cmd "$BASH_COMMAND" --json 2>/dev/null); then
+            _ee_exit=0
+        else
+            # Keep inherited `set -e` / `errexit` from turning advisory lookup
+            # failure into command suppression.
+            _ee_exit=$?
         fi
-        case "$_ee_reply" in
-            [yY]|[yY][eE][sS]) return 0 ;;
-        esac
-        printf '[ee preflight] Blocked by user.\n' >&2
-        return 1
+        if [ "$_ee_exit" != 0 ] && [ -n "$_ee_out" ]; then
+            printf '\n[ee preflight advisory]\n%s\n' "$_ee_out" >&2
+        fi
+        return 0
     }}
 
-    shopt -s extdebug 2>/dev/null || true
     EE_PREFLIGHT_HOOK_ACTIVE=1
     trap '__ee_preflight_hook_check' DEBUG
 fi
@@ -4374,18 +4299,12 @@ fi
 }
 
 fn zsh_preflight_snippet(ee_path_quoted: &str) -> String {
-    // zsh's `preexec` hook fires before each user command but, unlike bash's
-    // DEBUG trap with extdebug, it cannot natively cancel the command. When
-    // the user declines the prompt we SIGINT the shell (`kill -INT $$`),
-    // which interrupts the about-to-exec command in interactive zsh.
     format!(
         r#"#!/usr/bin/env zsh
-# ee preflight hook (zsh) — surface=trauma_guard_hook_helper
+# ee advisory preflight hook (zsh) — surface=trauma_guard_hook_helper
 #
-# Installs a preexec function that calls `ee preflight check --json` before
-# each user command. When the check exits 7, the user is prompted on /dev/tty;
-# declining the prompt aborts the upcoming command by sending SIGINT to the shell. zsh preexec
-# cannot natively cancel a command, so SIGINT is the documented mechanism.
+# This opt-in hook may inspect command-risk memory before interactive commands.
+# It never prompts, signals the shell, or suppresses a command.
 #
 # Install:   source <install_path>   (see install_path in the JSON envelope)
 # Disable:   add-zsh-hook -d preexec __ee_preflight_hook_check;
@@ -4402,34 +4321,22 @@ if [ -n "${{ZSH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
         case "$_ee_cmd" in
             __ee_preflight_*|'') return 0 ;;
         esac
-        # Only intercept in interactive shells. The /dev/tty read below
-        # defaults to N (block-via-SIGINT) when no controlling tty is
-        # available, so there is no need for a separate `[ ! -t 0 ]`
-        # early-return that would short-circuit before the snippet can
-        # call ee preflight, render the warning, or default-block.
+        # Only inspect interactive commands.
         [ -z "${{PS1:-}}" ] && return 0
 
-        local _ee_out _ee_exit _ee_sev _ee_msg _ee_reply
-        _ee_out=$("$EE_PREFLIGHT_HOOK_BINARY" preflight check \
-            --cmd "$_ee_cmd" --json 2>/dev/null)
-        _ee_exit=$?
-        [ "$_ee_exit" != 7 ] && return 0
-
-        _ee_sev=$(printf '%s' "$_ee_out" | awk -F'"severity":"' \
-            'NF>1{{split($2,a,"\""); print a[1]; exit}}')
-        _ee_msg=$(printf '%s' "$_ee_out" | awk -F'"message":"' \
-            'NF>1{{split($2,a,"\""); print a[1]; exit}}')
-        print -u2 -- "\n[ee preflight] $_ee_msg (severity=$_ee_sev)"
-        print -nu2 -- 'Proceed anyway? [y/N] '
-        if ! IFS= read -r _ee_reply </dev/tty; then
-            _ee_reply=N
+        local _ee_out _ee_exit
+        if _ee_out=$("$EE_PREFLIGHT_HOOK_BINARY" preflight check \
+            --cmd "$_ee_cmd" --json 2>/dev/null); then
+            _ee_exit=0
+        else
+            # Keep inherited `set -e` / `errexit` from turning advisory lookup
+            # failure into command suppression.
+            _ee_exit=$?
         fi
-        case "$_ee_reply" in
-            [yY]|[yY][eE][sS]) return 0 ;;
-        esac
-        print -u2 -- '[ee preflight] Blocked by user.'
-        kill -INT $$
-        return 1
+        if [ "$_ee_exit" != 0 ] && [ -n "$_ee_out" ]; then
+            print -u2 -- "\n[ee preflight advisory]\n$_ee_out"
+        fi
+        return 0
     }}
 
     add-zsh-hook preexec __ee_preflight_hook_check
@@ -4576,11 +4483,9 @@ mod tests {
             report
                 .snippets
                 .iter()
-                .any(|snippet| snippet.id == "ee-ambient-pre-risky-preflight"
-                    && snippet.command.contains("preflight")
-                    && snippet.command.contains("check")
-                    && snippet.command.contains("permissionDecision")),
-            "pre-risky snippet should route through preflight and carry a deny decision"
+                .all(|snippet| snippet.id != "ee-ambient-pre-risky-preflight"
+                    && !snippet.command.contains("permissionDecision")),
+            "ambient hooks must never install a command-denial surface"
         );
         assert!(
             report
@@ -4690,11 +4595,6 @@ mod tests {
                 session_end_capture_python(),
                 "session_end_capture_suggest",
             ),
-            (
-                "pre_bash_preflight",
-                pre_bash_preflight_python(),
-                "pre_risky_preflight",
-            ),
         ];
 
         for (name, script, surface) in ambient_templates {
@@ -4768,14 +4668,6 @@ mod tests {
         assert!(session_capture.contains("No memories were stored"));
         assert!(session_capture.contains("already_seen(text)"));
         assert!(session_capture.contains("provenance=ee:{SCHEMA}"));
-
-        let preflight = pre_bash_preflight_python();
-        assert!(preflight.contains("EE_AMBIENT_CONTEXT"));
-        assert!(preflight.contains("preflight"));
-        assert!(preflight.contains("check"));
-        assert!(preflight.contains("if result.returncode != 7:"));
-        assert!(preflight.contains("\"permissionDecision\": \"deny\""));
-        assert!(preflight.contains("provenance=ee:{SCHEMA}"));
     }
 
     /// Run a Python hook snippet under `python3 -c` with the given stdin JSON,
@@ -5670,12 +5562,13 @@ if not AGENT_NAME:
             report.hooks.iter().all(|hook| hook.status == "not_found"),
             "missing hooks should be reported as not_found"
         );
+        assert_eq!(report.summary.posture, "ready");
         assert!(
             report
                 .findings
                 .iter()
-                .any(|finding| finding.code == "preflight_guard_not_in_git_hooks"),
-            "missing hook chain should explain that preflight is not reachable"
+                .all(|finding| finding.code != "ee_command_gate_hook_retired"),
+            "absence of an ee command gate is the desired posture"
         );
 
         Ok(())
@@ -5803,7 +5696,7 @@ if not AGENT_NAME:
     }
 
     #[test]
-    fn git_readiness_clean_configured_chain_is_ready() -> TestResult {
+    fn git_readiness_flags_retired_ee_command_gate_hooks() -> TestResult {
         let temp = TempDir::new().map_err(|e| e.to_string())?;
         let hook_dir = temp.path().join(".git").join("hooks");
         fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
@@ -5826,10 +5719,16 @@ AGENT_NAME = os.environ.get("AGENT_NAME", "").strip()
         })
         .map_err(|e| e.message())?;
 
-        assert_eq!(report.summary.posture, "ready");
+        assert_eq!(report.summary.posture, "needs_attention");
         assert!(report.summary.agent_name_ready);
         assert!(report.summary.preflight_guard_reachable);
-        assert!(report.findings.is_empty(), "clean chain should not warn");
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "ee_command_gate_hook_retired"),
+            "existing ee command gates must be called out for removal"
+        );
 
         Ok(())
     }
@@ -6777,7 +6676,9 @@ AGENT_NAME = os.environ.get("AGENT_NAME", "").strip()
                 .snippet
                 .contains("trap '__ee_preflight_hook_check' DEBUG")
         );
-        assert!(report.snippet.contains("shopt -s extdebug"));
+        assert!(!report.snippet.contains("shopt -s extdebug"));
+        assert!(!report.snippet.contains("Proceed anyway?"));
+        assert!(report.snippet.contains("return 0"));
         Ok(())
     }
 
@@ -6796,7 +6697,9 @@ AGENT_NAME = os.environ.get("AGENT_NAME", "").strip()
                 .snippet
                 .contains("add-zsh-hook preexec __ee_preflight_hook_check")
         );
-        assert!(report.snippet.contains("kill -INT $$"));
+        assert!(!report.snippet.contains("kill -INT $$"));
+        assert!(!report.snippet.contains("Proceed anyway?"));
+        assert!(report.snippet.contains("return 0"));
         Ok(())
     }
 
@@ -6844,8 +6747,10 @@ AGENT_NAME = os.environ.get("AGENT_NAME", "").strip()
             .as_array()
             .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
-        assert!(severities.contains(&"high"));
-        assert!(severities.contains(&"critical"));
+        assert!(
+            severities.is_empty(),
+            "advisory hooks must not advertise blocking severities"
+        );
         assert!(!report.version.is_empty());
         assert_eq!(report.version.len(), PREFLIGHT_HOOK_VERSION_HEX_LEN);
         Ok(())

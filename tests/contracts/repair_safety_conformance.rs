@@ -45,7 +45,6 @@ const NEXT_ACTIONS: &[&str] = &[
     "coordinate_first",
     "ask_human",
     "manual_only",
-    "policy_denied",
 ];
 
 fn repo_root() -> PathBuf {
@@ -382,8 +381,8 @@ fn validate_repair_safety(
         }
         "destructive_or_irreversible_repair" => {
             ensure(
-                requires_human_approval && next_action == "policy_denied",
-                format!("{ctx}: destructive repair must be policy_denied"),
+                requires_human_approval && next_action == "ask_human",
+                format!("{ctx}: destructive repair must remain advisory and ask a human"),
             )?;
         }
         "unavailable_or_manual_only" => {
@@ -797,8 +796,9 @@ fn repair_safety_matrix_covers_agent_decisions() -> TestResult {
     let schema_text = preflight_schema.to_string();
     ensure(
         schema_text.contains("destructive_or_irreversible_repair")
-            && schema_text.contains("policy_denied"),
-        "preflight guard schema must retain destructive policy-denied vocabulary",
+            && schema_text.contains("ask_human")
+            && !schema_text.contains("policy_denied"),
+        "preflight guard schema must keep destructive guidance advisory",
     )?;
     Ok(())
 }

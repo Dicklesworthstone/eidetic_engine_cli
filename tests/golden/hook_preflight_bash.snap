@@ -2,23 +2,25 @@
 source: src/hooks/installer.rs
 bead: bd-3usjw.7
 surface: trauma_guard_hook_helper
-assertion: ee hook preflight-shell --shell bash emits a deterministic, syntactically-valid bash snippet that wires ee preflight check into a DEBUG trap and blocks the upcoming command when live preflight policy returns exit 7 and the user declines the prompt
+assertion: ee hook preflight-shell --shell bash emits a deterministic, syntactically-valid advisory snippet that may surface ee preflight output but always allows the upcoming command
 schema:
   envelope: ee.response.v2
   payload: ee.hooks.preflight_shell.v1
 contracts:
   - snippet body is byte-identical across runs for the same (shell, ee_binary_path) pair
   - snippet embeds a single-quoted absolute ee binary path (no PATH lookup)
-  - snippet installs `shopt -s extdebug` so DEBUG trap returning 1 actually blocks the next command
-  - snippet declines safely when /dev/tty is unreadable (defaults to N, blocks)
-  - snippet allows-listed shell-internal builtins (cd, set, unset, trap, exit, return, fc, history) bypass the trap
+  - snippet does not enable extdebug, prompt on /dev/tty, return nonzero, or otherwise suppress shell execution
+  - even `ee preflight check` exit code 7 is advisory and the hook returns success
+  - inherited `set -e` cannot turn a nonzero advisory lookup into command suppression
+  - candidate commands execute after advisory output is surfaced
   - version field is the first 16 hex chars of blake3(snippet) for upgrade detection
-  - live `ee preflight check` exit code 7 is authoritative; the snippet does not embed a stale client-side severity allowlist
+  - snippet does not embed a client-side severity blocklist
 evidence:
   - src/hooks/installer.rs::generate_preflight_shell_snippet
   - src/hooks/installer.rs::bash_preflight_snippet
   - tests/preflight_hook_bash.rs::bash_snippet_syntax_check_passes
   - tests/preflight_hook_bash.rs::bash_snippet_source_defines_hook_function_and_activation_flag
-  - tests/preflight_hook_bash.rs::bash_snippet_blocks_destructive_command_when_prompt_defaults_to_no
+  - tests/preflight_hook_bash.rs::bash_snippet_treats_preflight_exit_7_as_advisory
+  - tests/preflight_hook_bash.rs::bash_debug_trap_allows_candidate_command_after_preflight_exit_7
   - tests/preflight_hook_bash.rs::bash_snippet_is_byte_stable_across_runs_for_pinned_binary_path
   - tests/preflight_hook_bash.rs::bash_snippet_carries_documented_contract_markers

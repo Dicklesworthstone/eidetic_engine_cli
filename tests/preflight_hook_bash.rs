@@ -8,8 +8,8 @@
 //!      `__ee_preflight_hook_check`, sets `EE_PREFLIGHT_HOOK_ACTIVE`, and
 //!      installs the DEBUG trap.
 //!   3. With a stub `ee` binary that exits 7 with severity=high, the DEBUG
-//!      trap blocks the would-be-destructive command when the user prompt
-//!      defaults to N (no controlling tty).
+//!      trap may print advisory output but still returns success and allows
+//!      the candidate command to execute without prompting.
 //!   4. Snippet body is byte-stable across runs for the same binary path
 //!      (J7 determinism contract).
 //!
@@ -100,8 +100,8 @@ fn write_snippet_to_temp(dir: &Path, ee_binary_path: &Path) -> Result<(PathBuf, 
 fn write_stub_ee_binary(dir: &Path, severity: &str, exit_code: i32) -> Result<PathBuf, String> {
     // The stub mimics `ee preflight check --cmd "<cmd>" --json` by emitting
     // a minimal preflight JSON envelope and exiting with the requested code.
-    // Real ee uses exit 7 for policy-denied, which is what the hook
-    // intercepts.
+    // Exit 7 exercises the historical policy-denied status. The shell hook
+    // must treat every status as advisory and remain fail-open.
     let stub_path = dir.join("ee");
     let script = format!(
         r#"#!/usr/bin/env bash
@@ -332,10 +332,7 @@ exit 7
     let (snippet_path, _) = write_snippet_to_temp(temp.path(), &stub_path)?;
 
     // Direct-call the hook function with a synthetic BASH_COMMAND. This
-    // bypasses the [-t 0] interactive-shell guard (which would short-circuit
-    // under cargo test) but exercises the rest of the hook body: stub
-    // invocation, JSON parsing, prompt rendering, and (since /dev/tty is
-    // unreadable) the default-block path.
+    // exercises the advisory path without relying on an interactive tty.
     let script = format!(
         "PS1=test\nsource {snippet}\nBASH_COMMAND='rm -rf /tmp/test' \
          __ee_preflight_hook_check",
@@ -349,9 +346,9 @@ exit 7
         .map_err(|e| e.to_string())?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if !stderr.contains("[ee preflight]") {
+    if !stderr.contains("[ee preflight advisory]") {
         return Err(format!(
-            "expected '[ee preflight]' warning in stderr; got stderr={stderr}, stdout={stdout}"
+            "expected advisory output in stderr; got stderr={stderr}, stdout={stdout}"
         ));
     }
     if !stderr.contains("test-fire") {
@@ -359,10 +356,15 @@ exit 7
             "snippet did not surface the stub-ee message; stderr={stderr}"
         ));
     }
-    if output.status.code() != Some(1) {
+    if !output.status.success() {
         return Err(format!(
-            "expected hook function to return 1 on prompt-default-N; status={:?}, stdout={stdout}, stderr={stderr}",
+            "advisory hook must return success even when ee exits 7; status={:?}, stdout={stdout}, stderr={stderr}",
             output.status.code()
+        ));
+    }
+    if stderr.contains("Proceed anyway?") || stderr.contains("Blocked by user.") {
+        return Err(format!(
+            "advisory hook must not prompt or claim to block; stderr={stderr}"
         ));
     }
 
@@ -419,14 +421,14 @@ exit 7
         .map_err(|e| e.to_string())?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if !stderr.contains("[ee preflight]") {
+    if !stderr.contains("[ee preflight advisory]") {
         return Err(format!(
             "expected echo command substitution to reach ee preflight; stderr={stderr}, stdout={stdout}"
         ));
     }
-    if output.status.code() != Some(1) {
+    if !output.status.success() {
         return Err(format!(
-            "expected echo command substitution to default-block; status={:?}, stdout={stdout}, stderr={stderr}",
+            "advisory hook must allow echo command substitution after exit 7; status={:?}, stdout={stdout}, stderr={stderr}",
             output.status.code()
         ));
     }
@@ -449,7 +451,7 @@ exit 7
 }
 
 #[test]
-fn bash_snippet_treats_preflight_exit_7_as_authoritative() -> TestResult {
+fn bash_snippet_treats_preflight_exit_7_as_advisory() -> TestResult {
     let Some(bash) = bash_or_skip() else {
         eprintln!("skipping: bash not available on PATH");
         return Ok(());
@@ -472,15 +474,54 @@ fn bash_snippet_treats_preflight_exit_7_as_authoritative() -> TestResult {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    if !stderr.contains("severity=medium") {
+    if !stderr.contains("severity") || !stderr.contains("medium") {
         return Err(format!(
             "expected medium-severity exit-7 result to be surfaced; stderr={stderr}, stdout={stdout}"
         ));
     }
-    if output.status.code() != Some(1) {
+    if !output.status.success() {
         return Err(format!(
-            "expected hook function to return 1 for any policy-denied exit 7; status={:?}, stdout={stdout}, stderr={stderr}",
+            "exit 7 must remain advisory and return success; status={:?}, stdout={stdout}, stderr={stderr}",
             output.status.code()
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn bash_debug_trap_allows_candidate_command_after_preflight_exit_7() -> TestResult {
+    let Some(bash) = bash_or_skip() else {
+        eprintln!("skipping: bash not available on PATH");
+        return Ok(());
+    };
+    let temp = worker_local_tempdir("ee-preflight-bash-")?;
+    let stub_path = write_stub_ee_binary(temp.path(), "critical", 7)?;
+    let (snippet_path, _) = write_snippet_to_temp(temp.path(), &stub_path)?;
+    let marker = temp.path().join("candidate-ran");
+
+    let script = format!(
+        "set -e\nPS1=test\nsource {snippet}\nprintf candidate-ran > {marker}\n",
+        snippet = snippet_path.display(),
+        marker = marker.display(),
+    );
+    let output = Command::new(&bash)
+        .arg("-c")
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "candidate command failed under errexit after advisory exit 7: status={:?} stdout={} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    let marker_text = fs::read_to_string(&marker).map_err(|e| e.to_string())?;
+    if marker_text != "candidate-ran" {
+        return Err(format!(
+            "candidate command did not run after advisory exit 7; marker={marker_text:?}"
         ));
     }
     Ok(())
@@ -524,12 +565,13 @@ fn bash_snippet_carries_documented_contract_markers() -> TestResult {
     let report = generate_preflight_shell_snippet(&options).map_err(|e| e.message())?;
     let required = [
         "#!/usr/bin/env bash",
+        "ee advisory preflight hook",
         "surface=trauma_guard_hook_helper",
         "EE_PREFLIGHT_HOOK_BINARY='/usr/local/bin/ee'",
         "__ee_preflight_hook_check()",
         "preflight check \\\n            --cmd \"$BASH_COMMAND\" --json",
-        "[ \"$_ee_exit\" != 7 ] && return 0",
-        "shopt -s extdebug",
+        "[ee preflight advisory]",
+        "return 0",
         "trap '__ee_preflight_hook_check' DEBUG",
     ];
     let missing: Vec<&&str> = required
@@ -542,12 +584,20 @@ fn bash_snippet_carries_documented_contract_markers() -> TestResult {
             report.snippet
         ));
     }
-    if report
-        .snippet
-        .contains("EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES")
-    {
+    let forbidden = [
+        "EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES",
+        "shopt -s extdebug",
+        "Proceed anyway?",
+        "Blocked by user.",
+        "return 1",
+    ];
+    let present: Vec<&&str> = forbidden
+        .iter()
+        .filter(|needle| report.snippet.contains(*needle))
+        .collect();
+    if !present.is_empty() {
         return Err(format!(
-            "bash snippet must not embed a stale client-side severity allowlist:\n{}",
+            "bash advisory snippet contains blocking markers {present:?}:\n{}",
             report.snippet
         ));
     }

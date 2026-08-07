@@ -555,7 +555,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `why_pack_selection_unavailable` | low | bd-17c65.10.6 (J6) |
 | `why_result_target_unsupported_source` | medium | bd-17c65.10.6 (J6) |
 
-#### Preflight + quarantine (12)
+#### Preflight + quarantine (13)
 | Code | Severity | Bead |
 |------|----------|------|
 | `agent_contract_source_unavailable` | warning | bd-3d6ko.1 (AOP1) |
@@ -564,6 +564,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `bypass_token_expired` | medium | bd-3usjw.6.1 |
 | `bypass_token_invalid` | high | bd-3usjw.6.1 |
 | `bypass_token_revoked` | high | bd-3usjw.6.1 |
+| `bypass_token_storage_error` | critical | bd-ldmdc (P0) |
 | `no_risk_memories` | info | bd-3usjw.6 |
 | `preflight_evidence_stale` | warning | bd-17c65.10.6 (J6) |
 | `preflight_evidence_unavailable` | medium | bd-17c65.10.6 (J6) |

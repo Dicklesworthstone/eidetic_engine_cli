@@ -4412,22 +4412,6 @@ fn support_path_hash(path: Option<&str>) -> Option<String> {
 }
 
 fn local_cargo_tripwire_json(workspace: &Path) -> String {
-    let direct_cargo = local_cargo_preflight_classification(
-        workspace,
-        "cargo test --lib support_bundle_tripwire_probe",
-    );
-    let wrapped_cargo = local_cargo_preflight_classification(
-        workspace,
-        "scripts/rch_verify.sh -- cargo test --lib support_bundle_tripwire_probe",
-    );
-    let direct_status = direct_cargo
-        .get("policyStatus")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let wrapped_status = wrapped_cargo
-        .get("policyStatus")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
     let build_admission = super::disk_pressure::gather_build_admission_report(
         &super::disk_pressure::BuildAdmissionOptions {
             workspace: workspace.to_path_buf(),
@@ -4479,12 +4463,8 @@ fn local_cargo_tripwire_json(workspace: &Path) -> String {
         "local_disallowed_attempt"
     } else if !build_admission.admitted {
         "remote_required_blocked"
-    } else if direct_status == "local_cargo_disallowed"
-        && wrapped_status == "remote_wrapper_required"
-    {
-        "remote_required_ready"
     } else {
-        "needs_review"
+        "remote_required_ready"
     };
     let collection_status = if process_scan_detected_bypass {
         "local_cargo_bypass_detected"
@@ -4493,27 +4473,16 @@ fn local_cargo_tripwire_json(workspace: &Path) -> String {
     } else {
         "policy_summary_process_scan_unavailable"
     };
-    let policy_status = if process_scan_detected_bypass {
+    let policy_status = if process_scan_detected_bypass || !build_admission.admitted {
         "blocked"
-    } else if direct_status == "local_cargo_disallowed"
-        && wrapped_status == "remote_wrapper_required"
-    {
-        "enforced"
     } else {
-        "needs_review"
+        "enforced"
     };
     let repair_actions = if process_scan_detected_bypass {
         process_scan
             .get("repairActions")
             .cloned()
             .unwrap_or_else(|| json!([]))
-    } else if direct_status == "local_cargo_disallowed" {
-        json!([{
-            "priority": 1,
-            "kind": "use_remote_wrapper",
-            "command": SUPPORT_BUNDLE_REQUIRED_REMOTE_WRAPPER,
-            "message": "Run Rust verification through the repo RCH wrapper; do not retry local Cargo.",
-        }])
     } else {
         json!([])
     };
@@ -4534,14 +4503,9 @@ fn local_cargo_tripwire_json(workspace: &Path) -> String {
         "disk_pressure_context": disk_pressure_context,
         "evidence": [
             {
-                "kind": "planned_command_classification",
-                "result": direct_status,
-                "command": "cargo test --lib support_bundle_tripwire_probe",
-            },
-            {
-                "kind": "planned_command_classification",
-                "result": wrapped_status,
-                "command": "scripts/rch_verify.sh -- cargo test --lib support_bundle_tripwire_probe",
+                "kind": "policy_ownership",
+                "result": "repository_verification_tooling",
+                "detail": "ee command-risk memory is advisory only and does not enforce Cargo/RCH policy",
             },
             {
                 "kind": "build_admission",
@@ -4550,12 +4514,12 @@ fn local_cargo_tripwire_json(workspace: &Path) -> String {
             },
             process_evidence
         ],
-        "plannedCommandClassifications": [direct_cargo, wrapped_cargo],
         "buildAdmission": build_admission_json,
         "processScan": process_scan,
         "notes": [
             "Support bundle collection is read-only and does not execute Cargo.",
-            "Live process evidence comes from the read-only local-Cargo tripwire process scanner."
+            "Live process evidence comes from the read-only local-Cargo tripwire process scanner.",
+            "Cargo/RCH enforcement belongs to repository verification tooling, never ee command hooks."
         ],
     }))
 }
@@ -4819,50 +4783,6 @@ fn unavailable_local_cargo_process_scan_json(reason: &str, detail: Option<&str>)
             "result": "unavailable",
             "reason": reason,
         }],
-    })
-}
-
-fn local_cargo_preflight_classification(workspace: &Path, command: &str) -> Value {
-    let registry = super::preflight_guard::PreflightGuardRegistry::with_builtins();
-    let report = super::preflight_guard::run_preflight_guard(
-        &registry,
-        &super::preflight_guard::PreflightGuardOptions {
-            command: command.to_owned(),
-            workspace: workspace.to_path_buf(),
-            bypass_tokens: Vec::new(),
-            bypass_secret: None,
-        },
-    );
-    let matched_rule_ids = report
-        .matches
-        .iter()
-        .map(|matched| matched.rule_id.clone())
-        .collect::<Vec<_>>();
-    let local_cargo_denied = matched_rule_ids.iter().any(|rule_id| {
-        matches!(
-            rule_id.as_str(),
-            "builtin:local_cargo_heavy_verification"
-                | "builtin:local_cargo_target_dir_override"
-                | "builtin:local_rust_compiler_verification"
-        )
-    });
-    let policy_status = if local_cargo_denied {
-        "local_cargo_disallowed"
-    } else if report.exit_code == 0 && command.contains("scripts/rch_verify.sh") {
-        "remote_wrapper_required"
-    } else if report.exit_code == 0 {
-        "allowed"
-    } else {
-        "blocked_by_other_policy"
-    };
-
-    json!({
-        "schema": super::preflight_guard::PREFLIGHT_GUARD_SCHEMA_V1,
-        "command": command,
-        "policyStatus": policy_status,
-        "exitCode": report.exit_code,
-        "matchedRuleIds": matched_rule_ids,
-        "guardReport": report.to_json(),
     })
 }
 
@@ -12088,13 +12008,16 @@ mod tests {
             Some(&json!(SUPPORT_BUNDLE_REQUIRED_REMOTE_WRAPPER))
         );
         assert_eq!(value.pointer("/detectedLocalBuilds"), Some(&json!([])));
-        assert_eq!(
-            value.pointer("/plannedCommandClassifications/0/policyStatus"),
-            Some(&json!("local_cargo_disallowed"))
-        );
-        assert_eq!(
-            value.pointer("/plannedCommandClassifications/1/policyStatus"),
-            Some(&json!("remote_wrapper_required"))
+        assert!(
+            value
+                .pointer("/evidence")
+                .and_then(Value::as_array)
+                .is_some_and(|entries| entries.iter().any(|entry| {
+                    entry.pointer("/kind") == Some(&json!("policy_ownership"))
+                        && entry.pointer("/result")
+                            == Some(&json!("repository_verification_tooling"))
+                })),
+            "summary must keep Cargo policy outside ee preflight: {value}"
         );
         assert!(
             value.pointer("/buildAdmission/admitted").is_some(),
@@ -12128,25 +12051,22 @@ mod tests {
     }
 
     #[test]
-    fn local_cargo_tripwire_summary_classifies_direct_rustdoc_as_disallowed() -> TestResult {
-        let workspace = unique_test_path("local-rustdoc-tripwire-summary");
+    fn local_cargo_tripwire_summary_keeps_policy_outside_ee_preflight() -> TestResult {
+        let workspace = unique_test_path("local-cargo-policy-ownership-summary");
         fs::create_dir_all(&workspace)
             .map_err(|error| format!("failed to create workspace: {error}"))?;
 
-        let value = local_cargo_preflight_classification(&workspace, "rustdoc --test src/lib.rs");
-
-        assert_eq!(
-            value.pointer("/policyStatus"),
-            Some(&json!("local_cargo_disallowed"))
-        );
+        let value: Value = serde_json::from_str(&local_cargo_tripwire_json(&workspace))
+            .map_err(|error| error.to_string())?;
         assert!(
             value
-                .pointer("/matchedRuleIds")
+                .pointer("/evidence")
                 .and_then(Value::as_array)
-                .is_some_and(|ids| ids
-                    .iter()
-                    .any(|id| id == "builtin:local_rust_compiler_verification")),
-            "classification must cite the direct rustc/rustdoc guard: {value}"
+                .is_some_and(|entries| entries.iter().any(|entry| entry.pointer("/kind")
+                    == Some(&json!("policy_ownership"))
+                    && entry.pointer("/result")
+                        == Some(&json!("repository_verification_tooling")))),
+            "summary must keep Cargo policy in repository tooling: {value}"
         );
 
         Ok(())

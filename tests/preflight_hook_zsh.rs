@@ -1,10 +1,9 @@
 //! bd-3usjw.7 — `ee hook preflight-shell --shell zsh` integration tests.
 //!
 //! Mirror of `tests/preflight_hook_bash.rs` for the zsh flavor. Notes on
-//! mechanism: zsh's `preexec` hook fires before each user command but,
-//! unlike bash's DEBUG trap with `shopt -s extdebug`, it cannot natively
-//! cancel the upcoming command. The snippet documents this and uses
-//! `kill -INT $$` as the blocking mechanism in interactive shells.
+//! mechanism: zsh's `preexec` hook fires before each user command. The
+//! generated hook is advisory-only: it may surface command-risk memory, but
+//! it never prompts, signals the shell, or suppresses command execution.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -200,13 +199,10 @@ exit 7
 
     // Direct-invoke the hook function with the would-be command line. zsh's
     // preexec fires with the typed command line as $1; we mirror that here
-    // without needing an interactive zsh subshell. The /dev/tty read fails
-    // (no tty), so the prompt defaults to N and the function reaches
-    // `kill -INT $$`. We run the call inside `( ... )` so the SIGINT
-    // terminates only the subshell, not the test runner.
+    // without needing an interactive zsh subshell.
     let script = format!(
         "PS1=test\nsource {snippet}\n\
-         ( __ee_preflight_hook_check 'rm -rf /tmp/test' ) || true\n\
+         __ee_preflight_hook_check 'rm -rf /tmp/test'\n\
          print rc=$?",
         snippet = snippet_path.display(),
     );
@@ -218,14 +214,25 @@ exit 7
         .map_err(|e| e.to_string())?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if !stderr.contains("[ee preflight]") {
+    if !stderr.contains("[ee preflight advisory]") {
         return Err(format!(
-            "expected '[ee preflight]' warning in stderr; got stderr={stderr}, stdout={stdout}"
+            "expected advisory output in stderr; got stderr={stderr}, stdout={stdout}"
         ));
     }
     if !stderr.contains("test-fire") {
         return Err(format!(
             "snippet did not surface the stub-ee message; stderr={stderr}"
+        ));
+    }
+    if !output.status.success() || !stdout.contains("rc=0") {
+        return Err(format!(
+            "advisory hook must return success after ee exits 7; status={:?}, stderr={stderr}, stdout={stdout}",
+            output.status.code()
+        ));
+    }
+    if stderr.contains("Proceed anyway?") || stderr.contains("Blocked by user.") {
+        return Err(format!(
+            "advisory hook must not prompt or claim to block; stderr={stderr}"
         ));
     }
 
@@ -271,7 +278,7 @@ exit 7
 
     let script = format!(
         "PS1=test\nsource {snippet}\n\
-         ( __ee_preflight_hook_check 'cd /tmp && rm -rf /tmp/test' ) || true\n\
+         __ee_preflight_hook_check 'cd /tmp && rm -rf /tmp/test'\n\
          print rc=$?",
         snippet = snippet_path.display(),
     );
@@ -283,9 +290,15 @@ exit 7
         .map_err(|e| e.to_string())?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if !stderr.contains("[ee preflight]") {
+    if !stderr.contains("[ee preflight advisory]") {
         return Err(format!(
             "expected cd-prefixed compound command to reach ee preflight; stderr={stderr}, stdout={stdout}"
+        ));
+    }
+    if !output.status.success() || !stdout.contains("rc=0") {
+        return Err(format!(
+            "advisory hook must allow the compound command after exit 7; status={:?}, stderr={stderr}, stdout={stdout}",
+            output.status.code()
         ));
     }
 
@@ -307,7 +320,7 @@ exit 7
 }
 
 #[test]
-fn zsh_snippet_treats_preflight_exit_7_as_authoritative() -> TestResult {
+fn zsh_snippet_treats_preflight_exit_7_as_advisory() -> TestResult {
     let Some(zsh) = zsh_or_skip() else {
         eprintln!("skipping: zsh not available on PATH");
         return Ok(());
@@ -330,19 +343,60 @@ fn zsh_snippet_treats_preflight_exit_7_as_authoritative() -> TestResult {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    if !stderr.contains("severity=medium") {
+    if !stderr.contains("severity") || !stderr.contains("medium") {
         return Err(format!(
             "expected medium-severity exit-7 result to be surfaced; stderr={stderr}, stdout={stdout}"
         ));
     }
-    if output.status.success() {
+    if !output.status.success() {
         return Err(format!(
-            "expected zsh hook to interrupt the shell on policy-denied exit 7; stdout={stdout}, stderr={stderr}"
+            "exit 7 must remain advisory and return success; stdout={stdout}, stderr={stderr}"
         ));
     }
-    if !stderr.contains("Blocked by user.") {
+    if stderr.contains("Proceed anyway?") || stderr.contains("Blocked by user.") {
         return Err(format!(
-            "expected zsh hook to reach the default-block path; stdout={stdout}, stderr={stderr}"
+            "advisory zsh hook must not prompt or claim to block; stdout={stdout}, stderr={stderr}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn zsh_hook_allows_candidate_command_after_preflight_exit_7() -> TestResult {
+    let Some(zsh) = zsh_or_skip() else {
+        eprintln!("skipping: zsh not available on PATH");
+        return Ok(());
+    };
+    let temp = worker_local_tempdir("ee-preflight-zsh-")?;
+    let stub_path = write_stub_ee_binary(temp.path(), "critical", 7)?;
+    let (snippet_path, _) = write_snippet_to_temp(temp.path(), &stub_path)?;
+    let marker = temp.path().join("candidate-ran");
+
+    let script = format!(
+        "set -e\nPS1=test\nsource {snippet}\n\
+         __ee_preflight_hook_check 'candidate command'\n\
+         print -n candidate-ran > {marker}\n",
+        snippet = snippet_path.display(),
+        marker = marker.display(),
+    );
+    let output = Command::new(&zsh)
+        .arg("-c")
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "candidate command failed under errexit after advisory exit 7: status={:?} stdout={} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    let marker_text = fs::read_to_string(&marker).map_err(|e| e.to_string())?;
+    if marker_text != "candidate-ran" {
+        return Err(format!(
+            "candidate command did not run after advisory exit 7; marker={marker_text:?}"
         ));
     }
     Ok(())
@@ -381,13 +435,15 @@ fn zsh_snippet_carries_documented_contract_markers() -> TestResult {
     let report = generate_preflight_shell_snippet(&options).map_err(|e| e.message())?;
     let required = [
         "#!/usr/bin/env zsh",
+        "ee advisory preflight hook",
         "surface=trauma_guard_hook_helper",
         "EE_PREFLIGHT_HOOK_BINARY='/usr/local/bin/ee'",
         "autoload -Uz add-zsh-hook",
         "__ee_preflight_hook_check()",
         "preflight check \\\n            --cmd \"$_ee_cmd\" --json",
+        "[ee preflight advisory]",
+        "return 0",
         "add-zsh-hook preexec __ee_preflight_hook_check",
-        "kill -INT $$",
     ];
     let missing: Vec<&&str> = required
         .iter()
@@ -399,12 +455,20 @@ fn zsh_snippet_carries_documented_contract_markers() -> TestResult {
             report.snippet
         ));
     }
-    if report
-        .snippet
-        .contains("EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES")
-    {
+    let forbidden = [
+        "EE_PREFLIGHT_HOOK_BLOCK_SEVERITIES",
+        "kill -INT $$",
+        "Proceed anyway?",
+        "Blocked by user.",
+        "return 1",
+    ];
+    let present: Vec<&&str> = forbidden
+        .iter()
+        .filter(|needle| report.snippet.contains(*needle))
+        .collect();
+    if !present.is_empty() {
         return Err(format!(
-            "zsh snippet must not embed a stale client-side severity allowlist:\n{}",
+            "zsh advisory snippet contains blocking markers {present:?}:\n{}",
             report.snippet
         ));
     }

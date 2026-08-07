@@ -224,8 +224,7 @@
             "run_preflight_first",
             "coordinate_first",
             "ask_human",
-            "manual_only",
-            "policy_denied"
+            "manual_only"
           ]
         },
         "ruleId": {"type": "string"},

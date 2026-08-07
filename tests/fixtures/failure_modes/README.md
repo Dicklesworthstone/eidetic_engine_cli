@@ -186,6 +186,7 @@ in the same commit, keeping the catalog complete by construction.
 | `agent_contract_source_unavailable` | agent operating contract | warning | bd-3d6ko.1 (AOP1) |
 | `no_confident_answer` | ask | info | bd-169v0.5 |
 | `no_risk_memories` | preflight check | info | bd-3usjw.6 |
+| `bypass_token_storage_error` | preflight check | critical | bd-ldmdc (P0) |
 | `preflight_evidence_unavailable` | preflight | medium | bd-17c65.10.6 (J6) |
 | `preflight_evidence_stale` | preflight | warning | bd-17c65.10.6 (J6) |
 | `preflight_patterns_unavailable` | preflight check | medium | bd-3usjw.6 |
