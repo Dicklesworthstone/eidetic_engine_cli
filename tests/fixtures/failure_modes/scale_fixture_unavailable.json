@@ -19,7 +19,7 @@
       "Scale fixture unavailable",
       "fixture profile could not be loaded"
     ],
-    "repair_contains": "Regenerate or restore the fixture profile",
+    "repair_contains": "Regenerate or restore the requested deterministic scale fixture profile",
     "repair_string": "Regenerate or restore the requested deterministic scale fixture profile, then rerun the scale envelope probe."
   }
 }

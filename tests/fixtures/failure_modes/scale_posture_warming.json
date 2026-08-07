@@ -21,7 +21,7 @@
       "Scale posture is warming",
       "derived assets are still warming"
     ],
-    "repair_contains": "Allow the warmup to complete or prewarm",
+    "repair_contains": "Allow the warmup to complete, or run the recommended cache/index prewarm action",
     "repair_string": "Allow the warmup to complete, or run the recommended cache/index prewarm action before measuring steady-state SLOs."
   }
 }
