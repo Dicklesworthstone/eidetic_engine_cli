@@ -143,18 +143,19 @@ fn canonical_mesh_status(value: &Value, workspace: &Path) -> Result<Value, Strin
 }
 
 fn assert_golden(actual: &Value) -> TestResult {
-    let actual_text = pretty(actual)?;
     let path = golden_path();
-    let expected = fs::read_to_string(&path)
+    let expected_text = fs::read_to_string(&path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-    if actual_text == expected {
+    let expected: Value = serde_json::from_str(&expected_text)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+    if *actual == expected {
         Ok(())
     } else {
         Err(format!(
             "mesh auto-status golden drifted\nGolden file: {}\n\nexpected:\n{}\nactual:\n{}",
             path.display(),
-            expected,
-            actual_text
+            pretty(&expected)?,
+            pretty(actual)?
         ))
     }
 }
