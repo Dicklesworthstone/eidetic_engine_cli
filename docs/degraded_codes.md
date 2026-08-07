@@ -9607,7 +9607,7 @@ ee mesh sync --once --workspace . --json
 
 **Expected emission.** Message contains: `did not contact peers ... no usable foreground peer transport`
 
-**Repair hint.** `ee mesh export --peer <peer-id>`
+**Repair hint.** `Inspect enrolled peers`
 
 **Fixture.** [`tests/fixtures/failure_modes/mesh_sync_once_network_deferred.json`](../tests/fixtures/failure_modes/mesh_sync_once_network_deferred.json)
 

@@ -107,7 +107,7 @@ impl MeshCliDegradation {
             severity: "info",
             message: "Foreground sync --once did not contact peers because no usable foreground peer transport path was available."
                 .to_owned(),
-            repair: "Use `ee mesh export --peer <peer-id> --out mesh-export.json` and `ee mesh import --file mesh-export.json` for an enrolled peer transfer, or configure a peer transport before retrying sync. Use `ee export` or `ee backup` for local backups."
+            repair: "Inspect enrolled peers with `ee mesh peers --json`, then use `ee mesh export` and `ee mesh import --file mesh-export.json` for a foreground peer transfer, or configure a peer transport before retrying sync. Use `ee export` or `ee backup` for local backups."
                 .to_owned(),
         }
     }
