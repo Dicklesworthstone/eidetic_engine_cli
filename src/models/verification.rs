@@ -1978,7 +1978,7 @@ pub fn verification_broker_view(
         } else if let Some(record) = identity_candidate {
             let mut stale = remote_artifact_identity_rejections_for_broker(record, &request);
             if stale.is_empty() {
-                stale.push("artifact_build_identity_incomplete".to_owned());
+                stale.push("artifact_build_identity_incomplete");
             }
             (
                 VerificationBrokerStatus::Incompatible,

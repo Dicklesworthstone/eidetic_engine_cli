@@ -4397,8 +4397,8 @@ mod tests {
                 database_path: &database_path,
                 bead_id: None,
                 requirements: vec![VerificationGateRequirement::new(
-                    gate_name,
-                    Some(command),
+                    &gate_name,
+                    Some(&command),
                     false,
                 )],
             })
