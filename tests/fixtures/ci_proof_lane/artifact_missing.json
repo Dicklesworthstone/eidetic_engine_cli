@@ -49,6 +49,7 @@
           "artifacts": [
             {
               "name": "ee-aarch64-apple-darwin-debug",
+              "artifactId": null,
               "status": "missing",
               "retentionExpiresAt": null,
               "checksumStatus": "missing",
@@ -59,12 +60,23 @@
               "attestedGitTree": null,
               "manifestHash": null,
               "verificationHash": null,
+              "attestedRunId": null,
+              "binaryHash": null,
+              "archiveHash": null,
+              "buildCommandHash": null,
+              "effectiveInputHash": null,
+              "provenanceHash": null,
               "attestationRejections": ["artifact_missing"],
               "surfaceProbes": [
                 {
+                  "probeId": "environment_attestation_help",
                   "commandTemplate": "ee diag environment-attestation --help",
                   "status": "not_run",
                   "expectedSurface": "diag environment-attestation",
+                  "argvHash": null,
+                  "exitCode": null,
+                  "stdoutHash": null,
+                  "stderrHash": null,
                   "firstFailureDiagnosis": "expected artifact was missing after successful proof-lane completion"
                 }
               ]

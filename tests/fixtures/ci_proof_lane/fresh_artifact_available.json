@@ -47,6 +47,7 @@
           "artifacts": [
             {
               "name": "ee-aarch64-apple-darwin-debug",
+              "artifactId": "37006448051",
               "status": "available",
               "retentionExpiresAt": "2026-06-08T09:26:05Z",
               "checksumStatus": "verified",
@@ -57,12 +58,34 @@
               "attestedGitTree": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
               "manifestHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
               "verificationHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              "attestedRunId": "27006448051",
+              "binaryHash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "archiveHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "buildCommandHash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+              "effectiveInputHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "provenanceHash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
               "attestationRejections": [],
               "surfaceProbes": [
                 {
+                  "probeId": "version_json",
+                  "commandTemplate": "ee version --json",
+                  "status": "passed",
+                  "expectedSurface": "source-bound version provenance",
+                  "argvHash": "sha256:4af47b5e027e1686b124d8c7f986fe44a60b0b8a73c9cf1a32a8d8a592b39b48",
+                  "exitCode": 0,
+                  "stdoutHash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                  "stderrHash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                  "firstFailureDiagnosis": null
+                },
+                {
+                  "probeId": "environment_attestation_help",
                   "commandTemplate": "ee diag environment-attestation --help",
                   "status": "passed",
                   "expectedSurface": "diag environment-attestation",
+                  "argvHash": "sha256:37fa79e205cce2dafd8ac4da2075f73f74ed03beeca38cc6d741fcf54be21558",
+                  "exitCode": 0,
+                  "stdoutHash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+                  "stderrHash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                   "firstFailureDiagnosis": null
                 }
               ]

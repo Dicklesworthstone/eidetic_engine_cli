@@ -60,6 +60,7 @@
           "artifacts": [
             {
               "name": "ee-aarch64-apple-darwin-debug",
+              "artifactId": "37009940001",
               "status": "available",
               "retentionExpiresAt": "2026-06-08T10:45:38Z",
               "checksumStatus": "mismatch",
@@ -70,12 +71,23 @@
               "attestedGitTree": null,
               "manifestHash": null,
               "verificationHash": null,
+              "attestedRunId": null,
+              "binaryHash": null,
+              "archiveHash": null,
+              "buildCommandHash": null,
+              "effectiveInputHash": null,
+              "provenanceHash": null,
               "attestationRejections": [],
               "surfaceProbes": [
                 {
+                  "probeId": "environment_attestation_help",
                   "commandTemplate": "ee diag environment-attestation --help",
                   "status": "passed",
                   "expectedSurface": "diag environment-attestation",
+                  "argvHash": null,
+                  "exitCode": null,
+                  "stdoutHash": null,
+                  "stderrHash": null,
                   "firstFailureDiagnosis": null
                 }
               ]

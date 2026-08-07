@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "ci_proof_lane_artifact_attestation_invalid",
+  "introduced_by": {
+    "bead": "bd-fbeo2",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "diag environment-attestation"
+  ],
+  "severity": "high",
+  "repair_present": false,
+  "trigger": {
+    "description": "A CI proof-lane snapshot claims a fresh artifact while its run identity, source, hashes, or canonical behavior probes are missing or inconsistent.",
+    "setup_commands": [
+      "cp tests/fixtures/ci_proof_lane/fresh_artifact_available.json /tmp/ee-ci-proof-lane-invalid.json",
+      "sed -i.bak 's/sha256:dddd/sha256:invalid/' /tmp/ee-ci-proof-lane-invalid.json"
+    ],
+    "invocation": "ee diag environment-attestation --ci-proof-lane-snapshot /tmp/ee-ci-proof-lane-invalid.json --json"
+  },
+  "expected_emission": {
+    "code": "ci_proof_lane_artifact_attestation_invalid",
+    "severity": "high",
+    "message_contains": [
+      "artifact attestation",
+      "source",
+      "packaged bytes",
+      "behavior probe"
+    ]
+  }
+}

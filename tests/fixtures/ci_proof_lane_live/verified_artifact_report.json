@@ -53,6 +53,6 @@
   "status": "verified",
   "target": "aarch64-apple-darwin",
   "provenanceHash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
-  "verificationHash": "sha256:PLACEHOLDER",
+  "verificationHash": "sha256:3cc110e20128d7430c24b7cc502acbee15cf1771a61137cc71962fd9f6560613",
   "workflow": "macOS EE Artifact"
 }
