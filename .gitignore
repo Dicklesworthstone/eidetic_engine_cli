@@ -316,3 +316,6 @@ windsurf.mcp.json
 **/.beads/.bv.lock
 # Golden-test runtime outputs (authoritative fixtures use *.snap)
 *.actual
+
+# Beads compliance audit dir (managed by /beads-compliance-and-completion-verification skill)
+/beads_compliance_audit/
