@@ -407,8 +407,9 @@ jobs:
         # with `expired_token`. The dsr fallback signs artifacts with minisign
         # instead, so skip the in-workflow Sigstore step under act. Hosted
         # GitHub Actions runs (ACT unset) still sign normally; the build job's
-        # Upload artifacts step uses if-no-files-found=warn, so the missing
-        # .sigstore.json bundles do not fail the upload under act.
+        # Upload artifacts step checks whether the entire path set is empty,
+        # so missing .sigstore.json bundles do not fail the upload under act
+        # while the archive, checksum, and provenance files are present.
         if: ${{ env.ACT != 'true' }}
         shell: bash
         run: |
@@ -674,16 +675,33 @@ jobs:
           set -euo pipefail
           TAG="${{ needs.tag.outputs.tag }}"
           if gh release view "$TAG" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$TAG" --json isDraft --jq '.isDraft')"
+            if [ "$is_draft" != "true" ]; then
+              echo "::error title=Published release already exists::Refusing to mutate existing published release $TAG."
+              exit 1
+            fi
             gh release edit "$TAG" \
+              --draft \
               --title "ee $TAG" \
               --notes-file release_notes.md
-            gh release upload "$TAG" release/* --clobber
           else
             gh release create "$TAG" \
+              --draft \
+              --verify-tag \
               --title "ee $TAG" \
-              --notes-file release_notes.md \
-              release/*
+              --notes-file release_notes.md
           fi
+          gh release upload "$TAG" release/* --clobber
+
+          expected_assets="$(find release -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)"
+          remote_assets="$(gh release view "$TAG" --json assets --jq '.assets[].name' | LC_ALL=C sort)"
+          if [ "$remote_assets" != "$expected_assets" ]; then
+            echo "::error title=Remote release asset mismatch::Draft $TAG does not contain the exact verified 33-asset set."
+            printf '%s\n' "Expected assets:" "$expected_assets" "Remote assets:" "$remote_assets"
+            exit 1
+          fi
+
+          gh release edit "$TAG" --draft=false
 
   smoke-test:
     needs: [check-version, tag, release]

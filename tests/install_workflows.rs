@@ -1163,6 +1163,12 @@ fn release_workflow_proves_checksums_bash_and_native_reranker_smoke() -> TestRes
         "sha256sum --check SHA256SUMS",
         "expected_release_asset_count=33",
         "if [ \"$release_asset_count\" -ne \"$expected_release_asset_count\" ]; then",
+        "Refusing to mutate existing published release",
+        "--verify-tag",
+        "gh release upload \"$TAG\" release/* --clobber",
+        "gh release view \"$TAG\" --json assets --jq '.assets[].name'",
+        "Remote release asset mismatch",
+        "gh release edit \"$TAG\" --draft=false",
         "## Native reranking on every platform",
         "pure-Rust native reranker backend",
         "no ONNX Runtime",
@@ -1173,6 +1179,28 @@ fn release_workflow_proves_checksums_bash_and_native_reranker_smoke() -> TestRes
             &format!("release workflow is missing {contract:?}"),
         )?;
     }
+
+    let draft_index = RELEASE_WORKFLOW
+        .find("gh release create \"$TAG\"")
+        .ok_or_else(|| "release workflow does not create a draft release".to_owned())?;
+    let upload_index = RELEASE_WORKFLOW
+        .find("gh release upload \"$TAG\" release/* --clobber")
+        .ok_or_else(|| "release workflow does not upload its verified asset set".to_owned())?;
+    let verify_index = RELEASE_WORKFLOW
+        .find("gh release view \"$TAG\" --json assets --jq '.assets[].name'")
+        .ok_or_else(|| "release workflow does not verify remote release assets".to_owned())?;
+    let publish_index = RELEASE_WORKFLOW
+        .find("gh release edit \"$TAG\" --draft=false")
+        .ok_or_else(|| "release workflow does not publish the verified draft".to_owned())?;
+    ensure(
+        RELEASE_WORKFLOW[draft_index..upload_index].contains("--draft")
+            && RELEASE_WORKFLOW[draft_index..upload_index].contains("--verify-tag"),
+        "release creation must remain a draft and refuse to synthesize a missing tag",
+    )?;
+    ensure(
+        draft_index < upload_index && upload_index < verify_index && verify_index < publish_index,
+        "release publication must stage a draft, upload assets, verify the remote set, and only then publish",
+    )?;
 
     let (_, smoke_and_rest) = RELEASE_WORKFLOW
         .split_once("\n  smoke-test:\n")
