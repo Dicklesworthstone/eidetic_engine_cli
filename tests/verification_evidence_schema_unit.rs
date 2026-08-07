@@ -859,8 +859,8 @@ fn closeout_capsule_emits_caveats_for_local_cargo_and_source_mismatch() -> TestR
         },
         &record,
     );
-    assert_eq!(capsule.result, "passed");
-    assert_eq!(capsule.passed_count, Some(1));
+    assert_eq!(capsule.result, "unverified");
+    assert_eq!(capsule.passed_count, Some(0));
     assert!(
         capsule
             .failure_mode_codes

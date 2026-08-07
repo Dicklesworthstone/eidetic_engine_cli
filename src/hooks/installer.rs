@@ -235,6 +235,8 @@ pub struct HookInstallReport {
 
 #[cfg(test)]
 impl HookInstallReport {
+    // Retained only for the legacy installer regression harness.
+    #[allow(dead_code)]
     #[must_use]
     pub fn to_json(&self) -> String {
         serialize_hook_report(self, "HookInstallReport")
@@ -1058,6 +1060,8 @@ pub struct HookStatusReport {
 
 #[cfg(test)]
 impl HookStatusReport {
+    // Retained only for the legacy installer regression harness.
+    #[allow(dead_code)]
     #[must_use]
     pub fn to_json(&self) -> String {
         serialize_hook_report(self, "HookStatusReport")
