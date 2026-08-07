@@ -281,11 +281,11 @@ fn schema_registers_artifact_manifest_event_kind() -> TestResult {
             ));
         }
     }
-    if v2_contract.pointer(
-        "/then/properties/fields/properties/remote_artifact_attestation/$ref",
-    ) != Some(&Value::String(
-        "ee.remote_build_artifact_manifest.verification.v1.json".to_owned(),
-    )) {
+    if v2_contract.pointer("/then/properties/fields/properties/remote_artifact_attestation/$ref")
+        != Some(&Value::String(
+            "ee.remote_build_artifact_manifest.verification.v1.json".to_owned(),
+        ))
+    {
         return Err("artifact_manifest v2 schema does not bind the attestation schema".to_owned());
     }
     Ok(())
