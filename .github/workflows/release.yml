@@ -433,6 +433,7 @@ jobs:
             dist/ee-${{ matrix.target }}.tar.xz.sigstore.json
             dist/ee-${{ matrix.target }}.provenance.json
             dist/ee-${{ matrix.target }}.provenance.json.sigstore.json
+          if-no-files-found: error
           retention-days: 1
 
   release:
@@ -457,11 +458,37 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
+          expected_targets=(
+            x86_64-unknown-linux-gnu
+            x86_64-unknown-linux-musl
+            aarch64-unknown-linux-gnu
+            x86_64-apple-darwin
+            aarch64-apple-darwin
+            x86_64-pc-windows-msvc
+          )
+          expected_suffixes=(
+            .tar.xz
+            .tar.xz.sha256
+            .tar.xz.sigstore.json
+            .provenance.json
+            .provenance.json.sigstore.json
+          )
+          expected_artifact_count=30
           artifact_count="$(find artifacts -maxdepth 1 -type f | wc -l | tr -d '[:space:]')"
-          if [ "$artifact_count" -eq 0 ]; then
-            echo "::error title=Missing release artifacts::No build artifacts were downloaded for release publication."
+          if [ "$artifact_count" -ne "$expected_artifact_count" ]; then
+            echo "::error title=Incomplete release artifacts::Expected $expected_artifact_count build artifacts, found $artifact_count."
+            find artifacts -maxdepth 1 -type f -print | LC_ALL=C sort
             exit 1
           fi
+          for target in "${expected_targets[@]}"; do
+            for suffix in "${expected_suffixes[@]}"; do
+              expected="artifacts/ee-${target}${suffix}"
+              if [ ! -f "$expected" ]; then
+                echo "::error title=Missing release artifact::Expected $expected"
+                exit 1
+              fi
+            done
+          done
           find artifacts -maxdepth 1 -type f -exec mv {} release/ \;
 
           # Copy install scripts
@@ -481,6 +508,14 @@ jobs:
             sha256sum ee-*.tar.xz | LC_ALL=C sort -k2 > SHA256SUMS
             sha256sum --check SHA256SUMS
           )
+
+          expected_release_asset_count=33
+          release_asset_count="$(find release -maxdepth 1 -type f | wc -l | tr -d '[:space:]')"
+          if [ "$release_asset_count" -ne "$expected_release_asset_count" ]; then
+            echo "::error title=Incomplete release asset set::Expected $expected_release_asset_count release assets, found $release_asset_count."
+            find release -maxdepth 1 -type f -print | LC_ALL=C sort
+            exit 1
+          fi
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
